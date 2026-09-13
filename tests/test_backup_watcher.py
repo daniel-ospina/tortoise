@@ -660,10 +660,36 @@ def test_alert_path_failure_still_writes_the_heartbeat():
     assert ch.issues == {}, "nothing could be filed — the store is down"
 
 
-def test_alert_store_failure_does_not_skip_the_other_legs():
-    """A failure while resolving a leg must not stop the poll: the reminder of
-    the block is re-evaluated on the next poll (dedup-backed, idempotent), and
-    the heartbeat still lands."""
+def test_vanished_graph_resolution_failure_is_contained():
+    """#3031 (review): the universe-shrink resolutions used to run on the poll's
+    critical path OUTSIDE any containment — a raise there escaped before the
+    heartbeat and fabricated WATCHER_DOWN. Same gate, now contained, and the
+    `_last_graph_keys` update happens only AFTER a successful pass so the retry is
+    not lost."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 2)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w._last_graph_keys = {"team_a", "team_a:vanished"}
+
+    def _boom(kind, team_id=""):
+        raise RuntimeError("alert store down")
+
+    w._alerts.resolve_incident = _boom  # type: ignore[method-assign]
+    w.poll()
+
+    assert json.loads(storage.download(HEARTBEAT_KEY))["last_poll_at"]
+    # The failure aborted the pass, so the vanished key is still pending a retry
+    # rather than having been silently dropped.
+    assert "team_a:vanished" in w._last_graph_keys
+
+
+def test_alert_failure_does_not_lose_the_poll_or_the_heartbeat():
+    """A failure while resolving/opening a leg must not stop the poll: the poll
+    returns its status and the heartbeat still lands (the remaining legs are
+    re-evaluated on the next poll — the lifecycle is dedup-backed and idempotent;
+    that trade is what guarantees the heartbeat)."""
     ch = _Channels()
     storage = MemoryStorage()
     _seed_archive(storage, "team_a", 200)

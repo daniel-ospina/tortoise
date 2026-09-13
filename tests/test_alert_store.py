@@ -20,6 +20,7 @@ class _FakeChannels:
         self.fail_file = False
         self.fail_push = False
         self.fail_search = False
+        self.fail_close = False
         self.search_impl = None
         self._next = 1
 
@@ -32,6 +33,8 @@ class _FakeChannels:
         return n
 
     def close_issue(self, number, comment=None):
+        if self.fail_close:
+            raise RuntimeError("github unreachable")
         self.closed.append(number)
         if comment:
             self.comments.append((number, comment))
@@ -400,18 +403,23 @@ def test_search_failure_defers_filing_fail_closed():
     assert len(ch.issues) == 1
 
 
-def test_search_failure_does_not_lose_an_already_filed_incident():
-    """A filed incident is adopted from the object, never re-filed — and a
-    failing search cannot make the object look missing."""
+def test_a_filed_incident_is_adopted_from_the_object_without_any_search():
+    """The create-once object is the AUTHORITY: once it carries an issue number,
+    a repeat is a no-op that never consults GitHub. (Pinned because the review
+    showed the earlier version of this test passed even with the fail-closed
+    change reverted — the object short-circuited before the search, so the test
+    proved nothing about the fail-closed path.)"""
     ch = _FakeChannels()
     storage = MemoryStorage()
     store = _store(ch, storage)
     assert store.open_incident("STALE") is True
     filed = len(ch.issues)
+    searches_before = len(ch.search_calls)
 
-    ch.fail_search = True
+    ch.fail_search = True          # a dead/rate-limited search changes nothing
     assert store.open_incident("STALE") is False
-    assert len(ch.issues) == filed, "no duplicate on a failed search"
+    assert len(ch.issues) == filed, "no duplicate"
+    assert len(ch.search_calls) == searches_before, "the object short-circuits the search"
     assert store.resolve_incident("STALE") is True
     assert ch.closed, "resolution still works while the search is down"
 
@@ -422,7 +430,21 @@ def test_search_failure_does_not_lose_an_already_filed_incident():
 _ALERT_SOURCES = ("tortoise/alert_store.py", "tortoise/backup_watcher.py",
                   "tortoise/backup_sweep.py", "tortoise/hosted_api.py")
 _DRIVER = ".github/scripts/registry-cron.sh"
-_DEAD_KINDS = {"ALERTER_DOWN", "LIVENESS_NO_WORK"}
+def _dead_kinds_documented() -> set[str]:
+    """The kinds the runbook itself declares writer-less (#3033).
+
+    Parsed from the runbook rather than hardcoded: a revert of the runbook's
+    "Kinds with no writer" section must fail the drift test below, not silently
+    re-exempt the kinds.
+    """
+    import re
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parent.parent
+           / "docs/ops/registry-backup-dr.md").read_text()
+    section = doc.split("### Kinds with no writer", 1)
+    assert len(section) == 2, "the 'Kinds with no writer' section must exist"
+    return {m.group(1) for m in re.finditer(r"\|\s*`([A-Z][A-Z0-9_]+)`\s*\|", section[1])}
 
 
 def _documented_kinds() -> set[str]:
@@ -469,8 +491,12 @@ def test_documented_kinds_have_a_writer():
     """
     documented = _documented_kinds()
     emittable = _emittable_kinds()
+    dead = _dead_kinds_documented()
+    assert dead == {"ALERTER_DOWN", "LIVENESS_NO_WORK"}, (
+        f"the runbook's writer-less list changed: {dead} — update this test's expectation"
+    )
     assert "STALE" in documented and "STALE" in emittable, "the scan itself must work"
-    offenders = sorted(documented - emittable - _DEAD_KINDS)
+    offenders = sorted(documented - emittable - dead)
     assert not offenders, (
         f"documented but never emitted: {offenders} — give them a writer or move "
         "them to the 'Kinds with no writer' section"
@@ -487,10 +513,65 @@ def test_dead_kinds_are_documented_as_dead():
     dead_section = doc.split("### Kinds with no writer", 1)
     assert len(dead_section) == 2, "the 'Kinds with no writer' section must exist"
     body = dead_section[1]
-    for kind in _DEAD_KINDS:
+    for kind in _dead_kinds_documented():
         assert f"`{kind}`" in body, f"{kind} must be listed as writer-less"
     table = doc.split("## Alert taxonomy + triage", 1)[1].split("### How incidents CLOSE", 1)[0]
-    for kind in _DEAD_KINDS:
+    for kind in _dead_kinds_documented():
         row = [ln for ln in table.splitlines() if ln.startswith(f"| {kind} |")]
         assert row, f"{kind} must keep a triage row"
         assert "NOT EMITTED" in row[0], f"{kind}'s triage cell must say NOT EMITTED"
+
+
+# ── #3030 review: the bounded-open-set API + resolve failure semantics ───────
+
+
+def test_open_subjects_lists_open_incidents_without_a_read_per_candidate():
+    """One LIST per kind, so the sweep endpoint never issues an R2 read per graph.
+    The platform subject is stored as `_` (the legacy `global` alias is NOT
+    returned — it is the driver's id, not a key shape this store writes)."""
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    assert store.open_incident("P0_GUARD_FAIL", "team_a") is True
+    assert store.open_incident("P0_GUARD_FAIL", "team_b:g_x") is True
+    assert store.open_incident("P0_GUARD_FAIL") is True          # platform → "_"
+    assert store.open_incident("STALE", "team_a") is True
+
+    assert store.open_subjects("P0_GUARD_FAIL") == {"team_a", "team_b:g_x", "_"}
+    assert store.open_subjects("STALE") == {"team_a"}
+    assert store.open_subjects("NEVER_BACKED_UP") == set()
+
+
+def test_open_subjects_fails_safe_on_a_listing_error():
+    """A listing we could not perform must resolve NOTHING (fail-closed): the
+    empty set is the safe answer for a destructive follow-up."""
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    assert store.open_incident("STALE", "team_a") is True
+
+    def _boom(prefix):
+        raise RuntimeError("R2 list outage")
+
+    storage.list = _boom  # type: ignore[method-assign]
+    assert store.open_subjects("STALE") == set()
+
+
+def test_resolve_failure_leaves_the_incident_open_and_announces_nothing():
+    """REVIEW P1: a swallowed close used to push '✅ DR resolved' and delete the
+    object while the issue stayed OPEN — the next poll re-files, adopts the still
+    open issue and pushes '🚨 DR alert': a ✅/🚨 flip every poll and a false
+    all-clear. A failed close now resolves NOTHING (retried next poll)."""
+    ch = _FakeChannels()
+    storage = MemoryStorage()
+    store = _store(ch, storage)
+    assert store.open_incident("STALE", "team_a") is True
+    telegram_before = len(ch.telegram)
+
+    ch.fail_close = True
+
+    assert store.resolve_incident("STALE", "team_a") is False
+    assert storage.download("ops/alerts/STALE/team_a.json"), "the object must survive"
+    assert len(ch.telegram) == telegram_before, "no false 'resolved' announcement"
+    # The incident is still tracked, so a recurrence is not re-filed either.
+    assert store.open_incident("STALE", "team_a") is False

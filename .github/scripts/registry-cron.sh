@@ -158,19 +158,19 @@ r2_put_once() { # key body_file -> 0 created, 1 already exists, 2 UNRESOLVED (lo
   fi
   case "$out" in
     # The expected create-once race: the object already exists (S3 412).
-    *PreconditionFailed*|*412*|*"At least one of the pre-conditions"*) return 1 ;;
+    # Match the ERROR MARKERS only — a bare `*412*` would also match a
+    # request-id / byte-count / timestamp in an unrelated failure and report
+    # "exists" without ever HEAD-checking (review).
+    *PreconditionFailed*|*"At least one of the pre-conditions"*) return 1 ;;
   esac
-  # Conditional writes unsupported (or another error): the HEAD-check fallback —
-  # the object's EXISTENCE decides. Never a blind retry, never a silent "exists".
+  # Conditional writes unsupported (or another error): fall back to the
+  # HEAD-check — the object's EXISTENCE decides, exactly like the Python twin
+  # (hosted_backup.create_if_not_exists). An AMBIGUOUS HEAD (absent read or a
+  # read that failed) must NOT be followed by a blind unconditional put: it
+  # could overwrite a concurrent writer's object and reset its issue_number to
+  # null — the duplicate-risk class #3029 removes. Report unresolved instead.
   if r2_head "$1"; then return 1; fi
-  if aws s3api put-object --endpoint-url "$R2_ENDPOINT" \
-       --bucket "$R2_BUCKET" --key "$1" --body "$2" >/dev/null 2>&1; then
-    log "r2_put_once: conditional write unsupported — created $1 via the HEAD-check fallback"
-    return 0
-  fi
-  # Neither created nor provably present: dedup cannot be trusted this run.
-  # LOUD rather than a silent fall-through to search-only dedup.
-  fail "r2_put_once: could not create nor confirm $1 — conditional write rejected, HEAD-check absent, unconditional put failed. Dedup is unverified."
+  fail "r2_put_once: could not create nor confirm $1 — conditional write rejected and the HEAD-check could not confirm absence. Dedup is unverified; refusing a blind put."
   return 2
 }
 r2_get() { # key -> body (empty on failure)

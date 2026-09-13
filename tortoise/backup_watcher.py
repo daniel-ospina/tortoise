@@ -477,19 +477,16 @@ class BackupWatcher:
                 if key not in graph_state and t in teams:
                     per_graph[key] = "stamp_missing"
         # Universe shrink: graphs no longer on the seam surface (deleted /
-        # ineligible) resolve their incidents — but ONLY on a CONFIRMED
-        # surface. A degraded R2 or a failed control-plane read must never
-        # resolve real incidents (a CP blip at sweep time is exactly when
-        # customs age into staleness; delete-to-resolve would close the issue
-        # and re-file a fresh one on recovery — fabricated false recovery).
+        # ineligible) resolve their incidents — but ONLY on a CONFIRMED surface.
+        # A degraded R2 or a failed control-plane read must never resolve real
+        # incidents (a CP blip at sweep time is exactly when customs age into
+        # staleness; delete-to-resolve would close the issue and re-file a fresh
+        # one on recovery — fabricated false recovery).
+        # #3031 (review): this was ON the poll's critical path OUTSIDE any
+        # containment — a raise here escaped before the heartbeat and fabricated
+        # the very WATCHER_DOWN this change removes. Same gate, contained.
         if graph_surface_confirmed:
-            prev_graph_keys = set(getattr(self, "_last_graph_keys", set()))
-            cur_graph_keys = set(per_graph)
-            for key in prev_graph_keys - cur_graph_keys:
-                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST",
-                             "BACKUP_SET_MISSING"):
-                    self._alerts.resolve_incident(kind, key)
-            self._last_graph_keys = cur_graph_keys
+            self._resolve_vanished_graphs(per_graph)
         status = dict(status)
         status["per_graph"] = per_graph
         self._last_status = status
@@ -521,6 +518,34 @@ class BackupWatcher:
         self._check_memory()
         return status
 
+    def _resolve_vanished_graphs(self, per_graph: dict[str, Any]) -> None:
+        """Close the incidents of graphs no longer on the seam surface.
+
+        Only ever called on a CONFIRMED surface (a degraded R2 or a failed
+        control-plane read must never resolve real incidents — a CP blip at sweep
+        time is exactly when customs age into staleness, and delete-to-resolve
+        would close the issue and re-file a fresh one on recovery: fabricated
+        false recovery).
+
+        #3031 (review): contained like every other alert leg — the key update
+        after the loop means a failure here is RETRIED on the next poll instead
+        of being silently skipped, and it can no longer escape before the
+        heartbeat.
+        """
+        try:
+            prev_graph_keys = set(getattr(self, "_last_graph_keys", set()))
+            cur_graph_keys = set(per_graph)
+            for key in prev_graph_keys - cur_graph_keys:
+                for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST",
+                             "BACKUP_SET_MISSING"):
+                    self._alerts.resolve_incident(kind, key)
+            self._last_graph_keys = cur_graph_keys
+        except Exception:
+            logger.exception(
+                "vanished-graph resolution failed — heartbeat unaffected "
+                "(retried next poll)"
+            )
+
     def _drive_alerts(self, status: dict[str, Any], r2_ok: bool | None) -> None:
         """#3031: drive the alert store — fail-soft, never at the heartbeat's expense.
 
@@ -535,8 +560,11 @@ class BackupWatcher:
         heartbeat — so a broken alert path fabricated a *different*, false
         incident (WATCHER_DOWN) and masked the real R2 fault.
 
-        Each leg is therefore contained and logged; the lifecycle is
-        dedup-backed and idempotent, so the next poll re-evaluates.
+        The block is best-effort: a leg that fails aborts the remaining legs for
+        THIS poll (logged with its traceback, and with the audit trail that the
+        poll's other work still completed), and the next poll re-evaluates every
+        leg — the lifecycle is dedup-backed and idempotent. That is the deliberate
+        trade for never losing the heartbeat.
         """
         try:
             for team, state in status["per_team"].items():
@@ -589,10 +617,10 @@ class BackupWatcher:
                 self._alerts.open_incident("R2_DOWN")
             else:
                 self._alerts.resolve_incident("R2_DOWN")
-        except Exception as e:
-            logger.warning(
-                "alert store legs failed: %s — heartbeat unaffected (a broken "
-                "alerter must never fabricate WATCHER_DOWN)", e,
+        except Exception:
+            logger.exception(
+                "alert store legs failed — heartbeat unaffected (a broken "
+                "alerter must never fabricate WATCHER_DOWN)"
             )
 
     def _check_memory(self) -> None:

@@ -163,9 +163,18 @@ class AlertStore:
             # create-once object is a placeholder). Leave the placeholder in
             # place — it carries no issue_number, so the next poll re-enters this
             # branch and retries; nothing is lost, only delayed.
-            logger.warning(
-                "incident search failed for %s: %s — filing deferred "
-                "(a failed search is not 'no incident')", kind, e,
+            #
+            # ERROR level, not warning (#3029 review): nothing human-visible
+            # fires on this branch, so while it persists the ENTIRE app-side alert
+            # path is deaf. A persistent search failure (e.g. the search quota
+            # exhausting under a per-graph burst) must at least be visible in the
+            # logs; wiring a deferred-filing signal into `/status` + an
+            # ALERTER_DOWN writer is the tracked follow-up.
+            logger.error(
+                "incident search failed for %s/%s: %s — filing DEFERRED "
+                "(a failed search is not 'no incident'; the whole alert path is "
+                "deaf until the search recovers)",
+                kind, team_id or "global", e,
             )
             _write_json(self._storage, key, state)
             return False
@@ -185,8 +194,42 @@ class AlertStore:
             _write_json(self._storage, key, state)
         return True
 
+    def open_subjects(self, kind: str) -> set[str]:
+        """The subjects with an OPEN dedup object for ``kind`` (#3030 review).
+
+        One LIST instead of an R2 read per candidate: the sweep endpoint must not
+        issue a GET per graph per run just to discover that nothing is open — at a
+        few thousand graphs that adds minutes to a request held under the sweep
+        lock. Returns the raw key segments (``"_"`` is the platform subject).
+
+        Fails SAFE: a listing error returns the empty set, so nothing is resolved
+        on a read the caller could not perform.
+        """
+        prefix = f"{DEDUP_PREFIX}{kind}/"
+        try:
+            keys = self._storage.list(prefix)
+        except Exception as e:
+            logger.warning(
+                "open_subjects(%s) list failed: %s — resolving nothing this run", kind, e
+            )
+            return set()
+        return {
+            k[len(prefix):-len(".json")]
+            for k in keys
+            if k.startswith(prefix) and k.endswith(".json")
+        }
+
     def resolve_incident(self, kind: str, team_id: str = "") -> bool:
-        """Close + delete-to-resolve. True if an incident was open."""
+        """Close + delete-to-resolve. True if an incident was open.
+
+        Ordering matters (#3029/#3031 review): the issue close must SUCCEED before
+        we announce a resolution and delete the dedup object. A swallowed close
+        failure would push "✅ DR resolved", delete the object, and leave the issue
+        open — so the next poll re-files, adopts the still-open issue, and pushes
+        "🚨 DR alert" again: a ✅/🚨 flip every poll and a false all-clear in the
+        channel whose whole job is truthfulness. On a close failure nothing is
+        deleted and no resolution is announced; the caller retries next poll.
+        """
         key = self._key(kind, team_id)
         state = _read_json(self._storage, key)
         if not state:
@@ -196,7 +239,12 @@ class AlertStore:
             try:
                 self._close(int(number), "Resolved — condition cleared.")
             except Exception as e:
-                logger.warning("issue close failed for %s #%s: %s", kind, number, e)
+                logger.warning(
+                    "issue close failed for %s #%s: %s — leaving the incident OPEN "
+                    "(no resolution announced, object kept) so the next poll retries",
+                    kind, number, e,
+                )
+                return False
             self._push_with_pending(
                 key, f"✅ DR resolved: {kind}" + (f" ({team_id})" if team_id else "") + f" — issue #{number}"
             )

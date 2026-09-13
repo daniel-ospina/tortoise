@@ -19902,14 +19902,6 @@ def _legacy_bucket_map(rows: list[dict], legacy: list[dict]) -> dict[str, str]:
 # sweep-domain is duplicated here.
 
 
-def _graph_subject(team_id: str, graph_id: str) -> str:
-    """Alert-store subject for one graph (#2313) — thin alias for
-    ``backup_sweep.graph_subject``, keeping this module's call sites stable."""
-    from tortoise.backup_sweep import graph_subject
-
-    return graph_subject(team_id, graph_id)
-
-
 def _incident_subject(inc: dict) -> str:
     """#2313: alert-store subject for a sweep incident — thin alias for
     ``backup_sweep.incident_subject``."""
@@ -20574,14 +20566,26 @@ async def backups_sweep(request: Request):
 
         # ── #3030: producer-side resolution for the sweep's guard kinds. ──
         # The sweep is the authority on its own guards: a conclusive run that did
-        # NOT emit a kind IS the "condition cleared" evidence, closed through the
-        # same delete-to-resolve lifecycle the watcher uses. `sweep_resolutions`
-        # owns the decision (a degraded run clears nothing); this performs it.
+        # NOT emit a kind, with POSITIVE evidence the guard ran/looked, is the
+        # "condition cleared" evidence — closed through the same delete-to-resolve
+        # lifecycle the watcher uses. `sweep_resolutions` owns that decision
+        # (degraded runs and un-checked graphs clear nothing).
+        #
+        # Review: the candidate list is intersected with what is actually OPEN —
+        # one LIST per kind, never an R2 GET per graph, so an hourly sweep over a
+        # few thousand graphs does not serialise thousands of reads while holding
+        # the sweep lock (nor does a listing failure close anything).
         from tortoise.backup_sweep import sweep_resolutions
 
+        candidates = sweep_resolutions(result)
         resolved: list[str] = []
-        for kind, subject in sweep_resolutions(result):
+        open_cache: dict[str, set[str]] = {}
+        for kind, subject in candidates:
             try:
+                if kind not in open_cache:
+                    open_cache[kind] = await asyncio.to_thread(alerts.open_subjects, kind)
+                if (subject or "_") not in open_cache[kind]:
+                    continue
                 if await asyncio.to_thread(alerts.resolve_incident, kind, subject):
                     resolved.append(f"{kind}/{subject}" if subject else kind)
             except Exception as e:

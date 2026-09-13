@@ -148,11 +148,16 @@ case "$op" in
     esac
     ;;
   put-object)
-    # #3032 knobs: a client that rejects the conditional flag, and a store that
-    # fails the write outright. Both are distinguished from the 412 race.
+    # #3032 knobs: a client that rejects the conditional flag, a store that
+    # fails the write outright, and an unrelated error that merely contains the
+    # digits 412. All three are distinguished from the real 412 race.
     if [ "${STUB_NO_IFNONEMATCH:-0}" = "1" ] && printf '%s' "${args[*]}" | grep -q -- '--if-none-match'; then
       echo "Unknown options: --if-none-match" >&2
       exit 2
+    fi
+    if [ "${STUB_PUT_412_SUBSTRING:-0}" = "1" ] && printf '%s' "${args[*]}" | grep -q -- '--if-none-match'; then
+      echo "An error occurred (InternalError) when calling the PutObject operation: RequestId 4120xyz" >&2
+      exit 1
     fi
     if [ "${STUB_PUT_FAIL:-0}" = "1" ]; then
       echo "An error occurred (InternalError) when calling the PutObject operation" >&2
@@ -296,7 +301,7 @@ reset_case() {
   unset STUB_STATUS_BODY STUB_SWEEP_BODY STUB_PURGE_BODY STUB_PURGE_CODE \
         STUB_RECONCILE_CODE STUB_412 STUB_APP_DOWN STUB_R2_DOWN STUB_GET_BODY \
         SIMULATE_APP_DOWN STUB_GH_SEARCH_FAIL STUB_GH_SEARCH_BODY \
-        STUB_NO_IFNONEMATCH STUB_HEAD_EXISTS STUB_PUT_FAIL \
+        STUB_NO_IFNONEMATCH STUB_HEAD_EXISTS STUB_PUT_FAIL STUB_PUT_412_SUBSTRING \
         STUB_LIST_FAIL STUB_LIST_FAIL_TEAM STUB_FLAT_FAIL STUB_INDEX_FAIL GH_ISSUE_STATE STUB_ISSUE_CODE \
         GH_SEARCH_JSON GH_NEW_ISSUE R2_TEAMS R2_DEFAULT_LIST R2_FLAT_LIST \
         R2_DEFAULT_LIST_Z R2_DEFAULT_LIST_A \
@@ -1053,9 +1058,11 @@ run_driver
 assert_filed "$(cat "$LOG")" STALE "61. a per-graph subject does not satisfy the team subject"
 assert_not_match "$(cat "$LOG")" "issues/555" "61. the per-graph issue is not adopted by the team incident"
 
-# ── 62. #3032: unsupported IfNoneMatch + absent object → HEAD-check fallback ─
-# The Python twin has this fallback (hosted_backup.create_if_not_exists); the
-# shell twin silently degraded to the fail-open search instead.
+# ── 62. #3032: unsupported IfNoneMatch + ambiguous HEAD → LOUD, never a blind put
+# The Python twin RAISES in this case (`hosted_backup.create_if_not_exists`:
+# "a blind-put would weaken the dedup linearization point"); the shell twin must
+# not create an object it cannot prove absent — that could overwrite a
+# concurrent writer's object and null its issue_number.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
@@ -1063,9 +1070,24 @@ export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' nul
 export STUB_NO_IFNONEMATCH=1
 export STUB_HEAD_EXISTS=0
 run_driver
-assert_contains "$OUT" "HEAD-check fallback" "62. the fallback is logged, not silent"
+assert_eq "$RC" 1 "62. an ambiguous dedup write exits RED (1)"
 assert_match "$(cat "$LOG")" "AWS head-object key=ops/alerts/SWEEP_CONFIG_ERROR" "62. the fallback HEAD-checks the object"
-assert_filed "$(cat "$LOG")" "SWEEP_CONFIG_ERROR" "62. the incident is still filed (dedup object created)"
+assert_contains "$OUT" "refusing a blind put" "62. an unconfirmable object is never blind-put"
+assert_not_match "$(cat "$LOG")" "GH POST .*/issues \{" "62. nothing is filed on an unverified dedup"
+
+# ── 62b. #3032: a bare `412` in an unrelated error is NOT "already exists" ──
+# The pre-review glob `*412*` matched any request-id/byte-count, reporting
+# "exists" without ever HEAD-checking. Only the real AWS markers may shortcut.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body false '"REGISTRY_STREAM_KEY not set"' null)"
+export STUB_PUT_412_SUBSTRING=1
+export STUB_HEAD_EXISTS=1
+export STUB_GET_BODY='{"kind":"SWEEP_CONFIG_ERROR","issue_number":42}'
+run_driver
+assert_match "$(cat "$LOG")" "AWS head-object key=ops/alerts/SWEEP_CONFIG_ERROR" "62b. an unrelated 412 substring still HEAD-checks"
+assert_contains "$OUT" "already tracked by open issue #42" "62b. the existing object is adopted (not a false exists)"
 
 # ── 63. #3032: unsupported IfNoneMatch + EXISTING object → adopt, no duplicate
 reset_case

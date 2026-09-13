@@ -448,12 +448,25 @@ the resolved Telegram, delete the dedup object). The watcher drives this for the
 absence kinds (`STALE`, `NEVER_BACKED_UP`, `METADATA_LOST`, `BACKUP_SET_MISSING`,
 `R2_DOWN`, `DRIVER_DOWN`); the sweep endpoint drives it for **its own guards**
 (`P0_GUARD_FAIL`, `NO_ELIGIBLE_TEAMS`, `ENUM_DELTA`,
-`GRAPH_NAME_RESOLUTION_FAIL`) — a conclusive sweep run that does **not** re-emit a
-kind is the "condition cleared" evidence (#3030; before it, these four had no
-resolver on any surface and stayed open forever — the live case was #2821).
-A **degraded** run (`enum_failed`) clears nothing: it cannot tell "no teams" from
-"could not look". The driver self-heals `APP_DOWN`/`WATCHER_DOWN`/`SWEEP_CONFIG_ERROR`/
-`SWEEP_OFF_STALE`/`SWEEP_NO_COVERAGE` on a healthy run (`.github/scripts/registry-cron.sh`).
+`GRAPH_NAME_RESOLUTION_FAIL`) — before #3030 those four had no resolver on any
+surface and stayed open forever (the live case was #2821).
+
+   ⚠️ **Clearing requires POSITIVE EVIDENCE, never the mere absence of an
+   emission** (review P0 on the first #3030 cut — it closed live alerts):
+   * a **global** guard clears only on a run that actually **looked** — at least
+     one team result carrying a graph map. A 0-team or lock-busy run is exactly
+     what `ENUM_DELTA` reports; clearing it there would silence the #2823
+     silent-degradation class and it could never re-fire (the same run's
+     ops-state write resets the `>0 → 0` transition it keys on).
+   * **`P0_GUARD_FAIL`** clears only for a graph whose dump demonstrably **ran and
+     passed the guard**. A graph whose result is `error` (pre-dump failure) or
+     `aborted_size_guard` returned *before* the guard, so its incident stays open.
+   * a **blind** run (`enum_failed`/`error`/`already_running`) clears nothing; a
+     **`degraded`** run *did* look, so it clears the global guards it did not
+     re-emit while leaving the P0 incidents of its failed graphs open.
+   * the endpoint resolves only incidents that are **actually open** (one R2 LIST
+     per kind — never a read per graph, which at a few thousand graphs would add
+     minutes under the sweep lock).
 2. **Recovery-side clear** — the driver's self-heal legs (above).
 3. **Manual close only** — currently `DATA_LOSS_CANDIDATE` (a >50% node drop needs
 a human verdict: verify + re-baseline, or restore). Any kind added here must name
@@ -462,6 +475,19 @@ the verification the operator performs.
 A closed incident's dedup object is **deleted**, so a **recurrence files a new
 issue** — that is the contract (`delete-to-resolve`), and the driver adopts a
 still-open issue only when the object's recorded issue is verifiably open.
+
+Two residuals are known and tracked, not silently absorbed:
+
+* A graph **tombstoned/deleted after** its `P0_GUARD_FAIL` fired is no longer in
+  the run's graph map, so the resolver never revisits it — close it manually (or
+  via the trash/restore flow) until the resolver learns to reconcile the open
+  incident set against the current graph map.
+* If the issue **close** itself fails, the app leaves the incident open and
+  announces nothing (no "✅ resolved", no object deletion) and retries next poll —
+  a false all-clear is worse than a late one. A dedup object whose recorded issue
+  was closed **out of band** (by hand, or by the driver) is not re-verified on the
+  app side, so that incident can stay silent until the object is cleared; this is
+  a tracked follow-up, not a documented guarantee.
 
 ### Kinds with no writer (`ALERTER_DOWN`, `LIVENESS_NO_WORK`)
 

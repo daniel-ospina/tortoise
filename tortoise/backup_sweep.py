@@ -717,6 +717,12 @@ def _backup_graph(
         )
         return {"status": "p0_guard_failed", "team_id": team_id, "graph_id": graph_id}
 
+    # #3030 (review): record that the guard demonstrably RAN and PASSED. Callers
+    # must never infer this from a graph being present in the results map — a
+    # graph whose dump errored, was aborted by the size guard, or never resolved
+    # returns BEFORE this line, so "present" does not mean "checked".
+    p0_checked = True
+
     node_count = int(manifest["node_count"])
 
     # ── Empty-content transition guard (no state.json write on fire). ──
@@ -733,10 +739,10 @@ def _backup_graph(
                     "detail": {"previous": prev_node_count, "now": 0, "drop_pct": 100},
                 }
             )
-            return {"status": "data_loss_candidate", "team_id": team_id,
+            return {"p0_checked": p0_checked, "status": "data_loss_candidate", "team_id": team_id,
                     "graph_id": graph_id, "node_count": 0}
         # Steady-0 (chronic empty team) is a signal, never an incident.
-        return {"status": "empty_skipped", "team_id": team_id,
+        return {"p0_checked": p0_checked, "status": "empty_skipped", "team_id": team_id,
                 "graph_id": graph_id, "node_count": 0}
     if prev_node_count > 0 and node_count < prev_node_count * 0.5:
         _delete_uploaded(storage, team_id, manifest.get("backup_id", ""))
@@ -752,7 +758,7 @@ def _backup_graph(
                 },
             }
         )
-        return {"status": "data_loss_candidate", "team_id": team_id,
+        return {"p0_checked": p0_checked, "status": "data_loss_candidate", "team_id": team_id,
                 "graph_id": graph_id, "node_count": node_count}
 
     # ── Per-label drift guard (#661): fires when the overall >50% ratio is
@@ -778,7 +784,7 @@ def _backup_graph(
                     },
                 }
             )
-            return {"status": "data_loss_candidate", "team_id": team_id,
+            return {"p0_checked": p0_checked, "status": "data_loss_candidate", "team_id": team_id,
                     "graph_id": graph_id, "node_count": node_count}
 
     # ── #2319 geo-mirror (env-guarded second-store copy): an ACCEPTED
@@ -795,7 +801,7 @@ def _backup_graph(
             logger.exception(
                 "mirror of %s/%s failed (primary backup durable): %s",
                 team_id, graph_id, e)
-            return {"status": "error", "team_id": team_id,
+            return {"p0_checked": p0_checked, "status": "error", "team_id": team_id,
                     "graph_id": graph_id,
                     "error": f"backup accepted but mirror failed: {e}"}
     else:
@@ -839,6 +845,7 @@ def _backup_graph(
         deleted = []
 
     return {
+        "p0_checked": p0_checked,
         "status": "backed_up",
         "team_id": team_id,
         "graph_id": graph_id,
@@ -1411,35 +1418,53 @@ def sweep_resolutions(result: dict[str, Any]) -> list[tuple[str, str]]:
     channel exists to avoid (live instance: #2821 ``[DR] ENUM_DELTA``, whose own
     cause #2823 was fixed while the alert could not close).
 
-    The sweep is the authority on its own guards: a run that completed and did
-    NOT emit a kind IS the "condition cleared" evidence, so the caller closes it
-    through the same delete-to-resolve lifecycle the watcher uses.
+    Clearing requires POSITIVE EVIDENCE, never the mere absence of an emission
+    (review P0 — the first cut of this function closed live alerts):
 
-    A DEGRADED run resolves nothing: ``enum_failed`` cannot distinguish "no
-    teams" from "could not look", and clearing a guard there would silently
-    normalise the very blindness the guard exists to catch. ``already_running``
-    (a 202 lock-held pass) never runs this code, and is excluded defensively.
+    * **Global guards** (`ENUM_DELTA`, `NO_ELIGIBLE_TEAMS`,
+      `GRAPH_NAME_RESOLUTION_FAIL`) need a run that actually LOOKED: at least one
+      team result carrying a graph map. A 0-team/lock-busy run is exactly what
+      ENUM_DELTA reports — resolving it there would silence the #2823
+      silent-degradation class, and it could never re-fire (the guard triggers
+      only on the ``>0 → 0`` transition, which the same run's ops-state write
+      resets).
+    * **`P0_GUARD_FAIL`** is per-graph and cleared only for graphs whose dump
+      demonstrably RAN the guard and passed it (``p0_checked``). A graph whose
+      result is ``error`` (pre-dump failure) or ``aborted_size_guard`` returned
+      BEFORE the guard, so its P0 incident must stay open.
+    * A **degraded** run (``enum_failed``/``error``/``already_running``)
+      resolves nothing: it cannot distinguish "no teams" from "could not look".
 
-    P0_GUARD_FAIL is per-graph: it is cleared for every graph this run processed
-    without tripping the guard. A team whose result carries no graph map
-    (resolution/error) proves nothing about its graphs and is skipped.
+    The caller intersects this with the currently OPEN incidents (#3030 review:
+    one list per kind, never an R2 read per graph).
     """
     if result.get("status") in ("enum_failed", "error", "already_running"):
         return []
+    results = result.get("results") or {}
+    # Positive enumeration evidence: the sweep looked and got per-team graph
+    # maps (an empty result set means it had nothing to look at).
+    looked = any(
+        isinstance(res, dict) and isinstance(res.get("graphs"), dict)
+        for res in results.values()
+    )
     emitted = {
         (inc.get("kind"), incident_subject(inc))
         for inc in result.get("incidents", [])
     }
-    cleared: list[tuple[str, str]] = [
-        (kind, "")
-        for kind in SWEEP_RESOLVABLE_GLOBAL_KINDS
-        if (kind, "") not in emitted
-    ]
-    for team_id, team_res in (result.get("results") or {}).items():
+    cleared: list[tuple[str, str]] = []
+    if looked:
+        cleared.extend(
+            (kind, "")
+            for kind in SWEEP_RESOLVABLE_GLOBAL_KINDS
+            if (kind, "") not in emitted
+        )
+    for team_id, team_res in results.items():
         graphs = team_res.get("graphs") if isinstance(team_res, dict) else None
         if not isinstance(graphs, dict):
             continue
-        for gid in graphs:
+        for gid, gres in graphs.items():
+            if not (isinstance(gres, dict) and gres.get("p0_checked")):
+                continue
             subject = graph_subject(team_id, gid)
             if ("P0_GUARD_FAIL", subject) not in emitted:
                 cleared.append(("P0_GUARD_FAIL", subject))

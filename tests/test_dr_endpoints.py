@@ -355,6 +355,46 @@ class TestDrHeartbeat:
 
 
 class TestDrSweep:
+    def test_sweep_resolves_open_guard_kinds_a_clear_run_did_not_re_emit(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#3030 wiring + review P2: a conclusive run closes the guard incidents it
+        did NOT re-emit — but only those that are actually OPEN, and it reports what
+        it closed. A subject that is not open is never resolved."""
+        _seed_team("team_x", nodes=2)
+        fake = _FakeAlerts(open_subjects={
+            "ENUM_DELTA": {"_"},
+            "P0_GUARD_FAIL": {"team_x", "team_x:gone"},
+            "SWEEP_NO_COVERAGE": {"_"},
+        })
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "backed_up"
+        assert ("resolve", "ENUM_DELTA", "") in fake.calls
+        assert ("resolve", "P0_GUARD_FAIL", "team_x") in fake.calls
+        # Not open → no resolve call (and no per-graph read: exactly one LIST/kind).
+        assert ("resolve", "P0_GUARD_FAIL", "team_x:gone") not in fake.calls
+        assert ("resolve", "SWEEP_NO_COVERAGE", "") not in fake.calls
+        assert ("open_subjects", "ENUM_DELTA", "") in fake.calls
+        assert sorted(body["incidents_resolved"]) == ["ENUM_DELTA", "P0_GUARD_FAIL/team_x"]
+
+    def test_sweep_survives_a_resolve_failure(self, client, dr_env, mem_storage,
+                                              monkeypatch):
+        """A failing close must never fail the sweep request (the incident simply
+        stays open for the next run) nor lose the other resolutions."""
+        _seed_team("team_x", nodes=2)
+        fake = _FakeAlerts(
+            open_subjects={"ENUM_DELTA": {"_"}, "P0_GUARD_FAIL": {"team_x"}},
+            fail_resolve_kinds={"ENUM_DELTA"},
+        )
+        monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        assert r.json()["incidents_resolved"] == ["P0_GUARD_FAIL/team_x"]
+
     def test_sweep_backs_up_seeded_team(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=2)
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
@@ -1275,17 +1315,30 @@ class TestDrAclReconcile:
 # /status → last_drill surfacing.
 
 class _FakeAlerts:
-    """Recording alert-store stub — captures open/resolve calls (no network)."""
+    """Recording alert-store stub — captures open/resolve calls (no network).
 
-    def __init__(self):
+    ``open_subjects`` models the #3030 review contract: the endpoint must LIST
+    what is open (one call per kind) instead of issuing an R2 read per graph.
+    Pass ``{"KIND": {"subject", ...}}`` to declare open incidents.
+    """
+
+    def __init__(self, open_subjects=None, fail_resolve_kinds=()):
         self.calls: list = []
+        self._open = dict(open_subjects or {})
+        self._fail_resolve = set(fail_resolve_kinds)
 
     def open_incident(self, kind, team_id="", detail=None):
         self.calls.append(("open", kind, team_id, dict(detail or {})))
         return True
 
+    def open_subjects(self, kind):
+        self.calls.append(("open_subjects", kind, ""))
+        return set(self._open.get(kind, set()))
+
     def resolve_incident(self, kind, team_id=""):
         self.calls.append(("resolve", kind, team_id))
+        if kind in self._fail_resolve:
+            raise RuntimeError("alert store down")
         return True
 
 
