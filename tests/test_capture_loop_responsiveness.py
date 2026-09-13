@@ -1173,10 +1173,12 @@ def test_cancelled_m2_capture_records_the_m2_lane(client, monkeypatch):
     """#3129 (cycle-4 review): the marker records the ACTUAL lane, m2 included.
 
     The abandonment marker closes the retry hole on the v2 lane only: the
-    #2335 TRUE-retry gate requires `prior_capture_extractor == "v2"` (#2473),
-    so an abandoned m2 capture still replays on the next same-session POST.
-    That is deliberate — re-running m2 over a failed attempt mints duplicate
-    ULIDs, the hole #2473 closed. This pins the STATE the marker must leave
+    #2335 TRUE-retry gate requires `prior_capture_extractor == "v2"` AND the
+    retrying request to run v2 (#2473), so an abandoned m2 capture still
+    replays on the next same-session POST — and so does an abandoned v2 capture
+    re-POSTed after the deployment's lane was switched to m2. That is
+    deliberate — re-running m2 over a failed attempt mints duplicate ULIDs, the
+    hole #2473 closed. This pins the STATE the marker must leave
     (False + `m2`), i.e. that the fix does not falsely advertise v2 for an m2
     attempt (which would send the retry into the non-convergent re-run).
     """

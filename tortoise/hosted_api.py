@@ -7225,13 +7225,15 @@ def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
     SCOPE — the retry is closed on the **v2 lane only**, and only for IN-PROCESS
     cancellation:
 
-    * the TRUE-retry gate requires `prior_capture_extractor == "v2"` (#2473),
-      so an abandoned **m2** capture (`capture_ok=false, capture_extractor=m2`)
-      subsequent re-POST still replays. That is the documented, deliberate
-      m2 behaviour: re-running m2 over a failed attempt mints duplicate ULIDs,
-      which is the hole #2473 closed. The marker records the correct lane
-      rather than pretending otherwise (pinned by
-      test_cancelled_m2_capture_records_the_m2_lane).
+    * the TRUE-retry gate requires BOTH the prior lane AND the retrying request
+      to be v2 (`prior_capture_extractor == "v2"` **and** the request's
+      `TORTOISE_SESSION_EXTRACTOR != "m2"`, #2473), so an abandoned **m2**
+      capture re-POSTed still replays, and so does an abandoned v2 capture
+      re-POSTed after the deployment's lane was switched to m2. Both are the
+      documented, deliberate consequence of #2473: re-running m2 over a failed
+      attempt mints duplicate ULIDs, which is the hole that gate closed. The
+      marker records the correct lane rather than pretending otherwise (pinned
+      by test_cancelled_m2_capture_records_the_m2_lane).
     * a cancellation that never reaches Python leaves the NULL too — a SIGKILL
       (deploy/restart) executes no cleanup. Closing that needs a write-ahead
       attempt sentinel on the Session; filed as a residual (see the PR body).
