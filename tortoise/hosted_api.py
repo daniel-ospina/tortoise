@@ -19,6 +19,7 @@ import contextvars
 import functools
 import hmac
 import inspect
+import ipaddress
 import json as _json
 import logging
 import math
@@ -26,7 +27,7 @@ import os
 import re
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
@@ -59,6 +60,20 @@ from tortoise.hosted_backup import (
     restore_backup,
 )
 from tortoise.mcp_server import create_http_app
+from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    PROBE_HARD_TIMEOUT,
+    PROBE_STALE_AFTER,
+    HealthProbe,
+    event_retention_interval,
+    heartbeat_record,
+    loop_heartbeat_info,
+    loop_heartbeat_task,
+    run_on_daemon_worker,
+    start_health_listener,
+    start_stall_watchdog,
+    workload_enter,
+    workload_exit,
+)
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
     _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
@@ -160,14 +175,14 @@ _CAPTURE_MAX_IN_FLIGHT = max(1, min(_int_env("TORTOISE_CAPTURE_IN_FLIGHT", 8), 1
 _CAPTURE_IN_FLIGHT = 0
 _CAPTURE_IN_FLIGHT_LOCK = threading.Lock()
 
-# /health is the FLY liveness signal (fly.toml: path=/health, 15s timeout): the
-# one request that must answer even when everything else is wedged. Its probe
-# is hard-bounded (~1.5s, #1384) but could still QUEUE behind arbitrary
-# default-pool work — a dedicated pool plus a bounded wait keeps the liveness
-# answer independent of every other request.
-_HEALTH_PROBE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="health-probe")
-_HEALTH_PROBE_BUDGET_S = 5.0
+# NOTE (merge of #2850 x #2988/#3060): the dedicated ``_HEALTH_PROBE_EXECUTOR``
+# and its ``_HEALTH_PROBE_BUDGET_S`` wall bound were REMOVED here. They existed
+# so ``/health`` could run ``_probe_db`` off the shared default pool with a
+# bounded wait; ``/health`` is now pure in-memory (it reads
+# ``_HEALTH_PROBE.snapshot()``) and does no I/O and no thread hand-off at all,
+# so the pool and the bound had no remaining caller. ``_submit_off_loop`` /
+# ``_run_off_loop`` BELOW are kept: the capture path still uses them to stay
+# off the shared default executor.
 
 
 def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
@@ -547,6 +562,267 @@ def _iter_registered_teams() -> list[dict]:
         return []
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# #2850 (P0) liveness/readiness decouple + #2953 (bind the port BEFORE the
+# boot sweeps). The two hazards these helpers remove:
+#
+#   #2953 — uvicorn awaits ``lifespan.startup()`` BEFORE ``loop.create_server()``
+#   (uvicorn/server.py: ~107 vs ~145/152/173), so anything awaited in the
+#   startup half of ``_lifespan`` runs with NO LISTENING SOCKET AT ALL. The
+#   pre-fix code awaited two full graph sweeps there (``_sweep_events``,
+#   ``_purge_deleted_teams``) — every deploy/restart served nothing while they
+#   ran. They now start as background tasks after the startup half returns.
+#
+#   #2850 — the health path must never share fate with the work. /health now
+#   reads ONE in-memory value (no I/O, no thread hand-off, no await), and the
+#   dedicated /healthz listener (port 9090, own thread) answers a question
+#   about the event loop from outside the event loop.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: How often the background refresher re-probes the DB. Keeps ``/health``'s
+#: ``db`` field fresh WITHOUT the request path doing any I/O. Must stay below
+#: monitoring.PROBE_STALE_AFTER (30s) or a healthy DB would read as degraded.
+HEALTH_PROBE_REFRESH_S = 10.0
+#: Lower bound on a configured probe period (round-3 review P2). ``1e-9`` is
+#: finite but turns the refresher into a ~50 Hz loop, each iteration spawning a
+#: probe daemon thread and issuing a DB round trip — the same busy-loop the
+#: ``nan`` rejection exists to prevent. The upper clamp was one-sided.
+HEALTH_PROBE_MIN_INTERVAL_S = 0.5
+
+
+def _health_probe_interval() -> float:
+    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds).
+
+    Clamped to half the probe staleness window (review P2): a period longer
+    than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
+    refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
+    outage. Half the window leaves a full refresh of margin.
+
+    NON-FINITE values are rejected and fall back to the default (round-2
+    review P2): ``float()`` accepts ``nan``/``inf`` and neither is caught by
+    the ``v <= 0`` guard (``nan <= 0`` is False) nor by the ``v > cap`` clamp
+    (``nan > cap`` is False). ``nan`` flows into ``asyncio.sleep(nan)``, which
+    returns almost immediately — a busy loop hammering the DB probe and the
+    event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
+    stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
+
+    A finite but SUB-FLOOR period is rejected the same way (round-3 review
+    P2): ``1e-9`` busy-loops the probe exactly as ``nan`` did.
+    """
+    try:
+        v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
+    except (TypeError, ValueError):
+        return HEALTH_PROBE_REFRESH_S
+    if not math.isfinite(v):
+        _logger.error(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is not finite — falling back "
+            "to the default %.0fs; a nan period busy-loops the probe and an "
+            "infinite one leaves a healthy DB reading stale forever",
+            v, HEALTH_PROBE_REFRESH_S)
+        return HEALTH_PROBE_REFRESH_S
+    if v <= 0:
+        return HEALTH_PROBE_REFRESH_S
+    # Round-3 review P2: a finite but tiny period busy-loops the probe just
+    # like ``nan`` did — ``1e-9`` yields ~50 generations/s, each spawning a
+    # daemon thread and issuing a DB round trip. The clamp below is
+    # one-sided, so a floor is required too.
+    if v < HEALTH_PROBE_MIN_INTERVAL_S:
+        _logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is below the %.2fs floor — "
+            "falling back to the default %.0fs; a sub-floor period "
+            "busy-loops the probe and duplicates the DB round trip",
+            v, HEALTH_PROBE_MIN_INTERVAL_S, HEALTH_PROBE_REFRESH_S)
+        return HEALTH_PROBE_REFRESH_S
+    cap = PROBE_STALE_AFTER / 2.0
+    if v > cap:
+        _logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s exceeds half the probe "
+            "staleness window (%.0fs) — clamping to %.0fs; a longer period "
+            "would report a healthy DB as degraded and fail the deploy gate",
+            v, PROBE_STALE_AFTER, cap)
+        return cap
+    return v
+
+
+async def _health_probe_loop() -> None:
+    """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
+
+    ``/health`` must be answerable from memory alone, so freshness has to be
+    somebody else's job — this task. It is single-flight and hard-bounded
+    (``HealthProbe.run`` returns within ``DB_PROBE_HARD_TIMEOUT`` even against a
+    black-holed DB), never touches the app's shared default executor, and can
+    never die: a raise here would freeze the reported DB verdict forever.
+    """
+    while True:
+        try:
+            await _HEALTH_PROBE.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # a refresher must not die
+            _logger.warning("health probe refresh failed: %s", exc)
+        await asyncio.sleep(_health_probe_interval())
+
+
+def _sweep_events() -> None:
+    """#432: purge expired/overflowed events from every registered team graph.
+
+    #2953: hoisted out of ``_lifespan`` (it was a closure) so the boot phase
+    can be a background task and so it is patchable in tests.
+
+    Probe-before-purge is registry-mode only (#2251 review P2): a purge query
+    against an ABSENT team_{tid} graph (orphan registry row from a partial
+    provision) would materialize an empty one. Skip the probe in Supabase mode
+    — the registry namespace must NEVER be constructed there (#669; the
+    flip-gate pins the webhook path zero-touch), and that sweep predates #2251
+    so it keeps its pre-existing unconditional per-team purge. Registry mode:
+    enumerate the server-wide existing graphs ONCE; None → probe failed → skip
+    this cycle (best-effort — the per-team purges below hit the same graph
+    store, so they would fail anyway; the per-team SDK lazy hook still covers
+    purges).
+    """
+    try:
+        from tortoise.event_store import purge_expired, purge_overflow
+        days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+        cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+        from tortoise.supabase_control import is_supabase_enabled
+        existing = None  # None = no gate (Supabase mode)
+        if not is_supabase_enabled():
+            existing = _registry_existing_graphs()
+            if existing is None:
+                _logger.warning("event retention sweep skipped: registry graph probe failed")
+                return
+        # Sweep every registered team's graph (registry Team nodes).
+        for team in _iter_registered_teams():
+            if existing is not None and f"team_{team['team_id']}" not in existing:
+                continue
+            try:
+                sdk = _make_sdk(namespace=team["team_id"])
+                proj = sdk._get_proj()
+                purge_expired(proj, retention_days=days)
+                purge_overflow(proj, max_events=cap)
+            except Exception:
+                _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
+    except Exception as exc:
+        _logger.warning("event retention sweep failed: %s", exc)
+
+
+async def _run_boot_sweeps() -> None:
+    """#2953: the one-time boot sweeps, run as a BACKGROUND task.
+
+    This must never be awaited from the startup half of ``_lifespan``: uvicorn
+    only calls ``loop.create_server()`` after ``lifespan.startup()`` returns,
+    so awaiting here means the machine accepts no traffic at all for the
+    duration of the sweeps (guaranteed on every deploy/restart). Scheduled as
+    a task instead, the loop is free to bind immediately.
+
+    The ``await asyncio.sleep(0)`` at the top yields once before the first
+    blocking submission, so the loop reaches uvicorn's ``create_server`` before
+    any sweep work is handed to a thread. The hard guarantee is the removed
+    ``await``; this just makes the ordering explicit.
+
+    Best-effort by construction (mirroring the pre-#2953 ``try/except``): a
+    sweep failure logs and never kills startup.
+
+    The sweeps run on a dedicated DAEMON worker (``run_on_daemon_worker``), not
+    on the shared default executor: ``asyncio.run``'s
+    ``shutdown_default_executor()`` joins every DEFAULT-executor worker, so a
+    sweep blocked on a dead DB would hang uvicorn's whole process shutdown
+    until the socket timeout (and forever against a black hole with no
+    timeout). A daemon worker can always be abandoned.
+    """
+    await asyncio.sleep(0)
+    for label, fn in (("event retention", _sweep_events),
+                      ("deleted-team purge", _purge_deleted_teams)):
+        try:
+            await run_on_daemon_worker(fn, name="tortoise-boot-sweep")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # never fatal
+            _logger.warning("boot %s sweep failed: %s", label, exc)
+
+
+#: Task attributes armed across the lifespan that a re-entry or shutdown must
+#: disarm. SHARED by ``_start_liveness`` and ``_stop_liveness`` (round-3 review
+#: P2): the two lists used to differ, so a failed prior lifespan could leave
+#: ``_boot_sweep_task``/``_event_retention_task`` orphaned — a double boot
+#: sweep and "Task exception was never retrieved" at teardown.
+_LIVENESS_TASK_ATTRS = (
+    "_loop_heartbeat_task",
+    "_health_probe_task",
+    "_boot_sweep_task",
+    "_event_retention_task",
+)
+
+
+def _start_liveness(app) -> None:
+    """Arm the heartbeat, the dedicated /healthz listener and the watchdog.
+
+    Called from the STARTUP half of ``_lifespan`` — cheap, synchronous, no
+    I/O, no await, so it cannot delay the bind.
+
+    Order is load-bearing: ``heartbeat_record()`` runs ON the loop right now
+    (proving it is scheduling before the watchdog exists to judge it), then
+    the heartbeat task, then the listener, then the watchdog. Starting the
+    watchdog before the heartbeat would let it fire on a loop that simply had
+    not ticked yet. The watchdog additionally refuses to judge until at least
+    one REAL tick has landed (``LOOP_STALL_EXIT_MIN_TICKS``), so the slow-
+    starting part of the startup half cannot be mistaken for a wedge.
+    """
+    loop = asyncio.get_running_loop()
+    # A previous lifespan of the SAME app instance (in-process restart,
+    # TestClient reuse) may have failed before its shutdown half ran, leaving an
+    # armed watchdog and live tasks behind. Disarm them first: an orphaned
+    # watchdog would survive into the next shutdown, where a legitimately stale
+    # heartbeat (the cancelled heartbeat task) looks exactly like a wedge, and
+    # it would kill the process mid-drain.
+    prev_stop = getattr(app.state, "_loop_watchdog_stop", None)
+    if prev_stop is not None:
+        prev_stop.set()
+    for attr in _LIVENESS_TASK_ATTRS:
+        prev = getattr(app.state, attr, None)
+        if prev is not None:
+            prev.cancel()
+    heartbeat_record()
+    app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    app.state._healthz_server = start_health_listener()
+    app.state._loop_watchdog_stop = threading.Event()
+    # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
+    # unset this returns None — the /healthz listener is the signal and the
+    # destructive action lives in the out-of-band watchdog. Enabling it here
+    # also requires 3 consecutive stale windows and an idle workload.
+    app.state._loop_watchdog = start_stall_watchdog(
+        stop_event=app.state._loop_watchdog_stop)
+
+
+async def _stop_liveness(app) -> None:
+    """Shutdown half: cancel the loop tasks, stop the watchdog.
+
+    The watchdog MUST be stopped FIRST: shutdown cancels the heartbeat task,
+    which makes the heartbeat legitimately stale, which is indistinguishable
+    from a wedge. Leaving it armed would kill the process mid-drain.
+
+    The /healthz listener is deliberately NOT torn down — it is process-
+    lifetime, it answers 200 for as long as the loop is alive (so a rolling
+    drain is not mistaken for a dead machine), and rebinding it per lifespan
+    would race TIME_WAIT across in-process TestClient restarts.
+
+    Cancelled tasks are awaited: a bare ``cancel()`` leaves them pending and
+    the loop prints "Task was destroyed but it is pending!" at teardown. The
+    wait is prompt — cancellation is thrown into the awaiting coroutine at its
+    ``await`` point, so it does not wait for an in-flight ``to_thread`` worker.
+    """
+    stop = getattr(app.state, "_loop_watchdog_stop", None)
+    if stop is not None:
+        stop.set()
+    pending = [t for t in (getattr(app.state, attr, None)
+                           for attr in _LIVENESS_TASK_ATTRS) if t is not None]
+    for task in pending:
+        task.cancel()
+    if pending:
+        with suppress(Exception):
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
 @asynccontextmanager
 async def _lifespan(app):
     """Compose the FastMCP sub-app's lifespan (session manager init) into
@@ -563,6 +839,20 @@ async def _lifespan(app):
     OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
     retries on the next call and search falls back to FTS+structural RRF.
     """
+    # ── #2850: every app instance starts from a clean health-probe state.
+    # A probe worker wedged during a previous app instance (TestClient reuse
+    # in-process, or an in-process reload) must not survive into this one.
+    _HEALTH_PROBE.reset()
+    _READY_PROBE.reset()
+    _CONTROL_PLANE_PROBE.reset()
+    _probe_sdk_reset()
+
+    # ── #2850: arm liveness BEFORE anything that can block. The heartbeat
+    # task, the dedicated /healthz listener and the stall watchdog are all
+    # synchronous/cheap — they cannot delay uvicorn's bind, and they mean the
+    # machine reports its true liveness from the first millisecond.
+    _start_liveness(app)
+
     # ── #2444: optional Sentry activation for the hosted API (no-op without
     # SENTRY_DSN). Initialize before the app starts serving so captures are
     # armed from the first request. Hosted-only concern: local SDK/self-host
@@ -787,57 +1077,46 @@ async def _lifespan(app):
         # name for the WHOLE of _lifespan — so the earlier `os.environ.get(...)`
         # read above raised UnboundLocalError and aborted the entire watcher-start
         # block. Regression guard: tests/test_boot_regressions.py.
+        # #2953 (round-3 review P2): schedule the one-time BOOT sweeps FIRST,
+        # in their own try. They used to be created AFTER the ``interval``
+        # parse inside the SAME try, so a ``ValueError`` from
+        # ``TORTOISE_EVENT_RETENTION_INTERVAL=oops`` silently cancelled the
+        # boot sweeps too — a config typo disabled the retention purge at boot
+        # (and the deleted-team purge) for the process's lifetime. On
+        # origin/main the sweeps ran regardless (they were awaited before the
+        # parse); keep that independence.
         try:
-            def _sweep_events() -> None:
-                try:
-                    from tortoise.event_store import purge_expired, purge_overflow
-                    days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
-                    cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
-                    # Probe-before-purge is registry-mode only (#2251 review
-                    # P2): a purge query against an ABSENT team_{tid} graph
-                    # (orphan registry row from a partial provision) would
-                    # materialize an empty one. Skip the probe in Supabase
-                    # mode — the registry namespace must NEVER be
-                    # constructed there (#669; the flip-gate pins the
-                    # webhook path zero-touch), and that sweep predates
-                    # #2251 so it keeps its pre-existing unconditional
-                    # per-team purge. Registry mode: enumerate the
-                    # server-wide existing graphs ONCE; None → probe failed
-                    # → skip this cycle (best-effort — the per-team purges
-                    # below hit the same graph store, so they would fail
-                    # anyway; the per-team SDK lazy hook still covers
-                    # purges).
-                    from tortoise.supabase_control import is_supabase_enabled
-                    existing = None  # None = no gate (Supabase mode)
-                    if not is_supabase_enabled():
-                        existing = _registry_existing_graphs()
-                        if existing is None:
-                            _logger.warning("event retention sweep skipped: registry graph probe failed")
-                            return
-                    # Sweep every registered team's graph (registry Team nodes).
-                    for team in _iter_registered_teams():
-                        if existing is not None and f"team_{team['team_id']}" not in existing:
-                            continue
-                        try:
-                            sdk = _make_sdk(namespace=team["team_id"])
-                            proj = sdk._get_proj()
-                            purge_expired(proj, retention_days=days)
-                            purge_overflow(proj, max_events=cap)
-                        except Exception:
-                            _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
-                except Exception as exc:
-                    _logger.warning("event retention sweep failed: %s", exc)
+            # #2953: the BOOT sweeps are NOT awaited here. uvicorn calls
+            # loop.create_server() only after lifespan.startup() returns, so
+            # awaiting them meant the machine had NO listening socket for the
+            # whole sweep — every deploy and restart. Background task instead.
+            app.state._boot_sweep_task = asyncio.get_event_loop().create_task(
+                _run_boot_sweeps())
+        except Exception as exc:
+            _logger.error("boot sweeps did NOT run: %s", exc, exc_info=True)
 
-            await asyncio.to_thread(_sweep_events)  # boot sweep (#310, off the loop — same shape as the #302 purge below)
-            await asyncio.to_thread(_purge_deleted_teams)  # boot purge (#302)
-            interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+        try:
+            # #2850/#2953: the inline `_sweep_events` closure and the two
+            # `await asyncio.to_thread(...)` boot calls that used to live here
+            # are GONE. `_sweep_events` is now hoisted to module scope (see its
+            # own definition above), and both boot sweeps run as a background
+            # task (`_run_boot_sweeps`) so the listening socket binds before any
+            # DB work. The previous `import asyncio` / `import os` lines are also
+            # gone — module-scope imports already cover them, and a function-local
+            # `import os` shadowed the module name for the WHOLE of `_lifespan`
+            # (#2851/#2922; regression guard tests/test_boot_regressions.py).
+            interval = event_retention_interval()
 
             async def _event_retention_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
-                    await asyncio.to_thread(_sweep_events)
+                    # #2850: daemon worker, not the shared default executor —
+                    # see _run_boot_sweeps.
+                    await run_on_daemon_worker(_sweep_events,
+                                               name="tortoise-boot-sweep")
                     # #302: hard-delete past grace (sync DB work off the loop)
-                    await asyncio.to_thread(_purge_deleted_teams)
+                    await run_on_daemon_worker(_purge_deleted_teams,
+                                               name="tortoise-boot-sweep")
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
@@ -845,9 +1124,26 @@ async def _lifespan(app):
             # Best-effort by design (a purge failure must never block bind), but
             # there is no retry: retention is off for this process's lifetime, so
             # this is the same "silently never runs" shape as #2922 and gets the
-            # same treatment — ERROR plus a traceback.
-            _logger.error("event retention loop not started: %s", exc, exc_info=True)
+            # same treatment — ERROR plus a traceback. The one-time boot sweeps
+            # are scheduled independently (above) and are NOT affected by a bad
+            # interval; say so explicitly so the log is not read as "nothing ran".
+            _logger.error(
+                "event retention loop not started (the one-time boot sweeps "
+                "above WERE scheduled independently): %s", exc, exc_info=True)
+
+        # ── #2850: the DB probe refresher — keeps /health's ``db`` field
+        # honest without the request path doing any I/O at all.
+        try:
+            app.state._health_probe_task = asyncio.get_event_loop().create_task(
+                _health_probe_loop())
+        except Exception as exc:
+            _logger.warning("health probe refresher not started: %s", exc)
         yield
+
+        # ── shutdown: disarm the watchdog before the heartbeat task is
+        # cancelled (see _stop_liveness), then cancel the loop tasks.
+        with suppress(Exception):
+            await _stop_liveness(app)
 
 
 app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
@@ -1359,9 +1655,52 @@ class McpPathCanonicalizerMiddleware:
         await self.app(scope, receive, send)
 
 
-# Added LAST so it is the OUTERMOST middleware: the path is canonicalized before
-# any other middleware or router sees it, and before a redirect can be built.
+# Added LAST of the PATH-MUTATING middleware so it is the OUTERMOST one that
+# rewrites the scope: the path is canonicalized before any other path-mutating
+# middleware or the router sees it, and before a redirect can be built. (The
+# transparent in-flight gauge, ``InFlightMiddleware``, is registered after this
+# one and so wraps it from the outside; it never touches scope["path"], so it
+# cannot affect canonicalization order.)
 app.add_middleware(McpPathCanonicalizerMiddleware)
+
+
+class InFlightMiddleware:
+    """Count requests in flight for the opt-in loop-stall self-kill (#2850 P0).
+
+    The watchdog can see that the event loop stopped ticking but NOT why. This
+    app still runs synchronous work on the loop (LLM extraction, per-turn
+    FalkorDB queries), so a stale heartbeat is routinely "busy", not "wedged".
+    The self-kill must therefore refuse to fire while a request is in flight —
+    killing the process there would destroy the very request that is making
+    progress and turn ordinary provider latency into a restart loop.
+
+    Deliberately pure ASGI and OUTERMOST (registered last):
+      * it must increment BEFORE any middleware can short-circuit (a 429/404 is
+        still work in progress from the loop's point of view);
+      * no request/response wrapping, so it costs a lock acquire + a plain
+        increment on the hot path.
+
+    The decrement is in a ``finally`` so a raised handler cannot leak a slot and
+    permanently disarm the watchdog's idle predicate.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        workload_enter()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            workload_exit()
+
+
+app.add_middleware(InFlightMiddleware)
+
+
 # Internal auth key for Edge Function → API communication
 # Read lazily (not at import): tests and multi-app processes set
 # FASTAPI_INTERNAL_KEY after tortoise.hosted_api may already be imported,
@@ -1734,14 +2073,99 @@ def _validate_mint_expiry(body: dict) -> str | None:
     return None
 
 
+# ── #2850: reusable, bounded probe connection ────────────────────────────
+#
+# Pre-#2850 ``_probe_db`` called ``_make_sdk(namespace=None)`` on EVERY
+# invocation (a fresh TortoiseSDK + FalkorProjection + FalkorDB connection
+# pool each time) and never closed it. On a black-holed FalkorDB that leaked
+# one connection per health check, and the abandoned probe threads kept the
+# sockets (and the whole SDK) alive. The probe now owns ONE connection,
+# rebuilt only when the DB target itself changes.
+_PROBE_SDK_CACHE: dict = {"key": None, "sdk": None}
+_PROBE_SDK_LOCK = threading.Lock()
+
+
+def _probe_sdk_key() -> tuple:
+    """Identity of the DB target the cached probe SDK is bound to.
+
+    A changed TORTOISE_DB_URI / TORTOISE_DB_PATH / embedded path must rebuild
+    rather than probe a stale DB (test fixtures swap temp paths; entrypoint.sh
+    rewrites the URI). Production is a stable key, so the connection is built
+    once. TORTOISE_DB_PATH is included even when a URI is set: the hosted test
+    fixture force-binds a temp embedded path through a patched SDK __init__, so
+    the path — not the shared URI — is what actually changes per test.
+    """
+    uri = os.environ.get("TORTOISE_DB_URI") or ""
+    path = os.environ.get("TORTOISE_DB_PATH") or ""
+    return (uri, path, "" if uri else _resolve_embedded_db_path())
+
+
+def _probe_sdk_reset() -> None:
+    """Close + drop the cached probe SDK (app startup / tests / ops)."""
+    with _PROBE_SDK_LOCK:
+        sdk = _PROBE_SDK_CACHE.get("sdk")
+        _PROBE_SDK_CACHE["sdk"] = None
+        _PROBE_SDK_CACHE["key"] = None
+    if sdk is not None:
+        try:  # noqa: SIM105 — a stale temp DB may already be gone
+            sdk.close()
+        except Exception:
+            pass
+
+
+def _probe_sdk() -> TortoiseSDK:
+    """Return the cached probe SDK, rebuilding only when the target changes.
+
+    The per-request ``_make_sdk`` contract (a FRESH SDK per call, mutable
+    in-memory state) does not apply here: the health probes are single-flight
+    for their CALLERS — concurrent checks JOIN the in-flight probe, and a
+    second probe starts only by superseding a WEDGED one (capped per episode;
+    see the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``). In the
+    steady state the actual ``_get_proj().g.query`` executes on the ONE shared
+    probe worker (``monitoring._PROBE_WORKER``), which is exactly what stops
+    the per-check connection leak. NOTE the supersede window briefly overlaps a
+    wedged worker with its replacement, so this handle is not strictly
+    single-touch during a supersede; the wedged worker is by definition not
+    making progress, and the window is bounded by the supersede cap.
+
+    Both cache mutation and construction are serialized on
+    ``_PROBE_SDK_LOCK``, so concurrent coordinators can race for the handle but
+    cannot corrupt the cache or build two of them.
+    """
+    key = _probe_sdk_key()
+    with _PROBE_SDK_LOCK:
+        cached = _PROBE_SDK_CACHE.get("sdk")
+        if cached is not None and _PROBE_SDK_CACHE.get("key") == key:
+            return cached
+        old = cached
+        sdk = _make_sdk(namespace=None)
+        _PROBE_SDK_CACHE["sdk"] = sdk
+        _PROBE_SDK_CACHE["key"] = key
+    if old is not None:
+        try:  # noqa: SIM105
+            old.close()
+        except Exception:
+            pass
+    return sdk
+
+
 def _probe_db() -> dict:
-    """Deep-check the graph DB through the shared/default connection (#1384).
+    """Deep-check the graph DB through the reused probe connection (#1384).
 
     Reports ``{"ok": bool, "latency_ms": float, "error": str|None}`` via
-    monitoring.probe_db — never raises, hard-bounded (~1.5s). The probe
-    target is ``_make_sdk(namespace=None)``: the default-graph connection
-    shares the DB server with every team/registry endpoint, so a stopped
-    FalkorDB (NXDOMAIN, #1381) fails it too.
+    monitoring.probe_db — never raises. ``probe_db`` itself is statically
+    bounded at ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry
+    delay, ~3.1s, because a transient connect failure is retried once). The
+    ``_probe_sdk()`` prefix that runs BEFORE it is only NOMINALLY charged at
+    ``PROBE_SDK_ACQUISITION_BUDGET`` — that is the redis CONNECT leg, and on
+    the embedded path the acquisition runs real queries bounded by the redis
+    READ timeout (10s default, clampable to 60s) with redis-py's default 10
+    retries, which the budget does not cover. ``DB_PROBE_HARD_TIMEOUT`` below
+    is therefore the best-effort bound a caller should clear, NOT a proof that
+    it exceeds this worker's real total. The probe target is
+    ``_make_sdk(namespace=None)``: the default-graph connection shares the DB
+    server with every team/registry endpoint, so a stopped FalkorDB (NXDOMAIN,
+    #1381) fails it too.
 
     #669: NEVER probe the registry namespace — FalkorDB auto-creates the
     graph on select, so a registry-namespaced probe RECREATES a deleted
@@ -1749,38 +2173,195 @@ def _probe_db() -> dict:
     """
     from tortoise.monitoring import probe_db
     try:
-        sdk = _make_sdk(namespace=None)
+        sdk = _probe_sdk()
     except Exception as exc:
+        _probe_sdk_reset()
         return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return probe_db(sdk)
 
 
-def _probe_control_plane() -> None:
-    """Minimal control-plane probe — a 1-row teams read exercises the PostgREST
-    path without depending on any tenant data.
+# The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
+# ``monitoring.PROBE_HARD_TIMEOUT`` (``PROBE_DB_TOTAL_TIMEOUT`` +
+# ``PROBE_SDK_ACQUISITION_BUDGET`` + a strict-above margin), so a
+# ``PROBE_TIMEOUT`` change propagates. ``probe_db`` retries one transient
+# connect failure, so its statically-known ceiling is
+# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s) — NOT ``PROBE_TIMEOUT`` (1.5s); reading
+# only the per-attempt figure is what inverted the ordering in the
+# #2850/#2988 merge. Two honest caveats:
+#   * the ``_probe_sdk()`` prefix that runs BEFORE ``probe_db`` is charged at
+#     ``PROBE_SDK_ACQUISITION_BUDGET`` (the redis CONNECT leg). In URI mode
+#     that prefix is ~free (lazy projection, connect happens inside
+#     ``probe_db``'s own per-attempt bound); on the EMBEDDED path it runs real
+#     queries bounded by the redis READ timeout (10s default, clampable to
+#     60s) with redis-py's default 10 retries, which the budget does NOT cover;
+#   * ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` can raise even the connect leg
+#     the budget models (clamped at ``projection._DB_TIMEOUT_MAX_S`` = 60s).
+# So this is a best-effort ALIGNMENT that reduces how often a worker is
+# stranded; it is not a proof that the outer bound exceeds the worker's real
+# total. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
+DB_PROBE_HARD_TIMEOUT = PROBE_HARD_TIMEOUT
 
-    #2988: this is a SYNCHRONOUS HTTP call. Callers must run it off the event
-    loop (``asyncio.to_thread``); done on the loop, one black-holed socket
-    froze every route in the process.
+
+# #2850: the single-flight, hard-bounded coordinator BOTH health endpoints
+# read. The lambda resolves ``_probe_db`` at CALL time, so the existing
+# monkeypatch seams (tests patch ha_mod._probe_db) keep working.
+# Round-4 review P2: the self-heal gate is wired to ``_health_probe_interval()``
+# (resolved per read) so it always equals the refresher's ACTUAL period. The
+# old hardcoded ``HEALTH_PROBE_REFRESH_S`` (10s) was wrong whenever the
+# operator set the period anywhere in 0.5-15s — with a 15s period, ``/health``
+# started a duplicate DB probe once per cycle (age 11s > 10s gate).
+_HEALTH_PROBE = HealthProbe(lambda: _probe_db(),
+                            timeout=DB_PROBE_HARD_TIMEOUT,
+                            refresh_budget=lambda: _health_probe_interval())
+
+
+def _probe_control_plane() -> dict:
+    """Bounded Supabase control-plane probe (#2850 item 6). Never raises.
+
+    ``/health/ready`` used to run ``get_control_plane().query("teams", ...)``
+    DIRECTLY on the event loop with no timeout — the same hazard as the
+    FalkorDB half: a black-holed PostgREST endpoint blocked EVERY request in
+    the process, not just the readiness check. It now runs on the probe's own
+    daemon worker through ``_CONTROL_PLANE_PROBE``.
+
+    ``get_control_plane()`` is a process-wide lazy singleton, so the probe
+    does not build a client per check (and a construction failure — missing
+    creds in Supabase mode — is reported as not-ready, fail-closed).
     """
-    from tortoise.supabase_control import get_control_plane
+    start = time.monotonic()
+    try:
+        import httpx
 
-    get_control_plane().query("teams", select=["id"], limit=1)
+        from tortoise.supabase_control import get_control_plane
+        # Minimal control-plane probe — a 1-row teams read exercises the
+        # PostgREST path without depending on any tenant data. The explicit
+        # PER-REQUEST timeout NARROWS the overrun window (the client's 5.0s
+        # default is PER PHASE, not a total — see
+        # ``CONTROL_PLANE_PROBE_TOTAL_S``) so the request normally finishes
+        # inside ``CONTROL_PLANE_HARD_TIMEOUT``. It does NOT bound the
+        # request: httpx's ``read`` timeout applies PER READ OPERATION, so a
+        # slowly-dribbling server can outlive the sum of the phases
+        # indefinitely. The coordinator's outer bound is the safety net; a
+        # request that outruns it strands a worker until that request
+        # completes on its own.
+        get_control_plane().query(
+            "teams", select=["id"], limit=1,
+            timeout=httpx.Timeout(**CONTROL_PLANE_PROBE_PHASES))
+    except Exception as exc:  # never raise, always report
+        return {"ok": False,
+                "latency_ms": round((time.monotonic() - start) * 1000, 1),
+                "error": f"{type(exc).__name__}: {exc}"[:200]}
+    return {"ok": True,
+            "latency_ms": round((time.monotonic() - start) * 1000, 1),
+            "error": None}
 
 
-# #2988: wall bound for the readiness probes.
+# ── the control plane's composed per-request timeout ────────────────────
 #
-# ORDERING INVARIANT — the bound must be STRICTLY ABOVE the probe client's own
-# timeout ("SupabaseControlPlane" defaults to 5.0s; "probe_db" self-bounds at
-# ~1.6s). ``asyncio.wait_for`` cancels the AWAIT, not the worker thread: when
-# the outer bound wins the race it returns while the thread is still in its
-# socket read, so each timed-out request leaks an executor worker until that
-# read finishes. Keeping the outer bound above the inner one means the client
-# timeout normally fires first, the thread returns on its own, and this bound
-# stays what it is meant to be — a safety net for a probe that never
-# self-bounds. It is NOT an executor-occupancy bound; the shared default
-# executor is tracked separately on #2988.
-_READY_PROBE_TIMEOUT_S = 6.0
+# ``httpx.Timeout(5.0)`` — ``SupabaseControlPlane``'s constructor default
+# (tortoise/supabase_control.py: ``httpx.Client(timeout=self._timeout)``) —
+# applies PER PHASE (connect / read / write / pool), NOT as a total deadline.
+# A request that stalls in more than one phase can therefore run up to the SUM
+# of the phases (~15-20s), far above any sane coordinator bound: a 6.0s outer
+# bound would abandon a LIVE worker thread (CPython #87185 cannot cancel it).
+# The health probe therefore asks for its OWN composed timeout.
+CONTROL_PLANE_PROBE_PHASES: dict[str, float] = {
+    "connect": 2.0,
+    "read": 2.0,
+    "write": 0.5,
+    "pool": 0.5,
+}
+#: The requested per-phase budget — ``connect`` + ``write`` + ``pool`` plus
+#: ONE ``read`` operation. This is NOT the probe request's worst case: httpx
+#: has no total-deadline concept AND its ``read`` timeout applies PER READ
+#: OPERATION, so a slowly-dribbling server can outlive this sum indefinitely
+#: (a reviewer measured a response surviving 5.3x the configured ``read``
+#: phase). What it really is: the composed timeout the probe ASKS FOR, which
+#: narrows the overrun window versus the client's per-phase default. It does
+#: NOT bound the request; ``CONTROL_PLANE_HARD_TIMEOUT`` is the safety net and
+#: a request that outruns it strands a worker until the request completes on
+#: its own.
+CONTROL_PLANE_PROBE_TOTAL_S = sum(CONTROL_PLANE_PROBE_PHASES.values())
+
+#: Safety margin between the probe request's composed total and the
+#: coordinator's outer bound — room for the worker to unwind and record its
+#: result after the client's own timeout fires. NAMED so the gap is not a
+#: silent magic number.
+CONTROL_PLANE_BOUND_MARGIN_S = 1.0
+
+# The control plane's probe bound — DERIVED from the probe request's composed
+# total, deliberately ABOVE it so a phase timeout normally fires first and the
+# worker returns by itself. Best-effort, not provable: the ``read`` phase is
+# PER READ and a dribbling server can outrun this bound; the bound is then the
+# safety net that unblocks the loop, and the worker is stranded until its
+# request completes. See the LAYERED TIMEOUT note below.
+CONTROL_PLANE_HARD_TIMEOUT = CONTROL_PLANE_PROBE_TOTAL_S + CONTROL_PLANE_BOUND_MARGIN_S
+
+
+# Separate coordinator instance from the FalkorDB one: the two planes fail
+# independently, and single-flighting them together would let a wedged DB
+# starve the control-plane check (and vice versa).
+#
+# ``fresh_only=True``: readiness is a FAIL-CLOSED gate, so it must never answer
+# 200 from a verdict older than its own read budget (review P1). See the
+# ``_READY_PROBE`` note below.
+#
+# LAYERED TIMEOUT (the #2988 alignment, restored here PER-PLANE). The outer
+# bound is kept ABOVE the plane's statically-known inner TOTAL. ``HealthProbe.run()``
+# abandons a probe that outlives ``timeout`` — and abandoning it does NOT stop
+# the worker thread, which stays parked in its socket read (CPython #87185:
+# ``wait_for(to_thread(...))``'s worker "is never cancelled and continues
+# running forever despite the timeout error"; the Python docs likewise say
+# ``wait_for`` cancels the AWAITABLE, not the thread). If the outer bound can
+# win that race, the timeout strands a thread. The control-plane probe
+# therefore carries its OWN composed request timeout (phases summing to
+# ``CONTROL_PLANE_PROBE_TOTAL_S`` = 5.0s) so a phase timeout normally fires
+# first and the coordinator's bound stays what it is meant to be — a safety
+# net for a probe that never self-bounds. This NARROWS the overrun window; it
+# does not bound the request (httpx's ``read`` is per-read — see
+# ``CONTROL_PLANE_PROBE_TOTAL_S``).
+#
+# This is why the planes carry DIFFERENT bounds: the alignment is relative to
+# each plane's statically-known inner TOTAL, not a single global number.
+# FalkorDB's ``probe_db`` retries one transient failure, so the bound that CAN
+# be computed is ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT +
+# PROBE_RETRY_DELAY) plus the nominal SDK-acquisition budget plus a
+# strict-above margin — hence ``DB_PROBE_HARD_TIMEOUT`` =
+# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. The embedded acquisition prefix is NOT covered
+# by that computation, so this ordering is a best-effort alignment that
+# reduces how often a worker is stranded — see the guarantee summary at
+# ``monitoring.PROBE_MAX_SUPERSEDES``.
+_CONTROL_PLANE_PROBE = HealthProbe(
+    lambda: _probe_control_plane(),
+    timeout=CONTROL_PLANE_HARD_TIMEOUT,
+    fresh_only=True,
+)
+
+
+# #2850 item 6: READINESS gets its own coordinator, distinct from the one the
+# background refresher feeds. ``/health/ready`` is a fail-closed gate (the
+# deploy workflow asserts it LAST), so its verdict must reflect the DB at
+# request time — sharing the refresher's coordinator meant a readiness call
+# could JOIN a probe that started before the failure and report the stale
+# "ok" (#1384's whole point inverted). Its own coordinator is still
+# single-flight for its CALLERS and hard-bounded, so concurrent readiness
+# checks JOIN the in-flight probe rather than piling work up (a wedged probe
+# can still be superseded, capped per episode; see
+# ``monitoring.PROBE_MAX_SUPERSEDES``). Safe to run concurrently with
+# ``_HEALTH_PROBE``: the actual
+# ``_get_proj().g.query`` executes on the single shared probe worker
+# (monitoring._PROBE_WORKER), never concurrently.
+#
+# ``fresh_only=True`` (review P1): /health may serve "stale but honest"
+# last-known-good, but a readiness read must not. Without this flag a probe
+# that began after an outage could exhaust its own budget and ``run()`` would
+# return the coordinator's last completed ``{ok: True}`` — which stays within
+# ``stale_after`` (30s), so /health/ready could answer 200 "connected" for as
+# long as that window while the control plane or FalkorDB was already dead,
+# and deploy-hosted.yml asserts readiness LAST as its strongest post-deploy
+# signal.
+_READY_PROBE = HealthProbe(
+    lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
 @app.get("/health")
@@ -1788,31 +2369,56 @@ async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
 
     (cold-start fix, #338 follow-up): the previous DB-coupled /health caused
-    deploy failures on cold machines — Fly caps the http_check grace period at
-    60s, and a cold FalkorDB Cloud connection exceeds it. Liveness returns
-    immediately; DB readiness is `/health/ready`.
+    deploy failures on cold machines on a cold FalkorDB Cloud connection.
+    Liveness returns immediately; DB readiness is `/health/ready`.
 
-    Deep check (#1384): a lightweight graph-DB probe (RETURN 1, ≤1.5s bound)
-    rides along in `db`. A stopped FalkorDB (incident #1381 — NXDOMAIN with
-    /health staying ok) flips status to "degraded" + db.ok=false, visible
-    immediately without any graph-touching request. The handler never raises
-    and never 5xxes: a dead DB must not kill the process — deploy/backup
-    drivers gate on /health/ready, which still fails closed.
+    ⚠ The frequently repeated claim that "Fly caps the http_check grace period
+    at 60s" is UNCONFIRMED and possibly undocumented. It is NOT supported by
+    Fly's public docs, and independent research could not find it in flyctl or
+    fly-go either — treat it as folklore, not a contract (`fly.toml` here
+    configures `grace_period = "180s"`). To verify: deploy a machine whose
+    check fails continuously past the configured grace period and observe
+    whether Fly restarts it at 60s (machine event log / `flyctl machine
+    status`) or honours the larger configured value. This note exists because
+    the assertion was previously stated as fact in this docstring while the
+    same claim in PR #3063's runbook had to be corrected (review P2).
+
+    Deep check (#1384): a lightweight graph-DB probe (RETURN 1) rides along in
+    `db`. A stopped FalkorDB (incident #1381 — NXDOMAIN with /health staying
+    ok) flips status to "degraded" + db.ok=false, visible immediately without
+    any graph-touching request.
+
+    #2850 (P0): this handler now collects NO I/O and takes NO thread
+    # hand-off. It reads one in-memory value from ``_HEALTH_PROBE``
+    # (``snapshot()``) and one in-memory heartbeat timestamp, and returns.
+    # Nothing on the request path submits work to the event loop's DEFAULT
+    # ThreadPoolExecutor — the executor /health used to ride via
+    # ``asyncio.to_thread(_probe_db)``, shared with ~89 other ``to_thread``
+    # call sites whose queue wait has no timeout. That shared queue is what
+    # let a stalled FalkorDB push the check past Fly's 15s budget while the
+    # process was idle (2026-09-10 incident). A saturated executor, a
+    # black-holed DB, or 20 concurrent checks can no longer delay this
+    # response by a microsecond. Freshness comes from the background
+    # ``_health_probe_loop`` refresher, not from the check.
+    #
+    # The response shape is unchanged for deploy/dashboard consumers:
+    # ``{"status", "db"}`` — ``probe`` and ``loop_stale_ms`` are additive.
+    # It never 5xxes: a dead DB is "degraded", never a killed process.
     """
-    import asyncio
     try:
-        # #3060: off the loop AND off the shared default pool, with a bounded
-        # wait — /health must answer even when every default worker is tied up
-        # by long work (a starved probe → no answer → Fly drops the machine).
-        db = await asyncio.wait_for(
-            _run_off_loop(_HEALTH_PROBE_EXECUTOR, _probe_db),
-            timeout=_HEALTH_PROBE_BUDGET_S)
-    except TimeoutError:
-        db = {"ok": False, "latency_ms": 0.0,
-              "error": f"probe exceeded {_HEALTH_PROBE_BUDGET_S:.0f}s"}
-    except Exception as exc:
+        db = _HEALTH_PROBE.snapshot()
+    except Exception as exc:  # liveness must answer, always
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return {"status": "ok" if db["ok"] else "degraded", "db": db}
+    try:
+        probe_meta = _HEALTH_PROBE.info()
+    except Exception:
+        probe_meta = {}
+    try:
+        loop_age_ms = loop_heartbeat_info().get("loop_age_ms")
+    except Exception:
+        loop_age_ms = None
+    return {"status": "ok" if db.get("ok") else "degraded", "db": db,
+            "probe": probe_meta, "loop_stale_ms": loop_age_ms}
 
 
 @app.get("/health/ready")
@@ -1825,43 +2431,50 @@ async def health_ready():
     (today's behavior — selfhost has no second plane). Fail-closed: not-ready
     is a 503, never a 200.
 
-    #2988 — THE PROBES MUST NEVER TOUCH THE EVENT LOOP. Both planes are probed
-    with SYNCHRONOUS network I/O, so both run in ``asyncio.to_thread`` under a
-    wall bound, exactly like ``/health``'s probe (#1384). Done inline, a
-    stalled ``RETURN 1`` or a black-holed PostgREST read froze every route in
-    the process — ``/openapi.json`` included — for as long as the socket
-    waited. Measured in production 2026-09-11: 15 minutes in which every route
-    timed out while ``/proc/loadavg`` was 0.01 and the DB answered PING in
-    0.38s, i.e. an idle process blocked on I/O with the loop held. Because
-    every deploy curls this endpoint, that made readiness a self-inflicted
-    outage vector. Regression guard: tests/test_health_ready_nonblocking.py.
-
+    #2850: the FalkorDB half reads its OWN bounded, single-flight coordinator
+    (``_READY_PROBE`` — deliberately NOT the liveness refresher's, or a
+    readiness call could join a probe that began before the outage and report a
+    stale "ok"). The pre-fix code ran ``_make_sdk(...)._get_proj().g.query(...)``
+    directly on the event loop with no timeout, so a hung DB blocked EVERY
+    request, not just this one. A stalled probe now reads as not-ready (503),
+    fail-closed, without ever blocking the loop.
     """
-    # Data plane. Reuses /health's probe: itself hard-bounded (~1.5s) and it
-    # never raises, so a dead DB degrades the result instead of the process.
+    # Data plane. Runs its OWN coordinator (``_READY_PROBE`` — deliberately
+    # NOT the liveness refresher's, so a readiness call cannot join a probe
+    # started before the outage), hard-bounded at ``DB_PROBE_HARD_TIMEOUT``
+    # (a best-effort alignment: the ~3.1s ``probe_db`` TOTAL plus the nominal
+    # SDK-acquisition budget; the embedded acquisition prefix is not covered),
+    # and it never raises, so a dead DB degrades the result instead of the
+    # process.
     # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
     # auto-creates the graph on select, so a registry-namespaced probe
     # RECREATED the deleted registry_control_plane on every health check
     # (post-flip verification finding, #669). ``_probe_db`` targets the
     # default graph.
     try:
-        db = await asyncio.wait_for(asyncio.to_thread(_probe_db), timeout=_READY_PROBE_TIMEOUT_S)
-        db_ok = bool(db.get("ok"))
-    except Exception:  # incl. asyncio.TimeoutError — not-ready, never a hang
+        # #669 post-flip: the FalkorDB data-plane probe must NOT open the
+        # registry namespace — FalkorDB auto-creates the graph on select, so
+        # a registry-namespaced probe RECREATED the deleted
+        # registry_control_plane on every health check (post-flip
+        # verification finding, #669). Probe the data plane via the default
+        # graph (never the registry namespace).
+        db = await _READY_PROBE.run()
+        db_ok = db.get("ok") is True
+    except Exception:
         db_ok = False
     if not db_ok:
         raise HTTPException(status_code=503, detail="Database unreachable")
-
     from tortoise.supabase_control import is_supabase_enabled
-
     if is_supabase_enabled():
+        # #2850 item 6: bounded + off-loop, exactly like the FalkorDB half.
+        # A wedged/unreachable control plane is a 503 (fail-closed), never a
+        # blocked event loop.
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(_probe_control_plane),
-                timeout=_READY_PROBE_TIMEOUT_S,
-            )
-        except Exception:
-            raise HTTPException(status_code=503, detail="Control plane unreachable")  # noqa: B904
+            control = await _CONTROL_PLANE_PROBE.run()
+        except Exception:  # fail closed
+            control = {"ok": False}
+        if control.get("ok") is not True:
+            raise HTTPException(status_code=503, detail="Control plane unreachable")
         return {"status": "ok", "db": "connected", "control_plane": "connected"}
     return {"status": "ok", "db": "connected"}
 
@@ -13645,7 +14258,10 @@ async def _quarantine_import(
     """Record a rejected import: audit event + quarantine ledger prop.
 
     Best-effort by design — a control-plane blip must never mask the 422
-    (mirrors the #669 P3 metadata contract). The live graph is NEVER touched.
+    (mirrors the #669 P3 metadata contract). This helper itself never touches
+    the live graph; note that #3154's post-swap boolean-index audit raises
+    AFTER the swap, so at that call site the live graph may already have been
+    replaced (the verified temp + pre-restore copies are preserved).
     """
     try:
         await _async_audit(
@@ -14040,9 +14656,12 @@ async def import_team(team_id: str, request: Request,
                 )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
             except RuntimeError as e:
-                # Server-side swap failure — verified temp graph intact, live
-                # graph untouched or recoverable; still quarantined (a failed
-                # import attempt is recorded; the ledger makes re-import converge).
+                # Server-side swap failure — verified temp graph intact, and
+                # the live graph is untouched for pre-swap failures / the
+                # pre-restore copy is recoverable for post-swap failures
+                # (#3154's post-swap boolean-index audit raises after the
+                # swap); still quarantined (a failed import attempt is
+                # recorded; the ledger makes re-import converge).
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )
@@ -22016,11 +22635,320 @@ async def webhooks_stripe(request: Request):
 # closed 503 (OAuth is hosted-only); the well-known metadata endpoints still
 # serve (they describe the hosted AS; harmless static JSON).
 
-# DCR per-IP limiter (RFC 7591 registration is an unauthenticated write
-# surface — reuses the shared per-IP bucket primitive, 20/hr default).
-_OAUTH_DCR_BUCKETS: dict[str, list[float]] = defaultdict(list)
+# ── DCR capacity policy (#2866) ────────────────────────────────────────
+# RFC 7591 registration is an unauthenticated write surface. The limiter is
+# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: that
+# primitive inserts the bucket (`defaultdict`) BEFORE its 429 check and prunes
+# only *stale* buckets, so an attacker-keyed fresh-key flood grows its store
+# without bound and every request scans the whole store once over
+# `max_entries` (the charge append itself happens after the check; the
+# unbounded growth and the O(n) scan are the defects). The primitive is left
+# byte-identical; the sibling filing tracks it). This limiter states its
+# capacity policy in concrete, falsifiable numbers:
+#
+#   per bucket (per client IP, or /64 for IPv6) ... 20/hr   (PER_HOUR)
+#   anonymous global aggregate ................... 600/hr   (ANON_AGGREGATE)
+#   trusted-CIDR aggregate ....................... 1200/hr  (TRUSTED_PER_HOUR)
+#   live-bucket store cap ........................ 256      (STORE_CAP)
+#   window ....................................... 3600 s
+#
+# Dimension membership: *trusted ⇒ per-CIDR aggregate only* (no per-key
+# bucket, no shared overflow, no anonymous aggregate) and *anonymous ⇒
+# per-key bucket (or shared overflow) AND the anonymous global aggregate*.
+# The trusted carve-out is evaluated BEFORE any per-key/overflow path, so the
+# exemption is reachable under an anonymous flood — otherwise a first-time
+# trusted IP is a "new key" and would be denied once STORE_CAP buckets are
+# live. STORE_CAP (256) < ANON_AGGREGATE (600) keeps the reject-new/overflow
+# branch live at shipped defaults.
+#
+# Bounded store, deterministic eviction (#2866 D3/D4): a bucket is *active*
+# iff it holds an in-window entry. Store order is last-charge (charged hits
+# `move_to_end`); reclaim therefore stops at the first active head, because
+# every later key was charged no earlier than the head. Reclaim runs ONLY on
+# the new-key-at-cap path, so a tracked key's charge stays O(1) and the store
+# can never evict an active key. If the cap is still full, the new key is
+# denied its own bucket and charged to one shared overflow bucket (bounded by
+# the derived overflow cap = PER_HOUR) AND the anonymous aggregate (D9).
+#
+# Derived ceiling: the distinct-new-anonymous-key rate is bounded by
+# STORE_CAP + PER_HOUR = 276/hr (256 live keys + 20 overflow charges) — a
+# burst/concurrent-live bound, not a bound tested at shipped scale.
+#
+# IPv6: the store key is the /IPV6_PREFIX network (default /64) of the
+# normalized address, so a single client cannot mint 2**64 buckets; a
+# malformed address keys as the single constant "anonymous" (never the raw
+# string, so a malformed-identity flood cannot occupy STORE_CAP buckets).
+# Out-of-range prefix falls back to 64 (clamping 0 -> 1 would collapse every
+# IPv6 address into one bucket). Malformed IP/CIDR never raise; a missing
+# client early-returns like the shared primitive.
+#
+# Accepted limitations (PR body carries the full list): in-process stores ⇒
+# real capacity is limit × machines and resets on restart (#1677 / #2853 own
+# oauth_clients row pruning — owner @daniel-ospina, date 2026-10-15); the
+# limiter runs before body parsing, so invalid-JSON / oversized POSTs DO
+# consume budget; the anonymous aggregate is a one-source DoS (trusted CIDRs
+# unaffected); the exemption's security rests on the Fly edge stripping
+# client `Fly-*` headers (assumption 12 — dated re-verification with an
+# operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
+# filings from this work: #3124 (the shared per-IP primitive + the generic
+# middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
+# keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
+# scope into the minted token), #3134 (dated measurement of real DCR volume —
+# the 600/1200 aggregates are not load-validated). #3036 already covers
+# oauth_* token-table retention/GC.
+#
+# CHARGING DOCTRINE DIVERGENCE (tracked, #1719 / #2051): this limiter charges
+# at CHECK time, like `_check_ip_bucket_rate_limit` without `defer_charge`,
+# not at the TERMINAL outcome the way #1719's `defer_charge=True` callers do.
+# Consequence: a control-plane 5xx from `register_client` still consumed the
+# caller's budget, so a post-recovery retry can meet a spurious 429 that masks
+# the underlying failure. That is the #2051 failure class, and #2051 does not
+# currently list DCR. Documented here rather than silently mirrored, per the
+# #2038 precedent (PR #2049 review) — see also the docs limitation in
+# docs/oauth-mcp.md. The phase-1/phase-2 seam already exists, so moving the
+# charge past `register_client` is the follow-up if #2051 is taken up.
+_OAUTH_DCR_WINDOW_S = 3600
+_OAUTH_DCR_PER_HOUR_DEFAULT = 20
+_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT = 600
+_OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT = 1200
+_OAUTH_DCR_STORE_CAP_DEFAULT = 256
+_OAUTH_DCR_IPV6_PREFIX_DEFAULT = 64
+# Anthropic's published outbound/MCP egress range
+# (platform.claude.com/docs/en/api/ip-addresses; whois AP-2440). Comma-
+# separated; an EMPTY value means an empty trusted set (the documented lever
+# to disable the exemption) — never the default.
+_OAUTH_DCR_TRUSTED_CIDRS_DEFAULT = "160.79.104.0/21"
+# Singleton store keys for the aggregate dimensions (malformed client IPs
+# share the constant below, never a per-raw-string bucket).
+_OAUTH_DCR_ANON_KEY = "\x00anon"
+_OAUTH_DCR_OVERFLOW_KEY = "\x00overflow"
+_OAUTH_DCR_MALFORMED_KEY = "anonymous"
+
+_OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_TRUSTED: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_OVERFLOW: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_ANON: OrderedDict[str, list[float]] = OrderedDict()
 _OAUTH_DCR_LOCK = asyncio.Lock()
-_OAUTH_DCR_MAX_PER_HOUR = int(os.environ.get("TORTOISE_OAUTH_DCR_PER_HOUR", "20"))
+
+
+def _dcr_prune_window(bucket: list[float], now: float, window_s: int) -> list[float]:
+    """In-window entries of `bucket` (pure; the primitive's window contract is
+    pinned against this by a parity test, D10)."""
+    return [t for t in bucket if now - t < window_s]
+
+
+def _dcr_retry_after_s(bucket: list[float], now: float, window_s: int) -> int:
+    """Seconds until the oldest in-window charge expires (ceil — the caller
+    guards against an empty bucket; int() would understate, see #1081 P4)."""
+    return math.ceil(bucket[0] + window_s - now)
+
+
+def _oauth_dcr_trusted_networks() -> list:
+    """Parse TORTOISE_OAUTH_DCR_TRUSTED_CIDRS AT CALL TIME (no cache — no
+    staleness foot-gun). Whitespace-trimmed, empty items skipped, a malformed
+    item skipped without aborting the list. Unset ⇒ default; empty ⇒ empty
+    set (fail closed — the disable lever); never `or DEFAULT` falsy-coalescing."""
+    raw = os.environ.get("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS")
+    if raw is None:
+        raw = _OAUTH_DCR_TRUSTED_CIDRS_DEFAULT
+    nets: list = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _oauth_dcr_normalized_addr(client_ip):
+    """`ipaddress` address for `client_ip`, normalizing ANY IPv4-mapped IPv6
+    spelling (or None for a malformed address).
+
+    `_normalize_mapped_ipv6` (shared primitive helper, byte-identical to
+    origin/main) matches the literal lowercase ``::ffff:`` prefix, so the
+    structural check here additionally covers ``::FFFF:1.2.3.4`` and
+    ``0:0:0:0:0:ffff:1.2.3.4``. Without it one IPv4 address could hold two
+    bucket identities (its own plus the shared ``::/64``) and a non-canonical
+    mapped client would collapse into ``::/64`` instead of being keyed — or
+    trusted — as the address it actually is.
+    """
+    ip = _normalize_mapped_ipv6(client_ip)
+    if not isinstance(ip, str):
+        return None
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _oauth_dcr_trusted_net(client_ip) -> object | None:
+    """The trusted network containing `client_ip`, else None. Matches on the
+    NORMALIZED address (so every spelling of an IPv4-mapped trusted address is
+    trusted) and fails closed on a malformed address/CIDR."""
+    addr = _oauth_dcr_normalized_addr(client_ip)
+    if addr is None:
+        return None
+    for net in _oauth_dcr_trusted_networks():
+        try:
+            if addr.version == net.version and addr in net:
+                return net
+        except TypeError:  # version mismatch — not trusted
+            continue
+    return None
+
+
+def _oauth_dcr_store_key(client_ip) -> str:
+    """Per-bucket store key: the /IPV6_PREFIX network for IPv6 (default /64),
+    the plain address for IPv4, the constant "anonymous" for a malformed
+    address (D6)."""
+    addr = _oauth_dcr_normalized_addr(client_ip)
+    if addr is None:
+        return _OAUTH_DCR_MALFORMED_KEY
+    if addr.version != 6:
+        return str(addr)
+    prefix = _int_env("TORTOISE_OAUTH_DCR_IPV6_PREFIX",
+                      _OAUTH_DCR_IPV6_PREFIX_DEFAULT)
+    if not 1 <= prefix <= 128:
+        prefix = _OAUTH_DCR_IPV6_PREFIX_DEFAULT
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
+
+def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,
+                       cap: int) -> None:
+    """Pop inactive LRU-head buckets until the store is below `cap` or the
+    head is active (D3/D4). By the last-charge ordering invariant an active
+    head implies every later key is active too, so this stops at the first
+    live bucket — it can never evict an active key. O(1) at the hot cap."""
+    while store and len(store) >= cap:
+        head_key = next(iter(store))
+        head = store[head_key]
+        if head and now - head[-1] < window_s:
+            break
+        del store[head_key]
+
+
+def _oauth_dcr_deny(retry_after: int) -> None:
+    raise HTTPException(
+        status_code=429,
+        detail=("Too many client registrations from this IP. "
+                "Please try again later."),
+        headers={"Retry-After": str(max(1, retry_after))},
+    )
+
+
+async def _check_oauth_dcr_rate_limit(request: Request) -> None:
+    """DCR capacity limiter — policy block above (#2866).
+
+    Reads every knob AT CALL TIME (testability; no import-time freeze) and
+    the four stores dynamically off the module globals (the test fixture
+    swaps them). Atomic across dimensions (D5): phase 1 evaluates all
+    dimensions — it may evict INACTIVE buckets, but never charges or
+    inserts — and phase 2 charges only if every dimension passed, so a 429
+    charges nothing and inserts nothing. Does NOT call `_charge_ip_bucket`
+    (it re-takes `_OAUTH_DCR_LOCK`; asyncio.Lock is non-reentrant).
+    """
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    client = getattr(request.state, "client_ip", None)
+    if not client:
+        client = request.client.host if request.client else None
+    if not client:
+        return
+
+    now = time.time()
+    window_s = _OAUTH_DCR_WINDOW_S
+    per_hour = _int_env("TORTOISE_OAUTH_DCR_PER_HOUR",
+                        _OAUTH_DCR_PER_HOUR_DEFAULT)
+    anon_cap = _int_env("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                        _OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT)
+    trusted_cap = _int_env("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR",
+                           _OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT)
+    store_cap = _int_env("TORTOISE_OAUTH_DCR_STORE_CAP",
+                         _OAUTH_DCR_STORE_CAP_DEFAULT)
+
+    async with _OAUTH_DCR_LOCK:
+        # ── trusted carve-out (D2) — evaluated FIRST, before any per-key or
+        # overflow path so a first-time trusted IP can never be denied. ──
+        net = _oauth_dcr_trusted_net(client)
+        if net is not None:
+            tkey = str(net)
+            tcbucket = _OAUTH_DCR_TRUSTED.get(tkey)
+            if tcbucket is None:
+                tcbucket = []
+            else:
+                tcbucket[:] = _dcr_prune_window(tcbucket, now, window_s)
+            if trusted_cap <= 0:  # zero rule — deny, never index empty
+                _oauth_dcr_deny(window_s)
+            if len(tcbucket) >= trusted_cap:
+                _oauth_dcr_deny(_dcr_retry_after_s(tcbucket, now, window_s))
+            tcbucket.append(now)
+            _OAUTH_DCR_TRUSTED[tkey] = tcbucket
+            _OAUTH_DCR_TRUSTED.move_to_end(tkey)
+            return
+
+        # ── phase 1: evaluate every anonymous dimension (no charge/insert) ──
+        key = _oauth_dcr_store_key(client)
+        bucket = _OAUTH_DCR_BUCKETS.get(key)
+        on_overflow = False
+        if bucket is None:
+            _oauth_dcr_reclaim(_OAUTH_DCR_BUCKETS, now, window_s, store_cap)
+            if len(_OAUTH_DCR_BUCKETS) >= store_cap:
+                on_overflow = True  # cap full — no bucket of its own
+            else:
+                bucket = []  # inserted in phase 2 only
+        else:
+            bucket[:] = _dcr_prune_window(bucket, now, window_s)
+
+        overflow_bucket = None
+        if on_overflow:
+            overflow_bucket = _OAUTH_DCR_OVERFLOW.get(_OAUTH_DCR_OVERFLOW_KEY)
+            if overflow_bucket is None:
+                overflow_bucket = []
+            else:
+                overflow_bucket[:] = _dcr_prune_window(
+                    overflow_bucket, now, window_s)
+            if per_hour <= 0:
+                _oauth_dcr_deny(window_s)
+            if len(overflow_bucket) >= per_hour:  # derived cap = PER_HOUR
+                _oauth_dcr_deny(_dcr_retry_after_s(overflow_bucket, now,
+                                                   window_s))
+        else:
+            if per_hour <= 0:
+                _oauth_dcr_deny(window_s)
+            if len(bucket) >= per_hour:
+                _oauth_dcr_deny(_dcr_retry_after_s(bucket, now, window_s))
+
+        # D9: the anonymous aggregate covers per-key AND overflow charges —
+        # otherwise the stated "anonymous <= ANON_AGGREGATE/hr" bound is
+        # asserted but not enforced.
+        anon_bucket = _OAUTH_DCR_ANON.get(_OAUTH_DCR_ANON_KEY)
+        if anon_bucket is None:
+            anon_bucket = []
+        else:
+            anon_bucket[:] = _dcr_prune_window(anon_bucket, now, window_s)
+        if anon_cap <= 0:
+            _oauth_dcr_deny(window_s)
+        if len(anon_bucket) >= anon_cap:
+            _oauth_dcr_deny(_dcr_retry_after_s(anon_bucket, now, window_s))
+
+        # ── phase 2: every dimension passed — insert + charge ──
+        if on_overflow:
+            overflow_bucket.append(now)
+            _OAUTH_DCR_OVERFLOW[_OAUTH_DCR_OVERFLOW_KEY] = overflow_bucket
+            _OAUTH_DCR_OVERFLOW.move_to_end(_OAUTH_DCR_OVERFLOW_KEY)
+        else:
+            bucket.append(now)
+            _OAUTH_DCR_BUCKETS[key] = bucket
+            _OAUTH_DCR_BUCKETS.move_to_end(key)
+        anon_bucket.append(now)
+        _OAUTH_DCR_ANON[_OAUTH_DCR_ANON_KEY] = anon_bucket
+        _OAUTH_DCR_ANON.move_to_end(_OAUTH_DCR_ANON_KEY)
 
 
 def _oauth_control_plane() -> tuple:
@@ -22213,6 +23141,7 @@ async def oauth_token(request: Request):
     """
     from tortoise.oauth import (
         OAuthError,
+        _log_and_capture,
         exchange_auth_code,
         refresh_grant,
     )
@@ -22238,6 +23167,10 @@ async def oauth_token(request: Request):
                              "grant_type must be authorization_code or refresh_token")
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort bug detector, NOT a retry signal
+        _log_and_capture(exc, where="oauth/token boundary")
+        return _oauth_error_response(
+            OAuthError(500, "server_error", "Internal error processing the token request."))
     return out
 
 
@@ -22273,13 +23206,7 @@ async def oauth_dcr_register(request: Request):
     cp, enabled = _oauth_control_plane()
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
-    await _check_ip_bucket_rate_limit(
-        request, buckets=_OAUTH_DCR_BUCKETS, lock=_OAUTH_DCR_LOCK,
-        limit=_OAUTH_DCR_MAX_PER_HOUR, window_s=3600,
-        key=(getattr(request.state, "client_ip", None)
-             or (request.client.host if request.client else None)),
-        detail="Too many client registrations from this IP. Please try again later.",
-        retry_after_s=3600)
+    await _check_oauth_dcr_rate_limit(request)
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         body = _json.loads(raw)

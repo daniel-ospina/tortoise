@@ -2,10 +2,13 @@
 title: "OAuth 2.1 for Remote MCP Auth (hosted)"
 type: engineering
 subjects.team: epistemic-team
+ownedBy: epistemic-team
+aboutSubjects: tortoise
+aboutObjects: tortoise-oauth-mcp
 domain: platform
 doc_status: live
 created: 2026-08-15
-updated: 2026-09-10
+updated: 2026-09-11
 ---
 
 # OAuth 2.1 for Remote MCP Auth (hosted)
@@ -104,4 +107,82 @@ still rejected (RFC 8707 §2).
 - OAuth is hosted-only: in registry/selfhost mode the functional endpoints
   fail closed with 503; metadata endpoints still serve static JSON.
 - Env knobs: `TORTOISE_OAUTH_ACCESS_TTL` (3600s), `TORTOISE_OAUTH_REFRESH_TTL`
-  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s), `TORTOISE_OAUTH_DCR_PER_HOUR` (20/IP).
+  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s).
+
+## DCR capacity policy (#2866)
+
+`POST /register` (RFC 7591) is an unauthenticated write surface that Anthropic
+calls *per fresh connection*, so it needs a stated, testable capacity policy
+rather than an implicit one. The stated policy, enforced by
+`_check_oauth_dcr_rate_limit` in `tortoise/hosted_api.py`:
+
+| Dimension | Default | Knob |
+|---|---|---|
+| Per bucket (per client IP; per `/64` for IPv6) | 20/hr | `TORTOISE_OAUTH_DCR_PER_HOUR` |
+| Anonymous global aggregate (all non-exempt IPs) | 600/hr | `TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR` |
+| Trusted-CIDR aggregate (per trusted network) | 1200/hr | `TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR` |
+| Live-bucket store cap | 256 | `TORTOISE_OAUTH_DCR_STORE_CAP` |
+| IPv6 store-key prefix | `/64` | `TORTOISE_OAUTH_DCR_IPV6_PREFIX` |
+| Trusted CIDRs (comma-separated) | `160.79.104.0/21` | `TORTOISE_OAUTH_DCR_TRUSTED_CIDRS` |
+| Sliding window | 3600 s | fixed |
+
+Dimension membership: **trusted ⇒ per-CIDR aggregate only** (no per-key bucket,
+no shared overflow, no anonymous aggregate); **anonymous ⇒ per-key bucket (or
+shared overflow) AND the anonymous global aggregate**. The trusted carve-out is
+evaluated *before* any per-key/overflow path, so the exemption is reachable
+even under an anonymous flood.
+
+Bounded store. A bucket is *active* iff it holds an in-window entry. Reclaim
+pops inactive LRU-head buckets (store order is last-charge), so an active key
+can never be evicted and a tracked key's charge stays O(1) — lookups do not
+scan the store. When the cap is still full, a new key is denied its own bucket
+and charged to one shared overflow bucket (cap = `PER_HOUR`) **and** the
+anonymous aggregate. A 429 charges nothing and inserts nothing (all dimensions
+are evaluated before any insert/charge).
+
+Derived ceiling. The distinct-new-anonymous-key rate is bounded by
+`STORE_CAP + PER_HOUR = 276/hr` at defaults (256 live keys + 20 overflow
+charges). This is a *burst/concurrent-live* bound, derived from the constants
+above — not a bound tested at shipped scale.
+
+The default trusted CIDR `160.79.104.0/21` is Anthropic's published
+outbound/MCP egress range (`platform.claude.com/docs/en/api/ip-addresses`).
+`TORTOISE_OAUTH_DCR_TRUSTED_CIDRS` is read verbatim when set: an **empty value
+means an empty trusted set** (the documented lever to disable the exemption) —
+never the default. A malformed entry is skipped without aborting the list.
+
+Scope vectors. `SCOPES_SUPPORTED` (`["mcp"]`) stays the client-facing default
+and the RFC 9728 PRM document; `SCOPES_ACCEPTED` (`["mcp",
+"offline_access"]`) is what the DCR gate and the RFC 8414 AS metadata accept, so
+Claude's `offline_access` request no longer 400s.
+
+Accepted limitations (see the code comment for the full list):
+
+- The stores are **in-process**, so real capacity is `limit × machines` and
+  resets on restart. Out-of-process limiting is #1677.
+- `oauth_clients` row pruning is **not** part of this policy — #2853 owns it
+  (owner @daniel-ospina, review date 2026-10-15); #3124 tracks the still
+  unbounded shared per-IP bucket primitive.
+- The limiter runs **before body parsing**, so an invalid-JSON or oversized
+  POST still consumes budget (charges ≤ 600/hr anonymous + 1200/hr trusted);
+  row writes are not bounded by it.
+- **Charging doctrine:** the limiter charges at **check** time, not at the
+  terminal outcome (unlike #1719's `defer_charge=True` callers). A
+  control-plane 5xx from `register_client` therefore still consumes the
+  caller's budget, and a post-recovery retry can meet a spurious 429 that
+  masks the underlying failure — the #2051 failure class, which does not
+  currently list DCR. Tracked, not silent.
+- The **trusted aggregate (1200/hr) and anonymous aggregate (600/hr) are not
+  measured against production volume** — the pre-#2866 model was
+  `20/hr × distinct Anthropic egress IPs`, so 1200/hr could be either a large
+  increase or a new single point of failure for the traffic the policy exists
+  to protect. #3134 owns the dated measurement (owner @daniel-ospina,
+  2026-11-15).
+- `/register` also passes the generic `RateLimitMiddleware` (100/min, whose
+  bucket store has no hard key cap — #3124).
+- The exemption rests on the Fly edge overwriting any client-supplied
+  `Fly-Client-IP`; #3126 is the dated re-verification (owner
+  @daniel-ospina, 2026-11-15) and carries the operator recipe.
+- Trusted traffic is not charged to the anonymous aggregate; unrelated
+  protocol gaps found en route are filed as #3125 (`_check_claim_rate_limit`
+  proxy-IP keying) and #3128 (unvalidated authorize/consent scope).
