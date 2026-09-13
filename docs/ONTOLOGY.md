@@ -1,18 +1,37 @@
 ---
-title: "Tortoise — Canonical Ontology v3.10"
+title: "Tortoise — Canonical Ontology v3.11"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-05
+updated: 2026-09-12
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.10
+# Tortoise — Canonical Ontology v3.11
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.11 (2026-09-12, issue #3263 — provenance written by construction):**
+> - §3.3: `extractedFrom` cardinality amended **`many→1` → `many→many`**. The
+>   edge is written per source; a claim extracted from several sessions carries
+>   one `extractedFrom` edge each, with no upper bound. (`create_point` now
+>   infers `session:<session_id>` from the write context and accepts a sequence
+>   of refs.)
+> - §4.1 note: the scalar `Point.extractedFrom` node property is a query
+>   convenience only — the **edges are authoritative**. It holds a string when a
+>   single string is passed (including the inference path) and an **array**
+>   whenever a sequence is passed, *even a one-element one*. Arrays are not
+>   equality-matchable (`WHERE n.extractedFrom = '<url>'` will not hit them), so
+>   exact-match callers must pass the scalar or traverse the edge.
+> - §4.6: `session:<id>` Sources are minted with `sourceKind: agentSession`
+>   (already the registered value — this removes the need for the in-place
+>   upgrade `_materialize_session_source` performed). NOTE: `agentSession` is
+>   still registered tier-neutral, so `inherited-from-source` calibration is
+>   NOT yet satisfiable; assigning the tier is a calibration-policy decision,
+>   tracked separately.
 >
 > **Changelog v3.10 (2026-09-05, #2238 dirty-hub salvage landing — Problem family):**
 > - §5: registers core object kind `Problem` (deviation between actual and desired
@@ -230,7 +249,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `extractedFrom` | Point → Source | unidirectional | many→1 | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points. |
+| `extractedFrom` | Point → Source | unidirectional | many→many | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points, **and one Point may be backed by several sources** (amended v3.11, #3263: the edge is written per source — a claim extracted from several sessions carries one `extractedFrom` edge each; there is no upper bound). |
 
 ### §3.4 Source → Entity (Provenance)
 
