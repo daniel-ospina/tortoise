@@ -103,9 +103,26 @@ def _pkce() -> tuple[str, str]:
     return verifier, challenge
 
 
+def _consent(tc, *, client_id: str, redirect_uri: str, challenge: str,
+             state: str = "st-123", resource: str | None = None):
+    """POST /oauth/consent without asserting — the caller asserts the
+    outcome, so negative cases reuse the same request shape."""
+    return tc.post("/oauth/consent", json={
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+        "scope": "mcp",
+        "resource": resource,
+    }, headers={"Authorization": "Bearer fake-session-jwt"})
+
+
 def _auth_code_flow(tc, cp, *, user_id: str = _U1,
                     resource: str | None = None,
-                    client_id: str | None = None) -> dict:
+                    client_id: str | None = None,
+                    redirect_uri: str = REDIRECT) -> dict:
     """Register → consent → return the auth code + client_id (P2 path).
 
     Assumes the caller has stubbed hosted_api.verify_session_jwt.
@@ -113,16 +130,8 @@ def _auth_code_flow(tc, cp, *, user_id: str = _U1,
     if client_id is None:
         client_id = _register_client(tc)["client_id"]
     verifier, challenge = _pkce()
-    r = tc.post("/oauth/consent", json={
-        "client_id": client_id,
-        "redirect_uri": REDIRECT,
-        "response_type": "code",
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": "st-123",
-        "scope": "mcp",
-        "resource": resource,
-    }, headers={"Authorization": "Bearer fake-session-jwt"})
+    r = _consent(tc, client_id=client_id, redirect_uri=redirect_uri,
+                 challenge=challenge, resource=resource)
     assert r.status_code == 200, r.text
     return {"client_id": client_id, "code": r.json()["code"],
             "verifier": verifier, "challenge": challenge}
@@ -549,6 +558,157 @@ class TestAuthorizePage:
             "code_challenge": "x" * 64, "code_challenge_method": "plain"},
             follow_redirects=False)
         assert "error=" in r.headers["location"]
+
+
+class TestLoopbackPortAgnostic:
+    """#2846 — RFC 8252 §7.3: for loopback redirect URIs the AS must ignore the
+    port, because a native client (Claude Code CLI) binds an ephemeral port at
+    request time and cannot know it at registration. Anthropic's connector docs
+    require the same.
+
+    Live repro before the fix: registering ``http://localhost/callback`` and
+    authorizing with ``http://localhost:3118/callback`` returned
+    ``400 redirect_uri is not registered for this client`` — identical to the
+    response for a genuinely wrong PATH, so the AS could not even distinguish
+    the two cases.
+    """
+
+    PORTLESS = "http://localhost/callback"
+
+    def test_full_flow_with_ephemeral_port(self, api_client, session_user):
+        """The issue's indicator: register WITHOUT a port, complete consent and
+        token exchange presenting an ephemeral port at every step."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        assert reg["redirect_uris"] == [self.PORTLESS]
+        presented = "http://localhost:3118/callback"
+        flow = _auth_code_flow(tc, cp, client_id=reg["client_id"],
+                               redirect_uri=presented)
+        r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                      verifier=flow["verifier"], redirect_uri=presented)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["access_token"].startswith(ACCESS_TOKEN_PREFIX)
+        assert body["token_type"] == "Bearer"
+        # The code is bound to the PRESENTED uri, so the token step's exact
+        # comparison (RFC 6749 §4.1.3) is satisfied without being loosened.
+        assert cp.tables["oauth_codes"][0]["redirect_uri"] == presented
+
+    def test_authorize_page_accepts_ephemeral_port(self, api_client):
+        """The GET /oauth/authorize leg must also accept it (it validates
+        through the same helper). On rejection it redirects with ``error=``."""
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://localhost:3118/callback",
+            "response_type": "code", "state": "st-1",
+            "code_challenge": "x" * 43,
+            "code_challenge_method": "S256"},
+            follow_redirects=False)
+        assert r.status_code == 200, r.text
+        assert "error=" not in r.headers.get("location", "")
+
+    def test_different_path_still_rejected(self, api_client, session_user):
+        """Negative control: the port is ignored, the PATH is not."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        _, challenge = _pkce()
+        r = _consent(tc, client_id=reg["client_id"],
+                     redirect_uri="http://localhost:3118/evil",
+                     challenge=challenge)
+        assert r.status_code == 400
+        assert "not registered" in r.json()["error_description"]
+
+    def test_host_is_not_relaxed(self, api_client, session_user):
+        """Only the PORT varies. ``127.0.0.1`` must not satisfy a registration
+        for ``localhost`` — both are loopback, but they are different hosts."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        _, challenge = _pkce()
+        r = _consent(tc, client_id=reg["client_id"],
+                     redirect_uri="http://127.0.0.1:3118/callback",
+                     challenge=challenge)
+        assert r.status_code == 400
+        assert "not registered" in r.json()["error_description"]
+
+    def test_non_loopback_keeps_strict_exact_match(self, api_client, session_user):
+        """The hosted posture is unchanged for https: an explicit port is a
+        different string and must not match."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc,
+                               redirect_uris=["https://app.example.com/callback"])
+        _, challenge = _pkce()
+        r = _consent(tc, client_id=reg["client_id"],
+                     redirect_uri="https://app.example.com:443/callback",
+                     challenge=challenge)
+        assert r.status_code == 400
+        assert "not registered" in r.json()["error_description"]
+
+
+class TestRedirectUriMatches:
+    """Unit coverage for the helper — the HTTP tests above prove it is wired,
+    these pin the predicate's boundaries directly."""
+
+    def test_loopback_port_ignored(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("http://localhost/callback", "http://localhost:3118/callback")
+        assert m("http://localhost:3118/callback", "http://localhost/callback")
+        assert m("http://127.0.0.1/cb", "http://127.0.0.1:8765/cb")
+        assert m("http://[::1]/cb", "http://[::1]:8765/cb")
+        assert m("http://localhost:1/cb", "http://localhost:2/cb")
+
+    def test_exact_match_still_true_for_non_loopback(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("https://app.example.com/cb", "https://app.example.com/cb")
+
+    def test_non_loopback_is_strict(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("https://app.example.com/cb", "https://app.example.com:443/cb")
+        assert not m("https://app.example.com/cb", "https://app.example.com/other")
+
+    def test_host_and_scheme_are_never_relaxed(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", "http://127.0.0.1:3118/cb")
+        assert not m("http://localhost/cb", "https://localhost:3118/cb")
+        # The relaxation keys on LOOPBACK, not on the http scheme — the issue's
+        # Target draws the boundary at "non-loopback URIs keep strict exact
+        # match". https-on-loopback is loopback, so the port rule applies to it
+        # too; scheme/host/path are still compared exactly. Pinned explicitly so
+        # this boundary is a decision rather than an accident.
+        assert m("https://localhost/cb", "https://localhost:3118/cb")
+
+    def test_path_query_and_fragment_are_compared(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", "http://localhost:3118/evil")
+        assert not m("http://localhost/cb?x=1", "http://localhost:3118/cb?x=2")
+        assert not m("http://localhost/cb#a", "http://localhost:3118/cb#b")
+        assert m("http://localhost/cb?x=1", "http://localhost:3118/cb?x=1")
+
+    def test_non_string_and_malformed_inputs_are_safe(self):
+        """``redirect_uri`` is typed ``str | None`` at the call site — the
+        helper must never raise on it."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", None)  # type: ignore[arg-type]
+        assert not m(None, "http://localhost/cb")  # type: ignore[arg-type]
+        assert not m("http://localhost/cb", "")
+        assert not m("", "http://localhost:3118/cb")
+        assert not m("http://localhost/cb", "not a url")
+
+    def test_hostless_uri_only_matches_itself(self):
+        """A hostless URI cannot be REGISTERED — `_valid_redirect_uri` requires
+        a hostname — so it can never enter `redirect_uris`. The exact-match
+        short-circuit runs before the hostname guard, which preserves the
+        pre-#2846 semantics for the equal case (a strict superset of behaviour)
+        while the guard still blocks any relaxation."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("http:///cb", "http:///cb")         # exact match, as before
+        assert not m("http:///cb", "http:///other")  # no host → no relaxation
+        assert not m("http:///cb", "http://localhost:1/cb")
 
 
 class TestConsentPreview:

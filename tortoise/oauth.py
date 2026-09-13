@@ -238,6 +238,48 @@ def _valid_redirect_uri(uri: str) -> bool:
     return False
 
 
+def _redirect_uri_matches(registered: str, presented: str) -> bool:
+    """#2846 — does ``presented`` match a registered ``redirect_uri``?
+
+    RFC 8252 §7.3: for loopback redirect URIs the authorization server MUST
+    ignore the port, because a native app binds an ephemeral port at request
+    time and cannot know it at registration. Anthropic's connector docs state
+    the same requirement, and the Claude Code CLI depends on it.
+
+    The relaxation is deliberately narrow:
+
+    * both values must be ``http`` loopback URIs (``_is_loopback`` — the same
+      predicate registration validates with, so the two can never disagree);
+    * scheme, host and path must still match exactly (host case-insensitively);
+    * anything else — including every non-loopback URI — keeps the original
+      exact-string rule, so the hosted security posture is unchanged.
+
+    Host is NOT relaxed: ``localhost`` and ``127.0.0.1`` are distinct hosts,
+    even though both are loopback. Only the port varies.
+    """
+    if not isinstance(registered, str) or not isinstance(presented, str):
+        return False
+    if registered == presented:
+        return True
+    try:
+        reg = urlparse(registered)
+        pre = urlparse(presented)
+    except ValueError:
+        return False
+    if not reg.hostname or not pre.hostname:
+        return False
+    if not (_is_loopback(reg.hostname) and _is_loopback(pre.hostname)):
+        return False
+    return (
+        reg.scheme.lower() == pre.scheme.lower()
+        and reg.hostname.lower() == pre.hostname.lower()
+        and reg.path == pre.path
+        and reg.params == pre.params
+        and reg.query == pre.query
+        and reg.fragment == pre.fragment
+    )
+
+
 def mcp_resource_url(base: str) -> str:
     """Canonical RFC 8707 resource URI for the MCP surface at ``base``."""
     return base.rstrip("/") + "/mcp"
@@ -483,7 +525,10 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
     if response_type != "code":
         raise OAuthError(400, "invalid_request",
                          "Only response_type=code is supported.")
-    if redirect_uri not in (client.get("redirect_uris") or []):
+    # #2846: loopback ports are ignored (RFC 8252 §7.3); every other redirect
+    # keeps the exact-string rule. See `_redirect_uri_matches`.
+    if not any(_redirect_uri_matches(u, redirect_uri)
+               for u in (client.get("redirect_uris") or [])):
         raise OAuthError(400, "invalid_request",
                          "redirect_uri is not registered for this client.")
     if not code_challenge or not _valid_pkce(code_challenge):
