@@ -180,6 +180,47 @@ class SearchScores:
     rrf: float = 0.0
 
 
+# ── #3276: honest EP measurement state ──────────────────────────────────
+# ``has_ep`` must mean "EP has MEASURED this claim", not merely "a persisted
+# prior exists". The two came apart when #2199 began stamping a kind-derived
+# baseline (ep_alpha/ep_beta, baseline_set=true, baseline_source=
+# 'system-default') on decide parts at CREATE: every never-measured decision
+# then read has_ep=True at the prior mean (0.75), so the #2206 relevance gate
+# could not tell "we decided this" from "nobody measured this".
+#
+# A claim is EP-MEASURED when EP flushed a posterior (posterior_alpha — the
+# one column only a real EP run writes), or when it carries a persisted
+# ep_alpha that is NOT a #2199 baseline (legacy EP-prior back-compat).
+# PRIOR-ONLY (has_ep=False, baseline=True): a declared baseline prior — the
+# value is the prior mean, explicitly NOT a measured confidence. UNMEASURED
+# (has_ep=False, baseline=False): neutral Beta(1,1) mean 0.5.
+
+def ep_measured_cypher(alias: str) -> str:
+    """Cypher boolean: EP has MEASURED the :Point bound to ``alias`` (#3276)."""
+    return (f"({alias}.posterior_alpha IS NOT NULL "
+            f"OR ({alias}.ep_alpha IS NOT NULL "
+            f"AND NOT coalesce({alias}.baseline_set, false)))")
+
+
+def ep_baseline_cypher(alias: str) -> str:
+    """Cypher boolean: ``alias`` carries a #2199 baseline prior (#3276)."""
+    return f"coalesce({alias}.baseline_set, false)"
+
+
+def ep_measurement_state(*, posterior_alpha, ep_alpha,
+                         baseline_set: bool) -> str:
+    """Python twin of :func:`ep_measured_cypher`: 'measured' | 'baseline' |
+    'unmeasured' (#3276).
+
+    Pure measurement predicate — it does NOT know about the #2490 terminal
+    override, which each read surface applies on top (a terminal claim is
+    forced to has_ep=False/measured=False/baseline=False regardless of the
+    persisted columns)."""
+    if posterior_alpha is not None or (ep_alpha is not None and not baseline_set):
+        return "measured"
+    return "baseline" if baseline_set else "unmeasured"
+
+
 @dataclass
 class EpEvidence:
     impl_count: int = 0
@@ -215,10 +256,14 @@ class EpBreakdown:
     # as a first-class flag so agents treat the claim as disputed, not merely
     # high/low probability.
     contested: bool = False
-    # Whether this point has persisted EP data (posterior_alpha OR ep_alpha).
-    # True = EP has run on the claim (posterior) or a prior was persisted
-    # (baseline/evidence); False = unmeasured — confidence_mean is the neutral
-    # Beta(1,1) mean 0.5, which is NOT a signal of contestation.
+    # #3276: whether EP has MEASURED this point — True iff a real EP flush
+    # persisted a posterior (or a non-baseline legacy ep_alpha prior). A
+    # #2199 baseline prior alone does NOT set it: a never-measured decision
+    # with the kind-derived system-default baseline reads has_ep=False here
+    # (it used to read True at the 0.75 prior mean — the #3276 leak).
+    # False = not measured; confidence_mean is then the declared prior mean
+    # when ``baseline`` is True, else the neutral Beta(1,1) mean 0.5. Neither
+    # is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
     # decays to vacuity at the terminalizing write, so a terminal claim's
@@ -226,6 +271,16 @@ class EpBreakdown:
     # include-terminal surfaces". Consumers (topic disputed-pair gate,
     # volunteer, mcp) must not read terminal=unmeasured.
     has_ep: bool = False
+    # #3276 aliases of the same measurement state, explicit and unambiguous:
+    #   measured=True                     → EP measured (has_ep True)
+    #   measured=False, baseline=True     → prior-only (declared baseline)
+    #   measured=False, baseline=False    → unmeasured (neutral 0.5)
+    # A TERMINAL claim (#2490 gate) reads measured=False, baseline=False even
+    # when it was measured-and-baseline'd pre-terminalization: its 0.5 is the
+    # decayed vacuity posterior, not the prior, so it is neither prior-only
+    # nor a live measurement (the per-row terminal flag owns that state).
+    measured: bool = False
+    baseline: bool = False
 
     def __post_init__(self):
         if self.evidence is None:
@@ -1307,8 +1362,11 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "    ELSE 0.0 "
             "  END AS contention, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
-            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep, "
-            "  n.status, coalesce(n.outdated, false) "
+            # #3276: has_ep == EP MEASURED (not merely "a prior exists").
+            # baseline_set plumbs the prior-only distinction to Python.
+            f"  {ep_measured_cypher('n')} AS has_ep, "
+            "  n.status, coalesce(n.outdated, false), "
+            f"  {ep_baseline_cypher('n')} AS baseline_set "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
@@ -1319,8 +1377,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # as measured EP — has_ep=False + contested=False (the columns
             # are fetched so the terminal state is read, not guessed; the len
             # guard tolerates doubles mirroring the pre-#2490 7-col shape).
-            if len(row) > 8 and is_terminal_status(row[7], bool(row[8])):
+            terminal = len(row) > 8 and is_terminal_status(row[7], bool(row[8]))
+            if terminal:
                 has_ep = False
+            # #3276: baseline_set rides the tail (index 9) so the pre-#3276
+            # 7/9-col row shapes keep their index mapping under the len guard.
+            baseline_set = bool(row[9]) if len(row) > 9 else False
+            measured = bool(has_ep)
             total = impl + nand
             variance = _beta_variance(alpha, beta)
             breakdowns[pid] = EpBreakdown(
@@ -1333,8 +1396,16 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 # contested, it's unmeasured. (#2490: terminal claims are
                 # gated above, so their decayed (1,1) posterior never reads
                 # contested either.)
-                contested=bool(has_ep) and variance > CONTESTED_VARIANCE_THRESHOLD,
-                has_ep=bool(has_ep),
+                contested=measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+                has_ep=measured,
+                measured=measured,
+                # prior-only: a declared #2199 baseline on a LIVE claim with
+                # no EP measurement — confidence_mean is the PRIOR mean, never
+                # a measured one. A TERMINAL claim is neither measured nor
+                # prior-only (its 0.5 is the #2490 decayed posterior), so the
+                # terminal gate above also clears `baseline` — see the
+                # EpBreakdown three-state note.
+                baseline=baseline_set and not measured and not terminal,
             )
 
         # Fill in defaults for IDs that are not Point nodes (defaults match
@@ -1548,7 +1619,7 @@ def get_relationships_bounded(
                 "  AND NOT (op)-[:mitigated_by]->(other) "
                 "  AND (type(r2) = 'NAND' "
                 f"       OR {_terminal_expression('other.status')} "
-                "       OR ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) "
+                f"       OR ({ep_measured_cypher('other')} "
                 "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
                 "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
                 "                  * (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0) + 1)) > $contested_threshold)) "
@@ -1559,8 +1630,9 @@ def get_relationships_bounded(
                 # #2490: the aligned has_ep boolean — measured AND NOT terminal
                 # (a decayed terminal's (1,1) posterior is column-
                 # indistinguishable from a measured (1,1), so the status/flag
-                # gate lives INSIDE the projection).
-                f"  ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) AND {_alive_flag('other.status')}), "
+                # gate lives INSIDE the projection). #3276: "measured" is
+                # ep_measured_cypher — a #2199 baseline prior is NOT measurement.
+                f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
                 "  other.createdAt, coalesce(other.outdated, false) "
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
@@ -1601,8 +1673,9 @@ def get_relationships_bounded(
                 "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
                 # #2490: aligned has_ep gate (see op_crit) — support peers are
                 # also terminal-gated so a terminal peer's decayed posterior
-                # never reads as measured EP in the assembly.
-                f"  ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) AND {_alive_flag('other.status')}), "
+                # never reads as measured EP in the assembly. #3276: measured
+                # excludes the #2199 baseline prior (see ep_measured_cypher).
+                f"  ({ep_measured_cypher('other')} AND {_alive_flag('other.status')}), "
                 "  other.createdAt, coalesce(other.outdated, false)",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
                 timeout=_DECORATION_TIMEOUT_MS,
