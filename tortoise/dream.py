@@ -462,7 +462,18 @@ class Dreamer:
         so this dedicated scan stamps them directly, independent of the EP
         flush. ``claim_ids=None`` scans the whole graph (full passes); a list
         restricts the scan to the given anchors (local passes). Returns the
-        stamped claim ids.
+        stamped claim ids — the caller UNIONS them into the pass's affected
+        set, which is what clears an operator-less backlog after a SUCCESSFUL
+        pass (``_sweep_dirty_roots``).
+
+        #3139 (review P1): deliberately does NOT clear ``ep_dirty`` itself.
+        This runs BEFORE ``_guard_dream_progress``, so on a starved pass it
+        would erase the durable graph backlog and then raise — the failed pass
+        erasing its own backlog is precisely what the guard's docstring
+        promises cannot happen, and a fresh SDK (/v1/dream/health constructs
+        one per request) would then report ``alarm_verdict: False, 'ok'`` on a
+        silent no-op: the #3139 symptom, reintroduced. It would also bypass the
+        sweep's #1163 epoch guard and leave ``ep_dirty_at`` stale.
         """
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -625,7 +636,19 @@ class Dreamer:
         scanned_count = 0
         if stamp_dreamed_at and converged_all:
             with self._lock:
-                scanned_count = len(self._trivial_stamp(proj))
+                # #3139 (review P2): KEEP the stamped ids, not just their
+                # count. They were scanned independently of `total_affected`
+                # (per DE2E-1), so without this union the caller's sweep never
+                # saw them and an operator-less claim stayed in the in-memory
+                # dirty set forever — `stale_backlog` never reached zero after
+                # a fully successful pass, even though `ep_dirty` was cleared
+                # in the graph.
+                _trivially_stamped = self._trivial_stamp(proj)
+                scanned_count = len(_trivially_stamped)
+                self._last_affected_claims = (
+                    set(getattr(self, "_last_affected_claims", set()) or set())
+                    | _trivially_stamped
+                )
         return {
             "batches": batches,
             "total_affected": len(total_affected),

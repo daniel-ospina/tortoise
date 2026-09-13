@@ -352,3 +352,157 @@ class TestLegitimateNoOpIsDistinguishable:
         assert sdk.dream_health_check()["no_op_reason"] == "no_ep_factors"
         # The read path lazily dreams the dirty root — it must not raise.
         sdk.get_confidence(tgt, require_calibration=False)
+
+
+class TestHealthAlarmIsHonest:
+    """#3139 (review P1): ``dream_health_check()`` must not report
+    ``alarm_verdict: False, alarm_reason: 'ok'`` while belief state is missing.
+
+    The old alarm was ``backlog > 0 and last_output == 0 and last_pass_at is
+    not None``. It keyed on STAMPS (``affected_claims`` → ``last_pass_output``,
+    and ``coverage_pct`` counts ``lastDreamedAt`` stamps too), so it could not
+    see a BELIEF-STATE no-op — and it excused any graph that had never run a
+    pass. Both dishonest states are pinned here.
+    """
+
+    @staticmethod
+    def _starve_selector(monkeypatch):
+        from tortoise import analyze
+        monkeypatch.setattr(analyze, "_bfs_select_operators",
+                            lambda *a, **k: (set(), set()))
+
+    def test_never_passed_graph_with_backlog_alarms(self, sdk):
+        """(a) A never-passed graph with a live backlog: the old alarm excused
+        it via ``last_pass_at is not None``, reporting 'ok'."""
+        _factored_graph(sdk)
+        health = sdk.dream_health_check()
+        assert health["stale_backlog"] > 0
+        assert health["last_pass_at"] is None
+        assert health["coverage_pct"] == 0.0
+        assert health["alarm_verdict"] is True, health
+        assert health["alarm_reason"] in (
+            "zero_output_with_backlog", "zero_coverage_with_backlog",
+        ), health
+
+    def test_silent_no_op_raise_turns_the_alarm_on(self, sdk, monkeypatch):
+        """(b) The fixture must be one the OLD alarm was BLIND to.
+
+        A silent no-op still trivially stamps operator-less claims, so
+        ``last_pass_output`` is NON-zero and ``coverage_pct`` RISES while no
+        belief state was written. That is the hazard: the health surface got
+        more reassuring the worse the failure was. With only factored claims
+        nothing is stamped and the old formula happened to catch it anyway, so
+        this test asserts ``last_pass_output > 0`` to keep the fixture
+        discriminating (verified by reverting the fix: the old code reports
+        ``alarm_verdict: False`` on this state).
+        """
+        from tortoise.exceptions import DreamNoOpError
+
+        _factored_graph(sdk)
+        _claim(sdk, "operator-less claim stamped by the doomed pass")
+        self._starve_selector(monkeypatch)
+        with pytest.raises(DreamNoOpError):
+            sdk.dream(mode="stale-first", require_calibration=False)
+
+        health = sdk.dream_health_check()
+        assert health["no_op_reason"] == "silent_no_op"
+        assert health["last_pass_output"] > 0, (
+            "fixture is no longer discriminating: a stamping no-op must show "
+            f"last_pass_output > 0 {health}"
+        )
+        assert health["alarm_verdict"] is True, health
+        assert health["alarm_reason"] == "silent_no_op"
+
+    def test_starved_pass_does_not_erase_the_durable_backlog(
+            self, sdk, monkeypatch):
+        """#3139 (review P1) — the guard's contract, at the GRAPH level.
+
+        The guard's docstring promises the failed pass "cannot erase its own
+        backlog". That must hold in the graph, not only in memory: the
+        ``/v1/dream/health`` endpoint builds a FRESH SDK per request, so a
+        backlog that survived only in ``_dirty_roots`` reads as 0 and the alarm
+        reports 'ok' on a silent no-op — the issue's symptom, reintroduced.
+        (An earlier revision of this change cleared ``ep_dirty`` inside
+        ``_trivial_stamp``, which runs before the guard, and did exactly that.)
+        """
+        from tortoise.exceptions import DreamNoOpError
+
+        _factored_graph(sdk)
+        cid = _claim(sdk, "operator-less claim the starved pass must not clear")
+        self._starve_selector(monkeypatch)
+        with pytest.raises(DreamNoOpError):
+            sdk.dream(mode="stale-first", require_calibration=False)
+
+        row = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN coalesce(n.ep_dirty, false)",
+            params={"id": cid},
+        ).result_set
+        assert bool(row[0][0]) is True, (
+            "the starved pass cleared the durable backlog — a fresh SDK would "
+            "then report alarm_verdict False / 'ok' (#3139 reintroduced)"
+        )
+        assert sdk.dream_health_check()["stale_backlog"] > 0
+
+    def test_legitimate_no_op_does_not_alarm(self, sdk):
+        """The alarm must not contradict the guard's own classification.
+
+        ``_guard_dream_progress`` calls an explicit ``budget=0`` a legitimate
+        no-op ("not an error"), so it must not page — the backlog terms would
+        otherwise fire on it because the backlog is deliberately retained.
+        """
+        _factored_graph(sdk)
+        sdk.dream(mode="local", budget=0, require_calibration=False)
+        health = sdk.dream_health_check()
+        assert health["no_op_reason"] == "budget_zero"
+        assert health["stale_backlog"] > 0
+        assert health["alarm_verdict"] is False, health
+        assert health["alarm_reason"] == "ok"
+
+    def test_healthy_graph_does_not_alarm(self, sdk):
+        """Regression guard against over-firing: a converged graph with no
+        backlog is fine."""
+        _factored_graph(sdk)
+        sdk.dream(mode="local", require_calibration=False)
+        health = sdk.dream_health_check()
+        assert health["stale_backlog"] == 0
+        assert health["alarm_verdict"] is False, health
+        assert health["alarm_reason"] == "ok"
+
+    def test_belief_write_count_is_distinct_from_stamps(self, sdk):
+        """The surface must let a caller tell 'wrote beliefs' from 'stamped
+        claims' — that divergence IS the silent no-op — and a no-op pass must
+        not inherit the previous pass's count."""
+        _factored_graph(sdk)
+        sdk.dream(mode="local", require_calibration=False)
+        healthy = sdk.dream_health_check()
+        assert (healthy["last_belief_write_count"] or 0) > 0, healthy
+
+        # A legitimate no-op wrote no beliefs: a stale count would misdescribe
+        # the LAST pass, the same quiet lie in a smaller place.
+        sdk.dream(mode="local", budget=0, require_calibration=False)
+        assert sdk.dream_health_check()["last_belief_write_count"] == 0, (
+            "the no-op inherited the previous pass's belief-write count"
+        )
+
+
+class TestOperatorlessBacklogClears:
+    """#3139 (review P2): an operator-less claim was stamped but never left the
+    backlog.
+
+    ``_trivial_stamp`` ran independently of the Dreamer's reachable
+    ``total_affected`` (per DE2E-1), and its returned ids were discarded
+    (``scanned_count = len(self._trivial_stamp(proj))``), so the full-mode
+    sweep never saw them and they stayed dirty in memory forever.
+    """
+
+    def test_full_pass_clears_an_operatorless_backlog(self, sdk):
+        _claim(sdk, "operator-less claim with no edges at all")
+        assert sdk.dream_health_check()["stale_backlog"] == 1
+
+        result = sdk.dream(mode="full", require_calibration=False)
+        assert result["converged_all"] is True
+
+        assert sdk.dream_health_check()["stale_backlog"] == 0, (
+            "an operator-less claim must leave the backlog after being "
+            "trivially stamped"
+        )

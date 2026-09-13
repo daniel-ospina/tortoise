@@ -1890,6 +1890,9 @@ class TortoiseSDK:
             # raised DreamNoOpError). A silent no-op raises instead of
             # landing in a success shape.
             "last_pass_no_op_reason": None,
+            # #3139 (review P1): belief state written by the last pass, as
+            # distinct from ``last_pass_output`` (which counts stamps).
+            "last_belief_write_count": None,
             "per_mode_counts": {},
             "pass_count": 0,
             "failure_count": 0,
@@ -9698,18 +9701,69 @@ class TortoiseSDK:
         backlog = len(self._dirty_roots)
         last_output = self._dream_metrics.get("last_pass_output", 0)
         last_pass_at = self._dream_metrics.get("last_pass_at")
-        alarm = (backlog > 0 and last_output == 0
-                 and last_pass_at is not None)
+        # #3139 (review P1): the previous alarm was
+        #     backlog > 0 and last_output == 0 and last_pass_at is not None
+        # which stayed FALSE in BOTH dishonest states the issue measured.
+        #
+        #  (a) A graph that had never run a pass has `last_pass_at is None`,
+        #      so it reported `alarm_verdict: False, alarm_reason: 'ok'` with a
+        #      live backlog and 0% coverage — literally the state the issue
+        #      recorded.
+        #  (b) A silent no-op still trivially stamps operator-less claims, so
+        #      `affected_claims` (→ last_pass_output) is NON-zero even though no
+        #      belief state was written; and `coverage_pct` counts STAMPS too,
+        #      so it RISES. Keying the alarm on stamps cannot see a
+        #      belief-state no-op — the health surface got *more* reassuring
+        #      the worse the failure was.
+        #
+        # So the alarm now also keys on the two belief-state signals: the
+        # proven silent no-op, and a live backlog with no coverage at all.
+        #
+        # But it must NOT contradict the guard's own classification of a
+        # LEGITIMATE no-op. `_guard_dream_progress` says of the #1163
+        # stale-run stand-down "Zero writes is correct here" — yet the
+        # backlog terms below would page on it, because the stand-down
+        # deliberately retains the dirty root. Excuse the reasons the guard
+        # calls legitimate instead of false-paging on them.
+        no_op_reason = self._dream_metrics.get("last_pass_no_op_reason")
+        coverage = self._metrics_coverage()
+        _LEGITIMATE_NO_OP = {
+            "stale_run_guard", "budget_zero", "no_dirty_roots",
+            "no_ep_factors",
+        }
+        if no_op_reason in _LEGITIMATE_NO_OP:
+            alarm = False
+        else:
+            alarm = bool(
+                no_op_reason == "silent_no_op"
+                or (backlog > 0 and last_output == 0)
+                or (backlog > 0 and coverage == 0.0)
+            )
+        # Derive the reason FROM the verdict: a reason without an alarm would
+        # report a failure that `alarm_verdict` denies (and would leak a
+        # backlog-terms reason on a deliberately excused legitimate no-op).
+        if not alarm:
+            alarm_reason = "ok"
+        elif no_op_reason == "silent_no_op":
+            alarm_reason = "silent_no_op"
+        elif backlog > 0 and last_output == 0:
+            alarm_reason = "zero_output_with_backlog"
+        else:
+            alarm_reason = "zero_coverage_with_backlog"
         state = self.dream_health_state()
         stale_backlog = sum(  # noqa: F841
             1 for _ in self._dirty_roots)  # non-empty check below
         return {
             "alarm_verdict": alarm,
-            "alarm_reason": (
-                "zero_output_with_backlog" if alarm else "ok"),
+            "alarm_reason": alarm_reason,
             "stale_backlog": backlog,
             "last_pass_at": last_pass_at,
             "last_pass_output": last_output,
+            # #3139 (review P1): belief state WRITTEN — as distinct from
+            # `last_pass_output`, which counts stamps. Their divergence is
+            # exactly what a silent no-op looks like on this surface.
+            "last_belief_write_count": self._dream_metrics.get(
+                "last_belief_write_count"),
             # #3139: legitimate-no-op vs silent-no-op is a difference the
             # caller must be able to see. The silent case raised
             # DreamNoOpError; this reports the proven-empty case.
@@ -9764,6 +9818,12 @@ class TortoiseSDK:
         else:
             last_output = len(affected_claims)
         self._dream_metrics["last_pass_output"] = last_output
+        # #3139 (review P1): record belief writes alongside the stamp count so
+        # the health surface can distinguish "wrote beliefs" from "stamped
+        # claims" — the difference a silent no-op hides behind.
+        _dw = getattr(self._get_dreamer(), "_last_belief_write_count", None)
+        if _dw is not None:
+            self._dream_metrics["last_belief_write_count"] = int(_dw)
         self._dream_metrics["last_pass_mode"] = result.get("mode", mode)
         counts = self._dream_metrics["per_mode_counts"]
         counts[mode] = counts.get(mode, 0) + 1
@@ -10202,6 +10262,12 @@ class TortoiseSDK:
         contract)."""
         # #3139: an explicit budget=0 is a legitimate no-op — report why.
         self._dream_metrics["last_pass_no_op_reason"] = "budget_zero"
+        # #3139 (review P2): this pass wrote no belief state, so the belief
+        # count must not survive from a previous pass — a field documented as
+        # "beliefs written by the LAST pass" reporting a stale non-zero value
+        # on a no-op pass is the same class of quiet lie this change set
+        # exists to remove.
+        self._dream_metrics["last_belief_write_count"] = 0
         if mode == "local":
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
@@ -10327,6 +10393,10 @@ class TortoiseSDK:
             self._dream_metrics["last_pass_no_op_reason"] = None
             return
         wrote = getattr(dreamer, "_last_belief_write_count", 0) or 0
+        # #3139 (review P1): expose belief writes on the health surface, in
+        # the same units as the guard — `last_pass_output` counts stamps, so a
+        # no-op that stamped operator-less claims looks productive there.
+        self._dream_metrics["last_belief_write_count"] = wrote
         if wrote > 0:
             self._dream_metrics["last_pass_no_op_reason"] = None
             return
@@ -10362,6 +10432,9 @@ class TortoiseSDK:
         anchors = list(self._dirty_roots)
         if not anchors:
             self._dream_metrics["last_pass_no_op_reason"] = "no_dirty_roots"
+            # #3139 (review P2): no beliefs written by THIS pass — see the
+            # note in _dream_noop; a stale count would misdescribe the pass.
+            self._dream_metrics["last_belief_write_count"] = 0
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
         result = dreamer.dream(
