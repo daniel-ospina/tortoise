@@ -134,7 +134,10 @@ curl -fsSL ${ai} | bash -s -- --harness cursor
    env var, never the key):
 ${JSON.stringify(Ny,null,2)}
 3. Run: curl -fsSL ${ai} | bash -s -- --harness pi
-4. Reload Pi (run "/reload" — tortoise connects eagerly at startup).
+4. Restart Pi from a NEW terminal (quit Pi fully, open a new terminal
+   window, and start Pi there). A "/reload" is NOT enough — Pi reads the
+   key from the environment of the shell that launched it, so a reload
+   keeps the stale or empty value.
    Then call tortoise_health — when it passes, tell me "Tortoise is
    connected".`,"claude-desktop":()=>`# Tortoise — universal setup command (Claude Desktop — OAuth, no API key)
 # Claude Desktop is filesystem-less for remote MCP: use the Connectors UI, NOT

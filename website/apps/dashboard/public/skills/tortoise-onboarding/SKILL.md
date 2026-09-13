@@ -225,7 +225,10 @@ yours to execute, step 3 is a handoff to the user, and step 4 is the check.
 bearer token (`Authorization: Bearer`) and a 401 — not a config error:
 
 ```bash
-echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
+# Idempotent: a bare `>>` stacks a second export on every re-run.
+# Shell profiles are often version-controlled — if yours is, keep the key
+# out of it and use a non-committed include instead.
+grep -q 'export TORTOISE_API_KEY=' ~/.zshrc || echo 'export TORTOISE_API_KEY=<key>' >> ~/.zshrc   # or ~/.bashrc
 ```
 
 **2. Create/merge `.mcp.json` in the project** (MERGE — never replace an
@@ -249,10 +252,10 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 > ⛔ **Collision protocol — a `tortoise` entry already exists.** `mcpServers`
 > is a JSON object, so writing the `tortoise` key over an existing `tortoise`
 > key silently REPLACES it. "MERGE" protects the *other* servers, not this
-> one. In this workspace 10 repos declare `tortoise` across three backends,
-> and the local stdio one holds a POPULATED graph (1,263 nodes, verified via
-> `GRAPH.QUERY tortoise "MATCH (n) RETURN count(n)"`) — so a blind write is a
-> backend switch with no warning, no data check, and no way back. Work
+> one. Developers commonly have several `tortoise` entries declared across
+> more than one backend, and a local or self-hosted one can hold a POPULATED
+> graph — so a blind write is a backend switch with no warning, no data
+> check, and no way back. Work
 > through these five steps before writing — step 1 can stop you early if the
 > entry is already correct:
 >
@@ -264,10 +267,15 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 >    is absent. If the effective entry already matches the intended shape
 >    (same `url` AND `Authorization: Bearer ${TORTOISE_API_KEY}`), report
 >    "already correct — no repoint needed" and STOP: no confirm, no preserve,
->    no rewrite. Same `url` with a different header or key variable (e.g.
->    `${TORTOISE_MCP_API_KEY}`) is NOT correct — report it, confirm, then
->    write the corrected `tortoise` entry into the PROJECT `.mcp.json`. A
->    home/base entry is left untouched and merely shadowed, so nothing is
+>    no rewrite. Same `url` with a DIFFERENT KEY VARIABLE (e.g.
+>    `${TORTOISE_MCP_API_KEY}`) is a **policy difference, not a defect**: that
+>    variable may be deliberately distinct so a hosted session-capture path
+>    stays off. Report it and ASK; do not rewrite it on your own initiative,
+>    and treat "this profile intentionally defines that variable" as the
+>    human's decision rather than a misconfiguration to repair. Only a
+>    genuinely BROKEN entry (wrong `url`, missing or headerless
+>    `Authorization`) is yours to correct — and only after the confirm gate.
+>    A home/base entry is left untouched and merely shadowed, so nothing is
 >    overwritten and there is no preserve step.
 > 2. **Report** — tell the human the existing entry's backend (its `url`, or
 >    the local stdio `command`) and its graph size when that backend is
@@ -280,23 +288,34 @@ Pi's mcp-client expands plain `${TORTOISE_API_KEY}` (no `env:` prefix).
 > 4. **Preserve** — only when the existing `tortoise` entry lives in the SAME
 >    file you are about to write into (an overwrite in place). Rename it to a
 >    name that is FREE in that file: the obvious `tortoise-local` may already
->    be taken (it is an occupied key in this workspace) — check, and walk to
->    the next free name (`tortoise-local-2`, `tortoise-local-<backend>`, …).
+>    be taken — check before writing, and walk to the next free name
+>    (`tortoise-local-2`, `tortoise-local-<backend>`, …).
 >    Never write onto an already-present key. Set `"lazy": true` on the
->    preserved entry so it is not started eagerly at launch (it stays loadable
->    on demand via `mcp_load`). When the effective entry lives in a DIFFERENT
+>    preserved entry so it is not started eagerly at launch. ⛔ **A preserved
+>    LOCAL STDIO server must not inherit the hosted key.** Pi passes the parent
+>    environment to every stdio child, and a local stdio `tortoise` REFUSES TO
+>    START when `TORTOISE_API_KEY` is set and no `TORTOISE_SECRET_PEPPER` is
+>    configured — the hosted/cloud key is rejected by the local server on
+>    purpose (`tortoise/auth.py`). Because step 1 exports
+>    exactly that variable to the profile, a preserved stdio entry without
+>    `"TORTOISE_API_KEY": ""` in its `env` block will fail at import, so it is
+>    NOT "loadable on demand" — do not promise that. Add the blanking key, or
+>    if you cannot edit the preserved entry, tell the user it will need it.
+>    Then confirm the preserved entry still loads before reporting the switch
+>    complete. When the effective entry lives in a DIFFERENT
 >    file (the home/base config, which your project write only SHADOWS), there
 >    is nothing to preserve — skip this step; Report + Confirm still apply,
 >    and the base entry stays intact and recoverable by deleting the project
 >    entry.
-> 5. **Write** — only now add the hosted `tortoise` entry above, into the
->    PROJECT `.mcp.json` (never into the home/base config — see the
->    resolution-order note).
+> 5. **Write** — only now add the hosted `tortoise` entry above. Prefer the
+>    PROJECT `.mcp.json`; write the home/base config only when no project file
+>    is in play, since a project file always shadows it and a home write is
+>    then a silent no-op (see the resolution-order note).
 >
-> Preserving the prior entry does **not** certify it: the preserved local
-> stdio entry in this workspace is itself buggy (wrong port/password,
-> agent-infra #639). Preserve it so the switch stays recoverable in one step —
-> not as an endorsement of it.
+> Preserving the prior entry does **not** certify it: a preserved local stdio
+> entry can be broken in more than one way — a wrong port or password, and the
+> hosted-key rejection above. agent-infra #639 covers both. Preserve it so the
+> switch stays recoverable in one step — not as an endorsement of it.
 
 **3. Restart Pi from a NEW shell** (hand this to the user — the running Pi
 process cannot restart itself). Not `/reload`, and not a restart of an
@@ -312,9 +331,9 @@ client was built before the export.
 > ⛔ **The env var — not the config file — decides which organization you
 > connect to.** A Pi process launched with a stale `TORTOISE_API_KEY` connects
 > to the *previous* org and returns data from the wrong graph with no error.
-> Observed live 2026-09-12: an old key reached namespace
-> `7a3b5403935f865c27d3fb1751` (9,019 entities) instead of the configured
-> `3326a01ea34ae595d84de5d8f9` (3,033 entities). If `tortoise_health` reports
+> Observed live 2026-09-12: a stale key quietly reached a different, fully
+> populated organization — every tool answered normally, none of it from the
+> graph the user thought they were querying. If `tortoise_health` reports
 > an org you did not expect, the process env is stale — relaunch from a new
 > shell; editing `.mcp.json` will not help.
 
