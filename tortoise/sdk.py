@@ -18901,12 +18901,57 @@ class TortoiseSDK:
                     # would create duplicate Objects on every run).
                     oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
                 okind = "pr" if key == "prs" else "issue"
-                proj.g.query(
-                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
-                    "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
-                    params={"oid": oid, "name": name[:200], "okind": okind,
+                name = name[:200]
+                # #3389: Object identity is the NAME (#2977), so resolve an
+                # existing carrier of the name FIRST and reuse it. The bare
+                # `MERGE (o:Object {id:$oid}) SET o.name=$name` this replaces
+                # minted a SECOND carrier of an already-existing name with NO
+                # journal line, and the replay handler (`_upsert_object`)
+                # MERGEs ObjectRegistered by NAME — it can never materialize
+                # that second node. So live had two carriers and replay one: a
+                # later `delete_entity($oid)` retracted the second carrier
+                # live, but off replay the fold found the FIRST carrier by
+                # name and tombstoned it — a live, never-retracted Object
+                # buried. Measured before the fix:
+                #
+                #   OR(ARBITRARY_ID, SHARED); connect(id=obj-<sha26(SHARED)>,
+                #   name=SHARED); delete_entity(obj-<sha26(SHARED)>)
+                #   live   [['ARBITRARY_ID','SHARED','live']]
+                #   replay [['ARBITRARY_ID','SHARED','retracted']]   <-- BURIED
+                #
+                # Journaling the second carrier instead does NOT work: replay
+                # name-MERGEs it into the first carrier (measured — it renames
+                # the id and still buries it). Fixing the writer means never
+                # minting the unjournalable carrier. Names are not unique, so
+                # pick deterministically (`coalesce(o.createdAt,'') DESC,
+                # o.id`) exactly as `_fold_object_match_and_apply`'s name
+                # branch does; a carrier with no id ADOPTS `$oid` (the
+                # #1155-P1 stub-adoption case) but an existing id is never
+                # overwritten. The non-identity props coalesce (existing value
+                # wins) — `_upsert_object`'s ON MATCH rule — so a session
+                # reference cannot clobber a registered Object's props.
+                resolved = proj.g.query(
+                    "MATCH (o:Object {name:$name}) "
+                    "WITH o ORDER BY coalesce(o.createdAt,'') DESC, o.id "
+                    "LIMIT 1 "
+                    "SET o.id = CASE WHEN coalesce(o.id,'') = '' THEN $oid ELSE o.id END, "
+                    "    o.objectKind=coalesce(o.objectKind, $okind), "
+                    "    o.repo=coalesce(o.repo, $repo), "
+                    "    o.issue_number=coalesce(o.issue_number, $issue_number), "
+                    "    o.url=coalesce(o.url, $url) "
+                    "RETURN o.id",
+                    params={"oid": oid, "name": name, "okind": okind,
                             "repo": repo, "issue_number": issue_number, "url": url},
-                )
+                ).result_set
+                if resolved:
+                    oid = resolved[0][0] or oid
+                else:
+                    proj.g.query(
+                        "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
+                        "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
+                        params={"oid": oid, "name": name, "okind": okind,
+                                "repo": repo, "issue_number": issue_number, "url": url},
+                    )
                 if proj.create_about_edge(event_id, oid, "aboutObject"):
                     connected += 1
                 else:

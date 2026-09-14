@@ -792,21 +792,23 @@ class _EntityHandlers:
             # ⚠️ THIS DISCRIMINATOR IS NOT SOUND, and the earlier wording here
             # claimed it was ("the id demonstrably belongs to something else" —
             # false: a derived id appearing in no `ObjectRegistered` proves
-            # nothing about identity). Measured residual hole, filed as #3389:
+            # nothing about identity). A HAND-AUTHORED journal can still reach
+            # it:
             #
             #     OR(ARBITRARY_ID, SHARED), RT(_entity_name_id("SHARED"), SHARED)
             #     -> the guard short-circuits on `_derived_matches`, and the
             #        LIVE SHARED/ARBITRARY_ID is BURIED.
             #
-            # Production-reachable: `_connect_issue_objects` does
-            # `MERGE (o:Object {id:$oid}) SET o.name=$name` with
-            # `oid = item.get("id")`, and session transcripts routinely quote
-            # canonical `obj-<hash>` ids, so a second carrier of an existing
-            # name can legitimately carry a derived-LOOKING id. 6 review cycles
-            # each found the next hole in this rule; the root cause is the
-            # WRITER (a second carrier minted with no journal line), not fold
-            # selection — the same lesson cycle 3 taught. A sound fix belongs in
-            # `_connect_issue_objects`/`_delete_entity`, not here.
+            # #3389 was NOT fixed here. 6 review cycles each found the next
+            # hole in this rule, so the fix went to the WRITER — the same
+            # lesson cycle 3 taught for `_delete_entity`: `_connect_issue_objects`
+            # no longer mints a SECOND carrier of an existing name under a
+            # different id with no journal line (it resolves the name and
+            # reuses the existing carrier). That was the only production path
+            # to the shape above, so the hole is no longer reachable through
+            # the public SDK surface. It stays reachable by a hand-written
+            # journal, which is why the discriminator is left as-is rather than
+            # widened a seventh time.
             _derived_matches = False
             try:
                 from tortoise.sdk import _entity_name_id

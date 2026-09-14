@@ -2217,51 +2217,81 @@ def test_stub_lane_fallback_still_folds_after_the_id_identity_guard(tmp_path):
         sdk.close()
 
 
-def test_derived_looking_id_orphan_buries_the_name_known_limitation(tmp_path):
-    """**KNOWN LIMITATION — PINNED, NOT FIXED (#3389).** Recorded so the residual
-    hole is visible and cannot be mistaken for correct behaviour or for coverage.
+def test_public_sdk_path_does_not_bury_a_live_object_by_name(tmp_path):
+    """#3389: the WRITER must not mint an unjournaled second carrier.
 
-        OR(ARBITRARY_ID, SHARED)@0,
-        RT(_entity_name_id("Object","SHARED"), SHARED)@1
-        -> SHARED/ARBITRARY_ID is BURIED   (this test pins exactly that)
+    Replaces `test_derived_looking_id_orphan_buries_the_name_known_limitation`.
+    That pin drove the journal DIRECTLY (OR + RT), so it would keep certifying
+    the fold's unsound `_derived_matches` discriminator even after the writer
+    was fixed — but #3389 scopes the fix to the writer, and the public surface
+    no longer reaches that shape at all.
 
-    THE DISCRIMINATOR IN `_fold_object_match_and_apply` IS UNSOUND. Its
-    `not _derived_matches` condition spares #2164's legacy synthesized-id fold,
-    but a derived-LOOKING id proves nothing about identity, so an orphan carrying
-    one short-circuits the guard. Production-reachable through
-    `_connect_issue_objects`, which mints a second carrier of an existing name
-    under a different id and journals NOTHING — session transcripts routinely
-    quote canonical `obj-<hash>` ids, so the coincidence is natural, not only
-    adversarial.
+    Public-path shape (the live repro on #3389):
 
-    **WHY THIS IS PINNED RATHER THAN FIXED HERE.** This is the sixth consecutive
-    review cycle in which a change to this rule created the next hole. The root
-    cause is the WRITER (an unjournaled second carrier), not fold selection —
-    the same lesson cycle 3 taught, where the fix belonged in `_delete_entity`
-    rather than in the fold. #3389 scopes the fix there and says explicitly not
-    to patch the fold again.
+        sdk._create_entity("Object", "ARBITRARY_ID", {name: "SHARED", ...},
+                           "ObjectRegistered")      # journaled live carrier
+        sdk._connect_issue_objects("ev-1",
+            {"issues": [{"id": derived, "title": "SHARED"}]})
+        sdk.delete_entity(derived)                      # public SDK / MCP
 
-    If this assertion starts FAILING, someone fixed the writer — invert it
-    deliberately and close #3389. Do not "fix" it towards `live` by widening or
-    removing the guard: that reinstates the #2164 legacy-fold break pinned by
-    `test_rebuild_all_legacy_idless_object_fold_survives`.
+    Before the fix `_connect_issue_objects` minted a SECOND carrier of
+    `SHARED` under the derived id with NO journal line; the delete retracted
+    that carrier live, but on replay the derived id anchored NOWHERE while the
+    name did, so the fold's name branch tombstoned the FIRST carrier:
+
+        live   [['ARBITRARY_ID','SHARED','live']]
+        replay [['ARBITRARY_ID','SHARED','retracted']]   <-- BURIED
+
+    A derived-LOOKING id proves nothing about identity. The writer must
+    resolve the existing Object by NAME and reuse it (Object identity is the
+    name, #2977) instead of minting a carrier replay can never materialize —
+    `_upsert_object` MERGEs ObjectRegistered by name, so journaling the second
+    carrier does NOT reproduce it (measured: replay renames the id and still
+    buries the first carrier).
     """
-    from tortoise.sdk import _entity_name_id
     events = tmp_path / "events"
     events.mkdir(exist_ok=True)
-    log = EventLog(str(events / "events.jsonl"))
-    log.append({"type": "ObjectRegistered", "id": "ARBITRARY_ID",
-                "name": "SHARED"})
-    log.append({"type": "ObjectRetracted",
-                "id": _entity_name_id("Object", "SHARED"), "name": "SHARED",
-                "ts": "T1"})
-    proj = _drive("rebuild_all", tmp_path, events, "ARBITRARY_ID")
+    sdk = TortoiseSDK(str(tmp_path / "connect.db"),
+                      event_log_path=str(events / "events.jsonl"))
     try:
-        rows = {r[0]: r[1] for r in proj.g.query(
-            "MATCH (o:Object) RETURN o.name, o.status").result_set}
-        assert rows.get("SHARED") == "retracted", (
-            "KNOWN LIMITATION (#3389): a derived-looking id on a retraction "
-            "buries the name-sharing live Object. This test PINS the defect so "
-            f"it stays visible. Got {rows}")
+        proj = sdk._get_proj()
+        derived = _entity_name_id("Object", "SHARED")
+        # 1) A journaled live carrier of SHARED under an ARBITRARY id.
+        sdk._create_entity("Object", "ARBITRARY_ID",
+                           {"name": "SHARED", "objectKind": "core:other",
+                            "status": "live"}, "ObjectRegistered")
+        # 2) Session indexing references the canonical DERIVED id of the SAME
+        #    name (transcripts quote obj-<hash> ids). No second carrier may be
+        #    minted — replay could never materialize it.
+        ev = sdk.create_event("AgentSession", eventKind="AgentSession",
+                              session_id="s1")
+        assert sdk._connect_issue_objects(
+            ev["eventId"],
+            {"issues": [{"id": derived, "title": "SHARED"}]}) == 1
+        carriers = proj.g.query(
+            "MATCH (o:Object {name:'SHARED'}) RETURN o.id").result_set
+        assert carriers == [["ARBITRARY_ID"]], (
+            "the writer minted a second carrier of an existing Object name "
+            f"(#3389) — replay cannot reproduce it. Got {carriers}")
+        # 3) The public delete of the (never-created) derived id must leave the
+        #    live carrier alone.
+        assert sdk.delete_entity(derived) is False
+        live = proj.g.query(
+            "MATCH (o:Object {name:'SHARED'}) RETURN o.id, o.status").result_set
+        assert live == [["ARBITRARY_ID", "live"]], (
+            f"the live Object was buried (or altered) by the delete. Got {live}")
+        # 4) Replay must agree with live — the durability contract of #2977.
+        replay = _drive("rebuild_all", tmp_path / "replay", events,
+                        "ARBITRARY_ID")
+        try:
+            got = replay.g.query(
+                "MATCH (o:Object {name:'SHARED'}) RETURN o.id, o.status"
+            ).result_set
+            assert got == [["ARBITRARY_ID", "live"]], (
+                "live/replay divergence (#3389): a reference to a derived-"
+                "looking id off the public surface buried the name-sharing "
+                f"live Object on replay. Got {got}")
+        finally:
+            replay.close()
     finally:
-        proj.close()
+        sdk.close()
