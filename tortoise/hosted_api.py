@@ -8565,7 +8565,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         try:
             _cost_props = _capture_cost_props(session_id, meta)
             if _cost_props is not None:
-                _track_analytics_event(
+                # Off the event loop: `_track_analytics_event` POSTs
+                # synchronously (`httpx.Client`), and this API runs a single
+                # uvicorn worker — calling it inline stalls EVERY concurrent
+                # request for the duration of a Supabase round-trip (the
+                # #2988 / #3498 class of sync-HTTP-on-the-loop bug). This is
+                # the first call site on the highest-frequency path, so it is
+                # routed through `asyncio.to_thread` (the house style).
+                await asyncio.to_thread(
+                    _track_analytics_event,
                     team["team_id"], "capture_cost", _cost_props)
         except Exception:  # noqa: BLE001, RUF100 — never block capture
             import logging
