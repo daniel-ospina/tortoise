@@ -94,6 +94,12 @@ surfaces:
   # and a hosted_backup.py-only change select it (the #2938 precedent).
   - test_graphcopy_boolean_index_3154.py
   - test_hosted_api.py
+  # #3359: per-session provider-cost measurement — the hosted emit path
+  # (_capture_cost_props + the analytics allowlist) is api-owned, so the
+  # acceptance test is dual-registered (also under `core` for the extractor
+  # roll-up it drives). Same #2938 dual-membership convention as
+  # test_graphcopy_boolean_index_3154.py.
+  - test_capture_cost_measurement.py
   - test_hosted_auth.py
   - test_hosted_backup.py
   - test_import_endpoint.py
@@ -276,6 +282,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_capture_cost_measurement.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
