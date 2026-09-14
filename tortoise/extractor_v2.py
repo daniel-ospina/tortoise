@@ -4391,7 +4391,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # #1746 (D1/D7): the recovery counters roll per-stage (the ladder's
     # sanitize/repair events — never error strings, never census entries).
     llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0,
-                      "deadline_aborts": 0}  # #1787 P2-L: deadline-kill counter
+                      "deadline_aborts": 0,  # #1787 P2-L: deadline-kill
+                      # #3359: the cost driver (calibration data only)
+                      "prompt_tokens": 0, "completion_tokens": 0,
+                      "cost_usd": 0.0, "calls_without_cost": 0,
+                      "by_stage": {}}
     recovery_stats: dict[str, int] = {}
     error_census: dict[str, int] = {}
     # #1695 Task 5: the classify-later choke point — the env toggle read
@@ -4446,7 +4450,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             failed_chunks += 1
             errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
-        _rollup_llm(llm_stats, stage_stats)
+        _rollup_llm(llm_stats, stage_stats, "s1")
         _rollup_recovery(recovery_stats, stage_stats)
     if failed_chunks:
         errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
@@ -4476,7 +4480,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append("S2 output partial — truncated tail dropped "
                           "(embed list incomplete)")
             _bump_census_class(error_census, "partial_parse")
-        _rollup_llm(llm_stats, stage_stats)
+        _rollup_llm(llm_stats, stage_stats, "s2")
         _rollup_recovery(recovery_stats, stage_stats)
 
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
@@ -4501,7 +4505,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # must see the flag-on arm's batched adjudication cost.
                 usage = out["stats"].get("llm")
                 if usage:
-                    _rollup_llm(llm_stats, usage)
+                    _rollup_llm(llm_stats, usage, "classify")
         except Exception as e:  # never block capture (P1)
             errors.append(f"classify(S2) failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_error")
@@ -4549,7 +4553,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append("S4 output partial — truncated tail dropped "
                           "(embed list incomplete)")
             _bump_census_class(error_census, "partial_parse")
-        _rollup_llm(llm_stats, stage_stats)
+        _rollup_llm(llm_stats, stage_stats, "s4")
         _rollup_recovery(recovery_stats, stage_stats)
 
     # ── classify-later post-merge pass (#1695 Task 5): E4 + kind-preservation
@@ -4581,7 +4585,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # roll the adjudication tail spend (same as the S2 pass).
                 usage = out["stats"].get("llm")
                 if usage:
-                    _rollup_llm(llm_stats, usage)
+                    _rollup_llm(llm_stats, usage, "classify")
             slot_rekeys = _rekey_slots(complete_list)
         except Exception as e:  # never block capture (P1)
             errors.append(f"classify(union) failed: {type(e).__name__}: {e}")
@@ -5021,16 +5025,151 @@ def _bump_classify_census(error_census: dict[str, int], stats: dict) -> None:
             error_census[cls] = error_census.get(cls, 0) + n
 
 
-def _rollup_llm(llm_stats: dict, stage_stats: dict) -> None:
+def _empty_cost_bucket() -> dict:
+    """#3359: one ``(stage, provider, model)`` cost-envelope bucket — the
+    shape ``tools/longmem_eval/usage.py`` emits and
+    ``costing.price_usage_envelope`` consumes, so a stored ``capture_cost``
+    row is repricable at report time from the versioned pricing map.
+
+    ``usage_present`` ANDs conservatively (the #2185 contract): a lane with
+    ANY usage-less call is never silently priced.
+    """
+    return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "cost_usd": 0.0, "calls_without_cost": 0,
+            "calls_without_usage": 0, "usage_present": True}
+
+
+def _merge_cost_bucket(tgt: dict, src: dict) -> None:
+    """Merge one cost-envelope bucket into another of the same shape."""
+    tgt["calls"] += int(src.get("calls", 0) or 0)
+    tgt["prompt_tokens"] += int(src.get("prompt_tokens", 0) or 0)
+    tgt["completion_tokens"] += int(src.get("completion_tokens", 0) or 0)
+    tgt["cost_usd"] = round(
+        tgt["cost_usd"] + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    tgt["calls_without_cost"] += int(src.get("calls_without_cost", 0) or 0)
+    tgt["calls_without_usage"] += int(src.get("calls_without_usage", 0) or 0)
+    tgt["usage_present"] = bool(
+        tgt["usage_present"] and src.get("usage_present", True))
+
+
+def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
+    """Merge one stage's cost accumulator (``stats["cost"]``) into another.
+
+    The kind_classifier rolls per-batch accumulators into one adjudication
+    accumulator with the same shape ``_rollup_llm`` consumes — one concept,
+    one merge path.
+    """
+    src = (src_stats or {}).get("cost") or {}
+    if not src:
+        return
+    acc = tgt_stats.setdefault("cost", {})
+    acc["calls"] = int(acc.get("calls", 0)) + int(src.get("calls", 0) or 0)
+    acc["prompt_tokens"] = (
+        int(acc.get("prompt_tokens", 0))
+        + int(src.get("prompt_tokens", 0) or 0))
+    acc["completion_tokens"] = (
+        int(acc.get("completion_tokens", 0))
+        + int(src.get("completion_tokens", 0) or 0))
+    acc["cost_usd"] = round(
+        float(acc.get("cost_usd", 0.0))
+        + float(src.get("cost_usd", 0.0) or 0.0), 6)
+    acc["calls_without_cost"] = (
+        int(acc.get("calls_without_cost", 0))
+        + int(src.get("calls_without_cost", 0) or 0))
+    for provider, models in (src.get("by_route") or {}).items():
+        for model, bucket in (models or {}).items():
+            _merge_cost_bucket(
+                acc.setdefault("by_route", {}).setdefault(provider, {})
+                .setdefault(model, _empty_cost_bucket()), bucket)
+
+
+def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
+                          cost_usd, provider, model) -> None:
+    """#3359: accumulate ONE successful provider call into ``stats["cost"]``.
+
+    Called from ``_complete``'s success path — the single point where the
+    per-call token counts (return tuple) meet the provider-reported charge
+    captured in-thread by ``_call_once``. Accumulation, not overwrite, is
+    required: a stage may make SEVERAL calls (the S1/S2/S4 one-shot
+    escalation and the #1746 parse-retry both re-enter ``_complete``), and a
+    per-call snapshot would measure only the LAST one — dropping the base
+    call's spend from exactly the long sessions the p95 read is about.
+
+    ``calls_without_cost`` discloses calls the provider served without a
+    charge (the deepseek-direct lane today); ``calls_without_usage``
+    discloses calls with no usage block at all. Neither is ever silently
+    priced at $0.
+    """
+    acc = stats.setdefault("cost", {})
+    ptoks = int(prompt_tokens or 0)
+    ctoks = int(completion_tokens or 0)
+    acc["calls"] = int(acc.get("calls", 0)) + 1
+    acc["prompt_tokens"] = int(acc.get("prompt_tokens", 0)) + ptoks
+    acc["completion_tokens"] = int(acc.get("completion_tokens", 0)) + ctoks
+    if cost_usd is None:
+        acc["calls_without_cost"] = int(acc.get("calls_without_cost", 0)) + 1
+    else:
+        acc["cost_usd"] = round(
+            float(acc.get("cost_usd", 0.0)) + float(cost_usd), 6)
+    has_usage = bool(ptoks or ctoks or cost_usd is not None)
+    lane = (acc.setdefault("by_route", {}).setdefault(provider or "unknown", {})
+            .setdefault(model or "unknown", _empty_cost_bucket()))
+    lane["calls"] += 1
+    lane["prompt_tokens"] += ptoks
+    lane["completion_tokens"] += ctoks
+    if cost_usd is None:
+        lane["calls_without_cost"] += 1
+    else:
+        lane["cost_usd"] = round(lane["cost_usd"] + float(cost_usd), 6)
+    if not has_usage:
+        lane["calls_without_usage"] += 1
+    lane["usage_present"] = bool(lane["usage_present"] and has_usage)
+
+
+def _rollup_llm(llm_stats: dict, stage_stats: dict,
+                stage: str = "unattributed") -> None:
     """Roll one stage's per-call stats into the per-session LLM roll-up
     (D3: stats['llm'] = calls / retries / truncated across S1/S2/S4; #1787
     Task 5 Step 0 P2-L: ``deadline_aborts`` — deadline-killed generations
     are billed but never counted by any token accumulator, so the harness
-    bounds the loss via this counter)."""
+    bounds the loss via this counter).
+
+    #3359: also rolls the COST DRIVER — prompt/completion tokens, the
+    provider's own reported charge, and the ``calls_without_cost`` /
+    ``calls_without_usage`` disclosure counters — from the stage's cost
+    accumulator (``stage_stats["cost"]``, written per successful call by
+    ``_accumulate_call_cost``). Each call keeps the ``(provider, model)``
+    route that served it, so a mid-stage failover is never misattributed to
+    the configured primary. The ``by_stage`` buckets use the
+    pricing-envelope shape (``tools/longmem_eval/usage.py`` /
+    ``costing.price_usage_envelope``) so the row is repricable at report
+    time. ``stage`` defaults for the pre-existing 2-arg callers.
+    """
     llm_stats["calls"] += stage_stats.get("attempts", 0)
     llm_stats["retries"] += stage_stats.get("retries", 0)
     llm_stats["truncated"] += int(bool(stage_stats.get("truncated")))
     llm_stats["deadline_aborts"] += stage_stats.get("deadline_aborts", 0)
+
+    cost = stage_stats.get("cost") or {}
+    llm_stats["prompt_tokens"] = (
+        llm_stats.get("prompt_tokens", 0)
+        + int(cost.get("prompt_tokens", 0) or 0))
+    llm_stats["completion_tokens"] = (
+        llm_stats.get("completion_tokens", 0)
+        + int(cost.get("completion_tokens", 0) or 0))
+    llm_stats["cost_usd"] = round(
+        llm_stats.get("cost_usd", 0.0)
+        + float(cost.get("cost_usd", 0.0) or 0.0), 6)
+    llm_stats["calls_without_cost"] = (
+        llm_stats.get("calls_without_cost", 0)
+        + int(cost.get("calls_without_cost", 0) or 0))
+
+    by_stage = llm_stats.setdefault("by_stage", {})
+    for provider, models in (cost.get("by_route") or {}).items():
+        for model, bucket in (models or {}).items():
+            _merge_cost_bucket(
+                by_stage.setdefault(stage, {}).setdefault(provider, {})
+                .setdefault(model, _empty_cost_bucket()), bucket)
 
 
 def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
@@ -5052,6 +5191,14 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
     finish reason AND per-call token counts captured in the calling thread
     right after ``complete()`` returns (F4 #1780; token capture #2134
     Task 0 — never read the shared adapter attrs from the caller thread).
+
+    #3359: the same in-thread capture also snapshots the provider's OWN
+    reported charge (``last_cost_usd`` — ``None`` when the route reports
+    none) and the SERVING route (``last_route``/``route``/``provider``,
+    never the configured primary — a mid-call failover must not be
+    misattributed) plus the wire model id, and publishes them into ``stats``
+    on the JOINED success path only — an abandoned deadline thread must
+    never write into a stats dict that was already rolled up.
 
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
@@ -5089,6 +5236,23 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
             getattr(model, "last_prompt_tokens", None) or 0)
         box["completion_tokens"] = int(
             getattr(model, "last_completion_tokens", None) or 0)
+        # #3359: the provider's own charge + the route that served it,
+        # captured in the SAME thread as the call (same cross-thread-race
+        # reason as the tokens above; ``is None`` — 0.0 is authoritative).
+        _cost = getattr(model, "last_cost_usd", None)
+        box["cost_usd"] = (None if _cost is None else float(_cost))
+        # The SERVING route, never the configured primary: a RoutingModel
+        # keeps ``provider`` = the configured primary and flips
+        # ``last_route``/``route`` on failover, so reading ``provider``
+        # would attribute the fallback's charge to the primary's rate
+        # (and misprice it at report time). ``last_route`` (always the last
+        # served) → ``route`` (RotatingModel's active lane) → ``provider``
+        # (a plain adapter).
+        box["cost_provider"] = (getattr(model, "last_route", None)
+                                or getattr(model, "route", None)
+                                or getattr(model, "provider", None))
+        box["cost_model"] = (getattr(model, "model", None)
+                             or getattr(model, "id", None))
 
     def _run():
         try:
@@ -5155,6 +5319,14 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
 
     if "exc" in box:
         raise box["exc"]
+    # #3359: publish the cost-driver capture into the caller's per-call
+    # stats (the token counts travel back in the return tuple; the cost +
+    # route ride the same dict the stage roll-up already reads). Only the
+    # joined success path reaches here — the deadline-abort path raised above.
+    if stats is not None:
+        stats["cost_usd"] = box.get("cost_usd")
+        stats["cost_provider"] = box.get("cost_provider")
+        stats["cost_model"] = box.get("cost_model")
     return (box.get("resp"), box.get("finish_reason"),
             box.get("prompt_tokens", 0), box.get("completion_tokens", 0))
 
@@ -5196,7 +5368,10 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
     explicit ``deadline_s`` always wins, never ``max()``-ed). ``stats``
     (optional) records attempts / retries / truncated / last_class per call
     for the per-session LLM roll-up (D3), plus ``deadline_aborts`` (#1787
-    P2-L) on a deadline kill.
+    P2-L) on a deadline kill, and accumulates the #3359 cost driver —
+    tokens, the provider's own reported charge, and the serving route — into
+    ``stats["cost"]`` (one entry per SUCCESSFUL call, so the escalation /
+    parse-retry calls are summed, never overwritten).
 
     ``retries``/``backoff_*`` default to None → the module constants
     (``_COMPLETE_RETRIES`` / ``_BACKOFF_BASE_S`` / ``_BACKOFF_CAP_S``) are
@@ -5228,15 +5403,27 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                              finish_reason=finish_reason,
                              prompt_tokens=prompt_tokens,
                              completion_tokens=completion_tokens)
+                # #3359: accumulate THIS call's cost driver into the stage
+                # accumulator (the pop also clears the per-call markers so a
+                # later failed attempt can never re-count them). The token
+                # fields above stay per-call (``run_s1`` / ``_complete_parsed``
+                # read them as a snapshot); the accumulator is what the
+                # session roll-up sums.
+                _accumulate_call_cost(
+                    stats, prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    cost_usd=stats.pop("cost_usd", None),
+                    provider=stats.pop("cost_provider", None),
+                    model=stats.pop("cost_model", None))
                 # #2134 Task 0 (P1-22): the truncation-token read surface —
                 # a length-truncated call's emitted tokens are the lower
                 # bound on the true list size (the model filled its budget
                 # then was cut). Accumulate into recovery-carried keys so the
                 # per-call values roll for free through _rollup_recovery ->
                 # ingest_v2 -> run.py outcome recovery (the per-stage
-                # stats["prompt_tokens"]/["completion_tokens"] are transient;
-                # _rollup_llm copies only attempts/retries/truncated/
-                # deadline_aborts). The seam-less COMBINED keys count every
+                # stats["prompt_tokens"]/["completion_tokens"] are the LAST
+                # call's snapshot; _rollup_llm sums the #3359 cost
+                # accumulator above, which keeps every call's tokens). The seam-less COMBINED keys count every
                 # truncating call across the extractor seams (S1 chunks, S2,
                 # S4 — the kind_classifier adjudication seam does NOT reach
                 # this surface: its finally forwards only
