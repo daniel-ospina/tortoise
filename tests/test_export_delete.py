@@ -261,10 +261,49 @@ def sb_client(monkeypatch):
                 _close_seed_sdks()
 
 
+async def _quiet_boot_sweeps() -> None:
+    """#3472: no-op stand-in for the lifespan's one-shot `_run_boot_sweeps`.
+
+    Must be `async def`: `_lifespan` arms it with
+    `create_task(_run_boot_sweeps())`, so a sync stub would hand
+    `create_task` a `None` and raise inside the startup half — turning a
+    test-isolation fix into a second, unrelated failure.
+    """
+
+
 @pytest.fixture
 def reg_client(monkeypatch):
-    """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB."""
+    """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB.
+
+    #3472: the lifespan arms TWO background callers of `_purge_deleted_teams`
+    — `_run_boot_sweeps()` (`hosted_api.py:1227`, one-shot) and
+    `_event_retention_loop()` (`hosted_api.py:1243`, every
+    `event_retention_interval()`). Both sweep the SAME registry this fixture
+    hands to the test, so a background purge landing between the test's
+    seeding and its own `ha_mod._purge_deleted_teams()` call makes both read
+    the row before either deletes it: two `_drop_team_graph` calls and two
+    `team_delete_purged` audit rows, surfacing as
+    `assert ['reg-old', 'reg-old'] == ['reg-old']`.
+
+    The product behaviour is benign (dropping an already-dropped graph is
+    idempotent) — the defect is test isolation: the assertion assumes
+    exclusive ownership of a sweep production also runs. Both callers are
+    therefore quiesced here.
+
+    The CALLEE is deliberately not stubbed: this file's tests call
+    `ha_mod._purge_deleted_teams()` directly and resolve it off the module at
+    call time, so a callee stub would silence the very call under test.
+    """
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+    # #3472: quiesce both background callers BEFORE enter — the lifespan is
+    # what arms them. Each is looked up as a `hosted_api` global at call time,
+    # so patching the module attributes covers both the scheduled task and the
+    # `while True` loop. The retention interval is pinned beyond any test's
+    # lifetime rather than stubbing `_sweep_events`, which this file also
+    # exercises deliberately.
+    monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _quiet_boot_sweeps)
+    monkeypatch.setattr(ha_mod, "event_retention_interval",
+                        lambda *args, **kwargs: 86400.0)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
         # #2127: shared helper (see sb_client) — the anchor is created pinned
