@@ -284,22 +284,19 @@ def test_health_answers_while_the_default_executor_is_saturated(
     then requires /health to answer within a short budget. `wait_for` (rather
     than a bare await) is the assertion: if the probe queues, the request does
     not answer at all and this fails, instead of the suite hanging.
+
+    #2850 (P0) then removed the last request-path I/O: the handler now reads an
+    in-memory `_HEALTH_PROBE.snapshot()` and returns, so "does the handler probe
+    on the request path?" is the WRONG question — the design answer is "never".
+    This test previously asserted the opposite (`assert probed`: the request must
+    have run the probe), which pinned the pre-#2850 design and now fails by
+    construction. The contract that survives, and is asserted below, is the one
+    that actually matters: liveness answers within budget while every shared
+    executor worker is saturated. The snapshot's own self-heal probe runs on a
+    single bounded daemon thread, never on the shared pool, so it cannot mask a
+    regression here.
     """
-    import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app
-
-    # Spy on the probe: latency + `db.ok` alone are satisfied by a /health that
-    # never probes at all (review finding — proven by stubbing the submission
-    # path), so assert the probe RAN before judging how fast the answer was.
-
-    probed: list[int] = []
-    _real_probe = ha_mod._probe_db
-
-    def _spy_probe():
-        probed.append(1)
-        return _real_probe()
-
-    monkeypatch.setattr(ha_mod, "_probe_db", _spy_probe)
 
     HOG_WAIT_S = 30.0
     # Derived from the probe's OWN documented worst case (1.5s timeout + 0.1s
@@ -346,9 +343,10 @@ def test_health_answers_while_the_default_executor_is_saturated(
     r, elapsed = asyncio.run(_run())
 
     assert r.status_code == 200, r.text
-    assert probed, (
-        "the /health DB probe never ran — a short-circuiting liveness handler "
-        "would otherwise pass this test")
+    # Served from the snapshot rather than a trivial stub: the #2850 handler's
+    # response carries the probe's own additive metadata (`probe`, and
+    # `loop_stale_ms`), so a bare `{"status": "ok"}` cannot satisfy this.
+    assert "probe" in r.json(), r.text
     assert r.json()["db"]["ok"] is True, r.text
     assert elapsed < HEALTH_BUDGET_S, (
         f"/health took {elapsed:.2f}s while every default-executor worker was "
