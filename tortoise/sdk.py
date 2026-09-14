@@ -16458,7 +16458,6 @@ class TortoiseSDK:
         # deleted it": the Point arm runs first for a :Point:Object node, so an
         # Object-arm-keyed emission silently never fires and the node
         # resurrects from its surviving ObjectRegistered line (verified live).
-        _nm = None
         # #2977 code review round 3 (P0): read EVERY name, not just the first.
         # The delete arms below are `MATCH (n:{label} {id:$id}) DETACH DELETE n`
         # — they remove EVERY node sharing the id — so taking only
@@ -16484,8 +16483,6 @@ class TortoiseSDK:
         # truthy (mirroring `_upsert_object`), so emitting `name=None` would
         # create a fold that can never be survivor-matched.
         _names = [r[0] for r in _had_object if r and r[0]] if _had_object else []
-        if _names:
-            _nm = _names[0]
         total = 0
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
                             ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
