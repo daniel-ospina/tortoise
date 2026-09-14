@@ -218,6 +218,100 @@ def price_usage_envelope(envelope: dict | None
     }
 
 
+def _percentile(xs: list[float], q: float) -> float:
+    """Linear-interpolation percentile — the SAME convention as
+    ``tools/longmem_eval/report.py:_percentile`` (kept local to avoid an
+    import cycle: report.py consumes this module)."""
+    if not xs:
+        return 0.0
+    xs = sorted(xs)
+    k = (len(xs) - 1) * q
+    lo = int(math.floor(k))  # noqa: RUF046
+    hi = int(math.ceil(k))  # noqa: RUF046
+    if lo == hi:
+        return xs[lo]
+    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def cost_per_session_distribution(rows: list[dict] | None) -> dict:
+    """#3359 report-time ``cost_per_session`` (thresholds.yaml A18) producer.
+
+    Consumes ``analytics_events`` rows with ``event_name == "capture_cost"``
+    (or bare properties dicts). Per row:
+
+    * the provider's OWN reported charge (``properties.cost_usd``) is the
+      primary number (#2906 — in-band reconciliation), used whenever the
+      row discloses no unpriced calls (``calls_without_cost == 0``);
+    * when a row has unpriced calls, the raw ``by_stage`` token envelope is
+      repriced from the versioned ``PRICING_MAP`` (a provider that stops
+      reporting a charge, or a map correction, never invalidates the
+      measurement).
+
+    Returns ``{n, p50, p95, max, total_usd, provider_reported_usd,
+    map_priced_usd, unpriced_sessions, calls_without_cost, source,
+    map_version}``. ``source`` is ``provider`` / ``map`` / ``mixed`` and
+    ``unpriced_sessions`` counts rows whose tokens could NOT be priced even
+    from the map — surfaced, never silently zeroed.
+    """
+    costs: list[float] = []
+    provider_total = 0.0
+    map_total = 0.0
+    unpriced = 0
+    without_cost_total = 0
+    used_map = 0
+    used_provider = 0
+    for row in rows or []:
+        if isinstance(row, dict) and isinstance(row.get("properties"), dict):
+            props = row["properties"]
+        elif isinstance(row, dict):
+            props = row
+        else:
+            continue
+        provider_usd = props.get("cost_usd")
+        if isinstance(provider_usd, bool) or not isinstance(
+                provider_usd, (int, float)):
+            provider_usd = 0.0
+        provider_usd = float(provider_usd)
+        map_usd, priced, _ = price_usage_envelope(
+            {"by_stage": props.get("by_stage") or {}})
+        try:
+            without = int(props.get("calls_without_cost") or 0)
+        except (TypeError, ValueError):
+            without = 0
+        if without == 0:
+            session_cost = provider_usd
+            used_provider += 1
+        elif priced:
+            session_cost = map_usd
+            used_map += 1
+        else:
+            session_cost = provider_usd  # lower bound; disclosed below
+            unpriced += 1
+        costs.append(round(session_cost, 6))
+        provider_total += provider_usd
+        map_total += map_usd
+        without_cost_total += without
+    if used_map == 0:
+        source = "provider"
+    elif used_provider == 0 and unpriced == 0:
+        source = "map"
+    else:
+        source = "mixed"
+    return {
+        "n": len(costs),
+        "p50": _percentile(costs, 0.50),
+        "p95": _percentile(costs, 0.95),
+        "max": max(costs) if costs else 0.0,
+        "total_usd": round(sum(costs), 6),
+        "provider_reported_usd": round(provider_total, 6),
+        "map_priced_usd": round(map_total, 6),
+        "unpriced_sessions": unpriced,
+        "calls_without_cost": without_cost_total,
+        "source": source,
+        "map_version": PRICING_MAP_VERSION,
+    }
+
+
 def _price_lane(stage: str, provider: str, model: str, bucket: dict,
                 entry: dict | None) -> dict:
     def _tok(key: str) -> int | float:
