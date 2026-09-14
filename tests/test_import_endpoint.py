@@ -99,6 +99,15 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 # seeder's server is ever not the one a fresh opener resolves to, that check
 # raises the NAMED SeedVisibilityError instead of letting the condition
 # resurface as `assert [] == ['old-0']`.
+#
+# Blast radius of the critical section: it spans the WHOLE `__init__`,
+# including redislite's blocking `subprocess.call` server start and the
+# post-start `_auto_health_recover()` / `_ensure_indexes()` work. A wedged
+# embedded start therefore stalls every other constructor in the module,
+# where it previously stalled only its own thread. That wait is bounded by
+# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
+# `redis-server` binary — accepted deliberately: the serialization is the
+# fix, and a hung start is a louder failure than a silent second daemon.
 _EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
 
 
@@ -288,18 +297,33 @@ def _seed_live_graph(db_path: str, n_points: int = 1, *,
 
     # #3505: verify the seed is visible through the SAME read path the
     # assertions use (a fresh opener), while the seeder's projection is still
-    # held. A mismatch here is a server-identity failure, not an import.
+    # held. A miss here is a server-identity failure, not an import.
+    #
+    # This is a VISIBILITY (superset) claim, not an equality claim: it asserts
+    # every seeded id is READABLE, not that nothing else is. Extra ids are
+    # legitimate — a second seed on the same db_path, an app write, a log
+    # restore — and must never be reported as a server-identity fault, which
+    # would be precisely the misleading diagnosis this guard exists to
+    # prevent.
+    #
+    # The read is safe for the identity it checks: it constructs a fresh
+    # projection, but `_counts`'s close line is inert (`proj._conn` does not
+    # exist — see #3509) and release is GC-driven via
+    # `embedded_lifecycle._gc_close`, which skips the shutdown while the
+    # seeder holds a live connection (`_connection_count() > 1`). If #3509 is
+    # ever repaired into a live `proj.close()`, re-check that invariant.
     expected = sorted(f"old-{i}" for i in range(n_points))
     seen = _counts(db_path, graph_name)["ids"]
-    if seen != expected:
+    missing = sorted(set(expected) - set(seen))
+    if missing:
         raise SeedVisibilityError(
             f"seed not visible immediately after seeding (#3505): a fresh "
-            f"reader resolved to a DIFFERENT embedded server than the "
-            f"seeder — expected ids={expected}, fresh read ids={seen}; "
-            f"seeder server={_seed_server_identity(proj)}; "
+            f"reader is MISSING ids={missing} of {expected}; fresh read "
+            f"ids={seen}; seeder server={_seed_server_identity(proj)}; "
             f"db_path={db_path!r} graph={graph_name!r}. This is a harness "
-            f"server-identity failure (redislite double-start), NOT an "
-            f"import that wiped the graph."
+            f"server-identity failure (redislite double-start) — a fresh "
+            f"opener resolved to a DIFFERENT embedded server than the "
+            f"seeder — NOT an import that wiped the graph."
         )
 
 
@@ -329,18 +353,36 @@ def test_seed_visibility_guard_fails_loudly(monkeypatch, tmp_path):
     """#3505 acceptance (b): a seed a fresh reader cannot see fails with the
     DISTINCT, NAMED SeedVisibilityError — never as `assert [] == ['old-0']`.
 
-    Pins the guard's negative arm deterministically. The serialized
-    construction (`_embedded_local_file_lane`) removes the real race, so the
-    `seen != expected` branch would otherwise be unreachable from the suite —
-    and a future drift (e.g. `_counts` changed to read a different graph, or
-    the guard left comparing the wrong key) would silently reintroduce the
-    misleading empty-read failure the issue forbids.
+    Pins the guard's POLARITY given a reader-visible read. The serialized
+    construction (`_embedded_local_file_lane`) removes the real race, so both
+    arms would otherwise be unreachable from the suite and could rot behind a
+    green test:
+
+      * a read MISSING a seeded id raises — the arm the issue forbids from
+        surfacing as the misleading `assert [] == ['old-0']`;
+      * a read that reports the seed PLUS other content does NOT raise — the
+        claim is visibility, so extra ids are legitimate and must not be
+        misreported as a server-identity fault.
+
+    Deliberately stubs `_counts`: this pins the guard's comparison logic, NOT
+    `_counts`'s own graph/key selection. A drift in `_counts` (reading a
+    different graph, a renamed key) is out of scope here and would need a
+    test of `_counts` itself, not of this guard.
     """
+    db_path = str(tmp_path / "seed-visibility.db")
+
+    # Negative arm: the seed is invisible to a fresh reader.
     monkeypatch.setattr(sys.modules[__name__], "_counts",
                         lambda *args, **kwargs: {"ids": []})
     with pytest.raises(SeedVisibilityError,
                        match="seed not visible immediately after seeding"):
-        _seed_live_graph(str(tmp_path / "seed-visibility.db"), n_points=1)
+        _seed_live_graph(db_path, n_points=1)
+
+    # Positive arm: the seed IS visible; extra content must not fail it.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_counts",
+        lambda *args, **kwargs: {"ids": ["old-0", "some-other-point"]})
+    _seed_live_graph(db_path, n_points=1)  # must NOT raise
 
 
 # ── artifact builder (the tortoise-export-v1 envelope #1388 produces) ──────
