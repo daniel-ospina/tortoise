@@ -307,16 +307,12 @@ class TestDeleteDurability:
     Source and Event — plus a DIRECT `_delete_entity(point_id)` (the `delete()`
     label route gives Points a PointRetracted lane; the direct call does not).
 
-    _delete_entity is a bare DETACH DELETE — the journal vocabulary has no
-    Object-delete event, so a deleted canonical Object's ObjectRegistered line
-    still replays. Consequences (documented-by-test, accepted; #2296 scope
-    hook — the durability write-surface invariant must cover deletion):
-    - test 14: a deleted Object RESURRECTS on the next rebuild_all.
-    - test 15: delete→recreate journals TWO first-registrations; replay
-      first-wins the earlier line's createdAt (≠ the live node's second).
+    test 15 additionally pins that delete→recreate journals TWO
+    first-registrations; replay first-wins the earlier line's createdAt
+    (≠ the live node's second).
     """
 
-    def test_deleted_object_resurrects_on_rebuild(self, tmp_path):
+    def test_deleted_object_does_not_resurrect_on_rebuild(self, tmp_path):
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t14.db"),
