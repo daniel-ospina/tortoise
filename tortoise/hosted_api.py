@@ -8568,6 +8568,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt.
         _record_write_op(org)
+        # #3359: one capture_cost row per successful capture (calibration
+        # data only — the bill is unchanged). Idempotent for free: this is
+        # the SAME replay guard the write-op meter uses, so a zero-node
+        # re-POST writes no second row. Best-effort — analytics must never
+        # block a committed capture.
+        try:
+            _cost_props = _capture_cost_props(session_id, meta)
+            if _cost_props is not None:
+                _track_analytics_event(
+                    org["org_id"], "capture_cost", _cost_props)
+        except Exception:  # noqa: BLE001, RUF100 — never block capture
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture_cost analytics emit failed (non-fatal)")
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -19241,6 +19255,11 @@ _ALLOWED_ANALYTICS_PROPS = {
     "questions", "step", "error_type",
     # #889: MCP tool-call telemetry (friction evidence for epic #888)
     "tool_name", "status", "latency_ms", "error_kind",
+    # #3359: capture_cost — the per-session cost driver (calibration data
+    # only; never on the billing path). All measured fields must survive
+    # the PII filter or the measurement is silently lost.
+    "calls", "retries", "prompt_tokens", "completion_tokens",
+    "cost_usd", "calls_without_cost", "by_stage",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -19290,6 +19309,33 @@ def _track_analytics_event(org_id: str, event_name: str,
             f.write(_json.dumps(event) + "\n")
     except Exception:
         pass
+
+
+def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
+    """#3359: the per-session cost driver as an analytics ``properties`` dict.
+
+    Reads the extractor telemetry (``meta["stats"]["llm"]``) that
+    ``_rollup_llm`` now accumulates: provider calls, prompt/completion
+    tokens, the provider's own reported USD charge, the
+    ``calls_without_cost`` disclosure counter, and the per-stage/
+    per-route ``by_stage`` envelope (repricable at report time).
+
+    Returns ``None`` when the extractor produced no LLM roll-up (replayed /
+    M2 / error captures) — no measurement exists, so no row is written.
+    """
+    llm = ((meta.get("stats") or {}).get("llm") or {})
+    if not llm:
+        return None
+    return {
+        "session_id": session_id,
+        "calls": int(llm.get("calls", 0) or 0),
+        "retries": int(llm.get("retries", 0) or 0),
+        "prompt_tokens": int(llm.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(llm.get("completion_tokens", 0) or 0),
+        "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
+        "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
+        "by_stage": llm.get("by_stage") or {},
+    }
 
 
 def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
