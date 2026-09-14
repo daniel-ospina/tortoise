@@ -2146,13 +2146,12 @@ def test_retraction_whose_id_is_anchored_nowhere_does_not_bury_the_name(tmp_path
     branch saw `SHARED` registered (by ID1) and tombstoned ID1 — a LIVE,
     registered Object buried, and `applied` counted the fold as work done.
 
-    PRODUCTION-REACHABLE two ways:
-      - `_connect_issue_objects` executes
-        `MERGE (o:Object {id:$oid}) SET o.name=$name`, minting a SECOND carrier
-        of an existing name under a different id (session_indexer.py, sdk.py);
+    PRODUCTION-REACHABLE one way:
       - `update_entity(id, name=...)` renames a node on the public/MCP surface.
-    Both then yield a retraction whose id is anchored nowhere while the name
-    belongs to another node.
+    This yields a retraction whose id is anchored nowhere while the name
+    belongs to another node. (The second route — `_connect_issue_objects`
+    minting a SECOND carrier — was closed for #3389: the writer now resolves
+    the existing Object by name and reuses it.)
 
     The guard must be INERT for the stub lane it exists to serve: a stub node
     minted by `_event_plain_merge` has NO ObjectRegistered line, so its name is
@@ -2295,3 +2294,57 @@ def test_public_sdk_path_does_not_bury_a_live_object_by_name(tmp_path):
             replay.close()
     finally:
         sdk.close()
+
+
+def test_hand_authored_journal_derived_id_still_buries_the_name_known_limitation(
+        tmp_path):
+    """**KNOWN LIMITATION (#3389 — fold side; fixed at the writer, not the fold).**
+
+    Journal-driven pin for the fold's `_derived_matches` short-circuit
+    (`tortoise/projection/entities.py:_fold_object_match_and_apply`), which the
+    #3389 writer fix did NOT touch. The writer no longer mints the unjournaled
+    second carrier, so this shape is unreachable through the public SDK — but a
+    HAND-AUTHORED journal still reaches it, and nothing else pins the rule.
+
+        OR(ARBITRARY_ID, SHARED)@0,
+        RT(_entity_name_id("Object","SHARED"), SHARED)@1
+        -> SHARED/ARBITRARY_ID is BURIED   (this test pins exactly that)
+
+    The retraction's id is the name's OWN canonical derived id, so
+    `_derived_matches` is true and the name branch's id-identity guard is
+    short-circuited: the orphan's name folds onto the live, registered ID1
+    incarnation and buries it. A derived-LOOKING id proves nothing about
+    identity, so the discriminator is unsound — but #3389 scopes the fix to the
+    writer, and each attempt to patch this rule over six review cycles opened
+    the next hole.
+
+    This pins the CURRENT, still-buried outcome for the hand-authored-journal
+    case only. It does NOT imply the public SDK path is affected: the public
+    surface no longer produces this shape, which
+    `test_public_sdk_path_does_not_bury_a_live_object_by_name` certifies.
+
+    If this assertion starts FAILING, someone changed the fold — invert this pin
+    deliberately (and check `test_rebuild_all_legacy_idless_object_fold_survives`
+    still passes: widening or removing the guard reinstates the #2164 legacy-fold
+    break). Do not read a passing `live` here as coverage of the public surface.
+    """
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
+    log = EventLog(str(events / "events.jsonl"))
+    log.append({"type": "ObjectRegistered", "id": "ARBITRARY_ID",
+                "name": "SHARED"})
+    log.append({"type": "ObjectRetracted",
+                "id": _entity_name_id("Object", "SHARED"), "name": "SHARED",
+                "ts": "T1"})
+    proj = _drive("rebuild_all", tmp_path, events, "ARBITRARY_ID")
+    try:
+        rows = {r[0]: r[1] for r in proj.g.query(
+            "MATCH (o:Object) RETURN o.name, o.status").result_set}
+        assert rows.get("SHARED") == "retracted", (
+            "KNOWN LIMITATION (#3389 — fold side): a hand-authored journal's "
+            "derived-looking id short-circuits `_derived_matches` and buries "
+            "the name-sharing live Object. This test PINS the fold-side defect "
+            "so it stays visible; the public SDK path no longer reaches it. "
+            f"Got {rows}")
+    finally:
+        proj.close()

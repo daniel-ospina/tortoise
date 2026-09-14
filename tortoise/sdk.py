@@ -18925,8 +18925,12 @@ class TortoiseSDK:
                 # branch does; a carrier with no id ADOPTS `$oid` (the
                 # #1155-P1 stub-adoption case) but an existing id is never
                 # overwritten. The non-identity props coalesce (existing value
-                # wins) — `_upsert_object`'s ON MATCH rule — so a session
-                # reference cannot clobber a registered Object's props.
+                # wins) — deliberately NOT `_upsert_object`'s ON MATCH rule,
+                # which is incoming-wins for `objectKind` and `id`
+                # (`coalesce($ok, o.objectKind)`, `coalesce($id, o.id)`) and
+                # existing-wins only for `createdAt`. Here a session reference
+                # is the lower-authority writer, so an existing value wins and
+                # it cannot clobber a registered Object's props.
                 resolved = proj.g.query(
                     "MATCH (o:Object {name:$name}) "
                     "WITH o ORDER BY coalesce(o.createdAt,'') DESC, o.id "
