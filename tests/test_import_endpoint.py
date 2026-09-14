@@ -27,7 +27,9 @@ import base64
 import hashlib
 import json
 import os
+import sys
 import tempfile
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -66,6 +68,48 @@ from tests.test_supabase_control import (  # noqa: E402
 # Tests opt out of the IP rate limiter; rate-limit tests re-enable it.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
+# #3505: one embedded server per db_path — serialize construction.
+#
+# redislite starts a NEW redis-server daemon whenever `<db>.settings` is
+# absent (or its pid is dead) — `redislite.client.RedisMixin.__init__` (the
+# `_is_redis_running()` / `_start_redis()` fork). Two constructions that
+# interleave BEFORE either has written `.settings` therefore BOTH take the
+# fresh-start branch, each spawning its own daemon in its own tempdir, and
+# the later `_save_setting_registry()` silently owns the registry. The
+# loser's writes are then invisible to every later opener.
+#
+# That is exactly this module's flake (#3505): on a failing run the seeder
+# held one daemon while the `tortoise-health-probe` thread (`hosted_api.py`
+# `_probe_db` -> `_make_sdk`) started its own on the same `import.db`;
+# `_counts` then re-opened through `.settings` and resolved to the probe's
+# EMPTY daemon — `assert [] == ['old-0']`, which reads like the import wiped
+# the graph. Serializing the construction makes the first starter the single
+# owner of the registry, so every later opener (health probe, boot sweep,
+# `_counts`, the import handler) reuses that one server.
+#
+# Scope of the guarantee (this is NOT a global single-writer guarantee): the
+# lock serializes only IN-PROCESS `FalkorProjection.__init__` calls. Two paths
+# stay outside it and can still add or remove a registry entry — (1) a
+# construction that raises inside `_start_redis()` (RedisLiteException /
+# RedisLiteServerStartError) after its daemon spawned but before
+# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
+# redislite's `_cleanup()` last-client branch, which removes `<db>.settings`
+# and shuts the daemon down from `__del__`/atexit on any thread. That residual
+# is why `_seed_live_graph` ALSO verifies visibility at seed time: if the
+# seeder's server is ever not the one a fresh opener resolves to, that check
+# raises the NAMED SeedVisibilityError instead of letting the condition
+# resurface as `assert [] == ['old-0']`.
+#
+# Blast radius of the critical section: it spans the WHOLE `__init__`,
+# including redislite's blocking `subprocess.call` server start and the
+# post-start `_auto_health_recover()` / `_ensure_indexes()` work. A wedged
+# embedded start therefore stalls every other constructor in the module,
+# where it previously stalled only its own thread. That wait is bounded by
+# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
+# `redis-server` binary — accepted deliberately: the serialization is the
+# fix, and a hung start is a louder failure than a silent second daemon.
+_EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _embedded_local_file_lane():
@@ -80,9 +124,21 @@ def _embedded_local_file_lane():
     non-test-prefixed names). Popping the URI for this module keeps the whole
     harness on one local file on BOTH lanes. Documented divergence from the
     plan's Task 10 "13 migrate out" list: this is an embedded-file-contract
-    file, not docker-migratable — it stays in RAW_EMBEDDED_ALLOWLIST."""
+    file, not docker-migratable — it stays in RAW_EMBEDDED_ALLOWLIST.
+
+    #3505: also serializes embedded FalkorProjection construction for the
+    module (see _EMBEDDED_CONSTRUCTION_LOCK) — the app's probe/boot-sweep
+    threads construct on the same db_path as the test's seeder."""
     mp = pytest.MonkeyPatch()
     mp.delenv("TORTOISE_DB_URI", raising=False)
+
+    _orig_proj_init = FalkorProjection.__init__
+
+    def _serialized_proj_init(self, *args, **kwargs):
+        with _EMBEDDED_CONSTRUCTION_LOCK:
+            _orig_proj_init(self, *args, **kwargs)
+
+    mp.setattr(FalkorProjection, "__init__", _serialized_proj_init)
     yield
     mp.undo()
 
@@ -183,6 +239,29 @@ def _seed_team(fake, *, role: str = "owner", deleted_at: str | None = None,
 _SEED_PROJS: list = []
 
 
+class SeedVisibilityError(RuntimeError):
+    """A freshly seeded live graph is invisible to a fresh reader (#3505).
+
+    Raised when `_seed_live_graph` wrote its Points and a FRESH
+    `FalkorProjection` on the same `db_path` does not see them — i.e. the
+    seeder's embedded server is not the one a later opener resolves to
+    (redislite double-start: two constructions both took the
+    `_start_redis()` branch before either wrote `<db>.settings`).
+
+    Deliberately NAMED and distinct: this is a harness/server-identity
+    failure, never an import that wiped the graph. Without it the same
+    condition surfaced later as `assert [] == ['old-0']` on the import
+    assertion, which is indistinguishable from a real data-loss regression.
+    """
+
+
+def _seed_server_identity(proj) -> str:
+    """Socket + daemon pid of the server a projection is bound to (#3505)."""
+    client = getattr(getattr(proj, "db", None), "client", None)
+    return (f"socket={getattr(client, 'socket_file', None)!r} "
+            f"pid={getattr(client, 'pid', None)!r}")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _close_seed_projs():
     """Close held seeded projections at session end (see _SEED_PROJS)."""
@@ -196,7 +275,13 @@ def _close_seed_projs():
 
 def _seed_live_graph(db_path: str, n_points: int = 1, *,
                      graph_name: str = GRAPH_NAME) -> None:
-    """Seed the team's live FalkorDB graph (the content an import replaces)."""
+    """Seed the team's live FalkorDB graph (the content an import replaces).
+
+    Fails LOUDLY (SeedVisibilityError, #3505) if a fresh reader cannot see
+    the seed immediately after it is written — instead of letting the
+    precondition surface later as `assert [] == ['old-0']` on the import
+    assertion (which reads as data loss).
+    """
     proj = FalkorProjection(db_path, graph_name=graph_name)
     _SEED_PROJS.append(proj)  # #1612: hold so the server (and writes) survive
     try:
@@ -209,6 +294,37 @@ def _seed_live_graph(db_path: str, n_points: int = 1, *,
     finally:
         # keep the projection + its server alive until session end (#1612)
         pass
+
+    # #3505: verify the seed is visible through the SAME read path the
+    # assertions use (a fresh opener), while the seeder's projection is still
+    # held. A miss here is a server-identity failure, not an import.
+    #
+    # This is a VISIBILITY (superset) claim, not an equality claim: it asserts
+    # every seeded id is READABLE, not that nothing else is. Extra ids are
+    # legitimate — a second seed on the same db_path, an app write, a log
+    # restore — and must never be reported as a server-identity fault, which
+    # would be precisely the misleading diagnosis this guard exists to
+    # prevent.
+    #
+    # The read is safe for the identity it checks: it constructs a fresh
+    # projection, but `_counts`'s close line is inert (`proj._conn` does not
+    # exist — see #3509) and release is GC-driven via
+    # `embedded_lifecycle._gc_close`, which skips the shutdown while the
+    # seeder holds a live connection (`_connection_count() > 1`). If #3509 is
+    # ever repaired into a live `proj.close()`, re-check that invariant.
+    expected = sorted(f"old-{i}" for i in range(n_points))
+    seen = _counts(db_path, graph_name)["ids"]
+    missing = sorted(set(expected) - set(seen))
+    if missing:
+        raise SeedVisibilityError(
+            f"seed not visible immediately after seeding (#3505): a fresh "
+            f"reader is MISSING ids={missing} of {expected}; fresh read "
+            f"ids={seen}; seeder server={_seed_server_identity(proj)}; "
+            f"db_path={db_path!r} graph={graph_name!r}. This is a harness "
+            f"server-identity failure (redislite double-start) — a fresh "
+            f"opener resolved to a DIFFERENT embedded server than the "
+            f"seeder — NOT an import that wiped the graph."
+        )
 
 
 def _counts(db_path: str, graph_name: str = GRAPH_NAME) -> dict:
@@ -231,6 +347,42 @@ def _counts(db_path: str, graph_name: str = GRAPH_NAME) -> dict:
         return {"nodes": nodes, "edges": edges, "ids": ids}
     finally:
         proj._conn.close() if hasattr(proj, "_conn") else None
+
+
+def test_seed_visibility_guard_fails_loudly(monkeypatch, tmp_path):
+    """#3505 acceptance (b): a seed a fresh reader cannot see fails with the
+    DISTINCT, NAMED SeedVisibilityError — never as `assert [] == ['old-0']`.
+
+    Pins the guard's POLARITY given a reader-visible read. The serialized
+    construction (`_embedded_local_file_lane`) removes the real race, so both
+    arms would otherwise be unreachable from the suite and could rot behind a
+    green test:
+
+      * a read MISSING a seeded id raises — the arm the issue forbids from
+        surfacing as the misleading `assert [] == ['old-0']`;
+      * a read that reports the seed PLUS other content does NOT raise — the
+        claim is visibility, so extra ids are legitimate and must not be
+        misreported as a server-identity fault.
+
+    Deliberately stubs `_counts`: this pins the guard's comparison logic, NOT
+    `_counts`'s own graph/key selection. A drift in `_counts` (reading a
+    different graph, a renamed key) is out of scope here and would need a
+    test of `_counts` itself, not of this guard.
+    """
+    db_path = str(tmp_path / "seed-visibility.db")
+
+    # Negative arm: the seed is invisible to a fresh reader.
+    monkeypatch.setattr(sys.modules[__name__], "_counts",
+                        lambda *args, **kwargs: {"ids": []})
+    with pytest.raises(SeedVisibilityError,
+                       match="seed not visible immediately after seeding"):
+        _seed_live_graph(db_path, n_points=1)
+
+    # Positive arm: the seed IS visible; extra content must not fail it.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_counts",
+        lambda *args, **kwargs: {"ids": ["old-0", "some-other-point"]})
+    _seed_live_graph(db_path, n_points=1)  # must NOT raise
 
 
 # ── artifact builder (the tortoise-export-v1 envelope #1388 produces) ──────
