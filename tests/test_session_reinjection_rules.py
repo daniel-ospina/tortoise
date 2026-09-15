@@ -29,6 +29,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import coverage_loop, retrieval
@@ -199,6 +201,23 @@ def test_fetch_no_seeds_is_a_clean_noop():
     assert proj.g.calls == []
 
 
+def test_fetch_zero_budgets_short_circuit_before_the_query():
+    """A zero per-session OR zero total budget returns the clean zeroed
+    report with NO graph call. Deleting either disjunct falls through to a
+    real fetch and a non-empty group, so this test fails on that revert."""
+    rows = [("a1", "s1", 0), ("a2", "s1", 1)]
+    for label, kwargs in (("per_session_cap", {"per_session_cap": 0}),
+                          ("total_cap", {"total_cap": 0})):
+        proj = _FakeProj(rows=rows)
+        out = source_session_chunk_pass(
+            proj, ["s1"], question_id="q1", pool_ids=[],
+            per_session_cap=kwargs.get("per_session_cap", 2),
+            total_cap=kwargs.get("total_cap", 10))
+        assert out == {"ok": True, "by_session": {}, "total": 0,
+                       "dropped_by_cap": 0, "total_cap_hit": False}, label
+        assert proj.g.calls == [], label
+
+
 # ── MERGE ───────────────────────────────────────────────────────────────
 def test_merge_anchors_after_the_last_base_rank_in_the_pool():
     # s1's base hits are ranks 0 and 4 (the second one BEYOND the seed
@@ -238,6 +257,60 @@ def test_merge_accumulates_multiple_groups_in_seed_order():
     out = reinjection_merge_order(
         pool, added, guard=False, max_chunks_per_session=3)
     assert [h["id"] for h in out] == ["a0", "x1", "b0", "y1", "c0"]
+
+
+def test_merge_seed_order_drives_the_defensive_tail_not_dict_order():
+    """A seeded session with NO base rank is kept (the defensive tail) and
+    the tail follows ``seed_order`` — NOT ``added_by_session``'s key order.
+    Reverting ``order`` to ``list(added_by_session)`` must fail this test."""
+    pool = [_point("a0", "s1")]
+    added = {"s2": [_chunk("y1", "s2")], "s3": [_chunk("z1", "s3")]}
+    out = reinjection_merge_order(
+        pool, added, seed_order=["s3", "s2"], guard=False,
+        max_chunks_per_session=3)
+    assert [h["id"] for h in out] == ["a0", "z1", "y1"]
+    # the reversed seed_order reverses the tail (same items, new order)
+    out2 = reinjection_merge_order(
+        pool, added, seed_order=["s2", "s3"], guard=False,
+        max_chunks_per_session=3)
+    assert [h["id"] for h in out2] == ["a0", "y1", "z1"]
+
+
+def test_merge_empty_pool_is_a_noop():
+    assert reinjection_merge_order(
+        [], {"s1": [_chunk("x1", "s1")]}, guard=True,
+        max_chunks_per_session=3) == []
+
+
+def test_arm_conflict_is_raised_at_resolution_before_the_loop():
+    """Run-level safety gate, moved here from the docker-lane E2E module so
+    it executes on EVERY lane (the E2E module skips when the live FalkorDB
+    probe is unavailable, and its skip reason is skip-guard-exempt)."""
+    from tools.longmem_eval.run import ArmConflictError, run_evaluation
+    with pytest.raises(ArmConflictError) as excinfo:
+        run_evaluation([], reader=None, judge=None, split="s",
+                       coverage_loop=True, session_reinjection=True)
+    assert "coverage_loop" in str(excinfo.value)
+    assert "session_reinjection" in str(excinfo.value)
+
+
+def test_fingerprint_refuses_arm_and_guard_mismatches():
+    """Every new always-present fingerprint key refuses a resume that
+    flips it (moved here from the docker-lane E2E module, see above)."""
+    from tools.longmem_eval import run as _run
+    fp = _run._build_fingerprint(
+        reader_model="m", judge_model="m", ks=(5,), top_k=5, split="s",
+        ingest_mode="v2", extractor_model=None, max_retries=0,
+        dataset_fingerprint="unknown", rerank_config={},
+        session_reinjection=True, session_reinjection_guard=True)
+    assert fp["session_reinjection"] is True
+    assert fp["session_reinjection_guard"] is True
+    off = dict(fp, session_reinjection=False)
+    assert "session_reinjection" in _run._fingerprint_diffs(off, fp)
+    flipped = dict(fp, session_reinjection_guard=False)
+    assert "session_reinjection_guard" in _run._fingerprint_diffs(flipped, fp)
+    # a pre-feature fingerprint (no keys at all) refuses too
+    assert "session_reinjection" in _run._fingerprint_diffs({}, fp)
 
 
 def test_merge_with_no_new_ids_returns_the_base_pool_unchanged():

@@ -5539,18 +5539,18 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C4 source-session re-injection even "
                          "when TORTOISE_LME_SESSION_REINJECTION is set "
                          "(tri-state: explicit flags beat the env)")
-    p.add_argument("--session-reinjection-guard",
-                   dest="session_reinjection_guard", action="store_true",
-                   default=None,
-                   help="apply the C4 session-diverse window guard "
-                        "(default: ON — --no-session-reinjection-guard is "
-                        "the injection-only ablation)")
-    p.add_argument("--no-session-reinjection-guard",
-                   dest="session_reinjection_guard", action="store_false",
-                   default=None,
-                   help="skip the C4 session-diverse reorder (the "
-                        "injection-only ablation; the C5 re-cap still "
-                        "applies through the same shared contract)")
+    srg = p.add_mutually_exclusive_group()
+    srg.add_argument("--session-reinjection-guard",
+                     dest="session_reinjection_guard", action="store_true",
+                     default=None,
+                     help="apply the C4 session-diverse window guard "
+                          "(default: ON — --no-session-reinjection-guard is "
+                          "the injection-only ablation)")
+    srg.add_argument("--no-session-reinjection-guard",
+                     dest="session_reinjection_guard", action="store_false",
+                     help="skip the C4 session-diverse reorder (the "
+                          "injection-only ablation; the C5 re-cap still "
+                          "applies through the same shared contract)")
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state --aggregative-flag / --no-aggregative-flag (None
     # default so the TORTOISE_LME_AGGREGATIVE_FLAG env still applies; OFF

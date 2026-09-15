@@ -39,6 +39,7 @@ from tools.longmem_eval.dataset import (
     DEFAULT_SPLIT,
     SPLIT_DIGESTS,
     SPLIT_FILES,
+    _read_instances,
     cache_dir,
 )
 
@@ -79,7 +80,8 @@ def _verify_source(path: Path, *, allow_unpinned: bool = False) -> tuple[str, bo
                 f"{path} is not a pinned split corpus (known: "
                 f"{sorted(pinned)}) — refusing to slice an unverified "
                 "denominator; pass --allow-unpinned-source to override "
-                "(the override is recorded in the output)")
+                "(the override is written to the provenance sidecar and "
+                "printed)")
         return digest, False
     if expected != digest:
         raise SystemExit(
@@ -90,12 +92,42 @@ def _verify_source(path: Path, *, allow_unpinned: bool = False) -> tuple[str, bo
 
 
 def build_cohorts(source: Path) -> dict[str, list[dict]]:
-    """Materialize both cohorts from ``source`` (in-memory, source order)."""
-    instances = json.loads(source.read_text(encoding="utf-8"))
+    """Materialize both cohorts from ``source`` (in-memory, source order).
+
+    Parses through :func:`dataset._read_instances` — the eval lane's own
+    reader for the ``--data`` path — so a JSONL source (one instance per
+    line) is accepted alongside the documented JSON-list form instead of
+    raising a bare ``json.JSONDecodeError``. The digest check stays on the
+    RAW BYTES in :func:`_verify_source`.
+    """
+    instances = _read_instances(source)
     tail = instances[TAIL_SLICE[0]:TAIL_SLICE[1]]
     head = [q for q in instances if q.get("question_type") == HEAD_TYPE][
         :HEAD_N]
     return {"tail": tail, "head": head}
+
+
+def _write_provenance(out_dir: Path, *, source: Path, sha256: str,
+                      verified: bool, products: dict[str, int]) -> Path:
+    """Persist how a cohort was built, NEXT TO the cohort files.
+
+    The cohort payload stays the plain list-of-questions shape ``--data``
+    consumes; provenance lives in a sidecar so a cohort sliced from an
+    UNVERIFIED corpus (``--allow-unpinned-source`` → ``verified=false``)
+    can never be mistaken for a digest-verified one. Returns the path.
+    """
+    prov = out_dir / "longmemeval_2517.provenance.json"
+    prov.write_text(json.dumps({
+        "source": str(source),
+        "source_sha256": sha256,
+        "verified": verified,
+        "selectors": {
+            "tail": list(TAIL_SLICE),
+            "head": [HEAD_TYPE, HEAD_N],
+        },
+        "questions": products,
+    }, indent=1) + "\n", encoding="utf-8")
+    return prov
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -110,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
                     default="both")
     ap.add_argument("--allow-unpinned-source", action="store_true",
                     help="slice a corpus whose basename matches no known "
-                         "split (unverified; recorded in the output)")
+                         "split (unverified; the override is recorded in "
+                         "the provenance sidecar as verified=false)")
     args = ap.parse_args(argv)
 
     source = args.source or (cache_dir() / SPLIT_FILES[DEFAULT_SPLIT])
@@ -129,6 +162,10 @@ def main(argv: list[str] | None = None) -> int:
         out = out_dir / f"longmemeval_2517_{name}.json"
         out.write_text(json.dumps(cohorts[name]), encoding="utf-8")
         print(f"{name}: {len(cohorts[name])} questions -> {out}")
+    prov = _write_provenance(
+        out_dir, source=source, sha256=digest, verified=verified,
+        products={name: len(cohorts[name]) for name in wanted})
+    print(f"provenance: {prov}")
     print(f"source: {source} sha256={digest} "
           f"verified={str(verified).lower()}")
     print(f"selectors: tail={TAIL_SLICE} head=({HEAD_TYPE}, first {HEAD_N})")

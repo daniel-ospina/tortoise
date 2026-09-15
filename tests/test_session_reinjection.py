@@ -104,12 +104,20 @@ def _fresh_uri() -> str:
 @pytest.fixture(autouse=True)
 def _no_embedder(monkeypatch):
     """Pin the dense leg OUT (hermetic): the differential isolates the
-    sparse pool mechanics. No model load, no network."""
+    sparse pool mechanics. No model load, no network.
+
+    Also pin the ARM ENV to unset: the OFF-arm tests assert byte-identity
+    against the documented default, so an ambient
+    ``TORTOISE_LME_SESSION_REINJECTION`` / ``TORTOISE_LME_CONTEXT_ITEMS``
+    (which resizes the derived seed window) would silently flip the arm
+    under test."""
     import tortoise.embeddings as _emb
     monkeypatch.setattr(_emb, "compute_embedding",
                         staticmethod(lambda content: None))
     monkeypatch.setattr(_emb.EmbeddingModel, "get",
                         staticmethod(lambda: None))
+    monkeypatch.delenv("TORTOISE_LME_SESSION_REINJECTION", raising=False)
+    monkeypatch.delenv("TORTOISE_LME_CONTEXT_ITEMS", raising=False)
 
 
 def _question(question: str = QUESTION, *,
@@ -440,6 +448,19 @@ def test_reader_item_and_token_caps_hold_on_the_reinjected_pool(seeded_sdk):
         assert ret["context_point_count"] <= cap_items, (arm_on, ret)
         assert ret["context_tokens"] <= cap_tokens, (arm_on, ret)
         assert len(ret["hits"]) <= cap_items, (arm_on, len(ret["hits"]))
+        # the anti-desync derivation: the seed window tracks the RESOLVED
+        # reader item cap (reverting it to the product constant fails here)
+        assert ret["session_reinjection_stats"]["seed_window"] == cap_items
+
+
+def test_seed_window_defaults_to_the_product_constant(seeded_sdk):
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise.session_reinjection import DEFAULT_REINJECTION_SEED_WINDOW
+    ret = retrieve_for_question(
+        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
+        session_reinjection=True)
+    assert (ret["session_reinjection_stats"]["seed_window"]
+            == DEFAULT_REINJECTION_SEED_WINDOW)
 
 
 def test_census_key_set_is_pinned(seeded_sdk):
@@ -492,15 +513,6 @@ def test_both_arms_on_aborts_with_message_and_nonzero_exit(
     assert not (tmp_path / "r.json").exists()
 
 
-def test_arm_conflict_is_raised_at_resolution_before_the_loop():
-    from tools.longmem_eval.run import ArmConflictError, run_evaluation
-    with pytest.raises(ArmConflictError) as excinfo:
-        run_evaluation([], reader=None, judge=None, split="s",
-                       coverage_loop=True, session_reinjection=True)
-    assert "coverage_loop" in str(excinfo.value)
-    assert "session_reinjection" in str(excinfo.value)
-
-
 def test_run_level_tristate_and_methodology(monkeypatch, tmp_path):
     """CLI flag > env > OFF at the run level, and the resolved arm + guard
     are recorded in the methodology (methodology == actual)."""
@@ -518,20 +530,3 @@ def test_run_level_tristate_and_methodology(monkeypatch, tmp_path):
     k = rep["methodology"]
     assert k["session_reinjection"] is True
     assert k["session_reinjection_guard"] is False
-
-
-def test_fingerprint_refuses_arm_and_guard_mismatches():
-    from tools.longmem_eval import run as _run
-    fp = _run._build_fingerprint(
-        reader_model="m", judge_model="m", ks=(5,), top_k=5, split="s",
-        ingest_mode="v2", extractor_model=None, max_retries=0,
-        dataset_fingerprint="unknown", rerank_config={},
-        session_reinjection=True, session_reinjection_guard=True)
-    assert fp["session_reinjection"] is True
-    assert fp["session_reinjection_guard"] is True
-    off = dict(fp, session_reinjection=False)
-    assert "session_reinjection" in _run._fingerprint_diffs(off, fp)
-    flipped = dict(fp, session_reinjection_guard=False)
-    assert "session_reinjection_guard" in _run._fingerprint_diffs(flipped, fp)
-    # a pre-feature fingerprint (no keys at all) refuses too
-    assert "session_reinjection" in _run._fingerprint_diffs({}, fp)

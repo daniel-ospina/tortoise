@@ -1662,10 +1662,15 @@ def retrieve_for_question(
         reinjection_on = _sr_env.strip().lower() in _TRUTHY
     reinjection_guard = (session_reinjection_guard
                          if session_reinjection_guard is not None else True)
-    # the seed window is the reader-reachable pool head, DERIVED from the
-    # resolved reader item cap so a non-default
-    # TORTOISE_LME_CONTEXT_ITEMS cannot silently desynchronise it (the
-    # product constant is the fallback).
+    # the seed window is a conservative rank-window approximation of the
+    # reader-reachable pool head, DERIVED from the resolved reader item cap
+    # so a non-default TORTOISE_LME_CONTEXT_ITEMS cannot silently
+    # desynchronise it (the product constant is the fallback). It is NOT the
+    # reader's admitted set: assemble_context SKIPS claim-text-less hits
+    # (#2978) without spending an item slot, so the reader can admit hits
+    # BELOW this rank — a session whose first pool appearance lands in a
+    # skipped-hit gap is reader-reachable yet unseeded (follow-up tracked;
+    # widening it is a measurement-validity change, not a fix).
     _sr_seed_window = (eff_item_cap if eff_item_cap is not None
                        else DEFAULT_REINJECTION_SEED_WINDOW)
     _sr_seed_limit = DEFAULT_REINJECTION_SEED_SESSIONS
@@ -1708,6 +1713,11 @@ def retrieve_for_question(
                     sid: len(_rows)
                     for sid, _rows in (_fetch.get("by_session") or {}).items()}
                 sr_injected_total = sum(sr_injected_per_session.values())
+                # ``dropped_by_cap``/``total_cap_hit`` are FETCH-stage facts
+                # recorded with no later clearing point — under the shipped
+                # defaults ``total_cap_hit`` is structurally False (see
+                # DEFAULT_REINJECTION_TOTAL_ITEMS) and ``dropped_by_cap``
+                # counts per-session drops only.
                 _added_by_session: dict[str, list[dict]] = {}
                 if sr_fetch_ok:
                     # ONE annotation pass over ALL fetched ids (the C3-1

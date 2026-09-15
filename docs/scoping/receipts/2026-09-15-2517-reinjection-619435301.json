@@ -4,7 +4,8 @@
   "sample A landed on 10/10 single-session-preference questions (the tail slice's first 10), so it does not exercise the multi-session loss the arm targets; sample B was added to cover the target type",
   "reader-side metrics are mock-reader; chunk_evidence_recall@k is null in --retrieval-only --mock, so falsifier 2's chunk surface is UNMEASURED",
   "--retrieval-only --mock exits rc=1 in _print_summary (pre-existing bug, filed separately); the report JSON is written before that",
-  "no seed-free control: the guard runs only after injection fired, so the guard's own contribution cannot be isolated from injection firing by these three arms alone (see falsifier 1 attribution below)"
+  "no seed-free control: the guard runs only after injection fired, so the guard's own contribution cannot be isolated from injection firing by these three arms alone (see falsifier 1 attribution below)",
+  "SAMPLE A'S ARM DELTAS ARE NON-ATTRIBUTABLE (code-review cycle 2): its three arms did not run on a pinned, identical substrate (unlike sample B, which used a separate DB per arm and where off == inj_only question-for-question). Witness: for questions 505af2f5 and b0479f84 the off arm reports session_recall@5 = 0.0 while inj_only — the SAME injection with the reorder ablated — reports 1.0, and for b0479f84 off's evidence_recall@5 denominator is empty (null) where both injected arms report 1.0. Injection alone provably cannot promote a distinct session into hits[:5] (an injected group is spliced after its session's LAST base rank, and guard=False skips only the reorder), so those deltas are run-to-run ingest/pool drift, not arm effects. Read every A.* figure in this receipt as a same-revision observation, not an arm effect."
  ],
  "arm_flags": {
   "inj_only": "--session-reinjection --no-session-reinjection-guard",
@@ -71,7 +72,7 @@
    "verdict": "NOT FALSIFIED (on the multi-session sample; the flip is real but attributable to the GUARD, not to the injected items)"
   },
   "2_surface_census": {
-   "interpretation": "on the multi-session sample the marked evidence is not retrieved at k=5 by ANY arm (evidence_recall@5 == 0.0 for all 10 questions in all three arms): the reader-surface claim of part 2 of the confirmed problem is NOT supported here, and the arm neither raises it nor costs it. chunk_evidence_recall@k is unmeasurable under --retrieval-only --mock. Sample A's single-session questions DO have non-zero evidence recall and ON moved the common-denominator mean 0.4444 -> 0.5 (+0.0556), with one previously vacuous question becoming evidence-bearing.",
+   "interpretation": "on the multi-session sample the marked evidence is not retrieved at k=5 by ANY arm (evidence_recall@5 == 0.0 for all 10 questions in all three arms): the reader-surface claim of part 2 of the confirmed problem is NOT supported here, and the arm neither raises it nor costs it. chunk_evidence_recall@k is unmeasurable under --retrieval-only --mock. Sample A's single-session questions DO have non-zero evidence recall and ON reports a common-denominator mean of 0.5 vs off's 0.4444 (+0.0556), with one previously vacuous question becoming evidence-bearing — but see the SAMPLE A non-attributability limitation: that sample's arms did not share a pinned substrate (off vs inj_only disagree where injection alone cannot move hits[:5]), so this A figure is NOT an arm effect. The reader-surface verdict rests on sample B alone, which is clean.",
    "measured": {
     "A.evidence_recall@5": {
      "off_(mean,n)": [

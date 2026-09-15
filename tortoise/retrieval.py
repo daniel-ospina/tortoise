@@ -298,11 +298,20 @@ SESSION_TRANSCRIPT_KIND = "session-transcript"
 def session_key_of(hit: dict) -> str:
     """A hit's pool session identity — the AUTHORITY for the retrieval
     pool's bucket key (C4 #2517). ``session_id`` when present, else the
-    synthetic ``idx:{lme_session_index}`` bucket (distinct sessions never
-    share a bucket; no ``-1`` collapse). :func:`dedup_pool` and
+    synthetic ``idx:{lme_session_index}`` bucket. :func:`dedup_pool` and
     :func:`guard_and_recap_pool` default to it, and
     ``coverage_loop._session_of`` delegates to it (function-local import —
-    the module stays a stdlib-only leaf at import time)."""
+    the module stays a stdlib-only leaf at import time).
+
+    Collapse semantics (deliberate, pinned by
+    ``test_session_key_of`` and ``test_session_key_matches_the_historical
+    _bucket_key``): a hit carrying NEITHER ``session_id`` NOR
+    ``lme_session_index`` maps to the single bucket ``idx:-1``. Two
+    identity-less hits therefore cap together under the C5 per-session
+    cap, and :func:`seeded_sessions` drops them all as phantom ``idx:``
+    buckets (never a real graph ``p.session_id``). Hits that DO carry an
+    ``lme_session_index`` are distinct per index even when ``session_id``
+    is absent/empty (``""`` is falsy but not identity-less)."""
     return (hit.get("session_id")
             or f"idx:{hit.get('lme_session_index', -1)}")
 
@@ -321,7 +330,9 @@ def dedup_pool(annotated: list[dict], *,
     raw chunks per session survive in the pool (E2E-1 #1540). Bucket key =
     :func:`session_key_of` (the hit's session_id when present, else its
     lme_session_index) —
-    distinct sessions NEVER share a bucket (no ``-1`` collapse).
+    distinct IDENTIFIED sessions never share a bucket. The sole shared
+    bucket is ``idx:-1``, for hits carrying neither identity (see
+    :func:`session_key_of`).
     Points/turn points are never capped (compact epistemic surface, D3).
 
     ``session_key`` (#1987 Task 4, P2-20): optional per-hit key extractor.

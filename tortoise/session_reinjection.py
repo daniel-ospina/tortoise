@@ -61,11 +61,19 @@ from tortoise.retrieval import (
 
 logger = logging.getLogger(__name__)
 
-#: The default seed window: the reader-reachable pool head. The eval
-#: derives the effective window from the resolved reader item cap
-#: (``eff_item_cap``) so a non-default ``TORTOISE_LME_CONTEXT_ITEMS``
-#: cannot silently desynchronise it; this constant is the product
-#: fallback.
+#: The default seed window: a conservative rank-window approximation of
+#: the reader-reachable pool head. The eval derives the effective window
+#: from the resolved reader item cap (``eff_item_cap``) so a non-default
+#: ``TORTOISE_LME_CONTEXT_ITEMS`` cannot silently desynchronise it; this
+#: constant is the product fallback.
+#:
+#: NOT exact: ``retrieval.assemble_context`` SKIPS claim-text-less hits
+#: (#2978, decoration-only nodes such as operators) without consuming an
+#: item slot, so the reader may admit hits BELOW rank ``window``. This
+#: window can therefore under-seed — a session whose first pool appearance
+#: falls in a skipped-hit gap is reader-reachable yet unseeded. Widening it
+#: is a deliberate conservative bound, not an identity claim (tracked as a
+#: follow-up; changing it is a measurement-validity change, not a fix).
 DEFAULT_REINJECTION_SEED_WINDOW = 40
 
 #: Distinct seeded sessions per fired question (bounded fan-out).
@@ -75,6 +83,15 @@ DEFAULT_REINJECTION_SEED_SESSIONS = 5
 DEFAULT_REINJECTION_PER_SESSION = 3
 
 #: Injected chunks per fired question, across all seeds (the total budget).
+#:
+#: ⚠️ Under the shipped defaults this budget can NEVER bind: the fan-out
+#: is ``SEED_SESSIONS * PER_SESSION = 5 * 3 = 15`` distinct chunks (a
+#: duplicate id spends no slot), so ``total >= total_cap`` is unreachable
+#: and ``source_session_chunk_pass``'s returned ``total_cap_hit`` is
+#: ALWAYS False. With the defaults, ``dropped_by_cap`` therefore counts
+#: PER-SESSION drops only. This constant is HEADROOM for a caller that
+#: raises ``per_session_cap``/``limit`` — do not read ``total_cap_hit``
+#: from a default-configured eval run as a live signal.
 DEFAULT_REINJECTION_TOTAL_ITEMS = 20
 
 
