@@ -25,10 +25,12 @@ app, not the proxy or the network.
 
 The tests below assert the INVARIANT (other requests keep being served while
 a capture is stalled) — a future refactor that reintroduces a blocking call on
-the loop fails here regardless of shape. (Two deliberate exceptions pin the
+the loop fails here regardless of shape. (One deliberate exception pins the
 implementation the invariant depends on: the capture pool's thread-name prefix
-in the mechanism test, and the `/health` probe actually running in the liveness
-test — both are noted where they appear.)
+in the mechanism test. The second exception this file used to carry — the
+`/health` probe actually running in the liveness test — was REMOVED by #2850,
+which made the handler collect NO request-path I/O; asserting the probe ran
+would now pin the superseded design rather than the guarantee. See that test.)
 """
 from __future__ import annotations
 
@@ -154,8 +156,9 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
         f"(#3060)")
     assert str(seen["thread"]).startswith("capture-extract"), (
         f"[{mode}] the extraction ran on {seen['thread']!r}, not the dedicated "
-        f"capture pool — long stalls there can starve /health's probe and the "
-        f"auth middleware out of the shared default executor (#3060)")
+        f"capture pool — long stalls there would occupy the SHARED default "
+        f"executor's workers and starve every other ``to_thread`` caller out "
+        f"of it (the auth middleware's abuse hooks among them) (#3060)")
 
 
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
@@ -269,21 +272,21 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
 
 
 def test_health_answers_while_the_default_executor_is_saturated(
-        client, monkeypatch):
+        client):
     """#3060 review finding: liveness must not queue behind the shared pool.
 
     The first revision moved the extraction to `asyncio.to_thread`, which uses
-    the loop's SHARED default executor — the same one /health's DB probe (and
-    the auth middleware's abuse hooks) use. Six-plus concurrent stalls (prod
-    runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave the probe
-    queued for minutes, miss Fly's 15s check timeout, and drop the machine
-    exactly as in the original outage — one level down, with nothing blocking
-    the loop at all.
+    the loop's SHARED default executor — at the time, also the pool /health's DB
+    probe (and the auth middleware's abuse hooks) rode. Six-plus concurrent
+    stalls (prod runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave
+    that probe queued for minutes, miss Fly's 15s check timeout, and drop the
+    machine exactly as in the original outage — one level down, with nothing
+    blocking the loop at all.
 
     This test occupies EVERY default-executor worker with a blocking task and
     then requires /health to answer within a short budget. `wait_for` (rather
-    than a bare await) is the assertion: if the probe queues, the request does
-    not answer at all and this fails, instead of the suite hanging.
+    than a bare await) is the assertion: if the response is blocked on the
+    saturated pool it never arrives, so this fails instead of the suite hanging.
 
     #2850 (P0) then removed the last request-path I/O: the handler now reads an
     in-memory `_HEALTH_PROBE.snapshot()` and returns, so "does the handler probe
@@ -296,15 +299,33 @@ def test_health_answers_while_the_default_executor_is_saturated(
     single bounded daemon thread, never on the shared pool, so it cannot mask a
     regression here.
     """
-    from tortoise.hosted_api import app
+    from tortoise.hosted_api import _HEALTH_PROBE, app
+
+    # Prime the process-global `_HEALTH_PROBE` BEFORE saturating the pool, so the
+    # snapshot the handler serves is a COMPLETED result rather than an honest
+    # "probe in flight" verdict.
+    #
+    # This is required for determinism, not convenience. `snapshot()` deliberately
+    # NEVER waits (that is its whole point, #2850), so without priming both
+    # `db.ok` and `probe.result_age_s` depend on whether some earlier test in the
+    # file happened to warm the shared probe — i.e. on test ORDER. Observed
+    # directly: a full-file run answered
+    # `{"status":"degraded","db":{"ok":false,"error":"probe in flight
+    # (0.4s)"}}` while the identical test passed in isolation. `wait()` is the
+    # module's own blocking entry point, documented "for non-async
+    # probes/tests".
+    primed = _HEALTH_PROBE.wait()
+    assert primed.get("ok") is True, primed
 
     HOG_WAIT_S = 30.0
-    # Derived from the probe's OWN documented worst case (1.5s timeout + 0.1s
-    # retry delay + 1.5s retry, monitoring.py:24/31) plus 1s slack, so a
-    # slow-but-healthy probe can never red the suite and the bound stays
-    # honest if those constants change (review finding: a hardcoded 4.0 sat
-    # 0.9s above the design's own worst case). Below the production probe
-    # budget (5s), so the verdict comes from design, not timer ordering.
+    # Derived from the probe's OWN documented worst case — ``PROBE_TIMEOUT``
+    # bounds ONE attempt and a transient connect failure retries once after
+    # ``PROBE_RETRY_DELAY``, i.e. ``2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY`` —
+    # plus 1s slack, so a slow-but-healthy probe can never red the suite and
+    # the bound stays honest if those symbols change (review finding: a
+    # hardcoded 4.0 sat 0.9s above the design's own worst case). Below the
+    # production probe budget (5s), so the verdict comes from design, not
+    # timer ordering.
     from tortoise.monitoring import PROBE_RETRY_DELAY, PROBE_TIMEOUT
     HEALTH_BUDGET_S = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY + 1.0
 
@@ -328,12 +349,16 @@ def test_health_answers_while_the_default_executor_is_saturated(
                     r = await asyncio.wait_for(ac.get("/health"),
                                                timeout=HEALTH_BUDGET_S)
                 except TimeoutError:
+                    waited = time.perf_counter() - started
                     raise AssertionError(
                         f"/health did not answer within {HEALTH_BUDGET_S}s "
-                        f"while every default-executor worker was busy — the "
-                        f"liveness probe is sharing a pool with long/stallable "
-                        f"work, so a few stalled captures would starve it and "
-                        f"Fly would drop the machine exactly as in #3060"
+                        f"(still waiting after {waited:.2f}s) while every "
+                        f"default-executor worker was busy — /health must "
+                        f"serve from the in-memory `_HEALTH_PROBE.snapshot()` "
+                        f"and take NO thread hand-off (#2850), so a saturated "
+                        f"shared pool must not delay it; a delay here means "
+                        f"liveness has been put back on the shared executor, "
+                        f"the shape that dropped the machine in #3060"
                     ) from None
                 return r, time.perf_counter() - started
         finally:
@@ -343,16 +368,24 @@ def test_health_answers_while_the_default_executor_is_saturated(
     r, elapsed = asyncio.run(_run())
 
     assert r.status_code == 200, r.text
-    # Served from the snapshot rather than a trivial stub: the #2850 handler's
-    # response carries the probe's own additive metadata (`probe`, and
-    # `loop_stale_ms`), so a bare `{"status": "ok"}` cannot satisfy this.
-    assert "probe" in r.json(), r.text
+    # Served from the `_HEALTH_PROBE` snapshot rather than a trivial stub: the
+    # probe was primed above, so the response must carry its observability
+    # metadata WITH A REAL AGE (`HealthProbe.info()`).
+    #
+    # Deliberately stronger than key presence. `info()` reports
+    # `result_age_s=None` until a probe completes, so this cannot be satisfied
+    # by a `{"status": "ok", "db": {"ok": True}}` stub, by an empty `probe`
+    # dict, or by a reversion to the pre-#2850 response shape (which carried no
+    # `probe` key at all). Key presence alone would pass all three.
+    assert r.json()["probe"].get("result_age_s") is not None, r.text
     assert r.json()["db"]["ok"] is True, r.text
     assert elapsed < HEALTH_BUDGET_S, (
-        f"/health took {elapsed:.2f}s while every default-executor worker was "
-        f"busy — the liveness probe is sharing a pool with long/stallable "
-        f"work, so a few stalled captures would starve it and Fly would drop "
-        f"the machine exactly as in #3060")
+        f"/health took {elapsed:.2f}s (budget {HEALTH_BUDGET_S}s) while every "
+        f"default-executor worker was busy — /health must serve from the "
+        f"in-memory `_HEALTH_PROBE.snapshot()` and take NO thread hand-off "
+        f"(#2850), so a saturated shared pool must not delay it; a delay here "
+        f"means liveness has been put back on the shared executor, the shape "
+        f"that dropped the machine in #3060")
 
 
 def test_capture_capacity_limit_fails_fast_instead_of_queueing(

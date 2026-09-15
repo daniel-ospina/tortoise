@@ -19,8 +19,9 @@ the pool for every question — but the READER-WINDOW CUT:
   not an independent reader defect;
 * the TR temporal machinery that is supposed to reorder the pool
   (``_apply_time_window``) is INERT on this corpus: ``detect_time_constraint``
-  returns ``interval``/``recency`` for **0 of 55** (34 → ``None``,
-  21 → ``ordering``), so no window filter ever runs and ``tr_window_fallback``
+  returns ``interval``/``recency`` for **0 of 55** (all 55 → ``ordering``;
+  pre-#2976 it was 34 → ``None``, 21 → ``ordering``), so no window filter ever
+  runs and ``tr_window_fallback``
   never fires;
 * widening the window inside the RRF order (``tr_top_k`` 16/20/24) is measured
   null (0/0/1 admitted) because the band starts at rank 40, beyond even 24;

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import warnings
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +30,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import tortoise.hosted_api as ha_mod  # noqa: I001
 from tortoise.hosted_api import app, get_current_user
+from tortoise.projection import FalkorProjection
 from tortoise.sdk import TortoiseSDK
 
 from tests._http_fixtures import patched_tortoise_sdk
@@ -229,9 +231,116 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 # docs/scoping/2026-09-02-2127-b-waves-scoping.md.
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# #3472/#3505 — background work armed by `TestClient(app)`, for BOTH fixtures.
+# One shared mechanism, deliberately fixture-INDEPENDENT (never copy-pasted):
+# `_lifespan` arms this work for EVERY `TestClient(app)` entry, so it is a
+# property of opening the app, not of the control-plane mode.
+# ═══════════════════════════════════════════════════════════════════════
+
+# #3505: one embedded server per db_path — serialize construction.
+#
+# redislite starts a NEW redis-server daemon whenever `<db>.settings` is
+# absent (or its pid is dead). Two constructions that interleave BEFORE
+# either has written `.settings` therefore BOTH take the fresh-start branch,
+# each spawning its own daemon in its own tempdir, and the later
+# `_save_setting_registry()` silently owns the registry — the loser's writes
+# are then invisible to every later opener. Mirror of the proven Group B fix
+# in tests/test_import_endpoint.py (`_EMBEDDED_CONSTRUCTION_LOCK`):
+# serializing the construction makes the first starter the single owner, so
+# every later opener (seeder, `_registry_count`, health probe, request
+# handler) reuses that one server.
+_EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
+
+
+async def _quiet_boot_sweeps() -> None:
+    """#3472: no-op stand-in for the lifespan's one-shot `_run_boot_sweeps`.
+
+    Must be `async def`: `_lifespan` arms it with
+    `create_task(_run_boot_sweeps())`, so a sync stub would hand
+    `create_task` a `None` and raise inside the startup half — turning a
+    test-isolation fix into a second, unrelated failure.
+    """
+
+
+def _quiesce_testclient_background_work(monkeypatch) -> None:
+    """#3472/#3505: make `TestClient(app)` entry safe for this file's tests.
+
+    `_lifespan` arms background work for EVERY `TestClient(app)` entry,
+    regardless of control-plane mode, and all of it touches the same store
+    the test body is driving:
+
+    1. `_run_boot_sweeps()` (`hosted_api.py:1227`, one-shot) and
+       `_event_retention_loop()` (`hosted_api.py:1243`, every
+       `event_retention_interval()`) BOTH call `_purge_deleted_teams`. A
+       background purge landing between a test's seeding and its own
+       `ha_mod._purge_deleted_teams()` call makes both read the row before
+       either deletes it: two `_drop_team_graph` calls and two
+       `team_delete_purged` audit rows — `assert ['reg-old', 'reg-old'] ==
+       ['reg-old']` on the registry fixture. Worse on Supabase mode, where
+       the test injects its `_drop_team_graph_strict` fault ONLY AFTER
+       seeding: a boot sweep in that window runs the REAL strict drop for
+       the past-grace teams and deletes the retry-anchor row the test
+       asserts must survive.
+
+       The product behaviour is benign (dropping an already-dropped graph
+       is idempotent) — the defect is test isolation: the assertions assume
+       exclusive ownership of a sweep production also runs. Both callers are
+       therefore quiesced here.
+
+       The CALLEE is deliberately not stubbed: this file's tests call
+       `ha_mod._purge_deleted_teams()` directly and resolve it off the
+       module at call time, so a callee stub would silence the very call
+       under test. `_run_boot_sweeps` is stubbed with an `async def` because
+       `_lifespan` arms it with `create_task(...)` (see
+       `_quiet_boot_sweeps`). The retention interval is pinned beyond any
+       test's lifetime: `_event_retention_loop` invokes BOTH `_sweep_events`
+       and `_purge_deleted_teams` on the same target, so pinning the
+       interval quiesces the loop while leaving the directly-called
+       `_purge_deleted_teams` under test.
+
+    2. The app's `_health_probe_loop` (`hosted_api.py:1271`) is NOT stubbed:
+       it runs `_probe_db -> _probe_sdk -> _make_sdk(namespace=None)` and so
+       constructs a projection on the SAME pinned db file, concurrently with
+       the test body's own constructions (the seeder's and
+       `_registry_count`'s SDKs). Quiescing the boot sweeps does NOT remove
+       that constructor, so the embedded double-start race would stay live.
+       Rather than quiesce a third background caller one caller at a time
+       (whack-a-mole — `_lifespan` already grew the probe loop after
+       #2850), the CONSTRUCTION is serialized instead: the invariant
+       redislite actually needs is that the first construction on a given
+       db_path writes `<db>.settings` before any other opener evaluates the
+       fresh-start branch, and serializing holds it for EVERY in-process
+       construction in this file — no matter which background caller
+       `_lifespan` arms next.
+    """
+    # (1) quiesce both background callers of the purge sweep (the caller, not
+    # the callee — `_purge_deleted_teams` itself stays under test).
+    monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _quiet_boot_sweeps)
+    monkeypatch.setattr(ha_mod, "event_retention_interval",
+                        lambda *args, **kwargs: 86400.0)
+    # (2) serialize embedded projection construction on the pinned db file.
+    _orig_proj_init = FalkorProjection.__init__
+
+    def _serialized_proj_init(self, *args, **kwargs):
+        # `return` forwarded deliberately: `__init__` must return None, so it
+        # is inert today, but it stays correct if this wrapper is ever reused
+        # for a factory or `__new__` (where dropping the result is a bug).
+        with _EMBEDDED_CONSTRUCTION_LOCK:
+            return _orig_proj_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(FalkorProjection, "__init__", _serialized_proj_init)
+
+
 @pytest.fixture
 def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB.
+
+    #3472/#3505: `_quiesce_testclient_background_work` is applied BEFORE the
+    app is entered — the same lifespan-armed purge callers and health-probe
+    constructor run for this fixture too (the arming is mode-independent),
+    and on Supabase mode a boot sweep in the seeding window would run the
+    REAL strict drop behind the test's late-installed fault injection.
 
     #2090: no drift counter here (reg_client only) — supabase-mode authz is
     control-plane-only (no SDK/anchor op before the authz short-circuit in
@@ -239,6 +348,7 @@ def sb_client(monkeypatch):
     pin + close-at-restore still apply (anchors created mid-test via
     _export_graph_snapshot are reused, not evicted).
     """
+    _quiesce_testclient_background_work(monkeypatch)
     fake = FakeControlPlane({"teams": [], "api_keys": [],
                              "team_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
@@ -261,49 +371,22 @@ def sb_client(monkeypatch):
                 _close_seed_sdks()
 
 
-async def _quiet_boot_sweeps() -> None:
-    """#3472: no-op stand-in for the lifespan's one-shot `_run_boot_sweeps`.
-
-    Must be `async def`: `_lifespan` arms it with
-    `create_task(_run_boot_sweeps())`, so a sync stub would hand
-    `create_task` a `None` and raise inside the startup half — turning a
-    test-isolation fix into a second, unrelated failure.
-    """
-
-
 @pytest.fixture
 def reg_client(monkeypatch):
     """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB.
 
-    #3472: the lifespan arms TWO background callers of `_purge_deleted_teams`
-    — `_run_boot_sweeps()` (`hosted_api.py:1227`, one-shot) and
-    `_event_retention_loop()` (`hosted_api.py:1243`, every
-    `event_retention_interval()`). Both sweep the SAME registry this fixture
-    hands to the test, so a background purge landing between the test's
-    seeding and its own `ha_mod._purge_deleted_teams()` call makes both read
-    the row before either deletes it: two `_drop_team_graph` calls and two
-    `team_delete_purged` audit rows, surfacing as
-    `assert ['reg-old', 'reg-old'] == ['reg-old']`.
-
-    The product behaviour is benign (dropping an already-dropped graph is
-    idempotent) — the defect is test isolation: the assertion assumes
-    exclusive ownership of a sweep production also runs. Both callers are
-    therefore quiesced here.
-
-    The CALLEE is deliberately not stubbed: this file's tests call
-    `ha_mod._purge_deleted_teams()` directly and resolve it off the module at
-    call time, so a callee stub would silence the very call under test.
+    #3472/#3505: `_quiesce_testclient_background_work` is applied BEFORE the
+    tempdir opens — it neutralizes the lifespan-armed background work that
+    would otherwise race this fixture's own seeding: a background
+    `_purge_deleted_teams` landing between the seed and the test's direct
+    call (two `_drop_team_graph` calls, two `team_delete_purged` rows,
+    surfacing as `assert ['reg-old', 'reg-old'] == ['reg-old']`), plus the
+    health probe's projection construction on the same db file. Neither is
+    registry-specific — see the helper — but this is the fixture whose
+    exact-count assertions make the race an outright failure.
     """
+    _quiesce_testclient_background_work(monkeypatch)
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
-    # #3472: quiesce both background callers BEFORE enter — the lifespan is
-    # what arms them. Each is looked up as a `hosted_api` global at call time,
-    # so patching the module attributes covers both the scheduled task and the
-    # `while True` loop. The retention interval is pinned beyond any test's
-    # lifetime rather than stubbing `_sweep_events`, which this file also
-    # exercises deliberately.
-    monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _quiet_boot_sweeps)
-    monkeypatch.setattr(ha_mod, "event_retention_interval",
-                        lambda *args, **kwargs: 86400.0)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
         # #2127: shared helper (see sb_client) — the anchor is created pinned

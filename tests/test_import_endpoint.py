@@ -34,17 +34,34 @@ from datetime import datetime, timezone
 
 import pytest
 
-# #1389: these deep import-path tests (restore → temp graph → verify → swap)
-# collide with the in-process TestClient harness on embedded FalkorDBLite —
-# the app's keepalive anchor + the handler boot two embedded daemons on the
-# same single-writer path. Prod uses FalkorDB Cloud (multi-client — no
-# collision). The swap logic itself is covered by the hosted_backup
-# regression suite; the full import journey runs against the subprocess
-# server in #1390's parity E2E (tests/e2e/hosted). Skipped here until a
-# server-mode harness is wired for these cases.
+# #1389 / #3505: these deep import-path tests (restore → temp graph → verify →
+# swap) are the #1389 skips. Their recorded reason — the app's keepalive anchor
+# and the handler booting two embedded daemons on the same single-writer path —
+# no longer holds for this module: `_EMBEDDED_CONSTRUCTION_LOCK` (below)
+# serializes every IN-PROCESS `FalkorProjection.__init__`, so the second daemon
+# of that pair is never started and every later opener reuses the first
+# starter's server. What remains outside the lock (the residual exposure listed
+# in the lock's own note below) is (a) a construction that raises inside
+# `_start_redis()` after its daemon spawned but before `_save_setting_registry()`,
+# and (b) redislite's `_cleanup()` last-client branch removing `<db>.settings`
+# from `__del__`/atexit. Neither is the keepalive-anchor-vs-handler collision
+# this reason described, and neither is dodged by a different harness — the
+# `SeedVisibilityError` guard at `_seed_live_graph` is what makes them loud
+# instead of silent.
+#
+# The skip is therefore retained as a COVERAGE decision, not a collision
+# workaround: this path's authoritative coverage is the server-mode harness —
+# the subprocess server in #1390's parity E2E
+# (tests/e2e/hosted/test_12_selfhost_migration.py::test_parity_export_import),
+# which is the harness these cases would otherwise have to stand up here.
+# Unskipped in the in-process harness, four of the five pass; the fifth
+# (`test_import_tampered_blob_422`) fails on its own stale detail expectation
+# ("blob integrity" vs the endpoint's actual "decryption failed") — a
+# test-vs-code drift, not an embedded single-writer collision. Un-skipping or
+# repairing them is a scoped test change, not a comment change.
 _import_deep = pytest.mark.skip(
-    reason="embedded single-writer collision in the in-process harness — "
-           "deep import path covered by #1390 subprocess E2E"
+    reason="#3505: redundant in-process copies of the deep import path — "
+           "covered by #1390's subprocess-server parity E2E"
 )
 
 from fastapi.testclient import TestClient  # noqa: E402, I001
@@ -135,8 +152,11 @@ def _embedded_local_file_lane():
     _orig_proj_init = FalkorProjection.__init__
 
     def _serialized_proj_init(self, *args, **kwargs):
+        # `return` forwarded deliberately: `__init__` must return None, so it is
+        # inert today, but it keeps this wrapper correct if it is ever reused for
+        # a factory or `__new__` (where dropping the result would be a real bug).
         with _EMBEDDED_CONSTRUCTION_LOCK:
-            _orig_proj_init(self, *args, **kwargs)
+            return _orig_proj_init(self, *args, **kwargs)
 
     mp.setattr(FalkorProjection, "__init__", _serialized_proj_init)
     yield

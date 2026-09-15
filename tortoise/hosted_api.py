@@ -143,16 +143,23 @@ _KEEPALIVE_LOCK = threading.Lock()
 
 # ── #3060: dedicated executors for long / stallable work ───────────────────
 # `asyncio.to_thread` (the house style — see `list_packs`) submits to the
-# loop's SHARED default executor, which is also where /health's DB probe and
-# the auth middleware's abuse hooks run. That is fine for short work. It is
-# NOT fine for the capture extraction: on a stalled provider it blocks for the
-# token-scaled deadline (~800s at a 16K budget, per attempt, retried), so
-# enough concurrent stalls would occupy every default worker
-# (min(32, cpu+4) — 6 on prod's 2 vCPU) and the /health probe would then
-# QUEUE behind them, miss Fly's 15s check timeout, and the machine would be
-# dropped exactly as in #3060 — with nothing blocking the event loop at all.
-# Long or stallable work therefore gets its OWN pool: it can only ever starve
-# itself, never the liveness path or auth.
+# loop's SHARED default executor, which is where ~89 other `to_thread` call
+# sites and the auth middleware's abuse hooks (`_abuse_post_auth` et al.) run.
+# That is fine for short work. It is NOT fine for the capture extraction: on a
+# stalled provider it blocks for the token-scaled deadline (~800s at a 16K
+# budget, per attempt, retried), so enough concurrent stalls would occupy every
+# default worker (min(32, cpu+4) — 6 on prod's 2 vCPU) and hold that shared,
+# UNBOUNDED-wait queue against every other tenant of the pool — with nothing
+# blocking the event loop at all. Long or stallable work therefore gets its OWN
+# pool: it can only ever starve itself, never the other tenants of the default
+# executor.
+#
+# #2850 removed /health from that pool entirely — the handler now reads an
+# in-memory ``_HEALTH_PROBE.snapshot()`` and takes no thread hand-off, so it
+# cannot queue behind a stalled capture (or anything else) and liveness is no
+# longer a reason for the separation; see the NOTE on the removed
+# ``_HEALTH_PROBE_EXECUTOR`` below. The separation survives for the remaining
+# tenants named above.
 _CAPTURE_EXECUTOR = ThreadPoolExecutor(
     # max(1, _int_env(...)): the executor is built at IMPORT time, so a
     # malformed or zero/negative knob must degrade to the default — not raise
@@ -8334,10 +8341,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # ALL traffic ("no known healthy instances for route tcp/443") — one
             # slow model call took down the whole product, not just the capture.
             # `to_thread`-style context propagation, but on the CAPTURE pool:
-            # a stalled extraction must not be able to starve /health's probe or
-            # auth out of the shared default executor (#3060). `_run_off_loop`
-            # copies the caller's contextvars into the worker, which is what
-            # `_call_once`'s own `copy_context()` snapshot depends on (#2185).
+            # a stalled extraction must not be able to starve the auth
+            # middleware's abuse hooks or the other `to_thread` call sites out
+            # of the shared default executor (#3060). /health is no longer one
+            # of those tenants — since #2850 it reads in-memory state and takes
+            # no thread hand-off (see the pool notes at the top of the file).
+            # `_run_off_loop` copies the caller's contextvars into the worker,
+            # which is what `_call_once`'s own `copy_context()` snapshot
+            # depends on (#2185).
             # See tests/test_capture_loop_responsiveness.py.
             extracted, meta = await _run_capture_bounded(
                 slot, sdk._extract_session_v2,
