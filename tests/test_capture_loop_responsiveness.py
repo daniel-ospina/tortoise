@@ -345,18 +345,24 @@ def test_health_answers_while_the_default_executor_is_saturated(
     ``_probe_db``/coordinator seam and the event loop's executor entry point,
     and the submission record is scoped to the REQUEST WINDOW.
 
-      * An executor hand-off the request path INITIATES but SUBMITS after the
-        response is unwitnessed. The patch is uninstalled by then, and the
-        saturated pool means the invocation witness never fires either. A
-        deferred submit is caught only if it would have blocked the handler
-        past the budget, which by construction it does not. Concretely, this
-        shape passes all three assertions:
+      * The request window is a WINDOW, not an instant: a submission made AFTER
+        the response is outside it, and the submission record cannot see it.
+        Such a submit is usually caught anyway — not by the submission record
+        (the patch is uninstalled), but by the INVOCATION witness, because the
+        hogs are released as soon as the window closes, so a post-window worker
+        DOES start and its probe is recorded. That recovery is a test-lifetime
+        accident, not a guarantee: it holds only while the loop is still alive
+        when the deferred callback fires. This shape escapes precisely because
+        its timer never fires before the assertions run:
             loop.call_later(0.5, lambda: loop.run_in_executor(None, _probe_db))
-      * DB I/O reaching the database by neither the ``_probe_db`` seam nor an
-        executor submission — a direct ``_get_proj().g.query(...)``, or a
-        callable handed to a ``ThreadPoolExecutor.submit()`` (which does NOT
-        route through ``run_in_executor``) — is witnessed by neither record;
-        it is caught only if it blocks the handler past the budget.
+      * DB I/O reaching the database through neither witnessed seam — a direct
+        ``_get_proj().g.query(...)``, or a callable that does its OWN DB I/O
+        (i.e. does not resolve ``ha_mod._probe_db``, so the invocation witness
+        cannot see it) handed to a raw ``threading.Thread`` or a
+        ``ThreadPoolExecutor`` — is covered by the budget alone, so it is
+        caught only if it blocks the handler past the budget. (A
+        ``.submit(_probe_db)`` IS caught — see the INVOCATION bullet above: it
+        starts a worker, and the record is taken before the sleep.)
 
     NOT a gap, contrary to an earlier draft of this note: the submission witness
     records by ENTRY POINT, not by callable identity, so a NEW probe callable
