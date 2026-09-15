@@ -88,6 +88,7 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_ops_safety.py",
     "test_pre_migration_safety.py",
     "test_projection_lifecycle.py",
+    "test_projection_embedded_socket_timeout.py",  # #3350: the embedded client's socket timeouts / bounded retry ARE the under-test input (a redirected construction has neither)
     "test_reaper.py",
     "test_redis_guard.py",
     "test_redirect_seam.py",  # epic #1647 seam unit tests — construction IS the test input

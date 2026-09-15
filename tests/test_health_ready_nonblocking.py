@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import math
 import re
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -116,32 +118,128 @@ def test_both_probes_are_dispatched_through_their_coordinators():
     )
 
 
-def _fly_http_check_timeout_s() -> float:
+# Repo-owned POLICY ceiling for /health/ready's SEQUENTIAL worst case
+# (``DB_PROBE_HARD_TIMEOUT + CONTROL_PLANE_HARD_TIMEOUT``).
+#
+# This is deliberately NOT derived from fly.toml. The historical proxy was that
+# file's 15s ``[[services.http_checks]] timeout`` — removed by #2850 (2026-09-10)
+# because the /health HTTP check flapped and de-registered the sole machine. Its
+# successor is a TCP check whose 5s timeout times a KERNEL accept and is
+# documented as "generous headroom, not a latency budget", and deploy-hosted.yml
+# curls /health/ready with no ``--max-time`` at all. So there is no longer ANY
+# external quantity this can be compared against.
+#
+# Deleting the assertion instead would have silently unbounded the sum: the
+# per-plane asserts below compare each bound to its own inner total, so doubling
+# CONTROL_PLANE_HARD_TIMEOUT would pass every remaining assertion. Keeping an
+# explicit policy constant preserves that tripwire without pretending the number
+# is deploy-derived. 15.0s is the budget the old routing check implied; revisit
+# when a real deadline exists (add ``--max-time`` to that curl — #2850 follow-up).
+READY_WORST_CASE_BUDGET_S = 15.0
+
+
+def _fly_check_budget_proxy_s() -> float | None:
     """fly.toml's configured ``[[services.http_checks]] timeout``, in seconds.
 
-    NOTE this check targets ``/health`` — pure in-memory — NOT ``/health/ready``.
-    It is borrowed only as a coarse, repo-owned BUDGET PROXY for the readiness
+    NOTE this check targeted ``/health`` — pure in-memory — NOT ``/health/ready``.
+    It was borrowed only as a coarse, repo-owned BUDGET PROXY for the readiness
     surface: ``deploy-hosted.yml`` curls ``/health/ready`` with no
-    ``--max-time``, so there is no real deadline for it anywhere. Read from the
-    file rather than restated so the proxy cannot drift.
-    """
-    import tomllib
+    ``--max-time``, so there is no real deadline for it anywhere.
 
+    Returns ``None`` ONLY when fly.toml genuinely configures no ``http_checks``
+    at all (the deliberate #2850 migration). EVERY other state that leaves the
+    budget configured-but-unusable RAISES.
+
+    Collapsing those into ``None`` would silently disarm the ceiling: the
+    caller's ``else`` branch passes whenever ``tcp_checks`` is present, so
+    "budget absent" and "budget unreadable" must never share a return value.
+    A typo like ``timeout = "15x"`` — or a non-finite ``inf``, which would make
+    ``ready_worst_case < ceiling`` trivially true — has to FAIL LOUDLY rather
+    than quietly skip the assertion this test exists to make.
+    """
     path = REPO / "fly.toml"
-    if not path.exists():  # pragma: no cover — repo invariant
-        pytest.skip("fly.toml is missing — cannot read the health budget proxy")
+    assert path.exists(), (
+        f"fly.toml is missing at {path} — cannot read the health budget proxy"
+    )
     try:
-        cfg = tomllib.loads(path.read_text())
-        raw = cfg["services"][0]["http_checks"][0]["timeout"]
+        services = tomllib.loads(path.read_text())["services"]
     except (KeyError, IndexError, TypeError) as exc:
-        pytest.fail(
-            "fly.toml no longer exposes services[0].http_checks[0].timeout — "
-            f"update this reader or drop the cross-endpoint ceiling ({exc!r})"
-        )
+        raise AssertionError(
+            f"fly.toml has no readable services block ({exc!r}) — the "
+            "cross-endpoint ceiling cannot be evaluated"
+        ) from exc
+    # This proxy reads ``services[0]``. If fly.toml ever grows a second
+    # [[services]] block carrying the http_checks budget, services[0] would
+    # have none, the guard below would return None, and the caller's else
+    # branch (which only asks services[0] for tcp_checks) would pass — the
+    # same silent disarm, reached a different way. Pin the single-service
+    # assumption so an unexpected shape fails loudly instead.
+    assert isinstance(services, list) and len(services) == 1, (
+        "fly.toml must define exactly ONE [[services]] block for the "
+        f"cross-endpoint budget proxy to be meaningful; found {services!r}"
+    )
+    svc = services[0]
+    assert isinstance(svc, dict), (
+        f"fly.toml services[0] is not a table ({svc!r}) — the cross-endpoint "
+        "ceiling cannot be evaluated"
+    )
+    # #2850 (2026-09-10) removed [[services.http_checks]] deliberately: the
+    # /health HTTP check flapped and de-registered the sole machine, costing
+    # ~35 min of unreachability while the process was alive on loopback. It
+    # was replaced by [[services.tcp_checks]], whose ``timeout`` (5s) is
+    # documented in fly.toml as "generous headroom, not a latency budget" —
+    # it times a KERNEL accept, not an application response, so borrowing it
+    # as a /health/ready budget proxy would be a different quantity entirely
+    # (and smaller than the ready worst case, so it cannot serve as a ceiling).
+    # There is consequently NO HTTP-check budget left to compare against here.
+    # The deferred top-level ``[checks.loop_liveness]`` does NOT restore one:
+    # it is a loop-liveness check (fly.toml documents its timeout as 5s, below
+    # the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
+    # ``services[0].http_checks`` one, and this reader does not consume it. The
+    # cross-endpoint bound now lives in ``READY_WORST_CASE_BUDGET_S``, and the
+    # caller's else branch fails closed if any top-level ``[checks]`` appears.
+    if "http_checks" not in svc:
+        return None
     try:
-        return float(str(raw).rstrip("s"))
-    except ValueError as exc:  # pragma: no cover — malformed config
-        pytest.fail(f"fly.toml http_check timeout {raw!r} is not a duration: {exc!r}")
+        raw = svc["http_checks"][0]["timeout"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AssertionError(
+            "fly.toml configures http_checks but its [0].timeout is unreadable "
+            f"({svc['http_checks']!r}) — the cross-endpoint ceiling is "
+            "being silently disarmed; fix the reader or the config"
+        ) from exc
+    try:
+        raw_text = str(raw).strip()
+        # Strip a SINGLE trailing unit; only an exact one is a Fly duration.
+        if raw_text.endswith("s"):
+            raw_text = raw_text[:-1]
+        # Reject anything that is not a plain decimal. The old
+        # ``float(str(raw).rstrip("s"))`` was far too lenient: ``rstrip`` strips
+        # a CHARACTER SET, so "15ss" -> "15", and ``float`` also accepts
+        # "1_000" and "1e3". Leading/trailing whitespace IS still trimmed
+        # before this check (deliberate normalization of a TOML string); the
+        # point of the regex is the numeric shape, not the padding.
+        assert re.fullmatch(r"\d+(?:\.\d+)?", raw_text), (
+            f"fly.toml http_check timeout {raw!r} is not a plain duration — the "
+            "cross-endpoint ceiling is being silently disarmed"
+        )
+        value = float(raw_text)
+    except AssertionError:
+        raise
+    except ValueError as exc:
+        raise AssertionError(
+            f"fly.toml http_check timeout {raw!r} is not a duration ({exc!r}) — "
+            "the cross-endpoint ceiling is being silently disarmed"
+        ) from exc
+    # A non-finite budget is WORSE than a malformed one: ``ready_worst_case <
+    # inf`` is trivially true, so the ceiling would pass while bounding nothing.
+    # ``nan`` happens to fail loudly on the comparison, but reject both rather
+    # than depend on which side of the operator it lands.
+    assert math.isfinite(value), (
+        f"fly.toml http_check timeout {raw!r} parses to a non-finite value "
+        f"({value!r}) — the cross-endpoint ceiling would be silently disarmed"
+    )
+    return value
 
 
 def test_every_plane_probe_is_hard_bounded_and_fail_closed():
@@ -243,6 +341,22 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     does NOT cover the client-level ``SupabaseControlPlane(timeout=...)``
     default — that is per-phase too, which is why the probe overrides it
     per-request rather than relying on it.)
+
+    2026-09-13 (#3458): the cross-endpoint ceiling is asserted in TWO parts.
+    (1) UNCONDITIONALLY, ``ready_worst_case < READY_WORST_CASE_BUDGET_S`` — a
+    repo-owned POLICY constant (15.0s, the budget fly.toml's old routing check
+    implied). This is the part that keeps the SUM bounded: the per-plane
+    asserts above each compare a bound to its own inner total, so without it a
+    change doubling ``CONTROL_PLANE_HARD_TIMEOUT`` would pass everything.
+    (2) Additionally, ``ready_worst_case < fly.toml's http_check timeout`` WHEN
+    fly.toml exposes one. #2850 removed ``[[services.http_checks]]`` (the
+    /health HTTP check flapped and de-registered the sole machine), so today
+    the only external bound is the TCP replacement — whose 5s timeout is
+    documented as headroom, not a latency budget, and cannot serve as a
+    ceiling. When no http_check budget exists the test asserts instead that the
+    documented replacement (``[[services.tcp_checks]]``) IS present and that no
+    top-level ``[checks]`` table has appeared — so removing or altering the
+    checks block reds here rather than silently passing.
     """
     import httpx
 
@@ -306,21 +420,61 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     )
 
     # /health/ready runs the two planes SEQUENTIALLY, so its worst case is the
-    # sum of the two bounds. HONEST CAVEAT: fly.toml's 15s timeout governs
-    # /health (pure in-memory), NOT /health/ready, whose only caller
-    # (deploy-hosted.yml) curls it with no --max-time. It is borrowed here
-    # purely as a coarse repo-owned budget proxy, and the computed worst case
-    # is itself unreachable for a 200 (a 200 implies the DB leg succeeded, so
-    # the relevant bound is lower). Both are deliberate conservatism, not a
-    # claim about a real readiness deadline.
+    # sum of the two bounds. That sum is bounded UNCONDITIONALLY against the
+    # repo-owned policy ceiling below — the per-plane asserts above bound each
+    # phase against its own inner total, which does NOT bound the sum (doubling
+    # CONTROL_PLANE_HARD_TIMEOUT would pass all of them).
+    #
+    # Historically the sum was compared to fly.toml's 15s http_check timeout.
+    # #2850 (2026-09-10) removed that check, so the external proxy is gone and
+    # READY_WORST_CASE_BUDGET_S re-homes the same bound as an explicit policy
+    # constant rather than deleting the assertion. When fly.toml DOES expose an
+    # http_check budget it is checked too, as a stricter additional bound.
     ready_worst_case = mod.DB_PROBE_HARD_TIMEOUT + mod.CONTROL_PLANE_HARD_TIMEOUT
-    ceiling = _fly_http_check_timeout_s()
-    assert ready_worst_case < ceiling, (
+    assert ready_worst_case < READY_WORST_CASE_BUDGET_S, (
         f"/health/ready's sequential worst case ({ready_worst_case}s) must stay "
-        f"under fly.toml's http_check timeout ({ceiling}s), borrowed ONLY as a "
-        "coarse budget proxy for /health/ready (that check actually targets "
-        "/health, and deploy-hosted.yml curls /health/ready with no --max-time)"
+        f"under the repo-owned policy ceiling ({READY_WORST_CASE_BUDGET_S}s). "
+        "This is a POLICY constant, not deploy-derived: /health/ready is curled "
+        "by deploy-hosted.yml with no --max-time, and fly.toml's 15s http_check "
+        "was removed by #2850. Raise the constant deliberately if the bound "
+        "genuinely needs to grow; do not delete the assertion."
     )
+    ceiling = _fly_check_budget_proxy_s()
+    if ceiling is not None:
+        # Stricter, when fly.toml happens to configure an HTTP check budget.
+        assert ready_worst_case < ceiling, (
+            f"/health/ready's sequential worst case ({ready_worst_case}s) must stay "
+            f"under fly.toml's http_check timeout ({ceiling}s), borrowed ONLY as a "
+            "coarse budget proxy for /health/ready (that check actually targets "
+            "/health, and deploy-hosted.yml curls /health/ready with no --max-time)"
+        )
+    else:
+        # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a
+        # positive assertion rather than a silent skip: it may only mean the
+        # documented HTTP->TCP migration, so the replacement must be present, and
+        # deleting the whole checks block still reds here.
+        #
+        # FAIL CLOSED on a top-level [checks] table. The deferred
+        # [checks.loop_liveness] follow-up is NOT a readiness budget (fly.toml
+        # documents its timeout as 5s — below the sum — and it times loop
+        # liveness, not a request), so it can never restore this ceiling, and
+        # nothing here reads it. If it (or any other top-level check) lands, this
+        # reds so whoever adds it must wire a real deadline in deliberately
+        # instead of silently leaving the sum unbounded.
+        _cfg = tomllib.loads((REPO / "fly.toml").read_text())
+        assert _cfg["services"][0].get("tcp_checks"), (
+            "fly.toml exposes NEITHER an http_check budget proxy NOR the "
+            "tcp_checks that replaced it (#2850) — the services checks block "
+            "was removed or altered without the documented migration"
+        )
+        assert "checks" not in _cfg, (
+            "fly.toml now defines a top-level [checks] table. The deferred "
+            "[checks.loop_liveness] is a loop-liveness check, NOT a readiness "
+            "budget, so it does not restore the cross-endpoint ceiling and this "
+            "reader does not consume it. Wire its deadline into "
+            "READY_WORST_CASE_BUDGET_S (or assert it here) rather than letting "
+            f"the sum ({ready_worst_case}s) go unbounded."
+        )
 
 
 def test_db_probe_bound_covers_the_sdk_acquisition_prefix():

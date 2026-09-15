@@ -224,9 +224,57 @@ def _is_loopback(hostname: str) -> bool:
         return False
 
 
+# Bytes we refuse to reason about in a redirect URI, checked BEFORE any
+# comparison or echo. The authorization code is delivered by NAVIGATING THE
+# BROWSER to the raw `redirect_uri` (see `redirectBack` in the consent page), so
+# the browser's parse — never ours — is what decides where the code actually goes.
+#
+#   * `\` is a GENUINE parser differential and the reason this gate exists.
+#     WHATWG ends the authority at a backslash for special schemes (http/https);
+#     `urlsplit` does not. So `http://evil.example\@localhost/cb` has host
+#     `localhost` to us and `evil.example` to the browser: validated as loopback,
+#     then navigated off-device carrying the code. Found in review; reproduced in
+#     Chromium with the attacker's listener receiving `?code=...`. PKCE does not
+#     help — the attacker authors the authorize request and holds the verifier.
+#
+#   * C0 controls (0x00-0x1F) and DEL are NOT a differential, and this comment
+#     claimed they were until review falsified it. `urlsplit` strips \t \r \n
+#     (`urllib.parse._UNSAFE_URL_BYTES_TO_REMOVE`) exactly as a browser does, and
+#     for the remaining bytes no browser moves the authority boundary either.
+#     The precise treatment is position-dependent (stripped / refused /
+#     percent-encoded — `docs/oauth-mcp.md` carries the per-position detail),
+#     which is why this comment deliberately does NOT try to characterise it:
+#     three review rounds each caught an over-specific claim here. The only
+#     load-bearing point is that the boundary does not move. They are refused
+#     anyway, as defence in depth: no legitimate redirect URI contains a control
+#     character, so the conservative direction costs nothing real. It does mean a
+#     URI registered before this gate existed stops matching — deliberate, and
+#     pinned by `test_differential_uris_are_refused_even_on_exact_match`.
+#
+# Refusing the bytes outright is preferred to modelling WHATWG: a whitelist of
+# "URIs both parsers agree on" cannot be kept correct, and fail-closed is the
+# only safe direction on the input that decides where a credential is sent.
+def _unsafe_redirect_uri_bytes(uri: str) -> bool:
+    """True when a redirect URI holds bytes we refuse to reason about.
+
+    Conservative by design: a raw backslash is a real parser differential
+    between ``urlsplit`` and the browser, the control characters are
+    belt-and-suspenders. See the comment above — this is a fail-closed byte
+    filter, NOT a precise differential detector, which is what earlier wording
+    in this PR wrongly claimed.
+    """
+    return any(ch == "\\" or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri)
+
+
 def _valid_redirect_uri(uri: str) -> bool:
     """A registration-acceptable redirect URI: https, or http only when the
-    host is loopback (RFC 8252 native-app pattern used by MCP clients)."""
+    host is loopback (RFC 8252 native-app pattern used by MCP clients).
+
+    URIs holding bytes we refuse to reason about are rejected here too, so a
+    string the browser might read differently can never enter a client row.
+    """
+    if not isinstance(uri, str) or _unsafe_redirect_uri_bytes(uri):
+        return False
     try:
         parsed = urlparse(uri)
     except ValueError:
@@ -236,6 +284,62 @@ def _valid_redirect_uri(uri: str) -> bool:
     if parsed.scheme == "http" and parsed.hostname and _is_loopback(parsed.hostname):  # noqa: SIM103
         return True
     return False
+
+
+def _redirect_uri_matches(registered: str | None,
+                          presented: str | None) -> bool:
+    """#2846 — does ``presented`` match a registered ``redirect_uri``?
+
+    RFC 8252 §7.3: for loopback redirect URIs the authorization server MUST
+    ignore the port, because a native app binds an ephemeral port at request
+    time and cannot know it at registration. Anthropic's connector docs state
+    the same requirement, and the Claude Code CLI depends on it.
+
+    The relaxation is deliberately narrow:
+
+    * BOTH values must be loopback hosts (``_is_loopback`` — the same predicate
+      ``_valid_redirect_uri`` uses) carrying the SAME scheme. Nothing requires
+      ``http``: the relaxation keys on loopback, so an ``https``-on-loopback
+      pair relaxes as well.
+    * scheme, host, path, params, query and fragment must still match exactly
+      (host per RFC 3986 §3.2.2 and scheme per §3.1, case-insensitively).
+    * the userinfo component must match exactly, so ``http://evil@localhost/cb``
+      never satisfies a registration for ``http://localhost/cb``.
+    * anything else — including every non-loopback URI — keeps the original
+      exact-string rule, so the hosted security posture is unchanged.
+
+    Host is NOT relaxed: ``localhost`` and ``127.0.0.1`` are distinct hosts,
+    even though both are loopback. Only the port varies.
+
+    Inputs holding bytes we refuse to reason about are refused outright (see
+    ``_unsafe_redirect_uri_bytes``) — this function's own parse is never the one
+    that decides where the code actually goes.
+    """
+    if not isinstance(registered, str) or not isinstance(presented, str):
+        return False
+    if _unsafe_redirect_uri_bytes(registered) or _unsafe_redirect_uri_bytes(presented):
+        return False
+    if registered == presented:
+        return True
+    try:
+        reg = urlparse(registered)
+        pre = urlparse(presented)
+    except ValueError:
+        return False
+    if not reg.hostname or not pre.hostname:
+        return False
+    if not (_is_loopback(reg.hostname) and _is_loopback(pre.hostname)):
+        return False
+    return (
+        reg.scheme.lower() == pre.scheme.lower()
+        and reg.hostname.lower() == pre.hostname.lower()
+        and reg.username == pre.username
+        and reg.password == pre.password
+        and reg.path == pre.path
+        and reg.params == pre.params
+        and reg.query == pre.query
+        and reg.fragment == pre.fragment
+    )
 
 
 def mcp_resource_url(base: str) -> str:
@@ -483,7 +587,19 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
     if response_type != "code":
         raise OAuthError(400, "invalid_request",
                          "Only response_type=code is supported.")
-    if redirect_uri not in (client.get("redirect_uris") or []):
+    # #2846: loopback ports are ignored (RFC 8252 §7.3); every other redirect
+    # keeps the exact-string rule. See `_redirect_uri_matches`.
+    #
+    # A non-list `redirect_uris` can only come from a legacy/hand-corrupted row
+    # (`register_client` requires a list and the column is jsonb). Normalize it
+    # to a single-element list so a bare string stays ONE uri: iterating the
+    # string directly would compare character by character and silently stop
+    # matching it at all.
+    registered_uris = client.get("redirect_uris") or []
+    if not isinstance(registered_uris, (list, tuple)):
+        registered_uris = [registered_uris]
+    if not any(_redirect_uri_matches(u, redirect_uri)
+               for u in registered_uris):
         raise OAuthError(400, "invalid_request",
                          "redirect_uri is not registered for this client.")
     if not code_challenge or not _valid_pkce(code_challenge):
@@ -1112,7 +1228,7 @@ def authorization_server_metadata(base: str) -> dict:
 
 # ── Branded consent page (D2 — one custom HTML page, signup/signin pattern) ─
 
-_CONSENT_HTML = """<!DOCTYPE html>
+_CONSENT_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
