@@ -850,21 +850,30 @@ carve_out:
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:
-  # #3501: the BFF auth suites + the migration-backlog gate. Measured together
-  # in ONE invocation = 106s (41 passed, 5 xfailed), i.e. ~26.5s each. That
-  # marginal figure is what matters for the LPT split: the four share a single
-  # session-scoped `wrangler pages dev` boot, so a STANDALONE run costs ~90s
-  # each (boot-dominated) while running them together nearly amortises it.
-  # Registering them stops the splitter modelling 4 x 2.0s of real work.
+  # #3501: the BFF auth suites + the migration-backlog gate.
+  #
+  # Measured (this machine): STANDALONE 101s / 100s / 91s / 53s respectively —
+  # total 345s — but ALL FOUR TOGETHER in one invocation = 106s. The spread is
+  # boot caching, not work: each auth suite carries its own
+  # `@pytest.fixture(scope="module")` wrangler server (THREE separate boots, not
+  # one shared), and the first boot in a process pays the cold npx/workerd
+  # cost that its siblings then reuse. `test_no_legacy_token_path.py` boots no
+  # wrangler at all (a static 158-file scan) and is still 53s standalone,
+  # because importing the repo's conftest pulls the heavy tortoise deps.
+  #
+  # Values below are the combined 106s apportioned by the standalone ratios, so
+  # they sum to what a real invocation costs and the LPT splitter does not
+  # model 4 x 2.0s of work. They are an approximation of a high-variance,
+  # boot-dominated quantity — treat them as order-of-magnitude, and re-measure
+  # rather than trusting them if the wrangler boot path changes.
   #
   # Keys are the manifest MEMBER strings, not bare basenames: the three auth
-  # suites are registered as `auth/...`, so a basename key does not classify
-  # (classify_test_file checks the full name and the basename against each
-  # surface's members, and the members here carry the subdir).
-  auth/test_bff_flow.py: 26.5
-  auth/test_proxy.py: 26.5
-  auth/test_welcome_and_password.py: 26.5
-  test_no_legacy_token_path.py: 26.5
+  # suites are registered as `auth/...`, and classify_test_file checks the
+  # durations key itself, so a basename key fails duration_integrity.
+  auth/test_bff_flow.py: 31.0
+  auth/test_proxy.py: 31.0
+  auth/test_welcome_and_password.py: 28.0
+  test_no_legacy_token_path.py: 16.0
   test_oauth_token_fault.py: 100.0  # #2863: fault matrix + real-seam HTTPServer (measured ~100s locally)
   test_2199_decide_calibration.py: 8.5
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite

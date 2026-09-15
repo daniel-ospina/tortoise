@@ -371,26 +371,27 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
             f"welcome.html still contains {legacy!r} — the client-side session "
             "wait was the #3485 login loop and must stay removed (#3501)"
         )
-    # The page must not issue the auth redirect itself; that is the server's
-    # job now. A programmatic redirect back to /auth IS the #3485 loop.
+    # The page must not perform a client-side navigation; that is the server's
+    # job now, and a JS bounce back to /auth IS the #3485 loop.
     #
-    # Match the MECHANISM, not a quoted literal. A bare `"/auth" not in code`
-    # check is simultaneously too weak and too strong: it passes for
-    # `location.assign("/auth?mode=login")` and `location.href = "/auth?next=1"`
-    # (real reintroductions) while failing on the page's legitimate same-origin
-    # `action="/auth/update-password"` form and its `<a href="/auth?mode=login">`
-    # links. An earlier version of this test asserted exactly those two
-    # substrings and asserted nothing about `location.assign`.
-    assert not re.search(
-        # Assignment (`location.href = …`) AND call (`location.replace(…)`,
-        # `location.assign(…)`) forms — the call form has no `=`, so matching
-        # on `=` alone missed the most obvious reintroduction.
-        r"location\s*\.\s*(?:replace|assign|href)\s*[(=]"
-        r"|http-equiv\s*=\s*[\"']refresh[\"']",
-        WELCOME_CODE,
-        re.I,
-    ), (
-        "welcome.html must not redirect to /auth client-side — the auth "
-        "decision is the server's (#3501), and a JS/meta redirect here is the "
-        "#3485 login loop"
-    )
+    # Ban the TOKENS rather than enumerating spellings. Two earlier attempts at
+    # a regex were both wrong in opposite directions: the first keyed on
+    # `location.href =` and missed the call form `location.replace(...)`; the
+    # second keyed on `location.(replace|assign|href)\s*[(=]` and missed bracket
+    # access `location['href'] = ...` and `location = '/auth'` — which the
+    # naive substring form it replaced had actually CAUGHT, so it traded
+    # coverage away rather than only adding it. Enumerating spellings is
+    # unwinnable; the page has no legitimate use for these tokens, so a token
+    # ban is both simpler and strictly stronger.
+    #
+    # Case-INSENSITIVE: `LOCATION.HREF='/auth'` is valid JS and escaped a
+    # case-sensitive version of this check. `history` covers
+    # `history.pushState({}, '', '/auth')`, which navigates without ever
+    # naming `location`.
+    code_lower = WELCOME_CODE.lower()
+    for forbidden in ("location", "window.open", "http-equiv", "history"):
+        assert forbidden not in code_lower, (
+            f"welcome.html must not contain {forbidden!r} — the page must not "
+            "navigate client-side (#3501); the auth decision is the server's, "
+            "and a client-side bounce back to /auth is the #3485 login loop"
+        )
