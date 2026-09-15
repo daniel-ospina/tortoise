@@ -12,7 +12,7 @@ made that unsafe, and both produced GREEN tests asserting nothing:
 
 2. **Skipping when the toolchain is missing.** A suite that skips because
    `wrangler` is not on PATH is a no-op gate: green, exit 0, zero coverage. That
-   happened in CI — `pytest tests/auth/` reported "33 skipped" and passed, so
+   happened in CI — `pytest tests/auth/` (the path at the time) reported "33 skipped" and passed, so
    none of the auth security properties were actually enforced.
 
    The suites therefore require the toolchain and FAIL loudly rather than skip.

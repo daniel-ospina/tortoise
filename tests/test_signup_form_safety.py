@@ -367,7 +367,7 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
 
     The decision now happens SERVER-side in `functions/welcome.ts`, which reads
     the HttpOnly cookie and redirects before any HTML is served (pinned by
-    `tests/auth/test_welcome_and_password.py`). This test pins the ABSENCE of
+    `tests/e2e/auth/test_welcome_and_password.py`). This test pins the ABSENCE of
     the client-side implementation, so a regression fails here instead of in
     production.
     """
@@ -435,7 +435,7 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
 # (`window.open.call(window, '/auth')`), computed member access
 # (`window['loc'+'ation']`), unicode escapes (`loca\u0074ion`), and
 # target-only navigations (above). A static gate cannot close these. The
-# behavioural proof is tests/auth/test_welcome_and_password.py.
+# behavioural proof is tests/e2e/auth/test_welcome_and_password.py.
 _NAVIGATION_BANS = (
     ("read or assign `location`", r"\blocation\b"),
     ("navigate via `history`", r"\bhistory\b"),

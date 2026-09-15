@@ -1098,7 +1098,7 @@ def test_mobile_render_no_horizontal_scroll(page: Page, path: str) -> None:
     under a /welcome label. The one case where /welcome DOES render is
     `?reset=1` for a signed-in user, which needs a session this suite does not
     establish — so it is uncovered here rather than mislabelled, and the reset
-    panel's own behaviour is pinned by tests/auth/test_welcome_and_password.py."""
+    panel's own behaviour is pinned by tests/e2e/auth/test_welcome_and_password.py."""
     page.set_viewport_size({"width": 375, "height": 667})
     _goto(page, BASE_URL + path)
     dims = page.evaluate(

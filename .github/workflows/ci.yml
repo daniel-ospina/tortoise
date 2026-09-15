@@ -636,12 +636,18 @@ jobs:
         run: |
           npx --yes wrangler@4 --version
           npx --yes wrangler@4 pages dev --help >/dev/null
-      # #3501: the auth suites resolve wrangler via `shutil.which("wrangler")` and
-      # SKIP when it is missing — which is exactly what happened on a fresh
-      # runner: PATH had no wrangler, so `pytest tests/e2e/auth/` reported
-      # "33 skipped", exit 0, and the step was green while asserting nothing.
-      # Verified with a wrangler-less PATH. The npx pre-warm above does NOT put
-      # wrangler on PATH; this does.
+      # #3501: the auth suites resolve wrangler via `shutil.which("wrangler")`
+      # and FAIL (not skip) when it is missing — `require_toolchain()` calls
+      # `pytest.fail()`, so a missing toolchain reds this job instead of
+      # reporting a green step that asserted nothing. An earlier draft of that
+      # helper SKIPPED, which is exactly the silent no-op this step exists to
+      # prevent: PATH had no wrangler, so the suite reported "33 skipped", exit
+      # 0, and asserted nothing. Verified with a wrangler-less PATH. Skipping is
+      # still reachable, but only via an explicit `AUTH_ALLOW_NO_TOOLCHAIN=1`
+      # opt-in that no workflow sets.
+      #
+      # The npx pre-warm above does NOT put wrangler on PATH; this does. Removing
+      # this step reds welcome-e2e — it is load-bearing, not belt-and-braces.
       - name: Install wrangler on PATH (required by the #3501 auth suites)
         run: npm install -g wrangler@4.127.0
       - name: Start wrangler pages dev preview (website/ = Pages root)
