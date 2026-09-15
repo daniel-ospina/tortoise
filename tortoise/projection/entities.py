@@ -759,12 +759,15 @@ class _EntityHandlers:
             #   OR(ID1, SHARED), RT(ID2, SHARED)
             #   -> the name branch tombstoned ID1/SHARED, which the journal
             #      never retracted, and `applied` counted the fold as work done.
-            # Production-reachable: `_connect_issue_objects` MERGEs a second
-            # carrier of an existing name under a different id
-            # (`MERGE (o:Object {id:$oid}) SET o.name=$name`), and
-            # `update_entity(id, name=...)` renames a node on the public/MCP
-            # surface — both then produce a retraction whose id is anchored
-            # nowhere while the name belongs to another node.
+            # Production-reachable: `update_entity(id, name=...)` renames a
+            # node on the public/MCP surface WITHOUT journaling it (#3377), so
+            # a node `_connect_issue_objects` minted under a NEW name (with
+            # the caller's arbitrary `id` and no journal line) can be renamed
+            # onto an EXISTING name and then deleted — producing a retraction
+            # whose id is anchored nowhere while the name belongs to another
+            # node. (`_connect_issue_objects` no longer mints a second carrier
+            # of an existing name DIRECTLY — #3389 — but the unjournaled-rename
+            # lane still reaches the same shape.)
             #
             # SAFE FOR THE STUB LANE, which is what the fallback exists for: a
             # stub node minted by `_event_plain_merge` has NO ObjectRegistered
@@ -789,41 +792,46 @@ class _EntityHandlers:
             # usually arbitrary with respect to the name it carries. So the
             # guard fires only when the derived id does NOT match.
             #
-            # ⚠️ THIS DISCRIMINATOR IS NOT SOUND, and the earlier wording here
-            # claimed it was ("the id demonstrably belongs to something else" —
-            # false: a derived id appearing in no `ObjectRegistered` proves
-            # nothing about identity). A HAND-AUTHORED journal can still reach
-            # it:
+            # ⚠️ THE ESCAPE IS GATED TO THE SUPERSEDE FAMILY. A derived
+            # id proves nothing about identity, so on the RETRACTION lane the
+            # escape is unsound and is NOT applied: a derived-LOOKING id that
+            # anchors nothing must not short-circuit the guard. The escape
+            # exists ONLY to serve the #2164 legacy supersede fold above —
+            # `ObjectRetracted` did not exist before #2977, so the retraction
+            # lane has no legacy synthesized-id shape to preserve. Measured on
             #
-            #     OR(ARBITRARY_ID, SHARED), RT(_entity_name_id("SHARED"), SHARED)
-            #     -> the guard short-circuits on `_derived_matches`, and the
-            #        LIVE SHARED/ARBITRARY_ID is BURIED.
+            #     OR(ARBITRARY_ID, SHARED),
+            #     RT(_entity_name_id("SHARED"), SHARED)
             #
-            # #3389 was NOT fixed here. 6 review cycles each found the next
-            # hole in this rule, so the fix went to the WRITER — the same
-            # lesson cycle 3 taught for `_delete_entity`: `_connect_issue_objects`
-            # no longer mints a SECOND carrier of an existing name under a
-            # different id with no journal line (it resolves the name and
-            # reuses the existing carrier). That was the only production path
-            # to the shape above, so the hole is no longer reachable through
-            # the public SDK surface. It stays reachable by a hand-written
-            # journal, which is why the discriminator is left as-is rather than
-            # widened a seventh time.
-            _derived_matches = False
-            try:
-                from tortoise.sdk import _entity_name_id
-                _derived_matches = (_entity_name_id("Object", name) == oid)
-            except Exception:
-                # Cannot resolve the derived id → do NOT suppress. Failing open
-                # here preserves the pre-guard behaviour, which is the safer
-                # default for a durability lane: a mis-fired guard silently
-                # RESURRECTS a deleted Object.
-                _derived_matches = True
+            # (production-reachable through the unjournaled-rename lane above,
+            # and by a hand-authored journal): before this gate the name branch
+            # tombstoned ARBITRARY_ID/SHARED — a live Object the journal never
+            # retracted. Replay now yields `[['ARBITRARY_ID','live']]`, matching
+            # live. #3389's WRITER fix (no second-carrier mint in
+            # `_connect_issue_objects`) stays in place; this closes the FOLD
+            # side of the same shape.
+            #
+            # The lane discriminator is `skip_terminal`: `None` = supersede,
+            # `'retracted'` = retraction (see `_fold_object_match_and_apply`'s
+            # docstring). The escape is computed ONLY on the supersede lane, so
+            # on the retraction lane the guard fires whenever the id is
+            # unanchored and the name is anchored.
+            _derived_escape = False
+            if skip_terminal is None:
+                try:
+                    from tortoise.sdk import _entity_name_id
+                    _derived_escape = (_entity_name_id("Object", name) == oid)
+                except Exception:
+                    # Cannot resolve the derived id → treat it as a match so
+                    # the guard does NOT suppress the legacy supersede fold.
+                    # Failing open here preserves the #2164 behaviour: a
+                    # mis-fired guard silently RESURRECTS a deleted Object.
+                    _derived_escape = True
             if (oid is not None and anchored_ids is not None
                     and anchored_names is not None
                     and oid not in anchored_ids
                     and name in anchored_names
-                    and not _derived_matches):
+                    and not _derived_escape):
                 return (0, 0)
             result = self.g.query(
                 "MATCH (o:Object {name:$name}) "

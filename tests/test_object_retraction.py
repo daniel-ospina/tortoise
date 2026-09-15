@@ -1,5 +1,6 @@
 # tests/test_object_retraction.py
 import json
+import os
 import shutil
 
 import pytest
@@ -265,6 +266,39 @@ def test_retraction_name_fallback_does_not_fold_duplicate_names(tmp_path):
         "exactly the NEWEST live carrier (id-c, createdAt 2026-03-01) must be "
         "retracted; the already-retracted id-a must be skipped (else it is a "
         "clean (1,1) FALSE SUCCESS) and the older live id-b must survive")
+
+
+def test_retraction_name_fallback_null_created_at_sorts_last(tmp_path):
+    """#2977 code review P2: a carrier with NO `createdAt` must sort LAST.
+
+    The name branch orders `coalesce(o.createdAt,'') DESC, o.id` so a
+    stub-shaped carrier (minted by `_event_plain_merge`, which never writes
+    `createdAt`) does not win the pick. FalkorDB sorts NULL FIRST under DESC
+    (measured), so a plain `ORDER BY o.createdAt DESC` picks the STUB and leaves
+    the createdAt-bearing canonical carrier LIVE — the opposite of the intent,
+    and a clean `(1, 1)` false success.
+
+    The existing duplicate-name tests give EVERY carrier a `createdAt`, so the
+    `coalesce` NULL branch was never exercised. This pins the mixed case: one
+    carrier WITHOUT `createdAt` (stub-shaped) and one WITH.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "nullca.db"))
+    proj = sdk._get_proj()
+    # stub-shaped carrier: `_event_plain_merge` writes no `createdAt`.
+    proj.g.query("CREATE (:Object {id:'id-stub', name:'NCA', status:'live'})")
+    proj.g.query("CREATE (:Object {id:'id-canon', name:'NCA', status:'live', "
+                 "createdAt:'2026-03-01'})")
+    folded, matched = proj._fold_object_retracted(
+        {"id": "id-OTHER", "name": "NCA", "ts": "T1"})
+    assert (folded, matched) == (1, 1), "the fallback must fold exactly one node"
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'NCA'}) RETURN o.id, o.status ORDER BY o.id"
+    ).result_set
+    assert rows == [["id-canon", "retracted"], ["id-stub", "live"]], (
+        "the createdAt-bearing canonical carrier (id-canon) must be folded and "
+        "the NULL-createdAt stub (id-stub) must survive — a bare "
+        "`ORDER BY o.createdAt DESC` sorts NULL FIRST on FalkorDB and folds "
+        f"the stub instead. Got {rows}")
 
 
 def test_fold_object_retracted_skips_null_id_branch(tmp_path):
@@ -1240,11 +1274,13 @@ def test_fold_sweep_handles_2500_folds(tmp_path):
     import time
 
     from tortoise.projection import FalkorProjection
-    # This is the ONE test that BYPASSES the class-level test redirect (epic
-    # #1647 D-1=A): `from_uri` lands on the SHARED session graph rather than a
-    # per-test `test_<stem>_<hash>` one. Its wall-clock bound was calibrated on
-    # docker, which is why it opts in — and it must therefore clean up in a
-    # `finally`, since the shared graph outlives this test.
+    # #2977 review P2 (test isolation): this test used to call
+    # `FalkorProjection.from_uri(DB)` and start with a literal
+    # `MATCH (n) DETACH DELETE n` against the SHARED `tortoise_test_matrix`
+    # graph — wiping unrelated state under any concurrent run. It now mints a
+    # per-test UNIQUE `test_`-prefixed graph via `graph_name=`, so the
+    # destructive setup cannot touch another suite. `from_uri` journals the
+    # name (epic #1647 seam), so the session-end sweep drops it.
     # VERIFY-1 P1-4 (Reviewer slot 1, EMPIRICAL): N is 5000, NOT 10000. Slot 1
     # ran the exact Task-8 Step 3 command twice; the 10k form measured **124 s**
     # against a 60 s bound (`assert 124.02 < 60.0`) on this hardware. The
@@ -1253,8 +1289,8 @@ def test_fold_sweep_handles_2500_folds(tmp_path):
     # 5000-fold sweep is ~20 s, keeping a 3x margin on this machine and ~2x on a
     # 1.5x-slower CI runner, while still catching an order-of-magnitude
     # regression, which is the bound's only job.
-    proj = FalkorProjection.from_uri(DB)
-    proj.g.query("MATCH (n) DETACH DELETE n")
+    proj = FalkorProjection.from_uri(
+        DB, graph_name=f"test_fold_sweep_2500_{os.urandom(4).hex()}")
     try:
         folds, recreate = [], []
         for i in range(2_500):
@@ -1315,9 +1351,9 @@ def test_fold_sweep_handles_2500_folds(tmp_path):
             f"round-trip count (2500). This is a hang backstop, not a perf "
             f"gate — do NOT lower it; assert n_queries instead")
     finally:
-        # `from_uri(DB)` targets the SHARED session graph (see the Lane note) —
-        # leaving 10k :Object nodes behind would poison every later test in the
-        # session, so clean up here and not only at the start.
+        # The graph is per-test UNIQUE and journaled, so the session-end sweep
+        # drops it; the explicit Object wipe is belt-and-braces (it cannot
+        # touch another suite's graph).
         try:
             proj.g.query("MATCH (o:Object) DETACH DELETE o")
         finally:
@@ -2221,9 +2257,11 @@ def test_public_sdk_path_does_not_bury_a_live_object_by_name(tmp_path):
 
     Replaces `test_derived_looking_id_orphan_buries_the_name_known_limitation`.
     That pin drove the journal DIRECTLY (OR + RT), so it would keep certifying
-    the fold's unsound `_derived_matches` discriminator even after the writer
-    was fixed — but #3389 scopes the fix to the writer, and the public surface
-    no longer reaches that shape at all.
+    the fold's discriminator even after the writer was fixed — the fold side is
+    now separately gated (see
+    `test_hand_authored_journal_derived_id_no_longer_buries_the_name`), and
+    `test_public_unjournaled_rename_then_delete_does_not_bury_the_name` covers
+    the public lane #3389's writer fix does NOT close.
 
     Public-path shape (the live repro on #3389):
 
@@ -2296,37 +2334,99 @@ def test_public_sdk_path_does_not_bury_a_live_object_by_name(tmp_path):
         sdk.close()
 
 
-def test_hand_authored_journal_derived_id_still_buries_the_name_known_limitation(
-        tmp_path):
-    """**KNOWN LIMITATION (#3389 — fold side; fixed at the writer, not the fold).**
+def test_public_unjournaled_rename_then_delete_does_not_bury_the_name(tmp_path):
+    """#3389/#3377: the FOLD must not bury a live Object the journal never
+    retracted, on the PUBLIC unjournaled-rename lane.
 
-    Journal-driven pin for the fold's `_derived_matches` short-circuit
-    (`tortoise/projection/entities.py:_fold_object_match_and_apply`), which the
-    #3389 writer fix did NOT touch. The writer no longer mints the unjournaled
-    second carrier, so this shape is unreachable through the public SDK — but a
-    HAND-AUTHORED journal still reaches it, and nothing else pins the rule.
+    #3389's WRITER fix stopped `_connect_issue_objects` minting a second
+    carrier of an EXISTING name directly. It did not close the shape: a node
+    minted under a NEW name (unjournaled, with the caller's arbitrary `id`) can
+    be renamed onto an EXISTING name through the public/MCP
+    `update_entity(id, name=...)` — which journals NOTHING (#3377) — and then
+    deleted. The delete journals `ObjectRetracted` with the (derived-looking)
+    id and the new name; on replay the id anchors nowhere while the name does,
+    so the fold's name branch tombstoned the FIRST, live carrier:
+
+        OR(ARBITRARY_ID, SHARED)                     # journaled
+        _connect_issue_objects({id: derived, title: NEWNAME})  # unjournaled
+        update_entity(derived, name='SHARED')        # unjournaled rename
+        delete_entity(derived)                       # RT(derived, SHARED)
+
+        live   [['ARBITRARY_ID','SHARED','live']]
+        replay [['ARBITRARY_ID','SHARED','retracted']]   <-- BURIED (before)
+
+    After gating the derived-id escape to the supersede family (see
+    `tortoise/projection/entities.py:_fold_object_match_and_apply`) replay
+    matches live. This is the PUBLIC-path sibling of
+    `test_hand_authored_journal_derived_id_no_longer_buries_the_name`.
+    """
+    events = tmp_path / "events"
+    events.mkdir(exist_ok=True)
+    sdk = TortoiseSDK(str(tmp_path / "uni-rename.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        proj = sdk._get_proj()
+        derived = _entity_name_id("Object", "SHARED")
+        # 1) A journaled live carrier of SHARED under an ARBITRARY id.
+        sdk._create_entity("Object", "ARBITRARY_ID",
+                           {"name": "SHARED", "objectKind": "core:other",
+                            "status": "live"}, "ObjectRegistered")
+        # 2) Session indexing mints a NEW name under the caller's arbitrary id
+        #    (here the canonical derived id of SHARED) with NO journal line.
+        ev = sdk.create_event("AgentSession", eventKind="AgentSession",
+                              session_id="s1")
+        assert sdk._connect_issue_objects(
+            ev["eventId"],
+            {"issues": [{"id": derived, "title": "NEWNAME"}]}) == 1
+        # 3) Public/MCP rename onto the EXISTING name (unjournaled — #3377).
+        sdk.update_entity(derived, name="SHARED")
+        # 4) Delete the unjournaled carrier — journals RT(derived, SHARED).
+        assert sdk.delete_entity(derived) is True
+        live = proj.g.query(
+            "MATCH (o:Object {name:'SHARED'}) RETURN o.id, o.status").result_set
+        assert live == [["ARBITRARY_ID", "live"]], (
+            f"the live Object was buried (or altered) by the delete. Got {live}")
+        # 5) Replay must agree with live — the durability contract of #2977.
+        replay = _drive("rebuild_all", tmp_path / "replay", events,
+                        "ARBITRARY_ID")
+        try:
+            got = replay.g.query(
+                "MATCH (o:Object {name:'SHARED'}) RETURN o.id, o.status"
+            ).result_set
+            assert got == [["ARBITRARY_ID", "live"]], (
+                "live/replay divergence (#3389): a public unjournaled rename "
+                "onto a shared name then delete buried the live Object on "
+                f"replay. Got {got}")
+        finally:
+            replay.close()
+    finally:
+        sdk.close()
+
+
+def test_hand_authored_journal_derived_id_no_longer_buries_the_name(tmp_path):
+    """#3389 FOLD side: the derived-id escape is gated to the supersede family.
+
+    Journal-driven pin for `_fold_object_match_and_apply`. The retraction's id
+    is the name's OWN canonical derived id, so the #2164 legacy supersede fold
+    legitimately short-circuits the id-identity guard — but the RETRACTION lane
+    must NOT: a derived-LOOKING id proves nothing about identity, and on replay
 
         OR(ARBITRARY_ID, SHARED)@0,
         RT(_entity_name_id("Object","SHARED"), SHARED)@1
-        -> SHARED/ARBITRARY_ID is BURIED   (this test pins exactly that)
 
-    The retraction's id is the name's OWN canonical derived id, so
-    `_derived_matches` is true and the name branch's id-identity guard is
-    short-circuited: the orphan's name folds onto the live, registered ID1
-    incarnation and buries it. A derived-LOOKING id proves nothing about
-    identity, so the discriminator is unsound — but #3389 scopes the fix to the
-    writer, and each attempt to patch this rule over six review cycles opened
-    the next hole.
+    must leave SHARED/ARBITRARY_ID LIVE (the journal never retracted it).
 
-    This pins the CURRENT, still-buried outcome for the hand-authored-journal
-    case only. It does NOT imply the public SDK path is affected: the public
-    surface no longer produces this shape, which
-    `test_public_sdk_path_does_not_bury_a_live_object_by_name` certifies.
+    Replaces
+    `test_hand_authored_journal_derived_id_still_buries_the_name_known_limitation`,
+    which pinned the BURIAL as a known limitation. The fix gates the escape on
+    the lane discriminator (`skip_terminal is None` = supersede); the legacy
+    supersede fold is untouched and remains pinned by
+    `test_status_projection.py::TestProjectionFold::
+    test_rebuild_all_legacy_idless_object_fold_survives`.
 
-    If this assertion starts FAILING, someone changed the fold — invert this pin
-    deliberately (and check `test_rebuild_all_legacy_idless_object_fold_survives`
-    still passes: widening or removing the guard reinstates the #2164 legacy-fold
-    break). Do not read a passing `live` here as coverage of the public surface.
+    If this assertion starts FAILING (SHARED back to `retracted`), the escape
+    was un-gated — and re-check the legacy supersede fold, because a fix that
+    WIDENS or REMOVES the guard reinstates the #2164 break.
     """
     events = tmp_path / "events"
     events.mkdir(exist_ok=True)
@@ -2340,11 +2440,10 @@ def test_hand_authored_journal_derived_id_still_buries_the_name_known_limitation
     try:
         rows = {r[0]: r[1] for r in proj.g.query(
             "MATCH (o:Object) RETURN o.name, o.status").result_set}
-        assert rows.get("SHARED") == "retracted", (
-            "KNOWN LIMITATION (#3389 — fold side): a hand-authored journal's "
-            "derived-looking id short-circuits `_derived_matches` and buries "
-            "the name-sharing live Object. This test PINS the fold-side defect "
-            "so it stays visible; the public SDK path no longer reaches it. "
-            f"Got {rows}")
+        assert rows.get("SHARED") == "live", (
+            "a retraction whose id is a derived-LOOKING id but anchors nothing "
+            "must NOT bury the live Object that shares its name — the "
+            "derived-id escape is supersede-family-only (#3389). Got "
+            f"{rows}")
     finally:
         proj.close()
