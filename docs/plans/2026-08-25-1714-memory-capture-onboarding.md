@@ -667,5 +667,5 @@ fingerprint_recurrence_last_cycle: null
 9. **[P2]** The multi-process click-dedupe case (two API processes against one store) is #3514's.
 10. **[HUMAN]** One batch vs split for execution (§6, open decision 3), plus §6's two other open decisions (CLI-backfill timestamp admissibility; the "delete captured sessions" closure).
 
-**Triage record — the intervention that produced §8.** The cycle-5 recurring register was dispositioned **13 pushed down / 4 resolved here / 1 human**, every pushed-down row carrying a comment on its owning issue recording the resolution and the new ownership: **#3512, #3513, #3514, #3515, #3516, #3517, #3540, #3551, #3552, #3553, #3554** (16 comments, including the cycle-6/7 follow-ups on the same issues). Cycle 6's findings were dispositioned the same way (6 further push-downs, 10 more comments).
+**Triage record — the intervention that produced §8.** The cycle-5 recurring register was dispositioned **13 pushed down / 4 resolved here / 1 human**, every pushed-down row carrying a comment on its owning issue recording the resolution and the new ownership: **#3512, #3513, #3514, #3515, #3516, #3517, #3540, #3551, #3552, #3553, #3554** — **23 comments across those 11 issues** (7 after the cycle-5 triage, 10 after cycle 6, 6 after cycle 7). Cycle 6's findings were dispositioned the same way.
 
