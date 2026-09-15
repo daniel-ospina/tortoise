@@ -616,7 +616,9 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
     (redirect target is a constant, so this is safe on stale-DNS runs).
     Local dev / *.pages.dev previews pass through with 200 — not indexed,
     and the E2E suite runs against a dev server — so the 301 half is
-    asserted only against the production company host."""
+    asserted only against the production company host. Two exceptions are
+    redirect-by-design on every host: /signin (consolidation → /auth) and
+    /welcome (#3501: a pure server redirect, so it never serves a 200 body)."""
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     # The full company-host consolidation surface of the middleware
     # TORTOISE_ONLY set (extensionless forms; .html/trailing-slash variants
@@ -641,10 +643,27 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
             # Dev/preview pass-through: most tortoise-only pages serve
             # 200; the auth consolidation 301s apply on EVERY host, so
             # /signin → /auth here too (single auth page).
-            expected_dev = 301 if path == "/signin" else 200
+            #
+            # /welcome is 302 by design since #3501: `functions/welcome.ts` is a
+            # pure server redirect (signed-in → the app origin, anonymous →
+            # /auth). It has no HTML to serve, so a 200 here would mean the
+            # redirect was REMOVED and the page has silently become a rendered
+            # page again — the exact regression this asserts against.
+            expected_dev = {
+                "/signin": 301,
+                "/welcome": 302,
+            }.get(path, 200)
             assert r.status == expected_dev, (
                 f"{path} on {BASE_URL} → {r.status} (expected {expected_dev} dev pass-through)"
             )
+            if path == "/welcome":
+                location = r.headers.get("location") or ""
+                assert "/auth" in location, (
+                    f"anonymous /welcome must be redirected to /auth, got {location!r}"
+                )
+                assert location.startswith("/"), (
+                    f"/welcome must stay same-origin in dev, got {location!r}"
+                )
 
 
 @TORTOISE_HOST_SKIP

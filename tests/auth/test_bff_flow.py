@@ -15,6 +15,7 @@ Each assertion maps to a contract in SCOPE.md, named in the test.
 """
 from __future__ import annotations
 
+import contextlib
 import http.cookiejar
 import json
 import os
@@ -29,7 +30,6 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-
 from bff_test_helpers import require_toolchain
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -93,10 +93,8 @@ class Proc:
         )
 
     def stop(self):
-        try:
+        with contextlib.suppress(Exception):
             os.killpg(os.getpgid(self.p.pid), signal.SIGTERM)
-        except Exception:
-            pass
 
 
 @pytest.fixture(scope="module")
@@ -156,10 +154,8 @@ def stack():
         app.stop()
         mock.stop()
         out = b""
-        try:
+        with contextlib.suppress(Exception):
             out = app.p.stdout.read() if app.p.stdout else b""
-        except Exception:
-            pass
         pytest.fail(f"pages dev failed to start; output:\n{out.decode('utf-8', 'replace')[-3000:]}")
     time.sleep(2.0)  # let the function bundler finish
     yield {"app": APP, "mock": MOCK_URL}
@@ -176,13 +172,13 @@ class _LocalhostSecurePolicy(http.cookiejar.DefaultCookiePolicy):
     with the application — a false negative that would have masked real bugs.
     """
 
-    def return_ok_secure(self, cookie, request):  # noqa: N802 (stdlib signature)
+    def return_ok_secure(self, cookie, request):
         host = request.get_full_url() or ""
         if host.startswith("http://127.0.0.1") or host.startswith("http://localhost"):
             return True
         return super().return_ok_secure(cookie, request)
 
-    def set_ok_domain(self, cookie, request):  # noqa: N802
+    def set_ok_domain(self, cookie, request):
         # A `__Host-` cookie legitimately has no Domain attribute.
         return super().set_ok_domain(cookie, request)
 
@@ -347,7 +343,7 @@ def test_callback_with_forged_flow_cookie_is_rejected(stack):
 
     opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with opener.open(req, timeout=30) as r:  # noqa: S310
+        with opener.open(req, timeout=30) as r:
             status, headers = r.status, dict(r.headers)
     except urllib.error.HTTPError as e:
         status, headers = e.code, dict(e.headers)
@@ -394,7 +390,7 @@ def _fault(**kwargs) -> dict:
     data = json.dumps(kwargs).encode()
     req = urllib.request.Request(f"{MOCK_URL}/__mock/fault", method="POST", data=data)
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read().decode())
 
 
@@ -437,7 +433,7 @@ def test_legacy_bearer_provider_outage_is_503_not_401(stack):
         req.add_header("Authorization", "Bearer legacy-token")
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=30) as r:
                 status, body = r.status, r.read().decode()
         except urllib.error.HTTPError as e:
             status, body = e.code, e.read().decode()
@@ -459,7 +455,7 @@ def _blog_admin(user_id: str | None = None, clear: bool = False) -> dict:
     data = json.dumps(payload).encode()
     req = urllib.request.Request(f"{MOCK_URL}/__mock/blog-admin", method="POST", data=data)
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read().decode())
 
 
@@ -468,7 +464,7 @@ def _purge_with_bearer() -> tuple[int, str]:
     req.add_header("Authorization", "Bearer legacy-token")
     req.add_header("Content-Type", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=30) as r:
             return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()
@@ -528,7 +524,7 @@ def test_signout_revokes_the_row_not_just_the_cookie(stack):
     req2 = urllib.request.Request(f"{APP}/api/session", method="GET")
     req2.add_header("Cookie", f"__Host-session={handle}")
     try:
-        with urllib.request.urlopen(req2, timeout=30) as r:  # noqa: S310
+        with urllib.request.urlopen(req2, timeout=30) as r:
             status, body = r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         status, body = e.code, e.read().decode()
@@ -634,7 +630,7 @@ def test_malformed_cookie_does_not_500(stack):
         req = urllib.request.Request(f"{APP}{path}", method="POST" if "purge" in path else "GET")
         req.add_header("Cookie", "__Host-session=%")
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=30) as r:
                 status = r.status
         except urllib.error.HTTPError as e:
             status = e.code
@@ -681,10 +677,11 @@ def test_dead_refresh_token_401s_consistently(stack):
     # Force the session's refresh token to be unusable.
     _fault(refreshDead=True)
     try:
-        s1, b1, _ = j.get(f"{APP}/api/session")
+        s1, _b1, _ = j.get(f"{APP}/api/session")
         # Clear the cached access token so the next call must refresh into the
         # dead-token path rather than serving from the D1 cache.
-        import sqlite3, glob
+        import glob
+        import sqlite3
 
         for db in glob.glob(str(WEBSITE_DIR / ".wrangler/state/v3/d1/**/*.sqlite"), recursive=True):
             try:
@@ -718,7 +715,6 @@ def test_dead_bff_cookie_does_not_fall_back_to_a_legacy_bearer(stack):
     refused. Deleting the `presentedBffCookie` guard makes this fail: the bearer
     would be accepted and the admin gate reached.
     """
-    import http.cookiejar
 
     # Grant the mock user admin rights, so an ACCEPTED bearer gets past the gate
     # and the two outcomes are distinguishable.
@@ -730,7 +726,7 @@ def test_dead_bff_cookie_does_not_fall_back_to_a_legacy_bearer(stack):
         req.add_header("Authorization", "Bearer legacy-token")
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=30) as r:
                 status, body = r.status, r.read().decode()
         except urllib.error.HTTPError as e:
             status, body = e.code, e.read().decode()
@@ -790,7 +786,7 @@ def test_expired_session_is_401_on_both_endpoints(stack):
     req = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
     req.add_header("Cookie", f"__Host-session={handle}")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=30) as r:
             s_proxy, b_proxy = r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         s_proxy, b_proxy = e.code, e.read().decode()
@@ -805,7 +801,7 @@ def test_expired_session_is_401_on_both_endpoints(stack):
     req2 = urllib.request.Request(f"{APP}/api/session", method="GET")
     req2.add_header("Cookie", f"__Host-session={handle}")
     try:
-        with urllib.request.urlopen(req2, timeout=30) as r:  # noqa: S310
+        with urllib.request.urlopen(req2, timeout=30) as r:
             s_sess, b_sess = r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         s_sess, b_sess = e.code, e.read().decode()
@@ -834,7 +830,7 @@ def test_deprecated_verify_type_is_refused_by_upstream(stack):
             headers={"Content-Type": "application/json"}, method="POST",
         )
         try:
-            with u.urlopen(req, timeout=20) as r:  # noqa: S310
+            with u.urlopen(req, timeout=20) as r:
                 return r.status
         except urllib.error.HTTPError as e:
             return e.code

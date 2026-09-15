@@ -16,12 +16,12 @@ Opt-in via AUTH_CLICKTHROUGH=1.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -59,10 +59,9 @@ def _stop(proc) -> None:
     try:
         proc.wait(timeout=15)
     except Exception:
-        try:
+        # Escalate to SIGKILL; the process may already be gone, which is fine.
+        with contextlib.suppress(Exception):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
-            pass
 
 
 def _wait(port: int, timeout: float = 90.0) -> bool:

@@ -22,6 +22,7 @@ made that unsafe, and both produced GREEN tests asserting nothing:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import socket
@@ -91,7 +92,6 @@ def stop(proc) -> None:
     try:
         proc.wait(timeout=15)
     except Exception:
-        try:
+        # Escalate to SIGKILL; the process may already be gone, which is fine.
+        with contextlib.suppress(Exception):
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:
-            pass

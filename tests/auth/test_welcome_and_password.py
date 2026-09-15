@@ -31,7 +31,6 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-
 from bff_test_helpers import pick_free_port, require_toolchain, stop
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -109,7 +108,7 @@ def stack():
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Surface redirects instead of following them — the assertion IS the Location."""
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
@@ -122,7 +121,7 @@ def _req(path: str, cookie: str | None = None, method: str = "GET", body: dict |
         req.add_header("Content-Type", "application/json")
     opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with opener.open(req, timeout=45) as r:  # noqa: S310
+        with opener.open(req, timeout=45) as r:
             return r.status, r.read().decode(), dict(r.headers)
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode(), dict(e.headers)
@@ -141,7 +140,7 @@ def _session_cookie() -> str:
 
     jar = http.cookiejar.CookieJar(policy=Policy())
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    with opener.open(f"{APP}/auth/start", timeout=45) as r:  # noqa: S310
+    with opener.open(f"{APP}/auth/start", timeout=45) as r:
         r.read()
     for c in jar:
         if c.name == "__Host-session":
@@ -243,7 +242,7 @@ def test_update_password_revokes_the_session(stack):
 
     jar = http.cookiejar.CookieJar(policy=_Policy())
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    with opener.open(f"{APP}/auth/start", timeout=45) as r:  # noqa: S310
+    with opener.open(f"{APP}/auth/start", timeout=45) as r:
         r.read()
     handle = next((c.value for c in jar if c.name == "__Host-session"), None)
     assert handle, "sign-in produced no session"

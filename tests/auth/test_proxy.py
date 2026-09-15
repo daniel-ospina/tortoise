@@ -22,7 +22,6 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-
 from bff_test_helpers import pick_free_port, require_toolchain, stop
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -112,7 +111,7 @@ def _session_cookie() -> str:
 
     jar = http.cookiejar.CookieJar(policy=Policy())
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-    with opener.open(f"{APP}/auth/start", timeout=45) as r:  # noqa: S310
+    with opener.open(f"{APP}/auth/start", timeout=45) as r:
         r.read()
     for c in jar:
         if c.name == "__Host-session":
@@ -123,7 +122,7 @@ def _session_cookie() -> str:
 def test_anonymous_proxy_call_is_401(proxied):
     req = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=30) as r:
             status, body = r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         status, body = e.code, e.read().decode()
@@ -135,7 +134,7 @@ def test_proxy_attaches_credential_server_side(proxied):
     cookie = _session_cookie()
     req = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
     req.add_header("Cookie", cookie)
-    with urllib.request.urlopen(req, timeout=45) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=45) as r:
         status, body = r.status, r.read().decode()
     assert status == 200, f"expected proxied 200, got {status} {body}"
 
@@ -154,7 +153,7 @@ def _fault(**kwargs) -> dict:
     data = json.dumps(kwargs).encode()
     req = urllib.request.Request(f"{MOCK_URL}/__mock/fault", method="POST", data=data)
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read().decode())
 
 
@@ -162,7 +161,7 @@ def test_credential_never_reaches_the_browser(proxied):
     cookie = _session_cookie()
     req = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
     req.add_header("Cookie", cookie)
-    with urllib.request.urlopen(req, timeout=45) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=45) as r:
         raw = r.read().decode()
         headers = dict(r.headers)
 
@@ -189,7 +188,7 @@ def test_upstream_failure_is_503_not_401(proxied):
         req = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
         req.add_header("Cookie", cookie)
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=30) as r:
                 status, body = r.status, r.read().decode()
         except urllib.error.HTTPError as e:
             status, body = e.code, e.read().decode()
@@ -208,7 +207,7 @@ def _refresh_grants(reset: bool = False) -> int:
     data = json.dumps({"reset": True} if reset else {}).encode()
     req = urllib.request.Request(f"{MOCK_URL}/__mock/stats", method="POST", data=data)
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read().decode())["refreshGrants"]
 
 
@@ -217,7 +216,7 @@ def _seen_paths(reset: bool = False) -> list[str]:
     data = json.dumps({"reset": True} if reset else {}).encode()
     req = urllib.request.Request(f"{MOCK_URL}/__mock/paths", method="POST", data=data)
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=15) as r:
         return json.loads(r.read().decode())["paths"]
 
 
@@ -238,7 +237,7 @@ def test_upstream_401_is_503_and_does_not_storm_refreshes(proxied):
     # Warm the token cache BEFORE measuring, so the baseline is a cached token.
     req0 = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
     req0.add_header("Cookie", cookie)
-    with urllib.request.urlopen(req0, timeout=30) as r:  # noqa: S310
+    with urllib.request.urlopen(req0, timeout=30) as r:
         r.read()
 
     _refresh_grants(reset=True)
@@ -249,7 +248,7 @@ def test_upstream_401_is_503_and_does_not_storm_refreshes(proxied):
             req = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
             req.add_header("Cookie", cookie)
             try:
-                with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+                with urllib.request.urlopen(req, timeout=30) as r:
                     statuses.append(r.status)
             except urllib.error.HTTPError as e:
                 statuses.append(e.code)
@@ -298,7 +297,7 @@ def test_proxy_cannot_escape_the_v1_prefix(proxied):
         req = urllib.request.Request(f"{APP}{hostile}", method="GET")
         req.add_header("Cookie", cookie)
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=30) as r:
                 status = r.status
                 r.read()
         except urllib.error.HTTPError as e:
@@ -332,7 +331,7 @@ def test_proxy_forwards_a_legitimate_nested_path(proxied):
     cookie = _session_cookie()
     req = urllib.request.Request(f"{APP}/api/v1/teams/abc/members", method="GET")
     req.add_header("Cookie", cookie)
-    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=30) as r:
         assert r.status == 200
         assert json.loads(r.read().decode())["path"] == "/v1/teams/abc/members"
 
@@ -342,7 +341,7 @@ def test_unknown_handle_is_401(proxied):
     req = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
     req.add_header("Cookie", "__Host-session=deadbeef")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=30) as r:
             status, body = r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         status, body = e.code, e.read().decode()
@@ -358,7 +357,7 @@ def test_websocket_upgrade_is_refused_explicitly(proxied):
     req.add_header("Upgrade", "websocket")
     req.add_header("Connection", "Upgrade")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=30) as r:
             status, body = r.status, r.read().decode()
     except urllib.error.HTTPError as e:
         status, body = e.code, e.read().decode()
@@ -370,6 +369,6 @@ def test_proxy_response_is_not_cacheable(proxied):
     cookie = _session_cookie()
     req = urllib.request.Request(f"{APP}/api/v1/teams", method="GET")
     req.add_header("Cookie", cookie)
-    with urllib.request.urlopen(req, timeout=45) as r:  # noqa: S310
+    with urllib.request.urlopen(req, timeout=45) as r:
         cc = r.headers.get("Cache-Control", "")
     assert "no-store" in cc, f"authenticated proxy response must not be cached: {cc!r}"
