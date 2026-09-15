@@ -852,7 +852,7 @@ def _stamp_backup_latest(source, org_id: str, ts: str) -> None:
     """
     if _is_supabase_source(source):
         source.query(
-            "teams", method="PATCH", filters=[("id", "eq", org_id)],
+            "organizations", method="PATCH", filters=[("id", "eq", org_id)],
             json_body={"backup_latest_at": ts},
         )
     else:
@@ -871,7 +871,7 @@ def _stamp_backup_restored(source, org_id: str, ts: str | None = None) -> None:
     ts = ts or datetime.now(timezone.utc).isoformat()  # noqa: UP017
     if _is_supabase_source(source):
         source.query(
-            "teams", method="PATCH", filters=[("id", "eq", org_id)],
+            "organizations", method="PATCH", filters=[("id", "eq", org_id)],
             json_body={"backup_restored_at": ts},
         )
     else:

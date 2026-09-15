@@ -236,7 +236,7 @@ def enumerate_orgs(source) -> list[str]:
     try:
         _refuse_wrong_dialect(source)
         if _is_supabase_source(source):
-            rows = source.query("teams", select=["id", "graph_name"])
+            rows = source.query("organizations", select=["id", "graph_name"])
             return [str(r["id"]) for r in rows if r.get("id")]
         rows = source.query("MATCH (t:Team) RETURN t.id").result_set
         return [str(r[0]) for r in rows if r and r[0]]
@@ -258,7 +258,7 @@ def enumerate_eligible_orgs(source) -> list[str]:
         _refuse_wrong_dialect(source)
         if _is_supabase_source(source):
             rows = source.query(
-                "teams",
+                "organizations",
                 select=["id", "graph_name"],
                 filters=[("tier", "neq", "free"), ("backup_enabled", "eq", True)],
             )
@@ -289,7 +289,7 @@ def org_graph_name(source, org_id: str) -> str:
     if _is_supabase_source(source):
         try:
             rows = source.query(
-                "teams", select=["graph_name"], filters=[("id", "eq", org_id)]
+                "organizations", select=["graph_name"], filters=[("id", "eq", org_id)]
             )
         except Exception as e:
             raise RuntimeError(

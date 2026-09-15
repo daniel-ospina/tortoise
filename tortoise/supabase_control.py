@@ -484,7 +484,7 @@ def _orgs_row_fail_soft(cp, org_id: str, *, select: list[str],
         dropped = {c for tier in additive_tiers[:k] for c in tier}
         attempt_select = [c for c in select if c not in dropped]
         try:
-            rows = cp.query("teams", select=attempt_select,
+            rows = cp.query("organizations", select=attempt_select,
                             filters=[("id", "eq", org_id)])
             break
         except Exception as e:
@@ -991,7 +991,7 @@ def set_dashboard_key_login(cp, org_id: str, enabled: bool) -> None:
     return 403 dashboard_login_disabled; graph endpoints keep accepting the
     key. Anon orgs always keep it true (the Protect screen IS the bootstrap)."""
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
         filters=[("id", "eq", org_id)],
         json_body={"dashboard_key_login": bool(enabled)},
@@ -1475,7 +1475,7 @@ def org_onboarding_state(cp, org_id: str) -> dict | None:
     # time hosted_api is fully loaded.
     from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
     rows = cp.query(
-        "teams", select=["onboarding_state"], filters=[("id", "eq", org_id)]
+        "organizations", select=["onboarding_state"], filters=[("id", "eq", org_id)]
     )
     if not rows:
         return None
@@ -1495,7 +1495,7 @@ def update_onboarding_state(cp, org_id: str, state_dict: dict) -> None:
     error, never silently lose progress.
     """
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
         filters=[("id", "eq", org_id)],
         json_body={"onboarding_state": state_dict},
@@ -1504,7 +1504,7 @@ def update_onboarding_state(cp, org_id: str, state_dict: dict) -> None:
 
 def org_email(cp, org_id: str) -> str | None:
     """Read ``teams.email`` for an org (None when the row is missing)."""
-    rows = cp.query("teams", select=["email"], filters=[("id", "eq", org_id)])
+    rows = cp.query("organizations", select=["email"], filters=[("id", "eq", org_id)])
     return rows[0]["email"] if rows else None
 
 
@@ -1512,14 +1512,14 @@ def org_name(cp, org_id: str) -> str | None:
     """Read ``teams.name`` (the org display name) for an org (None when the
     row is missing) — #1999 (W3) hosted seed anchor data (DM-3: org display
     name ← teams.name, never invented)."""
-    rows = cp.query("teams", select=["name"], filters=[("id", "eq", org_id)])
+    rows = cp.query("organizations", select=["name"], filters=[("id", "eq", org_id)])
     return rows[0]["name"] if rows else None
 
 
 def update_org_email(cp, org_id: str, email: str) -> None:
     """PATCH ``teams`` SET email (onboarding flow writes the signup email)."""
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
         filters=[("id", "eq", org_id)],
         json_body={"email": email},
@@ -1531,7 +1531,7 @@ def org_onboarding_email_sent(cp, org_id: str) -> bool | None:
     provider (teams.onboarding_email_sent_at set); False when unset; None
     when the org row does not exist."""
     rows = cp.query(
-        "teams", select=["onboarding_email_sent_at"],
+        "organizations", select=["onboarding_email_sent_at"],
         filters=[("id", "eq", org_id)],
     )
     if not rows:
@@ -1547,7 +1547,7 @@ def set_org_onboarding_email_sent(cp, org_id: str) -> bool:
     replay raced us) returns False and the provider Idempotency-Key
     ``onboarding:{org_id}`` collapsed the duplicate send."""
     rows = cp.query(
-        "teams",
+        "organizations",
         select=["id"],
         filters=[("id", "eq", org_id),
                  ("onboarding_email_sent_at", "is", None)],
@@ -1710,7 +1710,7 @@ def github_credentials(cp, org_id: str) -> dict:
     when the org row is missing).
     """
     rows = cp.query(
-        "teams",
+        "organizations",
         select=["github_token_enc", "github_org"],
         filters=[("id", "eq", org_id)],
     )
@@ -1731,7 +1731,7 @@ def store_github_credentials(cp, org_id: str, *, token_enc: str, org: str) -> No
     replaced, so rotation needs no separate endpoint or background job.
     """
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
         filters=[("id", "eq", org_id)],
         json_body={"github_token_enc": token_enc, "github_org": org},
@@ -1761,7 +1761,7 @@ def soft_delete_org(cp, org_id: str, now: str | None = None,
     Idempotent: re-stamping an already-deleted org is a no-op PATCH.
     """
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
         filters=[("id", "eq", org_id)],
         json_body={"deleted_at": now or _now_iso(), "grace_hours": grace_hours},
@@ -1835,7 +1835,7 @@ def purge_org_control_plane(cp, org_id: str) -> None:
     cp.query("api_keys", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("org_memberships", method="DELETE", filters=[("org_id", "eq", org_id)])
     cp.query("invitations", method="DELETE", filters=[("org_id", "eq", org_id)])
-    cp.query("teams", method="DELETE", filters=[("id", "eq", org_id)])
+    cp.query("organizations", method="DELETE", filters=[("id", "eq", org_id)])
 
 
 # ── Task 8 writer inventory: keys + members + provisioning (#765) ────────────
@@ -2218,13 +2218,13 @@ def is_anon_org(cp, org_id: str) -> bool:
 
 def org_by_email(cp, email: str) -> dict | None:
     """Org row for an email (register idempotency — 409 already_registered)."""
-    rows = cp.query("teams", select=["id"], filters=[("email", "eq", email)])
+    rows = cp.query("organizations", select=["id"], filters=[("email", "eq", email)])
     return rows[0] if rows else None
 
 
 def org_by_name(cp, name: str) -> dict | None:
     """Org row for a name (create_org duplicate-name 409)."""
-    rows = cp.query("teams", select=["id"], filters=[("name", "eq", name)])
+    rows = cp.query("organizations", select=["id"], filters=[("name", "eq", name)])
     return rows[0] if rows else None
 
 
@@ -2472,7 +2472,7 @@ def graph_metadata(cp, org_id: str) -> list[dict]:
     dashboard.
     """
     rows = cp.query(
-        "teams", select=["id", "graph_name"], filters=[("id", "eq", org_id)]
+        "organizations", select=["id", "graph_name"], filters=[("id", "eq", org_id)]
     )
     if not rows or not rows[0].get("graph_name"):
         return []
@@ -2707,7 +2707,7 @@ def set_graph_name(cp, org_id: str, graph_id: str, name: str) -> bool:
     import uuid as _uuid
     from datetime import UTC, datetime
     tro = cp.query(
-        "teams", select=["graph_name"], filters=[("id", "eq", org_id)])
+        "organizations", select=["graph_name"], filters=[("id", "eq", org_id)])
     org_graph_name = tro[0].get("graph_name") if tro else None
     gid = f"g_{_uuid.uuid4().hex[:16]}"
     try:
@@ -2790,7 +2790,7 @@ def set_graph_recording(cp, org_id: str, graph_id: str,
     gid = f"g_{_uuid.uuid4().hex[:16]}"
     from datetime import UTC, datetime
     tro = cp.query(
-        "teams", select=["graph_name"], filters=[("id", "eq", org_id)])
+        "organizations", select=["graph_name"], filters=[("id", "eq", org_id)])
     org_graph_name = tro[0].get("graph_name") if tro else None
     try:
         cp.query(
@@ -2872,7 +2872,7 @@ def org_id_for_stripe_customer(cp, customer_id: str) -> str | None:
     binding" — Stripe stops retrying).
     """
     rows = cp.query(
-        "teams", select=["id"], filters=[("stripe_customer_id", "eq", customer_id)]
+        "organizations", select=["id"], filters=[("stripe_customer_id", "eq", customer_id)]
     )
     return rows[0]["id"] if rows else None
 
@@ -2897,7 +2897,7 @@ def update_org_billing(cp, org_id: str, updates: dict) -> None:
     if not body:
         return
     cp.query(
-        "teams",
+        "organizations",
         method="PATCH",
         filters=[("id", "eq", org_id)],
         json_body=body,
@@ -2936,7 +2936,7 @@ def org_tier(cp, org_id: str) -> str | None:
     """Current tier from the orgs row (webhook analytics twin of the
     registry tier read). #1082 PR2: derives the anon ceiling — an
     unclaimed zero-email org resolves to ``anon`` until claimed."""
-    rows = cp.query("teams", select=["tier"], filters=[("id", "eq", org_id)])
+    rows = cp.query("organizations", select=["tier"], filters=[("id", "eq", org_id)])
     if not rows:
         return None
     from tortoise.quota import derived_tier

@@ -664,7 +664,7 @@ def _iter_registered_orgs() -> list[dict]:
         )
         if is_supabase_enabled():
             rows = get_control_plane().query(
-                "teams", select=["id", "name"],
+                "organizations", select=["id", "name"],
                 filters=[("deleted_at", "is", None)],
             )
             return [{"org_id": r["id"], "name": r.get("name")} for r in rows]
@@ -2372,7 +2372,7 @@ _HEALTH_PROBE = HealthProbe(lambda: _probe_db(),
 def _probe_control_plane() -> dict:
     """Bounded Supabase control-plane probe (#2850 item 6). Never raises.
 
-    ``/health/ready`` used to run ``get_control_plane().query("teams", ...)``
+    ``/health/ready`` used to run ``get_control_plane().query("organizations", ...)``
     DIRECTLY on the event loop with no timeout — the same hazard as the
     FalkorDB half: a black-holed PostgREST endpoint blocked EVERY request in
     the process, not just the readiness check. It now runs on the probe's own
@@ -2399,7 +2399,7 @@ def _probe_control_plane() -> dict:
         # request that outruns it strands a worker until that request
         # completes on its own.
         get_control_plane().query(
-            "teams", select=["id"], limit=1,
+            "organizations", select=["id"], limit=1,
             timeout=httpx.Timeout(**CONTROL_PLANE_PROBE_PHASES))
     except Exception as exc:  # never raise, always report
         return {"ok": False,
@@ -14544,7 +14544,7 @@ def _stamp_import_prop(source, org_id: str, prop: str, value: str) -> None:
         raise ValueError(f"unexpected import prop {prop!r}")
     if _is_supabase_source(source):
         source.query(
-            "teams", method="PATCH", filters=[("id", "eq", org_id)],
+            "organizations", method="PATCH", filters=[("id", "eq", org_id)],
             json_body={prop: value},
         )
     else:
@@ -15426,7 +15426,7 @@ def _purge_deleted_orgs() -> None:
         if is_supabase_enabled():
             cp = get_control_plane()
             for row in cp.query(
-                "teams",
+                "organizations",
                 select=["id", "graph_name", "grace_hours", "deleted_at"],
                 filters=[("deleted_at", "lte", env_cutoff)],
             ):
@@ -21399,7 +21399,7 @@ def _reconcile_acl_users_sync() -> dict:
                             "acl_absent_skipped": skipped,
                             "default_skipped": defaults,
                             "errors": errors}
-    return {"status": "reconciled", "teams": len(results), "results": results}
+    return {"status": "reconciled", "organizations": len(results), "results": results}
 
 
 @app.post("/v1/internal/backups/acl-reconcile")

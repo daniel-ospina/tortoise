@@ -384,7 +384,7 @@ class SupabaseAbuseStore:
         return bool(rows)
 
     def _org_field(self, org_id: str, field: str):
-        rows = self._cp.query("teams", select=[field],
+        rows = self._cp.query("organizations", select=[field],
                               filters=[("id", "eq", org_id)])
         return rows[0].get(field) if rows else None
 
@@ -395,14 +395,14 @@ class SupabaseAbuseStore:
                   details: dict | None = None,
                   now: datetime | None = None) -> None:
         self._cp.query(
-            "teams", method="PATCH", filters=[("id", "eq", org_id)],
+            "organizations", method="PATCH", filters=[("id", "eq", org_id)],
             json_body={"flagged_at": _ensure_aware(_utcnow(now)).isoformat()},
         )
         self.record_event(org_id, EVENT_FLAG, rule=rule,
                           details={**(details or {}), "rule": rule})
 
     def clear_flag(self, org_id: str) -> None:
-        self._cp.query("teams", method="PATCH",
+        self._cp.query("organizations", method="PATCH",
                        filters=[("id", "eq", org_id)],
                        json_body={"flagged_at": None})
 

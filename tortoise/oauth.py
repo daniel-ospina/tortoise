@@ -395,7 +395,7 @@ def _selectable_orgs(cp, user_id: str) -> list[dict]:
     from tortoise.supabase_control import user_memberships
     out = []
     for m in user_memberships(cp, user_id):
-        rows = cp.query("teams", select=["name", "suspended_at"],
+        rows = cp.query("organizations", select=["name", "suspended_at"],
                         filters=[("id", "eq", m["org_id"])])
         if not rows or rows[0].get("suspended_at") is not None:
             continue
@@ -438,7 +438,7 @@ def _resolve_org(cp, user_id: str, base: str, resource: str | None) -> str:
 
 
 def _org_name(cp, org_id: str) -> str | None:
-    rows = cp.query("teams", select=["name"], filters=[("id", "eq", org_id)])
+    rows = cp.query("organizations", select=["name"], filters=[("id", "eq", org_id)])
     return rows[0].get("name") if rows else None
 
 
@@ -819,7 +819,7 @@ def _assert_org_usable(cp, org_id: str) -> None:
     """D5: a suspended org cannot mint/refresh tokens. The durable
     suspended_at check is the single rejection authority (mirrors the tt_
     path's #308 semantics)."""
-    rows = cp.query("teams", select=["suspended_at", "tier"],
+    rows = cp.query("organizations", select=["suspended_at", "tier"],
                     filters=[("id", "eq", org_id)])
     if not rows:
         raise OAuthError(403, "invalid_grant", "Team not found.")
@@ -875,7 +875,7 @@ def _owner_email_or(cp, org_id: str, fallback) -> str | None:
 
 
 def _org_row(cp, org_id: str) -> dict | None:
-    rows = cp.query("teams", select=[
+    rows = cp.query("organizations", select=[
         "id", "tier", "max_users", "max_graphs", "graph_size_cap",
         "max_points", "suspended_at", "flagged_at", "email",
     ], filters=[("id", "eq", org_id)])
