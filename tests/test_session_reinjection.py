@@ -20,8 +20,11 @@ Hermetic contract proven here (docker lane, dense leg pinned out):
   * (e) TR questions are excluded,
   * (f) the guard is a no-op on a single-session pool,
   * (g) guard OFF still re-caps through the same shared contract,
-  * (h) the census keys, the resolved-arm env gate, the CLI flags, the
-        fingerprint refusal, and the both-arms-ON ABORT (message + exit).
+  * (h) the census keys, the resolved-arm env gate, the CLI flags, and the
+        both-arms-ON ABORT (message + exit). The fingerprint-refusal and
+        arm-conflict gates are NOT here: they are hermetic run-level gates
+        and live in ``tests/test_session_reinjection_rules.py``, because
+        this module skips as a whole on an unavailable FalkorDB probe.
 
 Requires the docker lane's FTS backend — skips when unavailable.
 """
@@ -423,7 +426,7 @@ def test_guard_off_still_recaps(seeded_sdk):
     assert n_chunks_a == 2
 
 
-# ── (h) census keys + env gate + CLI + fingerprint + abort ───────────────
+# ── (h) census keys + env gate + CLI + abort ────────────────────────────
 
 _CENSUS_KEYS = {
     "on", "seed_window", "seed_limit", "seed_sessions", "seeded",

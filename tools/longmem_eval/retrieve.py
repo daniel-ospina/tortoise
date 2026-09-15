@@ -1639,8 +1639,11 @@ def retrieve_for_question(
     }
 
     # ── C4 (#2517/#2568, #2513): source-session re-injection — from the
-    # SEEDED reader-reachable pool head (a RANK trigger, label-free: never
-    # a stored/read-time mark, which the product does not have), fetch the
+    # SEEDED rank-window approximation of the reader-reachable pool head
+    # (a RANK trigger, label-free: never a stored/read-time mark, which the
+    # product does not have; the window is conservative, not the reader's
+    # admitted set — see session_reinjection.DEFAULT_REINJECTION_SEED_WINDOW),
+    # fetch the
     # rest of each seeded session's raw chunks in ONE batched query and
     # splice them back immediately after that session's LAST base hit —
     # additive, so an injected chunk can never evict a base chunk; the

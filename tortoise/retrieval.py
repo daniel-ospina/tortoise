@@ -304,8 +304,8 @@ def session_key_of(hit: dict) -> str:
     the module stays a stdlib-only leaf at import time).
 
     Collapse semantics (deliberate, pinned by
-    ``test_session_key_of`` and ``test_session_key_matches_the_historical
-    _bucket_key``): a hit carrying NEITHER ``session_id`` NOR
+    ``tests/test_session_reinjection_rules.py::test_session_key_matches_
+    the_historical_bucket_key``): a hit carrying NEITHER ``session_id`` NOR
     ``lme_session_index`` maps to the single bucket ``idx:-1``. Two
     identity-less hits therefore cap together under the C5 per-session
     cap, and :func:`seeded_sessions` drops them all as phantom ``idx:``

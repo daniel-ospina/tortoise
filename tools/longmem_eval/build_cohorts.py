@@ -26,7 +26,10 @@ Usage::
     python -m tools.longmem_eval.build_cohorts --cohort tail
 
 Writes ``longmemeval_2517_<cohort>.json`` (the same list-of-question shape
-``--data`` consumes) and prints the absolute paths.
+``--data`` consumes), a per-cohort provenance sidecar
+``longmemeval_2517_<cohort>.provenance.json`` (source, source sha256,
+``verified``, selectors, the cohort's own sha256), and prints the absolute
+paths.
 """
 from __future__ import annotations
 
@@ -63,9 +66,12 @@ def _verify_source(path: Path, *, allow_unpinned: bool = False) -> tuple[str, bo
     A basename that matches a known split MUST match its ``SPLIT_DIGESTS``
     pin (a truncated or tampered corpus must never be sliced into a cohort
     that the receipt then pins a selector for). A basename that matches NO
-    known split is refused unless ``allow_unpinned`` is set — the run side
-    (``dataset.load_dataset``) performs no digest check at all, so this is
-    the only guard.
+    known split is refused unless ``allow_unpinned`` is set — on the path
+    the cohorts actually travel (``--data`` →
+    ``dataset.load_dataset(data_path=…)``) no digest check runs at all, so
+    this is the only guard there. (``load_dataset``'s cached-split branch
+    and the download path DO verify via ``_verify_digest``; the ``--data``
+    branch does not.)
 
     Returns ``(sha256, verified)``.
     """
@@ -107,25 +113,35 @@ def build_cohorts(source: Path) -> dict[str, list[dict]]:
     return {"tail": tail, "head": head}
 
 
-def _write_provenance(out_dir: Path, *, source: Path, sha256: str,
-                      verified: bool, products: dict[str, int]) -> Path:
-    """Persist how a cohort was built, NEXT TO the cohort files.
+def _write_provenance(out_dir: Path, *, name: str, source: Path,
+                      source_sha256: str, verified: bool,
+                      cohort_sha256: str, questions: int) -> Path:
+    """Persist how ONE cohort was built, next to that cohort file.
 
     The cohort payload stays the plain list-of-questions shape ``--data``
-    consumes; provenance lives in a sidecar so a cohort sliced from an
-    UNVERIFIED corpus (``--allow-unpinned-source`` → ``verified=false``)
-    can never be mistaken for a digest-verified one. Returns the path.
+    consumes; provenance lives in a PER-COHORT sidecar so a cohort sliced
+    from an UNVERIFIED corpus (``--allow-unpinned-source`` →
+    ``verified=false``) can never be mistaken for a digest-verified one.
+
+    Per-cohort (not one sidecar per directory) is load-bearing: the
+    builder runs once per ``--cohort`` invocation, so a single shared file
+    would be overwritten by the next build and leave an earlier cohort
+    beside it reading as digest-verified — exactly the confusion the
+    sidecar exists to prevent. ``cohort_sha256`` lets a reader validate
+    the cohort payload independently of the invocation that wrote it.
     """
-    prov = out_dir / "longmemeval_2517.provenance.json"
+    prov = out_dir / f"longmemeval_2517_{name}.provenance.json"
     prov.write_text(json.dumps({
+        "cohort": name,
+        "cohort_sha256": cohort_sha256,
+        "questions": questions,
         "source": str(source),
-        "source_sha256": sha256,
+        "source_sha256": source_sha256,
         "verified": verified,
         "selectors": {
             "tail": list(TAIL_SLICE),
             "head": [HEAD_TYPE, HEAD_N],
         },
-        "questions": products,
     }, indent=1) + "\n", encoding="utf-8")
     return prov
 
@@ -160,12 +176,16 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     for name in wanted:
         out = out_dir / f"longmemeval_2517_{name}.json"
-        out.write_text(json.dumps(cohorts[name]), encoding="utf-8")
+        payload = json.dumps(cohorts[name])
+        out.write_text(payload, encoding="utf-8")
         print(f"{name}: {len(cohorts[name])} questions -> {out}")
-    prov = _write_provenance(
-        out_dir, source=source, sha256=digest, verified=verified,
-        products={name: len(cohorts[name]) for name in wanted})
-    print(f"provenance: {prov}")
+        prov = _write_provenance(
+            out_dir, name=name, source=source, source_sha256=digest,
+            verified=verified,
+            cohort_sha256=hashlib.sha256(
+                payload.encode("utf-8")).hexdigest(),
+            questions=len(cohorts[name]))
+        print(f"provenance: {prov}")
     print(f"source: {source} sha256={digest} "
           f"verified={str(verified).lower()}")
     print(f"selectors: tail={TAIL_SLICE} head=({HEAD_TYPE}, first {HEAD_N})")

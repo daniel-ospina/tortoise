@@ -10,8 +10,10 @@ starved session sits at rank >= 6). This module ships the product rules
 as pure primitives plus ONE bounded graph pass:
 
 1. **SEED** — :func:`seeded_sessions`: the distinct REAL ``session_id``
-   values represented in the reader-reachable pool head, in first-seen
-   rank order, bounded by ``limit``. Label-free: the trigger is RANK, never
+   values represented in a conservative RANK-WINDOW approximation of the
+   reader-reachable pool head (``assemble_context`` skips claim-text-less
+   hits without spending a slot, #2978 — so this under-seeds by at most
+   those skipped hits), in first-seen rank order, bounded by ``limit``. Label-free: the trigger is RANK, never
    a stored/read-time mark (the mark-triggered variant was rejected as
    gold leakage — the product has no such mark; #2513 §1.1). The
    synthetic ``idx:N`` bucket key is dropped (it can never equal a graph
@@ -118,9 +120,13 @@ def seeded_sessions(pool: list[dict], *,
     ``pool[:window]``, in first-seen rank order, at most ``limit``.
 
     Deterministic and label-free — the only signal is the pool rank the
-    retrieval engine already produced. ``window`` is the reader-reachable
-    head (the eval derives it from the resolved reader item cap);
-    ``limit`` bounds the fan-out.
+    retrieval engine already produced. ``window`` is a CONSERVATIVE
+    RANK-WINDOW APPROXIMATION of the reader-reachable head (the eval
+    derives it from the resolved reader item cap), not the reader's
+    admitted set: :func:`retrieval.assemble_context` skips claim-text-less
+    hits (#2978) without spending an item slot, so the reader can admit
+    hits below this rank and a session reader-reachable only through such
+    a gap is not seeded. ``limit`` bounds the fan-out.
     """
     if not pool or window < 1 or limit < 1:
         return []
