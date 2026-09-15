@@ -5738,6 +5738,13 @@ def _cmd_key_create(args) -> int:
     # Seed the team_{team_id} graph the tools actually resolve (hosted parity).
     try:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #3390 WRITE-AHEAD: journal the seeded team_{team_id} graph BEFORE the
+        # CREATE materializes it. sdk.team_create above journaled team_{name} —
+        # a DIFFERENT graph — so this seed was otherwise an unjournaled team_*
+        # orphan, invisible to the journal-driven sweep. No-op outside a test
+        # session (the journal is a test-session artifact).
+        from tortoise.projection import journal_mint_write_ahead
+        journal_mint_write_ahead(f"team_{team_id}")
         team_graph = sdk._get_proj().db.select_graph(f"team_{team_id}")
         team_graph.query(
             "CREATE (:TeamMeta {name: $name, created: $now})",

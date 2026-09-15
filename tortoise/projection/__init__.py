@@ -570,6 +570,67 @@ def _journal_append_product(graph_name: str) -> None:
         ) from e
 
 
+def journal_mint_write_ahead(graph_name: str) -> None:
+    """#3390: WRITE-AHEAD mint journaling — journal the INTENDED name BEFORE
+    the graph is materialized.
+
+    Every product mint site used to materialize the graph and journal its
+    ownership *afterwards*::
+
+        graph.query(_init_q)              # effect
+        _journal_append_product(name)     # ownership record
+
+    A kill in that gap left a graph the session's journal did not own — an
+    ORPHAN. The journal is the ownership record the journal-driven own/stale
+    sweep (``_sweep_drop``) reads, so an orphan leaks — no journal-driven sweep
+    can see it (``wipe_server`` is fail-closed to the ``test_``/``tortoise_test``
+    prefixes and never touches ``team_*``) — makes the owned-set a rebuild
+    produces diverge from live (live != rebuild), and is reclaimable only by
+    the opt-in ``_sweep_team_strays`` pass. This seam reverses the order: the
+    ownership line is journaled FIRST, so at the sites that adopt it the CREATE
+    cannot run before the line — including the two
+    ``_make_sdk(namespace=team_id)._get_proj()`` lanes, which journal before the
+    projection is constructed (``Projection.__init__`` runs ``_ensure_indexes()``,
+    a query that MATERIALIZES the graph).
+
+    The guarantee is conditional on the append SUCCEEDING: on this base
+    ``_journal_append_product`` still swallows an append failure (logging at
+    DEBUG), so a silently-failed write-ahead append lets the CREATE proceed
+    unjournaled. The fail-closed half is #3379's raising variant (unmerged at
+    this base) — this ordering fix is its prerequisite, and the two should land
+    together.
+
+    The residual window is the harmless inverse — journaled-but-never-created:
+    the sweep's DETACH+DELETE of an absent graph succeeds (or logs and
+    continues, ``_drop_one_graph``), and the journal file is removed only when
+    every name dropped, so replay/rebuild converges. It is idempotent: a
+    duplicate line is set-equivalent for the sweep's owned-set delta and the
+    peer-protection read (``_live_peer_session_graphs``); a never-materialized
+    line only ADDS a name to that protected set, which can spare a graph from a
+    global sweep — it can never cause a delete.
+
+    Rollback handlers must NOT compensate by removing the line: the journaled
+    name is the ownership tombstone that lets the sweep clean up a graph whose
+    create partially landed — removing it would re-open the orphan window this
+    seam closes. Known residual (follow-up to #3390): the session's own sweep
+    (``_sweep_drop``) carries no live-peer skip (unlike ``wipe_server``'s #3074
+    guard), so a name whose create FAILED — or was never reached — here can be
+    dropped at session end while a concurrent session's same-named graph is
+    live; a pair of *successful* same-name mints already had that exposure, but
+    write-ahead adds the never-created case. A second residual: a namespaced SDK
+    whose namespace equals the team name (``TortoiseSDK(namespace=X)
+    .team_create(X)``) has its target ``team_X`` materialized by
+    ``self._get_proj()``'s ``_ensure_indexes`` before this seam at the SDK
+    team-mint site — journaling earlier would over-own an EXISTING team on the
+    duplicate-name early-return path, so the order is left as-is; no product
+    caller uses that shape today.
+
+    No-op outside a test session (``_journal_append_product`` is env- and
+    process-flag gated), exactly as the post-create call it replaces.
+    """
+    _journal_append_product(graph_name)
+
+
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers  # noqa: E402, I001
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
