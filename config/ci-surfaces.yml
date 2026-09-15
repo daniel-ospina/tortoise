@@ -512,6 +512,11 @@ surfaces:
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
+  # #2725: venture domain pack — manifest scope, corpus kind coverage, the
+  # Objects-hold-state/supersede shape, and the two orthogonal pack-fit layers
+  # (per-graph approval vs per-item classification). DB-free guards plus
+  # docker-lane state/approval assertions (skipif no URI).
+  - test_venture_pack.py
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_write_verb.py
