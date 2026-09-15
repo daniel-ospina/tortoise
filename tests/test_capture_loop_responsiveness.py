@@ -300,12 +300,17 @@ def test_health_answers_while_the_default_executor_is_saturated(
     regression here.
 
     Independently of the budget, the coordinator's DB probe itself is replaced
-    with a stand-in that BLOCKS for twice the budget, so a request-path probe
-    re-introduced in ANY shape — fast against a healthy DB, on a dedicated
-    executor, or on the saturated shared pool — cannot possibly answer inside
-    the budget. The budget assertion ALONE only catches the shared-executor
-    queue shape; the stand-in is what makes the "no request-path I/O" contract
-    (#2850) unconditional.
+    with a stand-in that BLOCKS for twice the budget AND records every
+    invocation that is not the background refresher's own worker. A
+    request-path probe re-introduced in the SYNCHRONOUS or shared-pool shape
+    cannot answer inside the budget, so the budget assertion alone catches it;
+    a BOUNDED HAND-OFF (submit to a dedicated executor, wait with a timeout,
+    fall back to the cached snapshot — the pre-#2850 `_HEALTH_PROBE_EXECUTOR`
+    shape) can still answer inside the budget by timing out, and its failure is
+    then stranded on a Future nobody retrieves. The recorded witness is what
+    catches THAT shape, independent of timing: any off-worker probe call is
+    asserted absent after the request. Together they pin the "no request-path
+    I/O, no thread hand-off" contract (#2850) without overstating either one.
     """
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import _HEALTH_PROBE, app
@@ -335,19 +340,27 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # hardcoded 4.0 sat 0.9s above the design's own worst case). Below the
     # production probe budget (5s), so the verdict comes from design, not
     # timer ordering.
-    from tortoise.monitoring import PROBE_RETRY_DELAY, PROBE_TIMEOUT
+    from tortoise.monitoring import (
+        HEALTH_PROBE_THREAD_NAME,
+        PROBE_RETRY_DELAY,
+        PROBE_TIMEOUT,
+    )
     HEALTH_BUDGET_S = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY + 1.0
 
     # #2850's contract is stronger than "answers fast here": the request path
     # must perform NO I/O and NO thread hand-off at all. The budget assertion
-    # alone catches only the saturated-shared-executor shape — a regression that
-    # probed on the request path would still pass if it were fast (a healthy
-    # embedded DB), ran on a DEDICATED executor, or returned a stub that carried
-    # `probe.result_age_s`. Make a request-path probe IMPOSSIBLE to hide: the
-    # coordinator's `_probe_db` seam resolves `ha_mod._probe_db` at call time
-    # (the lambda in `_HEALTH_PROBE`), so replacing it here makes ANY probe that
-    # reaches the DB block for twice the budget, whichever pool it was submitted
-    # to.
+    # alone catches only the synchronous and saturated-shared-executor shapes —
+    # a regression that probed on the request path from a DEDICATED executor
+    # and waited with a bounded timeout would time out, fall back to the cached
+    # snapshot, and still answer inside budget, stranding its failure on a
+    # Future nobody retrieves. Make a request-path probe impossible to hide BOTH
+    # ways: the coordinator's `_probe_db` seam resolves `ha_mod._probe_db` at
+    # call time (the lambda in `_HEALTH_PROBE`), so replacing it here makes ANY
+    # probe that reaches the DB block for twice the budget, whichever pool it
+    # was submitted to; and any invocation that is NOT the background
+    # refresher's own worker is RECORDED in `probe_off_worker` (a witness that
+    # timing cannot erase and a stranded exception cannot raise away), asserted
+    # empty after the request.
     #
     # The stand-in is only reachable by the request path, and that is engineered,
     # not assumed. `snapshot()`'s self-heal is `begin(if_stale=True)`, gated on
@@ -360,11 +373,20 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # window its worker is answered healthily rather than failed, so a timer
     # coincidence can never corrupt `db.ok` for an unrelated reason. Every OTHER
     # caller — the only place a request-path probe can come from — raises.
+    probe_off_worker: list[str] = []
+
     def _blocking_probe(*args, **kwargs):
+        # WITNESS — independent of timing and impossible to raise away: record
+        # any invocation that is NOT the background refresher's own worker
+        # BEFORE the sleep. A bounded hand-off that the handler times out of
+        # leaves its AssertionError stranded on an unretrieved Future, so the
+        # raise alone cannot prove the request path was clean; this can.
+        if threading.current_thread().name != HEALTH_PROBE_THREAD_NAME:
+            probe_off_worker.append(threading.current_thread().name)
         # Any request-path probe that reaches the DB now blocks far past the
         # budget.
         time.sleep(HEALTH_BUDGET_S * 2)
-        if threading.current_thread().name == "tortoise-health-probe":
+        if threading.current_thread().name == HEALTH_PROBE_THREAD_NAME:
             # The background refresher's own worker running on schedule: do not
             # poison the shared result with a failure it did not earn.
             return {"ok": True, "latency_ms": 0.0, "error": None}
@@ -416,14 +438,19 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # probe was primed above, so the response must carry its observability
     # metadata WITH A REAL AGE (`HealthProbe.info()`).
     #
-    # Deliberately stronger than key presence. `info()` reports
-    # `result_age_s=None` until a probe completes, so this cannot be satisfied
-    # by a `{"status": "ok", "db": {"ok": True}}` stub, by an empty `probe`
-    # dict, or by a reversion to the pre-#2850 response shape (which carried no
-    # `probe` key at all). A bare `"probe" in r.json()` check would pass only one
-    # of those three — a populated-but-never-completed `probe` dict.
+    # Deliberately stronger than key presence. `info()` emits a `probe` dict
+    # whose `result_age_s` stays None until a probe completes, so this cannot be
+    # satisfied by a `{"status": "ok", "db": {"ok": True}}` stub with no
+    # `probe` key, by the pre-#2850 response shape (which carried no `probe` key
+    # at all), or by a `probe` dict that is present but never completed
+    # (`result_age_s is None`). A bare `"probe" in r.json()` check would pass
+    # the last of those.
     assert r.json()["probe"].get("result_age_s") is not None, r.text
     assert r.json()["db"]["ok"] is True, r.text
+    assert not probe_off_worker, (
+        f"/health invoked the DB probe off the coordinator worker: "
+        f"{probe_off_worker} (#2850: the request path must take no I/O and no "
+        f"thread hand-off)")
     assert elapsed < HEALTH_BUDGET_S, (
         f"/health took {elapsed:.2f}s (budget {HEALTH_BUDGET_S}s) while every "
         f"default-executor worker was busy — /health must serve from the "

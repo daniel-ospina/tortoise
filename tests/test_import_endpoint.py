@@ -405,6 +405,99 @@ def test_seed_visibility_guard_fails_loudly(monkeypatch, tmp_path):
     _seed_live_graph(db_path, n_points=1)  # must NOT raise
 
 
+def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
+    """#3505 anti-regression: the CONSTRUCTION SERIALIZATION is pinned.
+
+    Why this test exists: the four live `_seed_live_graph` tests do not pin
+    the lock. Running them against a copy with the serialization deleted is
+    FLAKY-RED, not reliably red — the double-start race they would have to
+    lose is timing-dependent, so on some runs they all pass with the lock
+    gone and the suite silently stops protecting the invariant #3505 is
+    about. This test pins it DETERMINISTICALLY, with no dependence on
+    redislite timing.
+
+    Mechanism: hold `_EMBEDDED_CONSTRUCTION_LOCK` from the test thread —
+    standing in for a construction that is inside the critical section — and
+    assert a second construction from another thread cannot reach its BODY
+    until the lock is released. The body's entry is observed by monkeypatching
+    `tortoise.FalkorDB`, which `__init__` imports and calls in the embedded
+    branch (tortoise/projection/__init__.py, `from tortoise import FalkorDB`):
+    the probe raises immediately, BEFORE redislite is touched, so the signal
+    is a pure-Python env-read away from the top of `__init__`. That makes the
+    discrimination sharp in both directions:
+
+      * serialization present  -> the worker blocks on the lock for the whole
+        join window and reaches the probe only after release (green);
+      * serialization removed  -> the worker reaches the probe in well under
+        a millisecond, INSIDE the window (red).
+
+    The join window is deliberately much larger than the probe latency (a
+    microsecond-scale path) so the red arm is deterministic rather than a
+    second timing lottery. Removing either half of the mechanism reds this
+    test: dropping the `with _EMBEDDED_CONSTRUCTION_LOCK` wrapper in
+    `_embedded_local_file_lane` lets the worker through; deleting the lock
+    object itself raises NameError on the holder thread.
+    """
+    import tortoise
+
+    db_path = str(tmp_path / "serialized-construction.db")
+    body_entered = threading.Event()
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    class _ProbeFalkorDBReached(Exception):
+        """Sentinel: `__init__`'s body ran (the embedded branch was entered)."""
+
+    def _probe_falkordb(*_args, **_kwargs):
+        body_entered.set()
+        raise _ProbeFalkorDBReached()
+
+    monkeypatch.setattr(tortoise, "FalkorDB", _probe_falkordb)
+
+    def _hold_lock() -> None:
+        with _EMBEDDED_CONSTRUCTION_LOCK:
+            holder_ready.set()
+            release_holder.wait(30.0)
+
+    holder = threading.Thread(target=_hold_lock, name="lock-holder", daemon=True)
+    holder.start()
+    assert holder_ready.wait(5.0), "could not take _EMBEDDED_CONSTRUCTION_LOCK"
+
+    outcome: list[BaseException] = []
+
+    def _construct() -> None:
+        try:
+            FalkorProjection(db_path, graph_name=GRAPH_NAME)
+        except BaseException as exc:  # the probe sentinel, or a real fault
+            outcome.append(exc)
+
+    worker = threading.Thread(target=_construct, name="constructor", daemon=True)
+    worker.start()
+    try:
+        worker.join(1.0)
+        assert not body_entered.is_set(), (
+            "#3505: FalkorProjection.__init__ reached its body while "
+            "_EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
+            "the construction serialization is missing or bypassed."
+        )
+        assert worker.is_alive(), (
+            "#3505: the constructor finished (or raised) while the lock was "
+            "held — the serialization did not gate it."
+        )
+    finally:
+        release_holder.set()
+
+    worker.join(10.0)
+    assert not worker.is_alive(), "constructor never unblocked after release"
+    assert body_entered.is_set(), (
+        "#3505: after release the construction never reached the embedded "
+        "branch — the probe wiring, not the lock, is what this run measured"
+    )
+    assert len(outcome) == 1 and isinstance(outcome[0], _ProbeFalkorDBReached), (
+        f"#3505: unexpected construction outcome after release: {outcome!r}"
+    )
+
+
 # ── artifact builder (the tortoise-export-v1 envelope #1388 produces) ──────
 
 

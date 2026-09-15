@@ -39,7 +39,7 @@ from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: bi
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import tortoise
-from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
+from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
     first_api_call,
@@ -1902,8 +1902,8 @@ async def _async_audit(
     # ClientIPMiddleware), never the Fly proxy IP (request.client.host).
     ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
     # #2104 (#2260 follow-up): _async_audit is reached from the MCP-tool
-    # capture path with a fabricated request stand-in (hosted_api.py ~6222:
-    # types.SimpleNamespace(state=…, client=None) — NO .headers). A bare
+    # capture path with a fabricated request stand-in
+    # (types.SimpleNamespace(state=…, client=None) — NO .headers). A bare
     # request.headers.get crashed the audit (AttributeError → non-fatal audit
     # failure → an 'error' key in the capture response). Mirror the defensive
     # getattr style used for state.client_ip above: header-less request-likes
@@ -2554,7 +2554,7 @@ async def health():
     # (``snapshot()``) and one in-memory heartbeat timestamp, and returns.
     # Nothing on the request path submits work to the event loop's DEFAULT
     # ThreadPoolExecutor — the executor /health used to ride via
-    # ``asyncio.to_thread(_probe_db)``, shared with ~89 other ``to_thread``
+    # ``asyncio.to_thread(_probe_db)``, shared with the module's other ``to_thread``
     # call sites whose queue wait has no timeout. That shared queue is what
     # let a stalled FalkorDB push the check past Fly's 15s budget while the
     # process was idle (2026-09-10 incident). A saturated executor, a
@@ -2963,7 +2963,7 @@ async def get_current_team(request: Request) -> dict:
                 "created_by_key_id": created_by_key_id}
         await _abuse_post_auth(request, team_dict)
         # #2600: canonical actor_user_id alias (UUID-gated, reads the raw
-        # created_by already on the dict at ~1830). Additive; ContextVar set
+        # created_by already on the resolved team dict). Additive; ContextVar set
         # lives in _data_sdk, not here.
         from tortoise.sdk import _alias_actor_user_id
         return _alias_actor_user_id(team_dict)
@@ -3217,7 +3217,7 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         raise HTTPException(status_code=403, detail="Team not found")
     # #1828 review P2: a suspended team must 403 on SESSION-authed
     # management reads too — the key-auth lane enforces this in
-    # get_current_team (~1390); the session lane resolved the team without
+    # get_current_team; the session lane resolved the team without
     # raising. One place fixes every session endpoint. The deliberate
     # "reachable while suspended" appeal flow (/v1/team/alerts) uses
     # get_current_user + _membership_team directly and is unaffected. The
@@ -3959,7 +3959,7 @@ class BackupRestoreRequest(BaseModel):
 # ── Onboarding: Default State ─────────────────────────────────────
 
 # #1727 (Slice 2, Task 11): DEFAULT_ONBOARDING_STATE (the LIVE provisioning
-# default, written at team creation — hosted_api.py:3132) carries the SAME
+# default, written at team creation by `register_user`) carries the SAME
 # CAPTURE-SURFACE key set as _ONBOARDING_DEFAULT_STATE (the read-time merge
 # default) — NOT the full key set (the two still diverge on legacy keys). Every
 # capture-surface key must be registered in BOTH dicts + the PATCH model or
@@ -6769,7 +6769,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     expires_at is written in both auth lanes and echoed in the response
     when set (absent = Never, response shape byte-identical). Expiry is
     immutable after creation (no PATCH-expiry); enforcement already lives
-    in the auth layer (~1558-1570, both lanes).
+    in the auth layer (`get_current_team`, both lanes).
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
     row via the seam (lookup_hash + key_prefix + created_via='provisioned'),
@@ -10269,8 +10269,8 @@ def _ensure_not_suspended(team_row: dict | None) -> None:
 
     Enforcement seam shared by the membership/owner endpoints — called from
     _require_owner / _require_owner_admin and the _membership_team-based
-    write endpoints for parity with the key-auth (get_current_team ~1390)
-    and _session_user_team (~1482) paths, which already 403 SUSPENDED.
+    write endpoints for parity with the key-auth (get_current_team)
+    and _session_user_team paths, which already 403 SUSPENDED.
     None team_row → pass: callers handle 404 separately, and the additive-
     column fail-soft seam degrades to un-suspended rather than a 500
     (missing suspended_at column → None → passes, same as #1828).
@@ -10444,7 +10444,7 @@ async def _owned_free_org_ids(user_id: str) -> list[str]:
     `pending_payment` (a not-yet-real org does not consume the allowance).
 
     Distinct from `_count_active_free_memberships` on purpose: the
-    invite-JOIN gates (hosted_api.py:11393/11808/12320) still read the
+    invite-JOIN gates (`_count_active_free_memberships`) still read the
     membership-scoped count, and #2789's out-of-scope list pins that
     semantics. Create-org gates read THIS one. Mode-aware with the same shape
     as the #1877 helper: supabase reads `subscription_status`; selfhost (no
@@ -12182,7 +12182,7 @@ def _raise_503_if_cp_outage(exc: BaseException) -> None:
     contract). Registry mode raises the redis exception family the falkordb
     client surfaces (ConnectionError / TimeoutError / BusyLoadingError /
     ResponseError / InvalidResponse — the classes sdk._classify_db_failure
-    buckets, sdk.py ~1368); RuntimeError is kept for the outage-simulating
+    buckets); RuntimeError is kept for the outage-simulating
     test seams. A non-outage exception (schema/dialect bug, authz 403 from a
     caller's own read) stays loud — it must never masquerade as an outage.
     """
@@ -14681,7 +14681,7 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
 
 
 # Kind-carrying prop keys on dump nodes — the 6 live writer keys
-# (sdk.py:9659-9660 kind_field: point/event/subject/document/object/source) plus
+# (sdk.py kind_field: point/event/subject/document/object/source) plus
 # `kind` (extractor_v2 legacy-compat) and `actionKind` (pack-declared bucket,
 # no current node carrier — future-proof). `op_type` is deliberately NOT here:
 # operator types are a fixed non-namespaced set (IMPL/NAND/MITIGATES).
@@ -15586,7 +15586,7 @@ _INVALID_SIGNUP_TOKEN_DETAIL = {
 
 
 def _hash_signup_token(token: str) -> str:
-    """SHA-256(PEPPER + token) — byte-identical to lookup_hash (auth.py:119);
+    """SHA-256(PEPPER + token) — byte-identical to `tortoise.auth.lookup_hash`;
     domain separation from api-key lookup hashes is the st_ prefix."""
     from tortoise.auth import lookup_hash
     return lookup_hash(token)
@@ -15942,7 +15942,7 @@ async def agent_signup(request: Request):
         # SignupToken node (#1709): hash-only — salted PBKDF2 (hash_api_key),
         # the same hashed-lookup format as Invitation token_hash, so
         # _verify_hashed_lookup("SignupToken", "token_hash", ...) can verify
-        # it at recovery time (sdk.py:11180 pattern).
+        # it at recovery time (sdk.py _verify_hashed_lookup pattern).
         reg.query(
             "CREATE (s:SignupToken {token_hash:$th, lookup_key:$lk, "
             "team_id:$tid, created_at:$now})",
@@ -16110,8 +16110,8 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
 #
 # POST /v1/claim attaches a provider-verified Supabase identity to an
 # anonymous (zero-email) team. GoTrue-native transport (ZERO new server-side
-# OAuth): the platform already ships client OAuth (signup.html:713,
-# signin.html:755, dashboard PKCE). Claim = ONE endpoint requiring BOTH
+# OAuth): the platform already ships client OAuth (signup.html / signin.html
+# `signInWithProvider`, dashboard PKCE). Claim = ONE endpoint requiring BOTH
 # credentials in one request:
 #   · Authorization: Bearer <fresh Supabase session JWT> — verified
 #     server-side via JWKS (session_auth.verify_session_jwt)

@@ -253,6 +253,17 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 # copy carries the full "Scope of the guarantee" / "Blast radius" note; the
 # two caveats that matter to THIS file are repeated here.
 #
+# LANE SCOPE — this lock is a NO-OP on the docker lane. With a supported
+# `TORTOISE_DB_URI` set, every construction from this module REDIRECTS to
+# that server (`tortoise/projection/__init__.py`, the #1647 D-1=A test
+# redirect: `path` is nulled, so `_is_embedded` is False), no redislite
+# daemon is started, and no double-start can occur. `test_export_delete` is
+# NOT in `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects
+# that branch. What protects THIS file on the docker lane is the BOOT-SWEEP
+# quiesce (`_quiesce_testclient_background_work`), not this lock. The
+# serialization is live on the embedded tier-2 / carve-out lane only. See
+# the LANE SCOPE note in `_quiesce_testclient_background_work`.
+#
 # Serializing the construction makes the first starter the single owner, so
 # later openers (seeder, `_registry_count`, health probe, request handler)
 # normally resolve through `.settings` to that one server. This is NOT a
@@ -336,6 +347,21 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
        fresh-start branch, and serializing holds it for EVERY in-process
        construction in this file — no matter which background caller
        `_lifespan` arms next.
+
+       LANE SCOPE — the serialization is INERT on the lane CI runs this file
+       on. Under a supported `TORTOISE_DB_URI` (the docker lane, this file's
+       default) every construction from this module redirects to that server
+       (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect:
+       `path` is nulled, so `_is_embedded` is False), so no redislite daemon
+       exists and no double-start is possible. `test_export_delete` is NOT in
+       `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that
+       branch. On that lane the protection this file actually gets is item 1
+       — the BOOT-SWEEP quiesce, which removes the second caller of
+       `_purge_deleted_teams` — and NOT this serialization. The lock is live
+       only on the embedded tier-2 / carve-out lane (no URI), where
+       constructions stay local-file and real daemons are spawned; it is
+       kept for correctness there, not because the docker lane depends on
+       it.
     """
     # (1) quiesce both background callers of the purge sweep (the caller, not
     # the callee — `_purge_deleted_teams` itself stays under test).
@@ -343,6 +369,9 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
     monkeypatch.setattr(ha_mod, "event_retention_interval",
                         lambda *args, **kwargs: 86400.0)
     # (2) serialize embedded projection construction on the pinned db file.
+    # NO-OP on a URI lane (docker): every construction redirects to the
+    # server, `_is_embedded` is False, no daemon is started — see the LANE
+    # SCOPE note in this fixture's docstring. Live on the embedded lane.
     _orig_proj_init = FalkorProjection.__init__
 
     def _serialized_proj_init(self, *args, **kwargs):
