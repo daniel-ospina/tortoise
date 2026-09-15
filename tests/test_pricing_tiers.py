@@ -98,7 +98,7 @@ class TestTeamCreateTierLimits:
         result = sdk.team_create("multi-graph-team")
         g = sdk._graph_create(result["id"], "project-b")
         assert g["kind"] == "custom"
-        assert g["namespace"] == f"team_{result['id']}_{g['graph_id']}"
+        assert g["namespace"] == f"org_{result['id']}_{g['graph_id']}"
         assert sdk.graph_count(result["id"]) == 2  # default + custom
         # Default graph sorts first
         graphs = sdk.graph_list(result["id"])

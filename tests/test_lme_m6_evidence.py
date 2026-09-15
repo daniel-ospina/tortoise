@@ -1102,7 +1102,7 @@ def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):
     from tortoise.commit_schema import compute_client_commit_id
     from tortoise.hosted_api import app, get_current_team
 
-    team = {"team_id": "m6-test-team", "key_id": "k", "legacy_full_access": True, "tier": "free",
+    team = {"org_id": "m6-test-team", "key_id": "k", "legacy_full_access": True, "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
             "max_api_keys": 2, "max_sessions": 1000}
     # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
@@ -1153,7 +1153,7 @@ def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):
         with ftc.TestClient(app) as tc:
             r = tc.post("/v1/sessions/commit", json=payload)
             assert r.status_code == 200, r.text
-        sdk = ha_mod._make_sdk(namespace=team["team_id"])
+        sdk = ha_mod._make_sdk(namespace=team["org_id"])
         proj = sdk._get_proj()
         pid = "pt_" + "0" * 63 + "1"
         rows = proj.g.query(

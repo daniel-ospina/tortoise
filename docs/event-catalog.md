@@ -31,7 +31,7 @@
 ## `:GraphEvent` node schema
 
 Stored in the **team's own FalkorDB graph namespace** (the namespace IS the
-team partition — **no `team_id` property**, plan-review P2). Nodes carry
+team partition — **no `org_id` property**, plan-review P2). Nodes carry
 **zero relationships** (graph islands — invisible to label-scoped queries,
 traversals, EP propagation; see §5 guard).
 

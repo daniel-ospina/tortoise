@@ -116,7 +116,7 @@ def _no_silent_faults():
 
 def _seed_base_tables(cp) -> None:
     """oauth_clients (id=_CLIENT_ID, token_endpoint_auth_method='none'), teams
-    (id='t1'), team_memberships (user_id=_U1 UUID, team_id='t1', status='active')."""
+    (id='t1'), org_memberships (user_id=_U1 UUID, org_id='t1', status='active')."""
     cp.tables.setdefault("oauth_clients", []).append({
         "id": _CLIENT_ID, "client_name": "test", "redirect_uris": [_REDIRECT],
         "scope": "mcp", "token_endpoint_auth_method": "none",
@@ -124,8 +124,8 @@ def _seed_base_tables(cp) -> None:
     cp.tables.setdefault("teams", []).append({
         "id": "t1", "tier": "Team", "suspended_at": None, "flagged_at": None,
         "email": "t@example.com"})
-    cp.tables.setdefault("team_memberships", []).append({
-        "user_id": _U1, "team_id": "t1", "role": "owner", "status": "active"})
+    cp.tables.setdefault("org_memberships", []).append({
+        "user_id": _U1, "org_id": "t1", "role": "owner", "status": "active"})
 
 
 def _live(cp, table: str) -> list[dict]:
@@ -141,7 +141,7 @@ def _s256(verifier: str) -> str:
 
 
 def _seed_code(cp, code="code-1", *, verifier=None, client_id=_CLIENT_ID,
-               user_id=_U1, team_id="t1", redirect_uri=_REDIRECT, used_at=None,
+               user_id=_U1, org_id="t1", redirect_uri=_REDIRECT, used_at=None,
                expires_in=600) -> str:
     """Insert an oauth_codes row and RETURN the PKCE verifier (a code seeded without
     its verifier 400s on PKCE before ever reaching the injected fault). Uses the
@@ -149,7 +149,7 @@ def _seed_code(cp, code="code-1", *, verifier=None, client_id=_CLIENT_ID,
     verifier = verifier or _pkce()[0]
     cp.tables.setdefault("oauth_codes", []).append({
         "code_hash": _sha256(code), "client_id": client_id, "user_id": user_id,
-        "team_id": team_id, "redirect_uri": redirect_uri,
+        "org_id": org_id, "redirect_uri": redirect_uri,
         "code_challenge": _s256(verifier), "code_challenge_method": "S256",
         "scope": "mcp", "resource": None,
         "expires_at": _expires_iso(expires_in), "used_at": used_at,
@@ -163,7 +163,7 @@ def _seed_refresh_token(cp, token="rt-1", **over) -> tuple[str, str]:
     and the claim PATCH address it by `id`."""
     token = over.pop("token", token)
     row = {"id": over.pop("id", secrets.token_urlsafe(16)), "token_hash": _sha256(token),
-           "client_id": _CLIENT_ID, "user_id": _U1, "team_id": "t1", "scope": "mcp",
+           "client_id": _CLIENT_ID, "user_id": _U1, "org_id": "t1", "scope": "mcp",
            "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S), "revoked_at": None,
            "rotated_from": None, "created_at": _expires_iso(0), **over}
     cp.tables.setdefault("oauth_refresh_tokens", []).append(row)
@@ -176,7 +176,7 @@ def _seed_access_token(cp, *, refresh_id: str) -> str:
     row_id = secrets.token_urlsafe(16)
     cp.tables.setdefault("oauth_access_tokens", []).append({
         "id": row_id, "token_hash": _sha256("at-" + row_id), "client_id": _CLIENT_ID,
-        "user_id": _U1, "team_id": "t1", "scope": "mcp",
+        "user_id": _U1, "org_id": "t1", "scope": "mcp",
         "expires_at": _expires_iso(3600), "revoked_at": None,
         "refresh_token_id": refresh_id, "created_at": _expires_iso(0)})
     return row_id
@@ -344,7 +344,7 @@ def test_real_seam_maps_status_and_unparseable_body(capture_server, status, payl
 # ── Task 3: `_issue_tokens` — 3-lane taxonomy, structural no-leak guarantee ──
 
 def _mint(cp, **over):
-    return oauth._issue_tokens(cp, client_id="c1", user_id="u1", team_id="t1",
+    return oauth._issue_tokens(cp, client_id="c1", user_id="u1", org_id="t1",
                                scope="mcp", resource=None, **over)
 
 
@@ -606,7 +606,7 @@ def test_bad_pkce_never_re_arms_the_code(fault_client):
     ("oauth_clients", None),        # FIRST read on the path — the :726 leak
     ("oauth_refresh_tokens", None),  # the refresh-token SELECT
     ("teams", None),                # _assert_team_usable
-    ("team_memberships", None),     # membership_for_user_team — S4 call site #4
+    ("org_memberships", None),     # membership_for_user_team — S4 call site #4
     ("oauth_access_tokens", ["id"]),  # prev_access
 ])
 def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select):
@@ -622,7 +622,7 @@ def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, selec
 def test_refresh_membership_revoke_failure_still_returns_403_invalid_grant(fault_client):
     tc, cp = fault_client
     _rid, rt = _seed_refresh_token(cp, "rt-mem")
-    cp.tables["team_memberships"] = []     # `setdefault` would be a NO-OP: the fixture seeded one
+    cp.tables["org_memberships"] = []     # `setdefault` would be a NO-OP: the fixture seeded one
     cp.fail_query(table="oauth_refresh_tokens", method="PATCH",
                   match=lambda t, m, sel, f: m == "PATCH" and not sel,
                   times=1, after_mutation=True)   # the revoke commits, then raises

@@ -57,11 +57,11 @@ Body `{"token": str}` → 200 `{"status": "otp_sent", "expires_in_s": 600}`.
 | v2 + no `path` | 409 `{"error_code":"invite_email_mismatch","detail":...,"choice":{"paths":["fuse","accept-mismatch"],"default_path":"fuse","otp_required":true,"invited_email":y}}` — the 3-path presentation |
 | v2 + `path` + no `otp` | 403 `{"error_code":"invite_mismatch_otp_required",...}` (BOTH override paths gated) |
 | v2 + `path` + wrong/expired `otp` | 403 `{"error_code":"invite_otp_invalid",...}` (attempts++; 5 failures clears the code) |
-| v2 + `path` + valid `otp` | OTP consumed (single-use) → membership under current account; invite records `accepted_at/accepted_by/otp_verified_at/otp_verified_by/accepted_via/fused_from_email`; ghost membership cleanup; 200 `{"team_id","role","accepted_via":"fuse"|"accept-mismatch","mismatch":{"invited_email":y,"recorded":true}}` |
+| v2 + `path` + valid `otp` | OTP consumed (single-use) → membership under current account; invite records `accepted_at/accepted_by/otp_verified_at/otp_verified_by/accepted_via/fused_from_email`; ghost membership cleanup; 200 `{"org_id","role","accepted_via":"fuse"|"accept-mismatch","mismatch":{"invited_email":y,"recorded":true}}` |
 
 ### Admin resend / expire (owner/admin only, mirroring `DELETE /v1/invites/{id}` RBAC)
-- `POST /v1/invites/{invitation_id}/resend?team_id=...` → rotates the token (new plaintext returned once + hash updated + email re-sent best-effort), refreshes expiry to +7d; consumed/revoked → 409; rate-capped (max 5 resends/day per invitation, env).
-- `POST /v1/invites/{invitation_id}/expire?team_id=...` → pending invite becomes `status='expired'` + `expires_at=now` (link dies, leaves pending lists, frees the Pro capacity seat) + ghost membership cleanup; consumed → 409.
+- `POST /v1/invites/{invitation_id}/resend?org_id=...` → rotates the token (new plaintext returned once + hash updated + email re-sent best-effort), refreshes expiry to +7d; consumed/revoked → 409; rate-capped (max 5 resends/day per invitation, env).
+- `POST /v1/invites/{invitation_id}/expire?org_id=...` → pending invite becomes `status='expired'` + `expires_at=now` (link dies, leaves pending lists, frees the Pro capacity seat) + ghost membership cleanup; consumed → 409.
 
 ### Accept-side arming (member_progress mechanics)
 Every successful accept (match + mismatch-override, registry lane; mirrored seam): ensure the org's OnboardingState node exists (create-on-write seam, `ensure_onboarding_state_node`) and idempotently write the invitee's member slot `member_progress {user_id: []}` (`write_member_progress`). NEVER writes org-level COMPLETED_STEP edges; NEVER evaluates org completion for the acceptor. This is the "inline-skippable affordance mechanics": armed slot + W5 checkpoint writes; skip = no write; org completion unchanged (DE2E-8 And-clause).
@@ -71,14 +71,14 @@ Every successful accept (match + mismatch-override, registry lane; mirrored seam
 ## 3. Implementation steps
 
 ### Step 1 — `tortoise/email_notify.py`: `send_otp_email`
-Mirror `send_invite_email` (budget reserve/refund + `_skip_channel` + async `_send_invite_attempt`-style send + `on_sent` callback). Copy: 6-digit code + team name + 10-min expiry. Signature: `send_otp_email(team_name, invitee_email, code, on_sent=None)`.
+Mirror `send_invite_email` (budget reserve/refund + `_skip_channel` + async `_send_invite_attempt`-style send + `on_sent` callback). Copy: 6-digit code + team name + 10-min expiry. Signature: `send_otp_email(org_name, invitee_email, code, on_sent=None)`.
 
 ### Step 2 — `tortoise/supabase_control.py`: seam (mirrors the registry lane; unit-tested on FakeControlPlane)
 - `invitation_otp_mint(cp, invitation_id, code_hash, expires_at, sent_at)` — PATCH invitations row (id filter) setting `otp_hash/otp_expires_at/otp_attempts=0/otp_sent_at`; row-must-match guard (returns False when the invitation vanished).
 - `invitation_otp_verify(cp, invitation_id, code_hash)` → `("ok"|"invalid"|"expired"|"no_otp")`; on ok clears the hash/expiry + sets `otp_verified_at` (single-use); invalid increments attempts, ≥5 clears the code.
-- `invitation_accept_mismatch_v2(cp, token, user_id, user_email, path, otp_verified)` — the mismatch-override accept: reuse `invitation_accept`'s checks (pending/expiry/existing-member/team kill-switches/free-cap/max_users) minus the email-match 403, + requires a verified OTP row, + PATCHes the invite with the mismatch/OTP/fusion record, + resurrect-or-insert the membership with `invited_email`. Returns the standard `{team_id, role}` + record fields.
-- `invitation_resend(cp, invitation_id, team_id, actor_user_id)` — owner/admin re-check is done by the caller (hosted_api) like rescind; seam validates pending + not-accepted, rotates `lookup_hash` to a fresh token (returned once) + bumps `expires_at`, returns the token.
-- `invitation_expire(cp, invitation_id, team_id)` — pending → `status='expired'`, `expires_at=now`; idempotent-ish guards.
+- `invitation_accept_mismatch_v2(cp, token, user_id, user_email, path, otp_verified)` — the mismatch-override accept: reuse `invitation_accept`'s checks (pending/expiry/existing-member/team kill-switches/free-cap/max_users) minus the email-match 403, + requires a verified OTP row, + PATCHes the invite with the mismatch/OTP/fusion record, + resurrect-or-insert the membership with `invited_email`. Returns the standard `{org_id, role}` + record fields.
+- `invitation_resend(cp, invitation_id, org_id, actor_user_id)` — owner/admin re-check is done by the caller (hosted_api) like rescind; seam validates pending + not-accepted, rotates `lookup_hash` to a fresh token (returned once) + bumps `expires_at`, returns the token.
+- `invitation_expire(cp, invitation_id, org_id)` — pending → `status='expired'`, `expires_at=now`; idempotent-ish guards.
 
 ### Step 3 — `supabase/migrations/20260902000001_invite_fusion_v2.sql` (deploy-time; conservative, pglite-styled)
 Add to `public.invitations`: `otp_hash text`, `otp_expires_at timestamptz`, `otp_attempts integer NOT NULL DEFAULT 0`, `otp_sent_at timestamptz`, `otp_verified_at timestamptz`, `otp_verified_by text`, `accepted_via text`, `accepted_mismatch boolean NOT NULL DEFAULT false`, `fused_from_email text`. Constraint check `accepted_via IN ('fuse','accept-mismatch')`. (Only if pglite validation passes locally is it added to `supabase/tests/pglite/validate.mjs`; otherwise it stays a normal reviewed deploy artifact like the other 2026xxxx migrations that postdate the pglite list.)
@@ -88,7 +88,7 @@ Add to `public.invitations`: `otp_hash text`, `otp_expires_at timestamptz`, `otp
 2. OTP send/verify registry helpers over the registry Invitation node (`_registry_invite_by_token` refactor reuse; fields `otp_hash/otp_expires_at/otp_attempts/otp_sent_at/otp_verified_at/by`), plus `_otp_rate_limit(request, token_key or ip)` sliding windows + env knobs + `RATE_LIMIT_DISABLED` opt-out.
 3. `POST /v1/invites/otp` endpoint (supabase seam `invitation_otp_mint` OR registry inline).
 4. `POST /v1/invites/accept` — split the mismatch branch: keep legacy 403 when not opted-in; add v2 discovery + OTP-gated override via a shared `_accept_mismatch_v2(...)` lane-parameterized executor. Match path untouched. OTP verify BEFORE any write; single-use consume; under the existing `_team_create_lock` + `_invite_team_lock` + capacity/free-cap pre-checks (reuse the by-id accept's structure — non-consuming 402s stay non-consuming).
-5. `_arm_invitee_member_progress(org_id, user_id)` after successful accept (registry lane; supabase lane: node arming is graph-side — do it through `_make_sdk(namespace=team_id)` like W5 does from hosted_api; fail-soft on graph error, never masks accept).
+5. `_arm_invitee_member_progress(org_id, user_id)` after successful accept (registry lane; supabase lane: node arming is graph-side — do it through `_make_sdk(namespace=org_id)` like W5 does from hosted_api; fail-soft on graph error, never masks accept).
 6. `POST /v1/invites/{invitation_id}/resend` + `POST /v1/invites/{invitation_id}/expire` (owner/admin; registry + supabase lanes; resend rate cap).
 
 ### Step 5 — Tests

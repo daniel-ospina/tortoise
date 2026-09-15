@@ -393,11 +393,11 @@ class TestGranularInvalidItem:
         # MCP surface: the failure response is the bulk failure shape —
         # {error, code: ERR_BUNDLE_INVALID, violations}, NO results key.
         import tortoise.mcp_server as mcp_mod  # noqa: I001
-        from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+        from tortoise.mcp_auth import (_current_org_id, _current_team_limits,
                                        _transport_mode)
         from tortoise.sdk import TortoiseSDK  # noqa: F401
         _transport_mode.set("stdio")
-        _current_team_id.set(None)
+        _current_org_id.set(None)
         _current_team_limits.set(None)
         db = _fresh_sdk()
         _orig_get_team_sdk = mcp_mod._get_team_sdk
@@ -408,7 +408,7 @@ class TestGranularInvalidItem:
                 granularity="granular")
         finally:
             _transport_mode.set(None)
-            _current_team_id.set(None)
+            _current_org_id.set(None)
             _current_team_limits.set(None)
             mcp_mod._get_team_sdk = _orig_get_team_sdk
             db.close()
@@ -440,10 +440,10 @@ class TestGranularResultsKeyForKey:
         """A temp SDK wired into the in-process MCP layer (stdio transport,
         no team context — quota skipped). Returns (db, cleanup)."""
         import tortoise.mcp_server as mcp_mod  # noqa: I001
-        from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+        from tortoise.mcp_auth import (_current_org_id, _current_team_limits,
                                        _transport_mode)
         _transport_mode.set("stdio")
-        _current_team_id.set(None)
+        _current_org_id.set(None)
         _current_team_limits.set(None)
         db = _fresh_sdk()
         _orig_get_team_sdk = mcp_mod._get_team_sdk
@@ -451,7 +451,7 @@ class TestGranularResultsKeyForKey:
 
         def cleanup():
             _transport_mode.set(None)
-            _current_team_id.set(None)
+            _current_org_id.set(None)
             _current_team_limits.set(None)
             mcp_mod._get_team_sdk = _orig_get_team_sdk
             db.close()

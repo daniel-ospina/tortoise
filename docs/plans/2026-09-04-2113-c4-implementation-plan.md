@@ -16,8 +16,8 @@ C5, documented).
 ## Decisions
 
 - **D1 (recipe, empirical 4.20.4):** `ACL SETUSER tenant_<gid> on ><pw>
-  ~team_{tid}_{gid} +GRAPH.QUERY +GRAPH.RO_QUERY +PING` — the key pattern is
-  the EXACT graph namespace (`team_{tid}_{gid}`, both modes — registry
+  ~org_{tid}_{gid} +GRAPH.QUERY +GRAPH.RO_QUERY +PING` — the key pattern is
+  the EXACT graph namespace (`org_{tid}_{gid}`, both modes — registry
   `_graph_create` + supabase `_provision_graph` derive the same shape), NOT
   the research doc's `~tenant_a` shorthand (that matched repro graphs named
   `tenant_a`). Username `tenant_<gid>` (gid unique → username unique). Never
@@ -73,12 +73,12 @@ C5, documented).
 
 ## Existing-surface map (verified on main 19a50ace)
 
-- `hosted_api._mint_key` — fires `_acl_user_create_hook(graph_id, team_id)`
+- `hosted_api._mint_key` — fires `_acl_user_create_hook(graph_id, org_id)`
   for graph-bound mints (~4658), AFTER key write. C4: add `acl_strict` param
   + move the hook before the key write (revoke-self on strict failure).
 - `hosted_api._mint_graph_key` — provisioning wrapper; passes acl_strict=True.
 - `hosted_api._acl_user_create_hook` / `_acl_user_drop_hook` (~4731/4747) —
-  import `tortoise.acl_graph_users.create_acl_user(graph_id, team_id)` /
+  import `tortoise.acl_graph_users.create_acl_user(graph_id, org_id)` /
   `drop_acl_user(graph_id)`. C4 module makes them real; hook body stays
   (adds strict arg threading).
 - `hosted_api` delete-graph endpoint (~8185) — `_acl_user_drop_hook(graph_id)`
@@ -86,9 +86,9 @@ C5, documented).
   by derived username works (no storage read).
 - `hosted_api._provision_graph` (~7752) — the ONE mint flow; generic except
   rolls back graph + revokes keys. Strict ACL failure raises → lands here.
-- `sdk._graph_create` — registry Graph node {id, team_id, name, kind,
+- `sdk._graph_create` — registry Graph node {id, org_id, name, kind,
   namespace, status, created_at}; C4 SETs acl_user/acl_pass.
-- Graph namespace convention `team_{tid}_{gid}` — registry `_graph_create`
+- Graph namespace convention `org_{tid}_{gid}` — registry `_graph_create`
   ns + supabase `_provision_graph` ns (D1 pattern source).
 - Docker test lane URI `docker://:falkordb@localhost:6379/tortoise_test_matrix`
   — falkordb module 4.20.4, default user password-secured (requirepass).
@@ -96,7 +96,7 @@ C5, documented).
 ## Tasks
 
 1. **`tortoise/acl_graph_users.py`** — `AclLayerError`, `_admin_client()`
-   (URI parse + redis-py; None guards), `create_acl_user(graph_id, team_id)`
+   (URI parse + redis-py; None guards), `create_acl_user(graph_id, org_id)`
    (upsert + credential storage on the registry node + SAVE), `drop_acl_user
    (graph_id)` (+SAVE), `acl_user_config(graph_id)` (ACL GETUSER parse for
    tests), `acl_user_exists`, `credential_for_graph(graph_id)` (C5 seam),
@@ -115,10 +115,10 @@ C5, documented).
 4. **Tests (docker lane — TORTOISE_DB_URI required; skip when absent or
    bare-redis):** `tests/test_acl_graph_users.py`
    - E2E-1 config-inspection: provision a graph via the mint flow →
-     `acl_user_config` == exact perms (`~team_{tid}_{gid}`,
+     `acl_user_config` == exact perms (`~org_{tid}_{gid}`,
      +GRAPH.QUERY/RO_QUERY/PING, ON, no GRAPH.LIST/KEYS/SCAN/CONFIG, no +@all).
    - E2E-2 cross-graph NOPERM: connect as `tenant_<gidA>` (stored creds) →
-     GRAPH.QUERY on team_{tid}_{gidB} → NOPERM error; own graph → OK.
+     GRAPH.QUERY on org_{tid}_{gidB} → NOPERM error; own graph → OK.
    - E2E-8 drop-on-delete: delete the graph → user absent.
    - E2E-11 no-orphan: strict provisioning failure (patch create_acl_user to
      raise AclLayerError with server up) → graph+key rolled back + no ACL
@@ -143,9 +143,9 @@ C5, documented).
 
 ## Execution log (2026-09-04)
 
-- **T1 `tortoise/acl_graph_users.py`** — `AclLayerError`, `_admin_client()` (URI → redis-py, None when embedded/bare-redis-absent — every fn no-ops), `create_acl_user` (SETUSER upsert: `tenant_<gid>` on `><pw>` `~team_{tid}_{gid}` +GRAPH.QUERY/RO_QUERY/PING; deny-all `-@all` base redis-8 composition asserted; default-user secured check first; credential stored on the registry Graph node; SAVE best-effort), `drop_acl_user` (+SAVE), `acl_user_config`/`acl_user_exists` (config inspection, RESP2-flat + RESP3-labeled + dict GETUSER shapes handled; rule strings token-expanded + lowercased for version-stable asserts), `credential_for_graph` (C5 seam), `_parse_getuser` shared.
+- **T1 `tortoise/acl_graph_users.py`** — `AclLayerError`, `_admin_client()` (URI → redis-py, None when embedded/bare-redis-absent — every fn no-ops), `create_acl_user` (SETUSER upsert: `tenant_<gid>` on `><pw>` `~org_{tid}_{gid}` +GRAPH.QUERY/RO_QUERY/PING; deny-all `-@all` base redis-8 composition asserted; default-user secured check first; credential stored on the registry Graph node; SAVE best-effort), `drop_acl_user` (+SAVE), `acl_user_config`/`acl_user_exists` (config inspection, RESP2-flat + RESP3-labeled + dict GETUSER shapes handled; rule strings token-expanded + lowercased for version-stable asserts), `credential_for_graph` (C5 seam), `_parse_getuser` shared.
 - **T2 hosted_api wiring** — `_mint_key(acl_strict=False)`: hook fires BEFORE the key write for graph-bound mints (a strict failure raises with nothing committed → clean rollback); `_mint_graph_key` passes acl_strict=True; `_acl_user_create_hook` re-raises AclLayerError when strict, logs otherwise (soft standalone mints to existing graphs never block). `_rollback_graph` now drops the ACL user (a strict create may have landed pre-rollback).
 - **T3 rollback seam** — verified: `_provision_graph` generic except catches the strict AclLayerError → `_revoke_graph_keys` (none) + `_rollback_graph` (node delete + ACL drop). Pinned by test_strict_mint_failure_no_orphan (no key, no user) + test_rollback_drops_user_and_node.
 - **T4 tests** `tests/test_acl_graph_users.py` (9, docker-lane skipif URI-or-module absent): exact-permission config inspection (key = exact ns only, 3 commands over -@all, deny set absent, no nopass); credential stored server-side + idempotent re-create reuses the password; cross-graph NOPERM + KEYS denied as the tenant user; drop + idempotent; rollback drops node+user; strict mint failure leaves no key/user; SOFT mint survives ACL failure (fail-soft contract); ACL SAVE/reconnect presence; default-user secured assert.
 - **T5 sweep** — ruff clean; py_compile clean; carve-out 486 pass (ACL tests skip — no URI → module no-ops); docker lane: test_acl_graph_users 9 pass + test_hosted_api 242 + supabase_control/dashboard/cli/writer_inventory/hosted_auth/auth_flip 358 pass. Existing provisioning/key/delete suites exercise the REAL hooks on the shared matrix server without breakage (users unique per gid; deleted with graphs).
-- **Code-review round-1 fixes (PR #2220)**: (a) port default 16379 (match sibling URI parsers — a port-less docker:// URI silently pointed at 6379 and fail-soft no-oped the whole layer); (b) open-default strict provisioning now rolls back + surfaces an ACTIONABLE 503 with the D6 remedy (was an opaque 500 — selfhosts without requirepass); (c) ONE live secret per graph — supabase/hosted mode is CREATE-ONCE (further mints no-op when the user exists — per-mint `>pw` appends accumulated live never-revoked secrets); registry store-miss window (user exists, no stored password) now SETUSERs `resetpass` first so the orphaned secret dies; stored-password reuse never churns; (d) fail-closed id charset guard ([0-9A-Za-z_-]) on graph_id/team_id in create/drop/namespace — SETUSER rule args are space-split server-side (injection hardening for future callers). New pins: test_store_miss_rotate_invalidates_old_secret (old pw fails auth after rotate, new pw works), test_unsafe_id_rejected_fail_closed, test_open_default_strict_provision_503 (rollback + actionable 503). 12 ACL tests pass on docker lane; hosted_api 242 + carve-out 410 pass; ruff clean. **Second-model gate fixes (S1-S5)**: S1 team-delete ACL orphan — new `_drop_team_acl_users(team_id)` enumerates the team's custom graph ids (registry nodes / supabase rows) + drops each tenant user, wired into BOTH purge paths (`_purge_registry_team` + the supabase purge branch); R13's periodic audit stays a plan note (an actual reconcile job is ops/capstone scope). S2 exact-state upsert — `_setuser` now issues a FULL `reset` before rebuilding (`reset on >pw ~ns +cmds`), healing any drifted broader grant (+@all/allkeys from a manual fix or old recipe) instead of accumulating rules; `_GRAPH_DENY` removed (the deny-all base + reset make it dead). S3 one-live-secret unconditional — the full reset clears passwords every upsert, so stored≠live divergence can never yield two live secrets (re-asserting the same stored pw is churn-free). S4 connection-class failures in `_setuser` log + return False (fail-soft — a transient drop between probe and SETUSER no longer 503s a healthy selfhost); only a server-side ResponseError raises AclLayerError (strict rollback reserved for real recipe/perm failures). S5 test coverage — runtime NOPERM assertions for GRAPH.CONFIG/DEBUG/UDF/LIST as the tenant user + test_upsert_heals_drift_exact_state (+@all drift → exact state restored) + test_team_purge_drops_custom_graph_users. 14 ACL tests pass on docker lane; hosted_api 242 + carve-out 410 pass; ruff clean.
+- **Code-review round-1 fixes (PR #2220)**: (a) port default 16379 (match sibling URI parsers — a port-less docker:// URI silently pointed at 6379 and fail-soft no-oped the whole layer); (b) open-default strict provisioning now rolls back + surfaces an ACTIONABLE 503 with the D6 remedy (was an opaque 500 — selfhosts without requirepass); (c) ONE live secret per graph — supabase/hosted mode is CREATE-ONCE (further mints no-op when the user exists — per-mint `>pw` appends accumulated live never-revoked secrets); registry store-miss window (user exists, no stored password) now SETUSERs `resetpass` first so the orphaned secret dies; stored-password reuse never churns; (d) fail-closed id charset guard ([0-9A-Za-z_-]) on graph_id/org_id in create/drop/namespace — SETUSER rule args are space-split server-side (injection hardening for future callers). New pins: test_store_miss_rotate_invalidates_old_secret (old pw fails auth after rotate, new pw works), test_unsafe_id_rejected_fail_closed, test_open_default_strict_provision_503 (rollback + actionable 503). 12 ACL tests pass on docker lane; hosted_api 242 + carve-out 410 pass; ruff clean. **Second-model gate fixes (S1-S5)**: S1 team-delete ACL orphan — new `_drop_team_acl_users(org_id)` enumerates the team's custom graph ids (registry nodes / supabase rows) + drops each tenant user, wired into BOTH purge paths (`_purge_registry_team` + the supabase purge branch); R13's periodic audit stays a plan note (an actual reconcile job is ops/capstone scope). S2 exact-state upsert — `_setuser` now issues a FULL `reset` before rebuilding (`reset on >pw ~ns +cmds`), healing any drifted broader grant (+@all/allkeys from a manual fix or old recipe) instead of accumulating rules; `_GRAPH_DENY` removed (the deny-all base + reset make it dead). S3 one-live-secret unconditional — the full reset clears passwords every upsert, so stored≠live divergence can never yield two live secrets (re-asserting the same stored pw is churn-free). S4 connection-class failures in `_setuser` log + return False (fail-soft — a transient drop between probe and SETUSER no longer 503s a healthy selfhost); only a server-side ResponseError raises AclLayerError (strict rollback reserved for real recipe/perm failures). S5 test coverage — runtime NOPERM assertions for GRAPH.CONFIG/DEBUG/UDF/LIST as the tenant user + test_upsert_heals_drift_exact_state (+@all drift → exact state restored) + test_team_purge_drops_custom_graph_users. 14 ACL tests pass on docker lane; hosted_api 242 + carve-out 410 pass; ruff clean.

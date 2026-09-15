@@ -38,7 +38,7 @@ Constraints that shape every approach:
 - **Signup key mint bypasses the app:** `api_keys` INSERT happens in two places — `insert_api_key` (supabase_control.py L480, dashboard-created keys) and the `provision_team` RPC (L1018, called by the tenant-provision Edge Function on user signup). **Only a DB trigger sees both.**
 - **Rate-limit template:** `_register_buckets` (hosted_api.py L1215–1245) and `MCPRateLimitMiddleware` (mcp_auth.py): `defaultdict(list)` timestamps + prune + cap + `asyncio.Lock` + `RATE_LIMIT_DISABLED`.
 - **Notify:** `notify.py` `KINDS` is billing-only (L30); `_send_resend` (L76) private; `teams.email` nullable (NULL for anon agent-signup teams). `alert_store.py` = GH issue + Telegram incident alerts with dedup.
-- **Audit:** `audit_events` table (migration 0002: `operation` column, index `(team_id, created_at DESC)`); Postgres-backed only when `TORTOISE_AUDIT_DSN` set, JSONL fallback otherwise; **no DSN in fly.toml** (must be confirmed via `fly secrets list`).
+- **Audit:** `audit_events` table (migration 0002: `operation` column, index `(org_id, created_at DESC)`); Postgres-backed only when `TORTOISE_AUDIT_DSN` set, JSONL fallback otherwise; **no DSN in fly.toml** (must be confirmed via `fly secrets list`).
 - **CLI:** `__main__.py` branches on HTTP error codes with hardcoded messages; 403 → `"key_rejected"`; response body `detail` not parsed → appeal link requires a detail parse.
 
 Common to all approaches (not differentiated):
@@ -59,7 +59,7 @@ The abuse control plane lives in Supabase: a new `abuse_events` table (migration
 
 | File | Change |
 |---|---|
-| `supabase/migrations/0015_abuse_events.sql` | `abuse_events` table + RLS (service_role_all, mirrors 0014) + index `(team_id, event_type, created_at)` + trigger `trg_api_keys_abuse` (AFTER INSERT on api_keys → `key_create` event) + `teams.suspended_at` column + `abuse_suspend`/`abuse_unsuspend` SECURITY DEFINER RPCs |
+| `supabase/migrations/0015_abuse_events.sql` | `abuse_events` table + RLS (service_role_all, mirrors 0014) + index `(org_id, event_type, created_at)` + trigger `trg_api_keys_abuse` (AFTER INSERT on api_keys → `key_create` event) + `teams.suspended_at` column + `abuse_suspend`/`abuse_unsuspend` SECURITY DEFINER RPCs |
 | `tortoise/abuse.py` (new) | `AbuseEventStore` protocol + `SupabaseAbuseStore` / `FakeAbuseStore` (tests) / `MemoryAbuseStore` (registry mode); rule engine (`evaluate(window_count) → None | flag | suspend`); `ReadVelocityTracker` (shared REST+MCP in-memory window); `GeoResolver` interface + `HeaderGeoResolver` + `IpInfoGeoResolver` |
 | `tortoise/supabase_control.py` | `get_abuse_store()` (monkeypatchable, same pattern as `get_control_plane`); `resolve_api_key` returns `suspended_at`; `record_abuse_event()` best-effort helper |
 | `tortoise/hosted_api.py` | `get_current_team` + `_get_current_team_supabase`: post-auth geo check (R4) + 403 `SUSPENDED` when `suspended_at` set (R5); `record_write_ops` hook site (L1035): best-effort `point_create` event (R1); `GET /v1/team/alerts` (R7); `TeamInfoResponse.status` additive field (L1079); siteverify on signup/register (R6); `session_key` mint gated on suspension |
@@ -85,7 +85,7 @@ api_keys INSERT (any path) ──trigger──> abuse_events('key_create')  (no 
                                      ▼
                           abuse.evaluate(team, type):
                             count = SELECT count(*) FROM abuse_events
-                                    WHERE team_id=$1 AND event_type=$2
+                                    WHERE org_id=$1 AND event_type=$2
                                     AND created_at > now()-window
                             (indexed; ~1ms; in request path)
                             → stage 1 breach: flag row + notify
@@ -105,7 +105,7 @@ Recording is best-effort fire-and-forget (never gates the write); **evaluation i
 
 **Reads (R3):** `ReadVelocityTracker` — shared module-level `defaultdict(list)` keyed by resolved `key_id`, 5-min window, prune + cap (mirrors `_register_buckets`). REST: increment in `get_current_team` post-success (every authed read passes through it; failed auths don't count). MCP: increment in `TeamResolutionMiddleware` post-resolution for `tools/call` methods **not** in `_QUOTA_GATED` (read tools). One tracker shared by both transports → same key counted once across REST+MCP. Breach → `notify_abuse('abuse_read_velocity')`, once per key per window (track notified window starts). Gated by `RATE_LIMIT_DISABLED=1` in tests (existing convention).
 
-**Geo (R4):** `GeoResolver.resolve(request) → country | None`. Default = `CF-IPCountry` header passthrough (fail-open: no header → None → rule inactive). Optional `IPINFO_TOKEN` resolver for Fly-direct deployments. Post-auth: if country resolves and is not in the team's seen set (`SELECT DISTINCT country FROM abuse_events WHERE team_id=$1 AND event_type='auth_ip'`), record `auth_ip` event + notify owner. Seen-set cached in-process per team (24h TTL) to avoid a query per request; the durable check happens on cache miss.
+**Geo (R4):** `GeoResolver.resolve(request) → country | None`. Default = `CF-IPCountry` header passthrough (fail-open: no header → None → rule inactive). Optional `IPINFO_TOKEN` resolver for Fly-direct deployments. Post-auth: if country resolves and is not in the team's seen set (`SELECT DISTINCT country FROM abuse_events WHERE org_id=$1 AND event_type='auth_ip'`), record `auth_ip` event + notify owner. Seen-set cached in-process per team (24h TTL) to avoid a query per request; the durable check happens on cache miss.
 
 **Dashboard (R7):** `GET /v1/team/alerts` returns recent `flagged`/suspend rows from `abuse_events` (joined to key id + timestamps). `TeamInfoResponse.status` = `"suspended" | "flagged" | "active"` (additive Pydantic field). Banner with appeal CTA renders for suspended; revoke button unchanged (re-mint gated server-side).
 
@@ -204,9 +204,9 @@ No new event table: rules run as **scheduled SQL aggregations over the existing 
 
 | File | Change |
 |---|---|
-| `supabase/migrations/0015_suspended_at.sql` | `teams.suspended_at` column + `abuse_suspend`/`abuse_unsuspend` RPCs + **composite index on `audit_events (team_id, operation, created_at DESC)`** (0002's `(team_id, created_at DESC)` index cannot serve the `operation`-filtered aggregates efficiently) |
+| `supabase/migrations/0015_suspended_at.sql` | `teams.suspended_at` column + `abuse_suspend`/`abuse_unsuspend` RPCs + **composite index on `audit_events (org_id, operation, created_at DESC)`** (0002's `(org_id, created_at DESC)` index cannot serve the `operation`-filtered aggregates efficiently) |
 | `tortoise/abuse.py` (new) | `AbuseRuleEngine` (threshold defs, two-stage state machine); `SuspensionStore` (Supabase RPC / registry prop); `ReadVelocityTracker` + `GeoResolver` (as A) |
-| `tortoise/hosted_api.py` | lifespan: start `AbusePoller` background task (every 60s: `SELECT operation, count(*) FROM audit_events WHERE team_id=$1 AND created_at > now()-interval GROUP BY operation` per active team; evaluate R1/R2); suspension check + 403 in auth; `GET /v1/team/alerts` (computed from audit_events aggregates at request time); `TeamInfoResponse.status`; siteverify; `session_key` gate |
+| `tortoise/hosted_api.py` | lifespan: start `AbusePoller` background task (every 60s: `SELECT operation, count(*) FROM audit_events WHERE org_id=$1 AND created_at > now()-interval GROUP BY operation` per active team; evaluate R1/R2); suspension check + 403 in auth; `GET /v1/team/alerts` (computed from audit_events aggregates at request time); `TeamInfoResponse.status`; siteverify; `session_key` gate |
 | `tortoise/mcp_server.py` | `_quota_gated`: best-effort `audit.record('point_create')` after successful writes (MCP audit gap today) |
 | `tortoise/mcp_auth.py` | `ERR_SUSPENDED` + cache-bust (as A) |
 | `tortoise/notify.py`, `tortoise/__main__.py`, `website/*`, `website/apps/dashboard/src/main.jsx` | same as A |

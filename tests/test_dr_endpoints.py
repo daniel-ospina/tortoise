@@ -73,7 +73,7 @@ def _quiet_watcher(monkeypatch):
 @pytest.fixture(autouse=True)
 def _clean_team_graphs(monkeypatch):
     """Epic #1647 (PR #1684 CI-fix): the DR tests seed the RAW team_team_x
-    graph (select_graph(f"team_{team_id}")) — NON-test-prefixed, so the
+    graph (select_graph(f"org_{org_id}")) — NON-test-prefixed, so the
     server lane's wipe_server skips it and seeds ACCUMULATE across tests
     (CREATE not MERGE → duplicate Points → rebaseline count 6 != 3). The
     embedded lane's wipe() clears everything per test; the server lane must
@@ -121,15 +121,15 @@ def mem_storage(monkeypatch):
 _SEED_SDKS: list = []
 
 
-def _seed_team(team_id: str = "team_x", nodes: int = 2) -> None:
+def _seed_team(org_id: str = "team_x", nodes: int = 2) -> None:
     # The path arg is IGNORED under the client fixture's patched __init__
     # (all current callers use client); the SDK binds to the per-test temp DB.
     sdk = TortoiseSDK(namespace="registry")
     _SEED_SDKS.append(sdk)
     reg = sdk._get_registry()
-    reg.query("MATCH (t:Team {id:$id}) DELETE t", params={"id": team_id})
-    reg.query("CREATE (t:Team {id:$id, tier:'pro'})", params={"id": team_id})
-    g = sdk._get_proj().db.select_graph(f"team_{team_id}")
+    reg.query("MATCH (t:Team {id:$id}) DELETE t", params={"id": org_id})
+    reg.query("CREATE (t:Team {id:$id, tier:'pro'})", params={"id": org_id})
+    g = sdk._get_proj().db.select_graph(f"org_{org_id}")
     for i in range(nodes):
         g.query(
             "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
@@ -171,7 +171,7 @@ class TestDrStatus:
             "last_team_count": 2,
             "last_sweep_at": "2026-09-06T10:00:00+00:00",
             "graph_totals": {"attempted": 3, "backed_up": 2, "errors": 1},
-            "graph_failures": [{"team_id": "team_x", "graph_id": "g_a",
+            "graph_failures": [{"org_id": "team_x", "graph_id": "g_a",
                                 "error": "boom", "streak": 2}],
             "graph_error_streaks": {"team_x:g_a": 2},
             # #2823: the dialect the sweep enumerated. This is the field that
@@ -405,7 +405,7 @@ class TestDrSweep:
         # Seed the DATA plane (FalkorDB stays the graph store in both lanes).
         db = ha_mod._make_sdk(namespace=None)._get_proj().db
         for tid in ("team_s1", "team_s2"):
-            g = db.select_graph(f"team_{tid}")
+            g = db.select_graph(f"org_{tid}")
             g.query("CREATE (p:Point {id:'p1', content:'c', pointKind:'claim'})")
 
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
@@ -565,7 +565,7 @@ class TestSupabaseLaneSeam:
         that rebuilt no ACLs after a full-platform restore."""
         monkeypatch.setattr(
             "tortoise.acl_graph_users.create_acl_user",
-            lambda graph_id, team_id: {"username": "u"})
+            lambda graph_id, org_id: {"username": "u"})
         cp = self._fortify_supabase_lane(monkeypatch)
         r = client.post("/v1/internal/backups/acl-reconcile",
                         headers=INTERNAL_HEADERS)
@@ -588,7 +588,7 @@ class TestSupabaseLaneSeam:
         cp = self._fortify_supabase_lane(monkeypatch)
         expired = (datetime.now(UTC) - timedelta(days=30)).isoformat()
         cp.seed("graphs", [{
-            "id": "g_old", "team_id": "team_s1", "name": "g_old",
+            "id": "g_old", "org_id": "team_s1", "name": "g_old",
             "kind": "custom", "status": "deleted",
             "namespace": "team_team_s1_g_old", "deleted_at": expired,
             "purged_at": None,
@@ -613,7 +613,7 @@ class TestSupabaseLaneSeam:
         cp = self._fortify_supabase_lane(monkeypatch)
         self._seed_data_plane()
         r = client.post("/v1/internal/backups/re-baseline",
-                        headers=INTERNAL_HEADERS, json={"team_id": "team_s1"})
+                        headers=INTERNAL_HEADERS, json={"org_id": "team_s1"})
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "rebaselined", body
@@ -623,14 +623,14 @@ class TestSupabaseLaneSeam:
     def test_drill_resolves_the_active_graph_via_the_supabase_seam(
             self, client, dr_env, mem_storage, monkeypatch):
         """The drill resolves its target graph through the seam AFTER the
-        team_id/backup_key validation — a body without a real archive key
+        org_id/backup_key validation — a body without a real archive key
         short-circuits before the seam and proves nothing."""
         cp = self._fortify_supabase_lane(monkeypatch)
         self._seed_data_plane()
         key = _default_drill_key(client, mem_storage, team="team_s1")
         ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-                        json={"team_id": "team_s1", "backup_key": key})
+                        json={"org_id": "team_s1", "backup_key": key})
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "drill_ok", r.text
         assert cp.query_count > 0
@@ -657,7 +657,7 @@ class TestSupabaseLaneSeam:
         legacy flat manifest lists under its actual custom graph instead of
         being mislabeled as the default."""
         cp = self._fortify_supabase_lane(monkeypatch)
-        cp.seed("graphs", [{"id": "g_custom", "team_id": "team_s1",
+        cp.seed("graphs", [{"id": "g_custom", "org_id": "team_s1",
                             "name": "g_custom", "kind": "custom",
                             "status": "active",
                             "namespace": "team_team_s1_g_custom"}])
@@ -665,14 +665,14 @@ class TestSupabaseLaneSeam:
         mem_storage.upload(
             f"backups/{backup_id}/manifest.json",
             json.dumps({
-                "backup_id": backup_id, "team_id": "team_s1",
+                "backup_id": backup_id, "org_id": "team_s1",
                 "graph_name": "team_team_s1_g_custom",
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "node_count": 1, "edge_count": 0, "sha256": "0" * 64,
             }).encode())
         ha_mod.app.dependency_overrides[
             ha_mod.get_current_team_session_ungated
-        ] = lambda: {"team_id": "team_s1"}
+        ] = lambda: {"org_id": "team_s1"}
         try:
             r = client.get("/backups", headers=INTERNAL_HEADERS)
         finally:
@@ -775,14 +775,14 @@ class TestDrRebaseline:
         assert r.status_code == 400
 
     def test_rebaseline_rejects_malformed_ids(self, client, dr_env, mem_storage):
-        """#2377: team_id/graph_id flow into R2 state keys — charset-gate the
+        """#2377: org_id/graph_id flow into R2 state keys — charset-gate the
         shape before any write (defense in depth; rows are server-generated
         today, but this endpoint must never mint keys off an attacker-shaped
         id)."""
         bad = [
-            {"team_id": "team_x", "graph_id": "../esc"},
-            {"team_id": "team_x", "graph_id": "g_a/b"},
-            {"team_id": "../team", "graph_id": "default"},
+            {"org_id": "team_x", "graph_id": "../esc"},
+            {"org_id": "team_x", "graph_id": "g_a/b"},
+            {"org_id": "../team", "graph_id": "default"},
         ]
         for body in bad:
             r = client.post("/v1/internal/backups/re-baseline",
@@ -799,7 +799,7 @@ class TestDrRebaseline:
         )
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x"},
+            json={"org_id": "team_x"},
         )
         assert r.status_code == 200
         assert r.json()["node_count"] == 3
@@ -825,7 +825,7 @@ class TestDrDrill:
         ha_mod._LAST_DRILL_AT = 0.0  # clear cooldown
         r2 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": backup_key},
+            json={"org_id": "team_x", "backup_key": backup_key},
         )
         assert r2.status_code == 200, r2.text
         body = r2.json()
@@ -873,7 +873,7 @@ class TestDrDrill:
         ha_mod._LAST_DRILL_AT = 0.0
         r2 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": backup_key},
+            json={"org_id": "team_x", "backup_key": backup_key},
         )
         assert r2.status_code == 200, r2.text
         assert r2.json()["status"] == "drill_ok"
@@ -889,12 +889,12 @@ class TestDrDrill:
         ha_mod._LAST_DRILL_AT = 0.0
         r1 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": backup_key},
+            json={"org_id": "team_x", "backup_key": backup_key},
         )
         assert r1.status_code == 200
         r2 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": backup_key},
+            json={"org_id": "team_x", "backup_key": backup_key},
         )
         assert r2.status_code == 429
 
@@ -903,14 +903,14 @@ class TestDrRebaselinePerGraph:
     """#2313 Task 5: re-baseline resolves the ACTIVE-graph seam (per-graph
     state; tombstone guard)."""
 
-    def _seed_custom(self, team_id="team_x", gid="g_c1", ns="team_team_x_g_c1"):
+    def _seed_custom(self, org_id="team_x", gid="g_c1", ns="team_team_x_g_c1"):
         sdk = TortoiseSDK(namespace="registry")
         _SEED_SDKS.append(sdk)
         reg = sdk._get_registry()
         reg.query(
-            "CREATE (g:Graph {id:$gid, team_id:$tid, kind:'custom', "
+            "CREATE (g:Graph {id:$gid, org_id:$tid, kind:'custom', "
             "namespace:$ns, status:'active'})",
-            params={"gid": gid, "tid": team_id, "ns": ns},
+            params={"gid": gid, "tid": org_id, "ns": ns},
         )
         g = sdk._get_proj().db.select_graph(ns)
         g.query("CREATE (p:Point {id:'c-0', content:'c', pointKind:'claim'})")
@@ -919,7 +919,7 @@ class TestDrRebaselinePerGraph:
         _seed_team("team_x", nodes=3)
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x"},
+            json={"org_id": "team_x"},
         )
         assert r.status_code == 200
         assert r.json()["graph_id"] == "default"
@@ -938,7 +938,7 @@ class TestDrRebaselinePerGraph:
         )
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "graph_id": "g_c1"},
+            json={"org_id": "team_x", "graph_id": "g_c1"},
         )
         assert r.status_code == 200
         assert r.json()["node_count"] == 1
@@ -954,11 +954,11 @@ class TestDrRebaselinePerGraph:
         sdk = TortoiseSDK(namespace="registry")
         _SEED_SDKS.append(sdk)
         sdk._get_registry().query(
-            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_dead', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_dead', status:'deleted'})")
         r = client.post(
             "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "graph_id": "g_dead"},
+            json={"org_id": "team_x", "graph_id": "g_dead"},
         )
         assert r.status_code == 400
         assert "not an active graph" in r.json()["detail"]
@@ -981,7 +981,7 @@ class TestDrDrillPerGraph:
         _SEED_SDKS.append(sdk)
         reg = sdk._get_registry()
         reg.query(
-            "CREATE (g:Graph {id:'g_c1', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_c1', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_c1', status:'active'})")
         g = sdk._get_proj().db.select_graph("team_team_x_g_c1")
         g.query("CREATE (p:Point {id:'c-0', content:'c', pointKind:'claim'})")
@@ -989,7 +989,7 @@ class TestDrDrillPerGraph:
         ha_mod._LAST_DRILL_AT = 0.0
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": key},
+            json={"org_id": "team_x", "backup_key": key},
         )
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "drill_ok"
@@ -1004,7 +1004,7 @@ class TestDrDrillPerGraph:
         _SEED_SDKS.append(sdk)
         reg = sdk._get_registry()
         reg.query(
-            "CREATE (g:Graph {id:'g_x', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_x', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_x', status:'active'})")
         g = sdk._get_proj().db.select_graph("team_team_x_g_x")
         g.query("CREATE (p:Point {id:'x-0', content:'x', pointKind:'claim'})")
@@ -1014,7 +1014,7 @@ class TestDrDrillPerGraph:
         ha_mod._LAST_DRILL_AT = 0.0
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": key},
+            json={"org_id": "team_x", "backup_key": key},
         )
         assert r.status_code == 409, r.text
         assert "not an active graph" in r.json()["detail"]
@@ -1098,12 +1098,12 @@ class TestReconcile:
         for e in entries:
             reg.query(
                 "CREATE (k:APIKey {id:$id, key_prefix:$prefix, hash:'test', "
-                "team_id:$tid, created_by:$by, created_at:$now, "
+                "org_id:$tid, created_by:$by, created_at:$now, "
                 "revoked_at:$rev, expires_at:$exp, created_via:$via})",
                 params={
                     "id": e["id"],
                     "prefix": e.get("prefix", "tt_test"),
-                    "tid": e.get("team_id", "team-reconcile"),
+                    "tid": e.get("org_id", "team-reconcile"),
                     "by": "test",
                     "now": "2025-01-01T00:00:00+00:00",
                     "rev": e.get("revoked_at"),
@@ -1239,15 +1239,15 @@ class TestDrAclReconcile:
         # eligible for hosted backup (acl reconcile enumerates eligible teams)
         reg.query("MATCH (t:Team {id:'team_x'}) SET t.backup_enabled = true")
         reg.query(
-            "CREATE (g:Graph {id:'g_a', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_a', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_a', status:'active'})")
         reg.query(
-            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_dead', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_dead', status:'deleted'})")
         calls: list = []
         monkeypatch.setattr(
             "tortoise.acl_graph_users.create_acl_user",
-            lambda graph_id, team_id: calls.append((graph_id, team_id)) or {"username": "u"},
+            lambda graph_id, org_id: calls.append((graph_id, org_id)) or {"username": "u"},
         )
         r = client.post(
             "/v1/internal/backups/acl-reconcile", headers=INTERNAL_HEADERS)
@@ -1280,12 +1280,12 @@ class _FakeAlerts:
     def __init__(self):
         self.calls: list = []
 
-    def open_incident(self, kind, team_id="", detail=None):
-        self.calls.append(("open", kind, team_id, dict(detail or {})))
+    def open_incident(self, kind, org_id="", detail=None):
+        self.calls.append(("open", kind, org_id, dict(detail or {})))
         return True
 
-    def resolve_incident(self, kind, team_id=""):
-        self.calls.append(("resolve", kind, team_id))
+    def resolve_incident(self, kind, org_id=""):
+        self.calls.append(("resolve", kind, org_id))
         return True
 
 
@@ -1303,7 +1303,7 @@ def _default_drill_key(client, mem_storage, team="team_x") -> str:
     (a sweep always adds one archive; retention keeps older ones)."""
     r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
     assert r.json()["status"] == "backed_up", r.text
-    keys = [k for k in mem_storage.list(f"backups/{team}/default/")
+    keys = [k for k in mem_storage.list(f"backups/{org_id}/default/")
             if k.endswith("dump.enc")]
     assert keys, f"no default archive for {team}"
     return sorted(keys)[-1]  # newest (lexicographic ts == chronological)
@@ -1383,7 +1383,7 @@ class TestDrDrillScheduled:
         _SEED_SDKS.append(sdk)
         reg = sdk._get_registry()
         reg.query(
-            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "CREATE (g:Graph {id:'g_dead', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_dead', status:'active'})")
         g = sdk._get_proj().db.select_graph("team_team_x_g_dead")
         g.query("CREATE (p:Point {id:'d-0', content:'d', pointKind:'claim'})")
@@ -1492,7 +1492,7 @@ class TestDrDrillScheduled:
         ha_mod._LAST_DRILL_AT = 0.0
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
-            json={"team_id": "team_x", "backup_key": key},
+            json={"org_id": "team_x", "backup_key": key},
         )
         assert r.status_code == 200, r.text
         body = r.json()
@@ -1564,10 +1564,10 @@ class TestBackupsSurfaceUnits:
 
     def test_incident_subject_mapping(self):
         _sub = ha_mod._incident_subject
-        assert _sub({"kind": "STALE", "team_id": "team_x"}) == "team_x"
+        assert _sub({"kind": "STALE", "org_id": "team_x"}) == "team_x"
         # custom-graph incidents carry graph_id → "{team}:{gid}"
-        assert _sub({"team_id": "team_x", "graph_id": "g_c1"}) == "team_x:g_c1"
+        assert _sub({"org_id": "team_x", "graph_id": "g_c1"}) == "team_x:g_c1"
         # default-graph incidents stay team-level (back-compat alert keys)
-        assert _sub({"team_id": "team_x", "graph_id": "default"}) == "team_x"
+        assert _sub({"org_id": "team_x", "graph_id": "default"}) == "team_x"
         # team-level kinds have no graph_id
-        assert _sub({"kind": "NO_ELIGIBLE_TEAMS", "team_id": ""}) == ""
+        assert _sub({"kind": "NO_ELIGIBLE_TEAMS", "org_id": ""}) == ""

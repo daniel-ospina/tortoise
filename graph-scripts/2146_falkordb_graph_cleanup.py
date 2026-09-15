@@ -2,8 +2,8 @@
 """2146 — drop e2e-live orphan FalkorDB graphs (companion to the Supabase cleanup).
 
 Issue: daniel-ospina/tortoise#2146. Each red-window welcome-mode provisioning
-mint seeded a FalkorDB graph `team_{team_id}` where
-team_id = sha256(user_id).hexdigest()[:26] (see supabase/functions/
+mint seeded a FalkorDB graph `org_{org_id}` where
+org_id = sha256(user_id).hexdigest()[:26] (see supabase/functions/
 tenant-provision/index.ts). The Supabase side is cleaned by
 2146_e2e_live_orphan_cleanup.py; THIS script drops the graphs for the teams in
 the manifest.

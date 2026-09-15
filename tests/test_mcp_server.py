@@ -22,14 +22,14 @@ def _transport_context():
     context (quota skipped). Restore after each test.
     """
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_team_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
+    _current_org_id.set(None)
     _current_team_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
+    _current_org_id.set(None)
     _current_team_limits.set(None)
 
 
@@ -394,14 +394,14 @@ class TestToolFunctions:
         """#1009: GITHUB_CLIENT_ID unset (self-host HTTP — OAuth is hosted-mode
         only) → the prompt-canonical text, not the misleading
         'GitHub OAuth not configured' (AGENT_ONBOARDING.md lines 51/209)."""
-        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_auth import _current_org_id
         from tortoise.mcp_server import tortoise_onboarding_github_connect
         monkeypatch.delenv("GITHUB_CLIENT_ID", raising=False)
-        token = _current_team_id.set("team-github-oauth")
+        token = _current_org_id.set("team-github-oauth")
         try:
             result = tortoise_onboarding_github_connect("acme")
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
         assert result == {"error": "No team context (HTTP mode required)"}
 
     def test_github_index_wraps_repo_into_list(self, monkeypatch):
@@ -412,11 +412,11 @@ class TestToolFunctions:
         (repo='repo1' → walks org/r, org/e, ...)."""
         import tortoise.hosted_api as ha
         import tortoise.mcp_server as ms
-        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_auth import _current_org_id
         from tortoise.mcp_server import tortoise_onboarding_github_index
 
         calls: list = []
-        token = _current_team_id.set("team-github-index")
+        token = _current_org_id.set("team-github-index")
         import asyncio as _asyncio
         # Hermetic (CI workers may have no current event loop — the tool's
         # get_event_loop().create_task raises RuntimeError there): create an
@@ -428,7 +428,7 @@ class TestToolFunctions:
             monkeypatch.setattr(ha, "_start_index_job",
                                 lambda tid, kind="github": ("job1", True))
 
-            async def _capture(job_id, team_id, org, repos):
+            async def _capture(job_id, org_id, org, repos):
                 calls.append((org, repos))
 
             monkeypatch.setattr(ha, "_run_indexing", _capture)
@@ -449,7 +449,7 @@ class TestToolFunctions:
             assert calls == [("acme", ["repo1"])], \
                 "the repo must be wrapped into a one-item list, not a bare str"
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
             loop.close()
             _asyncio.set_event_loop(None)
 
@@ -465,7 +465,7 @@ class TestGraphBoundTeamSurfaceReject:
 
     # tool name → call kwargs the function body needs BEFORE its reject
     # fires (required params only — the reject is the first gate in every
-    # body; only demo_create checks team_id first, so the probe sets it).
+    # body; only demo_create checks org_id first, so the probe sets it).
     TOOL_ARGS = {  # noqa: RUF012
         "tortoise_onboarding_demo_create": {},
         "tortoise_onboarding_state": {},
@@ -481,10 +481,10 @@ class TestGraphBoundTeamSurfaceReject:
         from fastmcp.exceptions import AuthorizationError  # noqa: I001
         from tortoise.mcp_auth import (
             _current_graph_id, _current_graph_namespace,
-            _current_legacy_full_access, _current_scopes, _current_team_id,
+            _current_legacy_full_access, _current_scopes, _current_org_id,
         )
         toks = [
-            _current_team_id.set("gb-team"),
+            _current_org_id.set("gb-team"),
             _current_graph_id.set("g_gb"),
             _current_graph_namespace.set("team_gb_g_gb"),
             _current_scopes.set(["graphs:read", "graphs:write"]),
@@ -750,7 +750,7 @@ class TestAnalyzeLlmBudget:
         """Beyond the per-minute budget, tortoise_analyze skips llm_classify
         (no outbound call) and degrades to keyword-only."""
         import tortoise.mcp_server as ms
-        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_auth import _current_org_id
         from tortoise.quota import MAX_ANALYZE_LLM_PER_MIN
 
         # embedded env (no Docker) so the team SDK resolves
@@ -760,7 +760,7 @@ class TestAnalyzeLlmBudget:
         monkeypatch.setenv("TORTOISE_DB_PATH", _os.path.join(_tf.mkdtemp(), "budget.db"))
 
         # Team context (HTTP) → budget accounting
-        token = _current_team_id.set("team-budget")
+        token = _current_org_id.set("team-budget")
         try:
             # Exercise the ACCUMULATION path: MAX calls allowed, next rejected
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
@@ -780,7 +780,7 @@ class TestAnalyzeLlmBudget:
             # Keyword path still answers
             assert result.get("pattern") is not None or "disagreement" in str(result.get("answer", ""))
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
             ms._ANALYZE_LLM_BUDGET.pop("team-budget", None)
 
 

@@ -7,19 +7,19 @@ live signup smoke was red for ~14 days (2026-08-19T22:20 → 2026-09-02): the
 REAL app root loaded every run and ran #1566 welcome-mode provisioning under
 emails matching `e2e-live-<8hex>@premise-labs.dev` — minting a prod team +
 api_keys row + FalkorDB graph per run. Monitor teardown deleted only the auth
-user (FK cascade removes team_memberships); the minted teams/api_keys rows and
+user (FK cascade removes org_memberships); the minted teams/api_keys rows and
 FalkorDB graphs were never cleaned (fix PR #2144 prevents NEW mints).
 
 Mint path (verified in repo, 2026-09-02):
   dashboard welcome-mode (website/apps/dashboard/src/main.jsx provisionInApp)
   → Supabase edge fn `tenant-provision` (supabase/functions/tenant-provision/
     index.ts) → `provision_team` SECURITY DEFINER RPC (migration 0010) which
-    writes teams + team_memberships + api_keys atomically, then FastAPI
-    `/internal/demo` seeds the FalkorDB graph `team_{team_id}` where
-    team_id = sha256(user_id).hexdigest()[:26] (deterministic per user).
+    writes teams + org_memberships + api_keys atomically, then FastAPI
+    `/internal/demo` seeds the FalkorDB graph `org_{org_id}` where
+    org_id = sha256(user_id).hexdigest()[:26] (deterministic per user).
 
 This script cleans the SUPABASE side (auth users + teams + api_keys +
-team_memberships + invitations + abuse_events). FalkorDB graphs are dropped by
+org_memberships + invitations + abuse_events). FalkorDB graphs are dropped by
 the companion script 2146_falkordb_graph_cleanup.py (separate store, needs
 FALKORDB_CLOUD_URI).
 
@@ -40,14 +40,14 @@ SAFETY MODEL
 
 DELETE-ORDER RATIONALE (mirrors tortoise purge semantics; live FK catalog):
   1. auth.users (remaining e2e-live accounts) via GoTrue Admin API — FK
-     `user_teams_user_id_fkey` (team_memberships.user_id → auth.users) ON
+     `user_teams_user_id_fkey` (org_memberships.user_id → auth.users) ON
      DELETE CASCADE removes their memberships; auth-internal tables cascade.
-  2. team_memberships WHERE team_id IN (...) — team_id has NO FK (explicit
+  2. org_memberships WHERE org_id IN (...) — org_id has NO FK (explicit
      delete required; also covers any row whose user is already gone).
-  3. api_keys WHERE team_id IN (...) — has FK ON DELETE CASCADE, deleted
+  3. api_keys WHERE org_id IN (...) — has FK ON DELETE CASCADE, deleted
      explicitly for an auditable, non-cascade-dependent sequence.
-  4. invitations WHERE team_id IN (...) — FK CASCADE, explicit anyway.
-  5. abuse_events WHERE team_id IN (...) — FK CASCADE (0015 key_create rows
+  4. invitations WHERE org_id IN (...) — FK CASCADE, explicit anyway.
+  5. abuse_events WHERE org_id IN (...) — FK CASCADE (0015 key_create rows
      minted by provision_team), explicit anyway.
   6. audit_events INSERT per team (operation=e2e_live_orphan_purged). Each run
      carries a fresh uuid in the audit id so a partial failure (INSERT ok,
@@ -137,22 +137,22 @@ USERS_SQL = """
 
 CHILDREN_SQL = """
     SELECT 'api_keys' AS kind, count(*) AS n FROM public.api_keys
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL
-    SELECT 'team_memberships', count(*) FROM public.team_memberships
-      WHERE team_id IN ({ids})
+    SELECT 'org_memberships', count(*) FROM public.org_memberships
+      WHERE org_id IN ({ids})
     UNION ALL
     SELECT 'invitations', count(*) FROM public.invitations
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL
     SELECT 'abuse_events', count(*) FROM public.abuse_events
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL
     SELECT 'analytics_events', count(*) FROM public.analytics_events
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL
     SELECT 'audit_events', count(*) FROM public.audit_events
-      WHERE team_id IN ({ids});
+      WHERE org_id IN ({ids});
 """
 
 
@@ -357,10 +357,10 @@ def phase_db(args: argparse.Namespace, manifest: dict, runner) -> None:
         return
     ids = _qlist([t["id"] for t in teams])
     steps = [
-        ("api_keys", f"DELETE FROM public.api_keys WHERE team_id IN ({ids});"),
-        ("team_memberships", f"DELETE FROM public.team_memberships WHERE team_id IN ({ids});"),
-        ("invitations", f"DELETE FROM public.invitations WHERE team_id IN ({ids});"),
-        ("abuse_events", f"DELETE FROM public.abuse_events WHERE team_id IN ({ids});"),
+        ("api_keys", f"DELETE FROM public.api_keys WHERE org_id IN ({ids});"),
+        ("org_memberships", f"DELETE FROM public.org_memberships WHERE org_id IN ({ids});"),
+        ("invitations", f"DELETE FROM public.invitations WHERE org_id IN ({ids});"),
+        ("abuse_events", f"DELETE FROM public.abuse_events WHERE org_id IN ({ids});"),
         # #2162 re-review ISSUE A: analytics_events is NOT deletable — migration
         # 0004 creates an analytics_events_immutable BEFORE UPDATE OR DELETE
         # FOR EACH STATEMENT trigger (not role-gated: fires on ANY delete
@@ -383,7 +383,7 @@ def phase_db(args: argparse.Namespace, manifest: dict, runner) -> None:
     steps.append((
         "audit_events (append trail)",
         f"INSERT INTO public.audit_events "
-        f"(id, team_id, actor_user_id, operation, resource_type, resource_id, created_at) "
+        f"(id, org_id, actor_user_id, operation, resource_type, resource_id, created_at) "
         f"VALUES {audit_values};",
     ))
     steps.append(("teams (LAST — retry anchor)", f"DELETE FROM public.teams WHERE id IN ({ids});"))
@@ -448,7 +448,7 @@ def main() -> int:
         print(f"[enumerate] wrote {args.manifest}")
         c = manifest["counts"]
         print(f"[enumerate] teams={c.get('teams', 0)} users={c.get('users', 0)} "
-              f"api_keys={c.get('api_keys', 0)} memberships={c.get('team_memberships', 0)} "
+              f"api_keys={c.get('api_keys', 0)} memberships={c.get('org_memberships', 0)} "
               f"invitations={c.get('invitations', 0)} abuse_events={c.get('abuse_events', 0)} "
               f"analytics_events={c.get('analytics_events', 0)} "
               f"audit_events={c.get('audit_events', 0)}")

@@ -83,7 +83,7 @@ def _mk_files(*paths: str) -> list[dict]:
 
 def test_walk_stages_docs_under_team_dir(tmp_path, monkeypatch):
     """docs/ blobs are fetched and staged under
-    {TORTOISE_INGEST_BASE_DIR}/{team_id}/{repo}/docs/... with the original
+    {TORTOISE_INGEST_BASE_DIR}/{org_id}/{repo}/docs/... with the original
     relative layout preserved."""
     base = str(tmp_path / "ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
@@ -115,7 +115,7 @@ def test_walk_stages_docs_under_team_dir(tmp_path, monkeypatch):
 
 def test_two_team_staging_isolation(tmp_path, monkeypatch):
     """Team A blobs are never picked up by team B — staging is partitioned
-    under {base}/{team_id}/ (T2-P2b)."""
+    under {base}/{org_id}/ (T2-P2b)."""
     base = str(tmp_path / "ingest")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
     entries, blobs = _mk_files("docs/README.md")

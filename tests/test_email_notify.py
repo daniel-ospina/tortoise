@@ -337,17 +337,17 @@ def test_send_budget_month_rollover_resets_month_counter():
 
 # ── #2406: onboarding-call offer email ───────────────────────────────────────
 
-def _invoke_onboarding(email, display_name=None, team_name=None,
-                       team_id="team-1"):
+def _invoke_onboarding(email, display_name=None, org_name=None,
+                       org_id="team-1"):
     """Run the AWAITED onboarding send to completion (no background task)."""
     return asyncio.run(email_notify.send_onboarding_offer_email(
-        email, display_name, team_name, team_id))
+        email, display_name, org_name, org_id))
 
 
 def test_onboarding_payload_verbatim_copy_exact_url_and_from(monkeypatch):
     """Copy is verbatim (issue #2406) incl. the EXACT booking URL (never the
     ...onbaording-call typo); from daniel@premiselabs.co; personalized with
-    the greeting; provider Idempotency-Key onboarding:{team_id}."""
+    the greeting; provider Idempotency-Key onboarding:{org_id}."""
     calls = []
 
     async def fake_post(self, url, **kwargs):

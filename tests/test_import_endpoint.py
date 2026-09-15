@@ -1,4 +1,4 @@
-"""HTTP tests for the #1230 graph import endpoint — POST /v1/teams/{team_id}/import.
+"""HTTP tests for the #1230 graph import endpoint — POST /v1/organizations/{org_id}/import.
 
 Integration-layer matrix (plan Integration Surface Map S4–S6):
 - Auth: no session 401; member/admin 403; unknown team 403 (no existence
@@ -87,9 +87,9 @@ def _embedded_local_file_lane():
     mp.undo()
 
 
-TEAM_ID = "team-free-001"
+ORG_ID = "team-free-001"
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID literals 22P02 (HTTP 400) under
 # FakeControlPlane's fidelity check. user-1 → _U1 (mirrors the constant
 # in test_supabase_control, which _membership_row already seeds).
@@ -115,7 +115,7 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB."""
     fake = FakeControlPlane({"teams": [], "api_keys": [],
-                             "team_memberships": [], "invitations": []})
+                             "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "import.db")
@@ -145,7 +145,7 @@ def as_user():
 @pytest.fixture
 def capture_audit(monkeypatch):
     captured: list[dict] = []
-    _POSITIONAL = ("team_id", "actor_user_id", "operation",
+    _POSITIONAL = ("org_id", "actor_user_id", "operation",
                    "resource_type", "resource_id", "ip_address", "user_agent")
 
     def _capture(*args, **kwargs):
@@ -171,7 +171,7 @@ def _seed_team(fake, *, role: str = "owner", deleted_at: str | None = None,
     if deleted_at:
         team["deleted_at"] = deleted_at
     fake.seed("teams", [team])
-    fake.seed("team_memberships", [_membership_row(role=role)])
+    fake.seed("org_memberships", [_membership_row(role=role)])
     fake.seed("api_keys", [_key_row()])
 
 
@@ -298,7 +298,7 @@ def _post_import(tc, artifact: bytes, key: bytes, *, headers: dict | None = None
             IMPORT_KEY_HEADER: _key_b64(key)}
     if headers:
         hdrs.update(headers)
-    return tc.post(f"/v1/teams/{TEAM_ID}/import", content=artifact, headers=hdrs)
+    return tc.post(f"/v1/organizations/{ORG_ID}/import", content=artifact, headers=hdrs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -309,7 +309,7 @@ def _post_import(tc, artifact: bytes, key: bytes, *, headers: dict | None = None
 class TestImportAuth:
     def test_import_requires_session_auth(self, sb_client):
         tc, _, _ = sb_client
-        r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+        r = tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x")
         assert r.status_code == 401
 
     def test_import_requires_owner(self, sb_client, as_user):
@@ -331,7 +331,7 @@ class TestImportAuth:
         """AuthZ-first: no existence oracle for unknown teams."""
         tc, _, _ = sb_client
         as_user()
-        r = tc.post("/v1/teams/nope/import", content=b"x",
+        r = tc.post("/v1/organizations/nope/import", content=b"x",
                     headers={IMPORT_KEY_HEADER: _key_b64(os.urandom(32))})
         assert r.status_code == 403
 
@@ -380,7 +380,7 @@ class TestImportCaps:
         artifact = _build_artifact(_build_payload(), key)
         chunks = [artifact[i:i + 64] for i in range(0, len(artifact), 64)]
         r = tc.post(
-            f"/v1/teams/{TEAM_ID}/import", content=iter(chunks),
+            f"/v1/organizations/{ORG_ID}/import", content=iter(chunks),
             headers={"Content-Type": "application/vnd.tortoise.export.v1",
                      IMPORT_KEY_HEADER: _key_b64(key)},
         )
@@ -406,9 +406,9 @@ class TestImportCaps:
             as_user()
             for _ in range(2):
                 # unknown team → 403 (authz-first), budget consumed either way
-                r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+                r = tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x")
                 assert r.status_code == 403
-            r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+            r = tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x")
             assert r.status_code == 429
             assert "Retry-After" in r.headers
         finally:
@@ -423,10 +423,10 @@ class TestImportCaps:
         try:
             tc, _, _ = sb_client
             as_user()
-            assert tc.get(f"/v1/teams/{TEAM_ID}/export").status_code == 403
-            assert tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x").status_code == 403
+            assert tc.get(f"/v1/organizations/{ORG_ID}/export").status_code == 403
+            assert tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x").status_code == 403
             # export didn't consume the import bucket → still budget left
-            r = tc.post(f"/v1/teams/{TEAM_ID}/import", content=b"x")
+            r = tc.post(f"/v1/organizations/{ORG_ID}/import", content=b"x")
             assert r.status_code == 429
         finally:
             ha_mod._SENSITIVE_BUCKETS.clear()
@@ -881,10 +881,10 @@ class TestImportPackConfigApplyFailures:
 
         real_stamp = ha_mod._stamp_import_prop
 
-        def _boom(source, team_id, prop, value):
+        def _boom(source, org_id, prop, value):
             if prop == "last_import_sha256" and value == "":
                 raise RuntimeError("simulated clear failure")
-            return real_stamp(source, team_id, prop, value)
+            return real_stamp(source, org_id, prop, value)
 
         monkeypatch.setattr(ha_mod, "_stamp_import_prop", _boom)
         tc, fake, _ = sb_client
@@ -958,10 +958,10 @@ class TestImportPackConfigApplyFailures:
         the pack-failure marker STILL clears → already fires."""
         real_stamp = ha_mod._stamp_import_prop
 
-        def _clear_boom(source, team_id, prop, value):
+        def _clear_boom(source, org_id, prop, value):
             if prop == "last_import_quarantined_sha256" and value == "":
                 raise RuntimeError("simulated persistent clear failure")
-            return real_stamp(source, team_id, prop, value)
+            return real_stamp(source, org_id, prop, value)
 
         monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
         # Transient apply failure on the FIRST import (fail-then-succeed).
@@ -1047,10 +1047,10 @@ class TestImportPackConfigApplyFailures:
         live despite L==sha."""
         real_stamp = ha_mod._stamp_import_prop
 
-        def _clear_boom(source, team_id, prop, value):
+        def _clear_boom(source, org_id, prop, value):
             if prop == "last_import_sha256" and value == "":
                 raise RuntimeError("simulated ledger-clear failure")
-            return real_stamp(source, team_id, prop, value)
+            return real_stamp(source, org_id, prop, value)
 
         monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
         real_apply = ha_mod._apply_import_pack_config
@@ -1111,10 +1111,10 @@ class TestImportPackConfigApplyFailures:
         for a non-empty quarantine of a DIFFERENT sha."""
         real_stamp = ha_mod._stamp_import_prop
 
-        def _clear_boom(source, team_id, prop, value):
+        def _clear_boom(source, org_id, prop, value):
             if prop == "last_import_sha256" and value == "":
                 raise RuntimeError("simulated ledger-clear failure")
-            return real_stamp(source, team_id, prop, value)
+            return real_stamp(source, org_id, prop, value)
 
         monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
         tc, fake, _ = sb_client
@@ -1156,11 +1156,11 @@ class TestImportPackConfigApplyFailures:
         sdk = TortoiseSDK(namespace="registry")
         try:
             g = sdk._get_registry()
-            g.query("CREATE (t:Team {id:$id})", params={"id": TEAM_ID})
-            _stamp_import_prop(g, TEAM_ID, "last_import_sha256", "")
+            g.query("CREATE (t:Team {id:$id})", params={"id": ORG_ID})
+            _stamp_import_prop(g, ORG_ID, "last_import_sha256", "")
             rows = g.query(
                 "MATCH (t:Team {id:$id}) RETURN t.last_import_sha256",
-                params={"id": TEAM_ID},
+                params={"id": ORG_ID},
             )
             assert rows.result_set[0][0] == ""
         finally:
@@ -1231,7 +1231,7 @@ class TestImportHappyPath:
         payload = _build_payload(n_points=2, n_edges=1)
         artifact = _build_artifact(payload, key)
         r = tc.post(
-            f"/v1/teams/{TEAM_ID}/import",
+            f"/v1/organizations/{ORG_ID}/import",
             json={"artifact": base64.b64encode(artifact).decode(),
                   "key": _key_b64(key)},
         )

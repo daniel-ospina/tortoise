@@ -131,48 +131,48 @@ class TestApiKeyHashing:
 
 # ── Team Name Sanitization Tests ────────────────────────────────────────────
 
-class TestTeamNameSanitization:
+class TestOrgNameSanitization:
     """Tests for team name validation and sanitization logic."""
 
-    def test_valid_team_name_accepted(self, sdk):
+    def test_valid_org_name_accepted(self, sdk):
         """Valid alphanumeric team names with hyphens/underscores pass."""
         result = sdk.team_create("my-team_123")
         assert result["name"] == "my-team_123"
         assert result["api_key"].startswith("tt_")
 
-    def test_team_name_with_spaces_allowed(self, sdk):
+    def test_org_name_with_spaces_allowed(self, sdk):
         """Spaces are now allowed in team names."""
         result = sdk.team_create("my team")
         assert result["name"] == "my team"
         assert result["api_key"].startswith("tt_")
 
-    def test_team_name_with_special_chars_rejected(self, sdk):
+    def test_org_name_with_special_chars_rejected(self, sdk):
         """Special characters are rejected."""
         with pytest.raises(ValueError, match="alphanumeric"):
             sdk.team_create("team@name!")
 
-    def test_team_name_empty_rejected(self, sdk):
+    def test_org_name_empty_rejected(self, sdk):
         """Empty team name raises ValueError."""
         with pytest.raises(ValueError):
             sdk.team_create("")
 
-    def test_team_name_whitespace_only_rejected(self, sdk):
+    def test_org_name_whitespace_only_rejected(self, sdk):
         """Whitespace-only name raises ValueError."""
         with pytest.raises(ValueError):
             sdk.team_create("   ")
 
-    def test_team_name_too_long_rejected(self, sdk):
+    def test_org_name_too_long_rejected(self, sdk):
         """Names > 64 characters are rejected."""
         with pytest.raises(ValueError):
             sdk.team_create("a" * 65)
 
-    def test_team_name_max_length_accepted(self, sdk):
+    def test_org_name_max_length_accepted(self, sdk):
         """Exactly 64 characters is fine."""
         name = "a" * 64
         result = sdk.team_create(name)
         assert result["name"] == name
 
-    def test_team_name_starts_with_hyphen_rejected(self, sdk):
+    def test_org_name_starts_with_hyphen_rejected(self, sdk):
         """Leading hyphen is not allowed."""
         with pytest.raises(ValueError, match="alphanumeric"):
             sdk.team_create("-myteam")
@@ -225,7 +225,7 @@ class TestTeamCreation:
         assert r1["api_key"] != r2["api_key"]
 
     def test_team_create_graph_name_format(self, sdk):
-        """Graph name follows team_{name} pattern."""
+        """Graph name follows org_{name} pattern."""
         result = sdk.team_create("mygraph")
         assert result["graph_name"] == "team_mygraph"
 
@@ -363,7 +363,7 @@ class TestTkPrefixAuth:
                 )
                 token = "tk_" + "a" * 40
                 sdk._get_registry().query(
-                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
                     "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
                     params={
                         "id": "tk-key", "tid": "tk-team",
@@ -376,7 +376,7 @@ class TestTkPrefixAuth:
                 request.headers = {"Authorization": f"Bearer {token}"}
                 request.state = MagicMock()
                 result = asyncio.run(get_current_team(request))
-                assert result["team_id"] == "tk-team"
+                assert result["org_id"] == "tk-team"
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 

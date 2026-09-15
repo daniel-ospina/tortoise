@@ -435,14 +435,14 @@ def test_shared_server_survives_single_gc(tmp_path):
 
 
 def test_team_create_journals_minted_graph(tmp_path, monkeypatch):
-    """#1686: team_create's minted team_{name} graph is journaled via the
+    """#1686: team_create's minted org_{name} graph is journaled via the
     product-side seam (_journal_append_product) so the session-end sweep
     drops it — team_* graphs no longer accumulate on the docker.
 
     Carve-out file → explicit-path constructions stay embedded in BOTH
     lanes (exemption holds under a URI-set process); a temp journal env
     makes the membership assertion exact. team_create writes the registry
-    Team node + mints team_{name} + the graph node, all on the embedded
+    Team node + mints org_{name} + the graph node, all on the embedded
     server."""
     from tests._embedded import _read_journal_file
     from tortoise.sdk import TortoiseSDK
@@ -468,7 +468,7 @@ def test_team_create_drops_the_graph_when_the_journal_append_fails(
     The append is forced to fail for the TEAM graph only (the registry append
     must succeed, or _get_registry would raise before anything is created —
     that call site's own contract is that a raise there mints nothing). Then
-    assert: the raise propagated, the ``team_{name}`` graph is GONE (post-fix
+    assert: the raise propagated, the ``org_{name}`` graph is GONE (post-fix
     the failure path calls ``team_graph.delete()``; pre-fix it survived with
     no ownership record, and no sweep could attribute it), and the registry
     Team node was rolled back by team_create's own handler.

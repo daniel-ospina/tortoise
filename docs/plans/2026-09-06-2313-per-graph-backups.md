@@ -41,7 +41,7 @@ aboutObjects:
 **Goal:** Every active graph (default + custom) in every eligible team is swept by the hosted backup pipeline with per-graph storage keys, state, drift guards, retention, and restore — fixing the default-only sweep.
 
 **Team:** epistemic-team
-**Architecture:** Reuse the existing per-team hourly sweep but iterate per graph via the graphs seam (`sdk.graph_list` / `supabase_control.graph_metadata`). Graph identity moves INTO the object key (`backups/{team}/{graph}/{ts}_{rnd}/…`) and per-graph state (`ops/teams/{tid}/graphs/{gid}/state.json`). Prune/list/restore/watcher gain a graph dimension; restore gains a tombstone guard; legacy flat objects stay readable (read-time bucketing by manifest `graph_name`). No DB schema change; no new deps.
+**Architecture:** Reuse the existing per-team hourly sweep but iterate per graph via the graphs seam (`sdk.graph_list` / `supabase_control.graph_metadata`). Graph identity moves INTO the object key (`backups/{org_id}/{graph}/{ts}_{rnd}/…`) and per-graph state (`ops/teams/{tid}/graphs/{gid}/state.json`). Prune/list/restore/watcher gain a graph dimension; restore gains a tombstone guard; legacy flat objects stay readable (read-time bucketing by manifest `graph_name`). No DB schema change; no new deps.
 
 **Pattern Research:** Skipped (plan touches zero third-party deps — in-repo storage adapters + tested graphs seam only; scoping doc axis research covers external patterns).
 
@@ -62,7 +62,7 @@ aboutObjects:
 ### Task 1: Graph enumeration seam (both lanes) + default normalization
 
 **Intent:** Give the sweep a deterministic per-team graph list — the substrate every later task consumes.
-**Acceptance:** `enumerate_team_graphs(source, team_id)` returns `[{graph_id, kind, namespace}]` in both dialects: supabase via `graph_metadata` (already default-first, custom active only, default graph_id literal "default"); registry via `graph_list` with `status != 'deleted'` filter and kind-default node mapped to graph_id literal `"default"`. Unit-tested against fakes; zero behavior change elsewhere.
+**Acceptance:** `enumerate_team_graphs(source, org_id)` returns `[{graph_id, kind, namespace}]` in both dialects: supabase via `graph_metadata` (already default-first, custom active only, default graph_id literal "default"); registry via `graph_list` with `status != 'deleted'` filter and kind-default node mapped to graph_id literal `"default"`. Unit-tested against fakes; zero behavior change elsewhere.
 **Files:**
 - Modify: `tortoise/backup_sweep.py` (add seam next to `enumerate_eligible_teams`)
 - Test: `tests/test_backup_sweep.py`
@@ -76,7 +76,7 @@ aboutObjects:
 ### Task 2: hosted_backup primitives gain a graph dimension (keys, state, prune, legacy compat)
 
 **Intent:** Graph identity becomes part of the artifact; prune/list can scope per graph; legacy flat objects remain readable.
-**Acceptance:** `create_backup(..., graph_id=...)` writes keys `backups/{team}/{graph}/{ts}_{rnd}/…` + manifest gains `graph_id` (default `None`/absent for team-era callers = legacy flat shape preserved); `_validate_graph_id` added; `list_backups(storage, team_id, graph_id=None)` filters by graph when given and reads legacy flat objects (bucketed by manifest graph_name) otherwise unchanged; `prune_backups` accepts `graph_id` (prefix-scoped retention) while team-level calls keep byte-identical behavior. All existing tests stay green (extended, not rewritten).
+**Acceptance:** `create_backup(..., graph_id=...)` writes keys `backups/{org_id}/{graph}/{ts}_{rnd}/…` + manifest gains `graph_id` (default `None`/absent for team-era callers = legacy flat shape preserved); `_validate_graph_id` added; `list_backups(storage, org_id, graph_id=None)` filters by graph when given and reads legacy flat objects (bucketed by manifest graph_name) otherwise unchanged; `prune_backups` accepts `graph_id` (prefix-scoped retention) while team-level calls keep byte-identical behavior. All existing tests stay green (extended, not rewritten).
 **Files:**
 - Modify: `tortoise/hosted_backup.py`
 - Test: `tests/test_hosted_backup.py`, `tests/test_backup.py`
@@ -91,7 +91,7 @@ aboutObjects:
 ### Task 3: Sweep inner loop — per-graph dump, state, drift guards, prune
 
 **Intent:** The nightly/hourly run actually backs up every active graph and fires per-graph data-loss signals.
-**Acceptance:** `run_backup_sweep` iterates per eligible team, then per graph (via Task 1 seam): size guard → per-graph prior state (`ops/teams/{tid}/graphs/{gid}/state.json`; legacy team-level state read as the default graph's prior) → per-label counts → dump → P0 guard (manifest graph_name == namespace) → empty/>50%/per-label drift incidents keyed (team_id, graph_id) → per-graph state write → per-graph prune. One graph's failure never aborts its team's others; deleted/quarantined graphs excluded. Team-level ops state + result shape unchanged for existing consumers.
+**Acceptance:** `run_backup_sweep` iterates per eligible team, then per graph (via Task 1 seam): size guard → per-graph prior state (`ops/teams/{tid}/graphs/{gid}/state.json`; legacy team-level state read as the default graph's prior) → per-label counts → dump → P0 guard (manifest graph_name == namespace) → empty/>50%/per-label drift incidents keyed (org_id, graph_id) → per-graph state write → per-graph prune. One graph's failure never aborts its team's others; deleted/quarantined graphs excluded. Team-level ops state + result shape unchanged for existing consumers.
 **Files:**
 - Modify: `tortoise/backup_sweep.py` (per-team loop → per-graph inner loop)
 - Test: `tests/test_backup_sweep.py`

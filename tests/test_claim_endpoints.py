@@ -19,7 +19,7 @@ Covered here (all Supabase-mode via the FakeControlPlane):
 - github/google provider → 200; same key still resolves pre/post
   (indicator 1); audit team_claim with detail
 - second claim by a different user → 409 first-claim-wins
-- tamper: client-supplied team_id/identity REJECTED — the RPC binds by
+- tamper: client-supplied org_id/identity REJECTED — the RPC binds by
   lookup_hash only
 - claim limiter: 2/24h per IP → 429 on the 3rd attempt (24h-window bucket)
 - /v1/claim/status: key-scoped claimability probe (welcome guard)
@@ -46,7 +46,7 @@ from tests.fake_control_plane import FakeControlPlane
 _SUPABASE_URL = "https://claimtest.supabase.co"
 
 # #1719 (Task 3): JWT subjects are real UUIDs — claim_status's
-# membership_for_user_team filters team_memberships.user_id (uuid column);
+# membership_for_user_team filters org_memberships.user_id (uuid column);
 # a non-UUID literal 22P02s (HTTP 400) under the fake's UUID fidelity.
 _U_A = "9f2c1a40-0000-4a00-8000-00000000000a"
 _U_B = "9f2c1a40-0000-4a00-8000-00000000000b"
@@ -95,20 +95,20 @@ def client():
         yield c
 
 
-def _provision_anon(client, fake, *, team_id=None, identity=None, email=None):
+def _provision_anon(client, fake, *, org_id=None, identity=None, email=None):
     """Mint an anonymous team through the real /v1/agent/signup path.
 
     Returns the plaintext key. The signup writes through the fake's
     provision_team RPC (Supabase mode) — the same seam the endpoint uses.
     """
-    if team_id is None:
-        team_id = f"team-{uuid.uuid4().hex[:10]}"
+    if org_id is None:
+        org_id = f"team-{uuid.uuid4().hex[:10]}"
     if identity is None:
         identity = f"anon-{uuid.uuid4().hex[:12]}"
     r = client.post("/v1/agent/signup", json={})
     assert r.status_code == 200, r.text
     data = r.json()
-    return data["key"], data["team_id"]
+    return data["key"], data["org_id"]
 
 
 def _jwt(user_id: str, *, email: str | None = "claim@example.com",
@@ -164,7 +164,7 @@ class TestClaimEndpoint:
         claim no longer writes teams.email, so a confirmed email+password
         session may claim (key-possession + confirmed-email + first-claim-
         wins remain the security model)."""
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, org_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt(_U_X, providers=["email"],
                                         email="pw@example.com"))
 
@@ -180,7 +180,7 @@ class TestClaimEndpoint:
         """A password login on a github-LINKED account legitimately passes:
         providers accumulates on linking (app_metadata survives refresh).
         This is the intended semantics (documented in the plan)."""
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, org_id = _provision_anon(client, fake)  # noqa: RUF059
         # providers accumulate: email (password) + github (linked earlier)
         _patch_verify(monkeypatch, _jwt(_U_X, email="a@b.co",
                                         providers=["email", "github"]))
@@ -201,7 +201,7 @@ class TestClaimEndpoint:
         lifted; amr remains irrelevant — app_metadata.providers is not the
         gate anymore either). Kept parametrized to pin that amr presence or
         absence never changes the outcome."""
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, org_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt(_U_X, email="a@b.co",
                                         providers=["email"], amr=amr,
                                         include_amr=True))
@@ -215,7 +215,7 @@ class TestClaimEndpoint:
     def test_amr_less_github_token_passes(self, client, fake, monkeypatch):
         """An amr-LESS github token still passes: app_metadata survives token
         refresh; amr is optional and refresh-mutated (never consulted)."""
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, org_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt(_U_X, email="a@b.co",
                                         providers=["github"]))
         r = client.post(
@@ -229,7 +229,7 @@ class TestClaimEndpoint:
                                                    monkeypatch):
         """Indicator 1: the minted key authenticates BEFORE claim (anon team)
         and AFTER claim (linked owner) — same key, memories intact."""
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         pre = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert pre.status_code == 200, pre.text
 
@@ -242,19 +242,19 @@ class TestClaimEndpoint:
         )
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["team_id"] == team_id
+        assert body["org_id"] == org_id
         assert body["status"] == "claimed"
 
         post = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert post.status_code == 200, post.text
-        assert post.json()["team_id"] == team_id
+        assert post.json()["org_id"] == org_id
         # #1765 demotion: claim never writes teams.email
         rows = fake.tables["teams"]
-        team_row = next(t for t in rows if t["id"] == team_id)
+        team_row = next(t for t in rows if t["id"] == org_id)
         assert team_row.get("email") is None
         # owner membership linked + identity cleared
-        mem = next(m for m in fake.tables["team_memberships"]
-                   if m["team_id"] == team_id)
+        mem = next(m for m in fake.tables["org_memberships"]
+                   if m["org_id"] == org_id)
         assert mem["user_id"] == _U_A
         assert mem["identity"] is None
 
@@ -262,14 +262,14 @@ class TestClaimEndpoint:
                                           capsys):
         """Indicator 5: audit team_claim fires with provider/email/user_id in
         detail (audit_events.detail JSONB, 20260813000004)."""
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         _patch_verify(monkeypatch, _jwt(_U_A, email="verified@example.com",
                                         providers=["google"]))
         import tortoise.hosted_api as _ha
         events = []
 
-        async def _capture_audit(request, team_id, operation, **kw):
-            events.append({"team_id": team_id, "operation": operation, **kw})
+        async def _capture_audit(request, org_id, operation, **kw):
+            events.append({"org_id": org_id, "operation": operation, **kw})
 
         monkeypatch.setattr(_ha, "_async_audit", _capture_audit)
         r = client.post(
@@ -281,7 +281,7 @@ class TestClaimEndpoint:
         claims = [e for e in events if e["operation"] == "team_claim"]
         assert len(claims) == 1
         ev = claims[0]
-        assert ev["team_id"] == team_id
+        assert ev["org_id"] == org_id
         assert ev["actor_user_id"] == _U_A
         assert ev["detail"]["email"] == "verified@example.com"
         assert ev["detail"]["user_id"] == _U_A
@@ -291,7 +291,7 @@ class TestClaimEndpoint:
                                                monkeypatch):
         """Indicator 5: first-claim-wins — a different user's claim on the
         same key → 409."""
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, org_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
                                         providers=["github"]))
         r = client.post(
@@ -315,7 +315,7 @@ class TestClaimEndpoint:
         pre-check passes because is_anon_team flips, but the RPC returns
         idempotent success — here we exercise the RPC-level idempotency by
         calling claim_membership directly after the first claim)."""
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, org_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
                                         providers=["github"]))
         r = client.post(
@@ -332,16 +332,16 @@ class TestClaimEndpoint:
         )
         assert r2.status_code == 409, r2.text
 
-    def test_tamper_client_team_id_identity_rejected(self, client, fake,
+    def test_tamper_client_org_id_identity_rejected(self, client, fake,
                                                      monkeypatch):
-        """Tamper: client-supplied team_id/identity are REJECTED — the RPC
+        """Tamper: client-supplied org_id/identity are REJECTED — the RPC
         binds by lookup_hash only (solution-verify P1). A body claiming a
         DIFFERENT team must claim the KEY's team, not the body's."""
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         # a second anon team the attacker "points at" via the body
         r = client.post("/v1/agent/signup", json={})
         victim_key = r.json()["key"]  # noqa: F841
-        victim_team = r.json()["team_id"]
+        victim_team = r.json()["org_id"]
         _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
                                         providers=["github"]))
         r = client.post(
@@ -349,19 +349,19 @@ class TestClaimEndpoint:
             headers={"Authorization": "Bearer abc.def.ghi"},
             json={
                 "api_key": key,
-                "team_id": victim_team,          # must be IGNORED
+                "org_id": victim_team,          # must be IGNORED
                 "identity": "anon-attacker",      # must be IGNORED
             },
         )
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"] == team_id, (
-            f"claim must bind to the key's team ({team_id}), not body team "
+        assert r.json()["org_id"] == org_id, (
+            f"claim must bind to the key's team ({org_id}), not body team "
             f"{victim_team}")
         # victim team untouched — still anon
-        mems = [m for m in fake.tables["team_memberships"]
-                if m["team_id"] == victim_team]
+        mems = [m for m in fake.tables["org_memberships"]
+                if m["org_id"] == victim_team]
         assert mems and mems[0]["user_id"] is None
-        assert sc.resolve_api_key(fake, key)["team_id"] == team_id
+        assert sc.resolve_api_key(fake, key)["org_id"] == org_id
 
     def test_invalid_key_401(self, client, fake, monkeypatch):
         _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
@@ -377,7 +377,7 @@ class TestClaimEndpoint:
                                                   monkeypatch):
         """email_confirmed_at is an AND conjunct (never OR): a token with the
         right provider but an unconfirmed email is rejected."""
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
                                         providers=["github"]))
 
@@ -393,8 +393,8 @@ class TestClaimEndpoint:
         assert r.status_code == 403, r.text
         assert "not confirmed" in r.json()["detail"].lower()
         # nothing was linked
-        mem = next(m for m in fake.tables["team_memberships"]
-                   if m["team_id"] == team_id)
+        mem = next(m for m in fake.tables["org_memberships"]
+                   if m["org_id"] == org_id)
         assert mem["user_id"] is None
 
     def test_claim_limiter_2_per_24h(self, client, fake, monkeypatch):
@@ -427,24 +427,24 @@ class TestClaimEndpoint:
         fires (the pin's premise)."""
         _patch_verify(monkeypatch, _jwt(_U_1, providers=["github"]))
         # Drift phase: suspended anon team claims successfully (fail-open).
-        key, team_id = _provision_anon(client, fake)
-        fake.rpc("abuse_suspend", {"p_team_id": team_id})
+        key, org_id = _provision_anon(client, fake)
+        fake.rpc("abuse_suspend", {"p_org_id": org_id})
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
         r = client.post("/v1/claim", json={"api_key": key})
         assert r.status_code == 200
         # The DURABLE write actually landed (the accepted-risk property):
         # owner membership linked + identity cleared. #1765: teams.email
         # is NEVER written by claim.
-        team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
+        team_row = next(t for t in fake.tables["teams"] if t["id"] == org_id)
         assert team_row.get("email") is None
-        mem = next(m for m in fake.tables["team_memberships"]
-                   if m["team_id"] == team_id)
+        mem = next(m for m in fake.tables["org_memberships"]
+                   if m["org_id"] == org_id)
         assert mem["user_id"] == _U_1
         assert mem["identity"] is None
         fake.missing_columns = None  # drift resolved — enforcement must resume
         # Healthy phase: a FRESH suspended anon team is 403-blocked at the gate.
-        key2, team_id2 = _provision_anon(client, fake)
-        fake.rpc("abuse_suspend", {"p_team_id": team_id2})
+        key2, org_id2 = _provision_anon(client, fake)
+        fake.rpc("abuse_suspend", {"p_org_id": org_id2})
         r = client.post("/v1/claim", json={"api_key": key2})
         assert r.status_code == 403
         assert r.json()["detail"]["code"] == "SUSPENDED"
@@ -464,7 +464,7 @@ class TestClaimStatusEndpoint:
         assert r.json() == {"claimable": False, "need_key": True}
 
     def test_anon_key_claimable(self, client, fake, monkeypatch):
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
                                         providers=["github"]))
         # P1-2: key travels via X-Claim-Key header (never query string —
@@ -477,13 +477,13 @@ class TestClaimStatusEndpoint:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["claimable"] is True
-        assert body["team_id"] == team_id
+        assert body["org_id"] == org_id
 
     def test_claim_status_query_form_rejected(self, client, fake,
                                               monkeypatch):
         """P1-2: the query-string api_key form is NOT accepted (access-log
         leak of the graph credential) — header only."""
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, org_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
                                         providers=["github"]))
         r = client.get(
@@ -496,7 +496,7 @@ class TestClaimStatusEndpoint:
 
     def test_claimed_key_reports_claimed_by_me(self, client, fake,
                                                monkeypatch):
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, org_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
                                         providers=["github"]))
         r = client.post(
@@ -557,7 +557,7 @@ class TestAnonCeiling:
                                                     monkeypatch):
         """Unclaimed anon team → /v1/team shows anon tier; limits resolve
         to the reduced anon caps (1,000 ops / 1,000 nodes / 1 key)."""
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r.status_code == 200, r.text
         team = r.json()
@@ -568,7 +568,7 @@ class TestAnonCeiling:
         assert team.get("write_ops_limit") == 1000, team
         # The reduced CAPS bind at the limits resolution layer.
         from tortoise.quota import resolve_team_limits
-        lim = resolve_team_limits(team_id)
+        lim = resolve_team_limits(org_id)
         assert lim["tier"] == "anon", lim
         assert lim.get("max_points") == 1000, lim  # 1k node cap
         assert lim.get("max_api_keys") == 1, lim  # 1 key on anon tier
@@ -577,7 +577,7 @@ class TestAnonCeiling:
                                                  monkeypatch):
         """After claim (owner user_id linked), the SAME key resolves free:
         tier free, full 10k caps, anon flag False."""
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         # claim with a github-provider session
         user_id = str(uuid.uuid4())
         _patch_verify(monkeypatch, _jwt(user_id, providers=["github"]))
@@ -591,7 +591,7 @@ class TestAnonCeiling:
         assert team.get("anon") is False
         assert team.get("write_ops_limit") == 10000, team
         from tortoise.quota import resolve_team_limits
-        lim = resolve_team_limits(team_id)
+        lim = resolve_team_limits(org_id)
         assert lim["tier"] == "free", lim
         assert lim.get("max_points") == 10000, lim
         assert lim.get("max_api_keys") == 2, lim
@@ -637,18 +637,18 @@ class TestAnonCeiling:
         precedence; anon ceiling still wins (checked in
         test_unclaimed_anon_team_resolves_anon_tier)."""
         from tortoise.quota import resolve_team_limits
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         user_id = str(uuid.uuid4())
         _patch_verify(monkeypatch, _jwt(user_id, providers=["github"]))
         r = client.post("/v1/claim", json={"api_key": key})
         assert r.status_code == 200, r.text
         # stored caps (free values) read-time override → 12345 wins
         fake.tables["teams"][0]["max_points"] = 12345
-        lim = resolve_team_limits(team_id)
+        lim = resolve_team_limits(org_id)
         assert lim["max_points"] == 12345, lim
         # NULL override → graph_size_cap fallback (GAP-B)
         fake.tables["teams"][0]["max_points"] = None
-        lim = resolve_team_limits(team_id)
+        lim = resolve_team_limits(org_id)
         assert lim["max_points"] == fake.tables["teams"][0]["graph_size_cap"], lim
 
     def test_parity_claim_rpc_resolve_limits(self, client, fake, monkeypatch):
@@ -658,12 +658,12 @@ class TestAnonCeiling:
         from tortoise.quota import resolve_team_limits
         from tortoise.supabase_control import is_anon_team
 
-        key, team_id = _provision_anon(client, fake)
+        key, org_id = _provision_anon(client, fake)
         # Before claim: predicate true, api-key tier anon, limits anon
-        assert is_anon_team(fake, team_id) is True
+        assert is_anon_team(fake, org_id) is True
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r.json()["tier"] == "anon"
-        lim = resolve_team_limits(team_id)
+        lim = resolve_team_limits(org_id)
         assert lim["tier"] == "anon", lim
 
         # After claim: predicate false, api-key tier free, limits free
@@ -671,16 +671,16 @@ class TestAnonCeiling:
         _patch_verify(monkeypatch, _jwt(user_id, providers=["github"]))
         r = client.post("/v1/claim", json={"api_key": key})
         assert r.status_code == 200, r.text
-        assert is_anon_team(fake, team_id) is False
+        assert is_anon_team(fake, org_id) is False
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r.json()["tier"] == "free"
-        lim = resolve_team_limits(team_id)
+        lim = resolve_team_limits(org_id)
         assert lim["tier"] == "free", lim
 
 
 class TestClaimStatusOutage503:
     """#1719 Task 4 (RC1-b): the claim funnel shares the unwrapped
-    team_memberships reads — a control-plane failure must degrade to 503
+    org_memberships reads — a control-plane failure must degrade to 503
     control_plane_unavailable, never a global-handler 500."""
 
     def test_claim_status_is_anon_team_outage_503(self, client, fake, monkeypatch):
@@ -692,7 +692,7 @@ class TestClaimStatusOutage503:
 
         def _boom(cp, tid):
             raise RuntimeError("Supabase control-plane query failed "
-                               "(team_memberships): HTTP 500")
+                               "(org_memberships): HTTP 500")
 
         monkeypatch.setattr(sc, "is_anon_team", _boom)
         r = client.get(

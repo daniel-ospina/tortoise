@@ -326,7 +326,7 @@ class TestSwitches:
         assert eng.record_point_create("t1", 5, now=T0) is None
         assert eng.record_point_create("t1", 1, now=T0) == "flag"
 
-    def test_empty_team_id_noop(self, notified):
+    def test_empty_org_id_noop(self, notified):
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         assert eng.record_point_create("", 9999, now=T0) is None
@@ -344,8 +344,8 @@ class TestReadVelocity:
         breach = tr.record_read("key1", "t1", now=now + 2)
         assert breach == ("key", "key1")
         assert [c[0] for c in notified] == ["abuse_read_velocity"]
-        # key-scope breach still notifies the TEAM owner (team_id carried)
-        assert notified[0][1]["team_id"] == "t1"
+        # key-scope breach still notifies the TEAM owner (org_id carried)
+        assert notified[0][1]["org_id"] == "t1"
         # dedup: same window → no repeat notification, no repeat breach return
         assert tr.record_read("key1", "t1", now=now + 3) is None
         assert len(notified) == 1
@@ -386,31 +386,31 @@ class TestSignupVelocity:
         # P1-FIX-2: breach on >= — the success feed fires on the 2nd mint
         # ("IP consumed its entire allowance" = the designed review signal).
         tr = SignupVelocityTracker(threshold=2, window_s=3600)
-        assert tr.record_signup("1.2.3.4", team_id="t1") is None
-        breach = tr.record_signup("1.2.3.4", team_id="t2")  # 2nd mint = breach
+        assert tr.record_signup("1.2.3.4", org_id="t1") is None
+        breach = tr.record_signup("1.2.3.4", org_id="t2")  # 2nd mint = breach
         assert breach == ("ip", "1.2.3.4")
         assert [c[0] for c in notified] == ["abuse_signup_velocity"]
         assert len(notified) == 1
         # dedup: further mints in the same window do NOT re-notify
-        tr.record_signup("1.2.3.4", team_id="t3")
+        tr.record_signup("1.2.3.4", org_id="t3")
         assert len(notified) == 1
 
     def test_window_expiry_rearms(self, monkeypatch, notified):
         tr = SignupVelocityTracker(threshold=2, window_s=60)
         for i in range(2):
-            tr.record_signup("9.9.9.9", team_id=f"t{i}", now=1000.0 + i)
+            tr.record_signup("9.9.9.9", org_id=f"t{i}", now=1000.0 + i)
         assert len(notified) == 1
         # window expires → a fresh burst is a NEW episode (re-notify)
         for i in range(2):
-            tr.record_signup("9.9.9.9", team_id=f"t{i}", now=2000.0 + i)
+            tr.record_signup("9.9.9.9", org_id=f"t{i}", now=2000.0 + i)
         assert len(notified) == 2
 
     def test_block_path_same_episode(self, monkeypatch, notified):
         # P1-FIX-2: success breach (2nd mint) + 429 block dedup to ONE email
         # per (ip, window) — same dedup key, never two.
         tr = SignupVelocityTracker(threshold=2, window_s=3600)
-        tr.record_signup("1.2.3.4", team_id="t1")
-        tr.record_signup("1.2.3.4", team_id="t2")   # success breach → notify
+        tr.record_signup("1.2.3.4", org_id="t1")
+        tr.record_signup("1.2.3.4", org_id="t2")   # success breach → notify
         tr.record_block("1.2.3.4")                    # 429 path → dedup'd
         tr.record_block("1.2.3.4")
         assert len(notified) == 1
@@ -418,7 +418,7 @@ class TestSignupVelocity:
     def test_kill_switch(self, monkeypatch, notified):
         monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
         tr = SignupVelocityTracker(threshold=1, window_s=3600)
-        assert tr.record_signup("1.2.3.4", team_id="t1") is None
+        assert tr.record_signup("1.2.3.4", org_id="t1") is None
 
     def test_memory_bound(self, monkeypatch, notified):
         # P1-B: the prune drops STALE entries (R3 precedent) — feed 10,100
@@ -428,7 +428,7 @@ class TestSignupVelocity:
         base = 1_000_000.0
         for i in range(10_100):
             now = base - 7200 if i < 200 else base  # first 200 stale (>window)
-            tr.record_signup(f"10.{(i // 250) % 250}.{i % 250}", team_id=f"t{i}", now=now)
+            tr.record_signup(f"10.{(i // 250) % 250}.{i % 250}", org_id=f"t{i}", now=now)
         # 10,100 > 10,000 → prune ran; 200 stale dropped, 9,900 live remain
         assert len(tr._by_ip) == 9_900
 
@@ -483,13 +483,13 @@ class TestSignalSet:
 # ── FakeControlPlane migration-0015 emulation (delta 9) ────────────────────
 
 class TestFakeTrigger:
-    def _provision(self, fake, team_id, lookup):
+    def _provision(self, fake, org_id, lookup):
         fake.rpc("provision_team", {
             "p_user_id": None, "p_identity": f"id-{lookup[:6]}",
-            "p_team_id": team_id, "p_team_name": team_id,
+            "p_org_id": org_id, "p_org_name": org_id,
             "p_api_key": f"tt_{lookup}", "p_key_hash": "kh",
-            "p_lookup_hash": lookup, "p_graph_name": f"team_{team_id}",
-            "p_email": f"{lookup}@x.co", "p_key_prefix": team_id[:8],
+            "p_lookup_hash": lookup, "p_graph_name": f"org_{org_id}",
+            "p_email": f"{lookup}@x.co", "p_key_prefix": org_id[:8],
         })
 
     def test_provision_records_key_create(self):
@@ -497,7 +497,7 @@ class TestFakeTrigger:
         self._provision(fake, "t1", "aaaa1111")
         events = [r for r in fake.tables["abuse_events"]
                   if r["event_type"] == "key_create"]
-        assert len(events) == 1 and events[0]["team_id"] == "t1"
+        assert len(events) == 1 and events[0]["org_id"] == "t1"
 
     def test_reprovision_no_duplicate_event(self):
         fake = FakeControlPlane()
@@ -510,19 +510,19 @@ class TestFakeTrigger:
     def test_bootstrap_mints_excluded(self):
         fake = FakeControlPlane()
         fake.query("api_keys", method="POST", json_body={
-            "id": "k1", "team_id": "t1", "created_via": "bootstrap"})
+            "id": "k1", "org_id": "t1", "created_via": "bootstrap"})
         assert fake.tables.get("abuse_events", []) == []
         fake.query("api_keys", method="POST", json_body={
-            "id": "k2", "team_id": "t1", "created_via": "recovery"})
+            "id": "k2", "org_id": "t1", "created_via": "recovery"})
         events = [r for r in fake.tables["abuse_events"]
                   if r["event_type"] == "key_create"]
         assert len(events) == 1
 
     def test_suspend_rpc_toggles_state(self):
         fake = FakeControlPlane().seed("teams", [{"id": "t1", "tier": "free"}])
-        fake.rpc("abuse_suspend", {"p_team_id": "t1"})
+        fake.rpc("abuse_suspend", {"p_org_id": "t1"})
         assert fake.tables["teams"][0]["suspended_at"] is not None
-        fake.rpc("abuse_unsuspend", {"p_team_id": "t1"})
+        fake.rpc("abuse_unsuspend", {"p_org_id": "t1"})
         assert fake.tables["teams"][0]["suspended_at"] is None
         assert fake.tables["teams"][0].get("flagged_at") is None
 
@@ -555,15 +555,15 @@ class TestNotifyAbuse:
         monkeypatch.setenv("RESEND_API_KEY", "re_test")
         monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@premiselabs.co")
 
-        notify.notify_abuse("abuse_flag", {"team_id": "t1", "email": "owner@x.co"}, {})
+        notify.notify_abuse("abuse_flag", {"org_id": "t1", "email": "owner@x.co"}, {})
         assert sent[-1][1] == "owner@x.co"
 
         # NULL email → ops fallback
-        notify.notify_abuse("abuse_flag", {"team_id": "t1", "email": None}, {})
+        notify.notify_abuse("abuse_flag", {"org_id": "t1", "email": None}, {})
         assert sent[-1][1] == "ops@premiselabs.co"
 
         # MISSING email key (registry dict shape) → ops fallback, no KeyError
-        notify.notify_abuse("abuse_flag", {"team_id": "t1"}, {})
+        notify.notify_abuse("abuse_flag", {"org_id": "t1"}, {})
         assert sent[-1][1] == "ops@premiselabs.co"
 
     def test_never_raises_on_channel_failure(self, monkeypatch):
@@ -576,7 +576,7 @@ class TestNotifyAbuse:
         monkeypatch.setenv("RESEND_API_KEY", "re_test")
         monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@premiselabs.co")
         # must not raise
-        notify.notify_abuse("abuse_suspended", {"team_id": "t1"}, {"rule": "point_create"})
+        notify.notify_abuse("abuse_suspended", {"org_id": "t1"}, {"rule": "point_create"})
 
     def test_unknown_kind_ignored(self, monkeypatch):
         import tortoise.notify as notify
@@ -584,7 +584,7 @@ class TestNotifyAbuse:
         monkeypatch.setattr(notify, "_send_resend", lambda *a: sent.append(a))
         monkeypatch.setenv("RESEND_API_KEY", "re_test")
         monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@x.co")
-        notify.notify_abuse("not_a_kind", {"team_id": "t1"}, {})
+        notify.notify_abuse("not_a_kind", {"org_id": "t1"}, {})
         assert sent == []
 
 

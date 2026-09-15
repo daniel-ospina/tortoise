@@ -25,7 +25,7 @@ created: 2026-09-10
      survive; internal whitespace runs collapse to one space. **Renameable.**
    - **Identifier** = `teams.id` (PK) / `Team.id`; the key the graph namespace is
      derived from. `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$` — **unchanged**. **Immutable.**
-   - The namespace is `team_{identifier}` in **both** lanes (the Supabase lane
+   - The namespace is `org_{identifier}` in **both** lanes (the Supabase lane
      already does this since #1903; the registry lane is fixed here, closing #2023).
 2. **One validator, one deriver.** New pure module `tortoise/org_naming.py`:
    `validate_display_name`, `slugify_id`, `resolve_id`, `identifier_error`,
@@ -33,12 +33,12 @@ created: 2026-09-10
    dashboard mirrors `slugify_id`/`identifier_error` in
    `website/apps/dashboard/src/orgNaming.js`, pinned by **one shared vector fixture**
    (`tests/fixtures/org_naming_vectors.json`) consumed by both test suites.
-3. **API.** `POST /v1/teams` gains an **optional** `id`. Absent → derived +
+3. **API.** `POST /v1/organizations` gains an **optional** `id`. Absent → derived +
    collision-resolved server-side. Present → validated with `ID_PATTERN`; taken →
    **409 naming the identifier** (no silent suffix). Response shape unchanged
-   (`{team_id, graph_name, tier, name}`), so a slice-1 client keeps working.
+   (`{org_id, graph_name, tier, name}`), so a slice-1 client keeps working.
 4. **Migration.** One index-only migration: drop `uq_teams_name` (vestigial since
-   #1903 — the namespace is `team_{team_id}`, `0011_teams_name_unique.sql`), add
+   #1903 — the namespace is `org_{org_id}`, `0011_teams_name_unique.sql`), add
    `uq_teams_graph_name` (guard the real shared resource). **No data backfill** —
    existing rows are already in the target shape.
 5. **Slices.** Four, each independently mergeable and green on its own. Slice 1 is
@@ -52,7 +52,7 @@ created: 2026-09-10
 |---|---|---|---|
 | **1** | Display name is free text + namespace charset safety | — | no schema change, no API contract change; the identifier is still today's opaque mint. Includes the registry-lane namespace charset fix so free text cannot reach `select_graph` unslugged. |
 | **2** | Derive the identifier (server + migration) | 1 | `id` is optional; absent-`id` behaviour is byte-identical to today until this lands. |
-| **3** | Dashboard surfaces | **2** (derived id) + 1 (validator module) | additive UI over a server that already returns the identifier. **Not** pre-slice-2 mergeable: the id field and the disambiguation test need a server that returns a derived `team_id`. Its two e2e tests are fenced accordingly. |
+| **3** | Dashboard surfaces | **2** (derived id) + 1 (validator module) | additive UI over a server that already returns the identifier. **Not** pre-slice-2 mergeable: the id field and the disambiguation test need a server that returns a derived `org_id`. Its two e2e tests are fenced accordingly. |
 | **4** | MCP, docs, ops, optional rename | 1 | additive docstring/param/payload fields. |
 
 > **Why this ordering.** A sibling feature recently died to a subagent time cap; the
@@ -104,7 +104,7 @@ two client files — without changing the storage model.
 2. **`tortoise/hosted_api.py`** — adopt the shared validator at every org-creation
    entry point:
    - `:1176-1198` `/internal/provision`: `_name_pattern` (`:1193`) is deleted;
-     `validate_display_name(team_name)` replaces it. `_id_pattern` (`:1192`) becomes
+     `validate_display_name(org_name)` replaces it. `_id_pattern` (`:1192`) becomes
      `ID_PATTERN` re-exported from `org_naming` (no behaviour change).
    - `:9157` `create_team`: the inline `^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$`
      (`:9175`) is replaced by `validate_display_name`.
@@ -129,7 +129,7 @@ two client files — without changing the storage model.
    the reported bug.** `startNewOrgCheckout` (`:4118-4121`) also switches to the
    shared helper.
 
-5. **`supabase/functions/tenant-provision/index.ts:327-347`** — `TEAM_NAME_RE` is
+5. **`supabase/functions/tenant-provision/index.ts:327-347`** — `ORG_NAME_RE` is
    replaced by the display-name rule (accept free text, keep the deterministic
    `sha256(user_id)[:26]` id and the slug fallback for older callers). This file is
    Deno/TS, so it cannot import the Python module; it carries a copied predicate with
@@ -138,10 +138,10 @@ two client files — without changing the storage model.
 
 6. **`tortoise/sdk.py:14323` `team_create`** — **namespace charset safety (this is
    why `slugify_id` lands in slice 1).** The display name is now free text, but
-   `:14373` still built `graph_name = f"team_{name}".replace(' ','_')` and passed it
+   `:14373` still built `graph_name = f"org_{name}".replace(' ','_')` and passed it
    to `select_graph` — so `{"name": "a/b"}` would have minted a graph key
    `team_a/b`. Slice 1 replaces that line with
-   `graph_name = f"team_{slugify_id(name)}"` (the id stays today's ulid; only the
+   `graph_name = f"org_{slugify_id(name)}"` (the id stays today's ulid; only the
    namespace's charset changes, and only for names that were previously rejected).
    Existing stored `graph_name` values are unaffected — reads use the stored value
    (#1903). **Do not defer this to slice 2**: slicing the namespace fix away from the
@@ -158,9 +158,9 @@ two client files — without changing the storage model.
 | `tests/test_org_naming.py::test_validate_display_name_spaces_unicode` | `"test org for multi-organisation"` survives verbatim; `"Café  Ltd"` → `"Café Ltd"` |
 | `tests/test_org_naming.py::test_validate_display_name_rejections` | blank, 65-char, control char — each message names the problem |
 | `tests/test_org_naming.py::test_identifier_error_names_the_character` | space / leading dash / `@` each produce a message containing the character and a suggestion |
-| `tests/test_create_team_name_free_text.py::test_post_teams_accepts_spaces_supabase` | `POST /v1/teams {"name": "test org for multi-organisation"}` → 200, `name` stored verbatim, `team_id` opaque |
-| `tests/test_create_team_name_free_text.py::test_post_teams_accepts_spaces_registry` | the registry-lane twin |
-| `tests/test_create_team_name_free_text.py::test_all_entry_points_share_the_rule` | parametrised matrix over `/v1/teams`, `/v1/onboarding/team`, `/v1/billing/checkout/new-org`, `/internal/provision` |
+| `tests/test_create_org_name_free_text.py::test_post_teams_accepts_spaces_supabase` | `POST /v1/organizations {"name": "test org for multi-organisation"}` → 200, `name` stored verbatim, `org_id` opaque |
+| `tests/test_create_org_name_free_text.py::test_post_teams_accepts_spaces_registry` | the registry-lane twin |
+| `tests/test_create_org_name_free_text.py::test_all_entry_points_share_the_rule` | parametrised matrix over `/v1/organizations`, `/v1/onboarding/team`, `/v1/billing/checkout/new-org`, `/internal/provision` |
 | `website/apps/dashboard/src/orgNaming.test.js` | `displayNameError` vectors mirror the Python set |
 | `website/apps/dashboard/src/wizardFlow.test.js:73-78` | unchanged assertions stay green (`orgNameError('has space') === null`) |
 | `tests/e2e/test_dashboard_identity.py::test_create_team_success:539-541` | fills `good name with spaces` and expects success — **currently latent-red**, module-skipped behind `RUN_DASHBOARD_E2E=1` (`:30`); slice 1 makes it green |
@@ -170,7 +170,7 @@ two client files — without changing the storage model.
 ### Verification commands (slice 1)
 
 ```bash
-uv run pytest tests/test_org_naming.py tests/test_create_team_name_free_text.py -v
+uv run pytest tests/test_org_naming.py tests/test_create_org_name_free_text.py -v
 node --test website/apps/dashboard/src/orgNaming.test.js website/apps/dashboard/src/wizardFlow.test.js
 RUN_DASHBOARD_E2E=1 uv run pytest tests/e2e/test_dashboard_identity.py::test_create_team_success -v
 ```
@@ -184,7 +184,7 @@ Revert the commit. No schema, no data, no API contract change — a pure code re
 ## Slice 2 — Derive the identifier (server model + migration)
 
 **Intent:** the identifier becomes the derived, collision-resolved, user-editable
-slug, and the two lanes finally agree on `team_{identifier}`.
+slug, and the two lanes finally agree on `org_{identifier}`.
 
 ### Steps
 
@@ -210,27 +210,27 @@ slug, and the two lanes finally agree on `team_{identifier}`.
      **and** `RESERVED_IDENTIFIERS` — not just the regex. `"registry"` satisfies the
      regex, would not be "taken", and `_make_sdk(namespace="registry")`
      (`hosted_api.py:199-215`) is the control-plane SDK (`sdk.py:1971` resolves any
-     namespace as `f"team_{ns}"`), so a team with `id="registry"` would collide with
+     namespace as `f"org_{ns}"`), so a team with `id="registry"` would collide with
      the control plane. Guarding only the derived path leaves that reachable. Then
      uniqueness on `id`; taken → **409 naming it**. Absent → `slugify_id(name)` +
      `resolve_id` against the taken set, inside the existing
      `_team_create_lock(user_id)` (def `:9040`; taken at `:9188`, `:9191`).
    - `_create_team_supabase_lane` (`:9242`): the `uuid4().hex[:26]` mint at `:9284`
-     is replaced by the resolved id; `provision_team(p_team_id=…,
-     p_graph_name=f"team_{id}")` shape unchanged.
+     is replaced by the resolved id; `provision_team(p_org_id=…,
+     p_graph_name=f"org_{id}")` shape unchanged.
    - `_create_team_registry_lane` (`:9323`): pass the identifier through to
      `sdk.team_create`.
    - `:17449` / `:20845`: same optional-`id` handling. `billing_checkout_new_org`
      adds `org_id` to the Stripe session `metadata` alongside the existing
      `org_name`, and `_provision_new_org_from_checkout` reads it.
-   - `:8997-8998` `GET /v1/teams`: no shape change (both fields already returned).
+   - `:8997-8998` `GET /v1/organizations`: no shape change (both fields already returned).
 
 3. **`tortoise/sdk.py:14323` `team_create`** — add keyword
-   `team_id: str | None = None`:
+   `org_id: str | None = None`:
    - when given, use it (validate with `identifier_error`, which enforces the
      reserved set); otherwise keep the `ulid()` mint;
-   - `graph_name = f"team_{team_id or tid}"` (replaces
-     `:14373 f"team_{name}".replace(' ','_')`) — closes **#2023**;
+   - `graph_name = f"org_{org_id or tid}"` (replaces
+     `:14373 f"org_{name}".replace(' ','_')`) — closes **#2023**;
    - validate `name` with `validate_display_name`;
    - the duplicate guard moves from `name` to `id` (`Team {name}` uniqueness is
      removed with `uq_teams_name`).
@@ -245,7 +245,7 @@ slug, and the two lanes finally agree on `team_{identifier}`.
    `id` (compute it with `slugify_id`; accept a `--team-id` option).
 
 5. **`supabase/functions/tenant-provision/index.ts`** — namespace becomes
-   `team_{team_id}` (slice 1 made it `team_{slugify_id(name)}`); the deterministic
+   `org_{org_id}` (slice 1 made it `org_{slugify_id(name)}`); the deterministic
    `sha256(user_id)[:26]` id for the **first** org is retained unchanged (retry
    idempotency for hook redelivery is load-bearing, `index.ts:~355-370`) and this
    exception is documented in the file.
@@ -259,9 +259,9 @@ slug, and the two lanes finally agree on `team_{identifier}`.
 7. **Migration `supabase/migrations/<ts>_teams_display_name.sql`** — the only
    migration in this design.
    ```sql
-   -- 0011's unique index on teams.name guarded team_{name} as a shared
+   -- 0011's unique index on teams.name guarded org_{name} as a shared
    -- namespace. Since #1903 (/docs/plans/2026-08-30-team-graph-name-parity.md)
-   -- the Supabase namespace is team_{team_id}, so the index protects nothing and
+   -- the Supabase namespace is org_{org_id}, so the index protects nothing and
    -- wrongly forbids two unrelated users from giving their personal org the same
    -- display name (#2779). Uniqueness moves to the namespace itself.
    DROP INDEX IF EXISTS public.uq_teams_name;
@@ -270,7 +270,7 @@ slug, and the two lanes finally agree on `team_{identifier}`.
 
    Safe **only after the pre-flight**: `NOT NULL` (`0006_teams.sql:41`) and `id` as
    the PK (`:24`) do not by themselves prove the existing `graph_name` values are
-   unique — `graph_name` was historically `team_{name}`, and `uq_teams_name` is what
+   unique — `graph_name` was historically `org_{name}`, and `uq_teams_name` is what
    kept *those* values distinct. M1 therefore opens with a pre-flight duplicate scan:
 
    ```sql
@@ -288,7 +288,7 @@ slug, and the two lanes finally agree on `team_{identifier}`.
    ```
 
    **No backfill for `name`:** existing rows already hold the display name in `name`,
-   the identifier in `id`, and (post-#1903) `team_{id}` in `graph_name`. Only a
+   the identifier in `id`, and (post-#1903) `org_{id}` in `graph_name`. Only a
    pre-#1903 row that actually collides needs a data fix, and the pre-flight names it
    instead of failing opaquely.
 
@@ -298,7 +298,7 @@ slug, and the two lanes finally agree on `team_{identifier}`.
 |---|---|
 | `tests/test_org_naming.py::test_slugify_vectors` | reads `tests/fixtures/org_naming_vectors.json`; `test org for multi-organisation` → `test-org-for-multi-organisation`; `Acme  Corp` → `Acme-Corp`; `Café Ltd` → `Cafe-Ltd`; `!!!` → `org-`; `registry` → `org-registry`; 80-char → 64 |
 | `tests/test_org_naming.py::test_resolve_id_collisions` | `acme` taken → `acme-2` → `acme-3`; >50 → random suffix; exhaustion raises |
-| `tests/test_resolve_org_id_api.py::test_derived_id_returned` | `POST /v1/teams {"name": "Acme"}` → `team_id == "Acme"` |
+| `tests/test_resolve_org_id_api.py::test_derived_id_returned` | `POST /v1/organizations {"name": "Acme"}` → `org_id == "Acme"` |
 | `tests/test_resolve_org_id_api.py::test_duplicate_display_name_allowed` | two orgs named `Acme` → ids `Acme`, `Acme-2` |
 | `tests/test_resolve_org_id_api.py::test_supplied_id_taken_409` | `{"name":"X","id":"acme"}` with `acme` taken → 409 whose message contains `acme` |
 | `tests/test_resolve_org_id_api.py::test_supplied_id_invalid_422` | `{"id":"a b"}` → 422 naming the space |
@@ -307,10 +307,10 @@ slug, and the two lanes finally agree on `team_{identifier}`.
 | `tests/test_writer_inventory.py::test_duplicate_name_race_maps_rpc_409:663-692` (**rewrite**) | currently asserts the literal `uq_teams_name` PostgREST error; re-target it at a duplicate `graph_name` (PK/`uq_teams_graph_name`) violation |
 | `supabase/tests/pglite/validate.mjs` | asserts `uq_teams_name` is gone and `uq_teams_graph_name` exists |
 | `tests/test_org_naming.py::test_resolve_id_never_reserved` | `slugify_id("registry") == "org-registry"` |
-| `tests/test_registry_lane_namespace_parity.py` | `sdk.team_create("Acme Ltd", team_id="acme")` → `graph_name == "team_acme"` (closes #2023) |
+| `tests/test_registry_lane_namespace_parity.py` | `sdk.team_create("Acme Ltd", org_id="acme")` → `graph_name == "team_acme"` (closes #2023) |
 | `tests/test_teams_migration_display_name.py` | fixture rows survive `DROP INDEX uq_teams_name`; `uq_teams_graph_name` rejects a duplicate `graph_name` |
 | `tests/test_one_free_org_entitlement.py` (updated) | the dup-name 409 assertions become the duplicate-display-name-allowed + collision assertions |
-| `tests/test_writer_inventory.py` (updated) | `p_graph_name == f"team_{team_id}"` assertions still hold with a derived id |
+| `tests/test_writer_inventory.py` (updated) | `p_graph_name == f"org_{org_id}"` assertions still hold with a derived id |
 
 ### Verification commands (slice 2)
 
@@ -344,9 +344,9 @@ same-named orgs apart.
    `Identifier` input (editable, `aria-describedby` linking to a hint) pre-filled by
    `slugifyOrgId(name)` and updating until the user edits it (then it stops
    auto-syncing — a "reset to suggestion" affordance restores it). Submit sends
-   `{name, id}`. The server's returned `team_id` is what the success path uses.
+   `{name, id}`. The server's returned `org_id` is what the success path uses.
 3. **Wizard org step** (`main.jsx:6155-6180`) — the same field, pre-filled, editable;
-   `provisionInApp` (`:3087`) passes `team_id` through `team_name`-adjacent plumbing
+   `provisionInApp` (`:3087`) passes `org_id` through `org_name`-adjacent plumbing
    to `tenant-provision` (which keeps its deterministic id for the first org — the
    field is therefore shown read-only there with a note, see §"Open").
 4. **Switcher / header / invites / team select** — display name primary; identifier
@@ -356,13 +356,13 @@ same-named orgs apart.
    (team `<select>`), `:8300` + `:8306` (Billing heading + its `aria-label`), and
    `:4389-4395` (connect-step key naming) / `:5933-5941` (wizard welcome header).
 5. **Checkout-return matching** (`main.jsx:2323-2330`) — replace the
-   `t.team_name === newOrgName` / `team_name.startsWith(newOrgNamePrefix)` heuristic
-   with matching on the returned `team_id` (already carried as `?new_org=<id>`), and
+   `t.org_name === newOrgName` / `org_name.startsWith(newOrgNamePrefix)` heuristic
+   with matching on the returned `org_id` (already carried as `?new_org=<id>`), and
    drop `newOrgName` from the success URL. The name heuristic existed only because
    the registry lane minted a different id (#2789 §S-B); with the identifier being
    the identity, it is dead code.
 6. **`#2789` interaction — no change required, verified:** the three-option dialog
-   keys on `ownedFreeOrgs[0].team_id` and `e.teamId`
+   keys on `ownedFreeOrgs[0].org_id` and `e.orgId`
    (`main.jsx:4085-4150`, `hosted_api.py:9142` `_one_free_org_detail`), i.e. the
    identifier. Duplicate display names cannot misroute "Upgrade current
    organization". The only edit is display copy (show the display name in the
@@ -371,7 +371,7 @@ same-named orgs apart.
 ### Tests (slice 3)
 
 > **Slice-3 dependency:** the two derived-id e2e tests below need slice 2's server
-> (they read a derived `team_id`). They are **fenced to this slice** and this slice
+> (they read a derived `org_id`). They are **fenced to this slice** and this slice
 > is declared dependent on slice 2 in the slice table — it is not claimed to be
 > mergeable before slice 2. The `node --test` tripwires below are slice-2-independent.
 
@@ -408,7 +408,7 @@ tell them apart.
 ### Steps
 
 1. **`tortoise/mcp_server.py:2135-2144` `tortoise_team_create`** — add optional
-   `team_id: str | None = None`; the docstring's "duplicate team names raise an
+   `org_id: str | None = None`; the docstring's "duplicate team names raise an
    error" becomes "the display name is free text; the identifier is derived or
    supplied and must be unique"; re-check `idempotentHint` (it stays `false` for
    name collisions, but note the derived-id path).
@@ -417,7 +417,7 @@ tell them apart.
 3. **Docs** — `docs/plans/2026-08-30-team-graph-name-parity.md` (note the registry
    lane is now closed), `docs/plans/2026-09-02-2003-W7-onboarding-plan.md`, and any
    doc stating the org-name rule, updated to the two-layer model. Link this plan.
-4. **Optional: display-name rename** — `PATCH /v1/teams/{team_id}` (or the existing
+4. **Optional: display-name rename** — `PATCH /v1/organizations/{org_id}` (or the existing
    team-update seam) accepting `{name}` only, validated with
    `validate_display_name`, writing `teams.name` / `Team.name`; identifier
    untouched. Mirrors `graph_set_name` (`sdk.py:14786`). Safe to defer — the
@@ -427,7 +427,7 @@ tell them apart.
 
 | Test | What it pins |
 |---|---|
-| `tests/test_mcp_team_create.py` | optional `team_id` honoured; the docstring names both layers; stdio-only guard unchanged (`mcp_server.py:2140-2143`) |
+| `tests/test_mcp_team_create.py` | optional `org_id` honoured; the docstring names both layers; stdio-only guard unchanged (`mcp_server.py:2140-2143`) |
 | `tests/test_admin_teams_payload.py` | admin payload carries `id` + `name` |
 | doc lint / `pytest tests/test_docs_links.py` (or the repo's doc check) | the updated docs link correctly |
 | (optional) `tests/test_team_rename.py` | `PATCH` changes `name` and never `id`/`graph_name` |
@@ -438,7 +438,7 @@ tell them apart.
 
 | Surface | Layer | Test assignment | Slice |
 |---|---|---|---|
-| `POST /v1/teams` (both lanes) | integration (FakeControlPlane + registry/docker) | `test_create_team_name_free_text.py`, `test_resolve_org_id_api.py` | 1, 2 |
+| `POST /v1/organizations` (both lanes) | integration (FakeControlPlane + registry/docker) | `test_create_org_name_free_text.py`, `test_resolve_org_id_api.py` | 1, 2 |
 | `POST /v1/onboarding/team` | integration | same files (matrix) | 1, 2 |
 | `POST /v1/billing/checkout/new-org` + webhook provisioning | integration (FakeControlPlane + fake Stripe event) | `test_one_free_org_entitlement.py` (+ `org_id` metadata assertion) | 1, 2 |
 | `/internal/provision` (selfhost) | integration | matrix | 1 |
@@ -477,7 +477,7 @@ tell them apart.
 | Lowercase the derived identifier | preserve case (matches the existing signup slugify, `hosted_api.py:4508`) — one vector, easily changed for *new* orgs only |
 | Server `id-preview` endpoint | start with the mirrored pure function + shared vectors; add the endpoint only if drift is observed |
 | The wizard's first-org identifier field | render it **read-only** with a note — `tenant-provision` keeps the deterministic `sha256(user_id)[:26]` id for retry idempotency. Showing an editable field there would be a lie. |
-| Display-name collisions warning | soft inline warning from the already-loaded `/v1/teams` list; client-only |
+| Display-name collisions warning | soft inline warning from the already-loaded `/v1/organizations` list; client-only |
 | Round-trip the `org_id` through Stripe metadata | do it in slice 2 — the webhook currently reads `org_name` (`hosted_api.py:~20769`); a rename between checkout and payment would otherwise provision the wrong name |
 | `Team` registry node needs a separate `display_name` property? | no — `name` is the display name, `id` is the identifier; same shape as `teams` and as `graphs.name`/`graphs.namespace` (#2701) |
 

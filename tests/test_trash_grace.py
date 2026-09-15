@@ -66,13 +66,13 @@ def _seed_graph(fake, *, deleted_at: str | None, purged_at: str | None = None):
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "solo", "max_graphs": 2})
     fake.seed("teams", [team])
-    fake.seed("team_memberships", [{
-        "id": "m-1", "team_id": _TEAM, "user_id": _OWNER, "role": "owner",
+    fake.seed("org_memberships", [{
+        "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
     }])
     fake.seed("graphs", [{
-        "id": _GID, "team_id": _TEAM, "name": "old-bot", "kind": "custom",
-        "namespace": f"team_{_TEAM}_{_GID}", "status": "deleted",
+        "id": _GID, "org_id": _TEAM, "name": "old-bot", "kind": "custom",
+        "namespace": f"org_{_TEAM}_{_GID}", "status": "deleted",
         "deleted_at": deleted_at, "purged_at": purged_at,
     }])
 
@@ -83,7 +83,7 @@ def sb_client(monkeypatch):
     (mirror of test_export_delete's fixture — kept local so this file is
     self-contained; #2127 shared helper for the SDK patch)."""
     fake = FakeControlPlane({"teams": [], "api_keys": [],
-                             "team_memberships": [], "invitations": []})
+                             "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "grace.db")
@@ -137,7 +137,7 @@ def test_restore_inside_window_200(sb_client, as_owner):
     _seed_graph(fake, deleted_at=(datetime.now(UTC)
                                   - timedelta(days=2)).isoformat())
     as_owner()
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "restored"
 
@@ -147,7 +147,7 @@ def test_restore_past_window_410(sb_client, as_owner):
     _seed_graph(fake, deleted_at=(datetime.now(UTC)
                                   - timedelta(days=60)).isoformat())
     as_owner()
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 410, r.text
     assert "recovery window" in r.json()["detail"]
 
@@ -156,7 +156,7 @@ def test_restore_legacy_tombstone_410(sb_client, as_owner):
     tc, fake, _ = sb_client
     _seed_graph(fake, deleted_at=None)  # pre-#2304 tombstone — past-grace
     as_owner()
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 410, r.text
 
 
@@ -166,5 +166,5 @@ def test_restore_non_owner_403(sb_client, as_owner):
                                   - timedelta(days=1)).isoformat())
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "9f2c1a40-0000-4a00-8000-000000000009"}  # non-member
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 403, r.text

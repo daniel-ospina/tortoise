@@ -45,9 +45,9 @@ surface. The slice's real work:
   (Kong install-state parity; Spree "no per-tenant installation"; SchemaSmith "no separate provisioning
   script pipeline"). The issue's indicator "copies starter packs" should be re-interpreted as **activation
   records (install-state)**, not file copies.
-- **The tenant-context seam already exists:** `tortoise/mcp_auth.py` ships `_current_team_id` /
+- **The tenant-context seam already exists:** `tortoise/mcp_auth.py` ships `_current_org_id` /
   `_current_team_limits` ContextVars set per-request by `TeamResolutionMiddleware`, and `_get_team_sdk()`
-  → `TortoiseSDK(namespace=team_id)`. Per-request tenant context is stdlib `contextvars` (PEP 567) —
+  → `TortoiseSDK(namespace=org_id)`. Per-request tenant context is stdlib `contextvars` (PEP 567) —
   no new dependency; in-repo precedent.
 - **Provisioning is dual-mode** (`supabase_control.py:82-92`): `TORTOISE_CONTROL_PLANE=supabase` →
   atomic `provision_team` RPC (migration 0010, production); `=registry` → `/internal/provision`
@@ -129,7 +129,7 @@ GTM confirms starter packs are a default set for all tenants.
   statement + concurrency test + partial-failure convergence test + FalkorDB-server semantics note);
   P2-A2 env validation (unknown names skip+warn, empty→default, read-at-call-time contract, tests);
   P3s: REST/MCP ensure-then-read symmetry + AC3 never-activated scenario; read-path failure semantics
-  (503-on-outage, partial-return, team_id-None fail-closed — no default-namespace fallback); explicit
+  (503-on-outage, partial-return, org_id-None fail-closed — no default-namespace fallback); explicit
   Risks-of-A block; validation/ label check (RESOLVED: no graph-label constraints — EP/license
   validators only); direct backfill partial-install test; graph-deletion behavior recorded. No
   re-dispatch (no P0/P1).
@@ -223,13 +223,13 @@ Ontology=low, UX=low, Library-deps=none-new.
 ### Integration Docs (drafted at solution-converge)
 
 - **`contextvars`** — stdlib (PEP 567), Python 3.11+. In-repo precedent: `tortoise/mcp_auth.py`
-  (`_current_team_id`, `_current_team_limits` ContextVars + `TeamResolutionMiddleware`). No new dep.
+  (`_current_org_id`, `_current_team_limits` ContextVars + `TeamResolutionMiddleware`). No new dep.
 - **No new third-party dependencies** in the chosen approach.
 - **Supabase RPC seam** — `provision_team` (migration 0010, `supabase_control.py:1018+`): atomic
   idempotent upserts; pack activation must ride the same transaction OR be an idempotent post-step
   (recommendation: idempotent post-step with retry-safe semantics, since it touches the tenant graph —
   a different store than the Supabase RPC transaction).
-- **FalkorDB graph per tenant** — `graph_name = team_{id}` (hosted_api.py:595, 1649; hosted_backup
+- **FalkorDB graph per tenant** — `graph_name = org_{id}` (hosted_api.py:595, 1649; hosted_backup
   graph_name conventions). Tenant graph is the natural home for per-tenant pack install-state
   (graph-native; works in BOTH control-plane modes).
 
@@ -248,9 +248,9 @@ Ontology=low, UX=low, Library-deps=none-new.
   custom-pack authoring path; near-term user-visible value is limited (nothing breaks today).
 
 **Boundary/lifecycle decisions (from problem-verify):**
-- Pack install-state lives in the tenant graph (`graph_name=team_{id}`). Graph deletion wipes
+- Pack install-state lives in the tenant graph (`graph_name=org_{id}`). Graph deletion wipes
   install-state — acceptable: tenant deletion implies pack-state deletion. Re-provisioning with the same
-  team_id re-activates via the idempotent path. Recorded as an explicit decision, not a gap.
+  org_id re-activates via the idempotent path. Recorded as an explicit decision, not a gap.
 - Vocabulary (kind expansion) stays process-global for this slice (shared catalog). Tenant-scoping of
   `domain_loader._registry` / `sdk._get_kind_expander()` consumers (extractor, SDK kind validation,
   hosted validators) is DEFERRED to the custom-pack slice — blast radius of that work is enumerated
@@ -263,7 +263,7 @@ Ontology=low, UX=low, Library-deps=none-new.
 
 **Approach A — Graph-native install-state + idempotent activation + read-only introspection surface (CHOSEN):**
 `(:PackInstall {namespace, version, status, source, installed_at})` nodes in the tenant graph
-(`graph_name=team_{id}` — the LANDED isolation boundary). Single `ensure_tenant_packs(sdk)` idempotent
+(`graph_name=org_{id}` — the LANDED isolation boundary). Single `ensure_tenant_packs(sdk)` idempotent
 routine (MERGE per namespace): eager after graph creation in all three provisioning sites, self-healing
 in the introspection surface, operator backfill for existing tenants. New read-only `GET /v1/packs`
 (REST, `Depends(get_current_team)`) + `packs_list` MCP tool (`tool_registry` http_policy=True, uses
@@ -273,7 +273,7 @@ in the introspection surface, operator backfill for existing tenants. New read-o
 `provision_team` RPC; RLS enforces tenant scope (403 semantics); introspection reads table.
 
 **Approach C — Per-tenant packs_dir copies (issue's literal mechanism):** copy `packs/` to
-`/data/packs/team_{id}/` at provision; per-tenant PackRegistry via contextvars.
+`/data/packs/org_{id}/` at provision; per-tenant PackRegistry via contextvars.
 
 **Approach D (variant, merged into A) — Pure lazy/on-demand activation** (no eager hook; activate on
 first pack introspection).
@@ -347,12 +347,12 @@ Best-effort (Backlex: failure never blocks signup).
 
 **4. Introspection surface (single ensure-then-read core for BOTH surfaces — REST/MCP symmetry):**
 - **Scoping model (PINNED): auth-only — no tenant_id selector parameter.** Team identity comes
-  EXCLUSIVELY from auth (`get_current_team` REST dependency / `_current_team_id` MCP contextvar).
+  EXCLUSIVELY from auth (`get_current_team` REST dependency / `_current_org_id` MCP contextvar).
   Consequence: cross-tenant access is **structurally impossible** (no request can name another
   tenant's graph), ensure can NEVER be triggered against a foreign team (no selector to abuse),
   and the anti-enumeration requirement rewords to: same-tenant no-installs → empty; two-token test
   asserts no bleed.
-- `GET /v1/packs` (hosted_api): `Depends(get_current_team)`; **rejects with 401 when `team_id is
+- `GET /v1/packs` (hosted_api): `Depends(get_current_team)`; **rejects with 401 when `org_id is
   None`** (SKIP_AUTH/background paths — fail closed, never default-namespace fallback; consistent
   with existing `get_current_team` 401). **Response matrix (pinned):** no auth → 401; auth + graph
   unreachable → 503 (never empty-on-outage); auth + no installs (starter set empty/unset or ensure
@@ -462,7 +462,7 @@ against an ontology whitelist that would reject the new label.
 
 | Touch Point | Type | Covered By | Status |
 |---|---|---|---|
-| Tenant FalkorDB graph (`team_{id}`) — `PackInstall` nodes | Data store | Plan §2 (`pack_state.py`), §3 (hooks at graph creation) | ✅ |
+| Tenant FalkorDB graph (`org_{id}`) — `PackInstall` nodes | Data store | Plan §2 (`pack_state.py`), §3 (hooks at graph creation) | ✅ |
 | pack_registry catalog (shared) — `pack_summaries()` helper | Data store/code | Plan §1 | ✅ |
 | `GET /v1/packs` endpoint | API | Plan §4 (auth-only, response matrix) | ✅ |
 | Provisioning hooks — 3 sites: registry-mode `/internal/provision` (~640), self-service (~1660), `v1/teams` (~2906) | API | Plan §3 (enumerated + mode-mapped) | ✅ |
@@ -490,7 +490,7 @@ Full per-gate cycle logs are in the **Verification Gates** section above (proble
 ## Finalize
 
 **Extra issues filed during scoping (do-not-absorb):**
-- **#1154** — tech-debt: process-global pack registry singletons (`domain_loader._registry`, `sdk._get_kind_expander`) are a latent cross-tenant leak when custom-pack authoring lands. Trigger: the custom-pack authoring slice. Proposed approach: per-tenant registry cache keyed by `team_id` via the existing `mcp_auth` ContextVar seam; `asyncio.to_thread`-only execution. Related: #318.
+- **#1154** — tech-debt: process-global pack registry singletons (`domain_loader._registry`, `sdk._get_kind_expander`) are a latent cross-tenant leak when custom-pack authoring lands. Trigger: the custom-pack authoring slice. Proposed approach: per-tenant registry cache keyed by `org_id` via the existing `mcp_auth` ContextVar seam; `asyncio.to_thread`-only execution. Related: #318.
 
 **Parallel-work checkpoint (skill-mandated `parallel_work_check`):** SKIPPED — infra tooling not present in this environment; noted per streamlined-run constraint.
 

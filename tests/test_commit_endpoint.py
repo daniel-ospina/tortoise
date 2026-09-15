@@ -49,9 +49,9 @@ from tortoise.sdk import TortoiseSDK
 
 # ── Test constants ───────────────────────────────────────────────────────────
 
-TEST_TEAM_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
+TEST_ORG_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
 TEST_TEAM = {
-    "team_id": TEST_TEAM_ID,
+    "org_id": TEST_ORG_ID,
     "key_id": "test-key-001",
     # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
     # data-plane gates otherwise (mirrors the #2241 migration pattern).
@@ -114,7 +114,7 @@ def client_quota40():
 def _team_sdk() -> TortoiseSDK:
     """Fresh tenant SDK on the shared test DB (post-request read surface)."""
     import tortoise.hosted_api as ha_mod
-    return ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    return ha_mod._make_sdk(namespace=TEST_ORG_ID)
 
 
 def _reg_sdk():
@@ -125,9 +125,9 @@ def _reg_sdk():
 
 def _metering_rows():
     rows = _reg_sdk()._get_registry().query(
-        "MATCH (m:MeteringRecord {team_id:$tid}) "
+        "MATCH (m:MeteringRecord {org_id:$tid}) "
         "RETURN m.write_ops, m.nodes_written",
-        params={"tid": TEST_TEAM_ID},
+        params={"tid": TEST_ORG_ID},
     ).result_set
     return (int(rows[0][0]), int(rows[0][1])) if rows else (0, 0)
 
@@ -319,7 +319,7 @@ class TestFourNodeChain:
         flag explicitly False can still POST /v1/sessions/commit (the
         derived-commit receiver never consults it)."""
         import tortoise.hosted_api as ha_mod
-        ha_mod._update_onboarding_state(TEST_TEAM_ID, session_recording=False)
+        ha_mod._update_onboarding_state(TEST_ORG_ID, session_recording=False)
         r = _commit(client, _raw_payload(1))
         assert r.status_code == 200, r.text
         assert r.json()["duplicate"] is False
@@ -1277,7 +1277,7 @@ class TestBudgetDE2E7:
             raw = _raw_payload(1, session_id=f"qs{i}")
             r = _commit(client_quota40, raw)
             assert r.status_code == 200, f"commit {i} failed: {r.text}"
-        assert count_team_usage(TEST_TEAM_ID, "sessions", sdk=sdk) == 40
+        assert count_team_usage(TEST_ORG_ID, "sessions", sdk=sdk) == 40
         # 41st commit → 402
         r = _commit(client_quota40, _raw_payload(1, session_id="qs40"))
         assert r.status_code == 402

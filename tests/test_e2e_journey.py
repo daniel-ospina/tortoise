@@ -28,7 +28,7 @@ class TestE2E1SignupProvision:
 
     def test_provisioned_team_exists(self, provision_test_user):
         u = provision_test_user(tier="free")
-        team = u["sdk"].team_get(u["team_id"])
+        team = u["sdk"].team_get(u["org_id"])
         assert team is not None
         assert team["tier"] == "free"
         # No max_teams field (user-level capability)
@@ -36,7 +36,7 @@ class TestE2E1SignupProvision:
 
     def test_membership_owner_created(self, provision_test_user):
         u = provision_test_user()
-        members = u["sdk"].membership_list(u["team_id"])
+        members = u["sdk"].membership_list(u["org_id"])
         assert any(m.get("role") == "owner" for m in members)
 
     def test_api_key_hash_stored(self, provision_test_user):
@@ -46,14 +46,14 @@ class TestE2E1SignupProvision:
         h = hash_api_key(u["api_key"])  # noqa: F841
         # Registry has APIKey nodes for the team; hash format matches (salt:digest)
         rows = u["sdk"]._get_registry().query(  # noqa: F841
-            "MATCH (k:APIKey {team_id:$tid}) RETURN k.key_hash",
-            params={"tid": u["team_id"]},
+            "MATCH (k:APIKey {org_id:$tid}) RETURN k.key_hash",
+            params={"tid": u["org_id"]},
         ).result_set
         # SDK team_create stores the key hash on the Team node (api_key prop);
         # the hosted provision path creates APIKey nodes. Verify the hash is
         # stored in salt:digest format (auth-compatible).
         team_row = u["sdk"]._get_registry().query(
-            "MATCH (t:Team {id:$id}) RETURN t.api_key", params={"id": u["team_id"]},
+            "MATCH (t:Team {id:$id}) RETURN t.api_key", params={"id": u["org_id"]},
         ).result_set
         assert team_row and ":" in team_row[0][0]
 
@@ -68,9 +68,9 @@ class TestE2E3KeyRecovery:
         key = f"tt_{os.urandom(16).hex()}"
         from tortoise.auth import hash_api_key
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:'rec1', team_id:$tid, key_hash:$kh, key_prefix:$kp, "
+            "CREATE (k:APIKey {id:'rec1', org_id:$tid, key_hash:$kh, key_prefix:$kp, "
             "created_by:$u, created_at:$now, revoked_at:null, expires_at:null, created_via:'recovery'})",
-            params={"tid": u["team_id"], "kh": hash_api_key(key), "kp": key[:10],
+            params={"tid": u["org_id"], "kh": hash_api_key(key), "kp": key[:10],
                     "u": u["user_id"], "now": "2026-08-08T00:00:00+00:00"},
         )
         # Key verifies (recovery path works without a pre-existing usable key)
@@ -79,8 +79,8 @@ class TestE2E3KeyRecovery:
     def test_recovery_key_persistent_not_24h(self, provision_test_user):
         u = provision_test_user()
         rows = u["sdk"]._get_registry().query(  # noqa: F841
-            "MATCH (k:APIKey {team_id:$tid, created_via:'recovery'}) RETURN k.expires_at",
-            params={"tid": u["team_id"]},
+            "MATCH (k:APIKey {org_id:$tid, created_via:'recovery'}) RETURN k.expires_at",
+            params={"tid": u["org_id"]},
         ).result_set
         # (fixture mints a recovery-style key in the test above; here assert the
         # schema allows persistent keys — expires_at nullable per plan §6.6)
@@ -92,14 +92,14 @@ class TestE2E6EmptyState:
 
     def test_no_demo_seed_leaves_empty_graph(self, provision_test_user):
         u = provision_test_user(demo_seed=False)
-        graphs = u["sdk"].graph_list(u["team_id"])
+        graphs = u["sdk"].graph_list(u["org_id"])
         # Default graph exists (guaranteed), no custom demo graph
         assert len(graphs) == 1
         assert graphs[0]["kind"] == "default"
 
     def test_demo_seed_adds_custom_graph(self, provision_test_user):
         u = provision_test_user(demo_seed=True)
-        graphs = u["sdk"].graph_list(u["team_id"])
+        graphs = u["sdk"].graph_list(u["org_id"])
         assert len(graphs) >= 2  # default + demo
 
 

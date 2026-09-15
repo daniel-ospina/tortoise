@@ -35,7 +35,7 @@
 
 ### Failure Modes
 - **Switch mid-render** → expected: `switchTeam` resets team-scoped state + re-fetches (existing behavior, verified in #1874 e2e); `setTab('billing')` keeps the tab → covered by the e2e switch assertion.
-- **teams not loaded** (`currentTeamId` null) → expected: select renders only when `teams.length > 1`; heading falls back to `currentTeamName || 'this team'` → covered by the single-team branch.
+- **teams not loaded** (`currentOrgId` null) → expected: select renders only when `teams.length > 1`; heading falls back to `currentOrgName || 'this team'` → covered by the single-team branch.
 - **Narrow viewport** → expected: the row already has `flexWrap: wrap`; the select is compact → covered by the existing narrow-viewport test (no overflow).
 
 ### UX Design Decisions
@@ -75,9 +75,9 @@ def test_billing_team_context(page: Page):
     plan data re-hydrates (pinned via team_reads + the Pro-plan badge)."""
     _seed(page)
     teams = [
-        {"team_id": "team_a", "team_name": "Alpha", "tier": "free",
+        {"org_id": "team_a", "org_name": "Alpha", "tier": "free",
          "subscription_status": None, "write_ops_used": 0, "write_ops_limit": 10000},
-        {"team_id": "team_b", "team_name": "Bravo", "tier": "pro",
+        {"org_id": "team_b", "org_name": "Bravo", "tier": "pro",
          "subscription_status": "active", "write_ops_used": 100, "write_ops_limit": 50000},
     ]
     team_reads: list = []
@@ -89,8 +89,8 @@ def test_billing_team_context(page: Page):
     select = page.get_by_label("Billing team")
     expect(select).to_be_visible()
     expect(select.locator("option")).to_have_count(2)
-    # switch — the ?team_id= pin must reach the API and the card re-renders
-    with page.expect_response(lambda r: "/v1/team" in r.url and "team_id=team_b" in r.url,
+    # switch — the ?org_id= pin must reach the API and the card re-renders
+    with page.expect_response(lambda r: "/v1/team" in r.url and "org_id=team_b" in r.url,
                               timeout=15000):
         select.select_option("team_b")
     assert "team_b" in team_reads
@@ -127,18 +127,18 @@ Expected: FAIL (no "Billing — Alpha" heading).
 **Step 1:** Replace the Billing header row:
 ```jsx
             <div className="row">
-              <h2>Billing — {currentTeamName || 'this team'}</h2>
+              <h2>Billing — {currentOrgName || 'this team'}</h2>
               {/* #1876: per-tenant billing — in-section context selector
                   (reuses switchTeam; single-team users get the name only). */}
               {teams.length > 1 && (
                 <select
                   className="billing-team-select"
                   aria-label="Billing team"
-                  value={currentTeamId || ''}
+                  value={currentOrgId || ''}
                   onChange={(e) => { switchTeam(e.target.value); setTab('billing') }}
                 >
                   {teams.map((t) => (
-                    <option key={t.team_id} value={t.team_id}>{t.team_name}</option>
+                    <option key={t.org_id} value={t.org_id}>{t.org_name}</option>
                   ))}
                 </select>
               )}

@@ -30,13 +30,13 @@ def _seed(fake):
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "solo", "max_graphs": 2})
     fake.seed("teams", [team])
-    fake.seed("team_memberships", [{
-        "id": "m-1", "team_id": _TEAM, "user_id": _OWNER, "role": "owner",
+    fake.seed("org_memberships", [{
+        "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
     }])
     fake.seed("graphs", [{
-        "id": _GID, "team_id": _TEAM, "name": "old-bot", "kind": "custom",
-        "namespace": f"team_{_TEAM}_{_GID}", "status": "deleted",
+        "id": _GID, "org_id": _TEAM, "name": "old-bot", "kind": "custom",
+        "namespace": f"org_{_TEAM}_{_GID}", "status": "deleted",
         "deleted_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
         "purged_at": None,
     }])
@@ -45,7 +45,7 @@ def _seed(fake):
 @pytest.fixture
 def sb_client(monkeypatch):
     fake = FakeControlPlane({"teams": [], "api_keys": [],
-                             "team_memberships": [], "invitations": []})
+                             "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "inspect.db")
@@ -91,7 +91,7 @@ def test_inspect_counts_runs_and_flat_archives(sb_client, as_owner,
     _seed(fake)
     _seed_storage(monkeypatch)
     as_owner()
-    r = tc.get(f"/v1/graphs/trash/{_GID}/points?team_id={_TEAM}")
+    r = tc.get(f"/v1/graphs/trash/{_GID}/points?org_id={_TEAM}")
     assert r.status_code == 200, r.text
     body = r.json()
     # runA (full) + runB (dump-only) + flat01 = 3 restorable archives —
@@ -106,7 +106,7 @@ def test_inspect_no_archives_reports_zero(sb_client, as_owner, monkeypatch):
     monkeypatch.setattr(ha_mod, "_backup_storage",
                         lambda: MemoryStorage())
     as_owner()
-    r = tc.get(f"/v1/graphs/trash/{_GID}/points?team_id={_TEAM}")
+    r = tc.get(f"/v1/graphs/trash/{_GID}/points?org_id={_TEAM}")
     assert r.status_code == 200, r.text
     assert r.json()["archive_count"] == 0
 
@@ -125,7 +125,7 @@ def test_inspect_excludes_purge_ghosted_flat_bids(sb_client, as_owner,
     store.upload("ops/purge-flat-ghosts/team-free-001.json",
                  b'{"team-free-001/flat01": {"erased_at": "2026-09-02T00:00:00Z"}}')
     as_owner()
-    r = tc.get(f"/v1/graphs/trash/{_GID}/points?team_id={_TEAM}")
+    r = tc.get(f"/v1/graphs/trash/{_GID}/points?org_id={_TEAM}")
     assert r.status_code == 200, r.text
     # runA + runB only — flat01 is ghosted out.
     assert r.json()["archive_count"] == 2, r.json()
@@ -140,6 +140,6 @@ def test_inspect_counts_flat_when_not_ghosted(sb_client, as_owner,
     store.upload("ops/purge-flat-ghosts/team-free-001.json",
                  b'{"team-free-001/OTHER-bid": {"erased_at": "2026-09-02T00:00:00Z"}}')
     as_owner()
-    r = tc.get(f"/v1/graphs/trash/{_GID}/points?team_id={_TEAM}")
+    r = tc.get(f"/v1/graphs/trash/{_GID}/points?org_id={_TEAM}")
     assert r.status_code == 200, r.text
     assert r.json()["archive_count"] == 3, r.json()

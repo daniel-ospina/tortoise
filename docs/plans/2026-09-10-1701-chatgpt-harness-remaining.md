@@ -45,8 +45,8 @@ created: 2026-09-10
 **Intent:** Remove the multi-team dead-end for resource-less OAuth clients (ChatGPT) and make team resolution consistent across preview → mint → exchange (suspended teams never bind a grant), keeping the single-team contract byte-identical.
 
 **Acceptance:**
-- `parse_resource(base, {base})` and `parse_resource(base, {base}/)` resolve to the bare MCP resource; `{base}/v1/keys`, `{base}/mcp/teams/x/y`, and foreign origins still raise `invalid_resource`.
-- No-resource resolution counts only **non-suspended** teams: sole active team → today's single-team shape; >1 active team → `{team_id: None, team_name: None, resource, memberships:[{team_id, team_name, resource}]}` (200); 0 active teams → the existing 403 `invalid_grant`.
+- `parse_resource(base, {base})` and `parse_resource(base, {base}/)` resolve to the bare MCP resource; `{base}/v1/keys`, `{base}/mcp/organizations/x/y`, and foreign origins still raise `invalid_resource`.
+- No-resource resolution counts only **non-suspended** teams: sole active team → today's single-team shape; >1 active team → `{org_id: None, org_name: None, resource, memberships:[{org_id, org_name, resource}]}` (200); 0 active teams → the existing 403 `invalid_grant`.
 - A declared team-scoped resource for a non-member still 403s; a declared resource for a **suspended** team 403s at preview.
 - `issue_auth_code` (the consent POST mint) refuses suspended teams (403 `invalid_grant`) — a code is never minted for a team that cannot exchange.
 - `/oauth/consent` POST semantics otherwise unchanged (member + active team binds; strict no-resource multi-active-team 400 preserved).
@@ -57,15 +57,15 @@ created: 2026-09-10
 
 **Step 1: Failing tests first** — add to `tests/test_oauth_mcp.py`:
 - `parse_resource` boundary: `TEST_BASE` and `TEST_BASE + "/"` → bare MCP, no team; `TEST_BASE + "/v1/keys"` → 400 `invalid_resource`; `"https://evil.example/mcp"` → 400; `TEST_BASE + "/mcp/"` → bare MCP.
-- `test_preview_multi_team_no_resource_returns_memberships` (2 active teams) → 200, `team_id is None`, `memberships` length 2, each row has a `team_resource_url` `resource`.
+- `test_preview_multi_team_no_resource_returns_memberships` (2 active teams) → 200, `org_id is None`, `memberships` length 2, each row has a `team_resource_url` `resource`.
 - `test_preview_multi_team_origin_root_echo_returns_memberships` (resource=`TEST_BASE`) → same as above (origin-root echo is treated as no-team-scope).
-- `test_preview_single_team_origin_root_echo_binds_sole_team` → 200, `team_id == team-free-001`, no `memberships` key.
-- `test_preview_excludes_suspended_teams` — split spec: (a) 2 memberships, 1 suspended → single-team auto-bind shape: `team_id == <active team>`, NO `memberships` key; (b) 3 memberships (2 active + 1 suspended) → `memberships` lists exactly the 2 active rows with scoped resources and the suspended team absent.
+- `test_preview_single_team_origin_root_echo_binds_sole_team` → 200, `org_id == team-free-001`, no `memberships` key.
+- `test_preview_excludes_suspended_teams` — split spec: (a) 2 memberships, 1 suspended → single-team auto-bind shape: `org_id == <active team>`, NO `memberships` key; (b) 3 memberships (2 active + 1 suspended) → `memberships` lists exactly the 2 active rows with scoped resources and the suspended team absent.
 - `test_preview_declared_resource_suspended_team_403` (active membership on a suspended team, declared team resource) → 403 at preview.
 - `test_consent_mint_refuses_suspended_team`: suspend the team AFTER a successful preview (mid-consent race), then POST the picked team's resource → 403 `invalid_grant`, no code issued.
 - `test_exchange_guard_still_rejects_mint_then_suspend_race`: mint a code while the team is ACTIVE, then set `teams.suspended_at` BEFORE the code exchange → `POST /oauth/token` 403 `invalid_grant`, no tokens issued (pins the surviving exchange-time `_assert_team_usable` backstop, which the reworked consent test would otherwise orphan).
 - `test_preview_all_teams_suspended_403`: 2 memberships, both teams suspended → preview 403 `invalid_grant` (0-active-after-exclusion branch).
-- `test_preview_declared_bare_mcp_resource_keeps_resource_field`: single team, client declares the PRM value `{base}/mcp` (truthy) → preview keeps today's `resource: team_resource_url(base, team_id)` (byte-identical contract pin).
+- `test_preview_declared_bare_mcp_resource_keeps_resource_field`: single team, client declares the PRM value `{base}/mcp` (truthy) → preview keeps today's `resource: team_resource_url(base, org_id)` (byte-identical contract pin).
 - `test_multi_team_default_requires_declaration` (existing, both teams active) stays 400.
 - `test_suspended_team_rejects_code_exchange` (existing): update — the suspension now rejects at the CONSENT POST (code never minted), so rework the test to assert the consent 403 and keep the exchange-level assertion for the refresh path only.
 
@@ -86,7 +86,7 @@ def _default_team(cp, user_id: str) -> str:
     never dead-ends on the multi-team 400."""
     active = [t for t in _selectable_teams(cp, user_id)]
     if len(active) == 1:
-        return active[0]["team_id"]
+        return active[0]["org_id"]
     if not active:
         raise OAuthError(403, "invalid_grant",
                          "This account has no active team. Create a team "
@@ -94,7 +94,7 @@ def _default_team(cp, user_id: str) -> str:
     raise OAuthError(400, "invalid_resource",
                      "This account belongs to multiple teams — the MCP client "
                      "must declare a team-scoped resource indicator "
-                     f"({team_resource_url('<base>', '<team_id>')} form).")
+                     f"({team_resource_url('<base>', '<org_id>')} form).")
 ```
 3. `_selectable_teams`:
 ```python
@@ -105,13 +105,13 @@ def _selectable_teams(cp, user_id: str) -> list[dict]:
     out = []
     for m in user_memberships(cp, user_id):
         rows = cp.query("teams", select=["name", "suspended_at"],
-                        filters=[("id", "eq", m["team_id"])])
+                        filters=[("id", "eq", m["org_id"])])
         if not rows or rows[0].get("suspended_at") is not None:
             continue
-        out.append({"team_id": m["team_id"],
-                    "team_name": rows[0].get("name") or m["team_id"]})
+        out.append({"org_id": m["org_id"],
+                    "org_name": rows[0].get("name") or m["org_id"]})
     # deterministic chooser order (user_memberships has no ORDER BY)
-    return sorted(out, key=lambda t: t["team_id"])
+    return sorted(out, key=lambda t: t["org_id"])
 ```
 4. `consent_preview` (replaces the current body — keeps single-team and declared-team shapes byte-identical, including the `resource` field conditional):
 ```python
@@ -125,36 +125,36 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
     Zero active teams keeps the 403 so an account with no usable team cannot
     mint a code.
     """
-    _, team_id = parse_resource(base, resource)
-    if team_id is not None:
+    _, org_id = parse_resource(base, resource)
+    if org_id is not None:
         from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(cp, user_id, team_id) is None:
+        if membership_for_user_team(cp, user_id, org_id) is None:
             raise OAuthError(403, "invalid_resource",
                              "Not a member of the requested team.")
-        _assert_team_usable(cp, team_id)   # suspended → 403 invalid_grant
+        _assert_team_usable(cp, org_id)   # suspended → 403 invalid_grant
         return {
-            "team_id": team_id,
-            "team_name": _team_name(cp, team_id),
-            "resource": (team_resource_url(base, team_id) if resource
+            "org_id": org_id,
+            "org_name": _org_name(cp, org_id),
+            "resource": (team_resource_url(base, org_id) if resource
                          else mcp_resource_url(base)),
         }
     teams = _selectable_teams(cp, user_id)
     if len(teams) == 1:
         return {
-            "team_id": teams[0]["team_id"],
-            "team_name": teams[0]["team_name"],
+            "org_id": teams[0]["org_id"],
+            "org_name": teams[0]["org_name"],
             # byte-identical with today: a truthy declared resource (bare MCP
             # or origin echo) keeps the team-scoped resource field.
-            "resource": (team_resource_url(base, teams[0]["team_id"])
+            "resource": (team_resource_url(base, teams[0]["org_id"])
                          if resource else mcp_resource_url(base)),
         }
     if len(teams) > 1:
         return {
-            "team_id": None,
-            "team_name": None,
+            "org_id": None,
+            "org_name": None,
             "resource": mcp_resource_url(base),
             "memberships": [
-                {**t, "resource": team_resource_url(base, t["team_id"])}
+                {**t, "resource": team_resource_url(base, t["org_id"])}
                 for t in teams
             ],
         }
@@ -162,13 +162,13 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
                      "This account has no team. Create a team before "
                      "connecting an MCP client.")
 ```
-`_selectable_teams` returns teams sorted deterministically by `team_id` (stable order for the chooser; the chooser never auto-binds — see Task 2).
+`_selectable_teams` returns teams sorted deterministically by `org_id` (stable order for the chooser; the chooser never auto-binds — see Task 2).
 5. `issue_auth_code` — assert the team is usable BEFORE inserting the code (suspension surfaces at consent, not at a later exchange):
 ```python
-    team_id = _resolve_team(cp, user_id, base, resource)
-    _assert_team_usable(cp, team_id)
+    org_id = _resolve_team(cp, user_id, base, resource)
+    _assert_team_usable(cp, org_id)
 ```
-(place after the existing `team_id = _resolve_team(...)` line, before the code insert).
+(place after the existing `org_id = _resolve_team(...)` line, before the code insert).
 6. Keep `_resolve_team` otherwise unchanged (its `_default_team` call now inherits suspension-aware resolution).
 
 **Step 3:** run `tests/test_oauth_mcp.py` — all green.
@@ -211,7 +211,7 @@ Behavior beyond these strings is explicitly NOT auto-verifiable (no jsdom layer 
   <select id="team-select" style="display:none" aria-label="Team for this connection"></select>
 </div>
 ```
-2. `#btn-auth` markup gains `disabled` (enabled by JS post-preview). `showConsent()` becomes in-flight-guarded, disables `#btn-auth` at every re-entry, **and resets the module-level `teamResource = null` at every entry** (the ONLY writer of `teamResource` is the current run's picker `change` handler — a re-run can never carry a stale selection into the POST); it **returns a `'stale'` sentinel when a session exists but the preview 401s**, so recovery runs OUTSIDE the guarded body (see item 4). After the preview resolves: single/auto-bound team → today's team-line text and Authorize enabled; `memberships.length > 1` → CLEAR the select's existing options, add a leading disabled `value=""` placeholder ("Choose a team…"), then append the real options (value = `m.resource`, label = `team_name (team_id)`), unhide the select, hide `team-line`, set `resource-line` to picker copy; `teamResource` is set ONLY in the select's `change` handler (the placeholder guarantees the first real pick fires `change`), and Authorize enables only then — an untouched picker cannot authorize (no silent wrong-org bind).
+2. `#btn-auth` markup gains `disabled` (enabled by JS post-preview). `showConsent()` becomes in-flight-guarded, disables `#btn-auth` at every re-entry, **and resets the module-level `teamResource = null` at every entry** (the ONLY writer of `teamResource` is the current run's picker `change` handler — a re-run can never carry a stale selection into the POST); it **returns a `'stale'` sentinel when a session exists but the preview 401s**, so recovery runs OUTSIDE the guarded body (see item 4). After the preview resolves: single/auto-bound team → today's team-line text and Authorize enabled; `memberships.length > 1` → CLEAR the select's existing options, add a leading disabled `value=""` placeholder ("Choose a team…"), then append the real options (value = `m.resource`, label = `org_name (org_id)`), unhide the select, hide `team-line`, set `resource-line` to picker copy; `teamResource` is set ONLY in the select's `change` handler (the placeholder guarantees the first real pick fires `change`), and Authorize enables only then — an untouched picker cannot authorize (no silent wrong-org bind).
 3. Authorize handler: `body.resource = teamResource || PARAMS.resource || null`; early-return (with an error) if the button was never enabled; **a 401 POST response triggers one `refreshSession()` then a single re-POST that RE-READS the session (`await supabaseClient.auth.getSession()`) and uses the fresh `access_token` — only a second 401 shows the expired-session sign-in view** (no `signOut()`; the cookie is replaced by a fresh sign-in).
 4. Stale-session recovery (single driver, capped): the caller of `showConsent()` (initial load, the `onAuthStateChange` handler, and the email sign-in path) receives the `'stale'` sentinel and performs AT MOST ONE `await supabaseClient.auth.refreshSession()` (the cookie still holds a valid refresh_token — the page runs `autoRefreshToken: false`, so only the ~1h access JWT is stale), then re-invokes `showConsent()` (the in-flight guard is already cleared). A second consecutive `'stale'` renders the expired-session sign-in view with "Your session expired — sign in again." (no `signOut()` anywhere on this path — a global-scope gotrue logout would revoke the shared parent-domain session server-side, logging the user out of the dashboard on every device). No session → `showSignin()` as today; non-401 preview failures → error banner + show `#btn-retry-preview` (re-runs the guarded `showConsent`), Authorize stays disabled.
 5. After client creation:

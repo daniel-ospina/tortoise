@@ -47,7 +47,7 @@ from tortoise.projection import FalkorProjection
 # the embedded lane keeps the historical literals byte-for-byte (P1
 # zero-change). test_team_graph_name_reads_from_teams keeps real-function
 # semantics: its registry-branch assert (team_graph_name(reg, "team_x") ==
-# "team_team_x") is deterministic team_{id} — lane-independent — and its
+# "team_team_x") is deterministic org_{id} — lane-independent — and its
 # supabase-branch assert follows the SEAMED row (_BETA_GRAPH), so the row
 # literal is replaced by the constant (a literal would leak a non-test graph
 # on the server).
@@ -72,12 +72,12 @@ _GHOST_GRAPH = (f"test_ghostapp_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
                 else "team_ghost_app")
 
 
-def _team_graph(team_id: str) -> str:
-    """Seam-resolved registry-mode team graph name: team_{id} → a guard-
-    passing per-team test_* name under URI; historical team_{id} embedded."""
+def _team_graph(org_id: str) -> str:
+    """Seam-resolved registry-mode team graph name: org_{id} → a guard-
+    passing per-team test_* name under URI; historical org_{id} embedded."""
     if _DOCKER_LANE:
-        return f"test_team_{team_id}_{_TEAM_SEAM_HEX}_tortoise"
-    return f"team_{team_id}"
+        return f"test_org_{org_id}_{_TEAM_SEAM_HEX}_tortoise"
+    return f"org_{org_id}"
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +91,7 @@ def _route_sweep_team_graph_consumption(monkeypatch, request):
     the exemption below can never fire). URI-gated: on the embedded lane the
     REAL function stays (seeds + asserts stay real). Exemption: the one test
     that exercises the REAL function's registry branch keeps it — the real
-    function is deterministic (team_{id}) so its L745 assert
+    function is deterministic (org_{id}) so its L745 assert
     (team_graph_name(reg, "team_x") == "team_team_x") holds on both lanes.
     The file's own direct imports of team_graph_name are unaffected by the
     module-attr patch (import-time binding), so the real-function tests
@@ -106,16 +106,16 @@ def _route_sweep_team_graph_consumption(monkeypatch, request):
     from tortoise.hosted_backup import _is_supabase_source
     _real_team_graph_name = bs.team_graph_name
 
-    def _seam_team_graph_name(source, team_id):
+    def _seam_team_graph_name(source, org_id):
         # Supabase-mode consumption reads graph_name from the teams ROW (the
         # rows are already seamed to _MYAPP_GRAPH etc.) — the real function
         # must stay for that dialect, or the supabase tests would dump the
         # registry-mode seam name (empty graph → no_work). Registry-mode
-        # consumption (the deterministic team_{id}) routes to the seam names
+        # consumption (the deterministic org_{id}) routes to the seam names
         # so seed and consumption agree.
         if _is_supabase_source(source):
-            return _real_team_graph_name(source, team_id)
-        return _team_graph(team_id)
+            return _real_team_graph_name(source, org_id)
+        return _team_graph(org_id)
 
     monkeypatch.setattr(bs, "team_graph_name", _seam_team_graph_name)
 
@@ -158,7 +158,7 @@ def _config(**over) -> BackupConfig:
 
 def _seed_flat_for_sweep(storage, team: str, graph_name: str,
                           hours_ago: float) -> str:
-    """Seed a pre-#2313 legacy FLAT dump (backups/{team}/{key}/…) — the flat
+    """Seed a pre-#2313 legacy FLAT dump (backups/{org_id}/{key}/…) — the flat
     pool the sweep classifies (#2370). Returns its backup_id (team/key)."""
     import secrets as _secrets
     from datetime import timedelta
@@ -166,7 +166,7 @@ def _seed_flat_for_sweep(storage, team: str, graph_name: str,
     key = (f"{ts.strftime('%Y%m%dT%H%M%S')}"
            f"{ts.microsecond // 1000:03d}Z_{_secrets.token_hex(4)}")
     backup_id = f"{team}/{key}"
-    m = {"backup_id": backup_id, "team_id": team, "graph_name": graph_name,
+    m = {"backup_id": backup_id, "org_id": team, "graph_name": graph_name,
          "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
          "sha256": "0" * 64}
     storage.upload(f"backups/{backup_id}/manifest.json",
@@ -187,8 +187,8 @@ def _make_env(monkeypatch, proj) -> FalkorProjection:
     return proj
 
 
-def _seed_team_graph(proj, team_id: str, n: int = 5) -> None:
-    g = proj.db.select_graph(_team_graph(team_id))
+def _seed_team_graph(proj, org_id: str, n: int = 5) -> None:
+    g = proj.db.select_graph(_team_graph(org_id))
     for i in range(n):
         g.query(
             "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
@@ -258,7 +258,7 @@ def test_sweep_noop_run_preserves_previous_rollup(shared_proj):
             "last_team_count": 2,
             "last_sweep_at": "2026-09-06T10:00:00+00:00",
             "graph_totals": {"attempted": 3, "backed_up": 2, "errors": 1},
-            "graph_failures": [{"team_id": "team_x", "graph_id": "g_a",
+            "graph_failures": [{"org_id": "team_x", "graph_id": "g_a",
                                 "error": "boom", "streak": 2}],
             "graph_error_streaks": {"team_x:g_a": 2},
             "updated_at": "2026-09-06T10:00:00+00:00",
@@ -571,9 +571,9 @@ def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
         # NO_ELIGIBLE_TEAMS incident is present.
         kinds = [i["kind"] for i in res["incidents"]]
         assert "NO_ELIGIBLE_TEAMS" in kinds
-        # Verify dedup characteristics: team_id is empty (platform-level alert).
+        # Verify dedup characteristics: org_id is empty (platform-level alert).
         noop = [i for i in res["incidents"] if i["kind"] == "NO_ELIGIBLE_TEAMS"][0]  # noqa: RUF015
-        assert noop["team_id"] == ""
+        assert noop["org_id"] == ""
         assert "0 eligible" in noop["detail"]["message"]
         # Re-run: incident is returned again (dedup is the alert store's job).
         res2 = run_backup_sweep(
@@ -1069,7 +1069,7 @@ def test_team_graph_name_reads_from_teams(shared_proj):
     """Sweep reads graph_name from teams (the column is the source of truth)."""
     cp = _fake_teams()
     assert team_graph_name(cp, "team_b") == _BETA_GRAPH  # the row value, seamed
-    # Registry mode: deterministic team_{id} (no graph_name stored there).
+    # Registry mode: deterministic org_{id} (no graph_name stored there).
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
@@ -1093,14 +1093,14 @@ def test_team_graph_name_supabase_fail_closed():
 
 def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
     """Full sweep with a Supabase source: enumerates teams, dumps the graph
-    teams.graph_name names (NOT team_{id}), stamps backup_latest_at on the row.
+    teams.graph_name names (NOT org_{id}), stamps backup_latest_at on the row.
     This is the E2E-4 enumeration+stamp leg against the seam fake."""
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
         wipe(proj)
-        # The team's graph is named per teams.graph_name — not team_{id}.
+        # The team's graph is named per teams.graph_name — not org_{id}.
         g = proj.db.select_graph(_MYAPP_GRAPH)
         g.query("CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
         g.query("CREATE (p:Point {id:'pt-1', content:'c2', pointKind:'claim'})")
@@ -1123,7 +1123,7 @@ def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
         keys = [k for k in store.list("backups/team_x/") if k.endswith("manifest.json")]
         assert len(keys) == 1
         manifest = json.loads(store.download(keys[0]))
-        assert manifest["graph_name"] == _MYAPP_GRAPH  # from teams, not team_{id}
+        assert manifest["graph_name"] == _MYAPP_GRAPH  # from teams, not org_{id}
         # Stamps land on the team's Supabase row (PATCH via the fake).
         row = cp.query("teams", select=["backup_latest_at"],
                        filters=[("id", "eq", "team_x")])
@@ -1327,7 +1327,7 @@ def test_sweep_backs_up_default_plus_custom_graphs(shared_proj):
                 g.query("CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
                         params={"id": f"pt-{j}", "c": f"custom {j}"})
             reg.query(
-                "CREATE (g:Graph {id:$gid, team_id:'team_mg', name:$gid, "
+                "CREATE (g:Graph {id:$gid, org_id:'team_mg', name:$gid, "
                 "kind:'custom', namespace:$ns, status:'active'})",
                 params={"gid": gid, "ns": ns},
             )
@@ -1379,7 +1379,7 @@ def test_sweep_skips_deleted_custom_tombstone(shared_proj):
         g = proj.db.select_graph(ns)
         g.query("CREATE (p:Point {id:'pt-x', content:'x', pointKind:'claim'})")
         reg.query(
-            "CREATE (g:Graph {id:'g_dead', team_id:'team_tomb', name:'dead', "
+            "CREATE (g:Graph {id:'g_dead', org_id:'team_tomb', name:'dead', "
             "kind:'custom', namespace:$ns, status:'deleted'})",
             params={"ns": ns},
         )
@@ -1412,7 +1412,7 @@ def test_sweep_custom_size_guard_is_per_graph(shared_proj):
             g.query("CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
                     params={"id": f"pt-{i}", "c": "big"})
         reg.query(
-            "CREATE (g:Graph {id:'g_big', team_id:'team_sz', name:'big', "
+            "CREATE (g:Graph {id:'g_big', org_id:'team_sz', name:'big', "
             "kind:'custom', namespace:$ns, status:'active'})",
             params={"ns": ns},
         )
@@ -1450,7 +1450,7 @@ def test_sweep_drains_legacy_flat_pool_leaves_nested(shared_proj):
         legacy_id = f"team_drain/{old_ts}"
         store.upload(f"backups/{legacy_id}/dump.enc", b"old")
         store.upload(f"backups/{legacy_id}/manifest.json", json.dumps({
-            "backup_id": legacy_id, "team_id": "team_drain",
+            "backup_id": legacy_id, "org_id": "team_drain",
             "graph_name": _team_graph("team_drain"),
             "created_at": (datetime.now(UTC) - timedelta(days=40)).isoformat(),
             "node_count": 1, "edge_count": 0, "sha256": "x",
@@ -1486,13 +1486,13 @@ def test_resolve_active_graph_registry_lane(shared_proj):
         reg.query("CREATE (t:Team {id:'team_rg2', tier:'pro'})")
         # active custom + tombstoned custom + another team's graph
         reg.query(
-            "CREATE (g:Graph {id:'g_live', team_id:'team_rg', kind:'custom', "
+            "CREATE (g:Graph {id:'g_live', org_id:'team_rg', kind:'custom', "
             "namespace:'ns_live', status:'active'})")
         reg.query(
-            "CREATE (g:Graph {id:'g_dead', team_id:'team_rg', kind:'custom', "
+            "CREATE (g:Graph {id:'g_dead', org_id:'team_rg', kind:'custom', "
             "namespace:'ns_dead', status:'deleted'})")
         reg.query(
-            "CREATE (g:Graph {id:'g_other', team_id:'team_rg2', kind:'custom', "
+            "CREATE (g:Graph {id:'g_other', org_id:'team_rg2', kind:'custom', "
             "namespace:'ns_other', status:'active'})")
         # active custom resolves to its namespace (the dump/select name)
         row = resolve_active_graph(reg, "team_rg", "g_live")
@@ -1520,17 +1520,17 @@ def test_resolve_active_graph_supabase_fake():
     cp = _FakeGraphsTable(
         {"id": "team_s", "graph_name": "team_myapp"},
         [
-            {"id": "g_a", "team_id": "team_s", "name": "a", "kind": "custom",
+            {"id": "g_a", "org_id": "team_s", "name": "a", "kind": "custom",
              "namespace": "team_s_g_a", "status": "active", "created_at": "1"},
-            {"id": "g_del", "team_id": "team_s", "name": "del", "kind": "custom",
+            {"id": "g_del", "org_id": "team_s", "name": "del", "kind": "custom",
              "namespace": "team_s_g_del", "status": "deleted", "created_at": "2"},
-            {"id": "g_def", "team_id": "team_s", "name": "default", "kind": "default",
+            {"id": "g_def", "org_id": "team_s", "name": "default", "kind": "default",
              "namespace": "team_myapp", "status": "active", "created_at": "0"},
         ],
     )
     assert _is_supabase_source(cp)
     row = resolve_active_graph(cp, "team_s", "default")
-    assert row["graph_name"] == "team_myapp"  # teams.graph_name, not team_{id}
+    assert row["graph_name"] == "team_myapp"  # teams.graph_name, not org_{id}
     row = resolve_active_graph(cp, "team_s", "g_a")
     assert row["graph_name"] == "team_s_g_a"
     with pytest.raises(ValueError):
@@ -1582,7 +1582,7 @@ def test_sweep_custom_graph_data_loss_transition_fires_per_graph(shared_proj):
             g.query("CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
                     params={"id": f"pt-{i}", "c": "c"})
         reg.query(
-            "CREATE (g:Graph {id:'g_c1', team_id:'team_dl', kind:'custom', "
+            "CREATE (g:Graph {id:'g_c1', org_id:'team_dl', kind:'custom', "
             "namespace:$ns, status:'active'})",
             params={"ns": ns},
         )
@@ -1639,7 +1639,7 @@ def test_sweep_legacy_drain_skipped_when_default_fails(shared_proj):
         legacy_id = f"team_keep/{old_ts}"
         store.upload(f"backups/{legacy_id}/dump.enc", b"old")
         store.upload(f"backups/{legacy_id}/manifest.json", json.dumps({
-            "backup_id": legacy_id, "team_id": "team_keep",
+            "backup_id": legacy_id, "org_id": "team_keep",
             "graph_name": _team_graph("team_keep"),
             "created_at": (datetime.now(UTC) - timedelta(days=30)).isoformat(),
             "node_count": 2, "edge_count": 0, "sha256": "x",
@@ -1675,7 +1675,7 @@ def test_sweep_writes_flat_index_and_prunes_custom_flats_on_default_failure(shar
         g = proj.db.select_graph(ns)
         g.query("CREATE (p:Point {id:'pt-1', content:'c', pointKind:'claim'})")
         reg.query(
-            "CREATE (g:Graph {id:'g_c1', team_id:'team_fi', kind:'custom', "
+            "CREATE (g:Graph {id:'g_c1', org_id:'team_fi', kind:'custom', "
             "namespace:$ns, status:'active'})",
             params={"ns": ns},
         )
@@ -1735,7 +1735,7 @@ def test_sweep_degraded_headline_and_error_streaks(shared_proj, monkeypatch):
         g = proj.db.select_graph(ns)
         g.query("CREATE (p:Point {id:'pt-1', content:'c', pointKind:'claim'})")
         reg.query(
-            "CREATE (g:Graph {id:'g_c1', team_id:'team_gr', kind:'custom', "
+            "CREATE (g:Graph {id:'g_c1', org_id:'team_gr', kind:'custom', "
             "namespace:$ns, status:'active'})",
             params={"ns": ns},
         )
@@ -1757,7 +1757,7 @@ def test_sweep_degraded_headline_and_error_streaks(shared_proj, monkeypatch):
         assert r1["graph_totals"] == {"attempted": 2, "backed_up": 1,
                                       "errors": 1}
         fail = r1["graph_failures"][0]
-        assert fail["team_id"] == "team_gr" and fail["graph_id"] == "g_c1"
+        assert fail["org_id"] == "team_gr" and fail["graph_id"] == "g_c1"
         assert fail["streak"] == 1
         assert r1["graph_error_streaks"] == {"team_gr:g_c1": 1}
         # ops/state.json persists the roll-up (surfaced by /status)
@@ -1804,16 +1804,16 @@ def test_classify_flat_pool_keys_by_listing_not_manifest_bid():
 
 # ── #2304 trash purge tests (delete = quarantine → grace → erasure) ─────────
 
-def _seed_custom_tombstone(proj, team_id, gid, name, *,
+def _seed_custom_tombstone(proj, org_id, gid, name, *,
                            ns=None, deleted_at=None, kind="custom"):
     """Seed a tombstoned custom Graph node in the registry + (optionally)
     its data-plane namespace graph with a Point. Returns the namespace."""
     reg = proj.db.select_graph(_REGISTRY_GRAPH)
-    namespace = ns or f"team_{team_id}_{gid}"
+    namespace = ns or f"org_{org_id}_{gid}"
     reg.query(
-        "CREATE (g:Graph {id:$gid, team_id:$tid, name:$name, kind:$kind, "
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:$name, kind:$kind, "
         "namespace:$ns, status:'deleted', deleted_at:$ts})",
-        params={"gid": gid, "tid": team_id, "name": name, "kind": kind,
+        params={"gid": gid, "tid": org_id, "name": name, "kind": kind,
                 "ns": namespace, "ts": deleted_at},
     )
     g = proj.db.select_graph(namespace)
@@ -1821,10 +1821,10 @@ def _seed_custom_tombstone(proj, team_id, gid, name, *,
     return namespace
 
 
-def _tombstone_props(proj, gid, team_id="team_x"):
+def _tombstone_props(proj, gid, org_id="team_x"):
     rows = proj.db.select_graph(_REGISTRY_GRAPH).query(
-        "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN properties(g)",
-        params={"gid": gid, "tid": team_id}).result_set
+        "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN properties(g)",
+        params={"gid": gid, "tid": org_id}).result_set
     return dict(rows[0][0]) if rows else {}
 
 
@@ -1844,7 +1844,7 @@ def test_purge_erases_namespace_artifacts_and_stamps_row(shared_proj):
     store.upload(f"ops/teams/team_x/graphs/{gid}/state.json", b"{}")
     bid = f"flat_{os.urandom(2).hex()}"
     # Canonical #2370 index shape: full bids "{team}/{key}" with objects at
-    # backups/{team}/{key}/...
+    # backups/{org_id}/{key}/...
     full_bid = f"team_x/{bid}"
     store.upload(f"backups/{full_bid}/dump.enc", b"flat")
     store.upload(f"backups/{full_bid}/manifest.json", b"{}")
@@ -1859,7 +1859,7 @@ def test_purge_erases_namespace_artifacts_and_stamps_row(shared_proj):
     store.upload(f"backups/team_x/{fresh_gid}/runA/dump.enc", b"keep")
 
     res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
-        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+        _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
 
     assert res["status"] == "ok"
     purged = [p for p in res["purged"] if p["graph_id"] == gid]
@@ -1882,7 +1882,7 @@ def test_purge_erases_namespace_artifacts_and_stamps_row(shared_proj):
     assert not fresh.get("purged_at")
     # Idempotent: a second run purges nothing (row excluded by purged_at).
     res2 = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
-        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+        _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
     assert all(p["graph_id"] != gid for p in res2["purged"])
 
 
@@ -1897,7 +1897,7 @@ def test_purge_legacy_tombstone_missing_deleted_at_is_past_grace(shared_proj):
                                 deleted_at=None)  # pre-#2304 tombstone
     store.upload(f"backups/team_x/{gid}/runA/dump.enc", b"blob")
     res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
-        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+        _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
     assert any(p["graph_id"] == gid for p in res["purged"])
     assert ns not in proj.db.list_graphs()
     props = _tombstone_props(proj, gid)
@@ -1918,7 +1918,7 @@ def test_purge_ownership_guard_retains_reoccupied_namespace(shared_proj):
                            deleted_at=(datetime.now(UTC)
                                        - timedelta(days=30)).isoformat())
     res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
-        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+        _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
     resids = [p for p in res["residuals"] if p["graph_id"] == gid]
     assert len(resids) == 1
     assert "ownership_guard" in resids[0]["reason"]
@@ -1940,21 +1940,21 @@ def test_purge_absent_namespace_converges(shared_proj):
     reg = proj.db.select_graph(_REGISTRY_GRAPH)
     namespace = f"team_team_x_{gid}"
     reg.query(
-        "CREATE (g:Graph {id:$gid, team_id:'team_x', name:'ghost', "
+        "CREATE (g:Graph {id:$gid, org_id:'team_x', name:'ghost', "
         "kind:'custom', namespace:$ns, status:'deleted', deleted_at:$ts})",
         params={"gid": gid, "ns": namespace,
                 "ts": (datetime.now(UTC) - timedelta(days=10)).isoformat()})
     # No data-plane namespace was ever minted — drop must be a no-op success.
     res = run_graph_purge(db=proj.db, registry=reg, storage=store,
-                          team_ids=["team_x"])
+                          org_ids=["team_x"])
     assert any(p["graph_id"] == gid for p in res["purged"])
     assert _tombstone_props(proj, gid).get("purged_at")
 
 
 # ── #2466 flat-index RMW reconciliation (sweep vs purge) ───────────────────
 
-def _flat_bids_in_index(store, team_id):
-    return set((json.loads(store.download(f"ops/legacy-flat-index/{team_id}.json")) or {}).keys())
+def _flat_bids_in_index(store, org_id):
+    return set((json.loads(store.download(f"ops/legacy-flat-index/{org_id}.json")) or {}).keys())
 
 
 def test_purge_records_ghosts_and_sweep_write_drops_stale_bids():
@@ -2017,7 +2017,7 @@ def test_enumerate_team_tombstones_excludes_active_and_purged(shared_proj):
                                    (purged, "deleted",
                                     datetime.now(UTC).isoformat())):
         reg.query(
-            "CREATE (g:Graph {id:$gid, team_id:'team_x', name:$gid, "
+            "CREATE (g:Graph {id:$gid, org_id:'team_x', name:$gid, "
             "kind:'custom', namespace:$ns, status:$st, purged_at:$pa})",
             params={"gid": gid, "ns": f"team_team_x_{gid}",
                     "st": status, "pa": purged_at})
@@ -2059,7 +2059,7 @@ def test_purge_skips_team_whose_lock_is_stuck(shared_proj, monkeypatch):
 
     reg = proj.db.select_graph(_REGISTRY_GRAPH)
     res = run_graph_purge(db=proj.db, registry=reg, storage=store,
-                          team_ids=["team_locked", "team_free"],
+                          org_ids=["team_locked", "team_free"],
                           lock_for=lock_for)
     # team_locked skipped loudly; team_free purged normally.
     assert any("team lock busy" in str(e.get("error"))
@@ -2081,7 +2081,7 @@ def test_purge_drops_erased_graphs_from_ops_state_rollup(shared_proj):
     reg = proj.db.select_graph(_REGISTRY_GRAPH)
     ghost = f"g_gh_{os.urandom(2).hex()}"
     reg.query(
-        "CREATE (g:Graph {id:$gid, team_id:'team_x', name:$gid, "
+        "CREATE (g:Graph {id:$gid, org_id:'team_x', name:$gid, "
         "kind:'custom', namespace:$ns, status:'deleted', "
         "deleted_at:$da, purged_at:null})",
         params={"gid": ghost, "ns": f"team_team_x_{ghost}",
@@ -2094,16 +2094,16 @@ def test_purge_drops_erased_graphs_from_ops_state_rollup(shared_proj):
             "graph_totals": {"attempted": 2, "backed_up": 1,
                               "errors": 1},
             "graph_failures": [
-                {"team_id": "team_x", "graph_id": ghost,
+                {"org_id": "team_x", "graph_id": ghost,
                  "error": "boom", "streak": 3},
-                {"team_id": "team_x", "graph_id": "g_live0001",
+                {"org_id": "team_x", "graph_id": "g_live0001",
                  "error": "x", "streak": 1},
             ],
             "graph_error_streaks": {f"team_x:{ghost}": 3,
                                      "team_x:g_live0001": 1},
         }).encode())
     res = run_graph_purge(db=proj.db, registry=reg, storage=store,
-                          team_ids=["team_x"])
+                          org_ids=["team_x"])
     assert any(p["graph_id"] == ghost for p in res["purged"])
     state = json.loads(store.download(OPS_STATE_KEY))
     assert f"team_x:{ghost}" not in (state.get("graph_error_streaks") or {})
@@ -2130,9 +2130,9 @@ def test_noop_write_cannot_resurrect_a_purge_dropped_streak(shared_proj):
             "updated_at": "2026-09-01T00:00:00Z",
             "graph_totals": {"attempted": 2, "backed_up": 1, "errors": 1},
             "graph_failures": [
-                {"team_id": "team_x", "graph_id": gid,
+                {"org_id": "team_x", "graph_id": gid,
                  "error": "boom", "streak": 3},
-                {"team_id": "team_x", "graph_id": "g_live0001",
+                {"org_id": "team_x", "graph_id": "g_live0001",
                  "error": "x", "streak": 1},
             ],
             "graph_error_streaks": {f"team_x:{gid}": 3,
@@ -2170,12 +2170,12 @@ def test_purge_skips_row_restored_between_enumeration_and_drop(shared_proj):
     # The restore flips it active between enumeration and the drop.
     reg = proj.db.select_graph(_REGISTRY_GRAPH)
     reg.query(
-        "MATCH (g:Graph {id:$gid, team_id:'team_x'}) "
+        "MATCH (g:Graph {id:$gid, org_id:'team_x'}) "
         "SET g.status = 'active' REMOVE g.deleted_at",
         params={"gid": gid})
     store.upload(f"backups/team_x/{gid}/runA/dump.enc", b"blob")
     res = run_graph_purge(db=proj.db, registry=reg, storage=store,
-                          team_ids=["team_x"])
+                          org_ids=["team_x"])
     skipped = [p for p in res["purged"] if p["graph_id"] == gid]
     assert not skipped
     # Namespace survives (live data), no purged stamp, artifacts untouched.
@@ -2199,7 +2199,7 @@ def test_registry_stamp_raises_when_row_no_longer_a_tombstone(shared_proj):
     gid = f"g_stamp_{os.urandom(2).hex()}"
     # Row is ACTIVE (a concurrent restore flipped it) — not a tombstone.
     reg.query(
-        "CREATE (g:Graph {id:$gid, team_id:'team_x', name:$gid, "
+        "CREATE (g:Graph {id:$gid, org_id:'team_x', name:$gid, "
         "kind:'custom', namespace:$ns, status:'active', purged_at:null})",
         params={"gid": gid, "ns": f"team_team_x_{gid}"})
     with pytest.raises(RuntimeError, match="stamp refused"):
@@ -2228,20 +2228,20 @@ def test_purge_reports_error_when_registry_stamp_refused(shared_proj,
     reg = proj.db.select_graph(_REGISTRY_GRAPH)
     orig_stamp = backup_sweep._stamp_purged
 
-    def _flip_before_stamp(source, team_id, graph_id, now_iso, *,
+    def _flip_before_stamp(source, org_id, graph_id, now_iso, *,
                            residual):
         # A cross-process restore flips the row right before the stamp.
         reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:'team_x'}) "
+            "MATCH (g:Graph {id:$gid, org_id:'team_x'}) "
             "SET g.status = 'active' REMOVE g.deleted_at, g.purged_at",
             params={"gid": graph_id})
-        return orig_stamp(source, team_id, graph_id, now_iso,
+        return orig_stamp(source, org_id, graph_id, now_iso,
                           residual=residual)
 
     monkeypatch.setattr(backup_sweep, "_stamp_purged",
                         _flip_before_stamp)
     res = run_graph_purge(db=proj.db, registry=reg, storage=store,
-                          team_ids=["team_x"])
+                          org_ids=["team_x"])
     # Not reported as purged; surfaced as an error; row live, unstamped.
     assert all(p["graph_id"] != gid for p in res["purged"])
     assert any(e.get("graph_id") == gid and "stamp refused" in str(e.get("error"))
@@ -2270,13 +2270,13 @@ def test_purge_race_restore_mid_drop_never_stamps(shared_proj, monkeypatch):
     store.upload(f"backups/team_x/{gid}/runA/dump.enc", b"blob")
     calls = {"n": 0}
 
-    def _race_row_still_tombstoned(source, team_id, gid_):
+    def _race_row_still_tombstoned(source, org_id, gid_):
         calls["n"] += 1
         if calls["n"] == 2:
             # The cross-process restore flips the row between the pre-drop
             # verify (call 1) and the post-artifact verify (call 2).
             reg.query(
-                "MATCH (g:Graph {id:$gid, team_id:'team_x'}) "
+                "MATCH (g:Graph {id:$gid, org_id:'team_x'}) "
                 "SET g.status = 'active' REMOVE g.deleted_at",
                 params={"gid": gid_})
             return False
@@ -2286,7 +2286,7 @@ def test_purge_race_restore_mid_drop_never_stamps(shared_proj, monkeypatch):
         "tortoise.backup_sweep._row_still_tombstoned",
         _race_row_still_tombstoned)
     res = run_graph_purge(db=proj.db, registry=reg, storage=store,
-                          team_ids=["team_x"])
+                          org_ids=["team_x"])
     # Not reported as purged; surfaced as an error entry (race surfaced
     # loudly); row is LIVE and never stamped purged_at.
     assert all(p["graph_id"] != gid for p in res["purged"])
@@ -2320,7 +2320,7 @@ def test_purge_erases_reclassified_legacy_flats_by_namespace(shared_proj):
         "ops/legacy-flat-index/team_x.json",
         json.dumps({bid: {"graph_name": ns, "graph_id": ""}}).encode())
     res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
-        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+        _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
     purged = [p for p in res["purged"] if p["graph_id"] == gid]
     assert len(purged) == 1
     assert purged[0]["artifacts"]["flat_keys"] == 2
@@ -2337,7 +2337,7 @@ def test_purge_erases_reclassified_legacy_flats_by_namespace(shared_proj):
         json.dumps({live_bid: {"graph_name": live_ns, "graph_id": "default"}})
         .encode())
     run_graph_purge(db=proj.db, registry=proj.db.select_graph(
-        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+        _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
     assert store.list(f"backups/{live_bid}/") != []  # untouched
 
 
@@ -2383,7 +2383,7 @@ def test_purge_partial_flat_delete_failure_still_rewrites_index(
             fail_bid: {"graph_name": ns, "graph_id": ""},
         }).encode())
     res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
-        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+        _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
     purged = [p for p in res["purged"] if p["graph_id"] == gid]
     assert len(purged) == 1
     # The flaky delete errored but the index was STILL rewritten: both bids
@@ -2417,7 +2417,7 @@ def test_purge_residual_still_erases_artifacts(shared_proj):
         "ops/legacy-flat-index/team_x.json",
         json.dumps({bid: {"graph_name": other_ns, "graph_id": ""}}).encode())
     res = run_graph_purge(db=proj.db, registry=proj.db.select_graph(
-        _REGISTRY_GRAPH), storage=store, team_ids=["team_x"])
+        _REGISTRY_GRAPH), storage=store, org_ids=["team_x"])
     residual = [p for p in res["residuals"] if p["graph_id"] == gid]
     assert len(residual) == 1
     # Namespace retained but the tombstone's artifacts are gone.
@@ -2549,7 +2549,7 @@ def test_list_drill_candidates_nested_only_oldest_first():
         "backups/team_x/default/20260103T000000Z_bb/dump.enc",
     ]
     assert all(r["graph_id"] for r in rows)
-    assert rows[0]["team_id"] == "team_x" and rows[0]["graph_id"] == "g_c1"
+    assert rows[0]["org_id"] == "team_x" and rows[0]["graph_id"] == "g_c1"
 
 
 def test_list_drill_candidates_max_candidates_and_empty():

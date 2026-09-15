@@ -36,7 +36,7 @@ from tests.test_supabase_control import (
     FREE_TEAM, TEAM_TIER_TEAM, TOKEN, _key_row, _membership_row,
 )
 
-# #1719 (Task 3): real UUIDs — JWT subjects + team_memberships.user_id are
+# #1719 (Task 3): real UUIDs — JWT subjects + org_memberships.user_id are
 # uuid in prod; non-UUID literals would 22P02 (the fake now enforces it).
 _USER1 = "9f2c1a40-0000-4a00-8000-000000000001"
 _USER2 = "9f2c1a40-0000-4a00-8000-000000000002"
@@ -61,7 +61,7 @@ def supabase_fake() -> FakeControlPlane:
     """Fake control plane pre-seeded with one free team."""
     return FakeControlPlane({
         "api_keys": [],
-        "team_memberships": [],
+        "org_memberships": [],
         "teams": [dict(FREE_TEAM)],
     })
 
@@ -112,7 +112,7 @@ class TestRestAuthFlip:
     def test_registry_only_key_401(self, rest_client):
         """E2E-7-negative: a key that exists only in the FalkorDB registry
         does NOT authenticate REST anymore."""
-        tc, _ = rest_client  # fake has NO api_keys/team_memberships rows
+        tc, _ = rest_client  # fake has NO api_keys/org_memberships rows
         r = tc.get("/v1/team/keys", headers={"Authorization": f"Bearer {TOKEN}"})
         assert r.status_code == 401
 
@@ -154,7 +154,7 @@ class TestSessionKeyRoundTrip:
 
     def test_mint_resolves_then_revoked_rejected(self, rest_client, authed_user):
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id="team-free-001")])
         fake.tables["api_keys"] = []  # ensure clean
 
         # bootstrap mint → api_keys row with created_via + expires_at
@@ -184,7 +184,7 @@ class TestSessionKeyRoundTrip:
 
     def test_recovery_mint_persistent_no_expiry(self, rest_client, authed_user):
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id="team-free-001")])
         r = tc.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None
@@ -192,7 +192,7 @@ class TestSessionKeyRoundTrip:
 
     def test_bootstrap_cap_three_active(self, rest_client, authed_user):
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id="team-free-001")])
         for i in range(3):
             fake.seed("api_keys", [_key_row(
                 id=f"boot-{i}", created_via="bootstrap", created_by=_USER1,
@@ -204,7 +204,7 @@ class TestSessionKeyRoundTrip:
         """Free tier max_api_keys=2: minting a 3rd recovery key auto-revokes
         the oldest OTHER user's key (#750.10 — never the user's own)."""
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id="team-free-001")])
         fake.seed("api_keys", [
             _key_row(id="other-old", created_via="recovery", created_by=_USER2,
                      lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
@@ -230,8 +230,8 @@ class TestSessionKeyRoundTrip:
         a recovery key immediately (no rotation, no 402), even with a tall
         revoked-tombstone stack present."""
         tc, fake = rest_client
-        fake.seed("team_memberships",
-                  [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_USER1, org_id="team-free-001")])
         fake.seed("api_keys", [
             _key_row(id=f"tomb-{i}",
                      created_via=("recovery" if i % 2 else "provisioned"),
@@ -264,7 +264,7 @@ class TestSessionKeyRoundTrip:
         keys unboundedly per login). Persistent user-minted keys stay
         untouched (#750.10)."""
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id="team-free-001")])
         fake.seed("api_keys", [
             # deliberate user-created keys (never rotation candidates)
             _key_row(id="own-prov-1", created_via="provisioned", created_by=_USER1,
@@ -304,7 +304,7 @@ class TestSessionKeyRoundTrip:
         with rotated=True. Own PROVISIONED keys are never rotation
         candidates (#750.10) and stay untouched."""
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id="team-free-001")])
         fake.seed("api_keys", [
             # cap=2: two own RECOVERY keys fill the cap (the #1830 deadlock)…
             _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
@@ -348,8 +348,8 @@ class TestSessionKeyRoundTrip:
         killing a live persistent credential). The mint response names the
         rotated key (rotated_key_prefix)."""
         tc, fake = rest_client
-        fake.seed("team_memberships",
-                  [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_USER1, org_id="team-free-001")])
         fake.seed(
             "api_keys",
             [
@@ -401,7 +401,7 @@ class TestSessionKeyRoundTrip:
         re-introduce the 402 deadlock — the rotated bootstrap would free no
         persistent slot.)"""
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id="team-free-001")])
         fake.seed("api_keys", [
             # cap=2: two own RECOVERY keys fill the cap (the #1830 deadlock)...
             _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
@@ -440,7 +440,7 @@ class TestSessionKeyRoundTrip:
         (test_session_key_http.py::test_at_cap_rotates_legacy_unowned_key_when_it_frees_a_slot
         asserts rotated is True there)."""
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=_USER1, org_id="team-free-001")])
         fake.seed("api_keys", [
             _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
                      lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
@@ -471,7 +471,7 @@ class TestSessionKeyRoundTrip:
 
     def test_mint_requires_membership(self, rest_client, authed_user):
         tc, fake = rest_client
-        fake.tables["team_memberships"] = []
+        fake.tables["org_memberships"] = []
         r = tc.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 403
 
@@ -500,8 +500,8 @@ class TestInvitesEndpointFlip:
         """Team-tier team with user-1 as owner (invites enabled)."""
         tc, fake = rest_client
         fake.tables["teams"] = [dict(TEAM_TIER_TEAM)]
-        fake.seed("team_memberships", [{
-            "user_id": _USER1, "team_id": "team-team-001",
+        fake.seed("org_memberships", [{
+            "user_id": _USER1, "org_id": "team-team-001",
             "role": "owner", "status": "active"}])
         return tc, fake
 
@@ -512,7 +512,7 @@ class TestInvitesEndpointFlip:
         as_user(_USER1)
 
         r = tc.post("/v1/invites", json={
-            "team_id": "team-team-001", "email": "bob@example.com",
+            "org_id": "team-team-001", "email": "bob@example.com",
             "role": "admin"})
         assert r.status_code == 200, r.text
         body = r.json()
@@ -532,9 +532,9 @@ class TestInvitesEndpointFlip:
         as_user(_USER2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 200, r.text
-        assert r.json() == {"team_id": "team-team-001", "role": "admin"}
+        assert r.json() == {"org_id": "team-team-001", "role": "admin"}
 
-        mem = [m for m in fake.tables["team_memberships"]
+        mem = [m for m in fake.tables["org_memberships"]
                if m["user_id"] == _USER2]
         assert len(mem) == 1
         assert mem[0]["role"] == "admin"  # invited role preserved (O/I/T)
@@ -550,7 +550,7 @@ class TestInvitesEndpointFlip:
     def test_mint_dedup_409(self, team_tier, as_user):
         tc, fake = team_tier
         as_user(_USER1)
-        payload = {"team_id": "team-team-001", "email": "bob@example.com",
+        payload = {"org_id": "team-team-001", "email": "bob@example.com",
                    "role": "member"}
         assert tc.post("/v1/invites", json=payload).status_code == 200
         r = tc.post("/v1/invites", json=payload)
@@ -560,23 +560,23 @@ class TestInvitesEndpointFlip:
     def test_mint_requires_team_tier(self, rest_client, as_user):
         """Free tier → 402 (invites are a Team-tier feature, D7 #574)."""
         tc, fake = rest_client
-        fake.seed("team_memberships", [{
-            "user_id": _USER1, "team_id": "team-free-001",
+        fake.seed("org_memberships", [{
+            "user_id": _USER1, "org_id": "team-free-001",
             "role": "owner", "status": "active"}])
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-free-001", "email": "bob@example.com",
+            "org_id": "team-free-001", "email": "bob@example.com",
             "role": "member"})
         assert r.status_code == 402
 
     def test_mint_requires_owner_admin(self, team_tier, as_user):
         tc, fake = team_tier
-        fake.seed("team_memberships", [{
-            "user_id": _USER9, "team_id": "team-team-001",
+        fake.seed("org_memberships", [{
+            "user_id": _USER9, "org_id": "team-team-001",
             "role": "member", "status": "active"}])
         as_user(_USER9)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-team-001", "email": "bob@example.com",
+            "org_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
         assert r.status_code == 403
 
@@ -584,7 +584,7 @@ class TestInvitesEndpointFlip:
         tc, fake = team_tier
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-team-001", "email": "bob@example.com",
+            "org_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
         token = r.json()["token"]
         from datetime import datetime, timedelta, timezone
@@ -600,12 +600,12 @@ class TestInvitesEndpointFlip:
         tc, fake = team_tier
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-team-001", "email": "bob@example.com",
+            "org_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
         invite_id = r.json()["invite_id"]
         token = r.json()["token"]
 
-        r = tc.delete(f"/v1/invites/{invite_id}?team_id=team-team-001")
+        r = tc.delete(f"/v1/invites/{invite_id}?org_id=team-team-001")
         assert r.status_code == 200, r.text
         assert r.json()["revoked"] is True
         assert fake.tables["invitations"][0]["status"] == "revoked"
@@ -616,20 +616,20 @@ class TestInvitesEndpointFlip:
         assert "revoked" in r.json()["detail"]
         # no membership created for the invitee (user-1's row is the owner)
         assert all(m["user_id"] != _USER2
-                   for m in fake.tables["team_memberships"])
+                   for m in fake.tables["org_memberships"])
 
     def test_rescind_requires_owner_admin(self, team_tier, as_user):
         tc, fake = team_tier
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-team-001", "email": "bob@example.com",
+            "org_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
         invite_id = r.json()["invite_id"]
-        fake.seed("team_memberships", [{
-            "user_id": _USER9, "team_id": "team-team-001",
+        fake.seed("org_memberships", [{
+            "user_id": _USER9, "org_id": "team-team-001",
             "role": "member", "status": "active"}])
         as_user(_USER9)
-        r = tc.delete(f"/v1/invites/{invite_id}?team_id=team-team-001")
+        r = tc.delete(f"/v1/invites/{invite_id}?org_id=team-team-001")
         assert r.status_code == 403
         assert fake.tables["invitations"][0]["status"] == "pending"
 
@@ -639,7 +639,7 @@ class TestInvitesEndpointFlip:
         tokens = {}
         for email in ("bob@example.com", "carol@example.com", "dave@example.com"):
             r = tc.post("/v1/invites", json={
-                "team_id": "team-team-001", "email": email,
+                "org_id": "team-team-001", "email": email,
                 "role": "member"})
             assert r.status_code == 200, r.text
             tokens[email] = r.json()["token"]
@@ -648,10 +648,10 @@ class TestInvitesEndpointFlip:
         r = tc.post("/v1/invites/accept", json={"token": tokens["bob@example.com"]})
         assert r.status_code == 200, r.text
         as_user(_USER1)
-        r = tc.delete(f"/v1/invites/{fake.tables['invitations'][2]['id']}?team_id=team-team-001")
+        r = tc.delete(f"/v1/invites/{fake.tables['invitations'][2]['id']}?org_id=team-team-001")
         assert r.status_code == 200, r.text
 
-        r = tc.get("/v1/invites?team_id=team-team-001")
+        r = tc.get("/v1/invites?org_id=team-team-001")
         assert r.status_code == 200
         rows = r.json()
         assert [i["email"] for i in rows] == ["carol@example.com"]
@@ -675,7 +675,7 @@ class TestInvitesEndpointFlip:
         tc, _ = team_tier
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-team-001", "email": "bob@example.com",
+            "org_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
         assert r.status_code == 503
         assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
@@ -875,8 +875,8 @@ class TestSessionKeyMintConcurrency:
 
         _, fake = rest_client
         tid = "team-free-001"
-        fake.seed("team_memberships",
-                  [_membership_row(user_id=_USER1, team_id=tid)])
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_USER1, org_id=tid)])
         # the mint's post-insert side effects run OUTSIDE the lock and need a
         # real request object — no-op them (we drive the mint directly).
         monkeypatch.setattr(ha, "_async_audit", _noop)
@@ -915,8 +915,8 @@ class TestSessionKeyMintConcurrency:
         lock would otherwise hang the suite red instead of failing)."""
         tc, fake = rest_client
         tid = "team-free-001"
-        fake.seed("team_memberships",
-                  [_membership_row(user_id=_USER1, team_id=tid)])
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_USER1, org_id=tid)])
         # cap reached with ONLY the user's own PROVISIONED keys — #750.10 /
         # #1828: provisioned keys are NEVER rotation candidates → 402.
         fake.seed("api_keys", [
@@ -948,8 +948,8 @@ class TestSessionKeyMintConcurrency:
 
         _, fake = rest_client
         tid = "team-free-001"
-        fake.seed("team_memberships",
-                  [_membership_row(user_id=_USER1, team_id=tid)])
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_USER1, org_id=tid)])
         # at cap-1: one OTHER user's recovery key occupies a slot
         fake.seed("api_keys", [
             _key_row(id="other-1", created_via="recovery", created_by=_USER2,
@@ -970,7 +970,7 @@ class TestSessionKeyMintConcurrency:
         assert all(r.status_code == 200 for r in results), \
             [r.text for r in results]
         active = [k for k in fake.tables["api_keys"]
-                  if k.get("team_id") == tid and k.get("revoked_at") is None
+                  if k.get("org_id") == tid and k.get("revoked_at") is None
                   and k.get("created_via") != "bootstrap"]
         assert len(active) <= 2, \
             f"cap overshot: {len(active)} active non-bootstrap keys"

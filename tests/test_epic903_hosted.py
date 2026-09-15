@@ -31,7 +31,7 @@ class TestBudgetAccounting:
         try:
             from fastapi import HTTPException
             with pytest.raises(HTTPException) as he:
-                asyncio.run(ha.dream(full=True, team={"team_id": tid}))
+                asyncio.run(ha.dream(full=True, team={"org_id": tid}))
             assert he.value.status_code == 429
             assert "Retry-After" in (he.value.headers or {}), (
                 "the 429 must carry Retry-After (seconds until window reset)")
@@ -46,7 +46,7 @@ class TestBudgetAccounting:
         ha._DREAM_FULL_BUCKETS.pop(tid, None)
         try:
             asyncio.run(ha.dream(mode="stale-first", budget=2,
-                                  team={"team_id": tid}))
+                                  team={"org_id": tid}))
             assert tid not in ha._DREAM_FULL_BUCKETS, (
                 "window passes must not consume the #329 bucket")
         finally:
@@ -65,7 +65,7 @@ class TestBudgetAccounting:
         try:
             from fastapi import HTTPException
             with pytest.raises(HTTPException) as he:
-                asyncio.run(ha.dream(mode="full", team={"team_id": tid}))
+                asyncio.run(ha.dream(mode="full", team={"org_id": tid}))
             assert he.value.status_code == 429
         finally:
             ha._DREAM_FULL_BUCKETS.pop(tid, None)

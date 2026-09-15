@@ -57,7 +57,7 @@ def supabase_client(monkeypatch):
     """
     fake = FakeControlPlane({
         "api_keys": [],
-        "team_memberships": [],
+        "org_memberships": [],
         "teams": [dict(FREE_TEAM, email="owner@example.com",
                        onboarding_state={}, github_token_enc=None,
                        github_org=None)],
@@ -108,8 +108,8 @@ class TestOnboardingStateFlip:
         GET/PATCH /v1/onboarding/state)."""
         tc, fake = supabase_client
         user_id = str(uuid.uuid4())
-        fake.seed("team_memberships", [_membership_row(user_id=user_id,
-                                                       team_id="team-free-001")])
+        fake.seed("org_memberships", [_membership_row(user_id=user_id,
+                                                       org_id="team-free-001")])
 
         async def _fake(request):
             return {"user_id": user_id, "email": "owner@example.com", "sub": user_id}
@@ -177,7 +177,7 @@ class TestGithubConnectFlip:
         token + org on the teams row (service-role seam), and onboarding state
         marks github_connected. The raw token never appears on the row.
         #1845: org is the token's REAL login (GET /user), never the internal
-        team_id — the pre-#1845 team_id default made every org-scoped lookup
+        org_id — the pre-#1845 org_id default made every org-scoped lookup
         404 (the empty source-scope selector)."""
         tc, fake = supabase_client
 
@@ -206,7 +206,7 @@ class TestGithubConnectFlip:
         # encrypted blob stored — never the raw token
         assert row["github_token_enc"] is not None
         assert row["github_token_enc"] != "gho_raw_access_token_123"
-        assert row["github_org"] == "acme-user"  # #1845: real login, not team_id
+        assert row["github_org"] == "acme-user"  # #1845: real login, not org_id
         # onboarding state marked connected through the same seam
         assert row["onboarding_state"]["github_connected"] is True
 
@@ -264,7 +264,7 @@ class TestGithubConnectFlip:
                 # callback is the public leg under test).
                 import time as _time
                 ha._GITHUB_STATES["test-state-1"] = {
-                    "team_id": "team-free-001", "org": "team-free-001",
+                    "org_id": "team-free-001", "org": "team-free-001",
                     "created_at": _time.time(),
                 }
                 r = tc.get("/v1/onboarding/github/callback?code=test-code&state=test-state-1",

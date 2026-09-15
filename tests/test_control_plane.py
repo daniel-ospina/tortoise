@@ -160,7 +160,7 @@ class TestMembershipCRUD:
 
     def test_membership_create_with_valid_role(self, sdk, team):
         m = sdk.membership_create(team["id"], "user-1", "admin")
-        assert m["team_id"] == team["id"]
+        assert m["org_id"] == team["id"]
         assert m["user_id"] == "user-1"
         assert m["role"] == "admin"
 
@@ -271,7 +271,7 @@ class TestAPIKeyCRUD:
         # Verify works before revoke
         valid = sdk.apikey_verify(plaintext)
         assert valid is not None
-        assert valid["team_id"] == team["id"]
+        assert valid["org_id"] == team["id"]
         # Revoke
         sdk.apikey_revoke(result["id"])
         # Verify after revoke
@@ -282,7 +282,7 @@ class TestAPIKeyCRUD:
         result = sdk.apikey_create(team["id"], "user-1")
         valid = sdk.apikey_verify(result["api_key"])
         assert valid is not None
-        assert valid["team_id"] == team["id"]
+        assert valid["org_id"] == team["id"]
 
     def test_apikey_verify_bad_key_returns_none(self, sdk):
         assert sdk.apikey_verify("tt_badkey123") is None
@@ -305,7 +305,7 @@ class TestAPIKeyCRUD:
         # Verify the last-created key (would fail a naive early-match scan)
         valid = sdk.apikey_verify(target_key)
         assert valid is not None
-        assert valid["team_id"] == team["id"]
+        assert valid["org_id"] == team["id"]
         # A bad key with a plausible tt_ prefix is still rejected
         assert sdk.apikey_verify("tt_" + "0" * 32) is None
 
@@ -366,7 +366,7 @@ class TestAPIKeyC1Tenancy:
         # Still authenticates (registry parity: hash path unchanged)
         valid = sdk.apikey_verify(result["api_key"])
         assert valid is not None
-        assert valid["team_id"] == team["id"]
+        assert valid["org_id"] == team["id"]
 
 
 class TestGraphC1Status:
@@ -423,7 +423,7 @@ class TestInvitationCRUD:
     def test_invitation_accept_creates_membership(self, sdk, team):
         inv = sdk.invitation_create(team["id"], "join@test.com", "admin", "user-1")
         result = sdk.invitation_accept(inv["id"], "user-2")
-        assert result["team_id"] == team["id"]
+        assert result["org_id"] == team["id"]
         assert result["membership_id"]
         # Verify membership was created
         members = sdk.membership_list(team["id"])

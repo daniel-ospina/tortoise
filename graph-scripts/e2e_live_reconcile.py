@@ -108,17 +108,17 @@ USERS_SQL = """
 # they are counted here as a drift signal, not a cleanup target.
 CHILDREN_SQL = """
     SELECT 'api_keys' AS kind, count(*) AS n FROM public.api_keys
-      WHERE team_id IN ({ids})
-    UNION ALL SELECT 'memberships', count(*) FROM public.team_memberships
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
+    UNION ALL SELECT 'memberships', count(*) FROM public.org_memberships
+      WHERE org_id IN ({ids})
     UNION ALL SELECT 'invitations', count(*) FROM public.invitations
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL SELECT 'abuse', count(*) FROM public.abuse_events
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL SELECT 'analytics', count(*) FROM public.analytics_events
-      WHERE team_id IN ({ids})
+      WHERE org_id IN ({ids})
     UNION ALL SELECT 'audit', count(*) FROM public.audit_events
-      WHERE team_id IN ({ids});
+      WHERE org_id IN ({ids});
 """
 
 

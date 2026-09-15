@@ -22,8 +22,8 @@ class _FakeGraphsTable:
 
     def query(self, table: str, *, select=None, filters=None, order=None):
         # graph_metadata query shapes:
-        #   teams: select id,graph_name filters [("id","eq",team_id)]
-        #   graphs: select recording filters [("team_id","eq",..),("kind","eq","default")]
+        #   teams: select id,graph_name filters [("id","eq",org_id)]
+        #   graphs: select recording filters [("org_id","eq",..),("kind","eq","default")]
         #   graphs: select [...] filters team/custom/active order created_at
         if table == "teams":
             return [self._teams]
@@ -65,13 +65,13 @@ def test_supabase_default_only():
 
 def test_supabase_default_plus_customs_excludes_deleted_and_default_rows():
     src = _supabase_source(graphs_rows=[
-        {"id": "g_a", "team_id": "t1", "name": "alpha", "kind": "custom",
+        {"id": "g_a", "org_id": "t1", "name": "alpha", "kind": "custom",
          "namespace": "team_t1_g_a", "status": "active",
          "recording": None, "created_at": "2026-09-01T00:00:00Z"},
-        {"id": "g_b", "team_id": "t1", "name": "beta", "kind": "custom",
+        {"id": "g_b", "org_id": "t1", "name": "beta", "kind": "custom",
          "namespace": "team_t1_g_b", "status": "active",
          "recording": None, "created_at": "2026-09-02T00:00:00Z"},
-        {"id": "g_del", "team_id": "t1", "name": "gone", "kind": "custom",
+        {"id": "g_del", "org_id": "t1", "name": "gone", "kind": "custom",
          "namespace": "team_t1_g_del", "status": "deleted",
          "recording": None, "created_at": "2026-09-03T00:00:00Z"},
     ])
@@ -82,11 +82,11 @@ def test_supabase_default_plus_customs_excludes_deleted_and_default_rows():
 
 def test_registry_default_normalized_and_deleted_filtered():
     src = _FakeRegistry([
-        {"id": "g_rand_default", "team_id": "t1", "name": "default",
+        {"id": "g_rand_default", "org_id": "t1", "name": "default",
          "kind": "default", "namespace": "team_t1", "status": "active"},
-        {"id": "g_x", "team_id": "t1", "name": "x", "kind": "custom",
+        {"id": "g_x", "org_id": "t1", "name": "x", "kind": "custom",
          "namespace": "team_t1_g_x", "status": "active"},
-        {"id": "g_y", "team_id": "t1", "name": "y", "kind": "custom",
+        {"id": "g_y", "org_id": "t1", "name": "y", "kind": "custom",
          "namespace": "team_t1_g_y", "status": "deleted"},
     ])
     out = enumerate_team_graphs(src, "t1")
@@ -99,7 +99,7 @@ def test_registry_pre_c1_nodes_default_to_active():
     # Pre-C1 Graph nodes lack status — they count as active (mode-agnostic
     # with the seam's coalesce contract).
     src = _FakeRegistry([
-        {"id": "g_legacy", "team_id": "t1", "name": "legacy",
+        {"id": "g_legacy", "org_id": "t1", "name": "legacy",
          "kind": "custom", "namespace": "team_t1_g_legacy"},
     ])
     out = enumerate_team_graphs(src, "t1")

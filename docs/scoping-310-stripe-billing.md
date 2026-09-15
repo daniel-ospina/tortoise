@@ -62,7 +62,7 @@ TIERS = {
 # JSON (8 entries: 4 tiers × monthly/annual, annual = -20%, annual_default: true).
 
 class StripeClient:  # thin httpx wrapper; signature verify via hmac.compare_digest
-    def create_checkout_session(team_id, price_id, customer_email, success_url, cancel_url) -> str
+    def create_checkout_session(org_id, price_id, customer_email, success_url, cancel_url) -> str
     def create_portal_session(customer_id, return_url) -> str
     def get_subscription(subscription_id) -> dict
     def list_subscriptions(customer_id) -> list[dict]
@@ -73,8 +73,8 @@ def effective_tier(team: dict, now=None) -> str:
     """Lazy grace: past_due + now > grace_until → 'free';
     current_period_end passed with no webhook yet → defensive 'free'."""
 def limits_for_tier(tier: str) -> dict: ...
-def apply_limits(sdk, team_id: str, tier: str) -> None: ...
-def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
+def apply_limits(sdk, org_id: str, tier: str) -> None: ...
+def reconcile_team(sdk, org_id: str, force: bool = False) -> None:
     """Fetch subscription from Stripe; repair mirror (idempotent absolute SETs)."""
 ```
 
@@ -145,7 +145,7 @@ def reconcile_team(sdk, team_id: str, force: bool = False) -> None:
 **When this WOULD have been better:** If #669 lands within ~a quarter — then billing built directly in Supabase is the end-state and the graph mirror becomes vestigial. **Migration path if A is later abandoned:** graph billing fields seed future Supabase tables via the same reconcile pattern; event history reconstructible from Stripe's List Events API.
 
 ### Approach C — Stripe-hosted, stateless read-through (Payment Links + TTL cache)
-**Rejected because:** Structurally cannot close the payment→team loop — Payment Links cannot bind server-side `team_id` metadata (no customer creation, no metadata association), violating the confirmed problem's "webhook-driven subscription state mirror." Also couples the enforcement hot path to Stripe API latency/availability (fail-open vs fail-closed decision with product consequences), leaves no durable billing record (orphans undetectable), and Payment Links are less expressive (no backend checkout customization).
+**Rejected because:** Structurally cannot close the payment→team loop — Payment Links cannot bind server-side `org_id` metadata (no customer creation, no metadata association), violating the confirmed problem's "webhook-driven subscription state mirror." Also couples the enforcement hot path to Stripe API latency/availability (fail-open vs fail-closed decision with product consequences), leaves no durable billing record (orphans undetectable), and Payment Links are less expressive (no backend checkout customization).
 **When this WOULD have been better:** If #669 landed immediately AND the team accepted read-through enforcement with an explicit fail-open decision AND no event-driven behavior was needed. None hold.
 
 ### Inline-extension of the issue's own approach (webhook → tier field only)

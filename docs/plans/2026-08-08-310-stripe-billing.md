@@ -57,7 +57,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Library version & API surface (Stripe REST API, 2026-08) — 3 calls**
 - *Canonical:* Checkout Sessions for subscriptions use `mode: "subscription"` with a recurring Price in `line_items`; `success_url`/`cancel_url` are required redirect URLs (can embed `{CHECKOUT_SESSION_ID}`); custom tracking data belongs in `metadata` (and `client_reference_id` — echoed in webhooks, the canonical team-binding field). Since the 2025-03-31 change, subscription-mode Checkout creates the Subscription **only after payment completes** — `checkout.session.completed` is the completion signal (do not rely on `payment_intent` fields). (docs.stripe.com/payments/subscriptions; docs.stripe.com/billing/quickstart; docs.stripe.com/changelog/basil/2025-03-31)
 - *Competitor variance:* reference integrations (stripe-samples) handle completion exclusively via `checkout.session.completed` webhook and read `data.object.customer_details.email` / `session.subscription`; the session's `subscription` field is the Subscription **ID** (object not embedded unless expanded) — a follow-up `GET /v1/subscriptions/{id}` (or `GET /v1/checkout/sessions/{id}?expand[]=line_items`) is required to learn the price id for tier resolution.
-- *Known pitfall:* creating a Customer at Checkout via `customer_creation` requires care with existing customers; for subscription Checkout pass `customer` (existing) OR `customer_email` (create-on-checkout). Use `client_reference_id=team_id` + `metadata.team_id` so the webhook can bind the event to the team without trusting email matching.
+- *Known pitfall:* creating a Customer at Checkout via `customer_creation` requires care with existing customers; for subscription Checkout pass `customer` (existing) OR `customer_email` (create-on-checkout). Use `client_reference_id=org_id` + `metadata.org_id` so the webhook can bind the event to the team without trusting email matching.
 
 **Idiomatic usage patterns (webhook signature verification) — 3 calls**
 - *Canonical:* `Stripe-Signature` header contains `t=<timestamp>,v1=<sig>[,v1=<sig2>...]` — **split on commas** and accept any matching signature. Signed payload = `f"{t}.{raw_body}"` (raw bytes, never re-serialized JSON); HMAC-SHA256 with the **webhook endpoint secret** (not the API key); `hmac.compare_digest`; **tolerance 300s (5 min)**; reject older timestamps. (docs.stripe.com/webhooks; docs.stripe.com/webhooks/signature; Stack Overflow #68288698)
@@ -149,12 +149,12 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Build the single billing module: Stripe API wrapper, `STRIPE_PRICE_IDS` catalog validated against pricing.json, lazy-grace tier resolution, and the atomic tier+limits writer used by webhook/reconcile.
 
 **Acceptance:**
-- `StripeClient` (httpx, form-encoded, timeouts) implements: `create_customer(email) -> str`, `create_checkout_session(team_id, price_id, customer, success_url, cancel_url) -> str` (takes the created Stripe customer id — see Task 5), `create_portal_session(customer_id, return_url) -> str`, `get_subscription(id) -> dict`, `list_subscriptions(customer_id) -> list[dict]`, `get_customer(id) -> dict`, `verify_webhook_signature(payload: bytes, sig_header, secret, tolerance_s=300) -> dict` (t= parse, comma-split multi-signature, HMAC-SHA256 over `f"{t}.{payload}"`, `hmac.compare_digest`, ±300s).
+- `StripeClient` (httpx, form-encoded, timeouts) implements: `create_customer(email) -> str`, `create_checkout_session(org_id, price_id, customer, success_url, cancel_url) -> str` (takes the created Stripe customer id — see Task 5), `create_portal_session(customer_id, return_url) -> str`, `get_subscription(id) -> dict`, `list_subscriptions(customer_id) -> list[dict]`, `get_customer(id) -> dict`, `verify_webhook_signature(payload: bytes, sig_header, secret, tolerance_s=300) -> dict` (t= parse, comma-split multi-signature, HMAC-SHA256 over `f"{t}.{payload}"`, `hmac.compare_digest`, ±300s).
 - `PriceCatalog` loads `STRIPE_PRICE_IDS` (JSON: 8 ids — 4 tiers × monthly/annual) and rejects: unknown tier, missing monthly or annual per tier, annual discount ≠ pricing.json `display.annual_discount_pct` (20%), non-`price_` ids. `tier_for_price(price_id, interval)` resolves; an id absent from the catalog raises `BillingError(unknown_price_id)` — the caller decides (Task 7/8: log + ops-notify + **keep stored tier/status**, never downgrade a paid sub on an unparseable price, review fix 7).
 - **Lazy config degradation (review fix 12):** missing `STRIPE_PRICE_IDS` / `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` does NOT fail at import/boot — the catalog and StripeClient construct lazily and raise a catchable `BillingConfigError` at first use (billing endpoints 503; boot/lifespan unaffected). This is the implementation home for Task 3's boot-gating promise.
 - `effective_tier(team, now)` — `past_due` past `grace_until` → `free`; else stored tier. Never returns a tier above the stored one. **No defensive "active + `current_period_end` passed → free" branch** (review fix 6: it fired on every auto-renewal before the webhook landed — a recurring false-downgrade; missed-event drift is covered by webhook + boot reconcile, Task 8).
-- `apply_limits(sdk, team_id, tier)` — single atomic Cypher SET: `tier`, `max_users`, `max_graphs`, `max_api_keys`, `max_points` (= `max_graph_nodes`), `max_sessions` (1000 flat) from `tortoise.pricing.tier_limits`.
-- `reconcile_team(sdk, team_id, force=False)` — subscription_id → `get_subscription` → mirror; elif stripe_customer_id → `list_subscriptions` → first active → mirror; else no-op. Unknown price id → keep stored tier/status (Task 8). Best-effort (raises `BillingError`, caller decides).
+- `apply_limits(sdk, org_id, tier)` — single atomic Cypher SET: `tier`, `max_users`, `max_graphs`, `max_api_keys`, `max_points` (= `max_graph_nodes`), `max_sessions` (1000 flat) from `tortoise.pricing.tier_limits`.
+- `reconcile_team(sdk, org_id, force=False)` — subscription_id → `get_subscription` → mirror; elif stripe_customer_id → `list_subscriptions` → first active → mirror; else no-op. Unknown price id → keep stored tier/status (Task 8). Best-effort (raises `BillingError`, caller decides).
 
 **Files:**
 - Create: `tortoise/billing.py`
@@ -254,7 +254,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 - `TeamInfoResponse` + `GET /v1/team` (`team_info` ~1010, model ~720) return `max_api_keys, max_points, max_sessions, subscription_status, current_period_end, grace_until, customer_email`.
 - `team_update` allowlist (~3271) gains `subscription_status, current_period_end, grace_until, customer_email`.
 - `_ensure_registry_indexes` (~320) gains `("Team", "stripe_customer_id")` — **Task 4b owns this index** (Task 8 owns only `("WebhookEvent", "event_id")` — review fix 14).
-- `docs/registry-graph-schema.md` Team entity updated with `subscription_status, current_period_end, grace_until, customer_email` + new `WebhookEvent` entity (`event_id`, `type`, `received_at`, `team_id`).
+- `docs/registry-graph-schema.md` Team entity updated with `subscription_status, current_period_end, grace_until, customer_email` + new `WebhookEvent` entity (`event_id`, `type`, `received_at`, `org_id`).
 
 **Files:**
 - Modify: `tortoise/hosted_api.py` (`TeamInfoResponse` ~720, `team_info` ~1010)
@@ -266,7 +266,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 
 **Step 2:** Extend `TeamInfoResponse` + `team_info`; extend `team_update` allowlist; add `("Team", "stripe_customer_id")` to `_ensure_registry_indexes`.
 
-**Step 3:** Update `docs/registry-graph-schema.md` (Team: `subscription_status`, `current_period_end`, `grace_until`, `customer_email`; new `WebhookEvent` entity: `event_id`, `type`, `received_at`, `team_id`).
+**Step 3:** Update `docs/registry-graph-schema.md` (Team: `subscription_status`, `current_period_end`, `grace_until`, `customer_email`; new `WebhookEvent` entity: `event_id`, `type`, `received_at`, `org_id`).
 
 **Step 4:** Run `tests/test_control_plane.py` + `tests/test_hosted_api.py` → green.
 
@@ -277,7 +277,7 @@ What #310 must still build: the **subscription state mirror + webhook surface + 
 **Intent:** Let an Owner start a Stripe Checkout for a valid price, persist the Stripe customer before redirect (survives a missed first event), and give existing subscribers a portal route — with a duplicate-subscription guard.
 
 **Acceptance:**
-- `POST /v1/billing/checkout` `{price_id}` → validates against catalog (400 unknown), resolves `customer_email` via the **fallback chain** (review fix 1): `Team.email` (set at register) → `APIKey.created_by` (provision-path teams have no `Team.email`; hosted_api.py ~455-464 stores `created_by` on the APIKey node) → **400 last-resort** with a clear message. Calls `StripeClient.create_customer(email)`; **persists `stripe_customer_id` + `customer_email` synchronously before redirect**; creates Checkout Session (`mode=subscription`, `customer=<customer_id>` — passes the created id, review fix 1, `client_reference_id=team_id`, `metadata.team_id`, `success_url`/`cancel_url` env-driven); returns `{checkout_url}`.
+- `POST /v1/billing/checkout` `{price_id}` → validates against catalog (400 unknown), resolves `customer_email` via the **fallback chain** (review fix 1): `Team.email` (set at register) → `APIKey.created_by` (provision-path teams have no `Team.email`; hosted_api.py ~455-464 stores `created_by` on the APIKey node) → **400 last-resort** with a clear message. Calls `StripeClient.create_customer(email)`; **persists `stripe_customer_id` + `customer_email` synchronously before redirect**; creates Checkout Session (`mode=subscription`, `customer=<customer_id>` — passes the created id, review fix 1, `client_reference_id=org_id`, `metadata.org_id`, `success_url`/`cancel_url` env-driven); returns `{checkout_url}`.
 - Guard (two layers): (1) stored `subscription_status in {active, past_due, trialing}` → **409** "team already has an active subscription"; (2) **stale-mirror race** (review fix 5) — even with a clean stored mirror, call `list_subscriptions(customer_id)` before creating the session and reject 409 if ANY subscription is `active`/`trialing`/`past_due` (the mirror may read "free" between checkout creation and the webhook landing; Stripe remains the authority for money).
 - `POST /v1/billing/portal` → creates portal session for existing customer, returns `{portal_url}`; 404 if no `stripe_customer_id`.
 - Both endpoints require team auth (Bearer key) — NOT in SKIP_AUTH.
@@ -463,7 +463,7 @@ Per `test-routing` (domain: code, complexity Standard): unit + integration are t
 ## 7. Rejected Alternatives (condensed from scoping — full rationale in `docs/scoping-310-stripe-billing.md`)
 
 - **Approach B — Supabase-first billing ledger (dual-write):** heavier MVP; #669 schema undecided; dual-write is a consistency bug source.
-- **Approach C — Stripe-hosted stateless read-through (Payment Links + TTL cache):** cannot bind server-side team_id; couples enforcement hot path to Stripe; no durable record.
+- **Approach C — Stripe-hosted stateless read-through (Payment Links + TTL cache):** cannot bind server-side org_id; couples enforcement hot path to Stripe; no durable record.
 - **Inline "webhook → tier field only" (issue's own framing):** tier had no causal power at scoping time; now the enforcement half exists but the value still only flows through `apply_limits` + GAP-A/B fixes — a bare field write remains worthless.
 
 ---

@@ -202,8 +202,8 @@ def provision_test_user():
         user_id = f"user-{os.urandom(4).hex()}"
         sdk.membership_create(team["id"], user_id, "owner")
         created.append(sdk)
-        return {"sdk": sdk, "team_id": team["id"], "api_key": team["api_key"],
-                "graph_name": team["graph_name"], "team_name": team["name"],
+        return {"sdk": sdk, "org_id": team["id"], "api_key": team["api_key"],
+                "graph_name": team["graph_name"], "org_name": team["name"],
                 "user_id": user_id}
 
     yield factory

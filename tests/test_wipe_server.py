@@ -474,21 +474,21 @@ def test_team_registry_isolation_across_sequential_tests(server_proj, monkeypatc
     monkeypatch.setattr("tests._embedded._JOURNAL_FILE",
                         str(tmp_path / "isolation.graphs.jsonl"))
     import tortoise.backup_sweep as bs
-    fake_team_names = iter(["test_team_0_tortoise", "test_team_1_tortoise"])
+    fake_org_names = iter(["test_team_0_tortoise", "test_team_1_tortoise"])
     monkeypatch.setattr(
-        bs, "team_graph_name", lambda registry, team_id: next(fake_team_names))
+        bs, "team_graph_name", lambda registry, org_id: next(fake_org_names))
     for i in range(2):
         reg_name = f"test_registry_{i}"
-        team_name = f"test_team_{i}_tortoise"
+        org_name = f"test_org_{i}_tortoise"
         _journal_append(reg_name)
-        _journal_append(team_name)
+        _journal_append(org_name)
         reg = server_proj.db.select_graph(reg_name)
-        team = server_proj.db.select_graph(team_name)
+        team = server_proj.db.select_graph(org_name)
         reg.query("CREATE (:Team {id:'team_x', tier:'pro'})")
         team.query("CREATE (:Point {id:'pt-0', content:'c', pointKind:'claim'})")
         # the sweep consumes the SEAM name, never the derived team_team_x
-        assert bs.team_graph_name(None, "team_x") == team_name
-        assert team_name.startswith(("test_", "tortoise_test")), \
+        assert bs.team_graph_name(None, "team_x") == org_name
+        assert org_name.startswith(("test_", "tortoise_test")), \
             "P0 guard: _backup_team's graph must stay guard-passing"
         _wipe_or(server_proj)
         if i == 1:
@@ -1008,17 +1008,17 @@ def test_session_end_sweep_drops_journaled_team_graph(uri_env, monkeypatch, tmp_
     journal = tmp_path / "session.graphs.jsonl"
     monkeypatch.setattr("tests._embedded._JOURNAL_FILE", str(journal))
     monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
-    team_name = "team_ws_journal_drop"
-    _journal_append_product(team_name)  # the #1686 mint-site seam
+    org_name = "team_ws_journal_drop"
+    _journal_append_product(org_name)  # the #1686 mint-site seam
     proj = FalkorProjection.from_uri(
         "docker://:falkordb@localhost:6379", graph_name="test_ws_team_probe")
     try:
-        proj.db.select_graph(team_name).query("CREATE (:TeamMeta {name:'x'})")
+        proj.db.select_graph(org_name).query("CREATE (:TeamMeta {name:'x'})")
         res = _session_end_own_sweep(os.environ["TORTOISE_DB_URI"], str(journal))
         assert res["journal_removed"] is True
         assert not journal.exists()
         remaining = proj.db.list_graphs() or []
-        assert team_name not in remaining
+        assert org_name not in remaining
     finally:
         proj.close()
 

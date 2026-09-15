@@ -33,7 +33,7 @@ Skipped — zero new third-party dependencies. supabase-js 2.112.2 is vendored (
 2. **User adds a second method from the profile**
    - Step: Profile → Add Google → **Acceptance:** identity row appears in inventory; banner clears → **Test:** `tests/e2e/hosted/test_14_profile.py` + `tests/test_user_identity_authority.py`
 3. **User adds email+password**
-   - Step: Profile → Add email+password → **Acceptance:** post-impl verification passes (signOut → signInWithPassword → same uid); `password_capable=true`; no `team_id=''` placeholder row (C6) → **Test:** `tests/test_user_identity_authority.py::test_add_password_no_placeholder_fires`
+   - Step: Profile → Add email+password → **Acceptance:** post-impl verification passes (signOut → signInWithPassword → same uid); `password_capable=true`; no `org_id=''` placeholder row (C6) → **Test:** `tests/test_user_identity_authority.py::test_add_password_no_placeholder_fires`
 4. **User sets a username**
    - Step: Profile → username field → **Acceptance:** `user_metadata.username` set; precedence `username > display_name > email-prefix`; duplicate → 409 → **Test:** `sessionKey.test.js`-style node test + `tests/test_user_identity_inventory.py`
 5. **User removes the second method**
@@ -56,7 +56,7 @@ Skipped — zero new third-party dependencies. supabase-js 2.112.2 is vendored (
 Identity facts are conflated across three tables:
 
 1. **`teams.email`** — a globally-unique TEAM attribute (`uq_teams_email` partial unique index, 20260813000004:107) used as the signup idempotency key (`team_by_email`, hosted_api:3007) and written by identity-ish flows (claim_membership Step 6, onboarding PATCH :8178-8210).
-2. **The user anchor** — `team_memberships.user_id` (nullable FK to auth.users, 0009) + GoTrue `auth.identities` (not browser-queryable without RLS/RPC, C14).
+2. **The user anchor** — `org_memberships.user_id` (nullable FK to auth.users, 0009) + GoTrue `auth.identities` (not browser-queryable without RLS/RPC, C14).
 3. **`api_keys.created_by`** — mixed attribution (bootstrap-NULL, agent principals, real user ids, C10).
 
 Every identity-adding operation collides with team-scoped uniqueness. **User deliverables:** (1) profile page — add login methods (GitHub/Google/email+password over time) + set username; (2) dashboard recovery banner for single-login-method users routing to the profile page.
@@ -138,7 +138,7 @@ P2:
 
 **Frontend (main.jsx, router-less — tab state :273, nav :2641-2649, banner :2624-2634):**
 - New `profile` tab (nav addition + `setTab('profile')`), session-gated like billing (the `authMode !== 'session'` gates at :2206/:2226/:2873).
-- `identity.js` extracted pure module: `buildInventory(json)`, `waysIn(inventory)`, `showBanner(inventory, teamId)`, `displayName(inventory)` precedence (`username > display_name > email-prefix`, #1691 discipline) — node --test-able (sessionKey.js precedent #1708).
+- `identity.js` extracted pure module: `buildInventory(json)`, `waysIn(inventory)`, `showBanner(inventory, orgId)`, `displayName(inventory)` precedence (`username > display_name > email-prefix`, #1691 discipline) — node --test-able (sessionKey.js precedent #1708).
 - Banner: renders when `showBanner(...)` (ways_in ≤ 1 AND ≥ 1 method AND team not anon); CTA → `setTab('profile')`. Never shown for anon teams (full-page Protect :2137/:2235 already covers, C8) or keyless-anon cohort (#1716 out of scope; banner must not promise a fix).
 - Profile tab: method list (identities + password-capable + credentials tier), Add GitHub/Google (P2, capability-gated), Add email+password (P2), Remove method (P2, floor-gated), username editor (P1).
 
@@ -223,7 +223,7 @@ P2:
 - Steps: tests → endpoints → commit.
 
 **Task 2.3: Add-email+password**
-- Files: Modify `website/apps/dashboard/src/main.jsx` (profile flow: updateUser password → verification → degrade), Modify `tortoise/hosted_api.py` (audit + inventory refresh hook), Test `tests/test_user_identity_authority.py::test_add_password_no_placeholder_fires` (assert no `team_id=''` membership created), `tests/e2e/hosted/test_14_profile.py` (mocked GoTrue).
+- Files: Modify `website/apps/dashboard/src/main.jsx` (profile flow: updateUser password → verification → degrade), Modify `tortoise/hosted_api.py` (audit + inventory refresh hook), Test `tests/test_user_identity_authority.py::test_add_password_no_placeholder_fires` (assert no `org_id=''` membership created), `tests/e2e/hosted/test_14_profile.py` (mocked GoTrue).
 - Steps: tests → implementation → commit.
 
 **Task 2.4: Unlink**
@@ -260,7 +260,7 @@ P2:
 2. Banner shows iff a session-authed, non-anon-team user has exactly one way in (identities + password-capability); CTA routes to the Profile tab; banner never renders for anon teams or the keyless-anon cohort.
 3. Username set → `user_metadata.username`; display precedence `username > display_name > email-prefix` everywhere; duplicate → 409; #1691 wizard still writes `display_name` only (no regression test).
 4. Add-OAuth creates exactly one new identity row via GoTrue; link-commit verifies intent + ownership + provider-verified email; audit `identity_link` row written; no `teams.email` write.
-5. Add-email+password uses `updateUser({password})` only — no admin-create — and passes post-impl verification; on failure the flow degrades to verified-identity (OTP) linking; no `team_id=''` placeholder row ever appears for the user (C6).
+5. Add-email+password uses `updateUser({password})` only — no admin-create — and passes post-impl verification; on failure the flow degrades to verified-identity (OTP) linking; no `org_id=''` placeholder row ever appears for the user (C6).
 6. Unlink with floor=1 refused (`409 LAST_METHOD`); concurrent two-tab unlink → exactly one succeeds; GoTrue reauth surfaced as `REAUTH_REQUIRED` with a working re-auth round; audit `identity_unlink` row written.
 7. `enable_manual_linking` off → add-method UI hidden after the click-time probe (fail-closed); banner shows "contact support" fallback.
 8. Identity flows never write `teams.email` (invariant — integration-test asserted + code-review checklist item).

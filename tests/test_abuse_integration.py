@@ -47,7 +47,7 @@ TEAM = "team-abuse-1"
 TOKEN_A = "tt_abuse_aaaa1111"
 TOKEN_B = "tt_abuse_bbbb2222"
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs, so non-UUID user_id literals are prod-impossible
 # (FakeControlPlane's fidelity check raises HTTP 400 on them). Identity /
 # api_keys.created_by stay TEXT and remain non-UUID.
@@ -60,14 +60,14 @@ _U_STRANGER = "9f2c1a40-0000-4a00-8000-00000000000a"
 def _seed_team(fake: FakeControlPlane, *, suspended=None, flagged=None):
     fake.seed("teams", [{
         "id": TEAM, "name": "abuse-team", "tier": "free",
-        "email": "owner@abuse.test", "graph_name": f"team_{TEAM}",
+        "email": "owner@abuse.test", "graph_name": f"org_{TEAM}",
         "max_users": 1, "max_graphs": 1, "ops_allowance": 10000,
         "graph_size_cap": 100000, "suspended_at": suspended,
         "flagged_at": flagged,
     }])
     for token, kid in ((TOKEN_A, "key-a"), (TOKEN_B, "key-b")):
         fake.seed("api_keys", [{
-            "id": kid, "team_id": TEAM, "lookup_hash": lookup_hash(token),
+            "id": kid, "org_id": TEAM, "lookup_hash": lookup_hash(token),
             "key_prefix": token[:10], "created_via": "provisioned",
             "created_by": "user-1", "created_at": "2026-08-01T00:00:00+00:00",
             "expires_at": None, "revoked_at": None,
@@ -137,7 +137,7 @@ def _auth(token=TOKEN_A):
 
 class TestRestSuspension:
     def test_suspended_team_403_with_appeal(self, env):
-        env["fake"].rpc("abuse_suspend", {"p_team_id": TEAM})
+        env["fake"].rpc("abuse_suspend", {"p_org_id": TEAM})
         with TestClient(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
         assert r.status_code == 403
@@ -151,7 +151,7 @@ class TestRestSuspension:
         the only local enforcement cell is torn down while the durable
         suspended_at stays stamped (the worst-case window mechanism)."""
         fake = env["fake"]
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         abuse.mark_suspended(TEAM)
         assert abuse.is_suspended_signal(TEAM)
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
@@ -163,17 +163,17 @@ class TestRestSuspension:
 
     def test_unsuspend_restores_next_request(self, env):
         fake = env["fake"]
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         with TestClient(env["app"]) as tc:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 403
-            fake.rpc("abuse_unsuspend", {"p_team_id": TEAM})
+            fake.rpc("abuse_unsuspend", {"p_org_id": TEAM})
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
 
     def test_suspension_survives_restart(self, env):
         """Bypass failure mode: durable state rejects even with the process
         signal set cleared (simulated restart)."""
         fake = env["fake"]
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         abuse.mark_suspended(TEAM)
         # simulate a worker restart: signal set + engine wiped
         with abuse._SIGNAL_LOCK:
@@ -258,7 +258,7 @@ class TestPointBurst:
         source-introspection test below.)"""
         fake = env["fake"]
         fake.seed("api_keys", [{
-            "id": "revoke-me", "team_id": TEAM,
+            "id": "revoke-me", "org_id": TEAM,
             "lookup_hash": "revoke-hash", "key_prefix": "tt_revoke12",
             "created_via": "recovery", "created_by": "user-1",
             "created_at": "2026-08-01T00:00:00+00:00",
@@ -280,9 +280,9 @@ class TestKeyVelocity:
     def _provision(self, fake, lookup):
         fake.rpc("provision_team", {
             "p_user_id": None, "p_identity": f"id-{lookup[:8]}",
-            "p_team_id": TEAM, "p_team_name": "abuse-team",
+            "p_org_id": TEAM, "p_org_name": "abuse-team",
             "p_api_key": f"tt_{lookup}", "p_key_hash": "kh",
-            "p_lookup_hash": lookup, "p_graph_name": f"team_{TEAM}",
+            "p_lookup_hash": lookup, "p_graph_name": f"org_{TEAM}",
             "p_email": f"{lookup[:8]}@x.co", "p_key_prefix": TEAM[:8],
         })
 
@@ -310,7 +310,7 @@ class TestKeyVelocity:
         fake = env["fake"]
         for i in range(11):
             fake.query("api_keys", method="POST", json_body={
-                "id": f"boot-{i}", "team_id": TEAM,
+                "id": f"boot-{i}", "org_id": TEAM,
                 "lookup_hash": f"boot-hash-{i}", "created_via": "bootstrap"})
         events = [e for e in fake.tables.get("abuse_events", [])
                   if e["event_type"] == "key_create"]
@@ -401,9 +401,9 @@ class TestSessionLane:
     """
 
     def _seed_membership(self, fake):
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
 
     def _ip_events(self, fake):
         return [e for e in fake.tables["abuse_events"]
@@ -428,7 +428,7 @@ class TestSessionLane:
             "headers": Headers({"cf-ipcountry": "MX"}).raw,
         })
         team = asyncio.run(_session_user_team(request, {"user_id": _U1}))
-        assert team["team_id"] == TEAM
+        assert team["org_id"] == TEAM
         # R4: the new-country session request recorded auth_ip + notified
         assert {e["country"] for e in self._ip_events(fake)} == {"MX"}
         geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
@@ -467,7 +467,7 @@ class TestMcp:
         return TestClient(app)
 
     def test_suspended_team_jsonrpc_error(self, env):
-        env["fake"].rpc("abuse_suspend", {"p_team_id": TEAM})
+        env["fake"].rpc("abuse_suspend", {"p_org_id": TEAM})
         with self._mcp_client() as tc:
             r = tc.post("/", headers=_auth(),
                         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -487,14 +487,14 @@ class TestMcp:
                            json={"jsonrpc": "2.0", "id": 1,
                                  "method": "tools/list"}).status_code == 200
             # suspend (engine path: durable RPC + signal)
-            fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+            fake.rpc("abuse_suspend", {"p_org_id": TEAM})
             abuse.mark_suspended(TEAM)
             r = tc.post("/", headers=_auth(),
                         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
             assert r.status_code == 403
             assert r.json()["error"]["code"] == -32006
             # un-suspend: durable clear + the next fresh resolution evicts
-            fake.rpc("abuse_unsuspend", {"p_team_id": TEAM})
+            fake.rpc("abuse_unsuspend", {"p_org_id": TEAM})
             r = tc.post("/", headers=_auth(),
                         json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
             assert r.status_code == 200
@@ -516,16 +516,16 @@ class TestMintGateAndAlerts:
     def test_mint_rejected_while_suspended(self, env):
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
-                            json={"purpose": "recovery", "team_id": TEAM})
+                            json={"purpose": "recovery", "org_id": TEAM})
             assert r.status_code == 403
             assert r.json()["detail"]["code"] == "SUSPENDED"
         finally:
@@ -537,9 +537,9 @@ class TestMintGateAndAlerts:
         recovery the 403 returns (the fail-open window closes)."""
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
         # env fixture pre-seeds 2 provisioned keys at the free-tier cap
         # (max_api_keys=2). The DRIFT-phase mint has the suspension gate
         # bypassed (degrade) and would 402 at the cap before creating a
@@ -547,20 +547,20 @@ class TestMintGateAndAlerts:
         # 403s at the suspension gate before any cap check.
         # (precedent: test_auth_flip test_mint_resolves_then_revoked_rejected).
         fake.tables["api_keys"] = []
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
-                            json={"purpose": "recovery", "team_id": TEAM})
+                            json={"purpose": "recovery", "org_id": TEAM})
                 assert r.status_code == 200  # fail-open during drift (accepted)
                 assert "key" in r.json()  # the grant actually minted
             fake.missing_columns = None  # drift resolved
             with TestClient(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
-                            json={"purpose": "recovery", "team_id": TEAM})
+                            json={"purpose": "recovery", "org_id": TEAM})
             assert r.status_code == 403
             # Gate identity: the SUSPENDED gate specifically (not another 403).
             assert r.json()["detail"]["code"] == "SUSPENDED"
@@ -570,9 +570,9 @@ class TestMintGateAndAlerts:
     def test_alerts_endpoint_session_authed(self, env):
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
         store = SupabaseAbuseStore(fake)
         store.flag_team(TEAM, "point_create", {"count": 6})
         store.record_event(TEAM, "auth_ip", country="US")
@@ -580,7 +580,7 @@ class TestMintGateAndAlerts:
             lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
-                r = tc.get(f"/v1/team/alerts?team_id={TEAM}")
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
             assert r.status_code == 200
             types = {a["type"] for a in r.json()["alerts"]}
             assert "flag" in types and "auth_ip" in types
@@ -592,16 +592,16 @@ class TestMintGateAndAlerts:
         (session auth — the API-key routes 403 by design)."""
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
-        fake.seed("team_memberships", [{
-            "user_id": _U1, "team_id": TEAM, "role": "owner",
-            "status": "active", "team_name": "abuse-team"}])
+        fake.seed("org_memberships", [{
+            "user_id": _U1, "org_id": TEAM, "role": "owner",
+            "status": "active", "org_name": "abuse-team"}])
         SupabaseAbuseStore(fake).flag_team(TEAM, "point_create", {"count": 6})
-        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
-                r = tc.get(f"/v1/team/alerts?team_id={TEAM}")
+                r = tc.get(f"/v1/team/alerts?org_id={TEAM}")
             assert r.status_code == 200
             assert any(a["type"] == "flag" for a in r.json()["alerts"])
         finally:
@@ -613,7 +613,7 @@ class TestMintGateAndAlerts:
             lambda: {"user_id": _U_STRANGER}
         try:
             with TestClient(env["app"]) as tc:
-                assert tc.get(f"/v1/team/alerts?team_id={TEAM}").status_code == 403
+                assert tc.get(f"/v1/team/alerts?org_id={TEAM}").status_code == 403
         finally:
             env["app"].dependency_overrides.clear()
 
@@ -801,8 +801,8 @@ class TestIntrospection:
         import tortoise.abuse as abuse_mod
         calls = []
         monkeypatch.setattr(abuse_mod, "record_read",
-                            lambda key_id, team_id, now=None:
-                            calls.append((key_id, team_id)))
+                            lambda key_id, org_id, now=None:
+                            calls.append((key_id, org_id)))
         ms.maybe_record_mcp_read("tortoise_search", "team-x",
                                  {"key_id": "k1"})
         assert calls == [("k1", "team-x")]
