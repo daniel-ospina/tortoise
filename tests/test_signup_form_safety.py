@@ -396,22 +396,39 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
 # A guard that has never been shown to fail is not a guard, and a guard whose
 # claim was never falsifiable is not evidence. Three generations were tried:
 #
-#   v1  substring `"/auth'"` / `'"/auth"'` / `location.replace`
-#   v2  regex `location\.(replace|assign|href)\s*[(=]` + quoted meta-refresh
+#   v1  substring `/auth'` / `"/auth"` / `location.replace`
+#   v2  regex, re.I: `location\s*\.\s*(?:replace|assign|href)\s*[(=]`
+#                   | `http-equiv\s*=\s*["']refresh["']`
 #   v3  the mechanism bans below (current)
 #
-# v3 is a strict superset of v2: v2 missed `location['href'] = ...`,
-# `location = '/auth'` and `setAttribute("http-equiv", ...)`, all of which v3
-# catches, and no v2-caught form was lost (asserted by the matrix below).
+# v3 vs v2 — NOT a strict superset in either direction, and the matrix below
+# does not prove that it is:
+#   * v2 missed `location['href'] = ...`, `location = '/auth'` and
+#     `setAttribute("http-equiv", ...)`; v3 catches all three.
+#   * v3's `\blocation\b` deliberately NARROWS v2, which had no left word
+#     boundary and so also matched any identifier merely ENDING in it:
+#     `_location.href = '/auth'`, `prevLocation.replace('/auth')`,
+#     `foo_location.assign('/auth')`. Those are v2-caught / v3-missed. Losing
+#     them costs no real coverage — they are v2 false positives on unrelated
+#     identifiers — but they are a genuine loss, so this is not "strictly
+#     stronger". The `\b` is kept because it is what keeps `relocation` /
+#     `allocation` prose out.
+#   A 37-form matrix cannot assert a universal property; it asserts its own
+#   rows. Read the claim as "every form in the matrix is caught", nothing more.
 #
 # v3 does NOT restore everything v1 caught, and that is a TRADE, not an
 # improvement. v1 matched the TARGET literal `/auth`, so it also caught
 # navigations that name no mechanism at all — `document.write(url='/auth')`,
-# `a.setAttribute("href", "/auth")`. Those are MISSED here. They were not
-# restored because matching the target cannot distinguish a navigation from the
-# page's legitimate references to the same path (the reset form's action, the
-# two sign-in links); the mechanism ban catches the plausible reintroductions
-# and accepts that residue.
+# `a.setAttribute("href", "/auth")`. Those are MISSED here.
+#
+# The reason they were not restored: matching the target cannot distinguish a
+# navigation from a legitimate reference to the same path. The demonstration is
+# `action="/auth"` (website/signup.html:612,638), which v1's `"/auth"` literal
+# DOES catch — i.e. the literal fires on a plain form action, not only on a
+# bounce. (Note v1 happens to pass on welcome.html: its `/auth` references are
+# `action="/auth/update-password"` and two `href="/auth?mode=login"` links,
+# none of which contain the exact literals. That is luck of quoting, not the
+# property v1 was pinning — which is itself the reason to pin mechanisms.)
 #
 # Known limits, stated rather than implied: indirection THROUGH a mechanism
 # (`window.open.call(window, '/auth')`), computed member access
