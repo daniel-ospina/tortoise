@@ -143,7 +143,7 @@ _KEEPALIVE_LOCK = threading.Lock()
 
 # ── #3060: dedicated executors for long / stallable work ───────────────────
 # `asyncio.to_thread` (the house style — see `list_packs`) submits to the
-# loop's SHARED default executor, which is where ~89 other `to_thread` call
+# loop's SHARED default executor, which is where 79 other `to_thread` call
 # sites and the auth middleware's abuse hooks (`_abuse_post_auth` et al.) run.
 # That is fine for short work. It is NOT fine for the capture extraction: on a
 # stalled provider it blocks for the token-scaled deadline (~800s at a 16K

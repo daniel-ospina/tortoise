@@ -272,7 +272,7 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
 
 
 def test_health_answers_while_the_default_executor_is_saturated(
-        client):
+        client, monkeypatch):
     """#3060 review finding: liveness must not queue behind the shared pool.
 
     The first revision moved the extraction to `asyncio.to_thread`, which uses
@@ -298,7 +298,16 @@ def test_health_answers_while_the_default_executor_is_saturated(
     executor worker is saturated. The snapshot's own self-heal probe runs on a
     single bounded daemon thread, never on the shared pool, so it cannot mask a
     regression here.
+
+    Independently of the budget, the coordinator's DB probe itself is replaced
+    with a stand-in that BLOCKS for twice the budget, so a request-path probe
+    re-introduced in ANY shape — fast against a healthy DB, on a dedicated
+    executor, or on the saturated shared pool — cannot possibly answer inside
+    the budget. The budget assertion ALONE only catches the shared-executor
+    queue shape; the stand-in is what makes the "no request-path I/O" contract
+    (#2850) unconditional.
     """
+    import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import _HEALTH_PROBE, app
 
     # Prime the process-global `_HEALTH_PROBE` BEFORE saturating the pool, so the
@@ -328,6 +337,41 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # timer ordering.
     from tortoise.monitoring import PROBE_RETRY_DELAY, PROBE_TIMEOUT
     HEALTH_BUDGET_S = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY + 1.0
+
+    # #2850's contract is stronger than "answers fast here": the request path
+    # must perform NO I/O and NO thread hand-off at all. The budget assertion
+    # alone catches only the saturated-shared-executor shape — a regression that
+    # probed on the request path would still pass if it were fast (a healthy
+    # embedded DB), ran on a DEDICATED executor, or returned a stub that carried
+    # `probe.result_age_s`. Make a request-path probe IMPOSSIBLE to hide: the
+    # coordinator's `_probe_db` seam resolves `ha_mod._probe_db` at call time
+    # (the lambda in `_HEALTH_PROBE`), so replacing it here makes ANY probe that
+    # reaches the DB block for twice the budget, whichever pool it was submitted
+    # to.
+    #
+    # The stand-in is only reachable by the request path, and that is engineered,
+    # not assumed. `snapshot()`'s self-heal is `begin(if_stale=True)`, gated on
+    # `HealthProbe._refresh_budget_now()` (the refresher's period, default 10s
+    # from `_health_probe_interval`); `primed` above just completed a probe, so
+    # the request reads the cache and starts nothing — the refresh budget is what
+    # stops the READ path from probing. The background refresher
+    # (`_health_probe_loop`) is periodic (10s), not request-driven, and its next
+    # tick is far outside this test's sub-second window; if it did land in the
+    # window its worker is answered healthily rather than failed, so a timer
+    # coincidence can never corrupt `db.ok` for an unrelated reason. Every OTHER
+    # caller — the only place a request-path probe can come from — raises.
+    def _blocking_probe(*args, **kwargs):
+        # Any request-path probe that reaches the DB now blocks far past the
+        # budget.
+        time.sleep(HEALTH_BUDGET_S * 2)
+        if threading.current_thread().name == "tortoise-health-probe":
+            # The background refresher's own worker running on schedule: do not
+            # poison the shared result with a failure it did not earn.
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+        raise AssertionError(
+            "the /health REQUEST PATH invoked the DB probe "
+            "(#2850: it must not)")
+    monkeypatch.setattr(ha_mod, "_probe_db", _blocking_probe)
 
     async def _run():
         release = threading.Event()
@@ -376,7 +420,8 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # `result_age_s=None` until a probe completes, so this cannot be satisfied
     # by a `{"status": "ok", "db": {"ok": True}}` stub, by an empty `probe`
     # dict, or by a reversion to the pre-#2850 response shape (which carried no
-    # `probe` key at all). Key presence alone would pass all three.
+    # `probe` key at all). A bare `"probe" in r.json()` check would pass only one
+    # of those three — a populated-but-never-completed `probe` dict.
     assert r.json()["probe"].get("result_age_s") is not None, r.text
     assert r.json()["db"]["ok"] is True, r.text
     assert elapsed < HEALTH_BUDGET_S, (

@@ -44,10 +44,11 @@ TEAM_ID = "team-free-001"
 # ═══════════════════════════════════════════════════════════════════════
 # #2090 — keepalive-anchor churn instrumentation (Task 1, RED).
 # The fixture patches TortoiseSDK.__init__ to a per-test temp DB but never
-# pins TORTOISE_DB_PATH, so _anchor_usable (hosted_api.py:96) path-drifts on
-# every _make_sdk/_registry_anchor() call → the #1607 keepalive anchor is
-# evicted+closed per call (0-other-client windows) → a dropped seed SDK's
-# GC-NOSAVE (embedded_lifecycle.py:204-282, TORTOISE_FAST_ATEXIT=1) can kill
+# pins TORTOISE_DB_PATH, so `_anchor_usable` (tortoise/hosted_api.py)
+# path-drifts on every _make_sdk/_registry_anchor() call → the #1607 keepalive
+# anchor is evicted+closed per call (0-other-client windows) → a dropped seed
+# SDK's GC-NOSAVE (`register_gc_close`/`_gc_close` in embedded_lifecycle.py,
+# TORTOISE_FAST_ATEXIT=1) can kill
 # the redislite daemon → empty respawn → 403 "Requires owner role in team".
 # The counter asserts ZERO mid-test drift evictions post-fix (Task 2); pre-fix
 # it deterministically reads ≥1 — the churn-enabler demonstration (G1).
@@ -64,10 +65,11 @@ _SEED_SDKS: list[TortoiseSDK] = []
 def _close_seed_sdks() -> None:
     """Close held seed SDKs (per-test; runs in the fixture finally).
 
-    # mirrors tests/test_dr_endpoints.py:34-39 — keep in sync.
+    # mirrors tests/test_dr_endpoints.py's session-scoped
+    # `_close_seed_sdks` — keep in sync.
     """
     while _SEED_SDKS:
-        try:  # noqa: SIM105  (mirrors test_dr_endpoints.py:37)
+        try:  # noqa: SIM105  (mirrors that fixture's pop/close drain)
             _SEED_SDKS.pop().close()
         except Exception:
             pass
@@ -76,7 +78,8 @@ def _close_seed_sdks() -> None:
 def _computed_db_path() -> str:
     """Replicate _make_sdk's env-path computation.
 
-    Mirrors tortoise/hosted_api.py:141-149 — keep in sync.
+    Mirrors `_resolve_embedded_db_path` (tortoise/hosted_api.py) — keep in
+    sync.
     """
     db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
     try:
@@ -87,7 +90,7 @@ def _computed_db_path() -> str:
 
 
 def _paths_same(path_a: object, path_b: str) -> bool:
-    """Mirror _anchor_usable's path comparison (hosted_api.py:114-125)."""
+    """Mirror `_anchor_usable`'s path comparison (tortoise/hosted_api.py)."""
     return (str(path_a) == str(path_b)) or (
         str(path_a) != ":memory:"
         and os.path.abspath(str(path_a)) == os.path.abspath(path_b)
@@ -246,10 +249,27 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 # each spawning its own daemon in its own tempdir, and the later
 # `_save_setting_registry()` silently owns the registry — the loser's writes
 # are then invisible to every later opener. Mirror of the proven Group B fix
-# in tests/test_import_endpoint.py (`_EMBEDDED_CONSTRUCTION_LOCK`):
-# serializing the construction makes the first starter the single owner, so
-# every later opener (seeder, `_registry_count`, health probe, request
-# handler) reuses that one server.
+# in tests/test_import_endpoint.py (`_EMBEDDED_CONSTRUCTION_LOCK`) — that
+# copy carries the full "Scope of the guarantee" / "Blast radius" note; the
+# two caveats that matter to THIS file are repeated here.
+#
+# Serializing the construction makes the first starter the single owner, so
+# later openers (seeder, `_registry_count`, health probe, request handler)
+# normally resolve through `.settings` to that one server. This is NOT a
+# global single-writer guarantee: the lock serializes only IN-PROCESS
+# `FalkorProjection.__init__` calls, and two paths stay outside it, each able
+# to add or remove a registry entry anyway — (1) a construction that raises
+# inside redislite's `_start_redis()` after its daemon spawned but before
+# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
+# redislite's `_cleanup()` last-client branch removing `<db>.settings` from
+# `__del__`/atexit on any thread.
+#
+# The critical section also spans redislite's BLOCKING server start, so a
+# wedged embedded start stalls every other constructor in the module, where
+# it previously stalled only its own thread. That wait is bounded by
+# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
+# `redis-server` binary — accepted deliberately: a hung start is a louder
+# failure than a silent second daemon.
 _EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
 
 
@@ -270,9 +290,11 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
     regardless of control-plane mode, and all of it touches the same store
     the test body is driving:
 
-    1. `_run_boot_sweeps()` (`hosted_api.py:1227`, one-shot) and
-       `_event_retention_loop()` (`hosted_api.py:1243`, every
-       `event_retention_interval()`) BOTH call `_purge_deleted_teams`. A
+    1. `_run_boot_sweeps()` (armed by `_lifespan` as
+       `app.state._boot_sweep_task`, one-shot) and `_event_retention_loop()`
+       (the `_lifespan` closure armed as `app.state._event_retention_task`,
+       re-armed every `event_retention_interval()`) BOTH call
+       `_purge_deleted_teams`. A
        background purge landing between a test's seeding and its own
        `ha_mod._purge_deleted_teams()` call makes both read the row before
        either deletes it: two `_drop_team_graph` calls and two
@@ -299,7 +321,8 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
        interval quiesces the loop while leaving the directly-called
        `_purge_deleted_teams` under test.
 
-    2. The app's `_health_probe_loop` (`hosted_api.py:1271`) is NOT stubbed:
+    2. The app's `_health_probe_loop` (armed by `_lifespan` as
+       `app.state._health_probe_task`) is NOT stubbed:
        it runs `_probe_db -> _probe_sdk -> _make_sdk(namespace=None)` and so
        constructs a projection on the SAME pinned db file, concurrently with
        the test body's own constructions (the seeder's and
@@ -431,8 +454,9 @@ def reg_client(monkeypatch):
                     # RESTORED real dict, which is empty — every in-test
                     # anchor lives in the counter). The fixture owns the
                     # deterministic close: drain + close counter-held anchors
-                    # (uncounted), verbatim mirror of TestDriftCounterWiring
-                    # :164-170. The (d) guard sits in an inner try so a RED
+                    # (uncounted), verbatim mirror of the `finally` drain in
+                    # TestDriftCounterWiring.test_drift_counter_classifies_real_eviction.
+                    # The (d) guard sits in an inner try so a RED
                     # still restores the real dict + closes seeds (code-
                     # review P2-2: an (a)/(d) assert RED must leave clean
                     # module state).
