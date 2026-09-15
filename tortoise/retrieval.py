@@ -46,6 +46,16 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from tortoise.coverage_loop import (
+    DEFAULT_LOOP_GUARD_WINDOW as DEFAULT_POOL_GUARD_WINDOW,
+)
+from tortoise.coverage_loop import (
+    DEFAULT_LOOP_SESSION_CAP as DEFAULT_POOL_SESSION_CAP,
+)
+from tortoise.coverage_loop import (
+    session_diverse_order,
+)
+
 #: token-count estimator (matches the reader-context alignment invariant):
 #: rough LLM token ≈ whitespace tokens, plus a 10% markup allowance for
 #: role prefixes/JSON.
@@ -277,11 +287,31 @@ def resolve_pool_size(
     return max(resolved, floor)
 
 
+#: R1 (#1540) / C4 (#2517): the raw-verbatim chunk pointKind. The PRODUCT
+#: constant is the single source — ``is_raw_chunk`` (below) and every
+#: eval-lane consumer (``tools/longmem_eval/ingest.py``'s re-export, its
+#: ``D5_POINTKIND_FILTER`` exclusion twin, and ``retrieve.py``'s
+#: ``CHUNK_KIND_FILTER`` equality twin) derive from it.
+SESSION_TRANSCRIPT_KIND = "session-transcript"
+
+
+def session_key_of(hit: dict) -> str:
+    """A hit's pool session identity — the AUTHORITY for the retrieval
+    pool's bucket key (C4 #2517). ``session_id`` when present, else the
+    synthetic ``idx:{lme_session_index}`` bucket (distinct sessions never
+    share a bucket; no ``-1`` collapse). :func:`dedup_pool` and
+    :func:`guard_and_recap_pool` default to it, and
+    ``coverage_loop._session_of`` delegates to it (function-local import —
+    the module stays a stdlib-only leaf at import time)."""
+    return (hit.get("session_id")
+            or f"idx:{hit.get('lme_session_index', -1)}")
+
+
 def is_raw_chunk(h: dict) -> bool:
     """True for a raw verbatim chunk (pointKind ``session-transcript``).
     Points of every other kind (extracted statements, episodic turn points)
     are the compact epistemic surface (D3 #1540: never chunk-capped)."""
-    return h.get("point_kind") == "session-transcript"
+    return h.get("point_kind") == SESSION_TRANSCRIPT_KIND
 
 
 def dedup_pool(annotated: list[dict], *,
@@ -289,7 +319,8 @@ def dedup_pool(annotated: list[dict], *,
                session_key: Callable[[dict], str] | None = None) -> list[dict]:
     """Per-session chunk cap (rank order): at most ``max_chunks_per_session``
     raw chunks per session survive in the pool (E2E-1 #1540). Bucket key =
-    the hit's session_id when present, else its lme_session_index —
+    :func:`session_key_of` (the hit's session_id when present, else its
+    lme_session_index) —
     distinct sessions NEVER share a bucket (no ``-1`` collapse).
     Points/turn points are never capped (compact epistemic surface, D3).
 
@@ -304,12 +335,7 @@ def dedup_pool(annotated: list[dict], *,
     if max_chunks_per_session < 1:
         raise ValueError("max_chunks_per_session must be >= 1, got "
                          f"{max_chunks_per_session!r}")
-    if session_key is None:
-        def _key(h: dict) -> str:
-            return (h.get("session_id") or
-                    f"idx:{h.get('lme_session_index', -1)}")
-    else:
-        _key = session_key
+    _key = session_key if session_key is not None else session_key_of
     seen: dict[str, int] = {}
     pool: list[dict] = []
     for h in annotated:
@@ -320,6 +346,34 @@ def dedup_pool(annotated: list[dict], *,
             seen[key] = seen.get(key, 0) + 1
         pool.append(h)
     return pool
+
+
+def guard_and_recap_pool(
+        items: list[dict], *,
+        guard: bool = True,
+        session_key: Callable[[dict], str] | None = None,
+        window: int = DEFAULT_POOL_GUARD_WINDOW,
+        per_session_cap: int = DEFAULT_POOL_SESSION_CAP,
+        max_chunks_per_session: int) -> list[dict]:
+    """The shared merge discipline (C3-1 #2567 / C4 #2517): optional
+    session-diverse window guard THEN the C5 per-session raw-chunk re-cap,
+    in that order, over one contract.
+
+    ``guard=True`` (the default, and every C3-1 call) applies
+    ``coverage_loop.session_diverse_order`` — no session may hold more
+    than ``per_session_cap`` of the ``window`` ranks — then
+    :func:`dedup_pool`. ``guard=False`` skips ONLY the reorder and still
+    re-caps through :func:`dedup_pool` — the C4 ablation isolates the
+    guard without a second recap entry point (the guard→re-cap ordering
+    lives here exactly once). Additive: reordering never drops an item;
+    the re-cap may drop raw chunks beyond the per-session cap.
+    """
+    if guard:
+        items = session_diverse_order(
+            items, window=window, per_session_cap=per_session_cap,
+            session_key=session_key)
+    return dedup_pool(items, max_chunks_per_session=max_chunks_per_session,
+                      session_key=session_key)
 
 
 def estimate_tokens(text: str) -> int:

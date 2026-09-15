@@ -1,0 +1,314 @@
+"""#2517 (C4, #2513) — source-session re-injection: hermetic product rules.
+
+Covers the pure primitives in ``tortoise/session_reinjection.py`` plus the
+shared contract extracted into ``tortoise/retrieval.py`` (the C3-1/C4
+guard + C5 re-cap helper, the ``session_key_of`` authority, the chunk-kind
+constant) — no graph, no network.
+
+  * SEED: only pool-head REAL sessions seed; bounded by window + limit;
+    label-free (rank is the only trigger); ``idx:N``/sentinel buckets
+    dropped as phantom sessions.
+  * EXPAND: one batched query per call, pool-membership filter IN the
+    query, ``pool_ids`` bound as a list, unconditional question id,
+    per-session + total caps applied in deterministic order, fail-open.
+  * MERGE: anchor = the session's LAST base rank in the pool; splices
+    accumulate deterministically in seed order; already-present ids are
+    dropped; a base chunk ranked beyond the seed window survives; the
+    whole merge is a no-op with zero new ids.
+  * CONTRACT: ``guard_and_recap_pool`` caps per-session ranks in the
+    guard window, is additive, is a no-op on a single-session pool, and
+    ``guard=False`` still re-caps through the SAME function.
+  * DIRECTION: ``session_key_of`` is the authority
+    (``coverage_loop._session_of`` delegates to it) and the
+    ``retrieval → coverage_loop`` edge has no cycle under either import
+    order.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tortoise import coverage_loop
+from tortoise.retrieval import (
+    SESSION_TRANSCRIPT_KIND,
+    dedup_pool,
+    guard_and_recap_pool,
+    is_raw_chunk,
+    session_key_of,
+)
+from tortoise.session_reinjection import (
+    DEFAULT_REINJECTION_PER_SESSION,
+    DEFAULT_REINJECTION_SEED_SESSIONS,
+    DEFAULT_REINJECTION_SEED_WINDOW,
+    DEFAULT_REINJECTION_TOTAL_ITEMS,
+    SeededSession,
+    reinjection_merge_order,
+    seeded_sessions,
+    source_session_chunk_pass,
+)
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _chunk(pid: str, sid: str, *, idx: int = 0) -> dict:
+    return {"id": pid, "session_id": sid, "point_kind": SESSION_TRANSCRIPT_KIND,
+            "lme_chunk_index": idx}
+
+
+def _point(pid: str, sid: str) -> dict:
+    return {"id": pid, "session_id": sid, "point_kind": "event"}
+
+
+# ── SEED ────────────────────────────────────────────────────────────────
+def test_seed_is_rank_ordered_bounded_and_label_free():
+    pool = [_point("a1", "s1"), _point("b1", "s2"),
+            _point("a2", "s1"), _point("c1", "s3"), _point("d1", "s4")]
+    seeds = seeded_sessions(pool, window=10, limit=3)
+    assert seeds == [SeededSession("s1", 0), SeededSession("s2", 1),
+                     SeededSession("s3", 3)]
+    # no mark/answer signal is read at all: the same pool with gold marks
+    # injected yields the identical seeds
+    marked = [dict(h, has_answer=True) for h in pool]
+    assert seeded_sessions(marked, window=10, limit=3) == seeds
+
+
+def test_seed_window_bounds_the_head():
+    pool = [_point("a1", "s1"), _point("b1", "s2")]
+    assert seeded_sessions(pool, window=1) == [SeededSession("s1", 0)]
+    assert seeded_sessions(pool, window=0) == []
+    assert seeded_sessions(pool, limit=0) == []
+    assert seeded_sessions([]) == []
+
+
+def test_seed_drops_synthetic_and_sentinel_buckets():
+    pool = [_point("x1", "idx:0"), _point("x2", "idx:-1"),
+            {"id": "x3", "lme_session_index": 2},
+            {"id": "x4", "session_id": ""},
+            _point("y1", "real")]
+    seeds = seeded_sessions(pool, window=10)
+    assert seeds == [SeededSession("real", 4)]
+
+
+def test_seed_defaults_are_the_documented_constants():
+    assert DEFAULT_REINJECTION_SEED_WINDOW == 40
+    assert DEFAULT_REINJECTION_SEED_SESSIONS == 5
+    assert DEFAULT_REINJECTION_PER_SESSION == 3
+    assert DEFAULT_REINJECTION_TOTAL_ITEMS == 20
+
+
+# ── EXPAND ──────────────────────────────────────────────────────────────
+class _Result:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _FakeGraph:
+    def __init__(self, rows=None, error=None):
+        self.rows = rows or []
+        self.error = error
+        self.calls: list[tuple[str, dict]] = []
+
+    def query(self, cypher, params=None):
+        self.calls.append((cypher, params))
+        if self.error is not None:
+            raise self.error
+        return _Result(self.rows)
+
+
+class _FakeProj:
+    def __init__(self, rows=None, error=None):
+        self.g = _FakeGraph(rows, error)
+
+
+def test_fetch_is_one_query_with_the_filter_in_the_query():
+    proj = _FakeProj(rows=[("c1", "s1", 1)])
+    out = source_session_chunk_pass(
+        proj, ["s1", "s2"], question_id="q1", pool_ids={"p1", "p2"})
+    assert len(proj.g.calls) == 1
+    cypher, params = proj.g.calls[0]
+    assert "NOT p.id IN $pool_ids" in cypher          # filter in-query
+    assert "p.lme_question_id = $q" in cypher         # unconditional qid
+    assert "coalesce(p.pointKind, '') = $chunk_kind" in cypher
+    assert params["q"] == "q1"
+    assert sorted(params["pool_ids"]) == ["p1", "p2"]  # coerced to a list
+    assert params["sids"] == ["s1", "s2"]
+    assert params["chunk_kind"] == SESSION_TRANSCRIPT_KIND
+    assert out["ok"] is True
+    assert out["total"] == 1
+    assert out["by_session"] == {"s1": [{"id": "c1", "session_id": "s1",
+                                         "lme_chunk_index": 1}]}
+
+
+def test_fetch_applies_per_session_and_total_caps_in_order():
+    rows = [("a1", "s1", 0), ("a2", "s1", 1), ("a3", "s1", 2),
+            ("b1", "s2", 0), ("b2", "s2", 1),
+            ("c1", "s3", 0)]
+    proj = _FakeProj(rows=rows)
+    out = source_session_chunk_pass(
+        proj, ["s1", "s2", "s3"], question_id="q1", pool_ids=[],
+        per_session_cap=2, total_cap=4)
+    assert out["total"] == 4
+    assert [r["id"] for r in out["by_session"]["s1"]] == ["a1", "a2"]
+    assert [r["id"] for r in out["by_session"]["s2"]] == ["b1", "b2"]
+    assert "s3" not in out["by_session"]
+    assert out["dropped_by_cap"] == 2
+    assert out["total_cap_hit"] is True
+
+
+def test_fetch_total_cap_hit_flag_is_false_when_only_per_session_binds():
+    proj = _FakeProj(rows=[("a1", "s1", 0), ("a2", "s1", 1)])
+    out = source_session_chunk_pass(
+        proj, ["s1"], question_id="q1", pool_ids=[], per_session_cap=1,
+        total_cap=10)
+    assert out["dropped_by_cap"] == 1
+    assert out["total_cap_hit"] is False
+
+
+def test_fetch_is_fail_open():
+    proj = _FakeProj(error=RuntimeError("boom"))
+    out = source_session_chunk_pass(
+        proj, ["s1"], question_id="q1", pool_ids=[])
+    assert out == {"ok": False, "by_session": {}, "total": 0,
+                   "dropped_by_cap": 0, "total_cap_hit": False}
+
+
+def test_fetch_no_seeds_is_a_clean_noop():
+    proj = _FakeProj(rows=[("a1", "s1", 0)])
+    out = source_session_chunk_pass(proj, [], question_id="q1", pool_ids=[])
+    assert out["ok"] is True and out["total"] == 0
+    assert proj.g.calls == []
+
+
+# ── MERGE ───────────────────────────────────────────────────────────────
+def test_merge_anchors_after_the_last_base_rank_in_the_pool():
+    # s1's base hits are ranks 0 and 4 (the second one BEYOND the seed
+    # window): the injected group lands after rank 4, never between them.
+    pool = [_point("a0", "s1"), _point("b0", "s2"), _point("c0", "s3"),
+            _point("d0", "s4"), _point("a1", "s1")]
+    added = {"s1": [_chunk("x1", "s1", idx=5)]}
+    out = reinjection_merge_order(
+        pool, added, guard=False, max_chunks_per_session=3)
+    ids = [h["id"] for h in out]
+    assert ids == ["a0", "b0", "c0", "d0", "a1", "x1"]
+    # the base chunk ranked beyond the seed window survived
+    assert "a1" in ids
+
+
+def test_merge_is_additive_and_never_drops_a_base_hit():
+    pool = [_point("a0", "s1"), _point("b0", "s2")]
+    added = {"s1": [_chunk("x1", "s1")]}
+    out = reinjection_merge_order(
+        pool, added, guard=True, max_chunks_per_session=3)
+    assert set(h["id"] for h in pool) <= set(h["id"] for h in out)
+
+
+def test_merge_drops_already_present_ids():
+    pool = [_point("a0", "s1"), _chunk("x1", "s1")]
+    added = {"s1": [_chunk("x1", "s1"), _chunk("x2", "s1", idx=2)]}
+    out = reinjection_merge_order(
+        pool, added, guard=False, max_chunks_per_session=3)
+    ids = [h["id"] for h in out]
+    assert ids.count("x1") == 1
+    assert "x2" in ids
+
+
+def test_merge_accumulates_multiple_groups_in_seed_order():
+    pool = [_point("a0", "s1"), _point("b0", "s2"), _point("c0", "s3")]
+    added = {"s2": [_chunk("y1", "s2")], "s1": [_chunk("x1", "s1")]}
+    out = reinjection_merge_order(
+        pool, added, guard=False, max_chunks_per_session=3)
+    assert [h["id"] for h in out] == ["a0", "x1", "b0", "y1", "c0"]
+
+
+def test_merge_with_no_new_ids_returns_the_base_pool_unchanged():
+    pool = [_point("a0", "s1"), _chunk("x1", "s1")]
+    out = reinjection_merge_order(
+        pool, {}, guard=True, max_chunks_per_session=3)
+    assert [h["id"] for h in out] == [h["id"] for h in pool]
+    out2 = reinjection_merge_order(
+        pool, {"s1": [_chunk("x1", "s1")]}, guard=True,
+        max_chunks_per_session=3)
+    assert [h["id"] for h in out2] == [h["id"] for h in pool]
+
+
+def test_c5_recap_keeps_base_chunks_first_so_injection_cannot_evict_them():
+    # s1 already holds 3 base chunks at the C5 ceiling: the injected chunk
+    # is anchored after the last base hit and dropped by the re-cap.
+    pool = [_chunk("a1", "s1", idx=0), _chunk("a2", "s1", idx=1),
+            _chunk("a3", "s1", idx=2), _point("b0", "s2")]
+    added = {"s1": [_chunk("a4", "s1", idx=3)]}
+    out = reinjection_merge_order(
+        pool, added, guard=False, max_chunks_per_session=3)
+    ids = [h["id"] for h in out]
+    assert "a1" in ids and "a2" in ids and "a3" in ids
+    assert "a4" not in ids
+
+
+# ── shared contract: guard_and_recap_pool ───────────────────────────────
+def test_guard_caps_a_monopolising_session_in_the_window():
+    pool = [_point("a0", "s1"), _point("a1", "s1"), _point("a2", "s1"),
+            _point("a3", "s1"), _point("b0", "s2"), _point("b1", "s2"),
+            _point("c0", "s3"), _point("c1", "s3")]
+    out = guard_and_recap_pool(pool, guard=True, window=5,
+                               per_session_cap=2, max_chunks_per_session=3)
+    assert [h["session_id"] for h in out[:5]].count("s1") <= 2
+    assert set(h["id"] for h in pool) <= set(h["id"] for h in out)
+
+
+def test_guard_is_a_noop_on_a_single_session_pool():
+    pool = [_point("a0", "s1"), _point("a1", "s1"), _point("a2", "s1")]
+    out = guard_and_recap_pool(pool, guard=True, window=5,
+                               per_session_cap=2, max_chunks_per_session=3)
+    assert [h["id"] for h in out] == [h["id"] for h in pool]
+
+
+def test_guard_off_still_recaps_through_the_same_function():
+    pool = [_chunk("a1", "s1", idx=0), _chunk("a2", "s1", idx=1),
+            _chunk("a3", "s1", idx=2), _chunk("a4", "s1", idx=3)]
+    out = guard_and_recap_pool(pool, guard=False, window=5,
+                               per_session_cap=2, max_chunks_per_session=3)
+    assert [h["id"] for h in out] == ["a1", "a2", "a3"]
+    # the reorder is skipped, the re-cap is NOT
+    assert [h["id"] for h in out] == [
+        h["id"] for h in dedup_pool(pool, max_chunks_per_session=3)]
+
+
+def test_guard_recap_uses_the_pinned_pool_session_key():
+    # same session_id, different lme indexes: one bucket, one cap.
+    pool = [_chunk("a1", "s1", idx=0), _chunk("a2", "s1", idx=1),
+            _chunk("a3", "s1", idx=2), _chunk("a4", "s1", idx=3)]
+    out = guard_and_recap_pool(pool, guard=True, window=5,
+                               per_session_cap=5, max_chunks_per_session=2)
+    assert len(out) == 2
+
+
+# ── contract: key authority + import direction ──────────────────────────
+def test_session_key_matches_the_historical_bucket_key():
+    assert session_key_of({"session_id": "s1"}) == "s1"
+    assert session_key_of({"lme_session_index": 7}) == "idx:7"
+    assert session_key_of({}) == "idx:-1"
+    # dedup_pool's default is the same authority
+    pool = [_chunk("a1", "s1"), _chunk("a2", "s1"), _chunk("a3", "s1")]
+    assert len(dedup_pool(pool, max_chunks_per_session=1)) == 1
+    assert is_raw_chunk(_chunk("a1", "s1"))
+    assert not is_raw_chunk(_point("a1", "s1"))
+
+
+def test_coverage_loop_session_of_delegates_to_the_authority():
+    assert coverage_loop._session_of({"session_id": "s1"}) == "s1"
+    assert coverage_loop._session_of({"lme_session_index": 7}) == "idx:7"
+    assert coverage_loop._session_of(
+        {"lme_session_index": 7}, lambda h: "explicit") == "explicit"
+
+
+def test_no_import_cycle_under_either_import_order():
+    for first in ("tortoise.retrieval", "tortoise.coverage_loop"):
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             f"import {first}; import tortoise.retrieval; "
+             "import tortoise.coverage_loop; import tortoise.session_reinjection"],
+            cwd=str(ROOT), capture_output=True, text=True)
+        assert proc.returncode == 0, (first, proc.stderr[-2000:])
