@@ -120,6 +120,13 @@ jobs:
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
                          "tests/test_tenant_provision_cors.mjs"),
+                  # #3501: the BFF auth suites live here and had NO path entry,
+                  # so a PR touching only them could not trigger the job that
+                  # runs them — the job would be skipped, not failed.
+                  startswith("tests/auth/"),
+                  isfile("tests/test_no_legacy_token_path.py"),
+                  isfile("tests/e2e/test_auth_bff_clickthrough.py",
+                         "tests/e2e/test_auth_cross_origin_cookie.py"),
                   startswith("supabase/functions/waitlist-subscribe/"),
                   startswith("supabase/functions/tenant-provision/"),
                   startswith("supabase/functions/_shared/"),
@@ -629,6 +636,14 @@ jobs:
         run: |
           npx --yes wrangler@4 --version
           npx --yes wrangler@4 pages dev --help >/dev/null
+      # #3501: the auth suites resolve wrangler via `shutil.which("wrangler")` and
+      # SKIP when it is missing — which is exactly what happened on a fresh
+      # runner: PATH had no wrangler, so `pytest tests/auth/` reported
+      # "33 skipped", exit 0, and the step was green while asserting nothing.
+      # Verified with a wrangler-less PATH. The npx pre-warm above does NOT put
+      # wrangler on PATH; this does.
+      - name: Install wrangler on PATH (required by the #3501 auth suites)
+        run: npm install -g wrangler@4.127.0
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -673,6 +688,39 @@ jobs:
           # (the e2e surface needs no FalkorDB server) — the URI-required
           # enforcement opt-in.
           TORTOISE_TEST_CARVE_OUT: "1"
+      # --- #3501 BFF auth -------------------------------------------------
+      # These four steps are the reason the suites exist in CI at all. Before
+      # them, all 33 auth tests + the static gate were LOCAL-ONLY: they ran
+      # green on a developer machine and nowhere else, which is the same class
+      # of hole the static gate's own docstring warns about ("a gate that
+      # scans nothing passes") — one level up.
+      #
+      # The static gate is first and needs no servers: it asserts the BFF
+      # invariant repo-wide, so it fails fast and names the offending file.
+      - name: BFF invariant gate — no client-held session token (#3501)
+        run: python -m pytest tests/test_no_legacy_token_path.py -q -rs -p no:cacheprovider
+        env:
+          TORTOISE_TEST_CARVE_OUT: "1"
+      # HTTP-level: real `wrangler pages dev` + a dependency-free mock Supabase,
+      # real ES256 JWKS verification, real PKCE. Ports are claimed at runtime so
+      # this can never silently no-op on a busy runner.
+      - name: BFF auth flow + proxy suites (#3501)
+        run: python -m pytest tests/auth/ -q -rs -p no:cacheprovider
+        env:
+          TORTOISE_TEST_CARVE_OUT: "1"
+      # Browser-level: the ONLY place the security property is asserted as a
+      # real browser sees it (HttpOnly unreadable from JS, no token in
+      # localStorage/sessionStorage). Opt-in by env var, so it MUST be set here
+      # or the assertion silently never runs.
+      - name: BFF auth real-browser clickthrough (#3501)
+        run: |
+          python -m pytest \
+            tests/e2e/test_auth_bff_clickthrough.py \
+            tests/e2e/test_auth_cross_origin_cookie.py \
+            -q -rs -p no:cacheprovider
+        env:
+          TORTOISE_TEST_CARVE_OUT: "1"
+          AUTH_CLICKTHROUGH: "1"
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
