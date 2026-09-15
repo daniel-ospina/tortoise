@@ -425,10 +425,11 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
 # navigation from a legitimate reference to the same path. The demonstration is
 # `action="/auth"` (website/signup.html:612,638), which v1's `"/auth"` literal
 # DOES catch — i.e. the literal fires on a plain form action, not only on a
-# bounce. (Note v1 happens to pass on welcome.html: its `/auth` references are
-# `action="/auth/update-password"` and two `href="/auth?mode=login"` links,
-# none of which contain the exact literals. That is luck of quoting, not the
-# property v1 was pinning — which is itself the reason to pin mechanisms.)
+# bounce. (Note v1 happens to pass on welcome.html: its `/auth` references
+# INCLUDE `action="/auth/update-password"`, `fetch("/auth/update-password"` and
+# two `href="/auth?mode=login"` links, none of which contain the exact literals.
+# That is luck of quoting, not the property v1 was pinning — which is itself the
+# reason to pin mechanisms.)
 #
 # Known limits, stated rather than implied: indirection THROUGH a mechanism
 # (`window.open.call(window, '/auth')`), computed member access
