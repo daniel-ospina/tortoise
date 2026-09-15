@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import coverage_loop
+from tortoise import coverage_loop, retrieval
 from tortoise.retrieval import (
     SESSION_TRANSCRIPT_KIND,
     dedup_pool,
@@ -175,6 +175,23 @@ def test_fetch_is_fail_open():
                    "dropped_by_cap": 0, "total_cap_hit": False}
 
 
+def test_fetch_budgets_count_distinct_ids_not_duplicate_nodes():
+    """A graph can hold several Point nodes for one id (a concurrent
+    re-ingest races the ingest exist-probe). Duplicate rows must not spend
+    the per-session budget twice: the budget is per DISTINCT chunk."""
+    rows = [("a1", "s1", 0), ("a1", "s1", 0), ("a1", "s1", 0),
+            ("a2", "s1", 1), ("a3", "s1", 2)]
+    proj = _FakeProj(rows=rows)
+    out = source_session_chunk_pass(
+        proj, ["s1"], question_id="q1", pool_ids=[], per_session_cap=2,
+        total_cap=10)
+    assert out["ok"] is True
+    assert [r["id"] for r in out["by_session"]["s1"]] == ["a1", "a2"]
+    assert out["total"] == 2
+    # a3 is dropped by the real budget, not by phantom duplicates
+    assert out["dropped_by_cap"] == 1
+
+
 def test_fetch_no_seeds_is_a_clean_noop():
     proj = _FakeProj(rows=[("a1", "s1", 0)])
     out = source_session_chunk_pass(proj, [], question_id="q1", pool_ids=[])
@@ -280,6 +297,23 @@ def test_guard_off_still_recaps_through_the_same_function():
         h["id"] for h in dedup_pool(pool, max_chunks_per_session=3)]
 
 
+def test_guard_off_skips_only_the_reorder_and_matches_dedup_pool():
+    """The guard-ablated arm must skip ONLY the session-diverse reorder
+    (mutating the guard argument to always-reorder must fail this test)."""
+    pool = [_point("a0", "s1"), _point("a1", "s1"), _point("a2", "s1"),
+            _point("a3", "s1"), _point("a4", "s1"),
+            _point("b0", "s2"), _point("c0", "s3")]
+    off = guard_and_recap_pool(pool, guard=False, window=5,
+                               per_session_cap=2, max_chunks_per_session=3)
+    assert [h["id"] for h in off] == [
+        h["id"] for h in dedup_pool(pool, max_chunks_per_session=3)]
+    on = guard_and_recap_pool(pool, guard=True, window=5,
+                              per_session_cap=2, max_chunks_per_session=3)
+    assert [h["id"] for h in on] != [h["id"] for h in off]
+    # the reorder is what differs: the same items, a different order
+    assert sorted(h["id"] for h in on) == sorted(h["id"] for h in off)
+
+
 def test_guard_recap_uses_the_pinned_pool_session_key():
     # same session_id, different lme indexes: one bucket, one cap.
     pool = [_chunk("a1", "s1", idx=0), _chunk("a2", "s1", idx=1),
@@ -301,9 +335,13 @@ def test_session_key_matches_the_historical_bucket_key():
     assert not is_raw_chunk(_point("a1", "s1"))
 
 
-def test_coverage_loop_session_of_delegates_to_the_authority():
-    assert coverage_loop._session_of({"session_id": "s1"}) == "s1"
-    assert coverage_loop._session_of({"lme_session_index": 7}) == "idx:7"
+def test_coverage_loop_session_of_delegates_to_the_authority(monkeypatch):
+    # sentinel: coverage_loop must DELEGATE, not re-implement — reverting it
+    # to the historical inline copy must fail this test
+    monkeypatch.setattr(retrieval, "session_key_of",
+                        lambda h: "SENTINEL")
+    assert coverage_loop._session_of({"session_id": "s1"}) == "SENTINEL"
+    assert coverage_loop._session_of({"lme_session_index": 7}) == "SENTINEL"
     assert coverage_loop._session_of(
         {"lme_session_index": 7}, lambda h: "explicit") == "explicit"
 

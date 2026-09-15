@@ -1698,6 +1698,16 @@ def retrieve_for_question(
                 sr_fetch_ok = bool(_fetch.get("ok"))
                 sr_dropped_by_cap = int(_fetch.get("dropped_by_cap") or 0)
                 sr_total_cap_hit = bool(_fetch.get("total_cap_hit"))
+                # the FETCH census is recorded the moment the fetch returns:
+                # a later annotate/merge failure must not read as "the graph
+                # fetch is broken" (the two stages are distinguishable —
+                # injected_total>0 with injected_merged==0 is a merge-stage
+                # failure; injected_total==0 with fetch_ok==False is a fetch
+                # failure).
+                sr_injected_per_session = {
+                    sid: len(_rows)
+                    for sid, _rows in (_fetch.get("by_session") or {}).items()}
+                sr_injected_total = sum(sr_injected_per_session.values())
                 _added_by_session: dict[str, list[dict]] = {}
                 if sr_fetch_ok:
                     # ONE annotation pass over ALL fetched ids (the C3-1
@@ -1749,11 +1759,6 @@ def retrieve_for_question(
                             guard_window=_LOOP_WINDOW,
                             max_chunks_per_session=max_chunks_per_session)
                         _merged_ids = {h["id"] for h in _merged}
-                        sr_injected_per_session = {
-                            sid: len(v)
-                            for sid, v in _added_by_session.items()}
-                        sr_injected_total = sum(
-                            sr_injected_per_session.values())
                         sr_injected_per_session_merged = {
                             sid: sum(1 for h in v if h["id"] in _merged_ids)
                             for sid, v in _added_by_session.items()}
@@ -1761,22 +1766,19 @@ def retrieve_for_question(
                             sr_injected_per_session_merged.values())
                         pool = _merged
         except Exception:  # noqa: BLE001, RUF100
-            # fail-open: any failure (fetch OR merge stage) keeps the
-            # ORIGINAL pool — byte-identical to the one-shot result. The
-            # SEED census is NOT wiped: "seeded but the fetch failed" must
-            # stay distinguishable from "nothing seeded" (a systematically
-            # broken fetch would otherwise read as an honest null).
+            # fail-open: any failure (fetch OR annotate/merge stage) keeps
+            # the ORIGINAL pool — byte-identical to the one-shot result. The
+            # SEED census AND the FETCH census are NOT wiped: "seeded but the
+            # fetch failed" must stay distinguishable from "nothing seeded"
+            # (a systematically broken fetch would otherwise read as an
+            # honest null), and a merge-stage failure must not impersonate a
+            # graph outage. Only the MERGED counters are cleared.
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "C4 source-session re-injection failed for %s — keeping "
                 "the original pool (fail-open)", qid, exc_info=True)
-            sr_injected_per_session = {}
-            sr_injected_total = 0
             sr_injected_per_session_merged = {}
             sr_injected_merged = 0
-            sr_dropped_by_cap = 0
-            sr_fetch_ok = False
-            sr_total_cap_hit = False
         sr_latency_ms = (time.monotonic() - _t_sr) * 1000.0
     session_reinjection_stats = {
         "on": reinjection_on,

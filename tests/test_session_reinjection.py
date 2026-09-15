@@ -311,7 +311,13 @@ def test_merge_stage_exception_keeps_the_base_pool(seeded_sdk, monkeypatch):
                                 pool_size=60, session_reinjection=True)
     assert [h["id"] for h in ret["hits"]] == base
     st = ret["session_reinjection_stats"]
-    assert st["injected_total"] == 0 and st["injected_merged"] == 0
+    # a MERGE-stage failure must not impersonate a graph outage: the FETCH
+    # census survives (fetch_ok=True, injected_total>0) and only the MERGED
+    # counters are cleared.
+    assert st["fetch_ok"] is True
+    assert st["injected_total"] >= 1
+    assert st["injected_merged"] == 0
+    assert st["injected_per_session_merged"] == {}
 
 
 def test_one_batched_fetch_per_fired_question(seeded_sdk, monkeypatch):
@@ -416,6 +422,24 @@ _CENSUS_KEYS = {
     "injected_per_session", "injected_total",
     "injected_per_session_merged", "injected_merged", "dropped_by_cap",
     "fetch_ok", "total_cap_hit", "guard", "latency_ms", "tr_excluded"}
+
+
+def test_reader_item_and_token_caps_hold_on_the_reinjected_pool(seeded_sdk):
+    """Task-3 acceptance (d): the reader item/token caps still bound the
+    context AFTER injection — a re-injected pool must not smuggle items
+    past the reader window (the C4 chunks are pool entries, not a bypass
+    of the reader budget)."""
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    q = _question()
+    cap_items, cap_tokens = 12, 900
+    for arm_on in (False, True):
+        ret = retrieve_for_question(
+            seeded_sdk, q, ks=(5,), top_k=10, pool_size=60,
+            session_reinjection=arm_on, context_item_cap=cap_items,
+            max_context_tokens=cap_tokens)
+        assert ret["context_point_count"] <= cap_items, (arm_on, ret)
+        assert ret["context_tokens"] <= cap_tokens, (arm_on, ret)
+        assert len(ret["hits"]) <= cap_items, (arm_on, len(ret["hits"]))
 
 
 def test_census_key_set_is_pinned(seeded_sdk):

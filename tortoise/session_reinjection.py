@@ -140,10 +140,18 @@ def source_session_chunk_pass(
     Returns a report dict (never raises):
       ``ok``            — the query ran (False on any failure).
       ``by_session``    — {session_id: [{id, session_id, lme_chunk_index}]}
-                          post-budget, deterministic order.
-      ``total``         — the injected row count (== sum of the groups).
+                          post-budget, deterministic order, DISTINCT ids.
+      ``total``         — the injected DISTINCT-chunk count (== sum of the
+                          groups).
       ``dropped_by_cap``— rows the per-session/total budgets dropped.
       ``total_cap_hit`` — the total budget bound at least once.
+
+    The budgets count DISTINCT chunk ids. A graph can hold several
+    ``Point`` nodes carrying one ``id`` (a concurrent re-ingest races the
+    ingest path's exist-probe — ``ingest._point_exists`` — which cannot be
+    atomic across processes); charging one budget slot per row would then
+    let duplicates eat a session's whole allowance and inject a single
+    chunk while reporting a full group.
     """
     report: dict[str, Any] = {
         "ok": False, "by_session": {}, "total": 0,
@@ -177,9 +185,11 @@ def source_session_chunk_pass(
     total = 0
     dropped = 0
     total_cap_hit = False
+    seen_pids: set[str] = set()
     for pid, sid, idx in rows or []:
         sid = str(sid or "")
-        if not sid:
+        pid = str(pid or "")
+        if not sid or not pid or pid in seen_pids:
             continue
         if total >= total_cap:
             total_cap_hit = True
@@ -188,6 +198,7 @@ def source_session_chunk_pass(
         if per.get(sid, 0) >= per_session_cap:
             dropped += 1
             continue
+        seen_pids.add(pid)
         by_session.setdefault(sid, []).append(
             {"id": pid, "session_id": sid, "lme_chunk_index": idx})
         per[sid] = per.get(sid, 0) + 1

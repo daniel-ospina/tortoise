@@ -56,20 +56,37 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _verify_source(path: Path) -> str:
-    """Verify a KNOWN split file against its pinned digest (an unknown
-    ``--source`` is used as-is, with its digest printed for the receipt)."""
+def _verify_source(path: Path, *, allow_unpinned: bool = False) -> tuple[str, bool]:
+    """Verify the source against its pinned digest.
+
+    A basename that matches a known split MUST match its ``SPLIT_DIGESTS``
+    pin (a truncated or tampered corpus must never be sliced into a cohort
+    that the receipt then pins a selector for). A basename that matches NO
+    known split is refused unless ``allow_unpinned`` is set — the run side
+    (``dataset.load_dataset``) performs no digest check at all, so this is
+    the only guard.
+
+    Returns ``(sha256, verified)``.
+    """
     digest = _sha256(path)
     pinned = {name: SPLIT_DIGESTS[split]
               for split, name in SPLIT_FILES.items()
               if split in SPLIT_DIGESTS}
     expected = pinned.get(path.name)
-    if expected is not None and expected != digest:
+    if expected is None:
+        if not allow_unpinned:
+            raise SystemExit(
+                f"{path} is not a pinned split corpus (known: "
+                f"{sorted(pinned)}) — refusing to slice an unverified "
+                "denominator; pass --allow-unpinned-source to override "
+                "(the override is recorded in the output)")
+        return digest, False
+    if expected != digest:
         raise SystemExit(
             f"{path} sha256 {digest} does not match the pinned digest "
             f"{expected} for {path.name} — the corpus is truncated or "
             "tampered; refusing to build a cohort from a wrong denominator")
-    return digest
+    return digest, True
 
 
 def build_cohorts(source: Path) -> dict[str, list[dict]]:
@@ -91,6 +108,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="output directory (default: dataset.cache_dir())")
     ap.add_argument("--cohort", choices=("tail", "head", "both"),
                     default="both")
+    ap.add_argument("--allow-unpinned-source", action="store_true",
+                    help="slice a corpus whose basename matches no known "
+                         "split (unverified; recorded in the output)")
     args = ap.parse_args(argv)
 
     source = args.source or (cache_dir() / SPLIT_FILES[DEFAULT_SPLIT])
@@ -99,7 +119,8 @@ def main(argv: list[str] | None = None) -> int:
             f"source corpus {source} not found — pass --source or set "
             "TORTOISE_LME_CACHE_DIR")
     out_dir = args.out_dir or cache_dir()
-    digest = _verify_source(source)
+    digest, verified = _verify_source(
+        source, allow_unpinned=args.allow_unpinned_source)
 
     cohorts = build_cohorts(source)
     wanted = (("tail", "head") if args.cohort == "both" else (args.cohort,))
@@ -108,7 +129,8 @@ def main(argv: list[str] | None = None) -> int:
         out = out_dir / f"longmemeval_2517_{name}.json"
         out.write_text(json.dumps(cohorts[name]), encoding="utf-8")
         print(f"{name}: {len(cohorts[name])} questions -> {out}")
-    print(f"source: {source} sha256={digest}")
+    print(f"source: {source} sha256={digest} "
+          f"verified={str(verified).lower()}")
     print(f"selectors: tail={TAIL_SLICE} head=({HEAD_TYPE}, first {HEAD_N})")
     return 0
 
