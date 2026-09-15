@@ -379,49 +379,181 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
     # The page must not perform a client-side navigation; that is the server's
     # job now, and a JS bounce back to /auth IS the #3485 loop.
     #
-    # Ban the NAVIGATION MECHANISMS rather than enumerating spellings. Three
-    # attempts got this wrong before settling here:
-    #
-    #   v1  `"/auth'"` substring      caught bracket access; missed the call form;
-    #                                 and fired on the page's own legitimate
-    #                                 `action="/auth/update-password"`
-    #   v2  `location\.(…)[(=]` regex  caught the call form; MISSED
-    #                                 `location['href'] = …` and
-    #                                 `location = '/auth'` — a coverage
-    #                                 regression against v1
-    #   v3  token ban                  strictly stronger than v2
-    #
-    # Scope, stated precisely: v3 is a strict superset of v2, but it does NOT
-    # restore v1's `/auth`-literal assertions — those were dropped deliberately
-    # (they were the false-positive source that fired on the reset form). The
-    # mechanisms below cover what those literals caught without that cost.
-    #
-    # The patterns use `\b` where the bare token would false-fire on prose
-    # (`relocation`, `allocation`) and match case-insensitively, because
-    # `LOCATION.HREF='/auth'` is valid JS and escaped a case-sensitive draft of
-    # this very check. Known limitation, stated rather than implied: a static
-    # gate cannot catch every obfuscation (`window['loc'+'ation']`,
-    # `loca\u0074ion`); it pins the plausible reintroductions, and the
-    # behavioural proof is `tests/auth/test_welcome_and_password.py`.
-    code_lower = WELCOME_CODE.lower()
-    banned = {
-        r"\blocation\b": "read or assign `location`",
-        r"\bhistory\b": "navigate via `history`",
-        r"http-equiv": "embed a meta-refresh redirect",
-        r"\bopen\s*\(": "open a window",
-        r"\.\s*submit\s*\(": "submit a form programmatically",
-        r"\.\s*click\s*\(": "click an element programmatically",
-        # Bracket/quoted method access (`window['open']('/auth')`) evades the
-        # dotted patterns above, and is a plausible reintroduction rather than
-        # exotic obfuscation. Require the INVOCATION (`'](` after the quoted
-        # name) so legitimate `type="submit"` and
-        # `addEventListener("submit", …)` are not caught.
-        r"['\"]\s*(?:open|submit|click)\s*['\"]\s*\]?\s*\(": "invoke a navigation method by name",
-    }
-    for pattern, what in banned.items():
-        assert not re.search(pattern, code_lower), (
+    # See _NAVIGATION_BANS for the mechanism list and its honestly-stated
+    # limits. The patterns are shared with the discrimination matrix below, so
+    # there is ONE definition rather than two that can drift apart.
+    for what, pattern in _NAVIGATION_BANS:
+        assert not re.search(pattern, WELCOME_CODE.lower()), (
             f"welcome.html must not {what} (matched {pattern!r}) — the page "
             "must not navigate client-side (#3501). The auth decision is the "
             "server's, and a client-side bounce back to /auth is the #3485 "
             "login loop."
         )
+
+
+# ── The client-navigation guard: its mechanisms and its limits ─────────────
+#
+# A guard that has never been shown to fail is not a guard, and a guard whose
+# claim was never falsifiable is not evidence. Three generations were tried:
+#
+#   v1  substring `"/auth'"` / `'"/auth"'` / `location.replace`
+#   v2  regex `location\.(replace|assign|href)\s*[(=]` + quoted meta-refresh
+#   v3  the mechanism bans below (current)
+#
+# v3 is a strict superset of v2: v2 missed `location['href'] = ...`,
+# `location = '/auth'` and `setAttribute("http-equiv", ...)`, all of which v3
+# catches, and no v2-caught form was lost (asserted by the matrix below).
+#
+# v3 does NOT restore everything v1 caught, and that is a TRADE, not an
+# improvement. v1 matched the TARGET literal `/auth`, so it also caught
+# navigations that name no mechanism at all — `document.write(url='/auth')`,
+# `a.setAttribute("href", "/auth")`. Those are MISSED here. They were not
+# restored because matching the target cannot distinguish a navigation from the
+# page's legitimate references to the same path (the reset form's action, the
+# two sign-in links); the mechanism ban catches the plausible reintroductions
+# and accepts that residue.
+#
+# Known limits, stated rather than implied: indirection THROUGH a mechanism
+# (`window.open.call(window, '/auth')`), computed member access
+# (`window['loc'+'ation']`), unicode escapes (`loca\u0074ion`), and
+# target-only navigations (above). A static gate cannot close these. The
+# behavioural proof is tests/auth/test_welcome_and_password.py.
+_NAVIGATION_BANS = (
+    ("read or assign `location`", r"\blocation\b"),
+    ("navigate via `history`", r"\bhistory\b"),
+    ("embed a meta-refresh redirect", r"http-equiv"),
+    ("open a window", r"\bopen\s*\("),
+    ("submit a form programmatically", r"\.\s*submit\s*\("),
+    ("click an element programmatically", r"\.\s*click\s*\("),
+    # Bracket/quoted method access (`window['open']('/auth')`) evades the dotted
+    # patterns and is a plausible reintroduction rather than exotic obfuscation.
+    # Requiring the INVOCATION keeps `type="submit"`, `class="btn-submit"` and
+    # `addEventListener("submit", ...)` out of it.
+    ("invoke a navigation method by name",
+     r"['\"]\s*(?:open|submit|click)\s*['\"]\s*\]?\s*\("),
+)
+
+
+def _guard_flags(source: str) -> str | None:
+    """Return the ban a source trips, or None.
+
+    Shared by the real-page assertion above and the matrix below, so the matrix
+    exercises the SAME patterns the guard enforces.
+    """
+    code = _strip_html_comments(source).lower()
+    for what, pattern in _NAVIGATION_BANS:
+        if re.search(pattern, code):
+            return what
+    return None
+
+
+# Every mechanism the guard claims to catch, as it would appear reintroduced.
+# Each is injected into a copy of the REAL page, so the matrix exercises the
+# actual guard over the actual file rather than a synthetic fixture.
+_NAVIGATION_FORMS = (
+    "location.replace('/auth')",
+    "location.assign('/auth?next=1')",
+    "location.href = '/auth'",
+    "location = '/auth'",
+    "window.location.href = '/auth'",
+    "document.location = '/auth'",
+    "self.location = '/auth'",
+    "top.location = '/auth'",
+    "parent.location.href = '/auth'",
+    "frames[0].location = '/auth'",
+    "location['replace']('/auth')",
+    "location['href'] = '/auth'",
+    "window['location']['replace']('/auth')",
+    "location[k]('/auth')",
+    "location.assign?.('/auth')",
+    "location.href ||= '/auth'",
+    "LOCATION.HREF = '/auth'",
+    "Location.Replace('/auth')",
+    "location . replace ( '/auth' )",
+    "location\n.href\n= '/auth'",
+    "history.pushState({}, '', '/auth')",
+    "history.replaceState({}, '', '/auth')",
+    '<meta http-equiv="refresh" content="0;url=/auth">',
+    "<meta http-equiv='refresh' content='0;url=/auth'>",
+    '<meta http-equiv=refresh content="0;url=/auth">',
+    '<meta http-equiv = "refresh" content="0;url=/auth">',
+    'x.setAttribute("http-equiv","refresh")',
+    'document.write(\'<meta http-equiv="refresh">\')',
+    'x.innerHTML = `<meta http-equiv="refresh">`',
+    "open('/auth')",
+    "window.open('/auth','_self')",
+    "window['open']('/auth')",
+    "window . open('/auth')",
+    "document.getElementById('f').submit()",
+    "document.forms[0].submit()",
+    "document.getElementById('a').click()",
+    "el['click']()",
+)
+
+# Constructs the REAL page legitimately contains. None may trip the guard: a
+# guard that fires on the correct implementation gets deleted by the next
+# person, and then it protects nothing.
+_LEGITIMATE_CONSTRUCTS = (
+    '<form id="reset-form" method="post" action="/auth/update-password">',
+    '<a href="/auth?mode=login">Sign in</a>',
+    '<a href="/auth?mode=signup">Create account</a>',
+    'fetch("/auth/update-password", { credentials: "same-origin" })',
+    '<button type="submit" class="btn-submit" id="btn-reset">Update</button>',
+    'form.addEventListener("submit", function (e) { e.preventDefault(); })',
+    '<link rel="icon" type="image/png" href="/logo.png">',
+    '<script src="/consent.js" defer></script>',
+    'var u = "https://app.premiselabs.co/x";',
+    '// a trailing comment mentioning location must not fire',
+)
+
+
+def test_the_navigation_guard_is_not_tripped_by_the_real_page() -> None:
+    """Non-vacuity, both directions.
+
+    The guard must PASS the real correct implementation, and the matrix must be
+    large enough to be meaningful — a matrix that silently shrank to two cases
+    would make the parametrized tests below pass while asserting almost
+    nothing.
+    """
+    assert _guard_flags(WELCOME) is None, (
+        "the guard fires on website/welcome.html as it actually is — a guard "
+        "that breaks the correct implementation gets deleted, not respected"
+    )
+    assert len(_NAVIGATION_FORMS) >= 30, (
+        f"discrimination matrix shrank to {len(_NAVIGATION_FORMS)} — the "
+        "guard's claim is only as strong as this list"
+    )
+    assert len(_LEGITIMATE_CONSTRUCTS) >= 8, (
+        f"legitimate-construct list shrank to {len(_LEGITIMATE_CONSTRUCTS)}"
+    )
+
+
+@pytest.mark.parametrize("anchor", ["</body>", "</head>"], ids=["body", "head"])
+@pytest.mark.parametrize("payload", _NAVIGATION_FORMS)
+def test_navigation_guard_catches_each_mechanism(payload: str, anchor: str) -> None:
+    """Every navigating mechanism must be flagged when injected into the real
+    page source.
+
+    This is the matrix the guard's claim rests on, run in CI. An earlier
+    version of this evidence lived in a scratch script under /tmp and was cited
+    in a commit message; it could not be re-run by anyone, it re-implemented the
+    guard instead of importing it, and it could not fail. This cannot drift
+    from the guard: both read _NAVIGATION_BANS.
+    """
+    injected = WELCOME.replace(anchor, f"<script>{payload}</script>\n{anchor}", 1)
+    assert injected != WELCOME, f"injection anchor {anchor!r} missing"
+    assert _guard_flags(injected), (
+        f"guard MISSED {payload!r} injected at {anchor} — a client-side bounce "
+        "back to /auth is the #3485 login loop"
+    )
+
+
+@pytest.mark.parametrize("construct", _LEGITIMATE_CONSTRUCTS)
+def test_navigation_guard_permits_legitimate_constructs(construct: str) -> None:
+    """And it must not fire on the constructs the page actually needs."""
+    injected = WELCOME.replace("</body>", construct + "\n</body>", 1)
+    assert injected != WELCOME
+    assert _guard_flags(injected) is None, (
+        f"guard false-fired on legitimate {construct!r} — a guard that breaks "
+        "correct code gets deleted, and then it protects nothing"
+    )
