@@ -818,7 +818,13 @@ jobs:
             # index_cli/index_restore legitimately spawn redislite servers
             # whose atexit close races the end-sweep). Bound the assert to
             # absorb those known exceptions; a real leak still reds (E2E-7).
-            THRESHOLD=6
+            # #2032: the docker half is not always ~0 — the SAME
+            # embedded-file-contract atexit race leaves strays on the full
+            # matrix too (trunk measured 7 with pytest rc 0 and ZERO test
+            # failures, so the old 6 red'd a clean suite on the leak counter
+            # alone). Match the tier-2 shape's 12: same exception class, same
+            # "a per-test leaky file spawns dozens; 12 still catches it" bar.
+            THRESHOLD=12
           else
             # Tier-2 embedded shape (full=false PR runs): the SAME
             # embedded-file-contract files run in the fast-gate halves and
