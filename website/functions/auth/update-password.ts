@@ -99,9 +99,23 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   // F15: a password change revokes every other session, so a stolen or lingering
   // session does not survive the reset. This intentionally includes the current
-  // one — the UI already tells the user to sign in with the new password, and
-  // `revokeAllForUser` is atomic + idempotent (meta.changes, verified in Gate 1b).
-  await revokeAllForUser(env.SESSIONS, row.user_id).catch(() => 0);
+  // one — the UI already tells the user to sign in with the new password.
+  //
+  // A failure here is NOT reported as success. This is the compromised-account
+  // recovery path, and `catch(() => 0)` turned its central promise into
+  // "maybe revoked" while telling the user the reset worked. The password HAS
+  // changed, so a retry is safe and re-attempts the revocation.
+  try {
+    await revokeAllForUser(env.SESSIONS, row.user_id);
+  } catch {
+    return json(
+      {
+        error: "revocation_failed",
+        message: "Your password changed, but other sessions could not be signed out. Please try again.",
+      },
+      { status: 503 },
+    );
+  }
 
   return json({ ok: true });
 };

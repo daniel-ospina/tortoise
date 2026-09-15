@@ -94,6 +94,35 @@ export const onRequest: PagesFunction<ProxyEnv> = async (ctx) => {
   const segs = params.path;
   const rest = Array.isArray(segs) ? segs.join("/") : (segs ?? "");
   const upstream = new URL(`${env.API_ORIGIN}/v1/${rest}`);
+
+  // Encoded separators are never legitimate in a /v1 route.
+  //
+  // URL normalisation does NOT decode `%2f`, so `/api/v1/..%2fadmin` stays under
+  // `/v1/` and passes the prefix check below — but it is forwarded to the
+  // upstream verbatim, and if the UPSTREAM decodes it, that is a traversal we
+  // handed it. Rejecting the encoding is the only place this can be stopped
+  // reliably, since we cannot control the upstream's decoder.
+  if (/%2e|%2f|%5c/i.test(rest)) {
+    return json({ error: "invalid_path" }, { status: 400 });
+  }
+
+  // The wildcard must not escape the `/v1/` prefix.
+  //
+  // WHATWG URL normalisation resolves dot-segments — and treats PERCENT-ENCODED
+  // dots as dots — so `/api/v1/%2e%2e/admin` normalises to `<origin>/admin`.
+  // Without this check an authenticated caller could drive ANY path on
+  // API_ORIGIN with a valid `Authorization: Bearer` attached, which is the
+  // opposite of this route's stated scope ("deliberately NOT a general-purpose
+  // proxy"). The check is on the CONSTRUCTED result, because that is what is
+  // actually fetched.
+  const upstreamBase = new URL(`${env.API_ORIGIN}/v1/`);
+  if (
+    upstream.origin !== upstreamBase.origin ||
+    !upstream.pathname.startsWith(upstreamBase.pathname)
+  ) {
+    return json({ error: "invalid_path" }, { status: 400 });
+  }
+
   upstream.search = url.search;
 
   const headers = new Headers();

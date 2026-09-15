@@ -94,8 +94,37 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
 /** Explicit sign-out is a POST so it cannot be triggered by a link or a prefetch. */
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const handle = readCookie(request, SESSION_COOKIE);
-  if (handle && env.SESSIONS) {
-    await revokeSession(env.SESSIONS, handle).catch(() => false);
+
+  if (handle) {
+    if (!env.SESSIONS) {
+      return json({ error: "session_store_unavailable" }, { status: 503 });
+    }
+    let revoked: boolean;
+    try {
+      revoked = await revokeSession(env.SESSIONS, handle);
+    } catch {
+      // Never report a successful sign-out on a failed write.
+      return json({ error: "session_store_unavailable" }, { status: 503 });
+    }
+    if (!revoked) {
+      // `revokeSession` returns false when the CAS matched no row: either the
+      // session was ALREADY revoked (idempotent, fine) or the write did not
+      // land (not fine). `getSession` filters `revoked = 0`, so a non-null row
+      // here is proof the session is still LIVE.
+      //
+      // This used to be `.catch(() => false)` with the result discarded, so a
+      // failed revocation still answered `{ok:true}` and cleared the cookie —
+      // telling the user they were signed out while the handle stayed usable
+      // for the session's full 400-day TTL.
+      const still = await getSession(env.SESSIONS, handle).catch(() => null);
+      if (still) {
+        return json(
+          { error: "revocation_failed", message: "Could not sign out — please try again." },
+          { status: 503 },
+        );
+      }
+    }
   }
+
   return json({ ok: true }, { cookies: [clearCookie(SESSION_COOKIE)] });
 };

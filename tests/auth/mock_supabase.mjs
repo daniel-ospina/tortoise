@@ -61,6 +61,9 @@ const ADMIN_USER_IDS = new Set();
  */
 let refreshGrants = 0;
 
+/** Every path the upstream was asked for (see the request handler). */
+const seenPaths = [];
+
 function mintAccessToken(sub, expiresIn = 3600) {
   const header = b64url(JSON.stringify({ alg: "ES256", typ: "JWT", kid: "mock-key-1" }));
   const claims = b64url(
@@ -124,6 +127,11 @@ let authorizeCounter = 0;
 
 const server = createServer((req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
+  // Record every path the upstream is asked for. The only end-to-end proof that
+  // the proxy wildcard did not escape `/v1/` is to observe what the UPSTREAM
+  // received — a status check cannot distinguish "blocked" from "escaped and
+  // the upstream had no such route" (both look like 404).
+  seenPaths.push(url.pathname);
 
   // GET /auth/v1/authorize — the realistic redirect hop. Supabase stores the
   // PKCE challenge against the code it issues; the mock must do the same or the
@@ -232,6 +240,13 @@ const server = createServer((req, res) => {
     if (url.pathname === "/rest/v1/blog_admins") {
       const uid = (url.searchParams.get("user_id") ?? "").replace(/^eq\./, "");
       return json(res, 200, ADMIN_USER_IDS.has(uid) ? [{ user_id: uid }] : []);
+    }
+
+    // What the upstream was actually asked for.
+    if (url.pathname === "/__mock/paths") {
+      const paths = [...seenPaths];
+      if (parsed.reset) seenPaths.length = 0;
+      return json(res, 200, { paths });
     }
 
     // Fault injection control. POST {"authUser":true} / {"upstream":true} /

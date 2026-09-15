@@ -212,6 +212,15 @@ def _refresh_grants(reset: bool = False) -> int:
         return json.loads(r.read().decode())["refreshGrants"]
 
 
+def _seen_paths(reset: bool = False) -> list[str]:
+    """Paths the upstream mock was asked for (optionally resetting first)."""
+    data = json.dumps({"reset": True} if reset else {}).encode()
+    req = urllib.request.Request(f"{MOCK_URL}/__mock/paths", method="POST", data=data)
+    req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=15) as r:  # noqa: S310
+        return json.loads(r.read().decode())["paths"]
+
+
 def test_upstream_401_is_503_and_does_not_storm_refreshes(proxied):
     """An UPSTREAM 401 is not OUR 401 — and must not stampede the token endpoint.
 
@@ -259,6 +268,73 @@ def test_upstream_401_is_503_and_does_not_storm_refreshes(proxied):
         "burns a single-use rotating refresh token, and GoTrue reuse-detection can "
         "then kill the session family"
     )
+
+
+def test_proxy_cannot_escape_the_v1_prefix(proxied):
+    """The wildcard must never reach a non-`/v1/` path on the upstream.
+
+    WHATWG URL normalisation resolves dot-segments and treats PERCENT-ENCODED dots
+    as dots, so `/api/v1/%2e%2e/admin` normalises to `<origin>/admin`. That would
+    let an authenticated caller drive ANY path on API_ORIGIN with a valid Bearer
+    attached — the opposite of this route's stated scope.
+
+    The assertion is on what the UPSTREAM RECEIVED, not on the HTTP status. An
+    earlier version asserted `status in (400, 404)` and was vacuous: Cloudflare's
+    router normalises `%2e%2e` BEFORE function matching, so the request never
+    reached this handler at all and the 404 came from Pages, not from our guard —
+    deleting the guard left the test green. Observing the upstream is the only
+    end-to-end proof.
+    """
+    cookie = _session_cookie()
+    _seen_paths(reset=True)
+
+    for hostile in (
+        "/api/v1/%2e%2e/admin",
+        "/api/v1/.%2e/admin",
+        "/api/v1/..%2fadmin",
+        "/api/v1/a/../../admin",
+        "/api/v1/../../../etc/passwd",
+    ):
+        req = urllib.request.Request(f"{APP}{hostile}", method="GET")
+        req.add_header("Cookie", cookie)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+                status = r.status
+                r.read()
+        except urllib.error.HTTPError as e:
+            status = e.code
+            e.read()
+        assert status >= 400, f"{hostile} returned {status} — must be refused"
+
+    # Flag anything that could be a traversal, either as a foreign path or as an
+    # encoded dot-segment the UPSTREAM may decode. Checking only the namespace
+    # would miss `/v1/..%2fadmin`: URL normalisation does not decode `%2f`, so it
+    # stays under `/v1/` and is forwarded verbatim for the upstream to interpret.
+    legitimate = ("/v1/", "/auth/", "/__mock/")
+    suspicious = [
+        p
+        for p in _seen_paths()
+        if (not p.startswith(legitimate))
+        or (".." in p)
+        or ("%2e" in p.lower())
+        or ("%2f" in p.lower())
+        or ("%5c" in p.lower())
+    ]
+    assert not suspicious, (
+        f"the proxy forwarded traversal-capable paths upstream: {suspicious} — the "
+        "wildcard reached beyond its prefix or handed the upstream an encoded "
+        "dot-segment with a valid bearer attached"
+    )
+
+
+def test_proxy_forwards_a_legitimate_nested_path(proxied):
+    """The prefix check must not reject real nested routes."""
+    cookie = _session_cookie()
+    req = urllib.request.Request(f"{APP}/api/v1/teams/abc/members", method="GET")
+    req.add_header("Cookie", cookie)
+    with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310
+        assert r.status == 200
+        assert json.loads(r.read().decode())["path"] == "/v1/teams/abc/members"
 
 
 def test_unknown_handle_is_401(proxied):

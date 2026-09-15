@@ -85,8 +85,22 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
 
   // Recovery: completing it must invalidate every other session (F15), so a
   // stolen session does not survive the reset.
+  //
+  // This runs BEFORE the new session is minted, so a failure here must stop the
+  // flow rather than be swallowed: `catch(() => 0)` asserted the F15 guarantee
+  // while leaving the stolen session alive.
   if (flow.kind === "recovery" || type === "recovery") {
-    await revokeAllForUser(env.SESSIONS, result.data.user.id).catch(() => 0);
+    try {
+      await revokeAllForUser(env.SESSIONS, result.data.user.id);
+    } catch {
+      return json(
+        {
+          error: "revocation_failed",
+          message: "Could not invalidate existing sessions. Please try the reset link again.",
+        },
+        { status: 503 },
+      );
+    }
   }
 
   const handle = await createSession(
