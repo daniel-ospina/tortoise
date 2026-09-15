@@ -75,7 +75,7 @@ def _provision_anon(client):
     r = client.post("/v1/agent/signup", json={})
     assert r.status_code == 200, r.text
     data = r.json()
-    return data["key"], data["team_id"]
+    return data["key"], data["org_id"]
 
 
 def _patch_session_user(monkeypatch, user_id: str):
@@ -88,41 +88,41 @@ def _patch_session_user(monkeypatch, user_id: str):
     monkeypatch.setattr(sa, "verify_session_jwt", _fake)
 
 
-def _seed_owner_membership(fake, team_id: str, user_id: str):
+def _seed_owner_membership(fake, org_id: str, user_id: str):
     """Give the session user an owner membership so _session_user_team's
-    membership resolution + ?team_id= ownership check pass."""
-    fake.tables.setdefault("team_memberships", []).append({
-        "id": str(uuid.uuid4()), "team_id": team_id, "user_id": user_id,
+    membership resolution + ?org_id= ownership check pass."""
+    fake.tables.setdefault("org_memberships", []).append({
+        "id": str(uuid.uuid4()), "org_id": org_id, "user_id": user_id,
         "role": "owner", "status": "active", "created_at": "2026-01-01T00:00:00Z",
         "identity": None, "lookup_hash": None,
     })
 
 
-def _seed_github_creds(fake, team_id: str):
+def _seed_github_creds(fake, org_id: str):
     """Seed github_token_enc/github_org on the teams row so the index POSTs
     pass the connect check. The blob is deliberately NOT fernet — the
     background job fails fast at decrypt (no network), exactly the
     established pattern in test_index_docs_api."""
     for t in fake.tables.get("teams", []):
-        if t.get("id") == team_id:
+        if t.get("id") == org_id:
             t["github_token_enc"] = "garbage-not-fernet"
             t["github_org"] = "acme"
             return
-    raise AssertionError(f"team row for {team_id} not found in fake plane")
+    raise AssertionError(f"team row for {org_id} not found in fake plane")
 
 
 @pytest.fixture
 def session_user(env, monkeypatch):
     """Provision a team, patch the session JWT verifier, seed the owner
     membership + GitHub creds. Yields a SimpleNamespace holding the client,
-    the fake plane, the tt_ key and the team_id."""
+    the fake plane, the tt_ key and the org_id."""
     client, fake = env
-    key, team_id = _provision_anon(client)
+    key, org_id = _provision_anon(client)
     user_id = str(uuid.uuid4())
     _patch_session_user(monkeypatch, user_id)
-    _seed_owner_membership(fake, team_id, user_id)
-    _seed_github_creds(fake, team_id)
-    return SimpleNamespace(client=client, fake=fake, key=key, team_id=team_id)
+    _seed_owner_membership(fake, org_id, user_id)
+    _seed_github_creds(fake, org_id)
+    return SimpleNamespace(client=client, fake=fake, key=key, org_id=org_id)
 
 
 def _drain_job(client, job_id: str, timeout_s: float = 3.0, *, docs: bool = False):
@@ -142,13 +142,13 @@ def _drain_job(client, job_id: str, timeout_s: float = 3.0, *, docs: bool = Fals
     return None
 
 
-def _set_dashboard_key_login(fake, team_id: str, enabled: bool):
+def _set_dashboard_key_login(fake, org_id: str, enabled: bool):
     """Flip teams.dashboard_key_login (the #1148 flag)."""
     for t in fake.tables.get("teams", []):
-        if t.get("id") == team_id:
+        if t.get("id") == org_id:
             t["dashboard_key_login"] = enabled
             return
-    raise AssertionError(f"team row for {team_id} not found in fake plane")
+    raise AssertionError(f"team row for {org_id} not found in fake plane")
 
 
 # ── Seed/write endpoints ────────────────────────────────────────────────────
@@ -205,7 +205,7 @@ class TestCreateEndpointsDualAuth:
         points → session-authed write 402s (fail-closed), proving the quota
         path reads the session dict's max_points, not a key field."""
         for t in session_user.fake.tables.get("teams", []):
-            if t.get("id") == session_user.team_id:
+            if t.get("id") == session_user.org_id:
                 t["graph_size_cap"] = 0
         r = session_user.client.post("/v1/points", headers={"Authorization": "Bearer eyJ.sess"},
                                      json={"content": "over-cap point", "kind": "statement"})
@@ -230,7 +230,7 @@ class TestCreateEndpointsDualAuth:
         tt_ keys must keep seeding the graph — the #1148 gate covers account
         management, never graph operations. A future swap to the GATED
         dependency would break flag-off agents and this test catches it."""
-        _set_dashboard_key_login(session_user.fake, session_user.team_id, False)
+        _set_dashboard_key_login(session_user.fake, session_user.org_id, False)
         r = session_user.client.post(
             "/v1/points", headers={"Authorization": f"Bearer {session_user.key}"},
             json={"content": "flag-off seed", "kind": "statement"})
@@ -238,7 +238,7 @@ class TestCreateEndpointsDualAuth:
 
     def test_index_github_flag_off_team_tt_key_still_200(self, session_user):
         """Same ungated pin for the index action lane."""
-        _set_dashboard_key_login(session_user.fake, session_user.team_id, False)
+        _set_dashboard_key_login(session_user.fake, session_user.org_id, False)
         r = session_user.client.post(
             "/v1/index/github", headers={"Authorization": f"Bearer {session_user.key}"},
             json={"org": "acme"})
@@ -305,7 +305,7 @@ class TestGitHubIndexDualAuth:
 
     def test_index_github_job_status_cross_tenant_404(self, session_user):
         """Cross-tenant isolation unchanged on the session lane: a job owned
-        by another team still 404s (job.get('team_id') != team dict's id)."""
+        by another team still 404s (job.get('org_id') != team dict's id)."""
         c = session_user.client
         # second team owns the job
         key2, team2 = _provision_anon(c)

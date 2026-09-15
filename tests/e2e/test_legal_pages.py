@@ -104,7 +104,7 @@ _CORS_PREFLIGHT = {
 
 # Browser-level network log noise from deliberately-failed requests (real
 # 401s from the /welcome bridge boot after the mocked sign-in redirect in
-# prod mode — rest/v1/team_memberships, /v1/onboarding/state fire ~100-500ms
+# prod mode — rest/v1/org_memberships, /v1/onboarding/state fire ~100-500ms
 # after commit; review P1 c60) — NOT page JS errors; the zero-console-errors
 # assertion in the mocked-signup test filters it (same filter the signup
 # safety suite uses).
@@ -806,7 +806,7 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     console_errors: list[str] = []
     # _RESOURCE_LOG_RE filter (review P1 c60): in prod mode the /welcome
     # redirect loads the REAL welcome page, whose boot fetches
-    # (rest/v1/team_memberships, /v1/onboarding/state) fire real 401 network
+    # (rest/v1/org_memberships, /v1/onboarding/state) fire real 401 network
     # errors ~100-500ms after commit — the mock session has no live team row.
     # Those are network noise, not page JS errors; the raw == [] assertion
     # raced them. pageerror is still captured unfiltered.

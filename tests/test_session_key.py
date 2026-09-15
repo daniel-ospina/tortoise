@@ -39,7 +39,7 @@ class TestE1SessionKey:
         # schema supports expires_at/created_via that E1 writes, and that the
         # tier cap is readable so E1 can enforce it)
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:'e1test', team_id:$tid, key_hash:'h', key_prefix:'tt_', "
+            "CREATE (k:APIKey {id:'e1test', org_id:$tid, key_hash:'h', key_prefix:'tt_', "
             "created_by:'u', created_at:'2026-08-07', revoked_at:null, "
             "expires_at:null, created_via:'recovery'})",
             params={"tid": team["id"]},
@@ -53,7 +53,7 @@ class TestE1SessionKey:
     def test_bootstrap_key_carries_expiry(self, sdk):
         team = sdk.team_create("boot-team")
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:'boot1', team_id:$tid, key_hash:'h', key_prefix:'tt_', "
+            "CREATE (k:APIKey {id:'boot1', org_id:$tid, key_hash:'h', key_prefix:'tt_', "
             "created_by:'u', created_at:'2026-08-07', revoked_at:null, "
             "expires_at:'2026-08-08T00:00:00+00:00', created_via:'bootstrap'})",
             params={"tid": team["id"]},

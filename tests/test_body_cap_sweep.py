@@ -82,7 +82,7 @@ def supabase_client(monkeypatch, tmp_path):
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
     monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
     cp = FakeControlPlane({"teams": [], "api_keys": [],
-                           "team_memberships": [], "invitations": []})
+                           "org_memberships": [], "invitations": []})
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
     db_path = os.path.join(tmp_path, "oauth_sweep.db")
     # #2127: shared helper (see embedded_client).
@@ -146,7 +146,7 @@ class TestRegisterCap:
             "/v1/register",
             json={"email": "cap-sweep@example.com", "password": "supersecret1"})
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"]
+        assert r.json()["org_id"]
 
 
 # ── /v1/signup/email ─────────────────────────────────────────────────────

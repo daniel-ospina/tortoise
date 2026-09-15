@@ -76,7 +76,7 @@ create_point props passthrough (persisted verbatim, sdk.py:2461-2465).
 | OAuth `oat_` (MCP only) | `resolve_oauth_access_token` oauth.py:722 | selects user_id/client_id, returns `_quota_fields` only | return dict gains `actor_user_id` (= row `user_id` — only when UUID-shaped) + `client_id` |
 | Supabase key | `resolve_api_key` supabase_control.py:503 | returns `created_by` | ADDITIVE `actor_user_id = created_by` when UUID-shaped; keep `created_by` untouched |
 | Registry key (REST) | `get_current_team` hosted_api.py:1656 | returns `created_by` | ADDITIVE `actor_user_id = created_by` when UUID-shaped |
-| Registry key (MCP) | `sdk.apikey_verify` sdk.py:14766 | returns team_id/key_id/delegation_depth/scopes/legacy_full_access — **NO created_by** | extend to select + return `created_by` from the APIKey node (`_verify_hashed_lookup` already returns full props — `m.get("created_by")`). Raw return; the UUID gate + `actor_user_id` alias happen at the §2.1 normalization seam, NOT in sdk.py (sdk cannot import supabase_control) |
+| Registry key (MCP) | `sdk.apikey_verify` sdk.py:14766 | returns org_id/key_id/delegation_depth/scopes/legacy_full_access — **NO created_by** | extend to select + return `created_by` from the APIKey node (`_verify_hashed_lookup` already returns full props — `m.get("created_by")`). Raw return; the UUID gate + `actor_user_id` alias happen at the §2.1 normalization seam, NOT in sdk.py (sdk cannot import supabase_control) |
 | Session JWT | `get_current_team_session` hosted_api.py:2372 | sets `team[session_user_id]` | also set `team[actor_user_id] = user["user_id"]` (already UUID) |
 
 **Human-shape gate (P1 fix):** `created_by` is NOT always a human identifier —

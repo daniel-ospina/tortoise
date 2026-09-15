@@ -83,7 +83,7 @@ def _cell_key(session_id: str, fixture: dict, gold: dict) -> str:
     """
     team = fixture.get("team")
     if team:
-        return f"team_{team}"
+        return f"org_{team}"
     if fixture.get("suite") == "continuity" or gold.get("suite") == "continuity":
         spec = (gold.get("continuity") or {})
         writer = spec.get("writer_session") or session_id

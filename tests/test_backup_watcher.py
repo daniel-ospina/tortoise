@@ -36,11 +36,11 @@ class _Channels:
     def close_issue(self, number, comment=None):
         self.issues.pop(number, None)
 
-    def search_open(self, kind, team_id=""):
+    def search_open(self, kind, org_id=""):
         return [
             n for n, t in self.issues.items()
             if f"[DR] {kind}" in t
-            and (team_id == "" or t.endswith(f" — {team_id}"))
+            and (org_id == "" or t.endswith(f" — {org_id}"))
         ]
 
     def push_telegram(self, text):
@@ -133,7 +133,7 @@ def _seed_archive(storage, team: str, hours_ago: float) -> None:
     ts = _ts(hours_ago)
     key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     backup_id = f"{team}/{key}"
-    manifest = {"backup_id": backup_id, "team_id": team, "graph_name": f"team_{team}",
+    manifest = {"backup_id": backup_id, "org_id": team, "graph_name": f"org_{team}",
                 "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
                 "sha256": "0" * 64}
     storage.upload(f"backups/{backup_id}/manifest.json", json.dumps(manifest).encode())
@@ -285,7 +285,7 @@ def _seed_graph_archive(storage, team: str, gid: str, hours_ago: float) -> None:
     ts = _ts(hours_ago)
     key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     backup_id = f"{team}/{gid}/{key}"
-    manifest = {"backup_id": backup_id, "team_id": team, "graph_id": gid,
+    manifest = {"backup_id": backup_id, "org_id": team, "graph_id": gid,
                 "graph_name": f"g-{gid}", "created_at": ts.isoformat(),
                 "node_count": 1, "edge_count": 0, "sha256": "0" * 64}
     storage.upload(f"backups/{backup_id}/manifest.json",
@@ -507,7 +507,7 @@ def test_watcher_legacy_custom_flat_does_not_gate_team_freshness():
     ts = _ts(0.2)
     key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     backup_id = f"team_a/{key}"
-    m = {"backup_id": backup_id, "team_id": "team_a",
+    m = {"backup_id": backup_id, "org_id": "team_a",
          "graph_name": "team_team_a_g_custom",  # a custom namespace
          "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
          "sha256": "0" * 64}
@@ -556,7 +556,7 @@ def _seed_flat_manifest(storage, team: str, graph_name: str,
     key = (f"{ts.strftime('%Y%m%dT%H%M%S')}"
            f"{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}")
     backup_id = f"{team}/{key}"
-    m = {"backup_id": backup_id, "team_id": team, "graph_name": graph_name,
+    m = {"backup_id": backup_id, "org_id": team, "graph_name": graph_name,
          "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
          "sha256": "0" * 64}
     storage.upload(f"backups/{backup_id}/manifest.json",

@@ -332,7 +332,7 @@ class TestHealthTruthMCP:
         import builtins
 
         from tortoise import mcp_server as _ms
-        from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+        from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
 
         real_import = builtins.__import__
 
@@ -344,11 +344,11 @@ class TestHealthTruthMCP:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", _blocked_import)
-        token = _current_team_id.set(SELFHOST_TEAM_ID)
+        token = _current_org_id.set(SELFHOST_ORG_ID)
         try:
             assert _ms._team_onboarding_complete() is False
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
 
 
 class TestOriginProtection:

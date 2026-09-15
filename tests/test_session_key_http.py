@@ -9,7 +9,7 @@ the audit:
 - 200 mint: bootstrap (24h expiry, cap-exempt, 3-active backstop) vs recovery
   (persistent, counts against max_api_keys)
 - 403 no-membership / no membership in team
-- 400 multi-team without team_id
+- 400 multi-team without org_id
 - 429 bootstrap backstop (3 active) — expired keys don't count (#742)
 - 402 recovery-at-cap with NO revocable other key
 - recovery-at-cap auto-revokes the OLDEST OTHER key (#750.10 — never the
@@ -37,7 +37,7 @@ from tortoise.auth import hash_api_key, verify_api_key  # noqa: F401
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
 # Session-key api_keys.created_by mirrors the minting user's UUID (the
 # cap/backstop logic compares it to the JWT subject); anon/reg identity
@@ -104,53 +104,53 @@ def reg():
 _REG_SDKS: list = []
 
 
-def _seed_team(reg, team_id: str, tier: str = "free"):
+def _seed_team(reg, org_id: str, tier: str = "free"):
     reg.query(
         "CREATE (t:Team {id:$id, name:$id, tier:$tier})",
-        params={"id": team_id, "tier": tier},
+        params={"id": org_id, "tier": tier},
     )
 
 
-def _seed_membership(reg, team_id: str, user_id: str, role: str,
+def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
     reg.query(
-        "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:$role, "
+        "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
-        params={"uid": user_id, "tid": team_id, "role": role, "status": status},
+        params={"uid": user_id, "tid": org_id, "role": role, "status": status},
     )
 
 
-def _seed_api_key(reg, team_id: str, key_id: str, *, created_by: str,
+def _seed_api_key(reg, org_id: str, key_id: str, *, created_by: str,
                   created_via: str, created_at: str,
                   revoked_at: str | None = None,
                   expires_at: str | None = None,
                   key_prefix: str = "tt_x",
                   last_used_at: str | None = None):
     reg.query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:'h', key_prefix:$kp, "
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', key_prefix:$kp, "
         "created_by:$cb, created_at:$ca, revoked_at:$ra, expires_at:$ea, "
         "created_via:$cv, last_used_at:$lua})",
-        params={"id": key_id, "tid": team_id, "cb": created_by, "ca": created_at,
+        params={"id": key_id, "tid": org_id, "cb": created_by, "ca": created_at,
                 "ra": revoked_at, "ea": expires_at, "cv": created_via,
                 "kp": key_prefix, "lua": last_used_at},
     )
 
 
-def _count_active_keys(reg, team_id: str) -> int:
+def _count_active_keys(reg, org_id: str) -> int:
     rows = reg.query(
-        "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
-        params={"tid": team_id},
+        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
+        params={"tid": org_id},
     ).result_set
     return int(rows[0][0])
 
 
-def _count_persistent_keys(reg, team_id: str) -> int:
+def _count_persistent_keys(reg, org_id: str) -> int:
     """Non-revoked keys that COUNT against max_api_keys (bootstrap-excluded
     — mirrors the mint's count predicate)."""
     rows = reg.query(
-        "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
         "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
-        params={"tid": team_id},
+        params={"tid": org_id},
     ).result_set
     return int(rows[0][0])
 
@@ -182,14 +182,14 @@ class TestBootstrapMint:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["purpose"] == "bootstrap"
-        assert body["team_id"] == "team-a"
+        assert body["org_id"] == "team-a"
         assert body["expires_at"] is not None
         assert body["key"].startswith("tt_")
         assert body["key_prefix"] == body["key"][:10]
 
         # Registry stores hash only — never the plaintext key
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:'team-a'}) RETURN k.key_hash, "
+            "MATCH (k:APIKey {org_id:'team-a'}) RETURN k.key_hash, "
             "k.key_prefix, k.created_via, k.created_by",
         ).result_set
         assert len(rows) == 1
@@ -265,7 +265,7 @@ class TestRecoveryMint:
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:'team-a'}) RETURN k.created_via",
+            "MATCH (k:APIKey {org_id:'team-a'}) RETURN k.created_via",
         ).result_set
         assert rows[0][0] == "recovery"
 
@@ -567,7 +567,7 @@ class TestRecoveryMint:
 
 
 class TestMintGuards:
-    """Membership / team_id / purpose validation."""
+    """Membership / org_id / purpose validation."""
 
     def test_no_membership_403(self, client, reg):
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
@@ -575,35 +575,35 @@ class TestMintGuards:
         assert "No team membership" in r.json()["detail"]
 
     def test_no_membership_in_requested_team_403(self, client, reg):
-        """Multi-membership + team_id pointing at a team the user is NOT in."""
+        """Multi-membership + org_id pointing at a team the user is NOT in."""
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
         _seed_team(reg, "team-x")
         _seed_membership(reg, "team-a", _U1, "owner")
         _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key",
-                        json={"purpose": "bootstrap", "team_id": "team-x"})
+                        json={"purpose": "bootstrap", "org_id": "team-x"})
         assert r.status_code == 403
         assert "No membership in team" in r.json()["detail"]
 
-    def test_multi_team_requires_team_id_400(self, client, reg):
+    def test_multi_team_requires_org_id_400(self, client, reg):
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
         _seed_membership(reg, "team-a", _U1, "owner")
         _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 400
-        assert "team_id required" in r.json()["detail"]
+        assert "org_id required" in r.json()["detail"]
 
-    def test_multi_team_with_team_id_ok(self, client, reg):
+    def test_multi_team_with_org_id_ok(self, client, reg):
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
         _seed_membership(reg, "team-a", _U1, "owner")
         _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key",
-                        json={"purpose": "bootstrap", "team_id": "team-b"})
+                        json={"purpose": "bootstrap", "org_id": "team-b"})
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"] == "team-b"
+        assert r.json()["org_id"] == "team-b"
 
     def test_bad_purpose_422(self, client, reg):
         _seed_team(reg, "team-a")

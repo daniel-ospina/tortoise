@@ -10,8 +10,8 @@ the two preconditions that must hold BEFORE the single-deploy flip:
      (plan Task 8, #765); zero nodes is the runnable proof.
   2. Supabase precondition — the Supabase control plane contains ONLY
      reconcilable placeholders: no ``teams`` rows, no ``api_keys`` rows,
-     and every ``team_memberships`` row is the auth-trigger placeholder
-     (``team_id=''`` AND ``key_hash='pending'``, migrations 0003/0010 —
+     and every ``org_memberships`` row is the auth-trigger placeholder
+     (``org_id=''`` AND ``key_hash='pending'``, migrations 0003/0010 —
      provisioned at signup by the tenant-provision RPC). Anything else
      means real data would have to migrate (legacy salted hashes are
      un-migratable without plaintext — the flip requires zero data).
@@ -57,8 +57,8 @@ REGISTRY_GRAPH = "registry_control_plane"
 
 # Placeholder sentinels written by the auth trigger (migration 0003) and
 # reconciled in place by tenant-provision (migration 0010 RPC): a membership
-# row with team_id='' / key_hash='pending' is a signup in flight, NOT data.
-PLACEHOLDER_TEAM_ID = ""
+# row with org_id='' / key_hash='pending' is a signup in flight, NOT data.
+PLACEHOLDER_ORG_ID = ""
 PLACEHOLDER_KEY_HASH = "pending"
 
 # Tables that must contain no real rows before the flip.
@@ -128,15 +128,15 @@ def check_supabase_placeholders(cp) -> list[str]:
                 f"Supabase {table} has {len(rows)} row(s) — the flip requires "
                 "zero real rows (legacy salted hashes are un-migratable "
                 "without plaintext; plan Task 1 P1-1).")
-    memberships = cp.query("team_memberships", select=["team_id", "key_hash"])
+    memberships = cp.query("org_memberships", select=["org_id", "key_hash"])
     for i, row in enumerate(memberships):
-        if row.get("team_id") != PLACEHOLDER_TEAM_ID or \
+        if row.get("org_id") != PLACEHOLDER_ORG_ID or \
                 row.get("key_hash") != PLACEHOLDER_KEY_HASH:
             failures.append(
-                f"Supabase team_memberships[{i}] is NOT a reconcilable "
-                "placeholder (team_id={row.get('team_id')!r}, "
+                f"Supabase org_memberships[{i}] is NOT a reconcilable "
+                "placeholder (org_id={row.get('org_id')!r}, "
                 f"key_hash={row.get('key_hash')!r}) — expected "
-                f"team_id={PLACEHOLDER_TEAM_ID!r} / "
+                f"org_id={PLACEHOLDER_ORG_ID!r} / "
                 f"key_hash={PLACEHOLDER_KEY_HASH!r} (migration 0003 trigger).")
     return failures
 

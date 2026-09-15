@@ -296,7 +296,7 @@ def _clean_question(namespace: str, qid: str) -> None:
         sdk.close()
     with contextlib.suppress(Exception):
         TortoiseSDK(namespace=namespace)._get_proj().db.select_graph(
-            f"team_{namespace}").delete()
+            f"org_{namespace}").delete()
 
 
 def _fake_extract_factory(calls: list):

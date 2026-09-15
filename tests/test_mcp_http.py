@@ -115,20 +115,20 @@ class TestContextVarsAndSdk:
         # Isolate: no URI → embedded mode; reset module global for identity check
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         ma.sdk = None
-        token = ma._current_team_id.set(None)
+        token = ma._current_org_id.set(None)
         try:
             assert ma._get_team_sdk() is ma._get_base_sdk()
         finally:
-            ma._current_team_id.reset(token)
+            ma._current_org_id.reset(token)
             ma.sdk = None
 
     def test_team_sdk_returns_team_scoped_when_set(self):
-        from tortoise.mcp_auth import _current_team_id, _get_team_sdk
-        token = _current_team_id.set("team-abc")
+        from tortoise.mcp_auth import _current_org_id, _get_team_sdk
+        token = _current_org_id.set("team-abc")
         try:
             assert isinstance(_get_team_sdk(), TortoiseSDK)
         finally:
-            _current_team_id.reset(token)
+            _current_org_id.reset(token)
 
     def test_http_allowed_populated_default_deny(self):
         from tortoise.mcp_auth import HTTP_ALLOWED
@@ -611,16 +611,16 @@ class TestOnboardingToolGating:
         assert r.status_code == 200, r.text
         return {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
 
-    def _build_client(self, tmp_path, monkeypatch, team_name):
+    def _build_client(self, tmp_path, monkeypatch, org_name):
         """Registry on TORTOISE_DB_PATH (so hosted_api onboarding-state reads
         hit the same graph the middleware authenticates against) + MCP app."""
         import os as _os  # noqa: F401, I001
         from tortoise.mcp_server import create_http_app
-        db_path = str(tmp_path / f"{team_name}.db")
+        db_path = str(tmp_path / f"{org_name}.db")
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create(team_name)
+        team = reg.team_create(org_name)
         key = reg.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         return _mounted_test_client(app), key, team["id"]
@@ -664,7 +664,7 @@ class TestOnboardingToolGating:
     def test_onboarding_tools_hidden_after_completion(self, tmp_path, monkeypatch):
         from tortoise.hosted_api import _update_onboarding_state  # noqa: I001
         from tortoise import mcp_server
-        tc, key, team_id = self._build_client(tmp_path, monkeypatch, "onb-team")
+        tc, key, org_id = self._build_client(tmp_path, monkeypatch, "onb-team")
         with tc:
             # Onboarding incomplete → onboarding tools ARE listed
             names = self._list_names(tc, key)
@@ -673,7 +673,7 @@ class TestOnboardingToolGating:
                 f"{self.ONBOARDING_TOOLS - names}")
             # Complete onboarding through the canonical state writer, then
             # clear the 60s per-team gate cache so the next list re-reads.
-            _update_onboarding_state(team_id, onboarding_complete=True)
+            _update_onboarding_state(org_id, onboarding_complete=True)
             mcp_server._onboarding_state_cache.clear()
             # Onboarding complete → onboarding tools retired from the listing
             names2 = self._list_names(tc, key)
@@ -713,7 +713,7 @@ class TestOnboardingToolGating:
     def test_fail_open_when_onboarding_state_unreadable(self, tmp_path, monkeypatch):
         """A control-plane read failure must NOT hide onboarding tools — a
         transient outage must not strand a team mid-onboarding (fail-open)."""
-        def _boom(team_id):
+        def _boom(org_id):
             raise RuntimeError("control plane down")
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _boom)
         from tortoise import mcp_server
@@ -731,18 +731,18 @@ class TestOnboardingToolGating:
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
         calls = {"n": 0}
-        def _state(team_id):
+        def _state(org_id):
             calls["n"] += 1
             return {"onboarding_complete": True}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("cache-team")
+        tok = mcp_auth._current_org_id.set("cache-team")
         try:
             assert mcp_server._team_onboarding_complete() is True
             assert mcp_server._team_onboarding_complete() is True  # cached
             assert calls["n"] == 1, f"re-fetched within TTL: {calls['n']} reads"
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
 
     def test_gate_cache_ttl_expiry_refetches(self, monkeypatch):
@@ -751,19 +751,19 @@ class TestOnboardingToolGating:
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
         calls = {"n": 0}
-        def _state(team_id):
+        def _state(org_id):
             calls["n"] += 1
             return {"onboarding_complete": True}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         monkeypatch.setattr(mcp_server, "_ONBOARDING_STATE_TTL", 0.0)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("ttl-team")
+        tok = mcp_auth._current_org_id.set("ttl-team")
         try:
             assert mcp_server._team_onboarding_complete() is True
             assert mcp_server._team_onboarding_complete() is True
             assert calls["n"] == 2, f"TTL=0 must refetch: {calls['n']} reads"
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
 
     def test_gate_failed_read_not_cached(self, monkeypatch):
@@ -773,14 +773,14 @@ class TestOnboardingToolGating:
         from tortoise import mcp_server  # noqa: I001
         from tortoise import mcp_auth
         calls = {"n": 0}
-        def _state(team_id):
+        def _state(org_id):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("transient")
             return {"onboarding_complete": False}
         monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _state)
         mcp_server._onboarding_state_cache.clear()
-        tok = mcp_auth._current_team_id.set("retry-team")
+        tok = mcp_auth._current_org_id.set("retry-team")
         try:
             assert mcp_server._team_onboarding_complete() is False  # fail-open
             assert mcp_server._team_onboarding_complete() is False  # retried read
@@ -789,7 +789,7 @@ class TestOnboardingToolGating:
             assert mcp_server._team_onboarding_complete() is False
             assert calls["n"] == 2, "successful read should now be cached"
         finally:
-            mcp_auth._current_team_id.reset(tok)
+            mcp_auth._current_org_id.reset(tok)
             mcp_server._onboarding_state_cache.clear()
 
 
@@ -821,7 +821,7 @@ class TestGraphBoundKeyTeamSurfaceReject:
         from tortoise.auth import hash_api_key
         token = "tk_" + _uuid.uuid4().hex
         reg._get_registry().query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:'#2300', graph_id:$gid, "
             "scopes:$scopes, delegation_depth:$dd})",
             params={"id": f"k-{_uuid.uuid4().hex[:8]}", "tid": tid,
@@ -833,7 +833,7 @@ class TestGraphBoundKeyTeamSurfaceReject:
     def _env(self, tmp_path, monkeypatch, name):
         """Registry on TORTOISE_DB_PATH + team + default graph + one custom
         graph (the per-graph keys bind here) + mounted MCP app. Returns
-        (reg, team_id, graph_id, tc)."""
+        (reg, org_id, graph_id, tc)."""
         from tortoise.mcp_server import create_http_app
         db_path = str(tmp_path / f"{name}.db")
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
@@ -1085,7 +1085,7 @@ class TestContextVarNoLeak:
         assert r.status_code == 401
         # After the request completes, ContextVar should be back to None
         # (fresh asyncio task per request — contextvars copy-on-write).
-        assert ma._current_team_id.get() is None
+        assert ma._current_org_id.get() is None
 
 
 class TestInputCaps:
@@ -1130,8 +1130,8 @@ class TestQuotaEnforcement:
         with tc:
             yield tc, reg, key, tid
 
-    def _set_max_points(self, reg_sdk, team_id, value):
-        reg_sdk.team_update(team_id, max_points=value)
+    def _set_max_points(self, reg_sdk, org_id, value):
+        reg_sdk.team_update(org_id, max_points=value)
 
     def test_create_point_blocked_at_cap(self, quota_client):
         """A team at its points cap gets ERR_QUOTA on create_point (HTTP)."""
@@ -1528,7 +1528,7 @@ class TestGraphSetRecordingHTTP:
             result = self._unwrap(body)
             assert result.get("recording") is None, body
             rows = reg._get_registry().query(
-                "MATCH (g:Graph {team_id:$tid, kind:'default'}) "
+                "MATCH (g:Graph {org_id:$tid, kind:'default'}) "
                 "RETURN g.recording",
                 params={"tid": team["id"]},
             ).result_set

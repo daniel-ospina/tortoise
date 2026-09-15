@@ -62,19 +62,19 @@ class TestAliasActorUserId:
     """Canonical actor_user_id key — UUID-gated, additive, never fabricated."""
 
     def test_aliases_user_id(self):
-        team = {"team_id": "t1", "user_id": UUID_A, "client_id": "c1"}
+        team = {"org_id": "t1", "user_id": UUID_A, "client_id": "c1"}
         out = _alias_actor_user_id(team)
         assert out["actor_user_id"] == UUID_A
         # additive — pre-existing keys untouched
-        assert out["team_id"] == "t1" and out["client_id"] == "c1"
+        assert out["org_id"] == "t1" and out["client_id"] == "c1"
 
     def test_aliases_created_by(self):
-        team = {"team_id": "t1", "created_by": UUID_A}
+        team = {"org_id": "t1", "created_by": UUID_A}
         assert _alias_actor_user_id(team)["actor_user_id"] == UUID_A
 
     def test_aliases_session_user_id(self):
         # Session-lane dict shape: user["user_id"] attached as session_user_id
-        team = {"team_id": "t1", "session_user_id": UUID_A, "auth_lane": "session"}
+        team = {"org_id": "t1", "session_user_id": UUID_A, "auth_lane": "session"}
         assert _alias_actor_user_id(team)["actor_user_id"] == UUID_A
 
     def test_never_aliases_non_uuid_shapes(self):
@@ -85,13 +85,13 @@ class TestAliasActorUserId:
             assert "actor_user_id" not in out
 
     def test_no_raw_field_leaves_no_actor(self):
-        team = {"team_id": "t1"}
+        team = {"org_id": "t1"}
         out = _alias_actor_user_id(team)
         assert "actor_user_id" not in out
-        assert out["team_id"] == "t1"
+        assert out["org_id"] == "t1"
 
     def test_never_removes_existing_actor(self):
-        team = {"team_id": "t1", "actor_user_id": "kept",
+        team = {"org_id": "t1", "actor_user_id": "kept",
                 "created_by": "api"}
         out = _alias_actor_user_id(team)
         assert out["actor_user_id"] == "kept"
@@ -114,7 +114,7 @@ class TestOauthResolverRawActor:
                 "token_hash": "x" * 64,
                 "client_id": "client-1",
                 "user_id": user_uuid,
-                "team_id": "team-oat",
+                "org_id": "team-oat",
                 "scope": "read",
                 "expires_at": (datetime.now(UTC) + timedelta(hours=1))
                 .isoformat(),
@@ -131,7 +131,7 @@ class TestOauthResolverRawActor:
         assert team["user_id"] == user_uuid
         assert team["client_id"] == "client-1"
         # additive — the quota/team shape is still present
-        assert team["team_id"] == "team-oat"
+        assert team["org_id"] == "team-oat"
         assert "tier" in team
 
     def test_revoked_token_returns_none(self, monkeypatch):
@@ -146,7 +146,7 @@ class TestOauthResolverRawActor:
                 "token_hash": _sha256("oat_revokedtoken"),
                 "client_id": "client-1",
                 "user_id": "550e8400-e29b-41d4-a716-446655440000",
-                "team_id": "team-oat",
+                "org_id": "team-oat",
                 "scope": "read",
                 "expires_at": (datetime.now(UTC) + timedelta(hours=1))
                 .isoformat(),
@@ -177,7 +177,7 @@ class TestRegistryApikeyVerifyRawCreatedBy:
         assert resolved is not None
         assert resolved["created_by"] == creator
         # additive — pre-existing return keys untouched
-        assert resolved["team_id"] == team["id"]
+        assert resolved["org_id"] == team["id"]
         assert "delegation_depth" in resolved
         assert "scopes" in resolved
 
@@ -444,7 +444,7 @@ class TestMcpBoundaryStripAndIgnore:
         success (no 4xx) and the node carries no forged key. Run with a
         minimal hosted team context."""
         from tortoise.mcp_auth import (  # noqa: I001
-            _current_team_id, _current_team_limits, _transport_mode)
+            _current_org_id, _current_team_limits, _transport_mode)
         from tortoise.mcp_server import tortoise_create_point
         import os
         os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
@@ -454,9 +454,9 @@ class TestMcpBoundaryStripAndIgnore:
             _ha._make_sdk(namespace="registry")._get_registry().query(
                 "CREATE (t:Team {id:$id})",
                 params={"id": "team-strip-2600"})
-            tok_t = _current_team_id.set("team-strip-2600")
+            tok_t = _current_org_id.set("team-strip-2600")
             tok_l = _current_team_limits.set(
-                {"team_id": "team-strip-2600", "tier": "free",
+                {"org_id": "team-strip-2600", "tier": "free",
                  "max_points": 100000})
             tok_m = _transport_mode.set("http")
             try:
@@ -473,7 +473,7 @@ class TestMcpBoundaryStripAndIgnore:
                 assert list(rows[0]) == [None, None, None], \
                     f"forged claims must never reach the node: {rows}"
             finally:
-                _current_team_id.reset(tok_t)
+                _current_org_id.reset(tok_t)
                 _current_team_limits.reset(tok_l)
                 _transport_mode.reset(tok_m)
 
@@ -490,7 +490,7 @@ class TestMcpToolSweepStripActor:
         import os
 
         from tests._http_fixtures import patched_tortoise_sdk
-        from tortoise.mcp_auth import _current_team_id, _current_team_limits, _transport_mode
+        from tortoise.mcp_auth import _current_org_id, _current_team_limits, _transport_mode
         os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
 
         @contextlib.contextmanager
@@ -500,15 +500,15 @@ class TestMcpToolSweepStripActor:
                 _ha._make_sdk(namespace="registry")._get_registry().query(
                     "CREATE (t:Team {id:$id})",
                     params={"id": "team-sweep-2600"})
-                tok_t = _current_team_id.set("team-sweep-2600")
+                tok_t = _current_org_id.set("team-sweep-2600")
                 tok_l = _current_team_limits.set(
-                    {"team_id": "team-sweep-2600", "tier": "free",
+                    {"org_id": "team-sweep-2600", "tier": "free",
                      "max_points": 100000})
                 tok_m = _transport_mode.set("http")
                 try:
                     yield
                 finally:
-                    _current_team_id.reset(tok_t)
+                    _current_org_id.reset(tok_t)
                     _current_team_limits.reset(tok_l)
                     _transport_mode.reset(tok_m)
         return _mgr()

@@ -2,7 +2,7 @@
 
 > Issue-scoping CONVERGENCE artifact for the confirmed problem: identity facts
 > conflated across `teams.email` (globally-unique team attribute), the user
-> anchor (`team_memberships.user_id` + GoTrue `auth.identities`), and
+> anchor (`org_memberships.user_id` + GoTrue `auth.identities`), and
 > `api_keys.created_by` (mixed attribution). Supersedes the divergence artifact
 > (`2026-08-26-identity-linking-solution-approaches.md`) by SELECTING a winner.
 > Verified against source 2026-08-26.
@@ -35,7 +35,7 @@ The platform stores three different "who is the user" facts in three places:
    path (claim RPC Step 6, unconditional P1-FIX-B), and the onboarding email
    seam (`PATCH /v1/onboarding/state`, `hosted_api.py:8204`). It doubles as the
    signup idempotency key (`team_by_email`, `hosted_api.py:~3003`).
-2. **The user anchor** — `team_memberships.user_id` + GoTrue
+2. **The user anchor** — `org_memberships.user_id` + GoTrue
    `auth.identities` (provider rows). `#2085`: `updateUser({password})` adds
    password capability WITHOUT an `auth.identities` row, so password is a
    third, service-role-only signal (`auth.users.encrypted_password IS NOT
@@ -142,7 +142,7 @@ The banner inventory has three tiers; two of them are **not client-readable**:
 |---|---|---|
 | Identities | `auth.identities` | service role only (not browser-queryable without RLS/RPC, C14) |
 | Password capability | `auth.users.encrypted_password IS NOT NULL` (**#2085**: `updateUser({password})` leaves no identity row) | service role only — **GoTrue's REST/admin API does NOT expose it** |
-| Keys as credentials | `api_keys` × `team_memberships` | control plane, with C10 exclusion |
+| Keys as credentials | `api_keys` × `org_memberships` | control plane, with C10 exclusion |
 
 So the banner **must** be assembled server-side; there is no client-computable
 shortcut. `GET /v1/user/identity` returns the assembled inventory AND the
@@ -210,7 +210,7 @@ copy, not just the code.
 [hosted_api]  POST /v1/user/username ─► reserve_username(p_user_id, p_username)
         │  (SECURITY DEFINER RPCs, service_role-only — C18 precedent)   │
         ▼                                                              ▼
-auth.identities · auth.users(encrypted_password) · user_usernames   api_keys × team_memberships
+auth.identities · auth.users(encrypted_password) · user_usernames   api_keys × org_memberships
 api_keys(created_by, C10-filtered)                                 (keys tier)
 ```
 
@@ -361,7 +361,7 @@ delete it performs. Both must pass.
    - `user_identity_inventory(p_user_id uuid) RETURNS jsonb` — SECURITY
      DEFINER, GRANT service_role ONLY (C18): identities from
      `auth.identities`, `has_password` from `auth.users.encrypted_password`,
-     keys tier from `api_keys` × `team_memberships` (attribution rule: `created_by
+     keys tier from `api_keys` × `org_memberships` (attribution rule: `created_by
      = p_user_id` OR team-owner-claimed — see step 4 which makes this exact),
      C10 exclusions, `ways_in`, `banner.show`, username.
    - `reserve_username(p_user_id uuid, p_username text) RETURNS jsonb` /
@@ -370,7 +370,7 @@ delete it performs. Both must pass.
      (`username_taken`, `username_invalid`).
    - **Claim RPC additive step (conflation root-fix):** inside the claim
      transaction, `UPDATE public.api_keys SET created_by = p_user_id WHERE
-     team_id = v_team_id AND (created_by LIKE 'anon-%' OR created_by LIKE
+     org_id = v_org_id AND (created_by LIKE 'anon-%' OR created_by LIKE
      'reg-%')` — post-claim the team has exactly one human owner
      (first-claim-wins), so the migration is unambiguous. Makes the keys tier
      exact.

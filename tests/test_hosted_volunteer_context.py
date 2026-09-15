@@ -28,7 +28,7 @@ from tortoise.hosted_api import (
 )
 from tortoise.sdk import TortoiseSDK
 
-TEST_TEAM_ID = "team-001"
+TEST_ORG_ID = "team-001"
 
 
 # ── fixtures (auth-override lane, mirrors test_hosted_api) ─────────────────
@@ -40,7 +40,7 @@ def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_team] = lambda: dict(
-            {"team_id": TEST_TEAM_ID, "tier": "free", "key_id": None})
+            {"org_id": TEST_ORG_ID, "tier": "free", "key_id": None})
         _orig_init = ha_mod.TortoiseSDK.__init__
 
         def _patched_init(self, db_path_arg=None, *, namespace=None,
@@ -60,10 +60,10 @@ def client():
             app.dependency_overrides.clear()
 
 
-def _seed_team_sdk(team_id: str = TEST_TEAM_ID) -> TortoiseSDK:
+def _seed_team_sdk(org_id: str = TEST_ORG_ID) -> TortoiseSDK:
     """Open the same lane's team SDK for direct seeding."""
     import tortoise.hosted_api as ha_mod
-    return ha_mod._make_sdk(namespace=team_id)
+    return ha_mod._make_sdk(namespace=org_id)
 
 
 def _plant_contested(sdk, content: str, counter_content: str) -> str:
@@ -320,7 +320,7 @@ def test_429_rate_limit_retry_after_backoff_safe(monkeypatch):
     # Reuse the real handler (real pipeline + real auth dependency overridden
     # to the no-key lane) — the limiter sees no Bearer → per-IP bucket.
     async def _team():
-        return {"team_id": TEST_TEAM_ID, "tier": "free", "key_id": None}
+        return {"org_id": TEST_ORG_ID, "tier": "free", "key_id": None}
 
     mini.dependency_overrides[get_current_team_gated] = _team
     mini.add_api_route("/v1/context", ha_mod.volunteer_context,
@@ -384,7 +384,7 @@ def _mint_api_key(real_auth, provisioned: dict) -> str:
     schema parity: hash_api_key + key_prefix token[:10] + expires_at null).
     The Bearer token authenticates through the REAL get_current_team verify
     path (PBKDF2 + prefix scan + team resolution + suspension check) and the
-    per-request _data_sdk(namespace=team_id) tenancy path.
+    per-request _data_sdk(namespace=org_id) tenancy path.
 
     NOTE (the #2083 external-tenancy fallback, documented): provision_test_user
     scopes its OWN control plane per namespace (``{ns}_control_plane``), which
@@ -399,11 +399,11 @@ def _mint_api_key(real_auth, provisioned: dict) -> str:
     token = f"tt_{uuid.uuid4().hex}"
     reg = real_auth.ha_mod._make_sdk(namespace="registry")._get_registry()
     reg.query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
         "key_prefix:$kp, created_by:$cb, created_via:'provisioned', "
         "created_at:$now, expires_at:null})",
         params={"id": f"key-{os.urandom(4).hex()}",
-                "tid": provisioned["team_id"],
+                "tid": provisioned["org_id"],
                 "kh": hash_api_key(token), "kp": token[:10],
                 "cb": provisioned["user_id"],
                 "now": datetime.now(UTC).isoformat()},
@@ -411,11 +411,11 @@ def _mint_api_key(real_auth, provisioned: dict) -> str:
     return token
 
 
-def _plant_team_fact(real_auth, team_id: str, content: str,
+def _plant_team_fact(real_auth, org_id: str, content: str,
                      counter: str | None = None) -> str:
     """Seed a measured belief in the team's data graph via the SAME tenancy
-    resolver the endpoint uses (per-request _make_sdk(namespace=team_id))."""
-    sdk = real_auth.ha_mod._make_sdk(namespace=team_id)
+    resolver the endpoint uses (per-request _make_sdk(namespace=org_id))."""
+    sdk = real_auth.ha_mod._make_sdk(namespace=org_id)
     claim = sdk.create_point("statement", content)
     proj = sdk._get_proj()
     proj.g.query(
@@ -434,17 +434,17 @@ def _plant_team_fact(real_auth, team_id: str, content: str,
 
 
 def test_two_teams_two_keys_zero_cross_team(provision_test_user, real_auth):
-    """R0 detection: per-request _make_sdk(namespace=team_id) tenancy — team
+    """R0 detection: per-request _make_sdk(namespace=org_id) tenancy — team
     B's key NEVER serves team A's context (0 cross-team), even on
     overlapping entity names (E2E-4 content isolation, not just names)."""
     team_a = provision_test_user(tier="free")
     team_b = provision_test_user(tier="free")
     a_claim = _plant_team_fact(
-        real_auth, team_a["team_id"],
+        real_auth, team_a["org_id"],
         "Harborlight gets a thirty percent allocation from Acme",
         "Harborlight allocation was cut to ten percent by Acme")
     _plant_team_fact(
-        real_auth, team_b["team_id"],
+        real_auth, team_b["org_id"],
         "Harborlight gets a five percent allocation from Beta Corp",
         "Harborlight allocation is under review by Beta Corp")
     key_a = _mint_api_key(real_auth, team_a)
@@ -528,7 +528,7 @@ def test_suspended_team_403(provision_test_user, real_auth):
     reg = real_auth.ha_mod._make_sdk(namespace="registry")._get_registry()
     reg.query(
         "MERGE (t:Team {id:$id}) SET t.suspended_at=$now",
-        params={"id": team["team_id"],
+        params={"id": team["org_id"],
                 "now": datetime.now(UTC).isoformat()})
     client = real_auth.client()
     with client:

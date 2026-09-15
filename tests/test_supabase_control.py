@@ -1,7 +1,7 @@
 """Unit tests for the Supabase control-plane auth resolution (#767, plan Task 3).
 
 Covers the lookup scheme (plan P1-1: lookup_hash exact-match against
-api_keys then team_memberships), authoritative revocation (P1-2:
+api_keys then org_memberships), authoritative revocation (P1-2:
 api_keys.revoked_at), #742 expiry, E2E-7-negative (registry-only key → None),
 fail-closed error behavior (P1-3 pattern), and tier/quota from teams — all
 against the in-memory FakeControlPlane (zero network).
@@ -94,7 +94,7 @@ TEAM_TIER_TEAM = {
 }
 
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs, so non-UUID user_id literals are prod-impossible test
 # artifacts (a non-UUID literal 22P02s → PostgREST 400, which
 # FakeControlPlane's fidelity check raises). Fixtures/filters use these
@@ -113,7 +113,7 @@ _U9 = "9f2c1a40-0000-4a00-8000-000000000009"
 
 def _key_row(**overrides) -> dict:
     row = {
-        "id": "key-001", "team_id": "team-free-001",
+        "id": "key-001", "org_id": "team-free-001",
         # Computed at CALL time, not import time: other test modules reload
         # tortoise.auth with different peppers (test_hosted_auth #6984 suite),
         # which mutates auth._PEPPER_BYTES mid-session — a frozen import-time
@@ -129,7 +129,7 @@ def _key_row(**overrides) -> dict:
 
 def _membership_row(**overrides) -> dict:
     row = {
-        "user_id": _U1, "team_id": "team-free-001",
+        "user_id": _U1, "org_id": "team-free-001",
         "lookup_hash": lookup_hash(TOKEN),
         "role": "owner", "status": "active", "identity": None,
     }
@@ -144,7 +144,7 @@ def fake() -> FakeControlPlane:
     # resolve/session tests.
     return FakeControlPlane({
         "api_keys": [],
-        "team_memberships": [],
+        "org_memberships": [],
         "teams": [dict(FREE_TEAM),
                    {"id": "team-1", "name": "Invite Team", "tier": "free",
                     "max_users": 100, "graph_name": "team_team-1"}],
@@ -171,7 +171,7 @@ class TestResolveApiKey:
         fake.seed("api_keys", [_key_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team is not None
-        assert team["team_id"] == "team-free-001"
+        assert team["org_id"] == "team-free-001"
         assert team["key_id"] == "key-001"
         assert team["tier"] == "free"
         assert team["created_via"] == "bootstrap"
@@ -180,20 +180,20 @@ class TestResolveApiKey:
         # exact-match index: only the api_keys table is consulted, no scans
         assert fake.query_count == 2  # api_keys + teams
 
-    def test_long_lived_key_resolves_via_team_memberships(self, fake):
+    def test_long_lived_key_resolves_via_org_memberships(self, fake):
         """Long-lived (provisioned) key with no api_keys row → membership path."""
-        fake.seed("team_memberships", [_membership_row()])
+        fake.seed("org_memberships", [_membership_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team is not None
-        assert team["team_id"] == "team-free-001"
+        assert team["org_id"] == "team-free-001"
         assert team["key_id"] is None  # no api_keys row to point at
         assert team["tier"] == "free"
 
     def test_revoked_twin_rejects_even_when_membership_matches(self, fake):
         """P1-2: api_keys.revoked_at is AUTHORITATIVE — a revoked twin rejects
-        even when the team_memberships row is active."""
+        even when the org_memberships row is active."""
         fake.seed("api_keys", [_key_row(revoked_at="2026-08-01T00:00:00Z")])
-        fake.seed("team_memberships", [_membership_row()])
+        fake.seed("org_memberships", [_membership_row()])
         assert resolve_api_key(fake, TOKEN) is None
 
     def test_expired_key_rejects(self, fake):
@@ -257,7 +257,7 @@ class TestResolveApiKey:
         """A long-lived key with no api_keys row (membership path) has no
         scopes/delegation → legacy full access (matches today)."""
         fake.tables["teams"] = [dict(FREE_TEAM)]
-        fake.seed("team_memberships", [_membership_row()])
+        fake.seed("org_memberships", [_membership_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team["graph_id"] is None
         assert team["scopes"] == []
@@ -274,7 +274,7 @@ class TestResolveApiKey:
             delegation_depth=0,
         )])
         fake.seed("graphs", [{
-            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "id": "g_abc123def4567890", "org_id": "team-free-001",
             "name": "prod", "kind": "custom",
             "namespace": "team_team-free-001_g_g_abc123def4567890",
             "status": "active",
@@ -330,7 +330,7 @@ class TestResolveApiKey:
         assert team["legacy_full_access"] is False
 
     def test_inactive_membership_does_not_resolve(self, fake):
-        fake.seed("team_memberships",
+        fake.seed("org_memberships",
                   [_membership_row(status="removed"), _membership_row(status="invited")])
         assert resolve_api_key(fake, TOKEN) is None
 
@@ -349,7 +349,7 @@ class TestResolveApiKey:
     def test_tier_and_quota_from_teams_row(self, fake):
         """Tier/quota come from the teams row (plan Task 3)."""
         fake.tables["teams"] = [dict(TEAM_TIER_TEAM)]
-        fake.seed("api_keys", [_key_row(team_id="team-team-001")])
+        fake.seed("api_keys", [_key_row(org_id="team-team-001")])
         team = resolve_api_key(fake, TOKEN)
         assert team["tier"] == "team"
         # Team tier = unlimited → None preserved (matches registry path)
@@ -387,7 +387,7 @@ class TestResolveApiKey:
     def test_dict_shape_matches_registry_contract(self, fake):
         fake.seed("api_keys", [_key_row()])
         team = resolve_api_key(fake, TOKEN)
-        for key in ("team_id", "key_id", "tier", "max_users", "max_graphs",
+        for key in ("org_id", "key_id", "tier", "max_users", "max_graphs",
                     "max_points", "max_api_keys", "max_sessions"):
             assert key in team, f"missing {key}"
 
@@ -408,7 +408,7 @@ class TestResolveApiKeyFailSoft:
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             team = resolve_api_key(fake, TOKEN)
         assert team is not None
-        assert team["team_id"] == "team-free-001"
+        assert team["org_id"] == "team-free-001"
         assert team["tier"] == "free"
         assert team["max_points"] == 10000
         assert team["suspended_at"] is None
@@ -521,10 +521,10 @@ class TestResolveApiKeyFailSoft:
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         try:
-            fake.seed("team_memberships", [{
+            fake.seed("org_memberships", [{
                 "user_id": "9f2c1a40-0000-4a00-8000-000000000001",
-                "team_id": "team-free-001", "role": "owner",
-                "status": "active", "team_name": "free-team",
+                "org_id": "team-free-001", "role": "owner",
+                "status": "active", "org_name": "free-team",
             }])
             fake.tables["teams"][0]["suspended_at"] = \
                 datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -568,10 +568,10 @@ class TestResolveApiKeyFailSoft:
         monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         try:
-            fake.seed("team_memberships", [{
+            fake.seed("org_memberships", [{
                 "user_id": "9f2c1a40-0000-4a00-8000-000000000001",
-                "team_id": "team-free-001", "role": "owner",
-                "status": "active", "team_name": "free-team",
+                "org_id": "team-free-001", "role": "owner",
+                "status": "active", "org_name": "free-team",
             }])
             request = Request({
                 "type": "http", "method": "GET", "path": "/v1/team",
@@ -656,7 +656,7 @@ class TestResolveApiKeyFailSoft:
         be read (same contract as team_by_id's deletion guard; suspension
         stays fail-soft, deletion fails-closed)."""
         fake = FakeControlPlane(
-            {"api_keys": [_key_row()], "team_memberships": [],
+            {"api_keys": [_key_row()], "org_memberships": [],
              "teams": [dict(FREE_TEAM)]},
             missing_columns={"teams": {"deleted_at", "grace_hours"}})
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
@@ -711,18 +711,18 @@ class TestResolveApiKeyFailSoft:
         """#1096: drift + absent team — the base retry returns [] → None
         (401), never a raise (fail-closed on not-found, fail-soft on drift)."""
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
-        fake.seed("api_keys", [_key_row(team_id="team-gone")])
+        fake.seed("api_keys", [_key_row(org_id="team-gone")])
         assert resolve_api_key(fake, TOKEN) is None
 
     def test_long_lived_key_resolves_under_0015_drift(self, fake):
-        """#1096: the team_memberships (long-lived key) branch drifts the
+        """#1096: the org_memberships (long-lived key) branch drifts the
         same way — the shared _teams_row_fail_soft teams read degrades
         identically; the membership query itself is drift-scoped."""
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
-        fake.seed("team_memberships", [_membership_row()])
+        fake.seed("org_memberships", [_membership_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team is not None
-        assert team["team_id"] == "team-free-001"
+        assert team["org_id"] == "team-free-001"
         assert team["suspended_at"] is None
         assert team["flagged_at"] is None
 
@@ -797,7 +797,7 @@ class TestTeamByID:
         fatal-path WARNING (the drift-diagnosability tripwire) fires and
         names the retry select."""
         fake = FakeControlPlane(
-            {"api_keys": [], "team_memberships": [], "teams": [dict(FREE_TEAM)]},
+            {"api_keys": [], "org_memberships": [], "teams": [dict(FREE_TEAM)]},
             missing_columns={"teams": {"deleted_at", "grace_hours"}})
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
             with pytest.raises(RuntimeError):
@@ -886,21 +886,21 @@ class TestEnvGating:
 
 class TestSessionHelpers:
     def test_user_memberships_active_only_no_placeholder(self, fake):
-        fake.seed("team_memberships", [
-            _membership_row(team_id="team-a", user_id=_U1, lookup_hash=None),
-            _membership_row(team_id="team-b", user_id=_U1, lookup_hash=None,
+        fake.seed("org_memberships", [
+            _membership_row(org_id="team-a", user_id=_U1, lookup_hash=None),
+            _membership_row(org_id="team-b", user_id=_U1, lookup_hash=None,
                             status="removed"),
-            _membership_row(team_id="", user_id=_U1, lookup_hash=None),
+            _membership_row(org_id="", user_id=_U1, lookup_hash=None),
         ])
         got = user_memberships(fake, _U1)
-        assert got == [{"team_id": "team-a", "role": "owner"}]
+        assert got == [{"org_id": "team-a", "role": "owner"}]
 
     def test_membership_for_user_team(self, fake):
-        fake.seed("team_memberships", [
-            _membership_row(team_id="team-a", user_id=_U1, lookup_hash=None),
+        fake.seed("org_memberships", [
+            _membership_row(org_id="team-a", user_id=_U1, lookup_hash=None),
         ])
         assert membership_for_user_team(fake, _U1, "team-a") == {
-            "team_id": "team-a", "role": "owner"}
+            "org_id": "team-a", "role": "owner"}
         assert membership_for_user_team(fake, _U1, "team-b") is None
 
     def test_team_by_id_returns_row(self, fake):
@@ -998,17 +998,17 @@ class TestInvitationSeam:
     rejected (E2E-3).
     """
 
-    def _owner(self, fake, team_id="team-1", user_id=_U3):
-        fake.seed("team_memberships", [{
-            "user_id": user_id, "team_id": team_id,
+    def _owner(self, fake, org_id="team-1", user_id=_U3):
+        fake.seed("org_memberships", [{
+            "user_id": user_id, "org_id": org_id,
             "role": "owner", "status": "active",
         }])
         # Accept's quota/tier gate (PR #864 review P2) reads the teams row —
         # seed it with a generous member cap unless a test overrides.
-        if not any(t.get("id") == team_id for t in fake.tables.get("teams", [])):
+        if not any(t.get("id") == org_id for t in fake.tables.get("teams", [])):
             fake.seed("teams", [{
-                "id": team_id, "name": "Invite Team", "tier": "free",
-                "max_users": 100, "graph_name": f"team_{team_id}",
+                "id": org_id, "name": "Invite Team", "tier": "free",
+                "max_users": 100, "graph_name": f"org_{org_id}",
             }])
 
     # ── mint ───────────────────────────────────────────────────────────
@@ -1025,7 +1025,7 @@ class TestInvitationSeam:
         # token stored ONLY as SHA-256(pepper + token) — O(1) indexed verify
         assert row["lookup_hash"] == lookup_hash(inv["token"])
         assert row["status"] == "pending"
-        assert row["team_id"] == "team-1"
+        assert row["org_id"] == "team-1"
         assert row["email"] == "bob@example.com"
         assert row["invited_by"] == "owner-1"
         # 7-day expiry (default)
@@ -1034,7 +1034,7 @@ class TestInvitationSeam:
         assert timedelta(days=6) < exp - now < timedelta(days=8)
 
     def test_mint_rejects_duplicate_pending(self, fake):
-        """Dedup: partial unique (team_id, email) WHERE status='pending'."""
+        """Dedup: partial unique (org_id, email) WHERE status='pending'."""
         invitation_mint(fake, "team-1", "bob@example.com", "admin", "u1")
         with pytest.raises(InvitationError) as ei:
             invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
@@ -1066,12 +1066,12 @@ class TestInvitationSeam:
         inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
                               "owner-1")
         result = invitation_accept(fake, inv["token"], _U2)
-        assert result == {"team_id": "team-1", "role": "admin"}
+        assert result == {"org_id": "team-1", "role": "admin"}
 
-        mem = fake.tables["team_memberships"]
+        mem = fake.tables["org_memberships"]
         assert len(mem) == 1
         assert mem[0]["user_id"] == _U2
-        assert mem[0]["team_id"] == "team-1"
+        assert mem[0]["org_id"] == "team-1"
         assert mem[0]["role"] == "admin"  # invited role preserved (O/I/T)
         assert mem[0]["status"] == "active"
         assert mem[0]["invited_email"] == "bob@example.com"
@@ -1084,7 +1084,7 @@ class TestInvitationSeam:
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
         invitation_accept(fake, inv["token"], _U2)
-        assert fake.tables["team_memberships"][0]["role"] == "member"
+        assert fake.tables["org_memberships"][0]["role"] == "member"
 
     def test_accept_unknown_token_rejected(self, fake):
         invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
@@ -1099,7 +1099,7 @@ class TestInvitationSeam:
         fake.tables["invitations"][0]["expires_at"] = past
         with pytest.raises(InvitationError, match="expired"):
             invitation_accept(fake, inv["token"], _U2)
-        assert fake.tables["team_memberships"] == []
+        assert fake.tables["org_memberships"] == []
 
     def test_accept_used_invite_rejected(self, fake):
         """E2E-3: a used invite cannot be re-accepted."""
@@ -1108,7 +1108,7 @@ class TestInvitationSeam:
         invitation_accept(fake, inv["token"], _U2)
         with pytest.raises(InvitationError, match="accepted"):
             invitation_accept(fake, inv["token"], _U5)
-        assert len(fake.tables["team_memberships"]) == 1  # no double join
+        assert len(fake.tables["org_memberships"]) == 1  # no double join
 
     def test_accept_revoked_invite_rejected(self, fake):
         """E2E-3: a revoked invite cannot be accepted."""
@@ -1120,13 +1120,13 @@ class TestInvitationSeam:
             invitation_accept(fake, inv["token"], _U2)
         # no membership created for the invitee (owner-1's row is the actor)
         assert all(m["user_id"] != _U2
-                   for m in fake.tables["team_memberships"])
+                   for m in fake.tables["org_memberships"])
 
     def test_accept_rejects_when_already_active_member(self, fake):
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        fake.seed("team_memberships", [{
-            "user_id": _U2, "team_id": "team-1",
+        fake.seed("org_memberships", [{
+            "user_id": _U2, "org_id": "team-1",
             "role": "member", "status": "active"}])
         with pytest.raises(InvitationError) as ei:
             invitation_accept(fake, inv["token"], _U2)
@@ -1138,11 +1138,11 @@ class TestInvitationSeam:
         row)."""
         inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
                               "owner-1")
-        fake.seed("team_memberships", [{
-            "id": "mem-1", "user_id": _U2, "team_id": "team-1",
+        fake.seed("org_memberships", [{
+            "id": "mem-1", "user_id": _U2, "org_id": "team-1",
             "role": "member", "status": "removed"}])
         invitation_accept(fake, inv["token"], _U2)
-        rows = fake.tables["team_memberships"]
+        rows = fake.tables["org_memberships"]
         assert len(rows) == 1
         assert rows[0]["status"] == "active"
         assert rows[0]["role"] == "admin"  # invited role wins
@@ -1155,14 +1155,14 @@ class TestInvitationSeam:
             invitation_accept(fake, inv["token"], _U2,
                               user_email="mallory@example.com")
         assert ei.value.status == 403
-        assert fake.tables["team_memberships"] == []
+        assert fake.tables["org_memberships"] == []
 
     def test_accept_email_guard_skipped_without_jwt_email(self, fake):
         """No email claim in the JWT → no guard (mirrors registry path)."""
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
         invitation_accept(fake, inv["token"], _U2, user_email=None)
-        assert len(fake.tables["team_memberships"]) == 1
+        assert len(fake.tables["org_memberships"]) == 1
 
     def test_accept_402_when_team_at_member_cap(self, fake):
         """Quota/tier gate parity with the registry accept path (code-review
@@ -1195,7 +1195,7 @@ class TestInvitationSeam:
                 self._fail_next_membership = False
 
             def query(self, table, **kw):
-                if table == "team_memberships" and kw.get("method") == "POST":
+                if table == "org_memberships" and kw.get("method") == "POST":
                     self._fail_next_membership = True
                     raise RuntimeError("simulated membership write failure")
                 return self._base.query(table, **kw)
@@ -1300,7 +1300,7 @@ class TestInvitationSeam:
                               "owner-1")
         # an owner of ANOTHER team cannot see this team's invite → 404
         # (role check passes for team-OTHER, but the id is not scoped there)
-        self._owner(fake, team_id="team-OTHER")
+        self._owner(fake, org_id="team-OTHER")
         with pytest.raises(InvitationError) as ei:
             invitation_rescind(fake, inv["id"], "team-OTHER", _U3)
         assert ei.value.status == 404
@@ -1514,7 +1514,7 @@ class TestTask8Helpers:
         key = "tt_provision_test_key_0000000000001"
         provision_team(fake, **{
             "p_user_id": None, "p_identity": "anon-abc123",
-            "p_team_id": "team-new-1", "p_team_name": "agent-new",
+            "p_org_id": "team-new-1", "p_org_name": "agent-new",
             "p_api_key": key, "p_key_hash": "salt:hash",
             "p_lookup_hash": lookup_hash(key),
             "p_graph_name": "team_team-new-1",
@@ -1523,14 +1523,14 @@ class TestTask8Helpers:
         })
         assert fake.rpc_calls[0][0] == "provision_team"
         assert any(t["id"] == "team-new-1" for t in fake.tables["teams"])
-        mem = [m for m in fake.tables["team_memberships"]
-               if m["team_id"] == "team-new-1"]
+        mem = [m for m in fake.tables["org_memberships"]
+               if m["org_id"] == "team-new-1"]
         assert len(mem) == 1
         assert mem[0]["user_id"] is None
         assert mem[0]["identity"] == "anon-abc123"
         assert mem[0]["role"] == "owner" and mem[0]["status"] == "active"
         keys = [k for k in fake.tables["api_keys"]
-                if k["team_id"] == "team-new-1"]
+                if k["org_id"] == "team-new-1"]
         assert len(keys) == 1
         assert keys[0]["lookup_hash"] == lookup_hash(key)
         assert keys[0]["created_via"] == "provisioned"
@@ -1543,7 +1543,7 @@ class TestTask8Helpers:
         key = "tt_provision_test_key_0000000000002"
         params = {
             "p_user_id": None, "p_identity": "anon-abc123",
-            "p_team_id": "team-new-2", "p_team_name": "agent-new",
+            "p_org_id": "team-new-2", "p_org_name": "agent-new",
             "p_api_key": key, "p_key_hash": "salt:hash",
             "p_lookup_hash": lookup_hash(key),
             "p_graph_name": "team_team-new-2", "p_tier": "free",
@@ -1558,16 +1558,16 @@ class TestTask8Helpers:
         provision_team(fake, **params)
         assert len([t for t in fake.tables["teams"]
                     if t["id"] == "team-new-2"]) == 1
-        assert len([m for m in fake.tables["team_memberships"]
-                    if m["team_id"] == "team-new-2"]) == 1
+        assert len([m for m in fake.tables["org_memberships"]
+                    if m["org_id"] == "team-new-2"]) == 1
         # rotated key lands as a SECOND api_keys row (multi-key valid; free
         # tier caps at 2) — matching 0010's ON CONFLICT (lookup_hash)
         assert len([k for k in fake.tables["api_keys"]
-                    if k["team_id"] == "team-new-2"]) == 2
+                    if k["org_id"] == "team-new-2"]) == 2
 
     def test_provision_team_fail_closed_on_rpc_error(self):
         with pytest.raises(RuntimeError):
-            provision_team(ErrorControlPlane(), p_team_id="t")
+            provision_team(ErrorControlPlane(), p_org_id="t")
 
     def test_team_by_email_and_name(self, fake):
         fake.seed("teams", [{"id": "t1", "name": "acme",
@@ -1583,7 +1583,7 @@ class TestTask8Helpers:
             _key_row(id="k2", created_at="2026-08-01T00:00:00Z"),
             _key_row(id="k3", created_at="2026-08-02T00:00:00Z",
                      revoked_at="2026-08-03T00:00:00Z"),
-            _key_row(id="k4", team_id="team-other"),
+            _key_row(id="k4", org_id="team-other"),
         ])
         rows = team_api_keys(fake, "team-free-001")
         assert [r["id"] for r in rows] == ["k3", "k2", "k1"]
@@ -1609,7 +1609,7 @@ class TestTask8Helpers:
         row = api_key_by_id(fake, "key-001")
         # #1148: api_key_by_id now returns created_via + enabled for the
         # key-toggle guard (bootstrap keys can't be toggled).
-        assert row["team_id"] == "team-free-001"
+        assert row["org_id"] == "team-free-001"
         assert row["revoked_at"] is None
         assert row["created_via"] == "bootstrap"
         assert row["enabled"] is None
@@ -1619,7 +1619,7 @@ class TestTask8Helpers:
         """Rate-limit counts: gt cutoff + anchor match, NULL-anchored rows
         excluded."""
         recent = "2026-08-01T00:00:00Z"
-        fake.seed("team_memberships", [
+        fake.seed("org_memberships", [
             {"id": "m1", "user_id": _U1, "identity": None,
              "created_at": "2026-08-02T00:00:00Z"},
             {"id": "m2", "user_id": _U1, "identity": None,
@@ -1637,20 +1637,20 @@ class TestTask8Helpers:
             fake, cutoff=recent, identity="anon-other") == 0
 
     def test_team_members_active_and_invited_with_identity(self, fake):
-        fake.seed("team_memberships", [
-            {"id": "m1", "user_id": _U1, "team_id": "team-free-001",
+        fake.seed("org_memberships", [
+            {"id": "m1", "user_id": _U1, "org_id": "team-free-001",
              "identity": None, "role": "owner", "status": "active",
              "invited_email": None},
-            {"id": "m2", "user_id": None, "team_id": "team-free-001",
+            {"id": "m2", "user_id": None, "org_id": "team-free-001",
              "identity": "anon-abc", "role": "member", "status": "active",
              "invited_email": None},
-            {"id": "m3", "user_id": _U2, "team_id": "team-free-001",
+            {"id": "m3", "user_id": _U2, "org_id": "team-free-001",
              "identity": None, "role": "member", "status": "invited",
              "invited_email": "bob@example.com"},
-            {"id": "m4", "user_id": _U3, "team_id": "team-free-001",
+            {"id": "m4", "user_id": _U3, "org_id": "team-free-001",
              "identity": None, "role": "member", "status": "removed",
              "invited_email": None},
-            {"id": "m5", "user_id": _U4, "team_id": "team-other",
+            {"id": "m5", "user_id": _U4, "org_id": "team-other",
              "identity": None, "role": "member", "status": "active",
              "invited_email": None},
         ])
@@ -1667,11 +1667,11 @@ class TestTask8Helpers:
         # would 22P02 on INSERT); identity anchors stay non-UUID so the
         # identity path stays exercised.
         user_uuid = str(uuid.uuid4())
-        fake.seed("team_memberships", [
-            {"id": "m1", "user_id": user_uuid, "team_id": "team-free-001",
+        fake.seed("org_memberships", [
+            {"id": "m1", "user_id": user_uuid, "org_id": "team-free-001",
              "identity": None, "role": "owner", "status": "active",
              "invited_email": None},
-            {"id": "m2", "user_id": None, "team_id": "team-free-001",
+            {"id": "m2", "user_id": None, "org_id": "team-free-001",
              "identity": "anon-abc", "role": "member", "status": "active",
              "invited_email": None},
         ])
@@ -1681,9 +1681,9 @@ class TestTask8Helpers:
         assert membership_role(fake, "team-free-001", "anon-abc") == "member"
         assert membership_role(fake, "team-free-001", "ghost") is None
         set_membership(fake, "team-free-001", "anon-abc", status="removed")
-        assert fake.tables["team_memberships"][1]["status"] == "removed"
+        assert fake.tables["org_memberships"][1]["status"] == "removed"
         set_membership(fake, "team-free-001", user_uuid, role="admin")
-        assert fake.tables["team_memberships"][0]["role"] == "admin"
+        assert fake.tables["org_memberships"][0]["role"] == "admin"
 
     def test_expired_bootstrap_keys(self, fake):
         past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
@@ -1701,11 +1701,11 @@ class TestTask8Helpers:
 
     def test_graph_metadata_derives_default(self, fake):
         """C1 (#2110): the seam emits the registry-shaped row
-        {graph_id, team_id, name, kind, namespace, status} — default derived
+        {graph_id, org_id, name, kind, namespace, status} — default derived
         from teams.graph_name (no row needed), status active."""
         fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
         assert graph_metadata(fake, "team-free-001") == [{
-            "graph_id": "default", "team_id": "team-free-001",
+            "graph_id": "default", "org_id": "team-free-001",
             "name": "default", "kind": "default",
             "namespace": "team_team-free-001", "status": "active",
             "recording": None}]  # recording key present both modes (#2110)
@@ -1728,12 +1728,12 @@ class TestTask8Helpers:
         assert sdk.graph_count("team-free-001") == 1
         # default + 1 active custom; deleted excluded → 2
         fake.seed("graphs", [{
-            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "id": "g_abc123def4567890", "org_id": "team-free-001",
             "name": "prod", "kind": "custom",
             "namespace": "team_team-free-001_g_g_abc123def4567890",
             "status": "active",
         }, {
-            "id": "g_deleted0000000", "team_id": "team-free-001",
+            "id": "g_deleted0000000", "org_id": "team-free-001",
             "name": "old", "kind": "custom",
             "namespace": "team_team-free-001_g_g_deleted0000000",
             "status": "deleted",
@@ -1752,12 +1752,12 @@ class TestTask8Helpers:
         default-only (D3 drift-safe)."""
         fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
         fake.seed("graphs", [{
-            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "id": "g_abc123def4567890", "org_id": "team-free-001",
             "name": "prod", "kind": "custom",
             "namespace": "team_team-free-001_g_g_abc123def4567890",
             "status": "active",
         }, {
-            "id": "g_deleted0000000", "team_id": "team-free-001",
+            "id": "g_deleted0000000", "org_id": "team-free-001",
             "name": "old", "kind": "custom",
             "namespace": "team_team-free-001_g_g_deleted0000000",
             "status": "deleted",
@@ -1775,7 +1775,7 @@ class TestTask8Helpers:
         """C1 (#2110): another team's graphs don't leak into the list."""
         fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
         fake.seed("graphs", [{
-            "id": "g_otherteam0001", "team_id": "team-other-000",
+            "id": "g_otherteam0001", "org_id": "team-other-000",
             "name": "theirs", "kind": "custom",
             "namespace": "team_team-other-000_g_g_otherteam0001",
             "status": "active",
@@ -2034,12 +2034,12 @@ class TestMeteringSeam:
                 # emulate the SQL function: upsert + increment
                 rows = self.tables["metering_records"]
                 row = next((r for r in rows
-                            if r["team_id"] == body["p_team_id"]
+                            if r["org_id"] == body["p_org_id"]
                             and r["period"] == body["p_period"]), None)
                 if row:
                     row["write_ops"] += body["p_n"]
                 else:
-                    rows.append({"team_id": body["p_team_id"],
+                    rows.append({"org_id": body["p_org_id"],
                                  "period": body["p_period"],
                                  "write_ops": body["p_n"]})
                 return None  # PostgREST minimal — no echo
@@ -2050,10 +2050,10 @@ class TestMeteringSeam:
         # #953: the RPC body carries p_nodes_written (epic #909 W-4 commit
         # cost driver; default 0 on plain increments).
         assert spy.rpc_calls == [
-            ("metering_increment", {"p_team_id": "team-1",
+            ("metering_increment", {"p_org_id": "team-1",
                                     "p_period": "2026-08", "p_n": 2,
                                     "p_nodes_written": 0}),
-            ("metering_increment", {"p_team_id": "team-1",
+            ("metering_increment", {"p_org_id": "team-1",
                                     "p_period": "2026-08", "p_n": 4,
                                     "p_nodes_written": 0}),
         ]
@@ -2075,7 +2075,7 @@ class TestMeteringSeam:
         spy = _Spy()
         metering_increment(spy, "team-1", "2026-08", 3, nodes_written=5)
         assert spy.rpc_calls == [
-            ("metering_increment", {"p_team_id": "team-1",
+            ("metering_increment", {"p_org_id": "team-1",
                                     "p_period": "2026-08", "p_n": 3,
                                     "p_nodes_written": 5}),
         ]
@@ -2149,7 +2149,7 @@ class TestResolveTeamLimitsSupabase:
 
         monkeypatch.setattr(q, "_make_sdk", lambda **kw: _Boom())
         limits = q.resolve_team_limits("team-1")
-        assert limits["team_id"] == "team-1"
+        assert limits["org_id"] == "team-1"
         assert limits["tier"] == "free"
         assert limits["max_users"] == 1
         assert limits["max_points"] == 10000
@@ -2179,16 +2179,16 @@ class TestResolveTeamLimitsSupabase:
 # over the FakeControlPlane emulation (which mirrors the SQL RPC semantics).
 
 
-def _provision_anon_team(fake: FakeControlPlane, *, team_id: str, identity: str,
+def _provision_anon_team(fake: FakeControlPlane, *, org_id: str, identity: str,
                          api_key: str, lookup: str | None = None,
                          email: str | None = None) -> None:
     """Provision an anonymous (NULL user_id) team via the fake RPC."""
     provision_team(fake, **{
-        "p_user_id": None, "p_identity": identity, "p_team_id": team_id,
-        "p_team_name": f"Anon {team_id}", "p_api_key": api_key,
+        "p_user_id": None, "p_identity": identity, "p_org_id": org_id,
+        "p_org_name": f"Anon {org_id}", "p_api_key": api_key,
         "p_key_hash": "salt:hash",
         "p_lookup_hash": lookup or lookup_hash(api_key),
-        "p_graph_name": f"team_{team_id}", "p_email": email,
+        "p_graph_name": f"org_{org_id}", "p_email": email,
         "p_key_prefix": api_key[:10], "p_tier": "free",
         "p_max_users": 1, "p_max_graphs": 1, "p_ops_allowance": 10000,
         "p_graph_size_cap": 10000,
@@ -2201,14 +2201,14 @@ class TestClaimSeam:
         NULL-user_id owner row gets user_id + identity=NULL; teams.email is
         NEVER written by claim (demotion) — same key intact, anon-/reg- keys
         attributed to the claimer."""
-        _provision_anon_team(fake, team_id="team-claim-1",
+        _provision_anon_team(fake, org_id="team-claim-1",
                              identity="anon-claim-1", api_key="tt_claim_1")
         fake.tables["api_keys"][0]["created_by"] = "anon-claim-1"
         claim_membership(fake, lookup_hash=lookup_hash("tt_claim_1"),
                          user_id=_U6, email="verified@example.com")
 
-        rows = fake.tables["team_memberships"]
-        owner = next(r for r in rows if r["team_id"] == "team-claim-1")
+        rows = fake.tables["org_memberships"]
+        owner = next(r for r in rows if r["org_id"] == "team-claim-1")
         assert owner["user_id"] == _U6
         assert owner["identity"] is None
         assert owner["role"] == "owner"
@@ -2219,25 +2219,25 @@ class TestClaimSeam:
         # created_by migration: anon- key attributed to the claimer
         assert fake.tables["api_keys"][0]["created_by"] == _U6
         # same key still resolves (indicator 1) — api_keys row untouched
-        assert resolve_api_key(fake, "tt_claim_1")["team_id"] == "team-claim-1"
+        assert resolve_api_key(fake, "tt_claim_1")["org_id"] == "team-claim-1"
         # anon predicate flips
         assert is_anon_team(fake, "team-claim-1") is False
 
     def test_claim_merge_promotes_existing_member(self, fake):
         """P3-FIX-R/P4: an existing (user, team) row is promoted to owner
         with the identity row's key material; a 'removed' row reactivates."""
-        _provision_anon_team(fake, team_id="team-merge-1",
+        _provision_anon_team(fake, org_id="team-merge-1",
                              identity="anon-merge-1", api_key="tt_merge_1")
-        fake.seed("team_memberships", [{
+        fake.seed("org_memberships", [{
             "id": "mem-user-merge", "user_id": _U7,
-            "team_id": "team-merge-1", "role": "member", "status": "removed",
+            "org_id": "team-merge-1", "role": "member", "status": "removed",
             "identity": None, "lookup_hash": None, "key_hash": "old-hash",
         }])
         claim_membership(fake, lookup_hash=lookup_hash("tt_merge_1"),
                          user_id=_U7, email="m@example.com")
 
-        rows = [r for r in fake.tables["team_memberships"]
-                if r["team_id"] == "team-merge-1"]
+        rows = [r for r in fake.tables["org_memberships"]
+                if r["org_id"] == "team-merge-1"]
         assert len(rows) == 1, f"merge must collapse to one row: {rows}"
         row = rows[0]
         assert row["user_id"] == _U7
@@ -2249,7 +2249,7 @@ class TestClaimSeam:
     def test_second_claim_409(self, fake):
         """first-claim-wins: a DIFFERENT user's claim raises ClaimError 409
         already_claimed after the team is claimed."""
-        _provision_anon_team(fake, team_id="team-wins-1",
+        _provision_anon_team(fake, org_id="team-wins-1",
                              identity="anon-wins-1", api_key="tt_wins_1")
         claim_membership(fake, lookup_hash=lookup_hash("tt_wins_1"),
                          user_id=_U8, email="a@example.com")
@@ -2261,55 +2261,55 @@ class TestClaimSeam:
 
     def test_claim_idempotent_same_user(self, fake):
         """P3-FIX-Q: re-claim by the SAME user is a noop success."""
-        _provision_anon_team(fake, team_id="team-idem-1",
+        _provision_anon_team(fake, org_id="team-idem-1",
                              identity="anon-idem-1", api_key="tt_idem_1")
         claim_membership(fake, lookup_hash=lookup_hash("tt_idem_1"),
                          user_id=_U8, email="a@example.com")
         claim_membership(fake, lookup_hash=lookup_hash("tt_idem_1"),
                          user_id=_U8, email="a2@example.com")  # no raise
-        rows = [r for r in fake.tables["team_memberships"]
-                if r["team_id"] == "team-idem-1"]
+        rows = [r for r in fake.tables["org_memberships"]
+                if r["org_id"] == "team-idem-1"]
         assert len(rows) == 1
 
     def test_claim_rejects_non_owner_row(self, fake):
         """non-owner-reject: an anon MEMBER row (role != 'owner') is never
         linked — the RPC only claims owner rows."""
-        _provision_anon_team(fake, team_id="team-nonown-1",
+        _provision_anon_team(fake, org_id="team-nonown-1",
                              identity="anon-nonown-1", api_key="tt_nonown_1")
-        for r in fake.tables["team_memberships"]:
-            if r["team_id"] == "team-nonown-1" and r["user_id"] is None:
+        for r in fake.tables["org_memberships"]:
+            if r["org_id"] == "team-nonown-1" and r["user_id"] is None:
                 r["role"] = "member"  # demote to anon member
         with pytest.raises(ClaimError) as ei:
             claim_membership(fake, lookup_hash=lookup_hash("tt_nonown_1"),
                              user_id=_U8, email="a@example.com")
         assert ei.value.code == "already_claimed"
-        row = next(r for r in fake.tables["team_memberships"]
-                   if r["team_id"] == "team-nonown-1")
+        row = next(r for r in fake.tables["org_memberships"]
+                   if r["org_id"] == "team-nonown-1")
         assert row["user_id"] is None
         assert row["identity"] == "anon-nonown-1"
 
     def test_claim_leaves_unrelated_null_user_rows_untouched(self, fake):
         """null-row-untouched: anon rows on OTHER teams (or non-owner rows on
         the same team) are never touched by a claim."""
-        _provision_anon_team(fake, team_id="team-t1",
+        _provision_anon_team(fake, org_id="team-t1",
                              identity="anon-t1", api_key="tt_t1")
-        _provision_anon_team(fake, team_id="team-t2",
+        _provision_anon_team(fake, org_id="team-t2",
                              identity="anon-t2", api_key="tt_t2")
         claim_membership(fake, lookup_hash=lookup_hash("tt_t1"),
                          user_id=_U8, email="a@example.com")
-        other = next(r for r in fake.tables["team_memberships"]
-                     if r["team_id"] == "team-t2")
+        other = next(r for r in fake.tables["org_memberships"]
+                     if r["org_id"] == "team-t2")
         assert other["user_id"] is None
         assert other["identity"] == "anon-t2"
 
     def test_claim_bootstrap_key_rejected(self, fake):
         """implementer advisory 1: session keys (created_via='bootstrap') can
         never claim — future-proofs merge/promote against member→owner."""
-        _provision_anon_team(fake, team_id="team-boot-1",
+        _provision_anon_team(fake, org_id="team-boot-1",
                              identity="anon-boot-1", api_key="tt_boot_1")
         # add a bootstrap session key for the SAME team
         fake.seed("api_keys", [{
-            "id": "key-sess-1", "team_id": "team-boot-1",
+            "id": "key-sess-1", "org_id": "team-boot-1",
             "lookup_hash": lookup_hash("tt_sess_1"), "created_via": "bootstrap",
             "created_by": "anon-boot-1", "expires_at": None, "revoked_at": None,
         }])
@@ -2329,36 +2329,36 @@ class TestClaimSeam:
         """#1765 demotion: claim never writes teams.email, so the same
         email across teams is legal — the claim SUCCEEDS and links the owner
         (uq_teams_email dropped; email_in_use is gone)."""
-        _provision_anon_team(fake, team_id="team-e1", identity="anon-e1",
+        _provision_anon_team(fake, org_id="team-e1", identity="anon-e1",
                              api_key="tt_e1", email="shared@example.com")
-        _provision_anon_team(fake, team_id="team-e2", identity="anon-e2",
+        _provision_anon_team(fake, org_id="team-e2", identity="anon-e2",
                              api_key="tt_e2")
         claim_membership(fake, lookup_hash=lookup_hash("tt_e2"),
                          user_id=_U8, email="shared@example.com")
-        row = next(r for r in fake.tables["team_memberships"]
-                   if r["team_id"] == "team-e2")
+        row = next(r for r in fake.tables["org_memberships"]
+                   if r["org_id"] == "team-e2")
         assert row["user_id"] == _U8  # linked — no collision
         team2 = next(t for t in fake.tables["teams"] if t["id"] == "team-e2")
         assert team2.get("email") is None  # claim never writes it
 
     def test_claim_drops_leftover_placeholder(self, fake):
-        """P3-FIX-Q tail: the user's placeholder row (team_id='') is dropped
+        """P3-FIX-Q tail: the user's placeholder row (org_id='') is dropped
         on claim — fresh, merge, AND idempotent paths."""
-        _provision_anon_team(fake, team_id="team-ph-1",
+        _provision_anon_team(fake, org_id="team-ph-1",
                              identity="anon-ph-1", api_key="tt_ph_1")
-        fake.seed("team_memberships", [{
-            "id": "ph-user", "user_id": _U8, "team_id": "",
+        fake.seed("org_memberships", [{
+            "id": "ph-user", "user_id": _U8, "org_id": "",
             "role": "owner", "status": "active", "identity": None,
         }])
         claim_membership(fake, lookup_hash=lookup_hash("tt_ph_1"),
                          user_id=_U8, email="a@example.com")
-        assert not any(r["team_id"] == "" and r["user_id"] == _U8
-                       for r in fake.tables["team_memberships"])
+        assert not any(r["org_id"] == "" and r["user_id"] == _U8
+                       for r in fake.tables["org_memberships"])
 
     def test_is_anon_team_predicate(self, fake):
         """The shared anon predicate: EXISTS active owner with user_id NULL.
         NOT the email proxy (reg- teams with teams.email set are anon)."""
-        _provision_anon_team(fake, team_id="team-anon-p", identity="anon-p",
+        _provision_anon_team(fake, org_id="team-anon-p", identity="anon-p",
                              api_key="tt_anon_p", email="reg@example.com")
         assert is_anon_team(fake, "team-anon-p") is True  # email set but anon
         claim_membership(fake, lookup_hash=lookup_hash("tt_anon_p"),
@@ -2409,11 +2409,11 @@ class TestIdentitySeam:
     def test_inventory_keys_tier_excludes_agent_principals(self, fake):
         self._seed_auth(fake, uid="u-keys", email="k@x.com", confirmed=True)
         fake.seed("api_keys", [
-            {"id": "k1", "team_id": "t1", "created_by": "u-keys",
+            {"id": "k1", "org_id": "t1", "created_by": "u-keys",
              "revoked_at": None, "enabled": True},
-            {"id": "k2", "team_id": "t2", "created_by": "anon-agent",
+            {"id": "k2", "org_id": "t2", "created_by": "anon-agent",
              "revoked_at": None, "enabled": True},
-            {"id": "k3", "team_id": "t3", "created_by": "u-keys",
+            {"id": "k3", "org_id": "t3", "created_by": "u-keys",
              "revoked_at": "2026-01-01T00:00:00Z", "enabled": True},
         ])
         inv = user_identity_inventory(fake, "u-keys")
@@ -2450,10 +2450,10 @@ class TestIdentitySeam:
         assert ei.value.code == "unlink_floor_violated"
 
     def test_owner_user_id_resolution(self, fake):
-        fake.seed("team_memberships", [
-            {"id": "m1", "team_id": "t-own", "user_id": "u-owner",
+        fake.seed("org_memberships", [
+            {"id": "m1", "org_id": "t-own", "user_id": "u-owner",
              "role": "owner", "status": "active"},
-            {"id": "m2", "team_id": "t-anon", "user_id": None,
+            {"id": "m2", "org_id": "t-anon", "user_id": None,
              "role": "owner", "status": "active", "identity": "anon-1"},
         ])
         assert owner_user_id(fake, "t-own") == "u-owner"
@@ -2476,20 +2476,20 @@ class TestGraphLifecycleSeam:
     def test_insert_graph_writes_row(self, fake):
         self._seed_team(fake)
         insert_graph(fake, {
-            "id": "g_c2test00000001", "team_id": "team-c2-001",
+            "id": "g_c2test00000001", "org_id": "team-c2-001",
             "name": "prod", "kind": "custom",
             "namespace": "team_team-c2-001_g_g_c2test00000001",
             "status": "active", "recording": None,
         })
         rows = fake.query("graphs", select=["id", "name", "status"],
-                          filters=[("team_id", "eq", "team-c2-001")])
+                          filters=[("org_id", "eq", "team-c2-001")])
         assert rows == [{"id": "g_c2test00000001", "name": "prod",
                          "status": "active"}]
 
     def test_soft_delete_tombstones_non_default(self, fake):
         self._seed_team(fake)
         insert_graph(fake, {
-            "id": "g_c2test00000002", "team_id": "team-c2-001",
+            "id": "g_c2test00000002", "org_id": "team-c2-001",
             "name": "prod", "kind": "custom",
             "namespace": "team_team-c2-001_g_g_c2test00000002",
             "status": "active", "recording": None,
@@ -2507,30 +2507,30 @@ class TestGraphLifecycleSeam:
     def test_delete_graph_row_rollback(self, fake):
         self._seed_team(fake)
         insert_graph(fake, {
-            "id": "g_c2test00000003", "team_id": "team-c2-001",
+            "id": "g_c2test00000003", "org_id": "team-c2-001",
             "name": "rb", "kind": "custom",
             "namespace": "team_team-c2-001_g_g_c2test00000003",
             "status": "active", "recording": None,
         })
         delete_graph_row(fake, "team-c2-001", "g_c2test00000003")
         assert fake.query("graphs", select=["id"],
-                          filters=[("team_id", "eq", "team-c2-001")]) == []
+                          filters=[("org_id", "eq", "team-c2-001")]) == []
 
     def test_count_graph_keys_active_only(self, fake):
         self._seed_team(fake)
         insert_graph(fake, {
-            "id": "g_c2test00000004", "team_id": "team-c2-001",
+            "id": "g_c2test00000004", "org_id": "team-c2-001",
             "name": "keys", "kind": "custom",
             "namespace": "team_team-c2-001_g_g_c2test00000004",
             "status": "active", "recording": None,
         })
         fake.seed("api_keys", [
-            {"id": "k1", "team_id": "team-c2-001", "lookup_hash": "h1",
+            {"id": "k1", "org_id": "team-c2-001", "lookup_hash": "h1",
              "graph_id": "g_c2test00000004", "revoked_at": None},
-            {"id": "k2", "team_id": "team-c2-001", "lookup_hash": "h2",
+            {"id": "k2", "org_id": "team-c2-001", "lookup_hash": "h2",
              "graph_id": "g_c2test00000004",
              "revoked_at": "2026-09-01T00:00:00Z"},
-            {"id": "k3", "team_id": "team-c2-001", "lookup_hash": "h3",
+            {"id": "k3", "org_id": "team-c2-001", "lookup_hash": "h3",
              "graph_id": None, "revoked_at": None},
         ])
         assert count_graph_keys(fake, "team-c2-001",
@@ -2552,9 +2552,9 @@ class TestGraphLifecycleSeam:
         before any lane count runs."""
         self._seed_team(fake)
         fake.seed("api_keys", [
-            {"id": "tw1", "team_id": "team-c2-001", "lookup_hash": "h1",
+            {"id": "tw1", "org_id": "team-c2-001", "lookup_hash": "h1",
              "graph_id": None, "revoked_at": None},
-            {"id": "tw2", "team_id": "team-c2-001", "lookup_hash": "h2",
+            {"id": "tw2", "org_id": "team-c2-001", "lookup_hash": "h2",
              "graph_id": None, "revoked_at": None},
         ])
         assert count_graph_keys(fake, "team-c2-001", "default") == 0
@@ -2562,13 +2562,13 @@ class TestGraphLifecycleSeam:
         # upsert (set_graph_recording); it carries its OWN g_ id, and any
         # api_keys row bound to it references THAT id (FK), never 'default'.
         insert_graph(fake, {
-            "id": "g_defrow0000001", "team_id": "team-c2-001",
+            "id": "g_defrow0000001", "org_id": "team-c2-001",
             "name": "default", "kind": "default",
             "namespace": "team_team-c2-001",
             "status": "active", "recording": None,
         })
         fake.seed("api_keys", [
-            {"id": "bd1", "team_id": "team-c2-001", "lookup_hash": "h3",
+            {"id": "bd1", "org_id": "team-c2-001", "lookup_hash": "h3",
              "graph_id": "g_defrow0000001", "revoked_at": None},
         ])
         # The default row's count (literal 'default') stays 0 …
@@ -2584,7 +2584,7 @@ class TestGraphLifecycleSeam:
     def _seed_tombstone(self, fake, gid="g_c2test00000005", purged_at=None):
         self._seed_team(fake)
         insert_graph(fake, {
-            "id": gid, "team_id": "team-c2-001", "name": "old",
+            "id": gid, "org_id": "team-c2-001", "name": "old",
             "kind": "custom",
             "namespace": f"team_team-c2-001_{gid}",
             "status": "deleted", "recording": None,
@@ -2596,7 +2596,7 @@ class TestGraphLifecycleSeam:
         grace window's start) alongside the tombstone flag."""
         self._seed_team(fake)
         insert_graph(fake, {
-            "id": "g_c2test00000009", "team_id": "team-c2-001",
+            "id": "g_c2test00000009", "org_id": "team-c2-001",
             "name": "prod", "kind": "custom",
             "namespace": "team_team-c2-001_g_g_c2test00000009",
             "status": "active", "recording": None,
@@ -2632,7 +2632,7 @@ class TestGraphLifecycleSeam:
         assert restore_graph(fake, "team-c2-001", "g_c2test00000007") is False
         # Default kind → refused.
         insert_graph(fake, {
-            "id": "g_c2test00000008", "team_id": "team-c2-001",
+            "id": "g_c2test00000008", "org_id": "team-c2-001",
             "name": "default", "kind": "default",
             "namespace": "team_team-c2-001", "status": "deleted",
             "recording": None,
@@ -2652,7 +2652,7 @@ class TestGraphLifecycleSeam:
         assert rows[0]["purged_residual"] is False
         # A restored (active) row is never purge-stamped.
         insert_graph(fake, {
-            "id": "g_c2test0000000a", "team_id": "team-c2-001",
+            "id": "g_c2test0000000a", "org_id": "team-c2-001",
             "name": "live", "kind": "custom",
             "namespace": "team_team-c2-001_g_g_c2test0000000a",
             "status": "active", "recording": None,
@@ -2677,7 +2677,7 @@ class TestC3KeyLifecycleSeam:
 
     def _seed_graph(self, fake, gid="g_c3test00000001"):
         fake.seed("graphs", [{
-            "id": gid, "team_id": "team-c3-001", "name": "acme",
+            "id": gid, "org_id": "team-c3-001", "name": "acme",
             "kind": "custom", "namespace": f"team_team-c3-001_g_{gid}",
             "status": "active", "recording": None,
         }])
@@ -2690,7 +2690,7 @@ class TestC3KeyLifecycleSeam:
         self._seed_graph(fake)
         token = "tk_c3test000000000000000001"
         insert_api_key(fake, {
-            "id": "k-c3-1", "team_id": "team-c3-001",
+            "id": "k-c3-1", "org_id": "team-c3-001",
             "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
             "created_via": "provisioned", "created_by": "user-1",
             "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
@@ -2716,7 +2716,7 @@ class TestC3KeyLifecycleSeam:
         self._seed_team(fake)
         token = "tt_c3test000000000000000002"
         insert_api_key(fake, {
-            "id": "k-c3-2", "team_id": "team-c3-001",
+            "id": "k-c3-2", "org_id": "team-c3-001",
             "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
             "created_via": "provisioned", "created_by": "user-1",
             "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
@@ -2737,7 +2737,7 @@ class TestC3KeyLifecycleSeam:
         self._seed_team(fake)
         token = "tk_c3test000000000000000003"
         insert_api_key(fake, {
-            "id": "k-c3-3", "team_id": "team-c3-001",
+            "id": "k-c3-3", "org_id": "team-c3-001",
             "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
             "created_via": "provisioned", "created_by": "user-1",
             "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
@@ -2762,21 +2762,21 @@ class TestInviteFusionV2Seam:
     store carries them without schema work.
     """
 
-    def _owner(self, fake, team_id="team-1", user_id=_U3):
-        fake.seed("team_memberships", [{
-            "user_id": user_id, "team_id": team_id,
+    def _owner(self, fake, org_id="team-1", user_id=_U3):
+        fake.seed("org_memberships", [{
+            "user_id": user_id, "org_id": org_id,
             "role": "owner", "status": "active",
         }])
-        if not any(t.get("id") == team_id for t in fake.tables.get("teams", [])):
+        if not any(t.get("id") == org_id for t in fake.tables.get("teams", [])):
             fake.seed("teams", [{
-                "id": team_id, "name": "Invite Team", "tier": "team",
-                "max_users": 100, "graph_name": f"team_{team_id}",
+                "id": org_id, "name": "Invite Team", "tier": "team",
+                "max_users": 100, "graph_name": f"org_{org_id}",
             }])
 
     def _pending_invite(self, fake, *, email="bob@example.com",
-                        team_id="team-1") -> dict:
-        self._owner(fake, team_id=team_id)
-        inv = invitation_mint(fake, team_id, email, "member", "owner-1")
+                        org_id="team-1") -> dict:
+        self._owner(fake, org_id=org_id)
+        inv = invitation_mint(fake, org_id, email, "member", "owner-1")
         return inv
 
     def _otp_for(self, fake, invitation_id: str, code: str) -> str:
@@ -2912,7 +2912,7 @@ class TestInviteFusionV2Seam:
         res = invitation_accept(fake, inv["token"], _U2,
                                 user_email="alice@example.com",
                                 mismatch_override="fuse", otp_code="123456")
-        assert res["team_id"] == "team-1"
+        assert res["org_id"] == "team-1"
         assert res["role"] == "member"
         assert res["accepted_via"] == "fuse"
         assert res["mismatch"] == {"invited_email": "bob@example.com",
@@ -2926,8 +2926,8 @@ class TestInviteFusionV2Seam:
         assert row["otp_verified_at"] is not None
         assert row["otp_verified_by"] == _U2
         # membership row under the CURRENT user (not bob)
-        mem = [m for m in fake.tables["team_memberships"]
-               if m.get("user_id") == _U2 and m.get("team_id") == "team-1"]
+        mem = [m for m in fake.tables["org_memberships"]
+               if m.get("user_id") == _U2 and m.get("org_id") == "team-1"]
         assert len(mem) == 1 and mem[0]["role"] == "member"
         # single-use token consumed
         with pytest.raises(InvitationError) as ei:
@@ -2970,7 +2970,7 @@ class TestInviteFusionV2Seam:
         res = invitation_accept(fake, inv["token"], _U2,
                                 user_email="alice@example.com",
                                 mismatch_override="fuse", otp_code="123456")
-        assert res["team_id"] == "team-1"
+        assert res["org_id"] == "team-1"
 
     # ── admin resend / expire ──────────────────────────────────────────
 
@@ -3060,11 +3060,11 @@ class _InterleaveLoserFake(FakeControlPlane):
                     "otp_attempts": 0,
                     "otp_verified_at": now,
                     "otp_verified_by": self.winner_uid})
-        self.tables.setdefault("team_memberships", []).append({
-            "id": f"mem-winner-{len(self.tables['team_memberships'])}",
+        self.tables.setdefault("org_memberships", []).append({
+            "id": f"mem-winner-{len(self.tables['org_memberships'])}",
             "user_id": self.winner_uid,
-            "team_id": row["team_id"],
-            "team_name": "", "key_hash": "pending",
+            "org_id": row["org_id"],
+            "org_name": "", "key_hash": "pending",
             "graph_name": "", "role": "member",
             "status": "active",
             "invited_email": row.get("email"),
@@ -3139,8 +3139,8 @@ class TestConcurrentAcceptSingleUseSupabase:
     commits at the loser's claim boundary."""
 
     def _seed(self, fake):
-        fake.seed("team_memberships", [{
-            "user_id": _U3, "team_id": "team-race-sb",
+        fake.seed("org_memberships", [{
+            "user_id": _U3, "org_id": "team-race-sb",
             "role": "owner", "status": "active",
         }])
         fake.seed("teams", [{
@@ -3172,7 +3172,7 @@ class TestConcurrentAcceptSingleUseSupabase:
         write. Pre-fix Carol's post-PATCH re-read saw alice's
         status='accepted' and minted a SECOND membership — assert she did
         NOT."""
-        base = FakeControlPlane({"api_keys": [], "team_memberships": [],
+        base = FakeControlPlane({"api_keys": [], "org_memberships": [],
                                  "invitations": [], "teams": []})
         fake = _InterleaveLoserFake(base.tables, winner_uid=_U2,
                                     winner_email="alice@example.com")
@@ -3186,8 +3186,8 @@ class TestConcurrentAcceptSingleUseSupabase:
                               mismatch_override="fuse", otp_code="123456")
         assert "already been accepted" in str(ei.value)
         # Carol (_U4, the loser) has NO membership — the claim gated the write
-        mems = [m for m in fake.tables["team_memberships"]
-                if m.get("team_id") == "team-race-sb"]
+        mems = [m for m in fake.tables["org_memberships"]
+                if m.get("org_id") == "team-race-sb"]
         uids = [m["user_id"] for m in mems]
         assert uids.count(_U3) == 1   # owner
         assert uids.count(_U2) == 1   # winner alice
@@ -3207,8 +3207,8 @@ class TestConcurrentAcceptSingleUseSupabase:
             invitation_accept(fake, inv["token"], _U4,
                               user_email="bob@example.com")
         assert ei.value.status == 400
-        mems = [m for m in fake.tables["team_memberships"]
-                if m.get("team_id") == "team-1"
+        mems = [m for m in fake.tables["org_memberships"]
+                if m.get("org_id") == "team-1"
                 and m.get("user_id") in (_U2, _U4)]
         assert len(mems) == 1 and mems[0]["user_id"] == _U2
 
@@ -3219,7 +3219,7 @@ class TestConcurrentAcceptSingleUseSupabase:
         own claim → the loser's PATCH returns [] → raises before ANY
         membership write (pre-fix the follow-up GET saw the winner's
         status='accepted' and minted a second membership)."""
-        base = FakeControlPlane({"api_keys": [], "team_memberships": [],
+        base = FakeControlPlane({"api_keys": [], "org_memberships": [],
                                  "invitations": [], "teams": []})
         fake = _InterleaveLoserFake(base.tables, winner_uid=_U2,
                                     winner_email="alice@example.com")
@@ -3231,8 +3231,8 @@ class TestConcurrentAcceptSingleUseSupabase:
                                     user_email="bob@example.com")
         assert "already been accepted" in str(ei.value)
         # loser _U4 (bob's OTHER session / racing user) never minted
-        mems = [m for m in fake.tables["team_memberships"]
-                if m.get("team_id") == "team-race-sb"]
+        mems = [m for m in fake.tables["org_memberships"]
+                if m.get("org_id") == "team-race-sb"]
         uids = [m["user_id"] for m in mems]
         assert uids.count(_U3) == 1   # owner
         assert uids.count(_U2) == 1   # winner alice
@@ -3250,8 +3250,8 @@ class TestConcurrentAcceptSingleUseSupabase:
                 "id": "team-1", "name": "Invite Team", "tier": "free",
                 "max_users": 100, "graph_name": "team_team-1",
             }])
-        fake.seed("team_memberships", [{
-            "user_id": _U3, "team_id": "team-1",
+        fake.seed("org_memberships", [{
+            "user_id": _U3, "org_id": "team-1",
             "role": "owner", "status": "active",
         }])
         return invitation_mint(fake, "team-1", "bob@example.com",
@@ -3263,7 +3263,7 @@ class TestConcurrentAcceptSingleUseSupabase:
         resend 409s and NEVER returns a token that wasn't written (no dead
         email link). Pre-fix the rotate PATCH ignored its matched-row count
         → phantom token."""
-        base = FakeControlPlane({"api_keys": [], "team_memberships": [],
+        base = FakeControlPlane({"api_keys": [], "org_memberships": [],
                                  "invitations": [], "teams": []})
         fake = _ResendRaceFake(base.tables, winner_uid=_U2)
         inv = self._seed(fake)

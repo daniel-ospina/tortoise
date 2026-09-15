@@ -29,20 +29,20 @@ def _seed_team(fake, *, max_graphs, active_customs: int = 0):
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "solo", "max_graphs": max_graphs})
     fake.seed("teams", [team])
-    fake.seed("team_memberships", [{
-        "id": "m-1", "team_id": _TEAM, "user_id": _OWNER, "role": "owner",
+    fake.seed("org_memberships", [{
+        "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
     }])
     rows = []
     for i in range(active_customs):
         rows.append({
-            "id": f"g_live{i:013d}", "team_id": _TEAM, "name": f"live-{i}",
-            "kind": "custom", "namespace": f"team_{_TEAM}_g_live{i:013d}",
+            "id": f"g_live{i:013d}", "org_id": _TEAM, "name": f"live-{i}",
+            "kind": "custom", "namespace": f"org_{_TEAM}_g_live{i:013d}",
             "status": "active", "deleted_at": None, "purged_at": None,
         })
     rows.append({
-        "id": _GID, "team_id": _TEAM, "name": "old-bot", "kind": "custom",
-        "namespace": f"team_{_TEAM}_{_GID}", "status": "deleted",
+        "id": _GID, "org_id": _TEAM, "name": "old-bot", "kind": "custom",
+        "namespace": f"org_{_TEAM}_{_GID}", "status": "deleted",
         "deleted_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
         "purged_at": None,
     })
@@ -52,7 +52,7 @@ def _seed_team(fake, *, max_graphs, active_customs: int = 0):
 @pytest.fixture
 def sb_client(monkeypatch):
     fake = FakeControlPlane({"teams": [], "api_keys": [],
-                             "team_memberships": [], "invitations": []})
+                             "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "quota.db")
@@ -79,7 +79,7 @@ def test_restore_at_cap_409(sb_client, as_owner):
     tc, fake, _ = sb_client
     _seed_team(fake, max_graphs=2, active_customs=1)
     as_owner()
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 409, r.text
     assert "X-Graph-Quota" in r.headers
 
@@ -89,7 +89,7 @@ def test_restore_under_cap_200(sb_client, as_owner):
     tc, fake, _ = sb_client
     _seed_team(fake, max_graphs=2, active_customs=0)
     as_owner()
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 200, r.text
 
 
@@ -100,16 +100,16 @@ def test_restore_unlimited_tier_no_gate(sb_client, as_owner):
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "team", "max_graphs": None})
     fake.seed("teams", [team])
-    fake.seed("team_memberships", [{
-        "id": "m-1", "team_id": _TEAM, "user_id": _OWNER, "role": "owner",
+    fake.seed("org_memberships", [{
+        "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
     }])
     fake.seed("graphs", [{
-        "id": _GID, "team_id": _TEAM, "name": "old-bot", "kind": "custom",
-        "namespace": f"team_{_TEAM}_{_GID}", "status": "deleted",
+        "id": _GID, "org_id": _TEAM, "name": "old-bot", "kind": "custom",
+        "namespace": f"org_{_TEAM}_{_GID}", "status": "deleted",
         "deleted_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
         "purged_at": None,
     }])
     as_owner()
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 200, r.text

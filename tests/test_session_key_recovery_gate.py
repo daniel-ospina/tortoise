@@ -51,7 +51,7 @@ from tortoise.hosted_api import (
 )
 from tortoise.sdk import TortoiseSDK
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID literals 22P02 under FakeControlPlane's
 # fidelity check. api_keys.created_by mirrors the minting user's UUID.
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
@@ -67,11 +67,11 @@ def _assert_role_403(r):
     assert r.json()["detail"] == _ROLE_403
 
 
-def _assert_recovery_mint_200(r, team_id: str):
+def _assert_recovery_mint_200(r, org_id: str):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["purpose"] == "recovery"
-    assert body["team_id"] == team_id
+    assert body["org_id"] == org_id
     assert body["expires_at"] is None
     assert body["key"].startswith("tt_")
 
@@ -100,37 +100,37 @@ def as_user():
     app.dependency_overrides.pop(get_current_user, None)
 
 
-def _sb_membership(fake, team_id: str, user_id: str, role: str):
+def _sb_membership(fake, org_id: str, user_id: str, role: str):
     """Seed an active membership row (member-matrix helper, mirrors
     test_dashboard_login._seed_membership)."""
-    fake.tables.setdefault("team_memberships", []).append({
-        "id": f"mem-{team_id}-{user_id}-{role}",
-        "team_id": team_id, "user_id": user_id, "role": role,
+    fake.tables.setdefault("org_memberships", []).append({
+        "id": f"mem-{org_id}-{user_id}-{role}",
+        "org_id": org_id, "user_id": user_id, "role": role,
         "status": "active", "created_at": "2026-01-01T00:00:00Z",
         "identity": None, "lookup_hash": None,
     })
 
 
-def _sb_team(fake, team_id: str, **overrides) -> dict:
+def _sb_team(fake, org_id: str, **overrides) -> dict:
     """Seed (or fetch) a teams row shaped like FREE_TEAM with a new id."""
     for t in fake.tables.setdefault("teams", []):
-        if t.get("id") == team_id:
+        if t.get("id") == org_id:
             t.update(overrides)
             return t
-    team = dict(FREE_TEAM, id=team_id)
+    team = dict(FREE_TEAM, id=org_id)
     team.update(overrides)
     fake.tables["teams"].append(team)
     return team
 
 
-def _sb_key(fake, key_id: str, team_id: str, *, created_by,
+def _sb_key(fake, key_id: str, org_id: str, *, created_by,
             created_via: str | None = "recovery",
             created_at: str = "2026-01-01T00:00:00Z",
             revoked_at: str | None = None):
     """Seed an api_keys row directly (no mint-trigger side effects — mirror
     the #750.10 fixtures in test_auth_flip)."""
     fake.tables.setdefault("api_keys", []).append({
-        "id": key_id, "team_id": team_id, "key_prefix": "tt_seeded",
+        "id": key_id, "org_id": org_id, "key_prefix": "tt_seeded",
         "lookup_hash": f"hash-{key_id}", "created_via": created_via,
         "created_by": created_by, "created_at": created_at,
         "expires_at": None, "revoked_at": revoked_at,
@@ -145,7 +145,7 @@ def sb(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://recovery-gate.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_recovery_gate")
     fake = FakeControlPlane({
-        "api_keys": [], "team_memberships": [], "teams": [dict(FREE_TEAM)],
+        "api_keys": [], "org_memberships": [], "teams": [dict(FREE_TEAM)],
         "invitations": [], "abuse_events": [],
     })
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
@@ -194,9 +194,9 @@ def reg():
     return sdk._get_registry()
 
 
-def _seed_team(reg, team_id: str, tier: str = "free",
+def _seed_team(reg, org_id: str, tier: str = "free",
                suspended_at: str | None = None):
-    props = {"id": team_id, "name": team_id, "tier": tier}
+    props = {"id": org_id, "name": org_id, "tier": tier}
     if suspended_at is not None:
         props["suspended_at"] = suspended_at
     reg.query(
@@ -207,16 +207,16 @@ def _seed_team(reg, team_id: str, tier: str = "free",
     )
 
 
-def _seed_membership(reg, team_id: str, user_id: str, role: str,
+def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
     reg.query(
-        "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:$role, "
+        "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
-        params={"uid": user_id, "tid": team_id, "role": role, "status": status},
+        params={"uid": user_id, "tid": org_id, "role": role, "status": status},
     )
 
 
-def _seed_api_key(reg, team_id: str, key_id: str, *, created_by: str | None,
+def _seed_api_key(reg, org_id: str, key_id: str, *, created_by: str | None,
                   created_via: str | None, created_at: str,
                   revoked_at: str | None = None):
     """Seed an APIKey node. created_by=None stores a NULL prop (legacy rows
@@ -224,18 +224,18 @@ def _seed_api_key(reg, team_id: str, key_id: str, *, created_by: str | None,
     include_created_by=False via the raw _seed_legacy_key for a node that
     LACKS the property entirely."""
     reg.query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:'h', key_prefix:'tt_x', "
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:'h', key_prefix:'tt_x', "
         "created_by:$cb, created_at:$ca, revoked_at:$ra, expires_at:null, "
         "created_via:$cv})",
-        params={"id": key_id, "tid": team_id, "cb": created_by, "ca": created_at,
+        params={"id": key_id, "tid": org_id, "cb": created_by, "ca": created_at,
                 "ra": revoked_at, "cv": created_via},
     )
 
 
-def _count_active_keys(reg, team_id: str) -> int:
+def _count_active_keys(reg, org_id: str) -> int:
     rows = reg.query(
-        "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
-        params={"tid": team_id},
+        "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
+        params={"tid": org_id},
     ).result_set
     return int(rows[0][0])
 
@@ -292,7 +292,7 @@ class TestRecoveryGateSupabase:
 
     def test_multi_membership_role_check_targets_resolved_team(self, sb, as_user):
         """#2380 acceptance: owner of team A + member of team B — the role
-        gate must check the RESOLVED tid (body team_id when multi-
+        gate must check the RESOLVED tid (body org_id when multi-
         membership), never memberships[0]. B (member) → 403; A (owner) → 200."""
         tc, fake = sb
         _sb_team(fake, "team-a-001")
@@ -305,11 +305,11 @@ class TestRecoveryGateSupabase:
         # role (which is owner): a memberships[0]-blind gate would 200 the
         # B pin and fail this assert.
         _assert_role_403(tc.post("/v1/session/key", json={
-            "purpose": "recovery", "team_id": "team-b-001"}))
+            "purpose": "recovery", "org_id": "team-b-001"}))
         assert not [k for k in fake.tables["api_keys"]
-                    if k["team_id"] == "team-b-001"]
+                    if k["org_id"] == "team-b-001"]
         _assert_recovery_mint_200(tc.post("/v1/session/key", json={
-            "purpose": "recovery", "team_id": "team-a-001"}), "team-a-001")
+            "purpose": "recovery", "org_id": "team-a-001"}), "team-a-001")
 
     def test_member_recovery_at_cap_403_revokes_nothing(self, sb, as_user):
         """Collateral pin: a MEMBER recovery attempt at max_api_keys 403s
@@ -411,10 +411,10 @@ class TestRecoveryGateRegistry:
         _seed_membership(reg, "team-rb", _U1, "member")
         as_user(_U1)
         _assert_role_403(tc.post("/v1/session/key", json={
-            "purpose": "recovery", "team_id": "team-rb"}))
+            "purpose": "recovery", "org_id": "team-rb"}))
         assert _count_active_keys(reg, "team-rb") == 0
         _assert_recovery_mint_200(tc.post("/v1/session/key", json={
-            "purpose": "recovery", "team_id": "team-ra"}), "team-ra")
+            "purpose": "recovery", "org_id": "team-ra"}), "team-ra")
 
     def test_member_recovery_at_cap_403_revokes_nothing(
             self, reg_client, reg, as_user):
@@ -456,10 +456,10 @@ class TestRecoveryGateRegistry:
 # Task 2 — created_by (minting user) on the keys list, both lanes
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _list_override(team_id: str, **extra) -> dict:
+def _list_override(org_id: str, **extra) -> dict:
     """Session/key-shaped dependency dict for GET /v1/team/keys (only
-    team_id is read; legacy_full_access passes _require_keys_manage)."""
-    dep = {"team_id": team_id, "key_id": None, "scopes": [],
+    org_id is read; legacy_full_access passes _require_keys_manage)."""
+    dep = {"org_id": org_id, "key_id": None, "scopes": [],
            "legacy_full_access": True, "delegation_depth": None}
     dep.update(extra)
     return dep
@@ -472,10 +472,10 @@ class TestCreatedByOnKeysList:
         (created_by NULL / absent) degrades to None with no error."""
         tc, fake = sb
         fake.seed("api_keys", [
-            {"id": "k-modern", "team_id": _SB_TEAM, "key_prefix": "tt_m1",
+            {"id": "k-modern", "org_id": _SB_TEAM, "key_prefix": "tt_m1",
              "created_via": "recovery", "created_by": _U2,
              "created_at": "2026-01-02T00:00:00Z", "revoked_at": None},
-            {"id": "k-legacy", "team_id": _SB_TEAM, "key_prefix": "tt_l1",
+            {"id": "k-legacy", "org_id": _SB_TEAM, "key_prefix": "tt_l1",
              "created_via": None,  # legacy row — NO created_by key at all
              "created_at": "2026-01-01T00:00:00Z", "revoked_at": None},
         ])
@@ -500,7 +500,7 @@ class TestCreatedByOnKeysList:
                       created_via="recovery", created_at="2026-01-02T00:00:00Z")
         # legacy node minted before created_by existed — prop ABSENT
         reg.query(
-            "CREATE (k:APIKey {id:'k-legacy', team_id:'team-r', "
+            "CREATE (k:APIKey {id:'k-legacy', org_id:'team-r', "
             "key_hash:'h', key_prefix:'tt_x', created_at:'2026-01-01T00:00:00Z'})",
         )
         app.dependency_overrides[get_current_team_session_ungated] = \
@@ -521,13 +521,13 @@ class TestCreatedByOnKeysList:
         tc = reg_client
         _seed_team(reg, "team-r")
         reg.query(
-            "CREATE (k:APIKey {id:'k-g1', team_id:'team-r', graph_id:'g1', "
+            "CREATE (k:APIKey {id:'k-g1', org_id:'team-r', graph_id:'g1', "
             "key_hash:'h', key_prefix:'tt_x', created_by:$cb, "
             "created_at:'2026-01-02T00:00:00Z'})",
             params={"cb": _U2},
         )
         reg.query(
-            "CREATE (k:APIKey {id:'k-g2', team_id:'team-r', graph_id:'g2', "
+            "CREATE (k:APIKey {id:'k-g2', org_id:'team-r', graph_id:'g2', "
             "key_hash:'h', key_prefix:'tt_x', created_by:$cb, "
             "created_at:'2026-01-01T00:00:00Z'})",
             params={"cb": _U3},
@@ -682,7 +682,7 @@ class TestLaneMarkers:
             get_current_team_session_ungated(_make_request(_SESSION_HEADERS)))
         assert team["session_user_id"] == _U1
         assert team["auth_lane"] == "session"
-        assert team["team_id"] == _SB_TEAM
+        assert team["org_id"] == _SB_TEAM
 
     def test_override_seam_dicts_pass_through_unchanged(self, sb):
         """The dependency-override seam returns override dicts UNCHANGED —
@@ -690,7 +690,7 @@ class TestLaneMarkers:
         role gate live (the ⛔ invariant — the predicate is session_user_id
         presence, never the auth_lane marker)."""
         app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": _SB_TEAM, "key_id": "key-1", "tier": "free",
+            "org_id": _SB_TEAM, "key_id": "key-1", "tier": "free",
             "scopes": [], "legacy_full_access": True,
         }
         try:
@@ -708,7 +708,7 @@ class TestLaneMarkers:
         tc, fake = sb
         _sb_membership(fake, _SB_TEAM, _U1, "member")
         app.dependency_overrides[get_current_team_session] = lambda: {
-            "team_id": _SB_TEAM, "tier": "free", "key_id": None,
+            "org_id": _SB_TEAM, "tier": "free", "key_id": None,
             "scopes": [], "legacy_full_access": True,
             "delegation_depth": None, "session_user_id": _U1,
             "max_api_keys": 2, "max_users": 1, "max_graphs": 1,
@@ -726,7 +726,7 @@ class TestLaneMarkers:
         200, created_by falls back to 'api' as documented)."""
         tc, fake = sb
         app.dependency_overrides[get_current_team_session] = lambda: {
-            "team_id": _SB_TEAM, "tier": "free", "key_id": "key-1",
+            "org_id": _SB_TEAM, "tier": "free", "key_id": "key-1",
             "scopes": [], "legacy_full_access": True,
             "delegation_depth": None, "graph_id": None,
             "max_api_keys": 2, "max_users": 1, "max_graphs": 1,
@@ -748,7 +748,7 @@ class TestLaneMarkers:
         token = "tt_marker_test_key_000000000001"
         _seed_membership(reg, "team-r", _U1, "owner")
         reg.query(
-            "CREATE (k:APIKey {id:'marker-key', team_id:'team-r', "
+            "CREATE (k:APIKey {id:'marker-key', org_id:'team-r', "
             "key_hash:$h, key_prefix:$kp, created_via:'provisioned', "
             "created_at:'2026-01-01T00:00:00Z'})",
             params={"h": hash_api_key(token), "kp": token[:10]},

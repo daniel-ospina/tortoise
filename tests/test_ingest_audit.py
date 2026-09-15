@@ -267,10 +267,10 @@ def test_audit_mcp_mirror(sdk, monkeypatch):
     """A13 MCP mirror: tortoise_list_batch / tortoise_list_batches route to
     the SDK through the in-process handler layer (stdio transport)."""
     import tortoise.mcp_server as mcp_mod  # noqa: I001
-    from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+    from tortoise.mcp_auth import (_current_org_id, _current_team_limits,
                                    _transport_mode)
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
+    _current_org_id.set(None)
     _current_team_limits.set(None)
     orig = mcp_mod._get_team_sdk
     mcp_mod._get_team_sdk = lambda: sdk
@@ -287,7 +287,7 @@ def test_audit_mcp_mirror(sdk, monkeypatch):
         assert "error" in bad or "batch_id" in str(bad)
     finally:
         _transport_mode.set(None)
-        _current_team_id.set(None)
+        _current_org_id.set(None)
         _current_team_limits.set(None)
         mcp_mod._get_team_sdk = orig
 

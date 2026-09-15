@@ -99,8 +99,8 @@ class TestPreconditions:
 
     def test_supabase_placeholder_membership_only_passes(self):
         from tests.fake_control_plane import FakeControlPlane
-        cp = FakeControlPlane({"team_memberships": [
-            {"id": "m1", "team_id": "", "key_hash": "pending"},
+        cp = FakeControlPlane({"org_memberships": [
+            {"id": "m1", "org_id": "", "key_hash": "pending"},
         ]})
         assert preconditions.check_supabase_placeholders(cp) == []
 
@@ -119,15 +119,15 @@ class TestPreconditions:
         assert "api_keys" in failures[0]
 
     def test_supabase_reconciled_membership_fails(self):
-        # A membership with a REAL team_id is reconciled data, not a
+        # A membership with a REAL org_id is reconciled data, not a
         # placeholder — the flip must not proceed.
         from tests.fake_control_plane import FakeControlPlane
-        cp = FakeControlPlane({"team_memberships": [
-            {"id": "m1", "team_id": "team-free-001", "key_hash": "abc123"},
+        cp = FakeControlPlane({"org_memberships": [
+            {"id": "m1", "org_id": "team-free-001", "key_hash": "abc123"},
         ]})
         failures = preconditions.check_supabase_placeholders(cp)
         assert len(failures) == 1
-        assert "team_memberships[0]" in failures[0]
+        assert "org_memberships[0]" in failures[0]
 
     def test_main_clean_state_exits_zero(self, tmp_path):
         code = preconditions.main([
@@ -275,9 +275,9 @@ class TestWebhookSupabaseBranch:
     graph (FalkorDB auto-creates on GRAPH.QUERY). In Supabase mode it must
     resolve + write via the seam (teams row)."""
 
-    def test_team_id_for_stripe_customer_via_seam(self, monkeypatch):
+    def test_org_id_for_stripe_customer_via_seam(self, monkeypatch):
         from tortoise.supabase_control import (  # noqa: I001
-            SupabaseControlPlane, team_id_for_stripe_customer,  # noqa: F401
+            SupabaseControlPlane, org_id_for_stripe_customer,  # noqa: F401
         )
         from tests.fake_control_plane import FakeControlPlane
 
@@ -285,8 +285,8 @@ class TestWebhookSupabaseBranch:
             {"id": "team-1", "stripe_customer_id": "cus_123"},
             {"id": "team-2", "stripe_customer_id": None},
         ]})
-        assert team_id_for_stripe_customer(fake, "cus_123") == "team-1"
-        assert team_id_for_stripe_customer(fake, "cus_nope") is None
+        assert org_id_for_stripe_customer(fake, "cus_123") == "team-1"
+        assert org_id_for_stripe_customer(fake, "cus_nope") is None
 
     def test_update_team_billing_writes_known_columns_only(self):
         from tortoise.supabase_control import update_team_billing  # noqa: I001

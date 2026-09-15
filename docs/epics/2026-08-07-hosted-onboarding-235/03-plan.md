@@ -401,13 +401,13 @@ Test against at minimum:
 
 | New Endpoint | Method | Purpose | Inputs | Outputs | Auth |
 |-------------|--------|---------|--------|---------|------|
-| `/v1/register` | POST | Self-service key provisioning (creates Supabase user ONLY — key comes from the existing webhook provisioning path) | email, password (or OAuth token) | `{status: "pending"\|"provisioned"\|409, team_id?}` | None (creates account) |
+| `/v1/register` | POST | Self-service key provisioning (creates Supabase user ONLY — key comes from the existing webhook provisioning path) | email, password (or OAuth token) | `{status: "pending"\|"provisioned"\|409, org_id?}` | None (creates account) |
 | `/v1/onboarding/github/connect` | POST | Initiate GitHub OAuth | `{org, redirect_uri}` | `{auth_url}` | Bearer `tt_` |
 | `/v1/onboarding/github/callback` | GET | GitHub OAuth callback | `code`, `state` | redirect to `{BASE_APP_URL}/welcome?github=connected` | None (OAuth state param) |
 | `/v1/onboarding/github/status` | GET | Check GitHub connection status (agent poll) | — | `{connected, repos_count, org, error?}` | Bearer `tt_` |
 | `/v1/index/github` | POST | Start background indexing | `{org, repo?}` | `{job_id, status: "started"}` | Bearer `tt_` |
 | `/v1/index/github/{job_id}` | GET | Poll indexing status | — | `{job_id, status, points_created, progress}` | Bearer `tt_` |
-| `/internal/demo` (existing) | POST | Create/backfill demo graph (sentinel-idempotent) | `{team_id}` | `{status: "created"\|"already_seeded"}` | Internal key |
+| `/internal/demo` (existing) | POST | Create/backfill demo graph (sentinel-idempotent) | `{org_id}` | `{status: "created"\|"already_seeded"}` | Internal key |
 | `/v1/onboarding/state` | GET | Get onboarding state | — | `{onboarding: {...}}` | Bearer `tt_` |
 | `/v1/onboarding/state` | PATCH | Update onboarding state (per-key last-write-wins) | `{step: value}` | `{onboarding: {...}}` | Bearer `tt_` |
 | `/v1/onboarding/state/progress` | GET | Client-safe progress (no tokens/raw internals) | — | `{steps_completed, completed_at, github_connected, ...}` | Bearer `tt_` (page-held key) |
@@ -453,7 +453,7 @@ The current page calls `POST /internal/provision` via Supabase edge function. Fo
 | Event | Fires when | Properties |
 |-------|-----------|------------|
 | `signup_completed` | **Welcome page fires this after successful Supabase auth** (the real signup path is Supabase Auth — NOT only `/v1/register`, which is an API-only path) | `{method: "email"\|"github", timestamp}` |
-| `key_provisioned` | API key generated and displayed | `{team_id, elapsed_from_signup_s}` |
+| `key_provisioned` | API key generated and displayed | `{org_id, elapsed_from_signup_s}` |
 | `artifact_copied` | User clicks "Copy" on welcome page | `{harness: "claude"\|"codex"\|"cursor"\|"pi", section: "config"\|"prompt"\|"both"}` |
 | `agent_connected` | Agent successfully calls `tortoise_health` (MCP) | `{harness, elapsed_from_copy_s}` |
 | `question_answered` | Agent records an answer via `tortoise_onboarding_answer` (yes AND no) | `{question_id, answer: "yes"\|"no"}` |
@@ -531,7 +531,7 @@ The endpoint must:
 2. **Rate limit per-IP and per-email** (e.g., 10/hour) — abuse protection; return 429 with Retry-After. Note in the plan: without this, the public endpoint is an open signup/email-bombing surface.
 3. Call Supabase Admin API to create user (`supabase.auth.admin.createUser`) — **only if `after_user_created` does not already fire for admin-created users** (verify; if it does, createUser alone triggers provisioning)
 4. **Return the key from the existing provisioning path** — poll the Supabase `user_teams` row (or the registry graph) for the APIKey the webhook created; do NOT generate a new key and do NOT re-run `/internal/provision`
-5. Return `{status: "provisioned", api_key, team_id, graph_name}` once provisioned, or `{status: "pending", team_id?}` while the webhook is still running (the welcome page already polls — keep the polling contract; see Task 11 for the "provisioning in progress" state)
+5. Return `{status: "provisioned", api_key, org_id, graph_name}` once provisioned, or `{status: "pending", org_id?}` while the webhook is still running (the welcome page already polls — keep the polling contract; see Task 11 for the "provisioning in progress" state)
 6. If the user already exists: return **409** `{message: "already registered"}` — never re-expose the key (resolves the plan's earlier contradiction between "returns the existing key" and "don't re-expose"; 409 + no key wins)
 
 **Supabase credential + RLS analysis (plan-review P1):** hosted_api.py has ZERO Supabase connectivity today. Adding `/v1/register` introduces a `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_ADMIN_API_KEY`) secret — document it in the env section (`.env.example`) and the security section: service-role key must be Fly-secret-only (never client-side), and the `user_teams` table needs RLS policies reviewed (currently the edge function writes it server-side; if `/v1/register` reads it, reads must be scoped to the authenticated user or internal-only).
@@ -577,10 +577,10 @@ Manual step (document in `docs/epics/2026-08-07-hosted-onboarding-235/`):
 async def github_connect(body: GitHubConnectRequest, team: dict = Depends(get_current_team)):
     """Generate GitHub OAuth URL for the user to authorize."""
     state = secrets.token_urlsafe(32)
-    # Store state → team_id mapping in the SHARED REGISTRY-GRAPH STATE STORE
+    # Store state → org_id mapping in the SHARED REGISTRY-GRAPH STATE STORE
     # (Task 11), NOT in-memory: Fly runs multiple replicas and in-memory
     # state would 401 every callback that lands on a different replica.
-    set_state("github_oauth", {state: team["team_id"]}, ttl_minutes=15)
+    set_state("github_oauth", {state: team["org_id"]}, ttl_minutes=15)
     auth_url = (
         f"https://github.com/login/oauth/authorize"
         f"?client_id={GITHUB_CLIENT_ID}"
@@ -754,7 +754,7 @@ The acceptance requires Operators (supports/contradicts/mitigates). The seed mus
 @app.get("/v1/onboarding/demo/status")
 async def demo_status(team: dict = Depends(get_current_team)):
     """Return demo-graph presence + stats. Sentinel check, no writes."""
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _make_sdk(namespace=team["org_id"])
     has_sentinel = sdk._get_proj().g.query(
         "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
     ).result_set
@@ -802,7 +802,7 @@ Wraps the verify/backfill flow; returns graph stats so the agent can describe wh
 ```python
 @app.get("/v1/onboarding/state")
 async def get_onboarding_state(team: dict = Depends(get_current_team)):
-    return {"onboarding": read_state(team["team_id"])}
+    return {"onboarding": read_state(team["org_id"])}
 
 @app.patch("/v1/onboarding/state")
 async def update_onboarding_state(body: OnboardingStateUpdate, team: dict = Depends(get_current_team)):
@@ -970,7 +970,7 @@ Analytics events are written as `operation = event_name` rows with `properties` 
 
 **Step 2: Instrument hosted API**
 
-Add a helper `_track_event(team_id, event_name, properties)` built on the existing `AuditLogger` (`_async_audit` pattern). Call it at:
+Add a helper `_track_event(org_id, event_name, properties)` built on the existing `AuditLogger` (`_async_audit` pattern). Call it at:
 - `tortoise_onboarding_complete` / state `completed_at` set → `onboarding_complete` (**server-side ONLY — single producer**; see Step 3 — the client never fires this event)
 - `POST /v1/team/keys` (key displayed) → `key_provisioned`
 - `POST /v1/onboarding/github/callback` → `github_connected`

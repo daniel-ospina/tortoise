@@ -345,7 +345,7 @@ Each orphan is classified by: (a) where it's used, (b) whether an agent needs it
 | 21–26 | `apikey_*` (6 methods) | sdk.py, mcp_auth.py, __main__.py, hosted_api.py | 2–8 each | **No** — auth infrastructure, not memory tools | **KEEP SDK-ONLY** — control-plane, handled by REST/internal endpoints | HIGH |
 | 27–32 | `invitation_*` (6 methods) | sdk.py, supabase_control.py, hosted_api.py | 2–5 each | **No** — team provisioning | **KEEP SDK-ONLY** — control-plane | HIGH |
 | 33–37 | `membership_*` (5 methods) | sdk.py, supabase_control.py, hosted_api.py | 2–8 each | **No** — team management | **KEEP SDK-ONLY** — control-plane | HIGH |
-| 38–41 | `team_{get,list,update,delete}` (4 methods) | sdk.py, hosted_api.py (2 use team_delete), quota.py | 3–5 each | **No** — team management | **KEEP SDK-ONLY** — control-plane; only `team_create` is exposed as a tool (and it's admin-only) | HIGH |
+| 38–41 | `org_{get,list,update,delete}` (4 methods) | sdk.py, hosted_api.py (2 use team_delete), quota.py | 3–5 each | **No** — team management | **KEEP SDK-ONLY** — control-plane; only `team_create` is exposed as a tool (and it's admin-only) | HIGH |
 | 42 | `graph_list` | sdk.py, supabase_control.py, hosted_api.py (4 refs) | 6 | **Periodic** — graph inventory | **EXPOSE** — `tortoise_list_graphs` already a tool but uses `list_graphs()` not `graph_list()`. Consolidate. | MEDIUM |
 | 43 | `graph_count` | sdk.py, hosted_api.py (1 ref) | 4 | **Rare** — admin | **FOLD INTO** `tortoise_status` | MEDIUM |
 

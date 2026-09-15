@@ -431,7 +431,7 @@ the `{error}`-only shape whose retry action is different.
 | **stdio, non-dev** (`TORTOISE_API_KEY` set) | **Fail-closed** — every tool rejects with an auth-required message. stdio cannot carry auth tokens. | — |
 | **stdio, dev mode** (no `TORTOISE_API_KEY`) | Local eval only. | N/A |
 | **Self-host static / none** (`serve --http --auth static` or `none`) | Single-tenant `team_selfhost` namespace. | **Quota N/A** (selfhost has no billing; batch caps still apply). |
-| **Self-host tenant** (`serve --http --auth tenant`) | Per-team `team_{id}` namespaces, `tt_` keys. Registry unavailable → **503 `ERR_REGISTRY` pre-write** (never a silent pass). | Enforced per team. |
+| **Self-host tenant** (`serve --http --auth tenant`) | Per-team `org_{id}` namespaces, `tt_` keys. Registry unavailable → **503 `ERR_REGISTRY` pre-write** (never a silent pass). | Enforced per team. |
 | **Hosted** (`https://api.premiselabs.co/mcp/`) | streamable-http, `Bearer tt_<key>`. | Enforced. |
 
 Additional posture rules:
@@ -440,7 +440,7 @@ Additional posture rules:
   (fail-closed); it never depends on dev-mode alone.
 - **Ingest works offline / degraded:** embeddings degrade to lexical/FTS
   search; structure (edges, `batch_id`, EP) is unaffected.
-- HTTP tenant mode writes to a fresh `team_{id}` namespace — data written over
+- HTTP tenant mode writes to a fresh `org_{id}` namespace — data written over
   stdio stays in the `tortoise` graph; they are separate namespaces.
 - Cross-process embedded contention: **planned** — this release adds the fail-fast
   `EmbeddedStoreBusyError` contract ([§8 row 9](#8-when-your-ingest-fails-error-code--action));

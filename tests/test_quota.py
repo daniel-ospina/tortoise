@@ -51,7 +51,7 @@ class TestResolveTeamLimits:
             resolve_team_limits("no-such-team")
 
     def test_provisioned_team_has_defaults(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         limits = resolve_team_limits(tid)
         # team_create writes max_api_keys from pricing.json free tier (=2),
         # but NOT max_points / max_sessions — defaults apply (points from
@@ -63,7 +63,7 @@ class TestResolveTeamLimits:
         assert limits["max_graphs"] == 1
 
 
-def _find_team_id(sdk) -> str:
+def _find_org_id(sdk) -> str:
     """Find a team id in the registry graph (test helper)."""
     rows = sdk._get_registry().query(
         "MATCH (t:Team) RETURN t.id LIMIT 1"
@@ -83,7 +83,7 @@ class TestEnforceTeamLimit:
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         sdk.create_point("statement", "A")
-        limits = {"team_id": "team1", "max_points": 1}
+        limits = {"org_id": "team1", "max_points": 1}
         with pytest.raises(QuotaExceededError):
             enforce_team_limit(limits, "points", sdk=sdk)
         sdk.close()
@@ -94,7 +94,7 @@ class TestEnforceTeamLimit:
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         sdk.create_point("statement", "A")
-        limits = {"team_id": "team1", "max_points": 10}
+        limits = {"org_id": "team1", "max_points": 10}
         enforce_team_limit(limits, "points", sdk=sdk)  # must not raise
         sdk.close()
 
@@ -108,7 +108,7 @@ class TestEnforceTeamLimit:
         import os
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
-        limits = {"team_id": "team1", "max_points": 1000}
+        limits = {"org_id": "team1", "max_points": 1000}
         def boom(*a, **kw):
             raise RuntimeError("db down")
         monkeypatch.setattr(sdk._get_proj().g._g, "query", boom)
@@ -124,7 +124,7 @@ class TestEnforceTeamLimit:
 
     def test_unknown_resource_fails_closed(self):
         with pytest.raises(QuotaCheckError):
-            enforce_team_limit({"team_id": "t", "max_points": 10}, "widgets")
+            enforce_team_limit({"org_id": "t", "max_points": 10}, "widgets")
 
 
 # ── #683: users + graphs enforcement ──────────────────────────────────────
@@ -133,14 +133,14 @@ class TestEnforceUsersLimit:
     """User/membership quota enforcement."""
 
     def test_users_below_limit_passes(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         limits = resolve_team_limits(tid)
         # team_create does NOT create a membership; count = 0, max_users = 1
         # → below limit
         enforce_team_limit(limits, "users")  # must not raise
 
     def test_users_at_limit_raises(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         # Create a membership to hit the limit
         reg_sdk.membership_create(tid, "user-1", "owner")
         limits = resolve_team_limits(tid)
@@ -150,7 +150,7 @@ class TestEnforceUsersLimit:
 
     def test_users_unlimited_skips(self, reg_sdk):
         """None max_users = unlimited (Team tier) — never raises."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         limits = resolve_team_limits(tid)
         limits["max_users"] = None  # Team tier → unlimited
         enforce_team_limit(limits, "users")  # must not raise
@@ -160,7 +160,7 @@ class TestEnforceGraphsLimit:
     """Graph quota enforcement."""
 
     def test_graphs_below_limit_passes(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         limits = resolve_team_limits(tid)
         # team_create auto-creates 1 default graph; max_graphs=1
         # bump limit to 5 so we're below it
@@ -168,7 +168,7 @@ class TestEnforceGraphsLimit:
         enforce_team_limit(limits, "graphs")  # must not raise
 
     def test_graphs_at_limit_raises(self, reg_sdk):
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         limits = resolve_team_limits(tid)
         # 1 default graph from team_create, max_graphs=1 → at limit
         with pytest.raises(QuotaExceededError, match="graphs limit reached"):
@@ -176,7 +176,7 @@ class TestEnforceGraphsLimit:
 
     def test_graphs_unlimited_skips(self, reg_sdk):
         """None max_graphs = unlimited (pro/team tier) — never raises."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         limits = resolve_team_limits(tid)
         limits["max_graphs"] = None  # Pro/Team tier → unlimited
         enforce_team_limit(limits, "graphs")  # must not raise
@@ -189,7 +189,7 @@ class TestNonePreservation:
 
     def test_resolve_team_limits_preserves_none_users(self, reg_sdk):
         """Team-tier team with max_users=None → resolve returns None, not 1."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         # Directly set max_users=None on the Team node (Team tier semantics)
         reg_sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.max_users = NULL",
@@ -201,7 +201,7 @@ class TestNonePreservation:
 
     def test_resolve_team_limits_preserves_none_graphs(self, reg_sdk):
         """Team-tier team with max_graphs=None → resolve returns None."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         reg_sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.max_graphs = NULL",
             params={"id": tid},
@@ -272,7 +272,7 @@ class TestSessionsQuota:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         # Inject max_sessions=40 on the Team node (provision_test_user
         # convention — direct write, DE2E-7 quota fixture).
         reg_sdk._get_registry().query(
@@ -314,7 +314,7 @@ class TestSessionsQuota:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = TortoiseSDK(db, namespace=tid)
         try:
             tenant.capture_session(
@@ -349,7 +349,7 @@ class TestDocumentsQuota:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         return tid, TortoiseSDK(db, namespace=tid)
 
     def _seed_doc(self, tenant, i: int, kind: str | None) -> None:
@@ -427,11 +427,11 @@ class TestObjectSubjectQuota:
         import os
         return TortoiseSDK(
             os.path.join(tmp_path, "quota.db"),
-            namespace=_find_team_id(reg_sdk))
+            namespace=_find_org_id(reg_sdk))
 
     def test_points_count_includes_objects_and_subjects(self, reg_sdk, tmp_path):
         """Indicator (1): the quota count includes Object+Subject nodes."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_point("statement", "a plain point")
@@ -445,11 +445,11 @@ class TestObjectSubjectQuota:
     def test_object_write_402_at_cap(self, reg_sdk, tmp_path):
         """Indicator (2): an object write 402s at the cap (pre-fix the
         points count could never see Object nodes → no 402)."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_object("o1", objectKind="org")
-            limits = {"team_id": tid, "max_points": 1}
+            limits = {"org_id": tid, "max_points": 1}
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_team_limit(limits, "points", sdk=tenant)
         finally:
@@ -457,11 +457,11 @@ class TestObjectSubjectQuota:
 
     def test_subject_write_402_at_cap(self, reg_sdk, tmp_path):
         """Indicator (2): a subject write 402s at the cap."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_subject("s1", subjectKind="person")
-            limits = {"team_id": tid, "max_points": 1}
+            limits = {"org_id": tid, "max_points": 1}
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_team_limit(limits, "points", sdk=tenant)
         finally:
@@ -469,17 +469,17 @@ class TestObjectSubjectQuota:
 
     def test_object_subject_mix_402_at_cap(self, reg_sdk, tmp_path):
         """Mixed object+subject nodes consume the cap together."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_object("o1", objectKind="org")
             tenant.create_subject("s1", subjectKind="person")
             # 2 nodes → at/over a cap of 2 → 402
             with pytest.raises(QuotaExceededError, match="points limit reached"):
-                enforce_team_limit({"team_id": tid, "max_points": 2},
+                enforce_team_limit({"org_id": tid, "max_points": 2},
                                    "points", sdk=tenant)
             # 2 nodes below a cap of 3 → passes
-            enforce_team_limit({"team_id": tid, "max_points": 3},
+            enforce_team_limit({"org_id": tid, "max_points": 3},
                                "points", sdk=tenant)
         finally:
             tenant.close()
@@ -489,7 +489,7 @@ class TestObjectSubjectQuota:
         """Regression: the Point predicate is untouched — a pure-point
         graph counts exactly as before (#1911 must not move the points cap
         for existing point-only usage)."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.create_point("statement", "one")
@@ -498,9 +498,9 @@ class TestObjectSubjectQuota:
             assert count_team_usage(tid, "points", sdk=tenant) == 3
             # at/over cap → 402; below cap → passes (unchanged semantics)
             with pytest.raises(QuotaExceededError, match="points limit reached"):
-                enforce_team_limit({"team_id": tid, "max_points": 3},
+                enforce_team_limit({"org_id": tid, "max_points": 3},
                                    "points", sdk=tenant)
-            enforce_team_limit({"team_id": tid, "max_points": 4},
+            enforce_team_limit({"org_id": tid, "max_points": 4},
                                "points", sdk=tenant)
         finally:
             tenant.close()
@@ -511,7 +511,7 @@ class TestObjectSubjectQuota:
         a non-episodic Object entity ('the strategy') alongside the extracted
         value point — the Object now counts against the quota too (pre-fix
         the Points-only count saw the value point but never the entity)."""
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
             tenant.capture_session(
@@ -532,11 +532,11 @@ class TestIsEpisodicBackfill:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         return TortoiseSDK(
-            os.path.join(tmp_path, "quota.db"), namespace=_find_team_id(reg_sdk))
+            os.path.join(tmp_path, "quota.db"), namespace=_find_org_id(reg_sdk))
 
     def test_legacy_nodes_backfilled_are_episodic(self, reg_sdk, tmp_path):
         from backfill_is_episodic import run_backfill
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._make_tenant(reg_sdk, tmp_path)
         try:
             proj = tenant._get_proj()
@@ -575,7 +575,7 @@ class TestIsEpisodicBackfill:
             assert count_team_usage(tid, "points", sdk=tenant) == 3
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_team_limit(
-                    {"team_id": tid, "max_points": 3}, "points", sdk=tenant)
+                    {"org_id": tid, "max_points": 3}, "points", sdk=tenant)
             # Dry-run reports without writing (5 capture artifacts: s, e, src,
             # p1, p2 — NOT k1)
             report = run_backfill(proj, dry_run=True)
@@ -588,7 +588,7 @@ class TestIsEpisodicBackfill:
             # k1 is untouched — still counted → quota is NOT undercounted
             assert count_team_usage(tid, "points", sdk=tenant) == 1
             enforce_team_limit(
-                {"team_id": tid, "max_points": 3}, "points", sdk=tenant)
+                {"org_id": tid, "max_points": 3}, "points", sdk=tenant)
             # Sessions branch still counts the (now-flagged) Session
             assert count_team_usage(tid, "sessions", sdk=tenant) == 1
         finally:
@@ -599,7 +599,7 @@ class TestIsEpisodicBackfill:
         on Session + turn Points going forward — unflagged new captures would
         re-introduce the false-402 this fix eliminates."""
         from backfill_is_episodic import run_backfill
-        tid = _find_team_id(reg_sdk)
+        tid = _find_org_id(reg_sdk)
         tenant = self._make_tenant(reg_sdk, tmp_path)
         try:
             proj = tenant._get_proj()

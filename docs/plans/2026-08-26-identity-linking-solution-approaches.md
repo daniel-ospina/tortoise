@@ -2,7 +2,7 @@
 
 > Issue-scoping solution alternatives for the confirmed problem: identity facts
 > conflated across `teams.email` (globally-unique team attribute), the user
-> anchor (`team_memberships.user_id` + GoTrue `auth.identities`), and
+> anchor (`org_memberships.user_id` + GoTrue `auth.identities`), and
 > `api_keys.created_by` (mixed attribution). Every identity-adding operation
 > collides with team-scoped uniqueness. **No winner selected — this is the
 > divergence artifact.** Verified against source 2026-08-26.
@@ -25,7 +25,7 @@ Verified against `docs/auth-architecture.md`, `supabase/migrations/*`,
 | C3 | Banner inventory = identities + password-capability + keys by `created_by` | scoping |
 | C4 | **#2085 caveat:** `updateUser({password})` creates NO `auth.identities` row → password-capability is a separate signal (`auth.users.encrypted_password IS NOT NULL` via service role) | scoping |
 | C5 | `enable_manual_linking` is an external Supabase toggle: `config.toml:173` = false; hosted state unknown; GoTrue returns **422** when off | supabase/config.toml |
-| C6 | Add-email+password must NOT use admin-create — `handle_new_user` placeholder trigger (`team_id=''`, `key_hash='pending'`) fires on every `auth.users` INSERT → phantom team placeholder (0001/0003/0010) | migrations 0001/0003/0010 |
+| C6 | Add-email+password must NOT use admin-create — `handle_new_user` placeholder trigger (`org_id=''`, `key_hash='pending'`) fires on every `auth.users` INSERT → phantom team placeholder (0001/0003/0010) | migrations 0001/0003/0010 |
 | C7 | Username collides with machine-synced `display_name` (**#1691** — wizard writes `display_name` = graph Subject, main.jsx:578-581) | main.jsx |
 | C8 | Anon teams already covered by full-page Protect (**#1148** `dashboard_key_login` gate) | hosted_api / 20260813000005 |
 | C9 | Keyless anon cohort exists (**#1716**) with no claim path | scoping |
@@ -37,7 +37,7 @@ Verified against `docs/auth-architecture.md`, `supabase/migrations/*`,
 | C15 | `teams.email` is the signup idempotency key (`team_by_email`, hosted_api ~3003) + `uq_teams_email` partial unique index (20260813000004 P3-FIX-S); `reg-<sha256(email)[:12]>` identity rows exist WITHOUT `auth.users` rows | hosted_api / 20260813000004 |
 | C16 | `supabase-session.js` shared helper must stay byte-parity across dashboard + website (static test `test_cross_subdomain_cookie_sync.py`) | tests/ |
 | C17 | Ops surfaces: hosted `enable_manual_linking`, OAuth redirect URLs, email confirmations (`enable_confirmations = true` — OTP available) | config.toml |
-| C18 | RPC precedent: mutations are SECURITY DEFINER + service_role-only (claim_membership/provision_team, auth binding INSIDE the RPC — never client-supplied team_id); reads are `auth.uid()`-bounded; audit via `audit_events.detail` jsonb | migrations |
+| C18 | RPC precedent: mutations are SECURITY DEFINER + service_role-only (claim_membership/provision_team, auth binding INSIDE the RPC — never client-supplied org_id); reads are `auth.uid()`-bounded; audit via `audit_events.detail` jsonb | migrations |
 
 **Shared semantic decision every approach must make (flagged, not resolved here):**
 what counts as a "way in" for the banner/floor — (a) strict login methods

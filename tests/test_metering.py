@@ -103,7 +103,7 @@ class TestRecordWriteOps:
         assert r2["write_ops"] == 8
         sdk.close()
 
-    def test_none_team_id_is_noop(self):
+    def test_none_org_id_is_noop(self):
         result = record_write_ops("", tier="pro")
         assert result is None
 
@@ -337,7 +337,7 @@ class TestGetCurrentUsageSupabaseDegrade:
                     return self._seeded
                 raise RuntimeError("Supabase down (simulated blip)")
 
-        seeded = [{"team_id": "team-blip-002", "period": _current_period(),
+        seeded = [{"org_id": "team-blip-002", "period": _current_period(),
                    "write_ops": 55000}]
         monkeypatch.setattr(
             "tortoise.supabase_control.get_control_plane",
@@ -363,7 +363,7 @@ class TestGetCurrentUsageSupabaseDegrade:
         # pro tier: 55,000 ops used this period — over the allowance → overage
         fake = FakeControlPlane({
             "metering_records": [
-                {"team_id": "team-1", "period": _current_period(),
+                {"org_id": "team-1", "period": _current_period(),
                  "write_ops": 55000},
             ],
             "teams": [{"id": "team-1", "tier": "pro"}],
@@ -404,19 +404,19 @@ class TestPeriodRollover:
         # Simulate writes in two periods by directly manipulating the registry
         reg = sdk._get_registry()
         reg.query(
-            "MERGE (m:MeteringRecord {team_id: $tid, period: '2026-07'}) "
+            "MERGE (m:MeteringRecord {org_id: $tid, period: '2026-07'}) "
             "SET m.write_ops = coalesce(m.write_ops, 0) + 100",
             params={"tid": tid},
         )
         reg.query(
-            "MERGE (m:MeteringRecord {team_id: $tid, period: '2026-08'}) "
+            "MERGE (m:MeteringRecord {org_id: $tid, period: '2026-08'}) "
             "SET m.write_ops = coalesce(m.write_ops, 0) + 50",
             params={"tid": tid},
         )
 
         # Verify separate records exist
         rows = reg.query(
-            "MATCH (m:MeteringRecord {team_id: $tid}) "
+            "MATCH (m:MeteringRecord {org_id: $tid}) "
             "RETURN m.period, m.write_ops ORDER BY m.period",
             params={"tid": tid},
         ).result_set
@@ -473,7 +473,7 @@ class TestAskMetering:
         assert usage["ask_tokens_out"] == 60
         assert abs(usage["ask_cost_usd"] - 0.003) < 1e-9
 
-    def test_none_team_id_noop(self):
+    def test_none_org_id_noop(self):
         from tortoise.metering import get_ask_usage, record_ask_usage
         assert record_ask_usage(None, tokens_in=1) is None
         # registry read for a nonexistent team → zeros
@@ -654,7 +654,7 @@ class TestAskMetering:
         rpc = _re.search(r"CREATE OR REPLACE FUNCTION public\.(\w+)\(", mig)
         assert rpc is not None and rpc.group(1) == "metering_increment_ask"
         params = set(_re.findall(r"p_(\w+)\s+\w+", mig))
-        assert params == {"team_id", "period", "calls", "tokens_in",
+        assert params == {"org_id", "period", "calls", "tokens_in",
                           "tokens_out", "cost_usd"}
         # (c) the supabase-mode record path calls the SAME RPC with the
         # SAME p_* body keys (FakeControlPlane records the call body)
@@ -670,12 +670,12 @@ class TestAskMetering:
                          cost_usd=0.001)
         fn, body = fake.rpc_calls[-1]
         assert fn == "metering_increment_ask"
-        assert set(body) == {"p_team_id", "p_period", "p_calls",
+        assert set(body) == {"p_org_id", "p_period", "p_calls",
                              "p_tokens_in", "p_tokens_out", "p_cost_usd"}
-        assert body["p_team_id"] == "team-1"
+        assert body["p_org_id"] == "team-1"
         assert body["p_tokens_in"] == 100 and body["p_tokens_out"] == 50
         # (d) the supabase-mode READ path selects the SAME ask_* columns
-        fake.seed("metering_records", [{"team_id": "team-1",
+        fake.seed("metering_records", [{"org_id": "team-1",
                                          "period": body["p_period"],
                                          "ask_calls": 1,
                                          "ask_tokens_in": 100,

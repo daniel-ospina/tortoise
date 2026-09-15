@@ -14,7 +14,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
-**Goal:** Make `verify_session_jwt` accept Supabase ES256-signed access tokens so session-plane endpoints (`/v1/teams`, `/v1/session/key`, member management, invites, MCP OAuth authorize) stop 500ing and the dashboard login completes.
+**Goal:** Make `verify_session_jwt` accept Supabase ES256-signed access tokens so session-plane endpoints (`/v1/organizations`, `/v1/session/key`, member management, invites, MCP OAuth authorize) stop 500ing and the dashboard login completes.
 
 **Team:** epistemic-team
 **Role:** (not set)
@@ -65,7 +65,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 
 - **Unit** (primary): full ES256 + RS256 + cache-hardening matrix in `tests/test_session_auth.py`.
 - **E2E**: harness JWKS mints converted to EC/ES256 via a shared mint helper; claim flow (`test_13_claim`) passes.
-- **Post-deploy live check**: real Supabase session token (dashboard login via GitHub OAuth) → `/v1/teams` 200 + `/v1/session/key` mints a key (dashboard login completes).
+- **Post-deploy live check**: real Supabase session token (dashboard login via GitHub OAuth) → `/v1/organizations` 200 + `/v1/session/key` mints a key (dashboard login completes).
 - Deferred (separate issues, not absorbed): ACAO-on-unhandled-500 hygiene.
 
 ---
@@ -217,7 +217,7 @@ aboutObjects: tortoise-session-auth, tortoise-hosted-api
 **Steps:**
 1. Local: `uv run pytest tests/test_session_auth.py -v` green.
 2. PR: code-review gate + CI (fast suite incl. new unit tests).
-3. Post-deploy: with a real Supabase session token (dashboard login via GitHub OAuth), confirm `/v1/teams` returns 200 and the dashboard no longer shows the login wall.
+3. Post-deploy: with a real Supabase session token (dashboard login via GitHub OAuth), confirm `/v1/organizations` returns 200 and the dashboard no longer shows the login wall.
 
 ### Rejected Alternatives
 - **A (in-place `_verify_es256`)**: bespoke raw r‖s→DER ECDSA owned in-house — the incident class; every future alg is new bespoke code.

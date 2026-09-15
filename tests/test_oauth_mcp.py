@@ -55,7 +55,7 @@ from tortoise.oauth import (  # noqa: E402, RUF100
     team_resource_url,
 )
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
 
@@ -75,8 +75,8 @@ TEAM_TEAM = {
 }
 
 
-def _member(user_id: str, team_id: str, role: str = "owner") -> dict:
-    return {"user_id": user_id, "team_id": team_id, "role": role,
+def _member(user_id: str, org_id: str, role: str = "owner") -> dict:
+    return {"user_id": user_id, "org_id": org_id, "role": role,
             "status": "active"}
 
 
@@ -84,7 +84,7 @@ def _join_second_team(api_client) -> None:
     """Seed a second active membership for _U1 (team-team-001) on the
     fixture control plane."""
     _, cp = api_client
-    cp.tables["team_memberships"].append(
+    cp.tables["org_memberships"].append(
         _member(_U1, "team-team-001", "member"))
 
 
@@ -177,7 +177,7 @@ def supabase_cp(monkeypatch) -> FakeControlPlane:
     """Supabase mode on + fake control plane seeded with two teams."""
     cp = FakeControlPlane({
         "teams": [dict(TEAM_FREE), dict(TEAM_TEAM)],
-        "team_memberships": [_member(_U1, "team-free-001")],
+        "org_memberships": [_member(_U1, "team-free-001")],
         "api_keys": [],
     })
     _enable_supabase(monkeypatch, cp)
@@ -917,8 +917,8 @@ class TestConsentPreview:
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
-        assert r.json()["team_id"] == "team-free-001"
-        assert r.json()["team_name"] == "Free Team"
+        assert r.json()["org_id"] == "team-free-001"
+        assert r.json()["org_name"] == "Free Team"
 
     def test_preview_resolves_team_scoped_resource(self, api_client, session_user):
         tc, _ = api_client
@@ -927,7 +927,7 @@ class TestConsentPreview:
                    params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
-        assert r.json()["team_id"] == "team-free-001"
+        assert r.json()["org_id"] == "team-free-001"
 
     def test_preview_non_member_403(self, api_client, session_user):
         tc, _ = api_client
@@ -950,14 +950,14 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] is None
-        assert body["team_name"] is None
+        assert body["org_id"] is None
+        assert body["org_name"] is None
         assert body["resource"] == mcp_resource_url(TEST_BASE)
-        assert [m["team_id"] for m in body["memberships"]] == [
+        assert [m["org_id"] for m in body["memberships"]] == [
             "team-free-001", "team-team-001"]  # deterministic sort
         for m in body["memberships"]:
-            assert m["resource"] == team_resource_url(TEST_BASE, m["team_id"])
-            assert m["team_name"]
+            assert m["resource"] == team_resource_url(TEST_BASE, m["org_id"])
+            assert m["org_name"]
 
     def test_preview_multi_team_origin_root_echo_returns_memberships(self, api_client, session_user):
         """An OpenAI-style origin-root resource echo is treated as no team
@@ -969,7 +969,7 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] is None
+        assert body["org_id"] is None
         assert len(body["memberships"]) == 2
 
     def test_preview_single_team_origin_root_echo_binds_sole_team(self, api_client, session_user):
@@ -981,7 +981,7 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
+        assert body["org_id"] == "team-free-001"
         assert "memberships" not in body
 
     def test_preview_declared_bare_mcp_resource_keeps_resource_field(self, api_client, session_user):
@@ -994,7 +994,7 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
+        assert body["org_id"] == "team-free-001"
         assert body["resource"] == team_resource_url(TEST_BASE, "team-free-001")
 
     def test_preview_memberships_exclude_suspended_teams(self, api_client, session_user):
@@ -1006,13 +1006,13 @@ class TestConsentPreview:
         cp.tables["teams"].append({
             "id": "team-suspended-001", "name": "Suspended Team",
             "tier": "free", "suspended_at": "2026-08-15T00:00:00Z"})
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-suspended-001", "member"))
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert [m["team_id"] for m in body["memberships"]] == [
+        assert [m["org_id"] for m in body["memberships"]] == [
             "team-free-001", "team-team-001"]
 
     def test_preview_one_active_one_suspended_autobinds_active(self, api_client, session_user):
@@ -1026,7 +1026,7 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
+        assert body["org_id"] == "team-free-001"
         assert "memberships" not in body
 
     def test_preview_all_teams_suspended_403(self, api_client, session_user):
@@ -1072,12 +1072,12 @@ class TestCodeExchange:
         assert body["expires_in"] == 3600
         # token rows persist with the bound team (P4)
         acc = cp.tables["oauth_access_tokens"][0]
-        assert acc["team_id"] == "team-free-001"
+        assert acc["org_id"] == "team-free-001"
         assert acc["user_id"] == _U1
         assert acc["token_hash"] == hashlib.sha256(
             body["access_token"].encode()).hexdigest()
         ref = cp.tables["oauth_refresh_tokens"][0]
-        assert ref["team_id"] == "team-free-001"
+        assert ref["org_id"] == "team-free-001"
 
     def test_wrong_verifier_rejected(self, api_client, session_user):
         tc, cp = api_client
@@ -1238,12 +1238,12 @@ class TestParseResource:
 
     def test_origin_root_maps_to_bare_mcp(self):
         from tortoise.oauth import parse_resource
-        canonical, team_id = parse_resource(TEST_BASE, TEST_BASE)
+        canonical, org_id = parse_resource(TEST_BASE, TEST_BASE)
         assert canonical == mcp_resource_url(TEST_BASE)
-        assert team_id is None
-        canonical2, team_id2 = parse_resource(TEST_BASE, TEST_BASE + "/")
+        assert org_id is None
+        canonical2, org_id2 = parse_resource(TEST_BASE, TEST_BASE + "/")
         assert canonical2 == mcp_resource_url(TEST_BASE)
-        assert team_id2 is None
+        assert org_id2 is None
 
     def test_origin_root_rejected_for_foreign_origin(self):
         from tortoise.oauth import OAuthError, parse_resource
@@ -1260,16 +1260,16 @@ class TestParseResource:
 
     def test_bare_mcp_trailing_slash_accepted(self):
         from tortoise.oauth import parse_resource
-        canonical, team_id = parse_resource(TEST_BASE, mcp_resource_url(TEST_BASE) + "/")
+        canonical, org_id = parse_resource(TEST_BASE, mcp_resource_url(TEST_BASE) + "/")
         assert canonical == mcp_resource_url(TEST_BASE)
-        assert team_id is None
+        assert org_id is None
 
     def test_team_scoped_still_parses(self):
         from tortoise.oauth import parse_resource
         resource = team_resource_url(TEST_BASE, "team-free-001")
-        canonical, team_id = parse_resource(TEST_BASE, resource)
+        canonical, org_id = parse_resource(TEST_BASE, resource)
         assert canonical == resource
-        assert team_id == "team-free-001"
+        assert org_id == "team-free-001"
 
 
 class TestRfc8707Mapping:
@@ -1277,21 +1277,21 @@ class TestRfc8707Mapping:
         tc, cp = api_client
         session_user(_U1)
         # user-1 joins the second team
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-team-001", "member"))
         resource = team_resource_url(TEST_BASE, "team-team-001")
         flow = _auth_code_flow(tc, cp, resource=resource)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"], resource=resource)
         assert r.status_code == 200, r.text
-        assert cp.tables["oauth_access_tokens"][0]["team_id"] == "team-team-001"
-        assert cp.tables["oauth_refresh_tokens"][0]["team_id"] == "team-team-001"
+        assert cp.tables["oauth_access_tokens"][0]["org_id"] == "team-team-001"
+        assert cp.tables["oauth_refresh_tokens"][0]["org_id"] == "team-team-001"
 
     def test_multi_team_default_requires_declaration(self, api_client, session_user):
         """D4 (no picker UI): a multi-team user MUST declare the resource."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-team-001", "member"))
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
@@ -1342,7 +1342,7 @@ class TestRfc8707Mapping:
     def test_zero_team_user_rejected(self, api_client, session_user):
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["team_memberships"] = []
+        cp.tables["org_memberships"] = []
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -1417,7 +1417,7 @@ class TestRefreshRotation:
         prev_access = [t for t in cp.tables["oauth_access_tokens"]  # noqa: RUF015
                        if t["revoked_at"] is None][0]
         args = dict(client_id=flow["client_id"], user_id=_U1,
-                    team_id="team-free-001", scope="mcp", resource=None)
+                    org_id="team-free-001", scope="mcp", resource=None)
         # worker A wins the atomic claim
         out_a = _issue_tokens(cp, prev_refresh=prev,
                               prev_access_id=prev_access["id"], **args)
@@ -1544,7 +1544,7 @@ class TestSuspensionRevocation:
         tc, cp = api_client
         session_user(_U1)
         tokens = self._granted(tc, cp)
-        cp.tables["team_memberships"] = []  # seat removed
+        cp.tables["org_memberships"] = []  # seat removed
         r = tc.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "refresh_token": tokens["refresh_token"],

@@ -365,7 +365,7 @@ class TestAskConnectedAssemblyExposure:
     ASSEMBLED evidence in the tool result; a forced assembler-stage raise
     maps to the retrieval-unavailable code (never a raw 500/traceback).
 
-    auth_mode="none" sets _current_team_id="selfhost" → the ask tool opens
+    auth_mode="none" sets _current_org_id="selfhost" → the ask tool opens
     TortoiseSDK(namespace="selfhost") (graph team_selfhost on the env URI),
     so the fixture is seeded INTO that namespace graph.
 

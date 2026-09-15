@@ -36,9 +36,9 @@ import tortoise.hosted_api as ha_mod
 from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.hosted_api import app, get_current_team, get_current_user
 
-TEST_TEAM_ID = f"team-{uuid.uuid4().hex[:8]}"
+TEST_ORG_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
-    "team_id": TEST_TEAM_ID,
+    "org_id": TEST_ORG_ID,
     "key_id": "test-key-001",
     # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
     # data-plane gates otherwise (mirrors the #2241 migration pattern).
@@ -47,7 +47,7 @@ TEST_TEAM = {
     "max_users": 1, "max_graphs": 1, "max_points": 10000,
     "max_api_keys": 2, "max_sessions": 1000,
 }
-TEST_TEAM_B = {"team_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
+TEST_TEAM_B = {"org_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
                # C5 #2114 (#2260): legacy tt_ class (see TEST_TEAM note).
                "legacy_full_access": True,
                "tier": "free", "max_users": 1, "max_graphs": 1,
@@ -97,8 +97,8 @@ def client_b():
             yield TestClient(app)
 
 
-def _team_sdk(team_id: str = TEST_TEAM_ID):
-    return ha_mod._make_sdk(namespace=team_id)
+def _team_sdk(org_id: str = TEST_ORG_ID):
+    return ha_mod._make_sdk(namespace=org_id)
 
 
 # ── validate_manifest (unit) ────────────────────────────────────────────────
@@ -317,8 +317,8 @@ class TestUploadRateLimit:
             # is still a terminal outcome, so the progression holds there
             # too — only moving export's check AFTER authz breaks it (a
             # real doctrine regression worth catching).
-            assert tc.get("/v1/teams/nope/export").status_code == 403
-            assert tc.get("/v1/teams/nope/export").status_code == 429
+            assert tc.get("/v1/organizations/nope/export").status_code == 403
+            assert tc.get("/v1/organizations/nope/export").status_code == 429
             # export didn't consume the pack bucket → budget still left
             r = tc.post("/v1/packs/manifests",
                         json={"manifest_yaml": VALID_MANIFEST})
@@ -566,7 +566,7 @@ class TestIsolation:
             db_b = os.path.join(tmp_b, "b.db")
 
             def _route_patch(self, db_path_arg=None, *, namespace=None, **kwargs):
-                target = db_b if namespace == TEST_TEAM_B["team_id"] else db_a
+                target = db_b if namespace == TEST_TEAM_B["org_id"] else db_a
                 _orig(self, target, namespace=namespace)
 
             import tortoise.sdk as sdk_mod

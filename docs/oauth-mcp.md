@@ -79,9 +79,9 @@ by an explicit user choice on the consent page for resource-less clients
 | Resource | Team |
 |---|---|
 | `https://api.premiselabs.co/mcp` (or omitted, or the AS origin root `https://api.premiselabs.co`) | the user's **sole** active team; several active teams → the consent page shows a **team chooser** (ChatGPT etc. cannot declare an RFC 8707 resource); 0 active teams → error |
-| `https://api.premiselabs.co/mcp/teams/{team_id}` | that team (must be an active membership, not suspended) |
+| `https://api.premiselabs.co/mcp/organizations/{org_id}` | that team (must be an active membership, not suspended) |
 
-The token row stores the bound `team_id`; the MCP boundary introspects it
+The token row stores the bound `org_id`; the MCP boundary introspects it
 directly (D6 — OAuth tokens are self-sufficient, no `tt_` key minting; the
 session→key bridge stays for dashboard flows).
 

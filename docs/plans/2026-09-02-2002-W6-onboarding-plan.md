@@ -10,7 +10,7 @@
 **Team:** epistemic-team
 **Role:** (unavailable)
 
-**Architecture:** The capture path is `_capture_session_impl` (hosted_api.py) — shared by POST /v1/sessions AND the `tortoise_session_capture` MCP tool (mcp_server.py imports the same impl), so the trigger lives in ONE place and both surfaces stay in lockstep (never touch mcp_server.py / sdk.py — shared modules, W8 parallel ownership). The trigger runs after all durable capture writes on the 2xx path: `_os.write_completed_step(proj, team_id, "capture-disclosed", status_from_mirror=...)` (idempotent keyed-MERGE; FWW; created-signal honest under the state.py per-org lock), then `_maybe_apply_completion` (capture-disclosed is NOT a card step — never a counted row, so it can never false-complete the guide; the gate eval is a monotonic no-op unless the real gate was already satisfied). The response gains `"first_capture": created` — the in-conversation agent reads it and fires the ONE line from SKILL.md §6. A session-existence re-verify immediately before the receipt write (the receipt↔Session invariant, T1-P12) skips the receipt when the Session was deleted mid-capture (delete-during-capture race: no orphaned receipt). DELETE is a new hosted endpoint (no partial exists — verified: only GET /v1/sessions + GET /v1/sessions/{id} + POST exist) with dual-auth team-member authz (`get_current_team_session_ungated` — session JWT membership-validated via `_session_user_team`, key auth team-scoped), graph deletion of exactly the session's owned subgraph, then receipt cleanup by recompute: a receipt key (bare or per-harness) is cleared iff ZERO remaining :Session nodes correspond to it (per-harness by `s.harness`, bare by `harness IS NULL`). The dashboard Settings home (W4 seam, Home 4 "Captured sessions") gains per-row View (transcript panel from GET /v1/sessions/{id}, reusing the #714 .session-detail/.turn-* CSS) + Delete (confirm → DELETE → list + onboarding refresh), with the row/list derivation logic in a pure `capturedSessions.js` module (node --test, no jsdom).
+**Architecture:** The capture path is `_capture_session_impl` (hosted_api.py) — shared by POST /v1/sessions AND the `tortoise_session_capture` MCP tool (mcp_server.py imports the same impl), so the trigger lives in ONE place and both surfaces stay in lockstep (never touch mcp_server.py / sdk.py — shared modules, W8 parallel ownership). The trigger runs after all durable capture writes on the 2xx path: `_os.write_completed_step(proj, org_id, "capture-disclosed", status_from_mirror=...)` (idempotent keyed-MERGE; FWW; created-signal honest under the state.py per-org lock), then `_maybe_apply_completion` (capture-disclosed is NOT a card step — never a counted row, so it can never false-complete the guide; the gate eval is a monotonic no-op unless the real gate was already satisfied). The response gains `"first_capture": created` — the in-conversation agent reads it and fires the ONE line from SKILL.md §6. A session-existence re-verify immediately before the receipt write (the receipt↔Session invariant, T1-P12) skips the receipt when the Session was deleted mid-capture (delete-during-capture race: no orphaned receipt). DELETE is a new hosted endpoint (no partial exists — verified: only GET /v1/sessions + GET /v1/sessions/{id} + POST exist) with dual-auth team-member authz (`get_current_team_session_ungated` — session JWT membership-validated via `_session_user_team`, key auth team-scoped), graph deletion of exactly the session's owned subgraph, then receipt cleanup by recompute: a receipt key (bare or per-harness) is cleared iff ZERO remaining :Session nodes correspond to it (per-harness by `s.harness`, bare by `harness IS NULL`). The dashboard Settings home (W4 seam, Home 4 "Captured sessions") gains per-row View (transcript panel from GET /v1/sessions/{id}, reusing the #714 .session-detail/.turn-* CSS) + Delete (confirm → DELETE → list + onboarding refresh), with the row/list derivation logic in a pure `capturedSessions.js` module (node --test, no jsdom).
 
 ### Pattern Research
 
@@ -37,7 +37,7 @@
 | 11b | DELETE /v1/sessions/{session_id} graph cleanup | DB (graph) | Out | Integration (docker lane) | 200 {deleted:true} removes Session + CONTAINS Points (turns + extracted) + sessionCaptured Event + agentSession Source; aboutObject targets survive; 404 unknown id; idempotent (2nd delete 404); cross-team isolation by tenant namespace |
 | 11c | DELETE capture-receipt cleanup | DB (jsonb/registry) | Out | Integration (docker lane) | Deleted session's receipt keys cleared iff zero remaining Sessions in that harness bucket (bare receipt ↔ harness-less Sessions; per-harness ↔ s.harness); a second session under the same harness keeps the receipt; probes untouched |
 | 11d | Delete-during-capture race | Concurrent | Both | Integration (docker lane) | Capture → delete → replay-capture (same session_id) writes NO receipt (session-existence re-verify at receipt time); receipt never orphans; delete recompute clears a receipt whose session vanished |
-| 11e | Authz (team-member until W10) | Auth | Guard | Integration (docker lane) | DELETE + detail GET dual-auth (session JWT OR tt_ key); session user without membership in ?team_id= team → 403 (`_session_user_team`); key auth team-scoped by resolution |
+| 11e | Authz (team-member until W10) | Auth | Guard | Integration (docker lane) | DELETE + detail GET dual-auth (session JWT OR tt_ key); session user without membership in ?org_id= team → 403 (`_session_user_team`); key auth team-scoped by resolution |
 | 11f | Settings view/delete UI (W4 home consumer) | UI | Both | JS unit (node --test) + ux-verification | Per-row View (transcript panel: turns + extracted) + Delete (confirm → DELETE → list mutates via pure filter fn); busy/error states honest; capture-status derivation (captureStatus.js) untouched |
 
 **Bug Pattern Flags**
@@ -72,9 +72,9 @@
 ## Task 1: First-capture trigger (hosted_api.py `_capture_session_impl`)
 
 - After the durable 2xx receipt write block, add the trigger:
-  - `legacy_mirror = bool(_get_onboarding_state(team["team_id"]).get("onboarding_complete"))`
-  - `res = _os.write_completed_step(proj, team["team_id"], "capture-disclosed", status_from_mirror=legacy_mirror)` — wrapped non-fatal (additive warning like the receipt block; a checkpoint hiccup never 500s a committed capture).
-  - `_maybe_apply_completion(team["team_id"])` — monotonic gate eval (no-op unless the real gate was already met; capture-disclosed never counts toward the card).
+  - `legacy_mirror = bool(_get_onboarding_state(team["org_id"]).get("onboarding_complete"))`
+  - `res = _os.write_completed_step(proj, team["org_id"], "capture-disclosed", status_from_mirror=legacy_mirror)` — wrapped non-fatal (additive warning like the receipt block; a checkpoint hiccup never 500s a committed capture).
+  - `_maybe_apply_completion(team["org_id"])` — monotonic gate eval (no-op unless the real gate was already met; capture-disclosed never counts toward the card).
   - `first_capture = bool(res["created"])`.
 - Before the receipt write, add the delete-race re-verify: `MATCH (s:Session {id:$sid}) RETURN count(s)` → if 0 (deleted mid-capture), skip the receipt write + append an additive warning (data was removed by DELETE — the receipt would be an orphan).
 - Response: `resp["first_capture"] = first_capture` (+ comment: the in-conversation agent fires W2 SKILL.md §6's ONE line when true; copy lives there, never duplicated).
@@ -82,19 +82,19 @@
 ## Task 2: DELETE /v1/sessions/{session_id} (hosted_api.py, next to GET detail)
 
 - `@app.delete("/v1/sessions/{session_id}")` with `Depends(get_current_team_session_ungated)` (dual-auth team-member; session membership validated in `_session_user_team`).
-- Query sequence on the team graph (`_make_sdk(namespace=team["team_id"])._get_proj()`):
+- Query sequence on the team graph (`_make_sdk(namespace=team["org_id"])._get_proj()`):
   1. Existence: `MATCH (s:Session {id:$sid}) RETURN s.id, s.harness` → 404 `{"detail": "Session not found"}` (matches GET detail contract) when absent.
   2. `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p` (turn + extracted points; aboutObject edges to entities die here, entities survive).
   3. Collect provenance event ids: `MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId` + `MATCH (src:Source {url:$url}) RETURN src.eventId` → delete `MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e`.
   4. `MATCH (src:Source {url:$url}) DETACH DELETE src`.
   5. `MATCH (s:Session {id:$sid}) DETACH DELETE s`.
-- Receipt cleanup by recompute (AFTER graph removal — self-healing under the race): for each truthy receipt key in state (bare + per-harness registered keys): bucket = harness (None for bare) → count remaining Sessions (`s.harness = $h` / `s.harness IS NULL`) → zero → `_update_onboarding_state(team_id, **{key: None})` (precedent: last-error clear). Probes/last-errors untouched.
+- Receipt cleanup by recompute (AFTER graph removal — self-healing under the race): for each truthy receipt key in state (bare + per-harness registered keys): bucket = harness (None for bare) → count remaining Sessions (`s.harness = $h` / `s.harness IS NULL`) → zero → `_update_onboarding_state(org_id, **{key: None})` (precedent: last-error clear). Probes/last-errors untouched.
 - Return `{"deleted": True}`. Graph failure handling: fail-loud 500 with retry-safe semantics (delete is idempotent).
 
 ## Task 3: Settings view/delete (W4 home consumer) + pure module
 
 - `website/apps/dashboard/src/capturedSessions.js` (pure, node --test): `removeSession(sessions, id)` (list minus id), `sessionMeta(s)` (turns/extracted counts with defaults), `transcriptGroups(detail)` (defaults for missing turns/extracted arrays), `sessionBucketLabel`/small formatting helpers the rows need.
-- main.jsx App: `deleteCapturedSession(id)` handler (confirm → DELETE via `api` with `useSession: true` + `?team_id=` → on success remove from local `sessions` via pure fn + `refreshOnboarding()` (receipts/probes may change) → error surfaced via a sessions-row error state) + wire `fetchSessionDetail` (already present) through Settings props.
+- main.jsx App: `deleteCapturedSession(id)` handler (confirm → DELETE via `api` with `useSession: true` + `?org_id=` → on success remove from local `sessions` via pure fn + `refreshOnboarding()` (receipts/probes may change) → error surfaced via a sessions-row error state) + wire `fetchSessionDetail` (already present) through Settings props.
 - SettingsTab Home 4: per-row View + Delete buttons (confirm copy states deletion is permanent), busy/error states per row (single-flight), transcript panel (expanded inline, reusing #714 CSS classes) with turns + extracted sections; keep W4's honest empty/off states.
 
 ## Task 4: Tests
@@ -103,7 +103,7 @@
   - Trigger: fresh team first capture → 200 + `first_capture: true` + capture-disclosed edge visible via `onboarding_state.completed_steps`; second NEW session → false + noop; replay same session → false; off-switch (session_recording False) → 409, no edge, #1927.
   - Delete hygiene: capture (with a fixed session_id) → DELETE → 200; Session/Points/Event/Source counts zero; GET detail → 404; receipt cleared; unknown id → 404; receipt survives when a second same-harness session remains; cross-harness bucket independence.
   - Race negative: capture → DELETE → replay same session_id POST → 200 with additive warning, NO receipt re-landed, zero Session nodes (delete-during-capture no-orphan).
-  - Authz: non-member session user (second registered user not in team) DELETE with `?team_id=` → 403.
+  - Authz: non-member session user (second registered user not in team) DELETE with `?org_id=` → 403.
 - JS: `src/capturedSessions.test.js` (pure-module style like captureStatus.test.js).
 - Register `test_onboarding_w6_capture_disclosure.py` in `config/ci-surfaces.yml` under `onboarding:` (comment #2002 W6).
 - `tests/test_markers.py` ROUTED_NAMESPACES: only if the test file uses the literal `registry` namespace (docker-lane register fixture may — check; if used, add entry).

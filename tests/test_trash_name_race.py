@@ -3,7 +3,7 @@
 Restore pre-checks the name under the per-team sweep lock; create_graph runs
 under a different lock (_provision_lock), so a create can land the freed name
 between the pre-check and the flip. On the SUPABASE lane the conditional
-PATCH then trips the partial unique index (uq_graphs_team_name_active →
+PATCH then trips the partial unique index (uq_graphs_org_name_active →
 PostgREST 409 → RuntimeError) which must map to HTTP 409, not a 500. On the
 REGISTRY lane (no unique index) both rows go live — the restore must roll
 itself back (never leave duplicate live names) and 409. Both paths tested
@@ -35,13 +35,13 @@ def _seed(fake):
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "solo", "max_graphs": 2})
     fake.seed("teams", [team])
-    fake.seed("team_memberships", [{
-        "id": "m-1", "team_id": _TEAM, "user_id": _OWNER, "role": "owner",
+    fake.seed("org_memberships", [{
+        "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
     }])
     fake.seed("graphs", [{
-        "id": _GID, "team_id": _TEAM, "name": "old-bot", "kind": "custom",
-        "namespace": f"team_{_TEAM}_{_GID}", "status": "deleted",
+        "id": _GID, "org_id": _TEAM, "name": "old-bot", "kind": "custom",
+        "namespace": f"org_{_TEAM}_{_GID}", "status": "deleted",
         "deleted_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
         "purged_at": None,
     }])
@@ -50,7 +50,7 @@ def _seed(fake):
 @pytest.fixture
 def sb_client(monkeypatch):
     fake = FakeControlPlane({"teams": [], "api_keys": [],
-                             "team_memberships": [], "invitations": []})
+                             "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "namerace.db")
@@ -72,7 +72,7 @@ def as_owner():
 
 
 def test_supabase_duplicate_key_maps_to_409(sb_client, as_owner, monkeypatch):
-    """The lane PATCH tripping uq_graphs_team_name_active (a create won the
+    """The lane PATCH tripping uq_graphs_org_name_active (a create won the
     name between the pre-check and the flip) must surface as HTTP 409, not a
     500 — the fake control plane does not model the unique index, so the
     RuntimeError is injected at the seam."""
@@ -91,7 +91,7 @@ def test_supabase_duplicate_key_maps_to_409(sb_client, as_owner, monkeypatch):
     # _make_sdk must return a counting stub (default-only: the deleted custom
     # consumes no quota), not None.
     class _StubSdk:
-        def graph_count(self, team_id):
+        def graph_count(self, org_id):
             return 1
 
     monkeypatch.setattr("tortoise.hosted_api._make_sdk",
@@ -99,7 +99,7 @@ def test_supabase_duplicate_key_maps_to_409(sb_client, as_owner, monkeypatch):
     # Patch the lane seam the endpoint imports fresh (inside the endpoint).
     import tortoise.supabase_control as sc
     monkeypatch.setattr(sc, "restore_graph", _dupe)
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 409, r.text
     assert "concurrent create" in r.json()["detail"]
 
@@ -115,7 +115,7 @@ def test_restore_false_flip_already_active_returns_409_not_410(
     as_owner()
 
     class _StubSdk:
-        def graph_count(self, team_id):
+        def graph_count(self, org_id):
             return 1
 
     monkeypatch.setattr("tortoise.hosted_api._make_sdk",
@@ -131,7 +131,7 @@ def test_restore_false_flip_already_active_returns_409_not_410(
         return False
 
     monkeypatch.setattr(sc, "restore_graph", _already_restored)
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 409, r.text
     assert "already restored" in r.json()["detail"]
 
@@ -154,7 +154,7 @@ def test_registry_rollback_on_post_flip_name_conflict(sb_client, as_owner,
 
     monkeypatch.setattr(ha_mod, "_trash_name_conflict",
                         _conflict_first_false)
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 409, r.text
     # The row is back in the trash (status deleted + a fresh deleted_at).
     rows = [g for g in fake.tables["graphs"] if g["id"] == _GID]
@@ -172,10 +172,10 @@ def test_trash_surfaces_503_on_cp_outage(sb_client, as_owner, monkeypatch):
 
     def _boom(*_a, **_k):
         raise RuntimeError("Supabase control-plane query failed "
-                           "(team_memberships): HTTP 500")
+                           "(org_memberships): HTTP 500")
 
     fake.query = _boom  # FakeControlPlane.query drives the CP reads
-    r = tc.get(f"/v1/graphs/trash?team_id={_TEAM}")
+    r = tc.get(f"/v1/graphs/trash?org_id={_TEAM}")
     assert r.status_code == 503, r.text
     assert (r.json().get("detail") or {}).get("error_code") == \
         "control_plane_unavailable"

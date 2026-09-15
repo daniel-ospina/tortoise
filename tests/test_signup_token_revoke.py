@@ -99,12 +99,12 @@ class TestSupabaseLane:
         """Journey: user revokes the leaked token → token-present signup AND
         recover return the uniform 422 (no recovery backdoor)."""
         data = _mint(client)
-        token, team_id = data["signup_token"], data["team_id"]
+        token, org_id = data["signup_token"], data["org_id"]
         r = client.post("/v1/agent/token/revoke", json={"signup_token": token},
                         headers={"Authorization": f"Bearer {data['key']}"})
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body == {"revoked": True, "already": False, "team_id": team_id}
+        assert body == {"revoked": True, "already": False, "org_id": org_id}
         # the row flipped in the control plane
         rows = self._token_rows(token)
         assert len(rows) == 1 and rows[0]["revoked_at"] is not None
@@ -176,7 +176,7 @@ class TestSupabaseLane:
         r2 = client.post("/v1/agent/recover",
                          json={"signup_token": b["signup_token"]})
         assert r2.status_code == 200, r2.text
-        assert r2.json()["team_id"] == b["team_id"]
+        assert r2.json()["org_id"] == b["org_id"]
 
     def test_revoke_already_revoked_idempotent(self, client):
         data = _mint(client)
@@ -190,7 +190,7 @@ class TestSupabaseLane:
                              headers=headers)
         assert second.status_code == 200, second.text
         assert second.json() == {"revoked": True, "already": True,
-                                 "team_id": data["team_id"]}
+                                 "org_id": data["org_id"]}
 
     def test_revoke_writes_via_rpc_and_audits(self, client, monkeypatch):
         """Supabase lane: the write goes through the revoke_signup_token RPC
@@ -198,8 +198,8 @@ class TestSupabaseLane:
         with resource_type='signup_token'."""
         captured: list[dict] = []
 
-        async def _capture_audit(request, team_id, operation, **kw):
-            captured.append({"team_id": team_id, "operation": operation, **kw})
+        async def _capture_audit(request, org_id, operation, **kw):
+            captured.append({"org_id": org_id, "operation": operation, **kw})
 
         monkeypatch.setattr(ha_mod, "_async_audit", _capture_audit)
         data = _mint(client)
@@ -212,14 +212,14 @@ class TestSupabaseLane:
         # contract of the service_role RPC, not just its name
         assert ("revoke_signup_token",
                 {"p_token_hash": _lookup_hash(data["signup_token"]),
-                 "p_team_id": data["team_id"]}) in self.fake.rpc_calls
+                 "p_org_id": data["org_id"]}) in self.fake.rpc_calls
         revoke_evts = [e for e in captured
                        if e["operation"] == "agent_signup_token_revoke"]
         assert len(revoke_evts) == 1, captured
         ev = revoke_evts[0]
         assert ev["resource_type"] == "signup_token"
-        assert ev["team_id"] == data["team_id"]
-        assert ev["resource_id"] == data["team_id"]
+        assert ev["org_id"] == data["org_id"]
+        assert ev["resource_id"] == data["org_id"]
 
     def test_fake_recover_mint_writes_iso_created_at(self, client):
         """#1754 (c): the fake recover_team_key mint writes a REAL ISO
@@ -232,7 +232,7 @@ class TestSupabaseLane:
                         json={"signup_token": data["signup_token"]})
         assert r.status_code == 200, r.text
         recovery_keys = [k for k in self.fake.tables.get("api_keys", [])
-                         if k.get("team_id") == data["team_id"]
+                         if k.get("org_id") == data["org_id"]
                          and k.get("created_via") == "recovery"]
         assert recovery_keys, "recover should have minted an api_keys row"
         from datetime import datetime
@@ -257,28 +257,28 @@ class TestRegistryLane:
 
     def test_registry_revoke_then_recover_422(self, client, monkeypatch):
         data = _mint(client)
-        token, team_id = data["signup_token"], data["team_id"]
+        token, org_id = data["signup_token"], data["org_id"]
         captured: list[dict] = []
 
-        async def _capture_audit(request, team_id, operation, **kw):
-            captured.append({"team_id": team_id, "operation": operation, **kw})
+        async def _capture_audit(request, org_id, operation, **kw):
+            captured.append({"org_id": org_id, "operation": operation, **kw})
 
         monkeypatch.setattr(ha_mod, "_async_audit", _capture_audit)
         r = client.post("/v1/agent/token/revoke", json={"signup_token": token},
                         headers={"Authorization": f"Bearer {data['key']}"})
         assert r.status_code == 200, r.text
-        assert r.json() == {"revoked": True, "already": False, "team_id": team_id}
+        assert r.json() == {"revoked": True, "already": False, "org_id": org_id}
         # the registry lane records the same audit event as the Supabase lane
         revoke_evts = [e for e in captured
                        if e["operation"] == "agent_signup_token_revoke"]
         assert len(revoke_evts) == 1, captured
         assert revoke_evts[0]["resource_type"] == "signup_token"
-        assert revoke_evts[0]["resource_id"] == team_id
+        assert revoke_evts[0]["resource_id"] == org_id
         # the node flipped
         sdk = ha_mod._make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
-            "MATCH (n:SignupToken {team_id:$tid}) RETURN n.revoked_at",
-            params={"tid": team_id},
+            "MATCH (n:SignupToken {org_id:$tid}) RETURN n.revoked_at",
+            params={"tid": org_id},
         ).result_set
         assert rows and rows[0][0] is not None
         # revoked token can no longer recover keys — uniform 422
@@ -299,7 +299,7 @@ class TestRegistryLane:
         r2 = client.post("/v1/agent/recover",
                          json={"signup_token": b["signup_token"]})
         assert r2.status_code == 200, r2.text
-        assert r2.json()["team_id"] == b["team_id"]
+        assert r2.json()["org_id"] == b["org_id"]
         # unknown token → 404
         r3 = client.post("/v1/agent/token/revoke",
                          json={"signup_token": _st_token()},
@@ -321,31 +321,31 @@ class TestRegistryLane:
         must be REVOCABLE too (it was: recoverable but unrevocable — the
         lookup_key-only MATCH could never find it)."""
         data = _mint(client)
-        token, team_id = data["signup_token"], data["team_id"]
+        token, org_id = data["signup_token"], data["org_id"]
         sdk = ha_mod._make_sdk(namespace="registry")
         reg = sdk._get_registry()
         # simulate a legacy hash-only node: strip the deterministic
         # lookup_key, leaving only the salted token_hash
         reg.query(
-            "MATCH (n:SignupToken {team_id:$tid}) REMOVE n.lookup_key",
-            params={"tid": team_id},
+            "MATCH (n:SignupToken {org_id:$tid}) REMOVE n.lookup_key",
+            params={"tid": org_id},
         )
         # recover still resolves the hash-only node (PBKDF2 fallback in
         # signup_token_lookup — the pre-existing recoverable half)
         r = client.post("/v1/agent/recover", json={"signup_token": token})
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"] == team_id
+        assert r.json()["org_id"] == org_id
         # revoke now works on the hash-only node too
         r2 = client.post("/v1/agent/token/revoke",
                          json={"signup_token": token},
                          headers={"Authorization": f"Bearer {data['key']}"})
         assert r2.status_code == 200, r2.text
         assert r2.json() == {"revoked": True, "already": False,
-                             "team_id": team_id}
+                             "org_id": org_id}
         # the node flipped
         rows = reg.query(
-            "MATCH (n:SignupToken {team_id:$tid}) RETURN n.revoked_at",
-            params={"tid": team_id},
+            "MATCH (n:SignupToken {org_id:$tid}) RETURN n.revoked_at",
+            params={"tid": org_id},
         ).result_set
         assert rows and rows[0][0] is not None
         # revoked hash-only token → uniform 422 on recover (no backdoor)
@@ -357,16 +357,16 @@ class TestRegistryLane:
         """#1754 (a): a token node with a matching lookup_key but a DIFFERENT
         team is never revoked — the SDK refuses (not_owned) and the foreign
         node stays live. The revoke write itself is team-scoped (parity with
-        the SQL lane's AND team_id), so no race can cross teams."""
+        the SQL lane's AND org_id), so no race can cross teams."""
         a, b = _mint(client), _mint(client)
         sdk = ha_mod._make_sdk(namespace="registry")
         # A attempts to revoke B's token through the same SDK call the
         # endpoint makes after auth — refused, B's node untouched
-        out = sdk.signup_token_revoke(b["signup_token"], a["team_id"])
-        assert out == {"team_id": a["team_id"], "status": "not_owned"}
+        out = sdk.signup_token_revoke(b["signup_token"], a["org_id"])
+        assert out == {"org_id": a["org_id"], "status": "not_owned"}
         rows = sdk._get_registry().query(
-            "MATCH (n:SignupToken {team_id:$tid}) RETURN n.revoked_at",
-            params={"tid": b["team_id"]},
+            "MATCH (n:SignupToken {org_id:$tid}) RETURN n.revoked_at",
+            params={"tid": b["org_id"]},
         ).result_set
         assert rows and rows[0][0] is None
         # B's token still recovers — the attempted cross-team kill changed
@@ -374,7 +374,7 @@ class TestRegistryLane:
         r = client.post("/v1/agent/recover",
                         json={"signup_token": b["signup_token"]})
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"] == b["team_id"]
+        assert r.json()["org_id"] == b["org_id"]
 
 
 class TestCmdTokenRevoke:
@@ -386,7 +386,7 @@ class TestCmdTokenRevoke:
         d.mkdir(parents=True, exist_ok=True)
         d.chmod(0o700)
         cfg = {"api_key": "tt_revoker", "api_url": "https://api.premiselabs.co",
-               "team_id": "team-9", **extra}
+               "org_id": "team-9", **extra}
         (d / "credentials.json").write_text(json.dumps(cfg))
 
     def test_token_revoke_happy_path(self, monkeypatch, tmp_path, capsys):
@@ -399,7 +399,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json(
                             {"revoked": True, "already": False,
-                             "team_id": "team-9"})) as urlopen:
+                             "org_id": "team-9"})) as urlopen:
             rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
         assert rc == 0
         out = capsys.readouterr().out
@@ -450,7 +450,7 @@ class TestCmdTokenRevoke:
                 with mock.patch("urllib.request.urlopen",
                                 return_value=_ok_json(
                                     {"revoked": True, "already": False,
-                                     "team_id": "team-9"})) as urlopen:
+                                     "org_id": "team-9"})) as urlopen:
                     rc = main._cmd_token_revoke(
                         mock.Mock(force=False, token=None))
         assert rc == 0
@@ -474,7 +474,7 @@ class TestCmdTokenRevoke:
                     with mock.patch("urllib.request.urlopen",
                                     return_value=_ok_json(
                                         {"revoked": True, "already": False,
-                                         "team_id": "team-9"})) as urlopen:
+                                         "org_id": "team-9"})) as urlopen:
                         rc = main._cmd_token_revoke(mock.Mock(token=token, force=False))
             assert rc == 0, f"answer {answer!r} should revoke"
             assert urlopen.called, f"answer {answer!r} should send the request"
@@ -510,7 +510,7 @@ class TestCmdTokenRevoke:
                 with mock.patch("urllib.request.urlopen",
                                 return_value=_ok_json(
                                     {"revoked": True, "already": False,
-                                     "team_id": "team-9"})) as urlopen:
+                                     "org_id": "team-9"})) as urlopen:
                     rc = main._cmd_token_revoke(
                         mock.Mock(force=True, token="st_" + "56" * 32))
         assert rc == 0
@@ -547,7 +547,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json(
                             {"revoked": True, "already": False,
-                             "team_id": "team-9"})) as urlopen:
+                             "org_id": "team-9"})) as urlopen:
             rc = main._cmd_token_revoke(mock.Mock(force=True, token=token))
         assert rc == 0
         assert json.loads(urlopen.call_args.args[0].data) == {
@@ -642,7 +642,7 @@ class TestCmdTokenRevoke:
             "signup_token": "st_" + "cd" * 32}))
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json({"revoked": True, "already": False,
-                                               "team_id": "team-9"})) as urlopen:
+                                               "org_id": "team-9"})) as urlopen:
             rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
         assert rc == 0
         req = urlopen.call_args.args[0]
@@ -658,7 +658,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         lambda req, timeout=None: _ok_json(
                             {"revoked": True, "already": True,
-                             "team_id": "team-9"})):
+                             "org_id": "team-9"})):
             rc = main._cmd_token_revoke(mock.Mock(force=True, token="st_" + "ab" * 32))
         assert rc == 0
         out = capsys.readouterr().out
@@ -692,7 +692,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json(
                             {"revoked": True, "already": False,
-                             "team_id": "team-b"})) as urlopen:
+                             "org_id": "team-b"})) as urlopen:
             rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
         assert rc == 0
         req = urlopen.call_args.args[0]
@@ -717,7 +717,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json(
                             {"revoked": True, "already": False,
-                             "team_id": "team-9"})) as urlopen:
+                             "org_id": "team-9"})) as urlopen:
             rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
         assert rc == 0
         assert json.loads(urlopen.call_args.args[0].data) == {
@@ -739,7 +739,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json(
                             {"revoked": True, "already": False,
-                             "team_id": "team-b"})) as urlopen:
+                             "org_id": "team-b"})) as urlopen:
             rc = main._cmd_token_revoke(mock.Mock(force=True, token=explicit))
         assert rc == 0
         req = urlopen.call_args.args[0]
@@ -773,7 +773,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json(
                             {"revoked": True, "already": False,
-                             "team_id": "team-b"})) as urlopen:
+                             "org_id": "team-b"})) as urlopen:
             rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
         assert rc == 0
         req = urlopen.call_args.args[0]
@@ -811,7 +811,7 @@ class TestRevokeBodySweepCap:
     def test_revoke_oversized_413(self, sweep_client, monkeypatch):
         from tortoise.hosted_api import get_current_team
         app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "team-001", "tier": "free", "key_id": "k1",
+            "org_id": "team-001", "tier": "free", "key_id": "k1",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
             "max_api_keys": 2, "max_sessions": 1000,
         }
@@ -833,7 +833,7 @@ class TestRevokeBodySweepCap:
         the conditional read has no try)."""
         from tortoise.hosted_api import get_current_team
         app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "team-001", "tier": "free", "key_id": "k1",
+            "org_id": "team-001", "tier": "free", "key_id": "k1",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
             "max_api_keys": 2, "max_sessions": 1000,
         }

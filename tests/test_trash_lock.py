@@ -28,13 +28,13 @@ def _seed(fake):
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "solo", "max_graphs": 2})
     fake.seed("teams", [team])
-    fake.seed("team_memberships", [{
-        "id": "m-1", "team_id": _TEAM, "user_id": _OWNER, "role": "owner",
+    fake.seed("org_memberships", [{
+        "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
     }])
     fake.seed("graphs", [{
-        "id": _GID, "team_id": _TEAM, "name": "old-bot", "kind": "custom",
-        "namespace": f"team_{_TEAM}_{_GID}", "status": "deleted",
+        "id": _GID, "org_id": _TEAM, "name": "old-bot", "kind": "custom",
+        "namespace": f"org_{_TEAM}_{_GID}", "status": "deleted",
         "deleted_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
         "purged_at": None,
     }])
@@ -43,7 +43,7 @@ def _seed(fake):
 @pytest.fixture
 def sb_client(monkeypatch):
     fake = FakeControlPlane({"teams": [], "api_keys": [],
-                             "team_memberships": [], "invitations": []})
+                             "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "lock.db")
@@ -75,7 +75,7 @@ def test_restore_503_when_team_lock_held(sb_client, as_owner, monkeypatch):
     acquired = lock.acquire(blocking=False)
     assert acquired
     try:
-        r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+        r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
         assert r.status_code == 503, r.text
         assert "backup operation is in flight" in r.json()["detail"]
         assert r.headers.get("Retry-After") == "300"
@@ -88,5 +88,5 @@ def test_restore_succeeds_when_lock_free(sb_client, as_owner, monkeypatch):
     _seed(fake)
     as_owner()
     monkeypatch.setattr(ha_mod, "_TRASH_RESTORE_LOCK_TIMEOUT_S", 1)
-    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?team_id={_TEAM}")
+    r = tc.post(f"/v1/graphs/trash/{_GID}/restore?org_id={_TEAM}")
     assert r.status_code == 200, r.text

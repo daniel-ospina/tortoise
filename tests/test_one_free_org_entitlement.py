@@ -46,7 +46,7 @@ _WEBHOOK_SECRET = "whsec_test"
 def fake() -> FakeControlPlane:
     return FakeControlPlane({
         "teams": [dict(FREE_TEAM)],
-        "team_memberships": [],
+        "org_memberships": [],
         "api_keys": [],
         "webhook_events": [],
     })
@@ -110,29 +110,29 @@ def user_client(client):
     return tc, fake
 
 
-def _seed_team(fake, team_id: str, tier: str = "free",
+def _seed_team(fake, org_id: str, tier: str = "free",
                subscription_status=None) -> None:
-    fake.seed("teams", [dict(FREE_TEAM, id=team_id, name=team_id, tier=tier,
+    fake.seed("teams", [dict(FREE_TEAM, id=org_id, name=org_id, tier=tier,
                              subscription_status=subscription_status)])
 
 
-def _seed_membership(fake, team_id: str, role: str = "owner") -> None:
-    fake.seed("team_memberships", [
-        _membership_row(user_id=_U1, team_id=team_id, role=role)])
+def _seed_membership(fake, org_id: str, role: str = "owner") -> None:
+    fake.seed("org_memberships", [
+        _membership_row(user_id=_U1, org_id=org_id, role=role)])
 
 
-def _checkout_event(team_id: str, *, org_name: str = "Second Org",
+def _checkout_event(org_id: str, *, org_name: str = "Second Org",
                     tier: str = "pro", event_id: str = "evt_new_org_1",
                     user_id: str = _U1, subscription: str | None = "sub_1",
                     metadata_extra: dict | None = None) -> dict:
-    meta = {"new_org": "1", "team_id": team_id, "user_id": user_id,
+    meta = {"new_org": "1", "org_id": org_id, "user_id": user_id,
             "org_name": org_name, "tier": tier}
     meta.update(metadata_extra or {})
     return {
         "id": event_id,
         "type": "checkout.session.completed",
         "data": {"object": {
-            "client_reference_id": team_id,
+            "client_reference_id": org_id,
             "customer": "cus_new_1",
             "customer_details": {"email": "owner@example.com"},
             "subscription": subscription,
@@ -178,7 +178,7 @@ class TestNewOrgCheckout:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["checkout_url"] == "https://checkout.stripe.com/cs_test_1"
-        tid = body["team_id"]
+        tid = body["org_id"]
         # the pre-minted id binds the session — the webhook provisions from it
         assert seen["new_org_id"] == tid
         assert len(tid) == 26
@@ -188,8 +188,8 @@ class TestNewOrgCheckout:
         assert seen["email"] == "owner@example.com"
         # NOTHING is written server-side (design 2): no team, no membership.
         assert not [t for t in fake.query("teams") if t.get("id") == tid]
-        assert not [m for m in fake.query("team_memberships")
-                    if m.get("team_id") == tid]
+        assert not [m for m in fake.query("org_memberships")
+                    if m.get("org_id") == tid]
 
     def test_success_url_carries_the_pre_minted_org(self, monkeypatch, user_client):
         """The returning tab switches to ?new_org=<id> once the webhook lands;
@@ -212,7 +212,7 @@ class TestNewOrgCheckout:
         # on either.
         assert seen["success_url"] == (
             "https://app.example.com/team?session_id={CHECKOUT_SESSION_ID}"
-            f"&new_org={r.json()['team_id']}&new_org_name=Second%20Org")
+            f"&new_org={r.json()['org_id']}&new_org_name=Second%20Org")
 
     def test_duplicate_name_409_before_any_stripe_call(self, monkeypatch, user_client):
         """teams.name is globally unique (0011) — a collision must fail BEFORE
@@ -284,13 +284,13 @@ class TestNewOrgCheckout:
 # ── webhook provisioning ────────────────────────────────────────────────────
 
 
-def _team_rows(fake, team_id):
-    return [t for t in fake.query("teams") if t.get("id") == team_id]
+def _team_rows(fake, org_id):
+    return [t for t in fake.query("teams") if t.get("id") == org_id]
 
 
-def _membership_rows(fake, team_id):
-    return [m for m in fake.query("team_memberships")
-            if m.get("team_id") == team_id]
+def _membership_rows(fake, org_id):
+    return [m for m in fake.query("org_memberships")
+            if m.get("org_id") == org_id]
 
 
 def _tid(prefix: str) -> str:
@@ -373,7 +373,7 @@ class _RecordingSDK:
 
     def __init__(self, state, namespace=None):
         self._state = state
-        self._current = f"team_{namespace}" if namespace else None
+        self._current = f"org_{namespace}" if namespace else None
 
     def _get_proj(self):
         state = self._state
@@ -449,7 +449,7 @@ class TestWebhookProvisioning:
         assert t["subscription_status"] == "active"
         assert t["stripe_customer_id"] == "cus_new_1"
         assert t["subscription_id"] == "sub_1"
-        assert t["graph_name"] == f"team_{tid}"
+        assert t["graph_name"] == f"org_{tid}"
         from tortoise.pricing import tier_limits
         assert t["max_graphs"] == tier_limits("pro")["max_graphs_per_team"]
         # exactly one OWNER membership — the org is enterable by its buyer
@@ -462,11 +462,11 @@ class TestWebhookProvisioning:
         assert mems[0]["user_id"] == _U1
         # keyless by policy (#1716/#1921): the org mints keys via
         # POST /v1/session/key, never a dead credential at provision time
-        assert not [k for k in fake.query("api_keys") if k.get("team_id") == tid]
+        assert not [k for k in fake.query("api_keys") if k.get("org_id") == tid]
         # the org graph was initialised exactly once (eager TeamMeta — the
         # switcher/graph_list/key-scope resolve it) and in the team's own graph
         assert len(_creates(statements)) == 1, statements
-        assert _create_graphs(_last_state()) == {f"team_{tid}"}
+        assert _create_graphs(_last_state()) == {f"org_{tid}"}
         # a PAID org does not consume the free-org allowance: the buyer can
         # still create their one free org later
         from tortoise.supabase_control import owned_free_org_ids
@@ -490,7 +490,7 @@ class TestWebhookProvisioning:
         # the graph at all — no second TeamMeta can be minted
         assert len(_creates(statements)) == 1, statements
         assert statements.count("MATCH (m:TeamMeta) RETURN count(m)") == 1
-        assert _create_graphs(_last_state()) == {f"team_{tid}"}
+        assert _create_graphs(_last_state()) == {f"org_{tid}"}
 
     def test_retry_after_a_failed_provision_converges(self, monkeypatch, user_client):
         """Stripe retries the SAME event id after a 500. The org row is still
@@ -575,17 +575,17 @@ class TestWebhookProvisioning:
         r = tc.post("/v1/billing/checkout/new-org",
                     json={"name": "Never Bought", "price_id": _PRO_PRICE})
         assert r.status_code == 200, r.text
-        tid = r.json()["team_id"]
+        tid = r.json()["org_id"]
         # no webhook arrived → nothing exists
         assert len(fake.query("teams")) == before_teams
         assert _team_rows(fake, tid) == []
         assert _membership_rows(fake, tid) == []
-        assert not [k for k in fake.query("api_keys") if k.get("team_id") == tid]
+        assert not [k for k in fake.query("api_keys") if k.get("org_id") == tid]
         # the allowance is unchanged: still exactly the one owned free org
         from tortoise.supabase_control import owned_free_org_ids
         assert owned_free_org_ids(fake, _U1) == ["team-free-a"]
         # and the free-org gate still behaves exactly as before the attempt
-        assert tc.post("/v1/teams", json={"name": "nope"}).status_code == 402
+        assert tc.post("/v1/organizations", json={"name": "nope"}).status_code == 402
 
     def test_unresolvable_paid_tier_is_not_acked(self, monkeypatch, user_client):
         """#2789 (code-review): a paying customer must never be ACKed (200) onto
@@ -627,10 +627,10 @@ class TestEagerGraphIdempotency:
         statements = _recording_sdk(monkeypatch)
         tid = _tid("g")
         assert ha_mod._eager_provision_org_graph(
-            fake, tid, "First", _U1) == f"team_{tid}"
+            fake, tid, "First", _U1) == f"org_{tid}"
         assert len(_creates(statements)) == 1, statements
         assert ha_mod._eager_provision_org_graph(
-            fake, tid, "Second", _U1) == f"team_{tid}"
+            fake, tid, "Second", _U1) == f"org_{tid}"
         assert len(_creates(statements)) == 1, (
             "the retry must not mint a second TeamMeta", statements)
         # the FIRST name wins: a replay must not overwrite the live org's name
@@ -640,7 +640,7 @@ class TestEagerGraphIdempotency:
         assert graph.params[create_i]["name"] == "First"
         # …and it landed in THIS team's graph (a wrong select_graph target
         # would otherwise be invisible — VGATE P2)
-        assert _create_graphs(graph) == {f"team_{tid}"}, graph.query_graphs
+        assert _create_graphs(graph) == {f"org_{tid}"}, graph.query_graphs
 
     def test_eager_provision_reads_the_prior_org_for_forking(
             self, monkeypatch, client):
@@ -656,13 +656,13 @@ class TestEagerGraphIdempotency:
         statements = _recording_sdk(monkeypatch)
         tid = _tid("g")
         assert ha_mod._eager_provision_org_graph(
-            fake, tid, "Forked", _U1) == f"team_{tid}"
+            fake, tid, "Forked", _U1) == f"org_{tid}"
         graph = _last_state()
         # the prior org's graph was READ (not skipped), through the projection
-        assert f"team_{prior}" in graph.query_graphs, graph.query_graphs
+        assert f"org_{prior}" in graph.query_graphs, graph.query_graphs
         create_i = next(i for i, s_ in enumerate(statements)
                         if s_.startswith("CREATE (:TeamMeta"))
-        assert graph.query_graphs[create_i] == f"team_{tid}"
+        assert graph.query_graphs[create_i] == f"org_{tid}"
         # prior memberships ⇒ compact + the earliest org as the fork source
         assert graph.params[create_i]["os_compact"] is True, graph.params[create_i]
 
@@ -673,7 +673,7 @@ class TestEagerGraphIdempotency:
 class TestNewOrgStripePayload:
     """The checkout-request parameters ARE the money path: `customer_email`
     (no customer) is what makes an abandoned checkout leave nothing, and
-    `metadata[new_org|team_id|...]` is what makes the webhook provision at all.
+    `metadata[new_org|org_id|...]` is what makes the webhook provision at all.
     A code-review pass found these were only exercised through a monkeypatched
     `create_checkout_session_for_new_org` — so dropping a metadata key would
     have shipped green while the webhook silently `_set` billing on a team
@@ -702,7 +702,7 @@ class TestNewOrgStripePayload:
         assert params["customer_email"] == "owner@example.com"
         assert params["client_reference_id"] == org_id
         assert params["metadata[new_org]"] == "1"
-        assert params["metadata[team_id]"] == org_id
+        assert params["metadata[org_id]"] == org_id
         assert params["metadata[user_id]"] == _U1
         assert params["metadata[org_name]"] == "Second Org"
         assert params["metadata[tier]"] == "pro"
@@ -747,8 +747,8 @@ class TestCollisionNameRule:
         # so drift in the server's constant (`63`) OR in the pre-minted id
         # shape (26 hex chars ⇒ suffix 8 ⇒ 55) fails here instead of silently
         # breaking the client's name match.
-        from tortoise.hosted_api import _new_org_collision_name, _new_org_team_id
-        tid = _new_org_team_id()
+        from tortoise.hosted_api import _new_org_collision_name, _new_org_org_id
+        tid = _new_org_org_id()
         assert len(tid) == 26, tid
         assert (_new_org_collision_name("z" * 64, tid)
                 == "z" * 55 + " " + tid[:8])
@@ -833,7 +833,7 @@ class TestRegistryLaneWebhookProvisioning:
         assert lims == tier_limits("pro")["max_graphs_per_team"]
         # the buyer owns the org that actually exists
         mems = _registry().query(
-            "MATCH (m:Membership {team_id:$t}) RETURN m.user_id, m.role, m.status",
+            "MATCH (m:Membership {org_id:$t}) RETURN m.user_id, m.role, m.status",
             params={"t": eff}).result_set
         assert [list(m) for m in mems] == [[_U1, "owner", "active"]], mems
         # nothing was minted at the pre-minted id — the divergence the client's
