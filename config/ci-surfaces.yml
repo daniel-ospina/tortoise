@@ -850,6 +850,21 @@ carve_out:
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:
+  # #3501: the BFF auth suites + the migration-backlog gate. Measured together
+  # in ONE invocation = 106s (41 passed, 5 xfailed), i.e. ~26.5s each. That
+  # marginal figure is what matters for the LPT split: the four share a single
+  # session-scoped `wrangler pages dev` boot, so a STANDALONE run costs ~90s
+  # each (boot-dominated) while running them together nearly amortises it.
+  # Registering them stops the splitter modelling 4 x 2.0s of real work.
+  #
+  # Keys are the manifest MEMBER strings, not bare basenames: the three auth
+  # suites are registered as `auth/...`, so a basename key does not classify
+  # (classify_test_file checks the full name and the basename against each
+  # surface's members, and the members here carry the subdir).
+  auth/test_bff_flow.py: 26.5
+  auth/test_proxy.py: 26.5
+  auth/test_welcome_and_password.py: 26.5
+  test_no_legacy_token_path.py: 26.5
   test_oauth_token_fault.py: 100.0  # #2863: fault matrix + real-seam HTTPServer (measured ~100s locally)
   test_2199_decide_calibration.py: 8.5
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite

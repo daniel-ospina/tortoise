@@ -33,10 +33,9 @@ def _strip_html_comments(text: str) -> str:
     """Remove HTML and JS comments from a page source.
 
     Absence assertions MUST run against comment-stripped source. welcome.html
-    explains the #3501 removal in a comment that names the very markers those
-    assertions forbid (`createTortoiseSupabaseClient`, `runSessionBridge`), so
-    an unstripped check fails on the documentation of the fix rather than on a
-    reintroduction of the bug.
+    explains the #3501 removal in a comment that names
+    `createTortoiseSupabaseClient`, so an unstripped check fails on the
+    documentation of the fix rather than on a reintroduction of the bug.
     """
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
@@ -372,9 +371,26 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
             f"welcome.html still contains {legacy!r} — the client-side session "
             "wait was the #3485 login loop and must stay removed (#3501)"
         )
-    # The page must not issue the auth redirect at all; that is the server's
-    # job now. A `location.replace`/`href` to /auth here would mean the
-    # decision moved back into JavaScript.
-    assert "/auth'" not in WELCOME_CODE
-    assert '"/auth"' not in WELCOME_CODE
-    assert "location.replace" not in WELCOME_CODE
+    # The page must not issue the auth redirect itself; that is the server's
+    # job now. A programmatic redirect back to /auth IS the #3485 loop.
+    #
+    # Match the MECHANISM, not a quoted literal. A bare `"/auth" not in code`
+    # check is simultaneously too weak and too strong: it passes for
+    # `location.assign("/auth?mode=login")` and `location.href = "/auth?next=1"`
+    # (real reintroductions) while failing on the page's legitimate same-origin
+    # `action="/auth/update-password"` form and its `<a href="/auth?mode=login">`
+    # links. An earlier version of this test asserted exactly those two
+    # substrings and asserted nothing about `location.assign`.
+    assert not re.search(
+        # Assignment (`location.href = …`) AND call (`location.replace(…)`,
+        # `location.assign(…)`) forms — the call form has no `=`, so matching
+        # on `=` alone missed the most obvious reintroduction.
+        r"location\s*\.\s*(?:replace|assign|href)\s*[(=]"
+        r"|http-equiv\s*=\s*[\"']refresh[\"']",
+        WELCOME_CODE,
+        re.I,
+    ), (
+        "welcome.html must not redirect to /auth client-side — the auth "
+        "decision is the server's (#3501), and a JS/meta redirect here is the "
+        "#3485 login loop"
+    )
