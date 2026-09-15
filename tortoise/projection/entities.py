@@ -226,7 +226,17 @@ class _EntityHandlers:
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
             params=params,
         )
-        # Ontology v2.1: also store extractedFrom as property for query convenience
+        # Ontology v2.1: also store extractedFrom as property for query convenience.
+        # #3263: many-to-many — the EDGES are authoritative (see
+        # _upsert_point_edges). This scalar/array prop is a query convenience
+        # ONLY, and its rule is: a STRING when a single string was passed
+        # (including the inference path), and an ARRAY whenever a SEQUENCE was
+        # passed — even a one-element one, which is NOT collapsed. Arrays are
+        # not equality-matchable (`WHERE n.extractedFrom = '<url>'` will not hit
+        # them), so exact-match callers must pass the scalar or traverse the
+        # edge. (Wording aligned with sdk.py `list_drafts` and ONTOLOGY v3.11;
+        # an earlier version of this comment said "the single-source case",
+        # which wrongly implied one-element sequences collapse.)
         source_ref = p.get("extractedFrom")
         if source_ref:
             self.g.query("MATCH (n:Point {id:$id}) SET n.extractedFrom = $ref", params={"id": p["id"], "ref": source_ref})
@@ -304,7 +314,9 @@ class _EntityHandlers:
         rebuild_all() pass 2 (#330) — same role as _upsert_point_props for
         node properties.
         """
-        # Ontology v2.1: link Point → Source via extractedFrom edge
+        # Ontology v2.1: link Point → Source via extractedFrom edge.
+        # #3263: many-to-many — one edge per source. _link_source fans a list
+        # out to N edges (ontology §3.3 amended to many→many).
         source_ref = p.get("extractedFrom")
         if source_ref:
             self._link_source(p["id"], source_ref)

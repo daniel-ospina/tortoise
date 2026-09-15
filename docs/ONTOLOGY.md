@@ -1,18 +1,37 @@
 ---
-title: "Tortoise — Canonical Ontology v3.10"
+title: "Tortoise — Canonical Ontology v3.11"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-05
+updated: 2026-09-12
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.10
+# Tortoise — Canonical Ontology v3.11
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.11 (2026-09-12, issue #3263 — provenance written by construction):**
+> - §3.3: `extractedFrom` cardinality amended **`many→1` → `many→many`**. The
+>   edge is written per source; a claim extracted from several sessions carries
+>   one `extractedFrom` edge each, with no upper bound. (`create_point` now
+>   infers `session:<session_id>` from the write context and accepts a sequence
+>   of refs.)
+> - §4.1 note: the scalar `Point.extractedFrom` node property is a query
+>   convenience only — the **edges are authoritative**. It holds a string when a
+>   single string is passed (including the inference path) and an **array**
+>   whenever a sequence is passed, *even a one-element one*. Arrays are not
+>   equality-matchable (`WHERE n.extractedFrom = '<url>'` will not hit them), so
+>   exact-match callers must pass the scalar or traverse the edge.
+> - §4.6: `session:<id>` Sources are minted with `sourceKind: agentSession`
+>   (already the registered value — this removes the need for the in-place
+>   upgrade `_materialize_session_source` performed). NOTE: `agentSession` is
+>   still registered tier-neutral, so `inherited-from-source` calibration is
+>   NOT yet satisfiable; assigning the tier is a calibration-policy decision,
+>   tracked separately.
 >
 > **Changelog v3.10 (2026-09-05, #2238 dirty-hub salvage landing — Problem family):**
 > - §5: registers core object kind `Problem` (deviation between actual and desired
@@ -230,7 +249,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
-| `extractedFrom` | Point → Source | unidirectional | many→1 | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points. |
+| `extractedFrom` | Point → Source | unidirectional | many→many | `pav:retrievedFrom` (inverse) | This claim was extracted from this source. One source backs many Points, **and one Point may be backed by several sources** (amended v3.11, #3263: the edge is written per source — a claim extracted from several sessions carries one `extractedFrom` edge each; there is no upper bound). |
 
 ### §3.4 Source → Entity (Provenance)
 
@@ -356,7 +375,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `pointKind` | string | ✅ | — | ✅ | Classification tag — extraction writes `statement` (option B); decision/vision/strategy/plan/goal/target/observation/hypothesis/humanApproval/event are legacy write kinds (§5) + pack pointKinds |
 | `is_operator` | bool | — | — | ✅ | true for operator Points |
 | `op_type` | string | — | — | ✅ | IMPL / NAND (operator Points only) |
-| `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/archived are terminal |
+| `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/outdated/archived are terminal, and the legacy `outdated=true` flag is terminal too (#2498) |
 | `confidence` | float 0..1 | — | — | ⚠️ | EP posterior mean, computed by propagation |
 | `c_cal` | float 0..1 | — | — | ❌ | Calibrated confidence — calibrated counterpart to the EP posterior `confidence` (registered #909 §4.3 #11; written by the calibrated pipeline, slice 5+) |
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
@@ -365,7 +384,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window |
 | `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — when a supersession/withdrawal terminated the record (written by `supersede_point`/`invalidate_point`, E6 #1538; complements the valid-window end `validTo` with the graph-write time) |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
-| `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Composite index `:Point(is_operator, lastDreamedAt)` created idempotently at init on docker/server FalkorDB; embedded (redislite) gets plain `:Point(lastDreamedAt)` only — an `is_operator` composite is #522-unsafe on embedded (stale bool type table across reopen) |
+| `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Indexed via the plain `:Point(lastDreamedAt)` index, created idempotently at init on ALL engines — `is_operator` is never indexed (#522 embedded stale bool type table; #3154 docker/server `GRAPH.COPY` drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it, and leaving the copy destination unable to rebuild it) |
 | `embedding` | vector | — | — | ✅ | Semantic embedding (FTS + vector search) |
 | `speaker` | string | — | — | ✅ | Role tag on episodic turn Points (user/assistant/…) — written by SDK `capture_session` (delta 5), not by hosted capture |
 | `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
@@ -596,7 +615,7 @@ degraded_reason    timeout | assembly_error | breaker_open      # degradations o
 | `live` | active | `create_operator` (auto-promote source), `update_point` (status='live') | `retracted`, `superseded` | Full EP participation |
 | `retracted` | terminal | `retract_point`, `EventAPI.retract_point` | *(none)* | Tombstone — stays in graph, `get_point` returns, `query`/`paginated_query` exclude by default |
 | `superseded` | terminal | `supersede_point` (sets alongside `outdated:true`) | *(none)* | Structural replacement via CORRECTS edge + **restatement-scoped edge disposition** (#2421 — semantic edges triaged per-edge, not bulk-transferred) |
-| `outdated` | legacy flag | `invalidate_point`, `supersede_point` (legacy flag) | `retracted` | Back-compat boolean; co-exists with `status` |
+| `outdated` | terminal (legacy flag) | `invalidate_point`, `supersede_point` (legacy flag) | *(none)* | Back-compat boolean; co-exists with `status`. Terminal on every read surface and for every lifecycle transition (#2498) — the pre-#2498 `→ retracted` allowance let a dead claim be re-terminalized |
 | `archived` | terminal (reserved) | *(no v1 SDK write path)* | *(none)* | Reserved for future lifecycle operations |
 
 > **`challenged` is NOT a state** — it is a DERIVED condition emerging from the presence of a NAND operator edge on a live point, queryable as such:

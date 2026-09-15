@@ -149,6 +149,9 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
 ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     "test_dr_endpoints.py": {
         'f"team_{team_id}"': "endpoint-constrained",  # seed write — drill/backup resolve team_{id}
+        # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
+        # both lanes; the endpoint resolves graph_name from teams.graph_name
+        'f"team_{tid}"': "endpoint-constrained",  # Supabase-lane sweep seed write
         '"team_team_x"': "read-only",                  # post-drill count assert
         # #2313 custom-graph drill seeds (per-graph sweep/restore E2E); the
         # server-lane _clean_team_graphs fixture drops team_* graphs per test
@@ -441,6 +444,11 @@ def test_no_redirect_stems_registry_exact():
         # asserts are embedded-FalkorDBLite-only; moved to the carve-out
         # lane with the other eval_* suites.
         "test_longmem_runner",
+        # #3420 (36fce6431, "bound the embedded DB lane's socket timeout and
+        # retry multiplier"): its test module was added to
+        # TEST_NO_REDIRECT_STEMS but this pin was not updated, so the
+        # repo-wide markers gate red'd on every PR until reconciled here.
+        "test_projection_embedded_socket_timeout",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

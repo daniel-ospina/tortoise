@@ -15,8 +15,11 @@ extractor/indexer, update the catalog reference.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hmac
 import inspect
+import ipaddress
 import json as _json
 import logging
 import math
@@ -24,8 +27,9 @@ import os
 import re
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Hashable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 
@@ -35,7 +39,7 @@ from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: bi
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import tortoise
-from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
+from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
     first_api_call,
@@ -56,6 +60,20 @@ from tortoise.hosted_backup import (
     restore_backup,
 )
 from tortoise.mcp_server import create_http_app
+from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
+    PROBE_HARD_TIMEOUT,
+    PROBE_STALE_AFTER,
+    HealthProbe,
+    event_retention_interval,
+    heartbeat_record,
+    loop_heartbeat_info,
+    loop_heartbeat_task,
+    run_on_daemon_worker,
+    start_health_listener,
+    start_stall_watchdog,
+    workload_enter,
+    workload_exit,
+)
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
     _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
@@ -122,6 +140,313 @@ _FALLBACK_KEEPALIVE: dict[str, TortoiseSDK] = {}
 # _make_sdk/_registry_anchor; the lock is never held across a per-request
 # fresh-SDK construction.
 _KEEPALIVE_LOCK = threading.Lock()
+
+# ── #3060: dedicated executors for long / stallable work ───────────────────
+# `asyncio.to_thread` (the house style — see `list_packs`) submits to the
+# loop's SHARED default executor, which is where 79 other `to_thread` call
+# sites and the auth middleware's abuse hooks (`_abuse_post_auth` et al.) run.
+# That is fine for short work. It is NOT fine for the capture extraction: on a
+# stalled provider it blocks for the token-scaled deadline (~800s at a 16K
+# budget, per attempt, retried), so enough concurrent stalls would occupy every
+# default worker (min(32, cpu+4) — 6 on prod's 2 vCPU) and hold that shared,
+# UNBOUNDED-wait queue against every other tenant of the pool — with nothing
+# blocking the event loop at all. Long or stallable work therefore gets its OWN
+# pool: it can only ever starve itself, never the other tenants of the default
+# executor.
+#
+# #2850 removed /health from that pool entirely — the handler now reads an
+# in-memory ``_HEALTH_PROBE.snapshot()`` and takes no thread hand-off, so it
+# cannot queue behind a stalled capture (or anything else) and liveness is no
+# longer a reason for the separation; see the NOTE on the removed
+# ``_HEALTH_PROBE_EXECUTOR`` below. The separation survives for the remaining
+# tenants named above.
+_CAPTURE_EXECUTOR = ThreadPoolExecutor(
+    # max(1, _int_env(...)): the executor is built at IMPORT time, so a
+    # malformed or zero/negative knob must degrade to the default — not raise
+    # `ValueError` and make `import tortoise.hosted_api` fail (a boot loop no
+    # deploy gate can fix).
+    max_workers=max(1, min(_int_env("TORTOISE_CAPTURE_WORKERS", 4), 8)),
+    thread_name_prefix="capture-extract")
+
+# #3060 review: a bounded pool with an UNBOUNDED queue is a new failure mode —
+# four stalled extractions park every worker (each up to the token-scaled
+# deadline, retried) and every later capture then waits forever while holding
+# its stored-window transcript (~MBs) on a 4GB VM, up to fly.toml's
+# hard_limit. Reject instead of enqueueing: at capacity the request fails fast
+# with 429 + Retry-After (the ask lane's quota 429 precedent,
+# `CODE_QUOTA_EXCEEDED` — its in-flight-limit 429 carries no Retry-After).
+# Counting is a plain locked int, NOT an asyncio.Semaphore — the latter binds
+# to the first event loop it waits on (mixins._LoopBoundMixin), which breaks
+# across the per-test loops.
+_CAPTURE_MAX_IN_FLIGHT = max(1, min(_int_env("TORTOISE_CAPTURE_IN_FLIGHT", 8), 16))
+_CAPTURE_IN_FLIGHT = 0
+_CAPTURE_IN_FLIGHT_LOCK = threading.Lock()
+# #3129: session ids with a capture IN FLIGHT. `capture_ok` is written only at
+# the very END of a successful capture, so once the extraction moved off the
+# event loop (#3060) a second request for the same session_id could be served
+# while the first was parked: it read `capture_ok = NULL`, the replay branch
+# treated NULL as "presumed captured" (#2335 legacy semantics), and it answered
+# 200 + a success receipt with 0 turns extracted — for a capture whose only
+# real attempt then FAILED. Silent data loss, and the client is actively told
+# to retry by the `Retry-After` the capacity gate advertises. Refusing at
+# ADMISSION closes it without touching the replay semantics for a session that
+# is genuinely finished. Bounded by _CAPTURE_IN_FLIGHT (one key per in-flight
+# capture).
+_CAPTURE_SESSIONS: dict[str, int] = {}
+# The detail string is the carve-out key for the team-visible last-error state
+# (both surfaces): an in-flight refusal is a SERVER concurrency condition, not
+# a team capture failure — same rationale as the capacity 429. A shared
+# constant so the raise site and the two carve-outs cannot drift.
+_CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
+    "a capture for this session_id is already in flight — retry shortly")
+
+# NOTE (merge of #2850 x #2988/#3060): the dedicated ``_HEALTH_PROBE_EXECUTOR``
+# and its ``_HEALTH_PROBE_BUDGET_S`` wall bound were REMOVED here. They existed
+# so ``/health`` could run ``_probe_db`` off the shared default pool with a
+# bounded wait; ``/health`` is now pure in-memory (it reads
+# ``_HEALTH_PROBE.snapshot()``) and does no I/O and no thread hand-off at all,
+# so the pool and the bound had no remaining caller. ``_submit_off_loop`` /
+# ``_run_off_loop`` BELOW are kept: the capture path still uses them to stay
+# off the shared default executor.
+
+
+def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """Submit blocking work to a DEDICATED executor, preserving contextvars.
+
+    Why not `asyncio.to_thread`: it ALWAYS uses the loop's shared default
+    executor, which is the starvation path #3060's review uncovered (see the
+    pool notes above). Why not a bare `run_in_executor`: it does NOT propagate
+    contextvars (cpython#78195 — the repo rule recorded at `list_packs`), and
+    the capture path depends on them: `_call_once` snapshots the caller's
+    context for the actor/usage ContextVars (extractor_v2.py:5066). Copying the
+    context in the CALLING thread and running under it in the worker is exactly
+    what `asyncio.to_thread` does internally (module: asyncio.to_thread).
+
+    Returns the CONCURRENT future. Callers needing a completion hook (the
+    in-flight accounting below) attach it there: a loop-side callback would
+    fire on cancellation while the worker is still parked.
+    """
+    ctx = contextvars.copy_context()
+    return executor.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+
+
+async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
+    """Await `_submit_off_loop` (see it for the contextvars rationale)."""
+    return await asyncio.wrap_future(_submit_off_loop(executor, fn, *args, **kwargs))
+
+
+def _capture_slot_decrement() -> None:
+    """Return one reserved capture slot (capacity only — see _capture_session_release).
+
+    The clamp is a safety net, NOT a licence: a decrement with nothing in
+    flight means the accounting leaked somewhere, which silently under-counts
+    and would admit more than `_CAPTURE_MAX_IN_FLIGHT` — so it is logged.
+    """
+    global _CAPTURE_IN_FLIGHT
+    with _CAPTURE_IN_FLIGHT_LOCK:
+        if _CAPTURE_IN_FLIGHT > 0:
+            _CAPTURE_IN_FLIGHT -= 1
+        else:
+            _logger.warning(
+                "capture slot decrement with nothing in flight — accounting "
+                "leak (#3060); the admission cap may under-count")
+
+
+class _CaptureSlot:
+    """One reserved capture slot (#3060).
+
+    Reserved at ADMISSION (before any state is written), so a concurrent burst
+    cannot all slip past a bare check and then queue without bound. Released
+    exactly once, by whichever comes last:
+
+    * the extraction's CONCURRENT future completing (`worker_done`) — for a
+      request that extracts. The request's own ``release()`` is a no-op once
+      the slot is handed off, so a cancelled request cannot free capacity
+      while its worker still occupies a pool thread (the shape of
+      `quota.run_ask_bounded`, quota.py:791-816); or
+    * the request's own teardown (`release()`) — for a replay / opt-out /
+      quota / provider-503 path that never extracts. Without that release the
+      reservation would leak and permanently burn capacity.
+
+    #3129: the same slot also owns the request's in-flight SESSION key, but on a
+    LATER release point — the key outlives the extraction, because the capture
+    is not finished when the extraction returns (`capture_ok` is written after
+    the event mint, audit and receipt). Releasing the key with the worker alone
+    left a residual window (reviewer-measured) in which a concurrent
+    same-session request was admitted and replayed a 200 for a capture that was
+    still finishing. The key therefore needs BOTH sides: the worker reporting,
+    and the request's own teardown.
+    """
+
+    __slots__ = (
+        "_cleanup_done",
+        "_done",
+        "_handed_off",
+        "_release_lock",
+        "_request_done",
+        "_session_key",
+        "_session_released",
+    )
+
+    def __init__(self, session_key: str | None = None) -> None:
+        self._done = False
+        self._handed_off = False
+        self._session_key = session_key
+        # Nothing to release, so both sides are trivially satisfied.
+        self._session_released = session_key is None
+        self._request_done = False
+        # #3129: False while an abandonment-marker write is in flight.
+        self._cleanup_done = True
+        # #3129 review (cycle 4): the release decision below now has THREE
+        # concurrent callers on three threads — the event loop (`release`), the
+        # capture-pool thread (`worker_done`) and the marker thread
+        # (`_cleanup_finished`). Its check-then-act was non-atomic, so two
+        # threads could both pass the guards and both pop: a stale second pop
+        # removes a FRESHLY reserved entry for the same key — i.e. disarms the
+        # admission guard for a new in-flight capture (reviewer demonstrated it
+        # by forcing preemption at the assignment).
+        self._release_lock = threading.Lock()
+
+    def hand_off(self) -> None:
+        """Transfer ownership to the extraction future (before any await)."""
+        self._handed_off = True
+
+    def release(self) -> None:
+        """Request-side teardown — runs even when the request is cancelled."""
+        if self._request_done:
+            return
+        self._request_done = True
+        if not self._handed_off and not self._done:
+            # No worker will report: this request owns the capacity too.
+            self._done = True
+            _capture_slot_decrement()
+        self._release_session()
+
+    def worker_done(self, _fut=None) -> None:
+        if not self._done:
+            self._done = True
+            _capture_slot_decrement()
+        self._release_session()
+
+    def hold_until(self, cfut) -> None:
+        """Keep the session key until this concurrent future lands (#3129).
+
+        Used for the abandonment-marker write: if the key were released first,
+        a same-session retry could be admitted and served the NULL→replay
+        payload the marker exists to prevent.
+        """
+        self._cleanup_done = False
+        cfut.add_done_callback(self._cleanup_finished)
+
+    def _cleanup_finished(self, _fut=None) -> None:
+        self._cleanup_done = True
+        self._release_session()
+
+    def _release_session(self) -> None:
+        """Pop the session key once BOTH the worker and the request are done.
+
+        A handed-off slot waits for its worker — a hung extraction keeps the
+        session refused (it genuinely IS still being captured); a non-extracting
+        path releases on the request's own teardown. A pending marker write
+        holds it too.
+
+        The decision is taken under `_release_lock` and the pop happens OUTSIDE
+        it: two threads passing the guards would both call
+        `_capture_session_release`, and the stale second pop could delete a key
+        a NEW capture for the same session had just registered (#3129 cycle-4
+        review).
+        """
+        with self._release_lock:
+            if self._session_released:
+                return
+            if not self._cleanup_done:
+                return
+            if self._handed_off and not (self._done and self._request_done):
+                return
+            self._session_released = True
+        _capture_session_release(self._session_key)
+
+
+def _capture_session_release(session_key: str | None) -> None:
+    """Drop one in-flight session key (lock-guarded, idempotent)."""
+    if session_key is None:
+        return
+    with _CAPTURE_IN_FLIGHT_LOCK:
+        _CAPTURE_SESSIONS.pop(session_key, None)
+
+
+def _capture_session_key(team: dict, session_id: str | None) -> str | None:
+    """Scope an in-flight session key to its tenant (and graph) — #3129.
+
+    Session ids are CLIENT-chosen (often a generic harness name), so a bare
+    session_id would let one tenant's in-flight capture refuse another tenant's
+    unrelated capture of the same name (reviewer-measured 409). The admission
+    COUNTER stays global (it bounds a server resource); only this key is scoped.
+    """
+    if not session_id:
+        return None
+    return (f"{team.get('team_id')}:"
+            f"{team.get('graph_id') or 'default'}:{session_id}")
+
+
+def _reserve_capture_slot(session_key: str | None = None) -> _CaptureSlot:
+    """Reserve a capture slot, or fail fast at capacity / on a duplicate.
+
+    Called at ADMISSION — before the impl writes anything. A 429 raised later
+    (after the Session MERGE) would leave ``capture_ok`` NULL, and the
+    advertised retry would then be served as a no-op REPLAY (200, 0 extracted)
+    — silent permanent data loss. Reserving (not just checking) is what bounds
+    the queue: a burst of simultaneous requests cannot all pass the gate and
+    then wait on the pool forever while holding their transcripts.
+
+    #3129: the same reasoning for a SECOND request carrying a ``session_id``
+    that is already being captured — it is refused (409) here, before any
+    write, instead of racing the first capture's `capture_ok` write. The
+    caller passes an already tenant-scoped key (`_capture_session_key`).
+    """
+    global _CAPTURE_IN_FLIGHT
+    session_key = session_key or None
+    with _CAPTURE_IN_FLIGHT_LOCK:
+        if _CAPTURE_IN_FLIGHT >= _CAPTURE_MAX_IN_FLIGHT:
+            raise HTTPException(
+                status_code=429,
+                detail=("capture capacity saturated — too many captures in "
+                        "flight; retry shortly"),
+                headers={"Retry-After": "30"})
+        if session_key in _CAPTURE_SESSIONS:
+            raise HTTPException(
+                status_code=409,
+                detail=_CAPTURE_SESSION_IN_FLIGHT_DETAIL,
+                headers={"Retry-After": "30"})
+        if session_key is not None:
+            _CAPTURE_SESSIONS[session_key] = 1
+        _CAPTURE_IN_FLIGHT += 1
+    return _CaptureSlot(session_key)
+
+
+async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
+    """Run one capture extraction on the capture pool, owning ``slot``.
+
+    The work runs off the event loop on the capture pool, with the caller's
+    contextvars copied in explicitly (`_submit_off_loop`'s rationale). The
+    slot is handed to the CONCURRENT future, not to the loop-side future the
+    caller awaits: cancelling the awaiting task (client disconnect, request
+    timeout) marks the loop-side future done immediately, so a callback
+    attached there would release the slot while the worker is still parked and
+    the cap would silently exceed itself. A synchronous submit failure leaves
+    ownership with the caller (no future, no callback), and the request's own
+    teardown releases it.
+
+    A cancellation is handled a level up, at the endpoint: it must cover the
+    WHOLE attempt (this worker await, then the post-extraction audit/abuse
+    awaits), and the marker it writes must land while the session key is still
+    held (#3129).
+    """
+    cfut = _submit_off_loop(_CAPTURE_EXECUTOR, fn, *args, **kwargs)
+    if slot is not None:
+        slot.hand_off()  # before any await: only the worker frees it now
+        cfut.add_done_callback(slot.worker_done)
+    return await asyncio.wrap_future(cfut)
 
 
 def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
@@ -322,6 +647,9 @@ mcp_http_app = create_http_app(
     allowed_origins=_ALLOWED_ORIGINS,
     allowed_hosts=_ALLOWED_HOSTS,
     rate_limit=100,
+    # #2864: this is the only surface with an authorization server, so it is the
+    # only one that advertises the RFC 9728 challenge on `/mcp` 401s.
+    emit_oauth_challenge=True,
 )
 
 
@@ -374,6 +702,267 @@ def _iter_registered_teams() -> list[dict]:
         return []
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# #2850 (P0) liveness/readiness decouple + #2953 (bind the port BEFORE the
+# boot sweeps). The two hazards these helpers remove:
+#
+#   #2953 — uvicorn awaits ``lifespan.startup()`` BEFORE ``loop.create_server()``
+#   (uvicorn/server.py: ~107 vs ~145/152/173), so anything awaited in the
+#   startup half of ``_lifespan`` runs with NO LISTENING SOCKET AT ALL. The
+#   pre-fix code awaited two full graph sweeps there (``_sweep_events``,
+#   ``_purge_deleted_teams``) — every deploy/restart served nothing while they
+#   ran. They now start as background tasks after the startup half returns.
+#
+#   #2850 — the health path must never share fate with the work. /health now
+#   reads ONE in-memory value (no I/O, no thread hand-off, no await), and the
+#   dedicated /healthz listener (port 9090, own thread) answers a question
+#   about the event loop from outside the event loop.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: How often the background refresher re-probes the DB. Keeps ``/health``'s
+#: ``db`` field fresh WITHOUT the request path doing any I/O. Must stay below
+#: monitoring.PROBE_STALE_AFTER (30s) or a healthy DB would read as degraded.
+HEALTH_PROBE_REFRESH_S = 10.0
+#: Lower bound on a configured probe period (round-3 review P2). ``1e-9`` is
+#: finite but turns the refresher into a ~50 Hz loop, each iteration spawning a
+#: probe daemon thread and issuing a DB round trip — the same busy-loop the
+#: ``nan`` rejection exists to prevent. The upper clamp was one-sided.
+HEALTH_PROBE_MIN_INTERVAL_S = 0.5
+
+
+def _health_probe_interval() -> float:
+    """Probe refresh period (``TORTOISE_HEALTH_PROBE_INTERVAL``, seconds).
+
+    Clamped to half the probe staleness window (review P2): a period longer
+    than ``PROBE_STALE_AFTER`` makes a HEALTHY DB read as ``degraded`` between
+    refreshes, which then fails the deploy gate and gets misdiagnosed as a DB
+    outage. Half the window leaves a full refresh of margin.
+
+    NON-FINITE values are rejected and fall back to the default (round-2
+    review P2): ``float()`` accepts ``nan``/``inf`` and neither is caught by
+    the ``v <= 0`` guard (``nan <= 0`` is False) nor by the ``v > cap`` clamp
+    (``nan > cap`` is False). ``nan`` flows into ``asyncio.sleep(nan)``, which
+    returns almost immediately — a busy loop hammering the DB probe and the
+    event loop. ``inf`` means the probe never refreshes, so a healthy DB reads
+    stale forever. Both DISABLE (fall back to ``HEALTH_PROBE_REFRESH_S``).
+
+    A finite but SUB-FLOOR period is rejected the same way (round-3 review
+    P2): ``1e-9`` busy-loops the probe exactly as ``nan`` did.
+    """
+    try:
+        v = float(os.environ.get("TORTOISE_HEALTH_PROBE_INTERVAL") or HEALTH_PROBE_REFRESH_S)
+    except (TypeError, ValueError):
+        return HEALTH_PROBE_REFRESH_S
+    if not math.isfinite(v):
+        _logger.error(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is not finite — falling back "
+            "to the default %.0fs; a nan period busy-loops the probe and an "
+            "infinite one leaves a healthy DB reading stale forever",
+            v, HEALTH_PROBE_REFRESH_S)
+        return HEALTH_PROBE_REFRESH_S
+    if v <= 0:
+        return HEALTH_PROBE_REFRESH_S
+    # Round-3 review P2: a finite but tiny period busy-loops the probe just
+    # like ``nan`` did — ``1e-9`` yields ~50 generations/s, each spawning a
+    # daemon thread and issuing a DB round trip. The clamp below is
+    # one-sided, so a floor is required too.
+    if v < HEALTH_PROBE_MIN_INTERVAL_S:
+        _logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s is below the %.2fs floor — "
+            "falling back to the default %.0fs; a sub-floor period "
+            "busy-loops the probe and duplicates the DB round trip",
+            v, HEALTH_PROBE_MIN_INTERVAL_S, HEALTH_PROBE_REFRESH_S)
+        return HEALTH_PROBE_REFRESH_S
+    cap = PROBE_STALE_AFTER / 2.0
+    if v > cap:
+        _logger.warning(
+            "TORTOISE_HEALTH_PROBE_INTERVAL=%s exceeds half the probe "
+            "staleness window (%.0fs) — clamping to %.0fs; a longer period "
+            "would report a healthy DB as degraded and fail the deploy gate",
+            v, PROBE_STALE_AFTER, cap)
+        return cap
+    return v
+
+
+async def _health_probe_loop() -> None:
+    """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
+
+    ``/health`` must be answerable from memory alone, so freshness has to be
+    somebody else's job — this task. It is single-flight and hard-bounded
+    (``HealthProbe.run`` returns within ``DB_PROBE_HARD_TIMEOUT`` even against a
+    black-holed DB), never touches the app's shared default executor, and can
+    never die: a raise here would freeze the reported DB verdict forever.
+    """
+    while True:
+        try:
+            await _HEALTH_PROBE.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # a refresher must not die
+            _logger.warning("health probe refresh failed: %s", exc)
+        await asyncio.sleep(_health_probe_interval())
+
+
+def _sweep_events() -> None:
+    """#432: purge expired/overflowed events from every registered team graph.
+
+    #2953: hoisted out of ``_lifespan`` (it was a closure) so the boot phase
+    can be a background task and so it is patchable in tests.
+
+    Probe-before-purge is registry-mode only (#2251 review P2): a purge query
+    against an ABSENT team_{tid} graph (orphan registry row from a partial
+    provision) would materialize an empty one. Skip the probe in Supabase mode
+    — the registry namespace must NEVER be constructed there (#669; the
+    flip-gate pins the webhook path zero-touch), and that sweep predates #2251
+    so it keeps its pre-existing unconditional per-team purge. Registry mode:
+    enumerate the server-wide existing graphs ONCE; None → probe failed → skip
+    this cycle (best-effort — the per-team purges below hit the same graph
+    store, so they would fail anyway; the per-team SDK lazy hook still covers
+    purges).
+    """
+    try:
+        from tortoise.event_store import purge_expired, purge_overflow
+        days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
+        cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+        from tortoise.supabase_control import is_supabase_enabled
+        existing = None  # None = no gate (Supabase mode)
+        if not is_supabase_enabled():
+            existing = _registry_existing_graphs()
+            if existing is None:
+                _logger.warning("event retention sweep skipped: registry graph probe failed")
+                return
+        # Sweep every registered team's graph (registry Team nodes).
+        for team in _iter_registered_teams():
+            if existing is not None and f"team_{team['team_id']}" not in existing:
+                continue
+            try:
+                sdk = _make_sdk(namespace=team["team_id"])
+                proj = sdk._get_proj()
+                purge_expired(proj, retention_days=days)
+                purge_overflow(proj, max_events=cap)
+            except Exception:
+                _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
+    except Exception as exc:
+        _logger.warning("event retention sweep failed: %s", exc)
+
+
+async def _run_boot_sweeps() -> None:
+    """#2953: the one-time boot sweeps, run as a BACKGROUND task.
+
+    This must never be awaited from the startup half of ``_lifespan``: uvicorn
+    only calls ``loop.create_server()`` after ``lifespan.startup()`` returns,
+    so awaiting here means the machine accepts no traffic at all for the
+    duration of the sweeps (guaranteed on every deploy/restart). Scheduled as
+    a task instead, the loop is free to bind immediately.
+
+    The ``await asyncio.sleep(0)`` at the top yields once before the first
+    blocking submission, so the loop reaches uvicorn's ``create_server`` before
+    any sweep work is handed to a thread. The hard guarantee is the removed
+    ``await``; this just makes the ordering explicit.
+
+    Best-effort by construction (mirroring the pre-#2953 ``try/except``): a
+    sweep failure logs and never kills startup.
+
+    The sweeps run on a dedicated DAEMON worker (``run_on_daemon_worker``), not
+    on the shared default executor: ``asyncio.run``'s
+    ``shutdown_default_executor()`` joins every DEFAULT-executor worker, so a
+    sweep blocked on a dead DB would hang uvicorn's whole process shutdown
+    until the socket timeout (and forever against a black hole with no
+    timeout). A daemon worker can always be abandoned.
+    """
+    await asyncio.sleep(0)
+    for label, fn in (("event retention", _sweep_events),
+                      ("deleted-team purge", _purge_deleted_teams)):
+        try:
+            await run_on_daemon_worker(fn, name="tortoise-boot-sweep")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # never fatal
+            _logger.warning("boot %s sweep failed: %s", label, exc)
+
+
+#: Task attributes armed across the lifespan that a re-entry or shutdown must
+#: disarm. SHARED by ``_start_liveness`` and ``_stop_liveness`` (round-3 review
+#: P2): the two lists used to differ, so a failed prior lifespan could leave
+#: ``_boot_sweep_task``/``_event_retention_task`` orphaned — a double boot
+#: sweep and "Task exception was never retrieved" at teardown.
+_LIVENESS_TASK_ATTRS = (
+    "_loop_heartbeat_task",
+    "_health_probe_task",
+    "_boot_sweep_task",
+    "_event_retention_task",
+)
+
+
+def _start_liveness(app) -> None:
+    """Arm the heartbeat, the dedicated /healthz listener and the watchdog.
+
+    Called from the STARTUP half of ``_lifespan`` — cheap, synchronous, no
+    I/O, no await, so it cannot delay the bind.
+
+    Order is load-bearing: ``heartbeat_record()`` runs ON the loop right now
+    (proving it is scheduling before the watchdog exists to judge it), then
+    the heartbeat task, then the listener, then the watchdog. Starting the
+    watchdog before the heartbeat would let it fire on a loop that simply had
+    not ticked yet. The watchdog additionally refuses to judge until at least
+    one REAL tick has landed (``LOOP_STALL_EXIT_MIN_TICKS``), so the slow-
+    starting part of the startup half cannot be mistaken for a wedge.
+    """
+    loop = asyncio.get_running_loop()
+    # A previous lifespan of the SAME app instance (in-process restart,
+    # TestClient reuse) may have failed before its shutdown half ran, leaving an
+    # armed watchdog and live tasks behind. Disarm them first: an orphaned
+    # watchdog would survive into the next shutdown, where a legitimately stale
+    # heartbeat (the cancelled heartbeat task) looks exactly like a wedge, and
+    # it would kill the process mid-drain.
+    prev_stop = getattr(app.state, "_loop_watchdog_stop", None)
+    if prev_stop is not None:
+        prev_stop.set()
+    for attr in _LIVENESS_TASK_ATTRS:
+        prev = getattr(app.state, attr, None)
+        if prev is not None:
+            prev.cancel()
+    heartbeat_record()
+    app.state._loop_heartbeat_task = loop.create_task(loop_heartbeat_task())
+    app.state._healthz_server = start_health_listener()
+    app.state._loop_watchdog_stop = threading.Event()
+    # DISABLED BY DEFAULT (#2850 review P0): with TORTOISE_LOOP_STALL_EXIT_S
+    # unset this returns None — the /healthz listener is the signal and the
+    # destructive action lives in the out-of-band watchdog. Enabling it here
+    # also requires 3 consecutive stale windows and an idle workload.
+    app.state._loop_watchdog = start_stall_watchdog(
+        stop_event=app.state._loop_watchdog_stop)
+
+
+async def _stop_liveness(app) -> None:
+    """Shutdown half: cancel the loop tasks, stop the watchdog.
+
+    The watchdog MUST be stopped FIRST: shutdown cancels the heartbeat task,
+    which makes the heartbeat legitimately stale, which is indistinguishable
+    from a wedge. Leaving it armed would kill the process mid-drain.
+
+    The /healthz listener is deliberately NOT torn down — it is process-
+    lifetime, it answers 200 for as long as the loop is alive (so a rolling
+    drain is not mistaken for a dead machine), and rebinding it per lifespan
+    would race TIME_WAIT across in-process TestClient restarts.
+
+    Cancelled tasks are awaited: a bare ``cancel()`` leaves them pending and
+    the loop prints "Task was destroyed but it is pending!" at teardown. The
+    wait is prompt — cancellation is thrown into the awaiting coroutine at its
+    ``await`` point, so it does not wait for an in-flight ``to_thread`` worker.
+    """
+    stop = getattr(app.state, "_loop_watchdog_stop", None)
+    if stop is not None:
+        stop.set()
+    pending = [t for t in (getattr(app.state, attr, None)
+                           for attr in _LIVENESS_TASK_ATTRS) if t is not None]
+    for task in pending:
+        task.cancel()
+    if pending:
+        with suppress(Exception):
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
 @asynccontextmanager
 async def _lifespan(app):
     """Compose the FastMCP sub-app's lifespan (session manager init) into
@@ -390,6 +979,20 @@ async def _lifespan(app):
     OPTIONAL — if the pre-warm misses its window, EmbeddingModel.get()
     retries on the next call and search falls back to FTS+structural RRF.
     """
+    # ── #2850: every app instance starts from a clean health-probe state.
+    # A probe worker wedged during a previous app instance (TestClient reuse
+    # in-process, or an in-process reload) must not survive into this one.
+    _HEALTH_PROBE.reset()
+    _READY_PROBE.reset()
+    _CONTROL_PLANE_PROBE.reset()
+    _probe_sdk_reset()
+
+    # ── #2850: arm liveness BEFORE anything that can block. The heartbeat
+    # task, the dedicated /healthz listener and the stall watchdog are all
+    # synchronous/cheap — they cannot delay uvicorn's bind, and they mean the
+    # machine reports its true liveness from the first millisecond.
+    _start_liveness(app)
+
     # ── #2444: optional Sentry activation for the hosted API (no-op without
     # SENTRY_DSN). Initialize before the app starts serving so captures are
     # armed from the first request. Hosted-only concern: local SDK/self-host
@@ -403,7 +1006,6 @@ async def _lifespan(app):
 
     async with mcp_http_app.lifespan(mcp_http_app):
         try:
-            import threading
 
             def _probe_loaded_model_id(model) -> str | None:
                 """Best-effort extraction of the loaded HF model id from a
@@ -469,25 +1071,58 @@ async def _lifespan(app):
         global _WATCHER
         try:
             cfg = _backup_config_safe()
-            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":  # noqa: F823
+            # #2922: EVERY reason the watcher does not start must be stated on
+            # boot. The UnboundLocalError was one silent path; these two
+            # conditions were others — an absent/invalid backup config (the
+            # fail-closed default) or the test-only kill switch both left
+            # `_WATCHER` unset with no log line at all, i.e. the same "invisible
+            # dead monitor" state that hid this incident for ~31 days.
+            _watcher_disabled = os.environ.get("BACKUP_WATCHER_DISABLED") == "1"
+            # "The monitor is absent" is a warning only where a monitor is
+            # expected. Gating on the hosted marker (FLY_APP_NAME — the same
+            # truthiness test the durability guard uses) keeps production loud
+            # without making every TestClient/embedded boot warn about a subsystem
+            # those deployments legitimately leave off: a warning that fires on
+            # every healthy non-production boot is training-to-ignore material for
+            # the very signal #2922 needed.
+            _watcher_expected = bool(os.environ.get("FLY_APP_NAME"))
+            _not_started_reason = None
+            if cfg is None:
+                _not_started_reason = (
+                    "backup config unavailable (BACKUP_SWEEP_ENABLED off, or config invalid)"
+                )
+            elif _watcher_disabled:
+                _not_started_reason = (
+                    "BACKUP_WATCHER_DISABLED=1 (test-only kill switch; "
+                    "must never be set in production)"
+                )
+            if _not_started_reason is not None:
+                if _watcher_expected:
+                    _logger.warning(
+                        "backup watcher not started: %s — no backup staleness "
+                        "monitoring this boot",
+                        _not_started_reason,
+                    )
+                else:
+                    _logger.debug(
+                        "backup watcher not started: %s — no backup staleness "
+                        "monitoring this boot",
+                        _not_started_reason,
+                    )
+            if cfg and not _watcher_disabled:
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
-                # #669 post-flip: the watcher's team enumeration must use the
-                # SAME seam as the sweep driver — Supabase teams in Supabase
-                # control-plane mode, the registry handle for selfhost. The
-                # raw registry handle would read an EMPTY graph post-flip
-                # (registry deleted) and file spurious staleness incidents
-                # (post-flip verification finding, #669).
-                from tortoise.supabase_control import (
-                    get_control_plane,
-                    is_supabase_enabled,
-                )
-                if is_supabase_enabled():
-                    team_source = get_control_plane()
-                else:
-                    reg_sdk = _registry_sdk()
-                    team_source = reg_sdk._get_registry()
+                # #669 post-flip: the watcher's team enumeration uses the SAME
+                # seam as the sweep driver — #2823 folded this last hand-rolled
+                # `is_supabase_enabled()` branch onto the shared
+                # `_control_plane_source()`, so no caller re-introduces the
+                # pre-#669 resolution (the raw registry handle reads an EMPTY
+                # graph post-flip — registry deleted — and files spurious
+                # staleness incidents; post-flip verification finding, #669).
+                from tortoise.supabase_control import is_supabase_enabled
+
+                team_source = _control_plane_source()
 
                 def _sweep_teams() -> list[str]:
                     from tortoise.backup_sweep import enumerate_teams
@@ -548,73 +1183,107 @@ async def _lifespan(app):
                 _WATCHER = WatcherThread(watcher, interval_seconds=cfg.watcher_poll_seconds)
                 _WATCHER.start()
                 if not is_supabase_enabled():
-                    _boot_gc_drill_graphs(reg_sdk._get_proj().db)
+                    try:
+                        # Registry lane only: the boot GC sweeps stale `_drill_*`
+                        # scratch graphs. The DATA-plane handle (#1366) is resolved
+                        # here rather than held above — `team_source` now comes from
+                        # the shared seam, and _make_sdk's process-lifetime
+                        # keepalive anchor keeps the embedded server alive
+                        # (#1475/#1607).
+                        _boot_gc_drill_graphs(_make_sdk(namespace=None)._get_proj().db)
+                    except Exception as exc:
+                        # #2922 review: a separate operation, so a separate
+                        # message. Reporting a drill-graph GC failure as "the
+                        # backup watcher could not start" would have told the
+                        # operator the opposite of the truth (the watcher IS
+                        # running by this point).
+                        _logger.error(
+                            "gc of drill graphs at boot failed: %s", exc, exc_info=True
+                        )
         except Exception as exc:
-            _logger.warning("backup watcher could not start: %s", exc)
+            # #2922: this used to be a swallowed `warning`. The watcher silently
+            # never started in hosted production (~31 days: watcher.running=false
+            # with last_poll 2026-08-11), which removed the one signal that would
+            # have surfaced #2790 (no sweep for 33 days, no drill ever recorded).
+            # Loud, with a traceback, so a dead watcher can never be invisible again.
+            _logger.error("backup watcher could not start: %s", exc, exc_info=True)
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
         # Per-team graphs get purged by the SDK lazy hook too (embedded/stdio);
         # here we sweep once at boot and then on an asyncio interval.
+        #
+        # #2922: do NOT import asyncio/os locally here. Both are imported at module
+        # scope (lines 17/23), and a function-local `import os` makes `os` a local
+        # name for the WHOLE of _lifespan — so the earlier `os.environ.get(...)`
+        # read above raised UnboundLocalError and aborted the entire watcher-start
+        # block. Regression guard: tests/test_boot_regressions.py.
+        # #2953 (round-3 review P2): schedule the one-time BOOT sweeps FIRST,
+        # in their own try. They used to be created AFTER the ``interval``
+        # parse inside the SAME try, so a ``ValueError`` from
+        # ``TORTOISE_EVENT_RETENTION_INTERVAL=oops`` silently cancelled the
+        # boot sweeps too — a config typo disabled the retention purge at boot
+        # (and the deleted-team purge) for the process's lifetime. On
+        # origin/main the sweeps ran regardless (they were awaited before the
+        # parse); keep that independence.
         try:
-            import asyncio
-            import os
+            # #2953: the BOOT sweeps are NOT awaited here. uvicorn calls
+            # loop.create_server() only after lifespan.startup() returns, so
+            # awaiting them meant the machine had NO listening socket for the
+            # whole sweep — every deploy and restart. Background task instead.
+            app.state._boot_sweep_task = asyncio.get_event_loop().create_task(
+                _run_boot_sweeps())
+        except Exception as exc:
+            _logger.error("boot sweeps did NOT run: %s", exc, exc_info=True)
 
-            def _sweep_events() -> None:
-                try:
-                    from tortoise.event_store import purge_expired, purge_overflow
-                    days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
-                    cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
-                    # Probe-before-purge is registry-mode only (#2251 review
-                    # P2): a purge query against an ABSENT team_{tid} graph
-                    # (orphan registry row from a partial provision) would
-                    # materialize an empty one. Skip the probe in Supabase
-                    # mode — the registry namespace must NEVER be
-                    # constructed there (#669; the flip-gate pins the
-                    # webhook path zero-touch), and that sweep predates
-                    # #2251 so it keeps its pre-existing unconditional
-                    # per-team purge. Registry mode: enumerate the
-                    # server-wide existing graphs ONCE; None → probe failed
-                    # → skip this cycle (best-effort — the per-team purges
-                    # below hit the same graph store, so they would fail
-                    # anyway; the per-team SDK lazy hook still covers
-                    # purges).
-                    from tortoise.supabase_control import is_supabase_enabled
-                    existing = None  # None = no gate (Supabase mode)
-                    if not is_supabase_enabled():
-                        existing = _registry_existing_graphs()
-                        if existing is None:
-                            _logger.warning("event retention sweep skipped: registry graph probe failed")
-                            return
-                    # Sweep every registered team's graph (registry Team nodes).
-                    for team in _iter_registered_teams():
-                        if existing is not None and f"team_{team['team_id']}" not in existing:
-                            continue
-                        try:
-                            sdk = _make_sdk(namespace=team["team_id"])
-                            proj = sdk._get_proj()
-                            purge_expired(proj, retention_days=days)
-                            purge_overflow(proj, max_events=cap)
-                        except Exception:
-                            _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
-                except Exception as exc:
-                    _logger.warning("event retention sweep failed: %s", exc)
-
-            await asyncio.to_thread(_sweep_events)  # boot sweep (#310, off the loop — same shape as the #302 purge below)
-            await asyncio.to_thread(_purge_deleted_teams)  # boot purge (#302)
-            interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+        try:
+            # #2850/#2953: the inline `_sweep_events` closure and the two
+            # `await asyncio.to_thread(...)` boot calls that used to live here
+            # are GONE. `_sweep_events` is now hoisted to module scope (see its
+            # own definition above), and both boot sweeps run as a background
+            # task (`_run_boot_sweeps`) so the listening socket binds before any
+            # DB work. The previous `import asyncio` / `import os` lines are also
+            # gone — module-scope imports already cover them, and a function-local
+            # `import os` shadowed the module name for the WHOLE of `_lifespan`
+            # (#2851/#2922; regression guard tests/test_boot_regressions.py).
+            interval = event_retention_interval()
 
             async def _event_retention_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
-                    await asyncio.to_thread(_sweep_events)
+                    # #2850: daemon worker, not the shared default executor —
+                    # see _run_boot_sweeps.
+                    await run_on_daemon_worker(_sweep_events,
+                                               name="tortoise-boot-sweep")
                     # #302: hard-delete past grace (sync DB work off the loop)
-                    await asyncio.to_thread(_purge_deleted_teams)
+                    await run_on_daemon_worker(_purge_deleted_teams,
+                                               name="tortoise-boot-sweep")
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
         except Exception as exc:
-            _logger.warning("event retention loop not started: %s", exc)
+            # Best-effort by design (a purge failure must never block bind), but
+            # there is no retry: retention is off for this process's lifetime, so
+            # this is the same "silently never runs" shape as #2922 and gets the
+            # same treatment — ERROR plus a traceback. The one-time boot sweeps
+            # are scheduled independently (above) and are NOT affected by a bad
+            # interval; say so explicitly so the log is not read as "nothing ran".
+            _logger.error(
+                "event retention loop not started (the one-time boot sweeps "
+                "above WERE scheduled independently): %s", exc, exc_info=True)
+
+        # ── #2850: the DB probe refresher — keeps /health's ``db`` field
+        # honest without the request path doing any I/O at all.
+        try:
+            app.state._health_probe_task = asyncio.get_event_loop().create_task(
+                _health_probe_loop())
+        except Exception as exc:
+            _logger.warning("health probe refresher not started: %s", exc)
         yield
+
+        # ── shutdown: disarm the watchdog before the heartbeat task is
+        # cancelled (see _stop_liveness), then cancel the loop tasks.
+        with suppress(Exception):
+            await _stop_liveness(app)
 
 
 app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
@@ -805,11 +1474,32 @@ async def _dream_worker(team_id: str, key: str | None = None) -> None:
             sdk.dream(dirty_only=True, mode="local")
         finally:
             sdk.close()
-    except Exception:
+    except Exception as exc:
         import logging
-        logging.getLogger("tortoise.api").exception(
-            "dream worker failed for tenant %s graph %s", team_id, key
-        )
+        _log = logging.getLogger("tortoise.api")
+        # #3139 (review P2): a DreamNoOpError means the pass reported
+        # convergence while writing ZERO belief state. Swallowing it here made
+        # the loud failure silent again on the hosted write path — the only
+        # evidence was a log line, and `dream_health_check` is served from a
+        # FRESH per-request SDK whose `_dream_metrics` is per-instance, so
+        # `/v1/dream/health` could never see `no_op_reason` or the failure
+        # bump. Log at ERROR with an alertable marker so the condition is
+        # greppable/alertable rather than indistinguishable from any other
+        # worker hiccup.
+        from .exceptions import DreamNoOpError
+        if isinstance(exc, DreamNoOpError):
+            _log.error(
+                "DREAM_NO_OP tenant=%s graph=%s mode=%s eligible_factors=%s: "
+                "the pass reported convergence while writing zero belief "
+                "state (#3139). The usual cause is a dropped boolean "
+                "is_operator index (GRAPH.COPY, #3154).",
+                team_id, key, getattr(exc, "mode", "?"),
+                getattr(exc, "eligible_factors", "?"),
+            )
+        else:
+            _log.exception(
+                "dream worker failed for tenant %s graph %s", team_id, key
+            )
     finally:
         # Reschedule if more roots arrived during the drain.
         if not q.empty():
@@ -993,13 +1683,22 @@ app.add_middleware(ClientIPMiddleware)
 class ForwardedProtoMiddleware(BaseHTTPMiddleware):
     """Honor forwarded-proto headers when building redirect Locations (#985).
 
-    Starlette builds redirect URLs (e.g. the trailing-slash 307 for
-    ``POST /mcp`` → ``/mcp/``) from ``scope["scheme"]``, which is the
+    Starlette builds redirect URLs from ``scope["scheme"]``, which is the
     scheme the proxy used to reach the app — plain http behind the Fly
-    proxy (TLS terminates at the edge). The result is a downgraded
-    ``Location: http://api.premiselabs.co/mcp/``; the client follows it,
-    Fly 301s http→https, and POST-following HTTP stacks (MCP TS SDK)
-    convert the method to GET per RFC 9110 → ``GET /mcp/`` 405.
+    proxy (TLS terminates at the edge). For any trailing-slash redirect the
+    app emits, the result is a downgraded ``Location: http://…``; the client
+    follows it, Fly 301s http→https, and POST-following HTTP stacks (MCP TS
+    SDK) may convert the method to GET at that 301 (RFC 9110 §15.4.2) → 405.
+
+    NOTE (#2864): the ``/mcp`` → ``/mcp/`` redirect is itself gone —
+    ``McpPathCanonicalizerMiddleware`` rewrites the scope path so the
+    canonical connector URL is served without a redirect. This middleware
+    remains the scheme fix for every OTHER trailing-slash redirect the app
+    emits, so do not read the note above as covering ``/mcp`` any longer.
+
+    Citation note: the POST→GET conversion above is a property of 301/302
+    (RFC 9110 sections 15.4.2/15.4.3), NOT of the 307 Starlette emits — 307 is
+    method-preserving (section 15.4.8). The lossy step is the Fly edge's 301.
 
     This middleware rewrites ``scope["scheme"]`` from the FIRST value of
     the forwarded-proto header so redirect Locations carry the
@@ -1074,6 +1773,95 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(AnalyticsMiddleware)
+
+
+class McpPathCanonicalizerMiddleware:
+    """Exact-match ``/mcp`` to ``/mcp/``, so the JSON-RPC POST never 307s (#2864).
+
+    Starlette's ``redirect_slashes`` answers a request for ``/mcp`` with a 307 to
+    ``/mcp/`` (the MCP app is mounted at ``/mcp``). 307 is method-preserving by
+    spec (RFC 9110 section 15.4.8: the method MUST NOT change), so the 307 itself
+    is not the hazard — the #985 chain is: the Fly edge 301s http→https, and 301
+    is NOT method-preserving (#15.4.2 lets a client rewrite POST to GET), so the
+    round trip is lossy for exactly the clients least able to tolerate it. Beyond
+    that, a redirect on a JSON-RPC POST is simply needless. Rewriting the scope
+    path internally means the client-visible URL stays ``https://…/mcp`` — the
+    canonical connector URL — with no redirect at all.
+
+    EXACT match only (on the ROUTE path): ``/mcpfoo``, ``/Mcp`` and ``/mcp/x``
+    are untouched, so the rewrite can never widen the surface or shadow a
+    sibling route. Deliberately
+    pure ASGI rather than ``BaseHTTPMiddleware``: it must mutate the scope
+    *before* routing, and this avoids the response-wrapping overhead on the
+    hottest endpoint in the app.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            # Compare on the ROUTE path (Starlette strips root_path there), not
+            # the raw path: under an ASGI mount prefix (`uvicorn --root-path
+            # /x`) scope["path"] is "/x/mcp" while the route path is "/mcp",
+            # so a raw comparison would silently re-enable the 307 — and would
+            # ALSO miss the unprefixed "/mcp" form. One comparison covers both.
+            from starlette.routing import get_route_path
+
+            if get_route_path(scope) == "/mcp":
+                scope = dict(scope)
+                root = scope.get("root_path", "")
+                scope["path"] = f"{root}/mcp/"
+                scope["raw_path"] = scope["path"].encode()
+        await self.app(scope, receive, send)
+
+
+# Added LAST of the PATH-MUTATING middleware so it is the OUTERMOST one that
+# rewrites the scope: the path is canonicalized before any other path-mutating
+# middleware or the router sees it, and before a redirect can be built. (The
+# transparent in-flight gauge, ``InFlightMiddleware``, is registered after this
+# one and so wraps it from the outside; it never touches scope["path"], so it
+# cannot affect canonicalization order.)
+app.add_middleware(McpPathCanonicalizerMiddleware)
+
+
+class InFlightMiddleware:
+    """Count requests in flight for the opt-in loop-stall self-kill (#2850 P0).
+
+    The watchdog can see that the event loop stopped ticking but NOT why. This
+    app still runs synchronous work on the loop (LLM extraction, per-turn
+    FalkorDB queries), so a stale heartbeat is routinely "busy", not "wedged".
+    The self-kill must therefore refuse to fire while a request is in flight —
+    killing the process there would destroy the very request that is making
+    progress and turn ordinary provider latency into a restart loop.
+
+    Deliberately pure ASGI and OUTERMOST (registered last):
+      * it must increment BEFORE any middleware can short-circuit (a 429/404 is
+        still work in progress from the loop's point of view);
+      * no request/response wrapping, so it costs a lock acquire + a plain
+        increment on the hot path.
+
+    The decrement is in a ``finally`` so a raised handler cannot leak a slot and
+    permanently disarm the watchdog's idle predicate.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":  # lifespan/websocket are not requests
+            await self.app(scope, receive, send)
+            return
+        workload_enter()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            workload_exit()
+
+
+app.add_middleware(InFlightMiddleware)
+
+
 # Internal auth key for Edge Function → API communication
 # Read lazily (not at import): tests and multi-app processes set
 # FASTAPI_INTERNAL_KEY after tortoise.hosted_api may already be imported,
@@ -1114,8 +1902,8 @@ async def _async_audit(
     # ClientIPMiddleware), never the Fly proxy IP (request.client.host).
     ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
     # #2104 (#2260 follow-up): _async_audit is reached from the MCP-tool
-    # capture path with a fabricated request stand-in (hosted_api.py ~6222:
-    # types.SimpleNamespace(state=…, client=None) — NO .headers). A bare
+    # capture path with a fabricated request stand-in
+    # (types.SimpleNamespace(state=…, client=None) — NO .headers). A bare
     # request.headers.get crashed the audit (AttributeError → non-fatal audit
     # failure → an 'error' key in the capture response). Mirror the defensive
     # getattr style used for state.client_ip above: header-less request-likes
@@ -1446,14 +2234,99 @@ def _validate_mint_expiry(body: dict) -> str | None:
     return None
 
 
+# ── #2850: reusable, bounded probe connection ────────────────────────────
+#
+# Pre-#2850 ``_probe_db`` called ``_make_sdk(namespace=None)`` on EVERY
+# invocation (a fresh TortoiseSDK + FalkorProjection + FalkorDB connection
+# pool each time) and never closed it. On a black-holed FalkorDB that leaked
+# one connection per health check, and the abandoned probe threads kept the
+# sockets (and the whole SDK) alive. The probe now owns ONE connection,
+# rebuilt only when the DB target itself changes.
+_PROBE_SDK_CACHE: dict = {"key": None, "sdk": None}
+_PROBE_SDK_LOCK = threading.Lock()
+
+
+def _probe_sdk_key() -> tuple:
+    """Identity of the DB target the cached probe SDK is bound to.
+
+    A changed TORTOISE_DB_URI / TORTOISE_DB_PATH / embedded path must rebuild
+    rather than probe a stale DB (test fixtures swap temp paths; entrypoint.sh
+    rewrites the URI). Production is a stable key, so the connection is built
+    once. TORTOISE_DB_PATH is included even when a URI is set: the hosted test
+    fixture force-binds a temp embedded path through a patched SDK __init__, so
+    the path — not the shared URI — is what actually changes per test.
+    """
+    uri = os.environ.get("TORTOISE_DB_URI") or ""
+    path = os.environ.get("TORTOISE_DB_PATH") or ""
+    return (uri, path, "" if uri else _resolve_embedded_db_path())
+
+
+def _probe_sdk_reset() -> None:
+    """Close + drop the cached probe SDK (app startup / tests / ops)."""
+    with _PROBE_SDK_LOCK:
+        sdk = _PROBE_SDK_CACHE.get("sdk")
+        _PROBE_SDK_CACHE["sdk"] = None
+        _PROBE_SDK_CACHE["key"] = None
+    if sdk is not None:
+        try:  # noqa: SIM105 — a stale temp DB may already be gone
+            sdk.close()
+        except Exception:
+            pass
+
+
+def _probe_sdk() -> TortoiseSDK:
+    """Return the cached probe SDK, rebuilding only when the target changes.
+
+    The per-request ``_make_sdk`` contract (a FRESH SDK per call, mutable
+    in-memory state) does not apply here: the health probes are single-flight
+    for their CALLERS — concurrent checks JOIN the in-flight probe, and a
+    second probe starts only by superseding a WEDGED one (capped per episode;
+    see the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``). In the
+    steady state the actual ``_get_proj().g.query`` executes on the ONE shared
+    probe worker (``monitoring._PROBE_WORKER``), which is exactly what stops
+    the per-check connection leak. NOTE the supersede window briefly overlaps a
+    wedged worker with its replacement, so this handle is not strictly
+    single-touch during a supersede; the wedged worker is by definition not
+    making progress, and the window is bounded by the supersede cap.
+
+    Both cache mutation and construction are serialized on
+    ``_PROBE_SDK_LOCK``, so concurrent coordinators can race for the handle but
+    cannot corrupt the cache or build two of them.
+    """
+    key = _probe_sdk_key()
+    with _PROBE_SDK_LOCK:
+        cached = _PROBE_SDK_CACHE.get("sdk")
+        if cached is not None and _PROBE_SDK_CACHE.get("key") == key:
+            return cached
+        old = cached
+        sdk = _make_sdk(namespace=None)
+        _PROBE_SDK_CACHE["sdk"] = sdk
+        _PROBE_SDK_CACHE["key"] = key
+    if old is not None:
+        try:  # noqa: SIM105
+            old.close()
+        except Exception:
+            pass
+    return sdk
+
+
 def _probe_db() -> dict:
-    """Deep-check the graph DB through the shared/default connection (#1384).
+    """Deep-check the graph DB through the reused probe connection (#1384).
 
     Reports ``{"ok": bool, "latency_ms": float, "error": str|None}`` via
-    monitoring.probe_db — never raises, hard-bounded (~1.5s). The probe
-    target is ``_make_sdk(namespace=None)``: the default-graph connection
-    shares the DB server with every team/registry endpoint, so a stopped
-    FalkorDB (NXDOMAIN, #1381) fails it too.
+    monitoring.probe_db — never raises. ``probe_db`` itself is statically
+    bounded at ``PROBE_DB_TOTAL_TIMEOUT`` (2 x ``PROBE_TIMEOUT`` + the retry
+    delay, ~3.1s, because a transient connect failure is retried once). The
+    ``_probe_sdk()`` prefix that runs BEFORE it is only NOMINALLY charged at
+    ``PROBE_SDK_ACQUISITION_BUDGET`` — that is the redis CONNECT leg, and on
+    the embedded path the acquisition runs real queries bounded by the redis
+    READ timeout (10s default, clampable to 60s) with redis-py's default 10
+    retries, which the budget does not cover. ``DB_PROBE_HARD_TIMEOUT`` below
+    is therefore the best-effort bound a caller should clear, NOT a proof that
+    it exceeds this worker's real total. The probe target is
+    ``_make_sdk(namespace=None)``: the default-graph connection shares the DB
+    server with every team/registry endpoint, so a stopped FalkorDB (NXDOMAIN,
+    #1381) fails it too.
 
     #669: NEVER probe the registry namespace — FalkorDB auto-creates the
     graph on select, so a registry-namespaced probe RECREATES a deleted
@@ -1461,10 +2334,195 @@ def _probe_db() -> dict:
     """
     from tortoise.monitoring import probe_db
     try:
-        sdk = _make_sdk(namespace=None)
+        sdk = _probe_sdk()
     except Exception as exc:
+        _probe_sdk_reset()
         return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return probe_db(sdk)
+
+
+# The FalkorDB-backed probes' bound. DERIVED, not restated: it is the shared
+# ``monitoring.PROBE_HARD_TIMEOUT`` (``PROBE_DB_TOTAL_TIMEOUT`` +
+# ``PROBE_SDK_ACQUISITION_BUDGET`` + a strict-above margin), so a
+# ``PROBE_TIMEOUT`` change propagates. ``probe_db`` retries one transient
+# connect failure, so its statically-known ceiling is
+# ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s) — NOT ``PROBE_TIMEOUT`` (1.5s); reading
+# only the per-attempt figure is what inverted the ordering in the
+# #2850/#2988 merge. Two honest caveats:
+#   * the ``_probe_sdk()`` prefix that runs BEFORE ``probe_db`` is charged at
+#     ``PROBE_SDK_ACQUISITION_BUDGET`` (the redis CONNECT leg). In URI mode
+#     that prefix is ~free (lazy projection, connect happens inside
+#     ``probe_db``'s own per-attempt bound); on the EMBEDDED path it runs real
+#     queries bounded by the redis READ timeout (10s default, clampable to
+#     60s) with redis-py's default 10 retries, which the budget does NOT cover;
+#   * ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` can raise even the connect leg
+#     the budget models (clamped at ``projection._DB_TIMEOUT_MAX_S`` = 60s).
+# So this is a best-effort ALIGNMENT that reduces how often a worker is
+# stranded; it is not a proof that the outer bound exceeds the worker's real
+# total. See the guarantee summary at ``monitoring.PROBE_MAX_SUPERSEDES``.
+DB_PROBE_HARD_TIMEOUT = PROBE_HARD_TIMEOUT
+
+
+# #2850: the single-flight, hard-bounded coordinator BOTH health endpoints
+# read. The lambda resolves ``_probe_db`` at CALL time, so the existing
+# monkeypatch seams (tests patch ha_mod._probe_db) keep working.
+# Round-4 review P2: the self-heal gate is wired to ``_health_probe_interval()``
+# (resolved per read) so it always equals the refresher's ACTUAL period. The
+# old hardcoded ``HEALTH_PROBE_REFRESH_S`` (10s) was wrong whenever the
+# operator set the period anywhere in 0.5-15s — with a 15s period, ``/health``
+# started a duplicate DB probe once per cycle (age 11s > 10s gate).
+_HEALTH_PROBE = HealthProbe(lambda: _probe_db(),
+                            timeout=DB_PROBE_HARD_TIMEOUT,
+                            refresh_budget=lambda: _health_probe_interval())
+
+
+def _probe_control_plane() -> dict:
+    """Bounded Supabase control-plane probe (#2850 item 6). Never raises.
+
+    ``/health/ready`` used to run ``get_control_plane().query("teams", ...)``
+    DIRECTLY on the event loop with no timeout — the same hazard as the
+    FalkorDB half: a black-holed PostgREST endpoint blocked EVERY request in
+    the process, not just the readiness check. It now runs on the probe's own
+    daemon worker through ``_CONTROL_PLANE_PROBE``.
+
+    ``get_control_plane()`` is a process-wide lazy singleton, so the probe
+    does not build a client per check (and a construction failure — missing
+    creds in Supabase mode — is reported as not-ready, fail-closed).
+    """
+    start = time.monotonic()
+    try:
+        import httpx
+
+        from tortoise.supabase_control import get_control_plane
+        # Minimal control-plane probe — a 1-row teams read exercises the
+        # PostgREST path without depending on any tenant data. The explicit
+        # PER-REQUEST timeout NARROWS the overrun window (the client's 5.0s
+        # default is PER PHASE, not a total — see
+        # ``CONTROL_PLANE_PROBE_TOTAL_S``) so the request normally finishes
+        # inside ``CONTROL_PLANE_HARD_TIMEOUT``. It does NOT bound the
+        # request: httpx's ``read`` timeout applies PER READ OPERATION, so a
+        # slowly-dribbling server can outlive the sum of the phases
+        # indefinitely. The coordinator's outer bound is the safety net; a
+        # request that outruns it strands a worker until that request
+        # completes on its own.
+        get_control_plane().query(
+            "teams", select=["id"], limit=1,
+            timeout=httpx.Timeout(**CONTROL_PLANE_PROBE_PHASES))
+    except Exception as exc:  # never raise, always report
+        return {"ok": False,
+                "latency_ms": round((time.monotonic() - start) * 1000, 1),
+                "error": f"{type(exc).__name__}: {exc}"[:200]}
+    return {"ok": True,
+            "latency_ms": round((time.monotonic() - start) * 1000, 1),
+            "error": None}
+
+
+# ── the control plane's composed per-request timeout ────────────────────
+#
+# ``httpx.Timeout(5.0)`` — ``SupabaseControlPlane``'s constructor default
+# (tortoise/supabase_control.py: ``httpx.Client(timeout=self._timeout)``) —
+# applies PER PHASE (connect / read / write / pool), NOT as a total deadline.
+# A request that stalls in more than one phase can therefore run up to the SUM
+# of the phases (~15-20s), far above any sane coordinator bound: a 6.0s outer
+# bound would abandon a LIVE worker thread (CPython #87185 cannot cancel it).
+# The health probe therefore asks for its OWN composed timeout.
+CONTROL_PLANE_PROBE_PHASES: dict[str, float] = {
+    "connect": 2.0,
+    "read": 2.0,
+    "write": 0.5,
+    "pool": 0.5,
+}
+#: The requested per-phase budget — ``connect`` + ``write`` + ``pool`` plus
+#: ONE ``read`` operation. This is NOT the probe request's worst case: httpx
+#: has no total-deadline concept AND its ``read`` timeout applies PER READ
+#: OPERATION, so a slowly-dribbling server can outlive this sum indefinitely
+#: (a reviewer measured a response surviving 5.3x the configured ``read``
+#: phase). What it really is: the composed timeout the probe ASKS FOR, which
+#: narrows the overrun window versus the client's per-phase default. It does
+#: NOT bound the request; ``CONTROL_PLANE_HARD_TIMEOUT`` is the safety net and
+#: a request that outruns it strands a worker until the request completes on
+#: its own.
+CONTROL_PLANE_PROBE_TOTAL_S = sum(CONTROL_PLANE_PROBE_PHASES.values())
+
+#: Safety margin between the probe request's composed total and the
+#: coordinator's outer bound — room for the worker to unwind and record its
+#: result after the client's own timeout fires. NAMED so the gap is not a
+#: silent magic number.
+CONTROL_PLANE_BOUND_MARGIN_S = 1.0
+
+# The control plane's probe bound — DERIVED from the probe request's composed
+# total, deliberately ABOVE it so a phase timeout normally fires first and the
+# worker returns by itself. Best-effort, not provable: the ``read`` phase is
+# PER READ and a dribbling server can outrun this bound; the bound is then the
+# safety net that unblocks the loop, and the worker is stranded until its
+# request completes. See the LAYERED TIMEOUT note below.
+CONTROL_PLANE_HARD_TIMEOUT = CONTROL_PLANE_PROBE_TOTAL_S + CONTROL_PLANE_BOUND_MARGIN_S
+
+
+# Separate coordinator instance from the FalkorDB one: the two planes fail
+# independently, and single-flighting them together would let a wedged DB
+# starve the control-plane check (and vice versa).
+#
+# ``fresh_only=True``: readiness is a FAIL-CLOSED gate, so it must never answer
+# 200 from a verdict older than its own read budget (review P1). See the
+# ``_READY_PROBE`` note below.
+#
+# LAYERED TIMEOUT (the #2988 alignment, restored here PER-PLANE). The outer
+# bound is kept ABOVE the plane's statically-known inner TOTAL. ``HealthProbe.run()``
+# abandons a probe that outlives ``timeout`` — and abandoning it does NOT stop
+# the worker thread, which stays parked in its socket read (CPython #87185:
+# ``wait_for(to_thread(...))``'s worker "is never cancelled and continues
+# running forever despite the timeout error"; the Python docs likewise say
+# ``wait_for`` cancels the AWAITABLE, not the thread). If the outer bound can
+# win that race, the timeout strands a thread. The control-plane probe
+# therefore carries its OWN composed request timeout (phases summing to
+# ``CONTROL_PLANE_PROBE_TOTAL_S`` = 5.0s) so a phase timeout normally fires
+# first and the coordinator's bound stays what it is meant to be — a safety
+# net for a probe that never self-bounds. This NARROWS the overrun window; it
+# does not bound the request (httpx's ``read`` is per-read — see
+# ``CONTROL_PLANE_PROBE_TOTAL_S``).
+#
+# This is why the planes carry DIFFERENT bounds: the alignment is relative to
+# each plane's statically-known inner TOTAL, not a single global number.
+# FalkorDB's ``probe_db`` retries one transient failure, so the bound that CAN
+# be computed is ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s = 2 x PROBE_TIMEOUT +
+# PROBE_RETRY_DELAY) plus the nominal SDK-acquisition budget plus a
+# strict-above margin — hence ``DB_PROBE_HARD_TIMEOUT`` =
+# ``PROBE_HARD_TIMEOUT`` (5.6s), not the superseded 2.0s bare default. The embedded acquisition prefix is NOT covered
+# by that computation, so this ordering is a best-effort alignment that
+# reduces how often a worker is stranded — see the guarantee summary at
+# ``monitoring.PROBE_MAX_SUPERSEDES``.
+_CONTROL_PLANE_PROBE = HealthProbe(
+    lambda: _probe_control_plane(),
+    timeout=CONTROL_PLANE_HARD_TIMEOUT,
+    fresh_only=True,
+)
+
+
+# #2850 item 6: READINESS gets its own coordinator, distinct from the one the
+# background refresher feeds. ``/health/ready`` is a fail-closed gate (the
+# deploy workflow asserts it LAST), so its verdict must reflect the DB at
+# request time — sharing the refresher's coordinator meant a readiness call
+# could JOIN a probe that started before the failure and report the stale
+# "ok" (#1384's whole point inverted). Its own coordinator is still
+# single-flight for its CALLERS and hard-bounded, so concurrent readiness
+# checks JOIN the in-flight probe rather than piling work up (a wedged probe
+# can still be superseded, capped per episode; see
+# ``monitoring.PROBE_MAX_SUPERSEDES``). Safe to run concurrently with
+# ``_HEALTH_PROBE``: the actual
+# ``_get_proj().g.query`` executes on the single shared probe worker
+# (monitoring._PROBE_WORKER), never concurrently.
+#
+# ``fresh_only=True`` (review P1): /health may serve "stale but honest"
+# last-known-good, but a readiness read must not. Without this flag a probe
+# that began after an outage could exhaust its own budget and ``run()`` would
+# return the coordinator's last completed ``{ok: True}`` — which stays within
+# ``stale_after`` (30s), so /health/ready could answer 200 "connected" for as
+# long as that window while the control plane or FalkorDB was already dead,
+# and deploy-hosted.yml asserts readiness LAST as its strongest post-deploy
+# signal.
+_READY_PROBE = HealthProbe(
+    lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
 @app.get("/health")
@@ -1472,25 +2530,56 @@ async def health():
     """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
 
     (cold-start fix, #338 follow-up): the previous DB-coupled /health caused
-    deploy failures on cold machines — Fly caps the http_check grace period at
-    60s, and a cold FalkorDB Cloud connection exceeds it. Liveness returns
-    immediately; DB readiness is `/health/ready`.
+    deploy failures on cold machines on a cold FalkorDB Cloud connection.
+    Liveness returns immediately; DB readiness is `/health/ready`.
 
-    Deep check (#1384): a lightweight graph-DB probe (RETURN 1, ≤1.5s bound)
-    rides along in `db`. A stopped FalkorDB (incident #1381 — NXDOMAIN with
-    /health staying ok) flips status to "degraded" + db.ok=false, visible
-    immediately without any graph-touching request. The handler never raises
-    and never 5xxes: a dead DB must not kill the process — deploy/backup
-    drivers gate on /health/ready, which still fails closed.
+    ⚠ The frequently repeated claim that "Fly caps the http_check grace period
+    at 60s" is UNCONFIRMED and possibly undocumented. It is NOT supported by
+    Fly's public docs, and independent research could not find it in flyctl or
+    fly-go either — treat it as folklore, not a contract (`fly.toml` here
+    configures `grace_period = "180s"`). To verify: deploy a machine whose
+    check fails continuously past the configured grace period and observe
+    whether Fly restarts it at 60s (machine event log / `flyctl machine
+    status`) or honours the larger configured value. This note exists because
+    the assertion was previously stated as fact in this docstring while the
+    same claim in PR #3063's runbook had to be corrected (review P2).
+
+    Deep check (#1384): a lightweight graph-DB probe (RETURN 1) rides along in
+    `db`. A stopped FalkorDB (incident #1381 — NXDOMAIN with /health staying
+    ok) flips status to "degraded" + db.ok=false, visible immediately without
+    any graph-touching request.
+
+    #2850 (P0): this handler now collects NO I/O and takes NO thread
+    # hand-off. It reads one in-memory value from ``_HEALTH_PROBE``
+    # (``snapshot()``) and one in-memory heartbeat timestamp, and returns.
+    # Nothing on the request path submits work to the event loop's DEFAULT
+    # ThreadPoolExecutor — the executor /health used to ride via
+    # ``asyncio.to_thread(_probe_db)``, shared with the module's other ``to_thread``
+    # call sites whose queue wait has no timeout. That shared queue is what
+    # let a stalled FalkorDB push the check past Fly's 15s budget while the
+    # process was idle (2026-09-10 incident). A saturated executor, a
+    # black-holed DB, or 20 concurrent checks can no longer delay this
+    # response by a microsecond. Freshness comes from the background
+    # ``_health_probe_loop`` refresher, not from the check.
+    #
+    # The response shape is unchanged for deploy/dashboard consumers:
+    # ``{"status", "db"}`` — ``probe`` and ``loop_stale_ms`` are additive.
+    # It never 5xxes: a dead DB is "degraded", never a killed process.
     """
-    import asyncio
     try:
-        # to_thread: a hung probe (firewall black-hole) must not stall the
-        # event loop — probe_db is itself bounded, but stay off the loop.
-        db = await asyncio.to_thread(_probe_db)
-    except Exception as exc:
+        db = _HEALTH_PROBE.snapshot()
+    except Exception as exc:  # liveness must answer, always
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
-    return {"status": "ok" if db["ok"] else "degraded", "db": db}
+    try:
+        probe_meta = _HEALTH_PROBE.info()
+    except Exception:
+        probe_meta = {}
+    try:
+        loop_age_ms = loop_heartbeat_info().get("loop_age_ms")
+    except Exception:
+        loop_age_ms = None
+    return {"status": "ok" if db.get("ok") else "degraded", "db": db,
+            "probe": probe_meta, "loop_stale_ms": loop_age_ms}
 
 
 @app.get("/health/ready")
@@ -1502,8 +2591,27 @@ async def health_ready():
     ready=false (503) unless both answer. Registry mode: FalkorDB only
     (today's behavior — selfhost has no second plane). Fail-closed: not-ready
     is a 503, never a 200.
+
+    #2850: the FalkorDB half reads its OWN bounded, single-flight coordinator
+    (``_READY_PROBE`` — deliberately NOT the liveness refresher's, or a
+    readiness call could join a probe that began before the outage and report a
+    stale "ok"). The pre-fix code ran ``_make_sdk(...)._get_proj().g.query(...)``
+    directly on the event loop with no timeout, so a hung DB blocked EVERY
+    request, not just this one. A stalled probe now reads as not-ready (503),
+    fail-closed, without ever blocking the loop.
     """
-    db_ok = False
+    # Data plane. Runs its OWN coordinator (``_READY_PROBE`` — deliberately
+    # NOT the liveness refresher's, so a readiness call cannot join a probe
+    # started before the outage), hard-bounded at ``DB_PROBE_HARD_TIMEOUT``
+    # (a best-effort alignment: the ~3.1s ``probe_db`` TOTAL plus the nominal
+    # SDK-acquisition budget; the embedded acquisition prefix is not covered),
+    # and it never raises, so a dead DB degrades the result instead of the
+    # process.
+    # #669 post-flip: NEVER a registry-namespaced probe — FalkorDB
+    # auto-creates the graph on select, so a registry-namespaced probe
+    # RECREATED the deleted registry_control_plane on every health check
+    # (post-flip verification finding, #669). ``_probe_db`` targets the
+    # default graph.
     try:
         # #669 post-flip: the FalkorDB data-plane probe must NOT open the
         # registry namespace — FalkorDB auto-creates the graph on select, so
@@ -1511,21 +2619,23 @@ async def health_ready():
         # registry_control_plane on every health check (post-flip
         # verification finding, #669). Probe the data plane via the default
         # graph (never the registry namespace).
-        sdk = _make_sdk(namespace=None)
-        sdk._get_proj().g.query("RETURN 1")
-        db_ok = True
+        db = await _READY_PROBE.run()
+        db_ok = db.get("ok") is True
     except Exception:
-        pass
+        db_ok = False
     if not db_ok:
         raise HTTPException(status_code=503, detail="Database unreachable")
-    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+    from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
+        # #2850 item 6: bounded + off-loop, exactly like the FalkorDB half.
+        # A wedged/unreachable control plane is a 503 (fail-closed), never a
+        # blocked event loop.
         try:
-            # Minimal control-plane probe — a 1-row teams read exercises the
-            # PostgREST path without depending on any tenant data.
-            get_control_plane().query("teams", select=["id"], limit=1)
-        except Exception:
-            raise HTTPException(status_code=503, detail="Control plane unreachable")  # noqa: B904
+            control = await _CONTROL_PLANE_PROBE.run()
+        except Exception:  # fail closed
+            control = {"ok": False}
+        if control.get("ok") is not True:
+            raise HTTPException(status_code=503, detail="Control plane unreachable")
         return {"status": "ok", "db": "connected", "control_plane": "connected"}
     return {"status": "ok", "db": "connected"}
 
@@ -1853,7 +2963,7 @@ async def get_current_team(request: Request) -> dict:
                 "created_by_key_id": created_by_key_id}
         await _abuse_post_auth(request, team_dict)
         # #2600: canonical actor_user_id alias (UUID-gated, reads the raw
-        # created_by already on the dict at ~1830). Additive; ContextVar set
+        # created_by already on the resolved team dict). Additive; ContextVar set
         # lives in _data_sdk, not here.
         from tortoise.sdk import _alias_actor_user_id
         return _alias_actor_user_id(team_dict)
@@ -2107,7 +3217,7 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         raise HTTPException(status_code=403, detail="Team not found")
     # #1828 review P2: a suspended team must 403 on SESSION-authed
     # management reads too — the key-auth lane enforces this in
-    # get_current_team (~1390); the session lane resolved the team without
+    # get_current_team; the session lane resolved the team without
     # raising. One place fixes every session endpoint. The deliberate
     # "reachable while suspended" appeal flow (/v1/team/alerts) uses
     # get_current_user + _membership_team directly and is unaffected. The
@@ -2849,7 +3959,7 @@ class BackupRestoreRequest(BaseModel):
 # ── Onboarding: Default State ─────────────────────────────────────
 
 # #1727 (Slice 2, Task 11): DEFAULT_ONBOARDING_STATE (the LIVE provisioning
-# default, written at team creation — hosted_api.py:3132) carries the SAME
+# default, written at team creation by `register_user`) carries the SAME
 # CAPTURE-SURFACE key set as _ONBOARDING_DEFAULT_STATE (the read-time merge
 # default) — NOT the full key set (the two still diverge on legacy keys). Every
 # capture-surface key must be registered in BOTH dicts + the PATCH model or
@@ -3941,15 +5051,21 @@ async def team_info(team: dict = Depends(get_current_team_session_ungated)):  # 
     teams (the #1148 gate stays scoped to the management set)."""
     _reject_graph_bound_team_surface(team, "team overview")
     sdk = _make_sdk(namespace=team["team_id"])
-    # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
-    # graph (half-failed provisioning, restores) must not dead-end the
-    # dashboard with a hard 500; the client renders the empty state and a
-    # write recreates the graph.
+    # Count REAL Points in default graph. #2360: demo/sample Points
+    # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
+    # — the Overview memory digest (this count) presents the user's own
+    # filings, never opt-in/legacy sample content masquerading as user data.
+    # The exclusion set is the same constant the demo seeder writes from, so
+    # it can never drift. #1591: FAIL SOFT — a missing/broken team graph
+    # (half-failed provisioning, restores) must not dead-end the dashboard
+    # with a hard 500; the client renders the empty state and a write
+    # recreates the graph.
     point_count = 0
     graph_ready = True
     try:
         point_count = sdk._get_proj().g.query(
-            "MATCH (n:Point) RETURN count(n)"
+            "MATCH (n:Point) WHERE NOT n.id IN $demo_ids RETURN count(n)",
+            params={"demo_ids": list(_DEMO_POINT_IDS)},
         ).result_set[0][0]
     except Exception:
         import logging
@@ -5008,34 +6124,104 @@ async def email_signup(request: Request):
     )
 
 
+# ── #2360 (re-spec): the demo/sample seed is NOT part of fresh-org
+# provisioning any more — the tenant-provision Edge Function calls the REAL
+# starter seed (/internal/starter-seed) instead, which files the signing-up
+# user + their Organization as connected anchor Subjects (never sample
+# Points). The demo seed below survives ONLY as an explicit opt-in sample
+# (/v1/demo + MCP tortoise_onboarding_demo_create) for callers who ask for
+# it — and every demo Point it writes is EXCLUDED from the count-of-record
+# surfaces (team.point_count — the Overview memory digest) so sample content
+# is never presented as the user's own filings. The id set is the single
+# source of truth for the exclusion: point_count and the seeder share it, so
+# a demo id can never drift into the digest.
+_DEMO_SENTINEL_ID = "_demo_sentinel"
+
+# (pid, pointKind, content, tags)
+_DEMO_SEMANTIC_POINTS = [
+    ("sem_welcome", "observation",
+     "Your Tortoise graph is ready. This is where agents file decisions, "
+     "observations, and findings so your team remembers across sessions.",
+     ["system", "welcome"]),
+    ("sem_fact_tortoise", "statement",
+     "Tortoise is a semantic epistemic graph engine that powers agent memory "
+     "through four ontology layers: Semantic, Episodic, Epistemic, and Procedural.",
+     ["tortoise", "overview"]),
+    ("sem_fact_layers", "statement",
+     "Semantic = facts and statements. Episodic = session history and events. "
+     "Epistemic = claims with evidence and confidence. Procedural = workflows and skills.",
+     ["tortoise", "ontology"]),
+]
+
+# (pid, content) — episodic turns (pointKind 'event', no tags)
+_DEMO_EPISODIC_TURNS = [
+    ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
+    ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
+     "Once set up, all decisions will be tracked automatically."),
+    ("epi_turn3", "[user] Great — make sure we capture decisions about architecture and product strategy."),
+]
+
+# (pid, pointKind, content, confidence, tags)
+_DEMO_EPISTEMIC_POINTS = [
+    ("epis_claim1", "hypothesis",
+     "Agent memory systems should be graph-native rather than vector-only "
+     "because semantic relationships carry more signal than embedding proximity.",
+     0.7, ["hypothesis", "architecture"]),
+    ("epis_claim2", "evidence",
+     "Teams using structured agent memory report 40% fewer repeated mistakes "
+     "and 3x faster onboarding for new team members.",
+     0.5, ["evidence", "adoption"]),
+    ("epis_claim3", "decision",
+     "We will use FalkorDB as the graph backend because it supports Cypher "
+     "queries and runs as a lightweight extension to Redis.",
+     0.9, ["decision", "infrastructure"]),
+]
+
+# (pid, pointKind, content, tags)
+_DEMO_PROCEDURAL_POINTS = [
+    ("proc_wf1", "workflow",
+     "CONTEXT-INJECTION: Before any coding task, call tortoise_suggest_entry_points() "
+     "to find related context from past sessions and decisions.",
+     ["workflow", "context"]),
+    ("proc_wf2", "workflow",
+     "DECISION-CAPTURE: After making a design decision, call tortoise_create_point() "
+     "with kind='decision' so future agents can trace the reasoning chain.",
+     ["workflow", "decision"]),
+    ("proc_wf3", "workflow",
+     "REVIEW-GATE: Before merging any PR, verify that key decisions are filed in Tortoise. "
+     "If not, file them before merging.",
+     ["workflow", "review"]),
+]
+
+# Every demo/sample Point the seeder can write, incl. the sentinel. The
+# Overview digest (team.point_count) excludes exactly this set — sample
+# content never counts as the user's own filings (#2360).
+_DEMO_POINT_IDS: frozenset[str] = frozenset(
+    pid for pid, *_ in (
+        _DEMO_SEMANTIC_POINTS + _DEMO_EPISODIC_TURNS
+        + _DEMO_EPISTEMIC_POINTS + _DEMO_PROCEDURAL_POINTS)
+) | {_DEMO_SENTINEL_ID}
+
+
 def _seed_demo_graph(team_id: str) -> dict:
-    """Seed the 4-layer demo graph for a team. Idempotent (sentinel)."""
+    """Seed the 4-layer OPT-IN demo/sample graph for a team. Idempotent
+    (sentinel). #2360: NEVER called on the fresh-org provisioning path —
+    fresh orgs get the REAL starter seed (/internal/starter-seed) instead.
+    Every Point written here is excluded from team.point_count, so opt-in
+    sample content is never counted as the user's own filings."""
     sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
     now = datetime.now(UTC).isoformat()
 
     # Idempotency: sentinel written last — skip if already fully seeded
     existing = proj.g.query(
-        "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+        f"MATCH (p:Point {{id: '{_DEMO_SENTINEL_ID}'}}) RETURN p.id"
     ).result_set
     if existing:
         return {"status": "already_seeded", "team_id": team_id}
 
     # ── Semantic Layer — facts and statements ────────────────────
-    semantic_points = [
-        ("sem_welcome", "observation",
-         "Your Tortoise graph is ready. This is where agents file decisions, "
-         "observations, and findings so your team remembers across sessions.",
-         ["system", "welcome"]),
-        ("sem_fact_tortoise", "statement",
-         "Tortoise is a semantic epistemic graph engine that powers agent memory "
-         "through four ontology layers: Semantic, Episodic, Epistemic, and Procedural.",
-         ["tortoise", "overview"]),
-        ("sem_fact_layers", "statement",
-         "Semantic = facts and statements. Episodic = session history and events. "
-         "Epistemic = claims with evidence and confidence. Procedural = workflows and skills.",
-         ["tortoise", "ontology"]),
-    ]
+    semantic_points = _DEMO_SEMANTIC_POINTS
     for pid, kind, content, tags in semantic_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5058,12 +6244,7 @@ def _seed_demo_graph(team_id: str) -> dict:
         "SET s.created_at=$now, s.turn_count=3",
         params={"sid": session_id, "now": now},
     )
-    episodic_turns = [
-        ("epi_turn1", "[user] Let's set up our agent memory system with Tortoise."),
-        ("epi_turn2", "[assistant] I'll initialize the graph and configure the ontology layers. "
-         "Once set up, all decisions will be tracked automatically."),
-        ("epi_turn3", "[user] Great — make sure we capture decisions about architecture and product strategy."),
-    ]
+    episodic_turns = _DEMO_EPISODIC_TURNS
     for pid, content in episodic_turns:
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
@@ -5078,20 +6259,7 @@ def _seed_demo_graph(team_id: str) -> dict:
         )
 
     # ── Epistemic Layer — claims with evidence ───────────────────
-    epistemic_points = [
-        ("epis_claim1", "hypothesis",
-         "Agent memory systems should be graph-native rather than vector-only "
-         "because semantic relationships carry more signal than embedding proximity.",
-         0.7, ["hypothesis", "architecture"]),
-        ("epis_claim2", "evidence",
-         "Teams using structured agent memory report 40% fewer repeated mistakes "
-         "and 3x faster onboarding for new team members.",
-         0.5, ["evidence", "adoption"]),
-        ("epis_claim3", "decision",
-         "We will use FalkorDB as the graph backend because it supports Cypher "
-         "queries and runs as a lightweight extension to Redis.",
-         0.9, ["decision", "infrastructure"]),
-    ]
+    epistemic_points = _DEMO_EPISTEMIC_POINTS
     for pid, kind, content, confidence, tags in epistemic_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5108,20 +6276,7 @@ def _seed_demo_graph(team_id: str) -> dict:
             )
 
     # ── Procedural Layer — workflows ─────────────────────────────
-    procedural_points = [
-        ("proc_wf1", "workflow",
-         "CONTEXT-INJECTION: Before any coding task, call tortoise_suggest_entry_points() "
-         "to find related context from past sessions and decisions.",
-         ["workflow", "context"]),
-        ("proc_wf2", "workflow",
-         "DECISION-CAPTURE: After making a design decision, call tortoise_create_point() "
-         "with kind='decision' so future agents can trace the reasoning chain.",
-         ["workflow", "decision"]),
-        ("proc_wf3", "workflow",
-         "REVIEW-GATE: Before merging any PR, verify that key decisions are filed in Tortoise. "
-         "If not, file them before merging.",
-         ["workflow", "review"]),
-    ]
+    procedural_points = _DEMO_PROCEDURAL_POINTS
     for pid, kind, content, tags in procedural_points:
         proj.g.query(
             "MERGE (p:Point {id:$id}) "
@@ -5151,7 +6306,7 @@ def _seed_demo_graph(team_id: str) -> dict:
 
     # ── Sentinel — written last so partial failure allows retry ──
     proj.g.query(
-        "CREATE (p:Point {id:'_demo_sentinel', content:'demo-sentinel', "
+        f"CREATE (p:Point {{id:'{_DEMO_SENTINEL_ID}', content:'demo-sentinel', "
         "pointKind:'system', is_operator:false, status:'live', "
         "createdAt:$now, updatedAt:$now})",
         params={"now": now},
@@ -5179,10 +6334,15 @@ def _seed_demo_graph(team_id: str) -> dict:
 
 @app.post("/internal/demo")
 async def create_demo_graph(request: Request):
-    """Create a demo graph with sample Points across all 4 ontology layers.
+    """Create an OPT-IN demo graph with sample Points across all 4 ontology
+    layers.
 
-    Called by the tenant-provision Edge Function after provisioning to seed
-    demo data so new users see a populated graph immediately.
+    #2360 (re-spec): this is NO LONGER auto-called by the tenant-provision
+    Edge Function on fresh orgs — fresh orgs receive the REAL starter seed
+    (/internal/starter-seed: the signing-up user + their Organization as
+    connected Subjects). This endpoint stays only as the explicit opt-in
+    sample path (quota-gated, metered), and every Point it writes is
+    excluded from the Overview memory digest (team.point_count).
     """
     _check_internal(request)
 
@@ -5609,7 +6769,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     expires_at is written in both auth lanes and echoed in the response
     when set (absent = Never, response shape byte-identical). Expiry is
     immutable after creation (no PATCH-expiry); enforcement already lives
-    in the auth layer (~1558-1570, both lanes).
+    in the auth layer (`get_current_team`, both lanes).
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
     row via the seam (lookup_hash + key_prefix + created_via='provisioned'),
@@ -6574,19 +7734,59 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
     the provider 503 / quota 402) so disabled teams do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
-    dashboard failure sub-line reads this, NOT client state) and 2xx records
+    dashboard failure sub-line reads this, NOT client state) — except the #3060
+    capacity 429 and the #3129 in-flight 409, which are server conditions — and
+    2xx records
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
     for legacy no-harness hooks).
     """
     _require_scope(team, "graphs:write", "capture_session")
     try:
-        return await _capture_session_impl(body, request, team)
+        # #3060: reserve ADMISSION before ANY state is written. Reserving (not
+        # merely checking) bounds the queue under a concurrent burst, and a
+        # 429 here cannot leave a half-created Session behind.
+        slot = _reserve_capture_slot(_capture_session_key(team, body.session_id))
+        # #3129: the impl records whether an ATTEMPT started and whether it
+        # FINALIZED (recorded its outcome). If the request is cancelled between
+        # the two, the Session would be left at `capture_ok=NULL`, which the
+        # replay rule reads as "presumed captured" — a later same-session retry
+        # would then be served 200 + a receipt with 0 turns extracted, forever.
+        _state: dict = {}
+        try:
+            return await _capture_session_impl(body, request, team, slot=slot,
+                                               state=_state)
+        except asyncio.CancelledError:
+            if _state.get("attempted") and not _state.get("finalized"):
+                # Off the loop (a dead graph socket would otherwise stall the
+                # liveness path), with the session key HELD until it lands:
+                # `hold_until` gates `slot.release()` in the finally below, so
+                # no same-session retry can slip into the NULL→replay rule
+                # while this write is pending.
+                try:
+                    slot.hold_until(_submit_off_loop(
+                        _CAPTURE_MARKER_EXECUTOR, _capture_abandoned_marker,
+                        _state.get("proj"), body.session_id,
+                        _state.get("lane") or _capture_lane()))
+                except Exception:  # pragma: no cover - pool shut down
+                    _logger.exception("abandoned-capture marker submit failed")
+            raise
+        finally:
+            slot.release()
     except HTTPException as e:
-        if e.status_code >= 400:
-            # Review PR #1827: a last-error state-write failure must never
-            # mask the intended 403/402/503 with a 500.
+        # #3060: a capacity 429 is a SERVER condition, not a team capture
+        # failure — recording it in the team-visible last-error slot (and
+        # clearing it on the retry, which then replays) would misreport
+        # capacity as a capture fault and mask a genuine prior error.
+        # #3129: the same for the in-flight 409 — a concurrency condition on
+        # the server side; the retry this advertises is the ping that will
+        # succeed once the first capture finishes.
+        # Review PR #1827: a last-error state-write failure must never mask the
+        # intended 403/402/503 with a 500.
+        if (e.status_code >= 400 and e.status_code != 429
+                and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             try:
-                _record_capture_last_error(team["team_id"], body.harness, e.detail)
+                _record_capture_last_error(
+                    team["team_id"], body.harness, e.detail)
             except Exception:
                 logging.getLogger("tortoise.api").exception(
                     "capture last-error state write failed (non-fatal)")
@@ -6624,8 +7824,91 @@ _SWEEP_EVENT_DELETE_CYPHER = (
 )
 
 
+# #3129 review round 2 (P2): the abandoned-capture marker's graph write runs
+# from a TEARDOWN path (the request is already cancelled) and is not bounded by
+# the graph-side timeout alone — the projection's socket_timeout is 10s, and on
+# the event loop that is the #3060 shape (Fly's /health check times out at 15s).
+# It therefore runs OFF-loop, on its OWN single-worker pool: the capture pool
+# may be full of parked extractions, and queueing the marker behind them would
+# hold the session's in-flight key for the whole stall. The caller keeps that
+# key until this future lands (`_CaptureSlot.hold_until`), so a same-session
+# retry cannot reach the NULL→replay rule while the write is pending.
+_CAPTURE_MARKER_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="capture-marker")
+# Graph-side bound for that write. The engine takes MILLISECONDS and rejects a
+# float ("Timeout argument must be a positive integer" — verified against the
+# embedded engine).
+_CAPTURE_ABANDON_MARKER_TIMEOUT_MS = 2000
+
+
+def _capture_lane() -> str:
+    """The extraction lane this request runs (single source of truth)."""
+    return "m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2" else "v2"
+
+
+def _capture_abandoned_marker(proj, session_id: str, lane: str) -> None:
+    """#3129 (reviewer P1): mark a capture attempt that was ABANDONED as failed.
+
+    Called when the request is CANCELLED anywhere inside the attempt — the
+    worker await, or the post-extraction audit/abuse awaits (client timeout,
+    disconnect, task cancel). Writes `capture_ok=false` + the lane on the
+    Session.
+
+    Why it is needed: `capture_ok` is written only at the very END of a
+    successful capture, so an abandoned attempt left the Session at
+    `capture_ok = NULL` — which the replay rule treats as "legacy, presumed
+    captured" — and the next same-session request was served 200 + a success
+    receipt with 0 turns extracted, permanently (reviewer-measured end-to-end;
+    the in-flight admission gate cannot cover it, because by then the worker is
+    gone). Marking it failed routes that retry into the EXISTING #2335
+    TRUE-retry lane, which re-extracts on the convergent v2 ids.
+
+    SCOPE — the retry is closed on the **v2 lane only**, and only for IN-PROCESS
+    cancellation:
+
+    * the TRUE-retry gate requires BOTH the prior lane AND the retrying request
+      to be v2 (`prior_capture_extractor == "v2"` **and** the request's
+      `TORTOISE_SESSION_EXTRACTOR != "m2"`, #2473), so an abandoned **m2**
+      capture re-POSTed still replays, and so does an abandoned v2 capture
+      re-POSTed after the deployment's lane was switched to m2. Both are the
+      documented, deliberate consequence of #2473: re-running m2 over a failed
+      attempt mints duplicate ULIDs, which is the hole that gate closed. The
+      marker records the correct lane rather than pretending otherwise (pinned
+      by test_cancelled_m2_capture_records_the_m2_lane).
+    * a cancellation that never reaches Python leaves the NULL too — a SIGKILL
+      (deploy/restart) executes no cleanup. Closing that needs a write-ahead
+      attempt sentinel on the Session; filed as a residual (see the PR body).
+
+    Deliberately scoped to CANCELLATION, not to failures: a capture that RAISES
+    (`RuntimeError` → 500/503) keeps its documented NULL→legacy-replay shape
+    (test_hosted_api.py::TestSessionActorStamp2600 raise-shape (ii): a re-POST
+    of a raise-shaped session must not re-extract, so the Session keeps its
+    original actor and no second actor's events are minted).
+
+    The caller invokes this — on `_CAPTURE_MARKER_EXECUTOR`, never on the event
+    loop — and holds the session's in-flight key until it lands, so a
+    same-session retry cannot reach the NULL→replay rule while the write is
+    pending. The write is a single indexed SET by session id, bounded at 2s
+    graph-side. Best-effort — a failure is logged, never raised into an
+    already-cancelled request.
+    """
+    if proj is None or not session_id:
+        return
+    try:
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) "
+            "SET s.capture_ok=false, s.capture_extractor=$extractor",
+            params={"sid": session_id, "extractor": lane},
+            timeout=_CAPTURE_ABANDON_MARKER_TIMEOUT_MS)
+    except Exception:  # pragma: no cover - graph hiccup
+        _logger.exception(
+            "abandoned-capture marker write failed (session %s) — a later "
+            "same-session retry would legacy-replay (#3129)", session_id)
+
+
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
-                                team: dict) -> dict:
+                                team: dict, slot: _CaptureSlot,
+                                state: dict | None = None) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
     surfaces can never drift on gate order.
@@ -6989,17 +8272,29 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         extraction_warnings = [
             "session already captured (same session_id) — no new extraction"]
     elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
+        if state is not None:
+            state["attempted"] = True
+            state["proj"] = proj
+            state["lane"] = "m2"
         # P1 #1529 (D5): the M2 branch returns the SAME (extracted, meta)
         # contract as v2 — no fabricated empty meta; extraction-stage failures
         # are structured, never raised (turn points have already landed).
         try:
-            extracted, meta = sdk._extract_session_llm(
+            # #3060: same invariant as the v2 branch below — this extractor is
+            # synchronous (model calls included), so it must never run on the
+            # event loop, and never on the shared default pool either.
+            extracted, meta = await _run_capture_bounded(
+                slot, sdk._extract_session_llm,
                 windowed, session_id, now)
         except ValueError as e:
             # no-key fail-closed (outer 503 gate normally catches this first;
             # belt-and-braces so an inner/outer drift never 500s, #1468).
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
+        if state is not None:
+            state["attempted"] = True
+            state["proj"] = proj
+            state["lane"] = "v2"
         try:
             # #2031: hosted extraction compiles the vocabulary from the
             # tenant's pack view (shared catalog + THIS team's custom packs,
@@ -7035,7 +8330,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                             "not applied")
                 except Exception:  # noqa: BLE001, RUF100
                     pass
-            extracted, meta = sdk._extract_session_v2(
+            # #3060 (P0) — INVARIANT: no provider/model call may run on the
+            # event loop. The extraction below is SYNCHRONOUS, and on a stalled
+            # model call it blocks in `_call_once`'s `t.join(timeout=deadline_s)`
+            # (extractor_v2.py:5101) for up to the token-scaled deadline —
+            # `_scaled_deadline(600, max_tokens)` is ~819s at a 16K budget
+            # (extractor_v2.py:5162), per retry. Run straight from this
+            # `async def` handler it froze the SINGLE event loop: /health stopped
+            # answering, Fly marked the machine unhealthy, and the proxy dropped
+            # ALL traffic ("no known healthy instances for route tcp/443") — one
+            # slow model call took down the whole product, not just the capture.
+            # `to_thread`-style context propagation, but on the CAPTURE pool:
+            # a stalled extraction must not be able to starve the auth
+            # middleware's abuse hooks or the other `to_thread` call sites out
+            # of the shared default executor (#3060). /health is no longer one
+            # of those tenants — since #2850 it reads in-memory state and takes
+            # no thread hand-off (see the pool notes at the top of the file).
+            # `_run_off_loop` copies the caller's contextvars into the worker,
+            # which is what `_call_once`'s own `copy_context()` snapshot
+            # depends on (#2185).
+            # See tests/test_capture_loop_responsiveness.py.
+            extracted, meta = await _run_capture_bounded(
+                slot, sdk._extract_session_v2,
                 windowed, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
@@ -7141,14 +8457,39 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # resolved to an existing node whose provenance belongs to
                 # its original ingest; re-stamping would clobber the first
                 # session's single-eventId provenance (mirror byte-parity).
+                minted_ids = _capture_minted_ids(extracted)
                 proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "SET n.eventId=$eid, n.source_session=$sid, "
                     "    n.source_harness=$harness, n.ingested_at=$ing",
-                    params={"ids": _capture_minted_ids(extracted),
+                    params={"ids": minted_ids,
                             "eid": event_id, "sid": session_id,
                             "harness": source_harness, "ing": now},
                 )
+                # #2552 (layer-2 WIRE — the structural leg): mirror of the
+                # sdk capture stamp — the reified operator Points this
+                # capture wrote must enter the eventId-keyed retrievable
+                # memory layer too (pre-fix they carried no eventId and
+                # were invisible; ``operator_counts`` was silently {}).
+                # Scope: operators touching a MINTED point, still draft
+                # (#780 extraction default), no eventId (never clobber a
+                # prior capture's provenance). The OperatorPromoted event
+                # emitted later by _apply_capture_ingest_ep snapshots the
+                # stamped state (rebuild-durable).
+                if minted_ids:
+                    proj.g.query(
+                        "MATCH (o:Point {is_operator:true})-"
+                        "[:IMPL|NAND]->(c:Point) "
+                        "WHERE c.id IN $ids "
+                        "AND (o.status IS NULL OR o.status = 'draft') "
+                        "AND o.eventId IS NULL "
+                        "SET o.eventId=$eid, o.source_session=$sid, "
+                        "    o.source_harness=$harness, "
+                        "    o.ingested_at=$ing",
+                        params={"ids": minted_ids,
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now},
+                    )
                 if retry_failed_capture:
                     # #2335 WI-2b / review (PR #2473): a RETRY heals the
                     # failed first attempt's provenance gap (mirror of the
@@ -7620,6 +8961,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")
+        if state is not None:
+            # #3129: the outcome is recorded — an abandonment from here on can
+            # no longer leave the NULL→replay shape (nothing below suspends).
+            state["finalized"] = True
     # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
     # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
     # per memory item THIS capture added; N = len = the disclosure count,
@@ -7702,7 +9047,9 @@ def _capture_last_error_key(harness: str | None) -> str | None:
 def _record_capture_last_error(team_id: str, harness: str | None,
                                detail: str | None) -> None:
     """Set (detail) or clear (None) the per-harness last-attempt failure key.
-    Called on every non-2xx (set) and every 2xx (cleared) capture attempt."""
+    Called on every non-2xx (set) EXCEPT the #3060 capacity 429 and the #3129
+    in-flight 409 — server conditions, not team capture failures — and every
+    2xx (cleared)."""
     key = _capture_last_error_key(harness)
     if key is None:
         return
@@ -8922,8 +10269,8 @@ def _ensure_not_suspended(team_row: dict | None) -> None:
 
     Enforcement seam shared by the membership/owner endpoints — called from
     _require_owner / _require_owner_admin and the _membership_team-based
-    write endpoints for parity with the key-auth (get_current_team ~1390)
-    and _session_user_team (~1482) paths, which already 403 SUSPENDED.
+    write endpoints for parity with the key-auth (get_current_team)
+    and _session_user_team paths, which already 403 SUSPENDED.
     None team_row → pass: callers handle 404 separately, and the additive-
     column fail-soft seam degrades to un-suspended rather than a 500
     (missing suspended_at column → None → passes, same as #1828).
@@ -9097,7 +10444,7 @@ async def _owned_free_org_ids(user_id: str) -> list[str]:
     `pending_payment` (a not-yet-real org does not consume the allowance).
 
     Distinct from `_count_active_free_memberships` on purpose: the
-    invite-JOIN gates (hosted_api.py:11393/11808/12320) still read the
+    invite-JOIN gates (`_count_active_free_memberships`) still read the
     membership-scoped count, and #2789's out-of-scope list pins that
     semantics. Create-org gates read THIS one. Mode-aware with the same shape
     as the #1877 helper: supabase reads `subscription_status`; selfhost (no
@@ -9167,13 +10514,13 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     + membership_create) stays for selfhost."""
     name = (body.get("name") or "").strip()
     if not name:
-        raise HTTPException(status_code=422, detail="Team name required")
+        raise HTTPException(status_code=422, detail="Organization name required")
     if len(name) > 64:
-        raise HTTPException(status_code=422, detail="Team name must be ≤ 64 characters")
+        raise HTTPException(status_code=422, detail="Organization name must be ≤ 64 characters")
     import re as _re
     # spaces are now allowed in team names (onboarding wizard needs them)
     if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=422, detail="Invalid team name")
+        raise HTTPException(status_code=422, detail="Invalid organization name")
 
     # #1954: the 429/409/402 gates + provision are read-then-write — the
     # whole check+provision runs under the per-user lock so a concurrent
@@ -9262,12 +10609,12 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
         cp, cutoff=since, user_id=user["user_id"], role="owner")
     if recent >= 3:
         raise HTTPException(status_code=429,
-                            detail="Too many teams created — try again later")
+                            detail="Too many organizations created — try again later")
     # Duplicate-name 409 (registry team_create raises ControlPlaneError
     # 'already exists'; the 0011 unique index is the atomic guard — the
     # pre-check is the friendly fast-path, the RPC 409 is authoritative).
     if team_by_name(cp, name):
-        raise HTTPException(status_code=409, detail="Team name already exists")
+        raise HTTPException(status_code=409, detail="Organization name already exists")
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (role='owner'), not membership. Any active owned org without an
     # active paid subscription blocks creating another (the new team would
@@ -9314,7 +10661,7 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
         # the registry path).
         if "HTTP 409" in str(e):
             raise HTTPException(status_code=409,  # noqa: B904
-                                detail="Team name already exists")
+                                detail="Organization name already exists")
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
     return {"team_id": team_id, "graph_name": graph_name,
             "tier": "free", "name": name}
@@ -9343,7 +10690,7 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
     ).result_set[0][0]
     if recent >= 3:
         raise HTTPException(status_code=429,
-                            detail="Too many teams created — try again later")
+                            detail="Too many organizations created — try again later")
 
     # #1877 ordering parity: the registry 409 currently surfaces only from
     # team_create's exception handler — add a dup-name pre-check BEFORE the
@@ -9354,7 +10701,7 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
         params={"name": name},
     ).result_set[0][0]
     if dup:
-        raise HTTPException(status_code=409, detail="Team name already exists")
+        raise HTTPException(status_code=409, detail="Organization name already exists")
     # #1877/#2789: per-person entitlement — one FREE ORGANIZATION, counted by
     # OWNERSHIP (registry tier='free' proxy; selfhost has no subscription
     # model). STRUCTURED detail (#2789) — parity with the supabase lane.
@@ -9373,7 +10720,7 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
                                  owner_user_id=user["user_id"])
     except Exception as e:
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
-            raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904
+            raise HTTPException(status_code=409, detail="Organization name already exists")  # noqa: B904
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
 
     # #1877 second-model P1: the owner Membership is created INSIDE
@@ -10835,7 +12182,7 @@ def _raise_503_if_cp_outage(exc: BaseException) -> None:
     contract). Registry mode raises the redis exception family the falkordb
     client surfaces (ConnectionError / TimeoutError / BusyLoadingError /
     ResponseError / InvalidResponse — the classes sdk._classify_db_failure
-    buckets, sdk.py ~1368); RuntimeError is kept for the outage-simulating
+    buckets); RuntimeError is kept for the outage-simulating
     test seams. A non-outage exception (schema/dialect bug, authz 403 from a
     caller's own read) stays loud — it must never masquerade as an outage.
     """
@@ -11034,7 +12381,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
             tier = team.get("tier") or "free"
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
-                                    detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+                                    detail="Invites require the Pro or Team tier — upgrade to invite members")
             # #1965: per-team lock around the capacity check + mint — two
             # concurrent invites must not both read active+pending < 2 and
             # both mint past max_users. Serialized per team_id; the count
@@ -11050,7 +12397,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
                                if not i.get("expires_at") or i["expires_at"] > now]
                     if len(active) + len(pending) >= 2:  # Pro max_users=2
                         raise HTTPException(status_code=402,
-                                            detail="Team member limit reached — upgrade to invite more")
+                                            detail="Member limit reached — upgrade to invite more")
                 inv = invitation_mint(get_control_plane(), team_id, email, role,
                                       invited_by=user["user_id"],
                                       inviter_email=(user.get("email") or None))
@@ -11106,7 +12453,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
         # active-only under-counted pending seats).
         if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+                                detail="Invites require the Pro or Team tier — upgrade to invite members")
         if tier == "pro":
             from datetime import datetime as _pdt
             active = reg.query(
@@ -11122,7 +12469,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
             ).result_set[0][0]
             if active + pending >= 2:  # Pro max_users=2
                 raise HTTPException(status_code=402,
-                                    detail="Team member limit reached — upgrade to invite more")
+                                    detail="Member limit reached — upgrade to invite more")
 
         # Invitation node via SDK (token returned once); roles admin/member allowed here
         import uuid as _uuid
@@ -11420,7 +12767,7 @@ async def accept_invite(body: dict, request: Request,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
 
         # Token single-use: CONDITIONAL claim — the SET's own matched-row
         # count is authoritative (P2-1 concurrency review, cross-lane half):
@@ -11824,7 +13171,7 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
         # Token single-use + OTP single-use: CONDITIONAL write (still-pending
         # guard) + the write's OWN matched-row count IS the authoritative
         # single-use claim — a concurrent accept (email-match invitee racing
@@ -12342,7 +13689,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             if _cap_active >= int(_cap_max):
                 raise HTTPException(
                     status_code=402,
-                    detail="Team member limit reached — upgrade to invite more")
+                    detail="Member limit reached — upgrade to invite more")
         # Single-use: CONDITIONAL claim — the SET's own matched-row count is
         # authoritative (P2-1 cross-lane half, by-id twin): a concurrent v2
         # OTP-mismatch winner on the SAME invitation row (or a same-user
@@ -13224,7 +14571,10 @@ async def _quarantine_import(
     """Record a rejected import: audit event + quarantine ledger prop.
 
     Best-effort by design — a control-plane blip must never mask the 422
-    (mirrors the #669 P3 metadata contract). The live graph is NEVER touched.
+    (mirrors the #669 P3 metadata contract). This helper itself never touches
+    the live graph; note that #3154's post-swap boolean-index audit raises
+    AFTER the swap, so at that call site the live graph may already have been
+    replaced (the verified temp + pre-restore copies are preserved).
     """
     try:
         await _async_audit(
@@ -13331,7 +14681,7 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
 
 
 # Kind-carrying prop keys on dump nodes — the 6 live writer keys
-# (sdk.py:9659-9660 kind_field: point/event/subject/document/object/source) plus
+# (sdk.py kind_field: point/event/subject/document/object/source) plus
 # `kind` (extractor_v2 legacy-compat) and `actionKind` (pack-declared bucket,
 # no current node carrier — future-proof). `op_type` is deliberately NOT here:
 # operator types are a fixed non-namespaced set (IMPL/NAND/MITIGATES).
@@ -13619,9 +14969,12 @@ async def import_team(team_id: str, request: Request,
                 )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
             except RuntimeError as e:
-                # Server-side swap failure — verified temp graph intact, live
-                # graph untouched or recoverable; still quarantined (a failed
-                # import attempt is recorded; the ledger makes re-import converge).
+                # Server-side swap failure — verified temp graph intact, and
+                # the live graph is untouched for pre-swap failures / the
+                # pre-restore copy is recoverable for post-swap failures
+                # (#3154's post-swap boolean-index audit raises after the
+                # swap); still quarantined (a failed import attempt is
+                # recorded; the ledger makes re-import converge).
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )
@@ -14233,7 +15586,7 @@ _INVALID_SIGNUP_TOKEN_DETAIL = {
 
 
 def _hash_signup_token(token: str) -> str:
-    """SHA-256(PEPPER + token) — byte-identical to lookup_hash (auth.py:119);
+    """SHA-256(PEPPER + token) — byte-identical to `tortoise.auth.lookup_hash`;
     domain separation from api-key lookup hashes is the st_ prefix."""
     from tortoise.auth import lookup_hash
     return lookup_hash(token)
@@ -14589,7 +15942,7 @@ async def agent_signup(request: Request):
         # SignupToken node (#1709): hash-only — salted PBKDF2 (hash_api_key),
         # the same hashed-lookup format as Invitation token_hash, so
         # _verify_hashed_lookup("SignupToken", "token_hash", ...) can verify
-        # it at recovery time (sdk.py:11180 pattern).
+        # it at recovery time (sdk.py _verify_hashed_lookup pattern).
         reg.query(
             "CREATE (s:SignupToken {token_hash:$th, lookup_key:$lk, "
             "team_id:$tid, created_at:$now})",
@@ -14757,8 +16110,8 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
 #
 # POST /v1/claim attaches a provider-verified Supabase identity to an
 # anonymous (zero-email) team. GoTrue-native transport (ZERO new server-side
-# OAuth): the platform already ships client OAuth (signup.html:713,
-# signin.html:755, dashboard PKCE). Claim = ONE endpoint requiring BOTH
+# OAuth): the platform already ships client OAuth (signup.html / signin.html
+# `signInWithProvider`, dashboard PKCE). Claim = ONE endpoint requiring BOTH
 # credentials in one request:
 #   · Authorization: Bearer <fresh Supabase session JWT> — verified
 #     server-side via JWKS (session_auth.verify_session_jwt)
@@ -14841,7 +16194,7 @@ async def claim_team(request: Request):
         raise HTTPException(
             status_code=403,
             detail=("Your email is not confirmed — cannot claim an "
-                    "anonymous team. Confirm your email and try again."),
+                    "anonymous organization. Confirm your email and try again."),
         )
 
     # 3. pasted key — the key-possession anchor.
@@ -16519,7 +17872,8 @@ def _maybe_apply_completion(team_id: str) -> bool:
             return False
         steps = _os.completed_steps(proj, team_id)
         if _os.completion_gate_satisfied(
-                steps, node.get("fork"), bool(node.get("compact"))):
+                steps, node.get("fork"), bool(node.get("compact")),
+                fork_unsure_at=bool(node.get("fork_unsure_at"))):
             _os.write_status(proj, team_id, _os.STATUS_COMPLETE)
             try:  # created-signal invalidates the 60s MCP TTL cache (pin 18)
                 from tortoise import mcp_server as _mcp
@@ -16714,6 +18068,7 @@ def _get_onboarding_projection(team_id: str) -> dict:
             node.get("member_progress")),
         "last_decide_attempt": node.get("last_decide_attempt"),
         "compact": node.get("compact", False),
+        "fork_unsure_at": node.get("fork_unsure_at"),
     })
     state["onboarding_complete"] = _os.resolve_wire_completion(
         node.get("status"), bool(raw.get("onboarding_complete")), steps)
@@ -16806,6 +18161,9 @@ class OnboardingStatePatchRequest(BaseModel):
     completed_steps: list[str] | None = None
     member_progress: dict | None = None
     last_decide_attempt: str | None = None
+    # #2407: fork_unsure_at is a server-stamped FLOW key — declared here so
+    # a stray PATCH is REJECTED loudly (403 server-owned) like the siblings.
+    fork_unsure_at: str | None = None
 
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
@@ -16813,6 +18171,7 @@ class OnboardingStatePatchRequest(BaseModel):
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
     "completed_steps", "member_progress", "last_decide_attempt",
+    "fork_unsure_at",
 }
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
@@ -17000,6 +18359,10 @@ class OnboardingCheckpointRequest(BaseModel):
     last_decide_attempt: str | None = None
     member_progress: dict | None = None
     status: str | None = None
+    # #2407: "not sure yet — decide later" fork-card answer — a MARKER
+    # (true) that records fork_unsure_at server-side WITHOUT consuming the
+    # set-once fork value. Never a timestamp from the client (server-stamped).
+    fork_unsure_at: bool | None = None
     model_config = {"extra": "forbid"}
 
 
@@ -17018,6 +18381,11 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
       (replay → noop), unknown step → 422.
     - fork/compact → set-once (first write wins; same-value replay 200;
       changed → 409).
+    - fork_unsure_at (true) → #2407 "not sure yet — decide later": records
+      the fork-card deferral (server-stamped ISO timestamp) WITHOUT
+      consuming the set-once fork — fork stays NULL so the card stays
+      answerable; repeat → 200 (re-stamp); fork already set or compact org
+      → 409 (never asked / already answered).
     - last_decide_attempt → LWW; 'failed' is SKIPPED once decide-completed
       exists (dismissal alone never completes).
     - member_progress → {user_id: [steps]} user-scoped map-merge;
@@ -17041,6 +18409,7 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
             ("compact", body.compact),
             ("last_decide_attempt", body.last_decide_attempt),
             ("member_progress", body.member_progress),
+            ("fork_unsure_at", body.fork_unsure_at),
         ) if val is not None
     ]
     if len(present) > 1:
@@ -17077,6 +18446,22 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                                     detail="fork must be 'self' or 'build'")
             outcome = _os.write_fork(proj, team_id, body.fork,
                                      status_from_mirror=legacy_mirror)
+            if outcome == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "fork_already_set"})
+            # #2407 invariant: the unsure marker is meaningful only while
+            # fork IS NULL — a consumed fork clears it (the org answered).
+            _os.clear_fork_unsure_at(proj, team_id)
+        elif body.fork_unsure_at is not None:
+            if body.fork_unsure_at is not True:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"message": "invalid_fork_unsure_at",
+                            "expects": True})
+            at = datetime.now(UTC).isoformat()
+            outcome = _os.write_fork_unsure_at(
+                proj, team_id, at, status_from_mirror=legacy_mirror)
             if outcome == "conflict":
                 raise HTTPException(
                     status_code=409,
@@ -17127,7 +18512,8 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                     proj, team_id, uid, steps,
                     status_from_mirror=legacy_mirror))
         # post-write fork-aware gate eval (monotonic) — step/fork/compact
-        # writes only (never member_progress)
+        # writes only (never member_progress; fork_unsure_at records no
+        # progress and its gate is unsatisfiable-by-design until answered)
         if body.step is not None or body.fork is not None or body.compact is not None:
             _maybe_apply_completion(team_id)
     except HTTPException:
@@ -17378,6 +18764,159 @@ async def onboarding_seed(body: OnboardingSeedRequest,
                             detail="Onboarding seed failed — retry-safe") from None
 
 
+# ── #2360: provisioning-time REAL starter seed (supersedes the demo auto-seed) ──
+# The tenant-provision Edge Function used to auto-seed 12 fake demo Points +
+# a _demo_sentinel into EVERY fresh org (/internal/demo) so new users "see a
+# populated graph immediately" — sample content the Overview digest then
+# counted as the user's own filings ('13 points filed' on a brand-new org).
+# The #2360 re-spec replaces that sample data with REAL data that kickstarts
+# the process: the signing-up user as a naturalPerson Subject and their
+# Organization as an organization Subject, the two CONNECTED (memberOf) — the
+# canonical two-anchor structure from tortoise/onboarding/seed.py (same
+# module the interactive W3 seed uses; replay is idempotent and never
+# merges a distinct identity). No demo Point is ever written on this path.
+#
+# Never-invented-identity (DM-3): the person anchor is filed ONLY when the
+# provisioning context carries the user's own display name (auth metadata —
+# user-provided at signup/OAuth). When only an email-prefix derivation would
+# be available, the starter seed files the org-anchor Subject only (the org
+# name IS user-confirmed at org-create) and leaves the first-points-filed
+# step pending — the connect-time interactive W3 seed then files the person
+# Subject + memberOf with a user-confirmed name. Both legs are REAL data;
+# nothing is ever invented or silently derived on the provisioning path.
+
+def _run_starter_seed(team_id: str, *, org_name: str | None = None,
+                      person_name: str | None = None,
+                      person_user_id: str | None = None,
+                      person_email: str | None = None) -> dict:
+    """The provisioning-time real starter seed (internal, #2360).
+
+    W3-parity runner over the canonical seed core: files the org-anchor
+    Subject (organization, org_id=team_id) ALWAYS (the org display name is
+    user-confirmed at org-create), and the person-anchor Subject
+    (naturalPerson, user_id/email) + the memberOf link WHEN a user-provided
+    display name is present. On success links the onboarding node (onboards
+    edge / org_subject_id) and — when the person anchor was filed too (the
+    full starter structure) — marks the first-points-filed seed step (W3
+    semantics: the org-anchor seed). A pending step otherwise stays with the
+    connect-time interactive seed (never-invented-identity). Idempotent:
+    replay reuses the canonical anchors (created=False). Graph-down → 503
+    fail-loud (retry-safe), mirroring the W3 runner."""
+    from tortoise.onboarding import seed as _seed
+    if not _graph_available(team_id):
+        raise HTTPException(status_code=503,
+                            detail="Onboarding graph unavailable — retry later")
+    org_display = (org_name or "").strip()
+    if not org_display:
+        org_display = _team_name(team_id) or ""
+    person = (person_name or "").strip() or None
+    # never-invented-identity guard: no org display name on the control
+    # plane → zero writes (the caller must name the org first).
+    if not org_display:
+        return {"status": "org_name_required", "team_id": team_id}
+    # the person user_id ref is a real user UUID only — 'api'/email-shaped
+    # values never ride the identity ref (W3 parity).
+    if person_user_id in (None, "api") or "@" in str(person_user_id):
+        person_user_id = None
+    include_person = person is not None
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        proj = sdk._get_proj()
+        surface = _TeamSeedSurface(sdk)
+        try:
+            report = _seed.seed_onboarding_anchors(
+                surface, org_name=org_display, org_id=team_id,
+                person_name=person, user_id=person_user_id,
+                person_email=person_email, include_person=include_person)
+        except _seed.SubjectCollision as exc:
+            # A same-name Subject that is NOT this org/user (rare on a fresh
+            # org) → surfaced, zero writes for that anchor, retry-safe. The
+            # provisioning caller logs + keeps the team usable (mirrors the
+            # W3 runner's all-or-nothing contract).
+            return {
+                "status": "collision",
+                "collisions": [{
+                    "kind": exc.kind, "name": exc.name,
+                    "existing_id": exc.existing_id, "reason": exc.reason,
+                    "existing_refs": exc.refs,
+                }],
+                "org_name": org_display,
+                "person_name_source": "provided" if include_person else None,
+            }
+        legacy_mirror = bool(_get_onboarding_state(team_id).get(
+            "onboarding_complete"))
+        org_subject = report["org_subject"]
+        onboards = _os.write_onboards_edge(proj, team_id, org_subject["id"])
+        step = None
+        if include_person:
+            step = _os.write_completed_step(
+                proj, team_id, "first-points-filed",
+                status_from_mirror=legacy_mirror)
+        _maybe_apply_completion(team_id)
+    finally:
+        sdk.close()
+    resp = {
+        "status": "seeded",
+        "team_id": team_id,
+        "org_name": org_display,
+        "org_subject": report["org_subject"],
+        "org_created": report["org_created"],
+        "org_kind_normalized": report["org_kind_normalized"],
+        "onboards": onboards,
+        "onboarding": _get_onboarding_projection(team_id),
+    }
+    if include_person:
+        resp.update({
+            "user_subject": report["user_subject"],
+            "person_created": report["person_created"],
+            "person_kind_normalized": report["person_kind_normalized"],
+            "member_of": report["member_of"],
+            "steps": {"first-points-filed": step},
+        })
+    return resp
+
+
+@app.post("/internal/starter-seed")
+async def starter_seed(request: Request):
+    """Provisioning-time REAL starter seed (#2360) — internal key only.
+
+    Called by the tenant-provision Edge Function right after provisioning a
+    fresh org (replacing the old demo auto-seed). Files the signing-up user
+    as a naturalPerson Subject and their Organization as an organization
+    Subject, connected memberOf (canonical two-anchor seed,
+    tortoise/onboarding/seed.py). Idempotent; never writes demo Points;
+    never silently derives the person name (person_name is the user's own
+    display name from the auth context; absent → org-anchor seed only).
+    """
+    _check_internal(request)
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    try:
+        body = _json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400,
+                            detail="Invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    team_id = body.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=400, detail="Missing team_id")
+    try:
+        return _run_starter_seed(
+            team_id,
+            org_name=(body.get("org_name") or None),
+            person_name=(body.get("person_name") or None),
+            person_user_id=(body.get("person_user_id") or None),
+            person_email=(body.get("person_email") or None))
+    except HTTPException:
+        raise
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "starter seed failed (team=%s)", team_id)
+        raise HTTPException(status_code=500,
+                            detail="Starter seed failed — retry-safe") from None
+
+
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
 async def set_session_recording(body: dict, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Toggle automatic session recording (Q3 / Memory-sources sessions toggle).
@@ -17436,7 +18975,7 @@ async def create_onboarding_team(body: dict,
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$", name):
-        raise HTTPException(status_code=400, detail="Invalid team name")
+        raise HTTPException(status_code=400, detail="Invalid organization name")
     # #1748: the session user owns the sub-team. Session JWT →
     # session_user_id (get_current_team_session); key-auth → created_by
     # (the key creator's user UUID — session-minted bootstrap/recovery
@@ -17541,7 +19080,7 @@ def _create_onboarding_team_lane(team: dict, name: str,
             # P1, PR #874).
             if "HTTP 409" in str(e):
                 raise HTTPException(status_code=409,  # noqa: B904
-                                    detail="Team name already exists")
+                                    detail="Organization name already exists")
             raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
         _update_onboarding_state(team["team_id"], team_created=True)
         _track_onboarding_event(team, "question_answered",
@@ -19345,13 +20884,11 @@ async def backups_list(team: dict = Depends(get_current_team_session_ungated)): 
                           and len(str(m.get("backup_id", "")).split("/")) == 2
                           and m.get("backup_id") not in (idx or {})]
             if unresolved:
-                from tortoise.supabase_control import (
-                    get_control_plane,
-                    is_supabase_enabled,
-                )
                 try:
-                    cp = (get_control_plane() if is_supabase_enabled()
-                          else _registry_sdk()._get_registry())
+                    # #2823: one shared dialect-aware seam — never a hand-rolled
+                    # `is_supabase_enabled()` branch (that per-caller drift is
+                    # what left the sweep enumerating the empty registry).
+                    cp = _control_plane_source()
                 except Exception as e:
                     _logger.warning("backups list cp unavailable: %s", e)
                     cp = None
@@ -19396,6 +20933,42 @@ def _registry_sdk() -> TortoiseSDK:
         time.sleep(PROBE_RETRY_DELAY)
         sdk._get_proj()  # ONE retry — same SDK; _proj stays None until success
     return sdk
+
+
+def _control_plane_source():
+    """Dialect-aware control-plane source for the backup/DR seam (#669/#2823).
+
+    Supabase lane: the ``SupabaseControlPlane`` (PostgREST adapter). Registry
+    lane (selfhost): the FalkorDB ``registry_control_plane`` graph handle.
+
+    #2823: this is the sanctioned way for the backup/DR OPERATORS to obtain
+    the control plane — every operator that hand-rolled the dialect branch
+    (sweep, purge, re-baseline, drill, scheduled drill, acl-reconcile,
+    `backups_list`, the watcher lifespan) now resolves it here, so the next
+    operator cannot re-introduce the defect per-endpoint (#2340).
+
+    Two older sites still resolve the same pair inline
+    (``backups_create``'s stamp seam, ``backups/restore``'s target resolver):
+    they HOLD the registry SDK as a request-scoped keepalive and close it in
+    their ``finally`` (#1475/#1607), so folding them needs that lifetime
+    preserved — tracked separately rather than risked here.
+
+    A Supabase-mode caller also never opens the registry namespace: the
+    pre-#2823 handlers passed ``_registry_sdk()._get_proj().db`` as the
+    data-plane handle. That projection is the registry namespace's own shell
+    (``registry_tortoise``), which it re-materializes; and ``_get_registry()``
+    — the pre-#2823 team source — runs ``CREATE INDEX`` against
+    ``registry_control_plane``, the graph the #669 flip DELETED. Both are
+    auto-recreate artifacts (#669 post-flip verification). The data-plane
+    handle (``_make_sdk(namespace=None)._get_proj().db`` — backup_sweep's
+    ``db``, the GRAPH.DELETE / ``select_graph`` target) is the one #669
+    mandates and the one that exists in BOTH lanes.
+    """
+    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+
+    if is_supabase_enabled():
+        return get_control_plane()
+    return _registry_sdk()._get_registry()
 
 
 # Per-team restore serialization: the swap (delete live → copy temp) must not
@@ -19668,7 +21241,7 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
 # endpoint 503s when the sweep is disabled (config missing or BACKUP_SWEEP_ENABLED
 # not true).
 
-_WATCHER: BackupWatcher | None = None  # spawned in _lifespan (driver-disabled leg)  # noqa: F821
+_WATCHER: WatcherThread | None = None  # WatcherThread imported in _lifespan  # noqa: F821
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600
@@ -19787,8 +21360,10 @@ def _reconcile_acl_users_sync() -> dict:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
     from tortoise.backup_sweep import _sweep_graph_list, enumerate_eligible_teams
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
+    # #2823/#2340: dialect-aware control plane — the raw registry handle
+    # enumerates an EMPTY graph post-#669, so this returned {"teams": 0} (a
+    # silent no-op success) instead of rebuilding the post-restore ACLs.
+    registry = _control_plane_source()
     try:
         team_ids = enumerate_eligible_teams(registry)
     except RuntimeError as e:
@@ -19866,9 +21441,14 @@ async def backups_sweep(request: Request):
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
     from tortoise.backup_sweep import run_backup_sweep
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823 (P0): the control plane resolves through the SHARED dialect-aware
+    # seam. `_registry_sdk()._get_registry()` is the pre-#669 resolution — the
+    # post-flip graph is DELETED, so the sweep enumerated 0 teams, reported a
+    # benign `no_teams`, and backed nothing up from the flip until now.
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         mirror = _backup_mirror_storage(cfg)
@@ -19879,7 +21459,14 @@ async def backups_sweep(request: Request):
     # In-flight guard: a concurrent sweep returns 202 (no queueing — the next
     # hourly run retries). This is what the driver's 202 branch keys on.
     if _SWEEP_INFLIGHT.locked():
-        return {"status": "already_running", "teams_backed_up": 0}
+        # #2823: the dialect rides the 202 too — a lock-held run is the one
+        # shape where an unresolved dialect would otherwise surface as `unknown`
+        # to every consumer of the sweep result (the source is already resolved
+        # above).
+        from tortoise.hosted_backup import source_dialect
+
+        return {"status": "already_running", "teams_backed_up": 0,
+                "source": source_dialect(registry)}
     async with _SWEEP_INFLIGHT:
         def lock_for(team_id: str):
             return _sweep_team_lock(team_id)
@@ -19925,9 +21512,13 @@ async def backups_purge(request: Request, body: dict | None = None):
     _check_internal(request)
     from tortoise.backup_sweep import run_graph_purge
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane. `run_graph_purge` enumerates
+    # teams through the same seam — off the raw registry handle it purged 0
+    # teams in Supabase mode (expired trash never erased).
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     grace_days = int((body or {}).get("grace_days")
                      or _TRASH_GRACE_DAYS)
@@ -20062,10 +21653,29 @@ async def backups_status(request: Request):
     last_sweep = {
         key: sweep_state.get(key)
         for key in ("last_sweep_at", "last_team_count", "graph_totals",
-                    "graph_failures", "graph_error_streaks")
+                    "graph_failures", "graph_error_streaks", "source",
+                    # #2823: the most recent run's dialect, which differs from
+                    # ``source`` only on a no-op run (whose roll-up preserves
+                    # the last REAL sweep's outcome fields + dialect).
+                    "last_run_source")
     }
     if not last_sweep.get("last_sweep_at"):
-        last_sweep = None  # sweep never ran — omit the block
+        # #2823 (code-review cycle 4): a deployment whose ONLY runs were no-ops
+        # has a dialect in ops/state.json but no `last_sweep_at` (see
+        # backup_sweep._noop_ops_state). Nulling the whole block there hid the
+        # lane on exactly the fresh / misconfigured deployment an operator is
+        # diagnosing — `_refuse_wrong_dialect` is deliberately one-directional,
+        # so a registry-dialect source on a Supabase deployment is NOT caught
+        # there. Keep the block when it can still name the lane; never
+        # fabricate the outcome fields (the driver reads
+        # `.last_sweep.last_sweep_at // empty`, so their absence stays
+        # meaningful).
+        dialect_only = {
+            key: last_sweep[key]
+            for key in ("source", "last_run_source")
+            if last_sweep.get(key)
+        }
+        last_sweep = dialect_only or None  # sweep never ran — omit the block
     driver_hb = {}
     try:
         parsed = _json.loads(storage.download(_DRIVER_HEARTBEAT_KEY))
@@ -20198,9 +21808,13 @@ async def backups_rebaseline(request: Request, body: dict):
         resolve_active_graph,
     )
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane — `resolve_active_graph`
+    # enumerates the team's graphs through this source; the raw registry handle
+    # 400s/409s ACTIVE Supabase-lane graphs.
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         row = resolve_active_graph(registry, team_id, graph_id)
@@ -20441,9 +22055,11 @@ async def backups_drill(request: Request, body: dict):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane (see re-baseline).
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     try:
         return await asyncio.to_thread(
@@ -20482,9 +22098,12 @@ async def backups_drill_scheduled(request: Request):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
-    db = reg_sdk._get_proj().db
+    # #2823/#2340: dialect-aware control plane — the scheduled drill resolves
+    # its candidate's active graph through this source.
+    registry = _control_plane_source()
+    # #2823/#669: the DATA-plane handle (#1366) — the data-plane SDK, never
+    # the registry namespace (see _control_plane_source's docstring).
+    db = _make_sdk(namespace=None)._get_proj().db
     storage = _backup_storage()
     alerts = _alert_store_from(cfg)
     try:
@@ -20787,13 +22406,13 @@ def _billing_checkout_new_org_sync(user: dict, name: str, price_id: str) -> dict
             detail="A paid plan is required to purchase a new organization")
     if is_supabase_enabled():
         if team_by_name(get_control_plane(), name):
-            raise HTTPException(status_code=409, detail="Team name already exists")
+            raise HTTPException(status_code=409, detail="Organization name already exists")
     else:
         _dup = _make_sdk(namespace="registry")._get_registry().query(
             "MATCH (t:Team {name:$name}) RETURN count(t)", params={"name": name},
         ).result_set[0][0]
         if _dup:
-            raise HTTPException(status_code=409, detail="Team name already exists")
+            raise HTTPException(status_code=409, detail="Organization name already exists")
 
     new_org_id = _new_org_team_id()
     try:
@@ -21329,11 +22948,320 @@ async def webhooks_stripe(request: Request):
 # closed 503 (OAuth is hosted-only); the well-known metadata endpoints still
 # serve (they describe the hosted AS; harmless static JSON).
 
-# DCR per-IP limiter (RFC 7591 registration is an unauthenticated write
-# surface — reuses the shared per-IP bucket primitive, 20/hr default).
-_OAUTH_DCR_BUCKETS: dict[str, list[float]] = defaultdict(list)
+# ── DCR capacity policy (#2866) ────────────────────────────────────────
+# RFC 7591 registration is an unauthenticated write surface. The limiter is
+# intentionally NOT the shared `_check_ip_bucket_rate_limit` primitive: that
+# primitive inserts the bucket (`defaultdict`) BEFORE its 429 check and prunes
+# only *stale* buckets, so an attacker-keyed fresh-key flood grows its store
+# without bound and every request scans the whole store once over
+# `max_entries` (the charge append itself happens after the check; the
+# unbounded growth and the O(n) scan are the defects). The primitive is left
+# byte-identical; the sibling filing tracks it). This limiter states its
+# capacity policy in concrete, falsifiable numbers:
+#
+#   per bucket (per client IP, or /64 for IPv6) ... 20/hr   (PER_HOUR)
+#   anonymous global aggregate ................... 600/hr   (ANON_AGGREGATE)
+#   trusted-CIDR aggregate ....................... 1200/hr  (TRUSTED_PER_HOUR)
+#   live-bucket store cap ........................ 256      (STORE_CAP)
+#   window ....................................... 3600 s
+#
+# Dimension membership: *trusted ⇒ per-CIDR aggregate only* (no per-key
+# bucket, no shared overflow, no anonymous aggregate) and *anonymous ⇒
+# per-key bucket (or shared overflow) AND the anonymous global aggregate*.
+# The trusted carve-out is evaluated BEFORE any per-key/overflow path, so the
+# exemption is reachable under an anonymous flood — otherwise a first-time
+# trusted IP is a "new key" and would be denied once STORE_CAP buckets are
+# live. STORE_CAP (256) < ANON_AGGREGATE (600) keeps the reject-new/overflow
+# branch live at shipped defaults.
+#
+# Bounded store, deterministic eviction (#2866 D3/D4): a bucket is *active*
+# iff it holds an in-window entry. Store order is last-charge (charged hits
+# `move_to_end`); reclaim therefore stops at the first active head, because
+# every later key was charged no earlier than the head. Reclaim runs ONLY on
+# the new-key-at-cap path, so a tracked key's charge stays O(1) and the store
+# can never evict an active key. If the cap is still full, the new key is
+# denied its own bucket and charged to one shared overflow bucket (bounded by
+# the derived overflow cap = PER_HOUR) AND the anonymous aggregate (D9).
+#
+# Derived ceiling: the distinct-new-anonymous-key rate is bounded by
+# STORE_CAP + PER_HOUR = 276/hr (256 live keys + 20 overflow charges) — a
+# burst/concurrent-live bound, not a bound tested at shipped scale.
+#
+# IPv6: the store key is the /IPV6_PREFIX network (default /64) of the
+# normalized address, so a single client cannot mint 2**64 buckets; a
+# malformed address keys as the single constant "anonymous" (never the raw
+# string, so a malformed-identity flood cannot occupy STORE_CAP buckets).
+# Out-of-range prefix falls back to 64 (clamping 0 -> 1 would collapse every
+# IPv6 address into one bucket). Malformed IP/CIDR never raise; a missing
+# client early-returns like the shared primitive.
+#
+# Accepted limitations (PR body carries the full list): in-process stores ⇒
+# real capacity is limit × machines and resets on restart (#1677 / #2853 own
+# oauth_clients row pruning — owner @daniel-ospina, date 2026-10-15); the
+# limiter runs before body parsing, so invalid-JSON / oversized POSTs DO
+# consume budget; the anonymous aggregate is a one-source DoS (trusted CIDRs
+# unaffected); the exemption's security rests on the Fly edge stripping
+# client `Fly-*` headers (assumption 12 — dated re-verification with an
+# operator recipe is #3126, owner @daniel-ospina, 2026-11-15). Sibling
+# filings from this work: #3124 (the shared per-IP primitive + the generic
+# middleware's store are still unbounded), #3125 (`_check_claim_rate_limit`
+# keys on the proxy IP), #3128 (authorize/consent forward an unvalidated
+# scope into the minted token), #3134 (dated measurement of real DCR volume —
+# the 600/1200 aggregates are not load-validated). #3036 already covers
+# oauth_* token-table retention/GC.
+#
+# CHARGING DOCTRINE DIVERGENCE (tracked, #1719 / #2051): this limiter charges
+# at CHECK time, like `_check_ip_bucket_rate_limit` without `defer_charge`,
+# not at the TERMINAL outcome the way #1719's `defer_charge=True` callers do.
+# Consequence: a control-plane 5xx from `register_client` still consumed the
+# caller's budget, so a post-recovery retry can meet a spurious 429 that masks
+# the underlying failure. That is the #2051 failure class, and #2051 does not
+# currently list DCR. Documented here rather than silently mirrored, per the
+# #2038 precedent (PR #2049 review) — see also the docs limitation in
+# docs/oauth-mcp.md. The phase-1/phase-2 seam already exists, so moving the
+# charge past `register_client` is the follow-up if #2051 is taken up.
+_OAUTH_DCR_WINDOW_S = 3600
+_OAUTH_DCR_PER_HOUR_DEFAULT = 20
+_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT = 600
+_OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT = 1200
+_OAUTH_DCR_STORE_CAP_DEFAULT = 256
+_OAUTH_DCR_IPV6_PREFIX_DEFAULT = 64
+# Anthropic's published outbound/MCP egress range
+# (platform.claude.com/docs/en/api/ip-addresses; whois AP-2440). Comma-
+# separated; an EMPTY value means an empty trusted set (the documented lever
+# to disable the exemption) — never the default.
+_OAUTH_DCR_TRUSTED_CIDRS_DEFAULT = "160.79.104.0/21"
+# Singleton store keys for the aggregate dimensions (malformed client IPs
+# share the constant below, never a per-raw-string bucket).
+_OAUTH_DCR_ANON_KEY = "\x00anon"
+_OAUTH_DCR_OVERFLOW_KEY = "\x00overflow"
+_OAUTH_DCR_MALFORMED_KEY = "anonymous"
+
+_OAUTH_DCR_BUCKETS: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_TRUSTED: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_OVERFLOW: OrderedDict[str, list[float]] = OrderedDict()
+_OAUTH_DCR_ANON: OrderedDict[str, list[float]] = OrderedDict()
 _OAUTH_DCR_LOCK = asyncio.Lock()
-_OAUTH_DCR_MAX_PER_HOUR = int(os.environ.get("TORTOISE_OAUTH_DCR_PER_HOUR", "20"))
+
+
+def _dcr_prune_window(bucket: list[float], now: float, window_s: int) -> list[float]:
+    """In-window entries of `bucket` (pure; the primitive's window contract is
+    pinned against this by a parity test, D10)."""
+    return [t for t in bucket if now - t < window_s]
+
+
+def _dcr_retry_after_s(bucket: list[float], now: float, window_s: int) -> int:
+    """Seconds until the oldest in-window charge expires (ceil — the caller
+    guards against an empty bucket; int() would understate, see #1081 P4)."""
+    return math.ceil(bucket[0] + window_s - now)
+
+
+def _oauth_dcr_trusted_networks() -> list:
+    """Parse TORTOISE_OAUTH_DCR_TRUSTED_CIDRS AT CALL TIME (no cache — no
+    staleness foot-gun). Whitespace-trimmed, empty items skipped, a malformed
+    item skipped without aborting the list. Unset ⇒ default; empty ⇒ empty
+    set (fail closed — the disable lever); never `or DEFAULT` falsy-coalescing."""
+    raw = os.environ.get("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS")
+    if raw is None:
+        raw = _OAUTH_DCR_TRUSTED_CIDRS_DEFAULT
+    nets: list = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def _oauth_dcr_normalized_addr(client_ip):
+    """`ipaddress` address for `client_ip`, normalizing ANY IPv4-mapped IPv6
+    spelling (or None for a malformed address).
+
+    `_normalize_mapped_ipv6` (shared primitive helper, byte-identical to
+    origin/main) matches the literal lowercase ``::ffff:`` prefix, so the
+    structural check here additionally covers ``::FFFF:1.2.3.4`` and
+    ``0:0:0:0:0:ffff:1.2.3.4``. Without it one IPv4 address could hold two
+    bucket identities (its own plus the shared ``::/64``) and a non-canonical
+    mapped client would collapse into ``::/64`` instead of being keyed — or
+    trusted — as the address it actually is.
+    """
+    ip = _normalize_mapped_ipv6(client_ip)
+    if not isinstance(ip, str):
+        return None
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _oauth_dcr_trusted_net(client_ip) -> object | None:
+    """The trusted network containing `client_ip`, else None. Matches on the
+    NORMALIZED address (so every spelling of an IPv4-mapped trusted address is
+    trusted) and fails closed on a malformed address/CIDR."""
+    addr = _oauth_dcr_normalized_addr(client_ip)
+    if addr is None:
+        return None
+    for net in _oauth_dcr_trusted_networks():
+        try:
+            if addr.version == net.version and addr in net:
+                return net
+        except TypeError:  # version mismatch — not trusted
+            continue
+    return None
+
+
+def _oauth_dcr_store_key(client_ip) -> str:
+    """Per-bucket store key: the /IPV6_PREFIX network for IPv6 (default /64),
+    the plain address for IPv4, the constant "anonymous" for a malformed
+    address (D6)."""
+    addr = _oauth_dcr_normalized_addr(client_ip)
+    if addr is None:
+        return _OAUTH_DCR_MALFORMED_KEY
+    if addr.version != 6:
+        return str(addr)
+    prefix = _int_env("TORTOISE_OAUTH_DCR_IPV6_PREFIX",
+                      _OAUTH_DCR_IPV6_PREFIX_DEFAULT)
+    if not 1 <= prefix <= 128:
+        prefix = _OAUTH_DCR_IPV6_PREFIX_DEFAULT
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
+
+def _oauth_dcr_reclaim(store: OrderedDict, now: float, window_s: int,
+                       cap: int) -> None:
+    """Pop inactive LRU-head buckets until the store is below `cap` or the
+    head is active (D3/D4). By the last-charge ordering invariant an active
+    head implies every later key is active too, so this stops at the first
+    live bucket — it can never evict an active key. O(1) at the hot cap."""
+    while store and len(store) >= cap:
+        head_key = next(iter(store))
+        head = store[head_key]
+        if head and now - head[-1] < window_s:
+            break
+        del store[head_key]
+
+
+def _oauth_dcr_deny(retry_after: int) -> None:
+    raise HTTPException(
+        status_code=429,
+        detail=("Too many client registrations from this IP. "
+                "Please try again later."),
+        headers={"Retry-After": str(max(1, retry_after))},
+    )
+
+
+async def _check_oauth_dcr_rate_limit(request: Request) -> None:
+    """DCR capacity limiter — policy block above (#2866).
+
+    Reads every knob AT CALL TIME (testability; no import-time freeze) and
+    the four stores dynamically off the module globals (the test fixture
+    swaps them). Atomic across dimensions (D5): phase 1 evaluates all
+    dimensions — it may evict INACTIVE buckets, but never charges or
+    inserts — and phase 2 charges only if every dimension passed, so a 429
+    charges nothing and inserts nothing. Does NOT call `_charge_ip_bucket`
+    (it re-takes `_OAUTH_DCR_LOCK`; asyncio.Lock is non-reentrant).
+    """
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    client = getattr(request.state, "client_ip", None)
+    if not client:
+        client = request.client.host if request.client else None
+    if not client:
+        return
+
+    now = time.time()
+    window_s = _OAUTH_DCR_WINDOW_S
+    per_hour = _int_env("TORTOISE_OAUTH_DCR_PER_HOUR",
+                        _OAUTH_DCR_PER_HOUR_DEFAULT)
+    anon_cap = _int_env("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                        _OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT)
+    trusted_cap = _int_env("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR",
+                           _OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT)
+    store_cap = _int_env("TORTOISE_OAUTH_DCR_STORE_CAP",
+                         _OAUTH_DCR_STORE_CAP_DEFAULT)
+
+    async with _OAUTH_DCR_LOCK:
+        # ── trusted carve-out (D2) — evaluated FIRST, before any per-key or
+        # overflow path so a first-time trusted IP can never be denied. ──
+        net = _oauth_dcr_trusted_net(client)
+        if net is not None:
+            tkey = str(net)
+            tcbucket = _OAUTH_DCR_TRUSTED.get(tkey)
+            if tcbucket is None:
+                tcbucket = []
+            else:
+                tcbucket[:] = _dcr_prune_window(tcbucket, now, window_s)
+            if trusted_cap <= 0:  # zero rule — deny, never index empty
+                _oauth_dcr_deny(window_s)
+            if len(tcbucket) >= trusted_cap:
+                _oauth_dcr_deny(_dcr_retry_after_s(tcbucket, now, window_s))
+            tcbucket.append(now)
+            _OAUTH_DCR_TRUSTED[tkey] = tcbucket
+            _OAUTH_DCR_TRUSTED.move_to_end(tkey)
+            return
+
+        # ── phase 1: evaluate every anonymous dimension (no charge/insert) ──
+        key = _oauth_dcr_store_key(client)
+        bucket = _OAUTH_DCR_BUCKETS.get(key)
+        on_overflow = False
+        if bucket is None:
+            _oauth_dcr_reclaim(_OAUTH_DCR_BUCKETS, now, window_s, store_cap)
+            if len(_OAUTH_DCR_BUCKETS) >= store_cap:
+                on_overflow = True  # cap full — no bucket of its own
+            else:
+                bucket = []  # inserted in phase 2 only
+        else:
+            bucket[:] = _dcr_prune_window(bucket, now, window_s)
+
+        overflow_bucket = None
+        if on_overflow:
+            overflow_bucket = _OAUTH_DCR_OVERFLOW.get(_OAUTH_DCR_OVERFLOW_KEY)
+            if overflow_bucket is None:
+                overflow_bucket = []
+            else:
+                overflow_bucket[:] = _dcr_prune_window(
+                    overflow_bucket, now, window_s)
+            if per_hour <= 0:
+                _oauth_dcr_deny(window_s)
+            if len(overflow_bucket) >= per_hour:  # derived cap = PER_HOUR
+                _oauth_dcr_deny(_dcr_retry_after_s(overflow_bucket, now,
+                                                   window_s))
+        else:
+            if per_hour <= 0:
+                _oauth_dcr_deny(window_s)
+            if len(bucket) >= per_hour:
+                _oauth_dcr_deny(_dcr_retry_after_s(bucket, now, window_s))
+
+        # D9: the anonymous aggregate covers per-key AND overflow charges —
+        # otherwise the stated "anonymous <= ANON_AGGREGATE/hr" bound is
+        # asserted but not enforced.
+        anon_bucket = _OAUTH_DCR_ANON.get(_OAUTH_DCR_ANON_KEY)
+        if anon_bucket is None:
+            anon_bucket = []
+        else:
+            anon_bucket[:] = _dcr_prune_window(anon_bucket, now, window_s)
+        if anon_cap <= 0:
+            _oauth_dcr_deny(window_s)
+        if len(anon_bucket) >= anon_cap:
+            _oauth_dcr_deny(_dcr_retry_after_s(anon_bucket, now, window_s))
+
+        # ── phase 2: every dimension passed — insert + charge ──
+        if on_overflow:
+            overflow_bucket.append(now)
+            _OAUTH_DCR_OVERFLOW[_OAUTH_DCR_OVERFLOW_KEY] = overflow_bucket
+            _OAUTH_DCR_OVERFLOW.move_to_end(_OAUTH_DCR_OVERFLOW_KEY)
+        else:
+            bucket.append(now)
+            _OAUTH_DCR_BUCKETS[key] = bucket
+            _OAUTH_DCR_BUCKETS.move_to_end(key)
+        anon_bucket.append(now)
+        _OAUTH_DCR_ANON[_OAUTH_DCR_ANON_KEY] = anon_bucket
+        _OAUTH_DCR_ANON.move_to_end(_OAUTH_DCR_ANON_KEY)
 
 
 def _oauth_control_plane() -> tuple:
@@ -21411,10 +23339,23 @@ async def oauth_authorize(request: Request):
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
         # Open-redirect guard: only redirect when the redirect_uri is
         # REGISTERED for the client — never echo an unvalidated param.
-        from tortoise.oauth import get_client
+        #
+        # #2846 review P2: this must use the SAME matcher as validation, or a
+        # native client that registered a PORTLESS loopback URI never receives
+        # the error on its ephemeral listener — the strict membership test
+        # fails, so we return JSON where the client is waiting for a redirect.
+        # Using the relaxed matcher here is safe ONLY because
+        # `_redirect_uri_matches` also refuses parse-differential input: this is
+        # the one place the raw request param is echoed into a Location header,
+        # so relaxing the match without that guard would BE the open redirect.
+        from tortoise.oauth import _redirect_uri_matches, get_client
         client = get_client(cp, params["client_id"]) if params["client_id"] else None
+        registered_uris = (client.get("redirect_uris") or []) if client else []
+        if not isinstance(registered_uris, (list, tuple)):
+            registered_uris = [registered_uris]
         if (params["redirect_uri"] and client is not None
-                and params["redirect_uri"] in (client.get("redirect_uris") or [])):
+                and any(_redirect_uri_matches(u, params["redirect_uri"])
+                        for u in registered_uris)):
             from urllib.parse import urlencode
             sep = "&" if "?" in params["redirect_uri"] else "?"
             return RedirectResponse(
@@ -21526,6 +23467,7 @@ async def oauth_token(request: Request):
     """
     from tortoise.oauth import (
         OAuthError,
+        _log_and_capture,
         exchange_auth_code,
         refresh_grant,
     )
@@ -21551,6 +23493,10 @@ async def oauth_token(request: Request):
                              "grant_type must be authorization_code or refresh_token")
     except OAuthError as exc:
         return _oauth_error_response(exc)
+    except Exception as exc:            # last-resort bug detector, NOT a retry signal
+        _log_and_capture(exc, where="oauth/token boundary")
+        return _oauth_error_response(
+            OAuthError(500, "server_error", "Internal error processing the token request."))
     return out
 
 
@@ -21586,13 +23532,7 @@ async def oauth_dcr_register(request: Request):
     cp, enabled = _oauth_control_plane()
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
-    await _check_ip_bucket_rate_limit(
-        request, buckets=_OAUTH_DCR_BUCKETS, lock=_OAUTH_DCR_LOCK,
-        limit=_OAUTH_DCR_MAX_PER_HOUR, window_s=3600,
-        key=(getattr(request.state, "client_ip", None)
-             or (request.client.host if request.client else None)),
-        detail="Too many client registrations from this IP. Please try again later.",
-        retry_after_s=3600)
+    await _check_oauth_dcr_rate_limit(request)
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         body = _json.loads(raw)

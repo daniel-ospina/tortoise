@@ -176,7 +176,7 @@ class TestInviteCreate:
         r2 = client.post("/v1/invites",
                          json={"team_id": "team-pro", "email": "carol@example.com"})
         assert r2.status_code == 402
-        assert "member limit" in r2.json()["detail"]
+        assert "member limit" in r2.json()["detail"].lower()
 
     def test_pro_capacity_consumed_invite_frees_seat(self, client, reg):
         """#1875 regression: capacity counts PENDING invitations — an
@@ -234,7 +234,7 @@ class TestInviteCreate:
         codes = sorted(r.status_code for r in results)
         assert codes == [200, 402, 402], [r.text for r in results]
         body = next(r for r in results if r.status_code == 402).json()
-        assert "member limit" in body["detail"]
+        assert "member limit" in body["detail"].lower()
         # exactly one Invitation node was minted — pending + active == 2
         # (owner + 1 invite), never 3.
         rows = reg.query(
