@@ -230,6 +230,7 @@ surfaces:
   - test_battery_differential.py
   - test_battery_streams.py
   - test_battery_recall.py
+  - test_battery_recall_wiring.py  # main-side drift unblock (#3439 added it without a manifest entry, reddening manifest-integrity on every PR); battery-owned — it pins battery/recall/prepass.py + battery/report/assemble.py + battery/runner/run.py wiring
   - test_battery_report.py
   - test_battery_arms_real.py
   - test_battery_cli.py

@@ -2565,3 +2565,113 @@ def test_list_drill_candidates_max_candidates_and_empty():
         )
     assert len(list_drill_candidates(store)) == 8  # default max_candidates
     assert len(list_drill_candidates(store, max_candidates=3)) == 3
+
+
+# ── #3030: the sweep's guard kinds must be able to CLOSE ─────────────────────
+
+
+def test_sweep_resolutions_clears_guards_a_conclusive_run_did_not_emit():
+    """A conclusive sweep that did NOT emit a guard kind is the "condition
+    cleared" evidence — before #3030 these four kinds had no resolver on any
+    surface and stayed open forever (#2821 was the live case)."""
+    from tortoise.backup_sweep import sweep_resolutions
+
+    result = {
+        "status": "backed_up",
+        "incidents": [],
+        "results": {"team_a": {"graphs": {
+            "default": {"status": "backed_up", "p0_checked": True},
+            "g_x": {"status": "backed_up", "p0_checked": True},
+        }}},
+    }
+    cleared = sweep_resolutions(result)
+    assert ("ENUM_DELTA", "") in cleared
+    assert ("NO_ELIGIBLE_TEAMS", "") in cleared
+    assert ("GRAPH_NAME_RESOLUTION_FAIL", "") in cleared
+    assert ("P0_GUARD_FAIL", "team_a") in cleared
+    assert ("P0_GUARD_FAIL", "team_a:g_x") in cleared
+
+
+def test_sweep_resolutions_needs_positive_enumeration_evidence():
+    """REVIEW P0: absence of an emission is NOT evidence when the run never
+    looked. A 0-team run is exactly what ENUM_DELTA reports — clearing it there
+    would silence the #2823 silent-degradation class, and it could never re-fire
+    (the same run's ops-state write resets the >0→0 transition)."""
+    from tortoise.backup_sweep import sweep_resolutions
+
+    for status in ("no_teams", "no_eligible_teams"):
+        cleared = sweep_resolutions({"status": status, "incidents": [], "results": {}})
+        assert not [c for c in cleared if c[0] != "P0_GUARD_FAIL"], (status, cleared)
+    # A team result WITHOUT a graph map (resolution failure / error) is not
+    # evidence either.
+    cleared = sweep_resolutions({"status": "backed_up", "incidents": [],
+                                 "results": {"team_a": {"status": "resolution"}}})
+    assert not [c for c in cleared if c[0] != "P0_GUARD_FAIL"], cleared
+
+
+def test_sweep_resolutions_only_clears_p0_for_checked_graphs():
+    """REVIEW P1: a graph whose dump errored or was aborted by the size guard
+    returned BEFORE the P0 guard, so its P0 incident must stay open — only a
+    graph that demonstrably ran and passed the guard carries `p0_checked`."""
+    from tortoise.backup_sweep import sweep_resolutions
+
+    result = {
+        "status": "degraded",
+        "incidents": [],
+        "results": {"team_a": {"graphs": {
+            "default": {"status": "aborted_size_guard"},
+            "g_x": {"status": "error", "error": "boom"},
+            "g_ok": {"status": "backed_up", "p0_checked": True},
+        }}},
+    }
+    cleared = sweep_resolutions(result)
+    assert ("P0_GUARD_FAIL", "team_a:g_ok") in cleared
+    assert ("P0_GUARD_FAIL", "team_a") not in cleared
+    assert ("P0_GUARD_FAIL", "team_a:g_x") not in cleared
+
+
+def test_sweep_resolutions_keeps_kinds_this_run_re_emitted():
+    """A guard that fires again must stay open — resolution is never blanket."""
+    from tortoise.backup_sweep import sweep_resolutions
+
+    # A `degraded` run (it looked; one graph failed the guard) — the only shape
+    # that can both re-emit P0_GUARD_FAIL and carry enumeration evidence. A
+    # `no_teams` run has `results == {}` by construction, and a `p0_guard_failed`
+    # result never carries `p0_checked` (the guard returns before it is set).
+    result = {
+        "status": "degraded",
+        "incidents": [
+            {"kind": "ENUM_DELTA", "team_id": "", "detail": {"previous": 3, "now": 0}},
+            {"kind": "P0_GUARD_FAIL", "team_id": "team_a", "graph_id": "default",
+             "detail": {}},
+        ],
+        "results": {"team_a": {"graphs": {
+            "default": {"status": "p0_guard_failed"},
+            "g_ok": {"status": "backed_up", "p0_checked": True},
+        }}},
+    }
+    cleared = sweep_resolutions(result)
+    assert ("ENUM_DELTA", "") not in cleared
+    assert ("P0_GUARD_FAIL", "team_a") not in cleared
+    # A "degraded" run DID look (it has team graph maps), so the global kinds it
+    # did not re-emit are cleared — pinned here because the distinction between
+    # "degraded" (looked, some graphs failed) and "enum_failed" (could not look)
+    # is exactly what a blanket "degraded clears nothing" rule would get wrong.
+    assert ("NO_ELIGIBLE_TEAMS", "") in cleared
+    assert ("P0_GUARD_FAIL", "team_a:g_ok") in cleared
+
+
+def test_sweep_resolutions_clears_nothing_on_a_blind_run():
+    """A blind run proves nothing: `enum_failed` cannot distinguish "no teams"
+    from "could not look", and `already_running` never evaluated anything."""
+    from tortoise.backup_sweep import sweep_resolutions
+
+    assert sweep_resolutions({"status": "enum_failed", "incidents": [], "results": {}}) == []
+    assert sweep_resolutions({"status": "already_running"}) == []
+    # The shape that ONLY the status guard excludes: a blind run that somehow
+    # carries enumeration evidence (empty `results` alone already fails the
+    # `looked` predicate, so the assertions above passed even without the guard).
+    blind_with_evidence = {"status": "enum_failed", "incidents": [], "results": {
+        "team_a": {"graphs": {"default": {"status": "backed_up", "p0_checked": True}}},
+    }}
+    assert sweep_resolutions(blind_with_evidence) == []

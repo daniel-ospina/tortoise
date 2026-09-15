@@ -138,9 +138,45 @@ if [ -z "$GH_TOKEN" ]; then
 fi
 
 # ── dedup helpers (R2 create-once + GH-search fallback) ─────────────────────
-r2_put_once() { # key body_file
-  aws s3api put-object --endpoint-url "$R2_ENDPOINT" \
-    --bucket "$R2_BUCKET" --key "$1" --body "$2" --if-none-match "*" >/dev/null 2>&1
+GH_SEARCH_FAILED_SENTINEL="__gh_search_failed__"
+r2_head() { # key -> 0 when the object EXISTS
+  aws s3api head-object --endpoint-url "$R2_ENDPOINT" \
+    --bucket "$R2_BUCKET" --key "$1" >/dev/null 2>&1
+}
+r2_put_once() { # key body_file -> 0 created, 1 already exists, 2 UNRESOLVED (loud)
+  # #3032: mirror the Python twin (hosted_backup.create_if_not_exists) — a
+  # rejected conditional write must never silently degrade the dedup AUTHORITY
+  # into the fail-open GitHub title search. The pre-#3032 shape collapsed every
+  # failure (412 race, unsupported `--if-none-match`, transport error, proxy)
+  # into "the object already exists", so on a runner whose client rejects the
+  # flag NO dedup object was ever created and dedup rested entirely on the
+  # unverified search (the #2828 class).
+  local out=""
+  if out="$(aws s3api put-object --endpoint-url "$R2_ENDPOINT" \
+    --bucket "$R2_BUCKET" --key "$1" --body "$2" --if-none-match "*" 2>&1)"; then
+    return 0
+  fi
+  case "$out" in
+    # The expected create-once race: the object already exists (S3 412).
+    # Match the ERROR MARKERS only — a bare `*412*` would also match a
+    # request-id / byte-count / timestamp in an unrelated failure and report
+    # "exists" without ever HEAD-checking (review).
+    *PreconditionFailed*|*"At least one of the pre-conditions"*) return 1 ;;
+  esac
+  # Conditional writes unsupported (or another error): fall back to the
+  # HEAD-check — the object's EXISTENCE decides, exactly like the Python twin
+  # (hosted_backup.create_if_not_exists). An AMBIGUOUS HEAD (absent read or a
+  # read that failed) must NOT be followed by a blind unconditional put: it
+  # could overwrite a concurrent writer's object and reset its issue_number to
+  # null — the duplicate-risk class #3029 removes. Report unresolved instead.
+  if r2_head "$1"; then return 1; fi
+  # Include the (truncated) AWS cause: "conditional write rejected" alone cannot
+  # distinguish an aws CLI that lacks --if-none-match (where this runner files
+  # NOTHING and is red every hour) from broken creds or a transient network
+  # fault — each needs a different operator action (final-cycle review P2).
+  cause="$(printf '%s' "${out:-}" | tr '\n' ' ' | cut -c1-200)"
+  fail "r2_put_once: could not create nor confirm $1 — conditional write rejected (${cause:-no output}) and the HEAD-check could not confirm absence. Dedup is unverified; refusing a blind put."
+  return 2
 }
 r2_get() { # key -> body (empty on failure)
   aws s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$1" /dev/stdout 2>/dev/null || true
@@ -148,26 +184,56 @@ r2_get() { # key -> body (empty on failure)
 r2_delete() { # key — delete-to-resolve (the alert_store lifecycle contract)
   aws s3api delete-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$1" >/dev/null 2>&1 || true
 }
-gh_find_open() { # kind id(subject) -> first open issue number whose TITLE subject matches exactly (or empty)
+gh_find_open() { # kind id(subject) -> first open issue number naming THIS incident (or empty)
   # #2375: subject-scoped — a bare kind search lets a per-graph issue
   # ("[DR] STALE — team_a:g_x") be adopted by a team-level file ("… team_a")
   # and vice versa (the bare team subject is a PREFIX of the per-graph
   # subject); recovery then closes the WRONG issue and orphans its dedup
   # object (silent-loss cross-talk — the server side is subject-scoped since
-  # #2313; the driver must match). Global alerts (id="global") keep the
-  # kind-only match (their titles carry prose, not the id).
+  # #2313; the driver must match).
+  #
+  # #3029: the search index is a RECALL filter, never an identity proof.
+  # GitHub tokenizes punctuation away, so `in:title "[DR] R2_DOWN"` also matches
+  # an ordinary bug report whose title merely contains the tokens — verified
+  # live: the production query resolved to #2844, a bug report ABOUT R2_DOWN,
+  # which the resolver would then have adopted and closed. Every hit is verified
+  # against the incident's OWN title shape (the same contract the server
+  # enforces in tortoise/github_issue.py::incident_title_matches): the kind must
+  # follow `[DR] ` immediately, and a subject must be the EXACT ` — ` segment
+  # after it. Global ids ("global"/"") accept the bare `[DR] KIND` title plus any
+  # trailing ` — prose`.
+  #
+  # The search is FAIL-CLOSED: a transport failure or an error body (a 403
+  # rate-limit response is valid JSON with no `items`) prints the
+  # GH_SEARCH_FAILED_SENTINEL instead of nothing, so no caller can read it as
+  # "no incident" — the pre-#3029 `|| true` collapsed both into empty, which
+  # made `file_alert` file a duplicate and let `resolve_global` close an
+  # unverified target. The sentinel rides STDOUT (not a global) because callers
+  # read this function through a command substitution, i.e. in a subshell.
   [ -n "$GH_TOKEN" ] || return 0
-  local kind="$1" id="${2:-}"
-  if [ "$id" = "global" ] || [ -z "$id" ]; then
-    curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-      "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22" \
-      | jq -r '.items[0].number // empty' 2>/dev/null || true
-    return 0
-  fi
-  curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22&per_page=20" \
-    | jq -r --arg suf " — $id" \
-      '[.items[] | select(.title | endswith($suf))][0].number // empty' 2>/dev/null || true
+  local kind="$1" id="${2:-}" resp=""
+  resp="$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/search/issues?q=repo:${REPO}+is:issue+is:open+label:%22dr:backup%22+in:title+%22%5BDR%5D+$kind%22&per_page=20" 2>/dev/null)" \
+    || { printf '%s' "$GH_SEARCH_FAILED_SENTINEL"; return 0; }
+  # `.items` must be PRESENT: an error/rate-limit body is not an empty result.
+  printf '%s' "$resp" | jq -e '.items' >/dev/null 2>&1 \
+    || { printf '%s' "$GH_SEARCH_FAILED_SENTINEL"; return 0; }
+  printf '%s' "$resp" | jq -r --arg k "$kind" --arg id "$id" '
+    ("[DR] " + $k) as $p
+    | [ .items[]
+        | (.title // "") as $t
+        | select($t | startswith($p))
+        | ($t[($p | length):]) as $rest
+        | select(
+            if ($id == "" or $id == "global") then
+              ($rest == "" or ($rest | startswith(" — ")))
+            else
+              ($rest | startswith(" — "))
+              and (($rest | ltrimstr(" — ") | split(" — ")[0]) == $id)
+            end
+          )
+        | .number
+      ][0] // empty' 2>/dev/null || { printf '%s' "$GH_SEARCH_FAILED_SENTINEL"; return 0; }
 }
 gh_issue_open() { # number -> 0 when OPEN or unknown; 1 when confirmed closed OR missing
   # #2796 (review R3/R4): the 412 dedup branch must trust the object over a GH
@@ -194,12 +260,27 @@ gh_issue_open() { # number -> 0 when OPEN or unknown; 1 when confirmed closed OR
 }
 gh_close() { # number comment kind id
   [ -n "$GH_TOKEN" ] || return 0
-  local kind="${3:-}" id="${4:-}"
+  local kind="${3:-}" id="${4:-}" code=""
   curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
     "https://api.github.com/repos/${REPO}/issues/$1/comments" \
     -d "$(jq -nc --arg b "$2" '{body:$b}')" >/dev/null 2>&1 || true
-  curl -sS -X PATCH -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${REPO}/issues/$1" -d '{"state":"closed"}' >/dev/null 2>&1 || true
+  # The close must SUCCEED before we drop the dedup object (#3029/#3031 class,
+  # cycle-2 review P1 — this is the shell twin of the Python fix in
+  # alert_store.resolve_incident). Deleting on a failed PATCH leaves the object
+  # gone while the issue stays OPEN: the next run re-creates the object, adopts
+  # the still-open issue and pages again — and `resolve_global` has already set
+  # the run green, so the false all-clear is invisible. On a non-2xx the object
+  # is KEPT and the failure is LOUD so the next hourly run retries.
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -X PATCH \
+    -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/${REPO}/issues/$1" -d '{"state":"closed"}' 2>/dev/null)" || code=""
+  case "$code" in
+    2*) : ;;
+    *)
+      LOUD=1
+      fail "gh_close: closing issue #$1 returned HTTP ${code:-<no response>} — keeping the dedup object so the next run retries (the issue is still OPEN)"
+      return 1 ;;
+  esac
   # delete-to-resolve: drop the R2 dedup object so a RECURRENCE is a new
   # incident. Without this, file_alert's 412 branch would adopt the stale
   # object and silently swallow the recurrence (the #2796 class).
@@ -217,7 +298,18 @@ gh_close() { # number comment kind id
 resolve_global() { # kind comment — close an open global incident (no-op if none)
   local kind="$1" comment="$2" num=""
   num="$(gh_find_open "$kind" "global")"
-  if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global"; fi
+  if [ "$num" = "$GH_SEARCH_FAILED_SENTINEL" ]; then
+    # #3029 fail-closed: without a verified target, closing is a guess — and the
+    # guess closes whatever the fuzzy search returned (the #2844 class). Skip;
+    # the next run retries. LOUD so the skipped self-heal is never invisible.
+    fail "GitHub search failed for ${kind}/global — skipping resolve (target unverifiable); the next run retries"
+    LOUD=1
+    return 0
+  fi
+  # `|| true`: the failure is already LOUD (and the object kept), so it must not
+  # abort the whole run under `set -e` — the remaining legs and the /status exit
+  # code still need to evaluate.
+  if [ -n "$num" ]; then gh_close "$num" "$comment" "$kind" "global" || true; fi
 }
 telegram() { # text
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ] \
@@ -225,12 +317,36 @@ telegram() { # text
       --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$1" >/dev/null 2>&1 || true
 }
 file_alert() { # kind title body dedup_id
-  local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num=""
+  local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num="" rc=0
   LOUD=1
   tmp="$(mktemp)"
   printf '{"kind":"%s","issue_number":null,"filed_at":"%s"}' "$kind" "$(date -u +%FT%TZ)" > "$tmp"
+  # #3032: three outcomes, not two — 0 created, 1 already exists (the 412
+  # race), 2 dedup UNRESOLVED (unsupported conditional write + no provable
+  # object). Only 0/1 may proceed; 2 must never reach the search-only path.
   if r2_put_once "ops/alerts/${kind}/${id}.json" "$tmp"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" = "2" ]; then
+    fail "dedup unresolved for ${kind}/${id:-global} — refusing to continue on search-only dedup"
+    LOUD=1
+    rm -f "$tmp"
+    return 0
+  fi
+  if [ "$rc" = "0" ]; then
     num="$(gh_find_open "$kind" "$id")"
+    if [ "$num" = "$GH_SEARCH_FAILED_SENTINEL" ]; then
+      # #3029 fail-closed: the create succeeded but the search could not run, so
+      # whether an issue for this incident already exists is UNKNOWN. Filing now
+      # could duplicate; the placeholder object stays with issue_number:null, so
+      # the next run's 412 branch retries. LOUD, never silent.
+      fail "GitHub search failed for ${kind}/${id:-global} — filing DEFERRED (a failed search is not 'no incident'); the dedup object remains for the next run"
+      LOUD=1
+      rm -f "$tmp"
+      return 0
+    fi
     if [ -z "$num" ]; then
       num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/${REPO}/issues" \
@@ -268,6 +384,15 @@ file_alert() { # kind title body dedup_id
       return 0
     fi
     num="$(gh_find_open "$kind" "$id")"
+    if [ "$num" = "$GH_SEARCH_FAILED_SENTINEL" ]; then
+      # #3029 fail-closed, 412 branch: the object exists but carries no usable
+      # issue number, and the search that would find one did not run. Filing now
+      # risks a duplicate on a stale object; defer to the next run. LOUD.
+      fail "GitHub search failed for ${kind}/${id:-global} (412 branch) — filing deferred; the dedup object is kept for the next run"
+      LOUD=1
+      rm -f "$tmp"
+      return 0
+    fi
     if [ -z "$num" ]; then
       num="$(curl -sS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
         "https://api.github.com/repos/${REPO}/issues" \
