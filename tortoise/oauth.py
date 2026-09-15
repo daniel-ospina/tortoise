@@ -266,9 +266,31 @@ def _unsafe_redirect_uri_bytes(uri: str) -> bool:
     return any(ch == "\\" or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri)
 
 
+# Private-use URI schemes (RFC 8252 §7.1) that a harness may register as a
+# redirect target. Cursor IDE's MCP OAuth DCR still sends its custom-scheme
+# callback (cursor://anysphere.cursor-mcp/oauth/callback) on the exthost path —
+# the Cursor 3.13.25 report on their forum, and their own staff answer, confirm
+# it persists alongside the documented loopback/https pair. Registration is
+# ALL-OR-NOTHING (`register_client` rejects the whole request if ANY entry is
+# invalid), so a single custom-scheme entry costs the client its client_id
+# entirely: Cursor never reaches /oauth/authorize and the tester cannot sign in.
+#
+# Deliberately an ALLOWLIST, not "any private-use scheme". The consent page
+# delivers the code by navigating to the raw redirect_uri
+# (`window.location.href = redirect_uri + "?code=…"`), so a scheme the browser
+# executes rather than navigates — javascript:, data:, vbscript: — would run in
+# the consent page's own origin, and a scheme with an app handler the user has
+# is a code-delivery target we have not reasoned about. Failing closed on every
+# scheme that is not listed costs nothing today: Cursor is the only harness in
+# the beta using one. Extending it is a reviewed one-line change with a test.
+_NATIVE_REDIRECT_SCHEMES = frozenset({"cursor"})
+
+
 def _valid_redirect_uri(uri: str) -> bool:
-    """A registration-acceptable redirect URI: https, or http only when the
-    host is loopback (RFC 8252 native-app pattern used by MCP clients).
+    """A registration-acceptable redirect URI: https; http only when the host
+    is loopback (RFC 8252 §7.3 native-app pattern used by MCP clients); or a
+    private-use scheme listed in `_NATIVE_REDIRECT_SCHEMES` (RFC 8252 §7.1) —
+    see that constant for why it is an allowlist and not "any scheme".
 
     URIs holding bytes we refuse to reason about are rejected here too, so a
     string the browser might read differently can never enter a client row.
@@ -279,10 +301,23 @@ def _valid_redirect_uri(uri: str) -> bool:
         parsed = urlparse(uri)
     except ValueError:
         return False
+    if parsed.fragment:
+        # RFC 6749 §3.1.2 — a fragment is never a valid redirect component, and
+        # this function's error message already promises rejection. Enforced
+        # for every scheme so no registered value can smuggle one past the
+        # consent page's `redirect_uri + "?code=…"` navigation.
+        return False
     if parsed.scheme == "https" and parsed.hostname:
         return True
-    if parsed.scheme == "http" and parsed.hostname and _is_loopback(parsed.hostname):  # noqa: SIM103
+    if parsed.scheme == "http" and parsed.hostname and _is_loopback(parsed.hostname):
         return True
+    if parsed.scheme in _NATIVE_REDIRECT_SCHEMES:
+        # Not a network location, so "https or loopback" does not describe it.
+        # The invariant that matters is that it names something to hand the code
+        # to — an authority (cursor://anysphere.cursor-mcp/oauth/callback) or at
+        # least a path. Exact-match at authorize time is unchanged
+        # (`_redirect_uri_matches` relaxes only for two LOOPBACK hosts).
+        return bool(parsed.netloc or parsed.path)
     return False
 
 
@@ -566,8 +601,9 @@ def register_client(cp, body: dict) -> dict:
     invalid = [u for u in redirect_uris if not isinstance(u, str) or not _valid_redirect_uri(u)]
     if invalid:
         raise OAuthError(400, "invalid_client_metadata",
-                         "Each redirect_uri must be https (or http loopback), "
-                         "absolute, and may not contain a fragment.")
+                         "Each redirect_uri must be https, http loopback, or a "
+                         "supported native-app scheme, absolute, and may not "
+                         "contain a fragment.")
 
     grant_types = body.get("grant_types", ["authorization_code"])
     if not isinstance(grant_types, list) or not grant_types:
