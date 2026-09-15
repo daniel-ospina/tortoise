@@ -214,7 +214,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
     up = cypher.upper()
     if "DETACH" not in up or "DELETE" not in up:
         return False
-    # Property map in MATCH => targeted (e.g. {id:$id}, {team_id:$id})
+    # Property map in MATCH => targeted (e.g. {id:$id}, {org_id:$id})
     if "{" in cypher:
         return False
     # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
@@ -526,11 +526,11 @@ def _journal_append_product(graph_name: str) -> None:
         cached and BEFORE ``_ensure_registry_indexes`` writes, and
         ``select_graph`` is client-side (no server call) — a raise there
         mints nothing and leaves no half-initialized registry behind;
-      * the team-mint append (``team_create``) runs AFTER the team graph's
+      * the org-mint append (``org_create``) runs AFTER the org graph's
         TeamMeta CREATE, and its failure path DROPS that graph (best-effort —
         if the drop fails too the graph survives and is WARNING-logged)
-        before re-raising; ``team_create``'s own handler rolls the registry
-        Team node back.
+        before re-raising; ``org_create``'s own handler rolls the registry
+        Org node back.
     The other call sites are MIXED, which is why this is a per-caller
     contract and not a property of the function: some hosted mint lanes drop
     the graph on failure (``provision_tenant``, ``register_user``'s provision
@@ -930,7 +930,7 @@ class FalkorProjection(
                     _graph = graph_name
                 else:
                     # Cycle-2 P0-1b: explicit non-guard-passing names ("test",
-                    # "t", "team_...") derive PER-PATH names — the parity/
+                    # "t", "org_...") derive PER-PATH names — the parity/
                     # g_consistency pairs construct distinct paths with one
                     # shared explicit name and must land on DISTINCT server
                     # graphs (a shared rename makes the apply-vs-rebuild
@@ -950,9 +950,9 @@ class FalkorProjection(
                     _stem = re.sub(r"[^a-zA-Z0-9_]", "_", _stem)
                     # CI P2 fix: fold the explicit graph_name into the hash.
                     # The per-path-only derivation COLLAPSED namespaces — two
-                    # team_<ns> SDKs on the SAME temp path (test_hosted_api's
-                    # cross-team isolation, quota tests) derived the SAME
-                    # server graph, destroying team isolation. hash(path+name)
+                    # org_<ns> SDKs on the SAME temp path (test_hosted_api's
+                    # cross-org isolation, quota tests) derived the SAME
+                    # server graph, destroying org isolation. hash(path+name)
                     # keeps parity pairs (distinct paths, one shared name)
                     # distinct AND namespace pairs (one path, distinct names)
                     # distinct — the embedded same-file/same-name analog
@@ -3090,9 +3090,9 @@ def is_missing_graph_error(e: Exception) -> bool:
     #2163: GRAPH.DELETE (select_graph(name).delete()) raises on an ABSENT
     graph — real server text (v4.16.7, empirically verified): "Invalid graph
     operation on empty key". Graph-drop callers treat this family as SUCCESS
-    so the deleted-team purge sweep's #926 retry anchor converges (a graph
+    so the deleted-org purge sweep's #926 retry anchor converges (a graph
     dropped by a previous sweep, never minted, or manually removed must not
-    keep the team row poisoned forever); genuine failures (auth, dead
+    keep the org row poisoned forever); genuine failures (auth, dead
     connection) still propagate. Canonical prod copy — tests/_embedded.py's
     private _is_missing_graph_error is kept in sync with these patterns.
     """

@@ -15,14 +15,14 @@ Flow (locked scoping decisions 2026-08-15, docs/scoping/2026-08-15-524-oauth-mcp
     existing JWKS path (session_auth.verify_session_jwt — D2: "reuse
     JWKS verify"). Branded consent = ONE custom HTML page (D2).
   * P3 — Dynamic Client Registration (RFC 7591) at ``POST /register`` (D1).
-  * P4 — token→team mapping via RFC 8707 resource indicator, client-declared
+  * P4 — token→org mapping via RFC 8707 resource indicator, client-declared
     (D4): the resource is ``{origin}/mcp`` (single-membership users resolve
-    to their sole active team) or ``{origin}/mcp/teams/{team_id}`` (explicit
-    team). Rotating refresh tokens per (user, team), revoked on team
+    to their sole active org) or ``{origin}/mcp/organizations/{org_id}`` (explicit
+    org). Rotating refresh tokens per (user, org), revoked on org
     suspension (D5). #1701 R1 — resource-less OAuth clients (ChatGPT cannot
     declare RFC 8707 resources): ``consent_preview`` returns the account's
-    selectable (non-suspended) teams and the consent page offers a team
-    chooser; suspended teams never bind (preview, mint AND exchange); the AS
+    selectable (non-suspended) orgs and the consent page offers an org
+    chooser; suspended orgs never bind (preview, mint AND exchange); the AS
     origin root is accepted as the bare MCP resource echo.
   * D6 — OAuth tokens are self-sufficient at the MCP boundary: the middleware
     introspects the access token row (no tt_ key minting); the session→key
@@ -347,18 +347,18 @@ def mcp_resource_url(base: str) -> str:
     return base.rstrip("/") + "/mcp"
 
 
-def team_resource_url(base: str, team_id: str) -> str:
-    """Team-scoped resource indicator (D4 — the client-declared team selector)."""
-    return mcp_resource_url(base) + "/teams/" + team_id
+def org_resource_url(base: str, org_id: str) -> str:
+    """Org-scoped resource indicator (D4 — the client-declared org selector)."""
+    return mcp_resource_url(base) + "/organizations/" + org_id
 
 
-# ── RFC 8707 resource → team mapping (P4, D4) ──────────────────────────────
+# ── RFC 8707 resource → org mapping (P4, D4) ──────────────────────────────
 
 def parse_resource(base: str, resource: str | None) -> tuple[str | None, str | None]:
-    """Split a client-declared resource indicator into (canonical, team_id).
+    """Split a client-declared resource indicator into (canonical, org_id).
 
-    Returns (mcp_resource, None) for the bare MCP resource (team resolved
-    from the user's memberships), (mcp_resource, team_id) for a team-scoped
+    Returns (mcp_resource, None) for the bare MCP resource (org resolved
+    from the user's memberships), (mcp_resource, org_id) for an org-scoped
     resource, or raises OAuthError for anything outside the MCP resource
     tree (RFC 8707 §2 — the AS must reject unknown resource values so a
     token can never be minted for a resource the client does not declare).
@@ -366,7 +366,7 @@ def parse_resource(base: str, resource: str | None) -> tuple[str | None, str | N
     #1701 R1: the AS's own origin root (``{base}`` / ``{base}/``) is accepted
     as the bare MCP resource — some OAuth clients (OpenAI/ChatGPT's runtime)
     echo ``resource={origin}`` instead of the PRM value. Exact equality only
-    (never a prefix rule); tokens stay (user, team)-bound and MCP-only.
+    (never a prefix rule); tokens stay (user, org)-bound and MCP-only.
     """
     base_mcp = mcp_resource_url(base)
     if not resource:
@@ -377,43 +377,43 @@ def parse_resource(base: str, resource: str | None) -> tuple[str | None, str | N
     base_root = base.rstrip("/")
     if resource == base_root:
         return base_mcp, None
-    team_prefix = base_mcp + "/teams/"
-    if resource.startswith(team_prefix) and "/" not in resource[len(team_prefix):]:
-        team_id = resource[len(team_prefix):]
-        if team_id:
-            return resource, team_id
+    org_prefix = base_mcp + "/organizations/"
+    if resource.startswith(org_prefix) and "/" not in resource[len(org_prefix):]:
+        org_id = resource[len(org_prefix):]
+        if org_id:
+            return resource, org_id
     raise OAuthError(400, "invalid_resource",
                      "Unknown resource indicator. Expected the MCP endpoint "
                      f"({base_mcp}) or a team-scoped resource under it.")
 
 
-def _selectable_teams(cp, user_id: str) -> list[dict]:
-    """The user's ACTIVE memberships whose teams are not durably suspended —
-    the single source for default-team resolution AND the consent chooser
-    (#1701 R1). Sorted deterministically by team_id (user_memberships has no
+def _selectable_orgs(cp, user_id: str) -> list[dict]:
+    """The user's ACTIVE memberships whose orgs are not durably suspended —
+    the single source for default-org resolution AND the consent chooser
+    (#1701 R1). Sorted deterministically by org_id (user_memberships has no
     ORDER BY; the chooser needs a stable order)."""
     from tortoise.supabase_control import user_memberships
     out = []
     for m in user_memberships(cp, user_id):
         rows = cp.query("teams", select=["name", "suspended_at"],
-                        filters=[("id", "eq", m["team_id"])])
+                        filters=[("id", "eq", m["org_id"])])
         if not rows or rows[0].get("suspended_at") is not None:
             continue
-        out.append({"team_id": m["team_id"],
-                    "team_name": rows[0].get("name") or m["team_id"]})
-    return sorted(out, key=lambda t: t["team_id"])
+        out.append({"org_id": m["org_id"],
+                    "org_name": rows[0].get("name") or m["org_id"]})
+    return sorted(out, key=lambda t: t["org_id"])
 
 
-def _default_team(cp, user_id: str) -> str:
-    """The user's sole ACTIVE (non-suspended) team (D4 + #1701 R1).
+def _default_org(cp, user_id: str) -> str:
+    """The user's sole ACTIVE (non-suspended) org (D4 + #1701 R1).
 
-    0 usable teams → error; >1 usable teams → error telling the client to
-    declare a team-scoped resource. Suspended memberships never count toward
-    the default, so a 1-active + 1-suspended account binds the active team
-    and never dead-ends on the multi-team 400."""
-    active = _selectable_teams(cp, user_id)
+    0 usable orgs → error; >1 usable orgs → error telling the client to
+    declare an org-scoped resource. Suspended memberships never count toward
+    the default, so a 1-active + 1-suspended account binds the active org
+    and never dead-ends on the multi-org 400."""
+    active = _selectable_orgs(cp, user_id)
     if len(active) == 1:
-        return active[0]["team_id"]
+        return active[0]["org_id"]
     if not active:
         raise OAuthError(403, "invalid_grant",
                          "This account has no active team. Create a team "
@@ -421,24 +421,24 @@ def _default_team(cp, user_id: str) -> str:
     raise OAuthError(400, "invalid_resource",
                      "This account belongs to multiple teams — the MCP client "
                      "must declare a team-scoped resource indicator "
-                     f"({team_resource_url('<base>', '<team_id>')} form).")
+                     f"({org_resource_url('<base>', '<org_id>')} form).")
 
 
-def _resolve_team(cp, user_id: str, base: str, resource: str | None) -> str:
-    """RFC 8707 mapping (D4): client-declared resource → team_id, verified
+def _resolve_org(cp, user_id: str, base: str, resource: str | None) -> str:
+    """RFC 8707 mapping (D4): client-declared resource → org_id, verified
     against the user's active memberships."""
-    _, team_id = parse_resource(base, resource)
-    if team_id is not None:
-        from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(cp, user_id, team_id) is None:
+    _, org_id = parse_resource(base, resource)
+    if org_id is not None:
+        from tortoise.supabase_control import membership_for_user_org
+        if membership_for_user_org(cp, user_id, org_id) is None:
             raise OAuthError(403, "invalid_resource",
                              "Not a member of the requested team.")
-        return team_id
-    return _default_team(cp, user_id)
+        return org_id
+    return _default_org(cp, user_id)
 
 
-def _team_name(cp, team_id: str) -> str | None:
-    rows = cp.query("teams", select=["name"], filters=[("id", "eq", team_id)])
+def _org_name(cp, org_id: str) -> str | None:
+    rows = cp.query("teams", select=["name"], filters=[("id", "eq", org_id)])
     return rows[0].get("name") if rows else None
 
 
@@ -612,46 +612,46 @@ def validate_authorize_params(cp, *, client_id: str, redirect_uri: str | None,
 
 
 def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
-    """Consent-page team preview (D4 + #1701 R1 account-chooser).
+    """Consent-page org preview (D4 + #1701 R1 account-chooser).
 
-    A client-declared team-scoped resource resolves to that team (membership
-    AND suspension checked — a suspended team 403s here, never at exchange).
+    A client-declared org-scoped resource resolves to that org (membership
+    AND suspension checked — a suspended org 403s here, never at exchange).
     A bare/omitted/origin-root-echoed resource resolves to the sole ACTIVE
-    team or, for several, returns the selectable list for the page's chooser.
-    Zero active teams keeps the 403 so an account with no usable team cannot
+    org or, for several, returns the selectable list for the page's chooser.
+    Zero active orgs keeps the 403 so an account with no usable org cannot
     mint a code.
     """
-    _, team_id = parse_resource(base, resource)
-    if team_id is not None:
-        from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(cp, user_id, team_id) is None:
+    _, org_id = parse_resource(base, resource)
+    if org_id is not None:
+        from tortoise.supabase_control import membership_for_user_org
+        if membership_for_user_org(cp, user_id, org_id) is None:
             raise OAuthError(403, "invalid_resource",
                              "Not a member of the requested team.")
-        _assert_team_usable(cp, team_id)  # suspended → 403 invalid_grant
+        _assert_org_usable(cp, org_id)  # suspended → 403 invalid_grant
         return {
-            "team_id": team_id,
-            "team_name": _team_name(cp, team_id),
-            "resource": (team_resource_url(base, team_id) if resource
+            "org_id": org_id,
+            "org_name": _org_name(cp, org_id),
+            "resource": (org_resource_url(base, org_id) if resource
                          else mcp_resource_url(base)),
         }
-    teams = _selectable_teams(cp, user_id)
-    if len(teams) == 1:
+    orgs = _selectable_orgs(cp, user_id)
+    if len(orgs) == 1:
         return {
-            "team_id": teams[0]["team_id"],
-            "team_name": teams[0]["team_name"],
+            "org_id": orgs[0]["org_id"],
+            "org_name": orgs[0]["org_name"],
             # byte-identical with today: a truthy declared resource (bare MCP
-            # or origin echo) keeps the team-scoped resource field.
-            "resource": (team_resource_url(base, teams[0]["team_id"])
+            # or origin echo) keeps the org-scoped resource field.
+            "resource": (org_resource_url(base, orgs[0]["org_id"])
                          if resource else mcp_resource_url(base)),
         }
-    if len(teams) > 1:
+    if len(orgs) > 1:
         return {
-            "team_id": None,
-            "team_name": None,
+            "org_id": None,
+            "org_name": None,
             "resource": mcp_resource_url(base),
             "memberships": [
-                {**t, "resource": team_resource_url(base, t["team_id"])}
-                for t in teams
+                {**t, "resource": org_resource_url(base, t["org_id"])}
+                for t in orgs
             ],
         }
     raise OAuthError(403, "invalid_grant",
@@ -662,22 +662,22 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
 def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
                     redirect_uri: str, code_challenge: str, state: str | None,
                     scope: str | None, resource: str | None) -> tuple[str, str]:
-    """Bind a (user, team) grant to a single-use PKCE code (P2 + P4).
+    """Bind a (user, org) grant to a single-use PKCE code (P2 + P4).
 
-    Resolves the team from the client-declared resource indicator (RFC 8707)
-    at consent time so the code carries the exact team the token will bind.
-    #1701 R1: the team must be USABLE (not suspended) — a suspended team can
+    Resolves the org from the client-declared resource indicator (RFC 8707)
+    at consent time so the code carries the exact org the token will bind.
+    #1701 R1: the org must be USABLE (not suspended) — a suspended org can
     never mint a code (suspension surfaces at consent, not at a later
-    exchange). Returns (code, team_id).
+    exchange). Returns (code, org_id).
     """
-    team_id = _resolve_team(cp, user_id, base, resource)
-    _assert_team_usable(cp, team_id)
+    org_id = _resolve_org(cp, user_id, base, resource)
+    _assert_org_usable(cp, org_id)
     code = secrets.token_urlsafe(32)
     cp.query("oauth_codes", method="POST", json_body={
         "code_hash": _sha256(code),
         "client_id": client_id,
         "user_id": user_id,
-        "team_id": team_id,
+        "org_id": org_id,
         "redirect_uri": redirect_uri,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
@@ -687,7 +687,7 @@ def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
         "used_at": None,
         "created_at": _now_iso(),
     })
-    return code, team_id
+    return code, org_id
 
 
 def _consume_state(cp, code: str) -> str:
@@ -799,7 +799,7 @@ def _consume_code(cp, code: str) -> dict:
     PR #1264 review P2).
     """
     rows = cp.query("oauth_codes", select=[
-        "code_hash", "client_id", "user_id", "team_id", "redirect_uri",
+        "code_hash", "client_id", "user_id", "org_id", "redirect_uri",
         "code_challenge", "code_challenge_method", "scope", "resource",
         "expires_at", "used_at",
     ], method="PATCH",
@@ -815,12 +815,12 @@ def _consume_code(cp, code: str) -> dict:
     return row
 
 
-def _assert_team_usable(cp, team_id: str) -> None:
-    """D5: a suspended team cannot mint/refresh tokens. The durable
+def _assert_org_usable(cp, org_id: str) -> None:
+    """D5: a suspended org cannot mint/refresh tokens. The durable
     suspended_at check is the single rejection authority (mirrors the tt_
     path's #308 semantics)."""
     rows = cp.query("teams", select=["suspended_at", "tier"],
-                    filters=[("id", "eq", team_id)])
+                    filters=[("id", "eq", org_id)])
     if not rows:
         raise OAuthError(403, "invalid_grant", "Team not found.")
     if rows[0].get("suspended_at") is not None:
@@ -831,7 +831,7 @@ def _assert_team_usable(cp, team_id: str) -> None:
 
 # ── Token issuance / exchange (P2 + P4 + D5) ────────────────────────────────
 
-def _quota_fields(cp, team_row: dict) -> dict:
+def _quota_fields(cp, org_row: dict) -> dict:
     """Quota shape shared with resolve_api_key so REST/MCP limits match
     (#329): preserve None (unlimited, Team tier), fall back to pricing.
     #1859 P3-2: max_points column (points-cap override) takes precedence
@@ -839,50 +839,50 @@ def _quota_fields(cp, team_row: dict) -> dict:
     from tortoise.pricing import tier_limits  # noqa: I001
     from tortoise.quota import DEFAULT_MAX_SESSIONS
     from tortoise.quota import derived_tier
-    tier = derived_tier({**team_row, "id": team_row.get("id")})
+    tier = derived_tier({**org_row, "id": org_row.get("id")})
     lim = tier_limits(tier)
-    mp = team_row.get("max_points")
+    mp = org_row.get("max_points")
     if mp is None:
-        mp = team_row.get("graph_size_cap")
+        mp = org_row.get("graph_size_cap")
     return {
-        "team_id": team_row.get("id"),
+        "org_id": org_row.get("id"),
         "tier": tier,
-        "max_users": (team_row.get("max_users")
-                      if team_row.get("max_users") is not None
+        "max_users": (org_row.get("max_users")
+                      if org_row.get("max_users") is not None
                       else lim["max_users_per_team"]),
-        "max_graphs": (team_row.get("max_graphs")
-                       if team_row.get("max_graphs") is not None
+        "max_graphs": (org_row.get("max_graphs")
+                       if org_row.get("max_graphs") is not None
                        else lim["max_graphs_per_team"]),
         "max_points": (int(mp)
                        if mp is not None
                        else int(lim["max_graph_nodes"])),
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": DEFAULT_MAX_SESSIONS,
-        "suspended_at": team_row.get("suspended_at"),
-        "flagged_at": team_row.get("flagged_at"),
+        "suspended_at": org_row.get("suspended_at"),
+        "flagged_at": org_row.get("flagged_at"),
         # #1765: prefer the owner's USER email (demotion — teams.email is a
         # stale-prone contact field), fall back to the contact value.
-        "email": _owner_email_or(cp, team_row.get("id"), team_row.get("email")),
+        "email": _owner_email_or(cp, org_row.get("id"), org_row.get("email")),
     }
 
 
-def _owner_email_or(cp, team_id: str, fallback) -> str | None:
+def _owner_email_or(cp, org_id: str, fallback) -> str | None:
     from tortoise.supabase_control import owner_email
     try:
-        return owner_email(cp, team_id) or fallback
+        return owner_email(cp, org_id) or fallback
     except Exception:
         return fallback
 
 
-def _team_row(cp, team_id: str) -> dict | None:
+def _org_row(cp, org_id: str) -> dict | None:
     rows = cp.query("teams", select=[
         "id", "tier", "max_users", "max_graphs", "graph_size_cap",
         "max_points", "suspended_at", "flagged_at", "email",
-    ], filters=[("id", "eq", team_id)])
+    ], filters=[("id", "eq", org_id)])
     return rows[0] if rows else None
 
 
-def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
+def _issue_tokens(cp, *, client_id: str, user_id: str, org_id: str,
                   scope: str, resource: str | None,
                   prev_refresh: dict | None = None,
                   prev_access_id: str | None = None) -> dict:
@@ -911,7 +911,7 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
             "token_hash": _sha256(refresh),
             "client_id": client_id,
             "user_id": user_id,
-            "team_id": team_id,
+            "org_id": org_id,
             "scope": scope,
             "expires_at": _expires_iso(REFRESH_TOKEN_TTL_S),
             "revoked_at": None,
@@ -924,7 +924,7 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
             "token_hash": _sha256(access),
             "client_id": client_id,
             "user_id": user_id,
-            "team_id": team_id,
+            "org_id": org_id,
             "scope": scope,
             "expires_at": _expires_iso(ACCESS_TOKEN_TTL_S),
             "revoked_at": None,
@@ -983,7 +983,7 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
     """POST /oauth/token grant_type=authorization_code (P2 + P4).
 
     Validates the PKCE verifier, redirect_uri, client auth, and the RFC 8707
-    resource (must map to the SAME team the code was bound to), then issues
+    resource (must map to the SAME org the code was bound to), then issues
     the access+refresh pair.
     """
     # #2863: the redemption is atomic-feel — a failure after the atomic claim
@@ -1008,18 +1008,18 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
                             code_row.get("code_challenge_method") or "S256"):
             raise OAuthError(400, "invalid_grant", "PKCE verification failed.")
         # RFC 8707: the resource at the token endpoint must resolve to the same
-        # team the authorization code was bound to (lenient when omitted — the
+        # org the authorization code was bound to (lenient when omitted — the
         # mcp SDK always sends it, but a bare authorize→token pair is legal).
         resource = body.get("resource")
         if resource:
-            _, requested_team = parse_resource(base, resource)
-            if requested_team is not None and requested_team != code_row["team_id"]:
+            _, requested_org = parse_resource(base, resource)
+            if requested_org is not None and requested_org != code_row["org_id"]:
                 raise OAuthError(400, "invalid_grant",
                                  "Resource indicator does not match the authorized team.")
-        _assert_team_usable(cp, code_row["team_id"])
+        _assert_org_usable(cp, code_row["org_id"])
         scope = code_row.get("scope") or " ".join(SCOPES_SUPPORTED)
         out = _issue_tokens(cp, client_id=client["id"], user_id=code_row["user_id"],
-                            team_id=code_row["team_id"], scope=scope,
+                            org_id=code_row["org_id"], scope=scope,
                             resource=code_row.get("resource"))
     except OAuthError:
         raise                        # an intentional terminal signal — never re-arm
@@ -1048,11 +1048,11 @@ def exchange_auth_code(cp, body: dict, base: str) -> dict:
     return {k: v for k, v in out.items() if not k.startswith("_")}
 
 
-def _revoke_team_family(cp, user_id: str, team_id: str) -> None:
-    """D5: revoke the user's ENTIRE refresh-token family for a team (called
-    on team suspension). Mirrors durable revocation semantics of api_keys."""
+def _revoke_org_family(cp, user_id: str, org_id: str) -> None:
+    """D5: revoke the user's ENTIRE refresh-token family for an org (called
+    on org suspension). Mirrors durable revocation semantics of api_keys."""
     cp.query("oauth_refresh_tokens", method="PATCH",
-             filters=[("user_id", "eq", user_id), ("team_id", "eq", team_id),
+             filters=[("user_id", "eq", user_id), ("org_id", "eq", org_id),
                       ("revoked_at", "is", None)],
              json_body={"revoked_at": _now_iso()})
 
@@ -1060,8 +1060,8 @@ def _revoke_team_family(cp, user_id: str, team_id: str) -> None:
 def refresh_grant(cp, body: dict, base: str) -> dict:
     """POST /oauth/token grant_type=refresh_token (D5).
 
-    Rotating per (user, team): each use revokes the presented token and mints
-    a fresh pair. Team suspension revokes the whole (user, team) family;
+    Rotating per (user, org): each use revokes the presented token and mints
+    a fresh pair. Org suspension revokes the whole (user, org) family;
     a lapsed membership revokes the presented token.
     """
     # #2863: wrap every pre-mint read (the FIRST one is `_verify_client_auth` →
@@ -1072,7 +1072,7 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
         client = _verify_client_auth(cp, body.get("client_id"), body)
         refresh_token = body.get("refresh_token", "")
         rows = cp.query("oauth_refresh_tokens", select=[
-            "id", "token_hash", "client_id", "user_id", "team_id", "scope",
+            "id", "token_hash", "client_id", "user_id", "org_id", "scope",
             "expires_at", "revoked_at",
         ], filters=[("token_hash", "eq", _sha256(refresh_token))])
         if not rows:
@@ -1088,24 +1088,24 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
             raise OAuthError(400, "invalid_grant", "Refresh token expired.")
         resource = body.get("resource")
         if resource:
-            _, requested_team = parse_resource(base, resource)
-            if requested_team is not None and requested_team != row["team_id"]:
+            _, requested_org = parse_resource(base, resource)
+            if requested_org is not None and requested_org != row["org_id"]:
                 raise OAuthError(400, "invalid_grant",
                                  "Resource indicator does not match the token's team.")
-        # D5: suspension → revoke the whole (user, team) family, then reject.
+        # D5: suspension → revoke the whole (user, org) family, then reject.
         try:
-            _assert_team_usable(cp, row["team_id"])
+            _assert_org_usable(cp, row["org_id"])
         except OAuthTemporarilyUnavailable:
             raise        # a transient signal must NEVER trigger family revocation
         except OAuthError:
             try:
-                _revoke_team_family(cp, row["user_id"], row["team_id"])
+                _revoke_org_family(cp, row["user_id"], row["org_id"])
             except Exception as exc:  # correction #8: the single capture for this path
                 _log_and_capture(exc, where="family revoke")
             raise
         # Lapsed membership → revoke this token (the grant dies with the seat).
-        from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(cp, row["user_id"], row["team_id"]) is None:
+        from tortoise.supabase_control import membership_for_user_org
+        if membership_for_user_org(cp, row["user_id"], row["org_id"]) is None:
             try:
                 cp.query("oauth_refresh_tokens", method="PATCH",
                          filters=[("id", "eq", row["id"])],
@@ -1126,7 +1126,7 @@ def refresh_grant(cp, body: dict, base: str) -> dict:
             "Temporary control-plane failure before token rotation — retry.") from None
     try:
         out = _issue_tokens(cp, client_id=row["client_id"], user_id=row["user_id"],
-                            team_id=row["team_id"], scope=row.get("scope")
+                            org_id=row["org_id"], scope=row.get("scope")
                             or " ".join(SCOPES_SUPPORTED), resource=resource,
                             prev_refresh=row,
                             prev_access_id=prev_access[0]["id"] if prev_access else None)
@@ -1161,19 +1161,19 @@ def revoke_token(cp, body: dict) -> None:
 # ── MCP-boundary introspection (D6) ─────────────────────────────────────────
 
 def resolve_oauth_access_token(cp, token: str) -> dict | None:
-    """Introspect an ``oat_`` access token → team dict (same shape as
+    """Introspect an ``oat_`` access token → org dict (same shape as
     resolve_api_key) or None. This is the OAuth half of the MCP auth
     boundary — no tt_ key is minted (D6).
 
     Checks, in order: prefix, token row (revoked_at authoritative, expiry),
-    team existence + durable suspension (the suspended_at check rides the
-    returned dict so TeamResolutionMiddleware's existing #308 gate applies
+    org existence + durable suspension (the suspended_at check rides the
+    returned dict so OrgResolutionMiddleware's existing #308 gate applies
     identically to OAuth and tt_ credentials).
     """
     if not isinstance(token, str) or not token.startswith(ACCESS_TOKEN_PREFIX):
         return None
     rows = cp.query("oauth_access_tokens", select=[
-        "token_hash", "client_id", "user_id", "team_id", "scope",
+        "token_hash", "client_id", "user_id", "org_id", "scope",
         "expires_at", "revoked_at",
     ], filters=[("token_hash", "eq", _sha256(token))])
     if not rows:
@@ -1184,17 +1184,17 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     exp = _parse_ts(row.get("expires_at"))
     if exp is None or exp < _now():
         return None
-    team = _team_row(cp, row["team_id"])
-    if team is None:
+    org = _org_row(cp, row["org_id"])
+    if org is None:
         return None
-    team = _quota_fields(cp, team)
+    org = _quota_fields(cp, org)
     # #2600: the resolved dict carries the RAW actor fields (the token row's
     # user_id/client_id) so consuming seams (mcp_auth middleware / REST DI)
     # can alias the canonical `actor_user_id` — additive, transport-agnostic
     # (the resolver never aliases; the seam gates UUID shape).
-    team["user_id"] = row.get("user_id")
-    team["client_id"] = row.get("client_id")
-    return team
+    org["user_id"] = row.get("user_id")
+    org["client_id"] = row.get("client_id")
+    return org
 
 
 # ── Metadata (P1 — RFC 9728 PRM + RFC 8414 AS metadata) ────────────────────
@@ -1286,9 +1286,9 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     <p class="muted" id="client-line"></p>
     <div class="row"><span class="k">Requested scopes</span><span class="v" id="scope-line"></span></div>
     <div class="row"><span class="k">Resource</span><span class="v" id="resource-line"></span></div>
-    <div class="row"><span class="k">Team</span>
-      <span class="v" id="team-line">resolving…</span>
-      <select id="team-select" style="display:none;background:var(--bg,#0d1a2d);color:var(--text,#e2e8f0);border:1px solid var(--border,#1e293b);border-radius:6px;font-family:var(--mono);font-size:13px;padding:4px 6px;max-width:60%;text-align:left;" aria-label="Team for this connection"></select>
+    <div class="row"><span class="k">Org</span>
+      <span class="v" id="org-line">resolving…</span>
+      <select id="org-select" style="display:none;background:var(--bg,#0d1a2d);color:var(--text,#e2e8f0);border:1px solid var(--border,#1e293b);border-radius:6px;font-family:var(--mono);font-size:13px;padding:4px 6px;max-width:60%;text-align:left;" aria-label="Org for this connection"></select>
     </div>
     <div class="actions">
       <button class="btn-deny" id="btn-deny">Deny</button>
@@ -1433,22 +1433,22 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     }
     if (res.status === 401) return null;   // stale/rejected session
     if (!res.ok) {
-      // Terminal 4xx (suspended team, no usable team) carries an actionable
+      // Terminal 4xx (suspended org, no usable org) carries an actionable
       // error_description — surface it verbatim; only 5xx is retryable.
       const payload = await res.json().catch(() => null);
       const err = new Error((payload && (payload.error_description || payload.error)) ||
-          ("Could not resolve team: " + res.status));
+          ("Could not resolve org: " + res.status));
       if (res.status >= 500) err.transient = true;
       throw err;
     }
     return res.json();
   }
 
-  // #1701 R1: account-chooser state. teamResource is set ONLY by the picker's
+  // #1701 R1: account-chooser state. orgResource is set ONLY by the picker's
   // change handler — an untouched picker can never authorize (no silent
   // wrong-org bind). previewInFlight guards concurrent showConsent runs.
   let previewInFlight = false;
-  let teamResource = null;
+  let orgResource = null;
   let staleRefreshes = 0;   // at most ONE refresh per stale cycle
   const authBtn = () => document.getElementById("btn-auth");
   function disableAuthorize() { authBtn().disabled = true; }
@@ -1472,9 +1472,9 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     document.getElementById("client-line").textContent =
         PARAMS.client_name + " wants to access your Tortoise MCP surface.";
     document.getElementById("scope-line").textContent = PARAMS.scope || "mcp";
-    document.getElementById("team-line").style.display = "";
-    const teamSelect = document.getElementById("team-select");
-    teamSelect.style.display = "none";
+    document.getElementById("org-line").style.display = "";
+    const orgSelect = document.getElementById("org-select");
+    orgSelect.style.display = "none";
     hideRetry();
     try {
       const preview = await fetchPreview(data.session.access_token);
@@ -1483,38 +1483,38 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       if (memberships && memberships.length > 1) {
         // Account chooser — options are REBUILT from scratch every run so a
         // sequential re-run can never duplicate rows. Authorize stays disabled
-        // until the user explicitly picks a team (change event below).
-        document.getElementById("team-line").style.display = "none";
-        while (teamSelect.firstChild) teamSelect.removeChild(teamSelect.firstChild);
+        // until the user explicitly picks an org (change event below).
+        document.getElementById("org-line").style.display = "none";
+        while (orgSelect.firstChild) orgSelect.removeChild(orgSelect.firstChild);
         const placeholder = document.createElement("option");
         placeholder.value = "";
         placeholder.disabled = true;
         placeholder.selected = true;
-        placeholder.textContent = "Choose a team…";
-        teamSelect.appendChild(placeholder);
+        placeholder.textContent = "Choose an org…";
+        orgSelect.appendChild(placeholder);
         memberships.forEach((m) => {
           const opt = document.createElement("option");
           opt.value = m.resource;
-          opt.textContent = (m.team_name || m.team_id) + " (" + m.team_id + ")";
-          teamSelect.appendChild(opt);
+          opt.textContent = (m.org_name || m.org_id) + " (" + m.org_id + ")";
+          orgSelect.appendChild(opt);
         });
-        teamSelect.style.display = "block";
+        orgSelect.style.display = "block";
         document.getElementById("resource-line").textContent =
-            "Tortoise MCP — choose the team this connection will use";
+            "Tortoise MCP — choose the org this connection will use";
         disableAuthorize();
-      } else if (preview.team_id) {
-        // single / sole-active-team auto-bind — the page renders EXACTLY as
-        // before R1 (byte-identical single-team contract): the resource line
+      } else if (preview.org_id) {
+        // single / sole-active-org auto-bind — the page renders EXACTLY as
+        // before R1 (byte-identical single-org contract): the resource line
         // shows the client-declared value (or the pre-R1 default), never the
-        // resolved team URL
+        // resolved org URL
         document.getElementById("resource-line").textContent =
-            PARAMS.resource || "default (sole team)";
-        document.getElementById("team-line").textContent =
-            (preview.team_name || preview.team_id) + " (" + preview.team_id + ")";
+            PARAMS.resource || "default (sole org)";
+        document.getElementById("org-line").textContent =
+            (preview.org_name || preview.org_id) + " (" + preview.org_id + ")";
         enableAuthorize();
       } else {
         disableAuthorize();
-        showError("No usable team for this account.");
+        showError("No usable org for this account.");
       }
       return "ok";
     } catch (e) {
@@ -1528,7 +1528,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   async function runConsentFlow() {
     if (previewInFlight) return;   // concurrent guard (spans the refresh too)
     previewInFlight = true;
-    teamResource = null;           // never carry a stale selection between runs
+    orgResource = null;           // never carry a stale selection between runs
     staleRefreshes = 0;            // one-shot cap per cycle — never sticky across runs
     disableAuthorize();
     let result;
@@ -1574,15 +1574,15 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     runConsentFlow();
   };
 
-  const teamSelectEl = document.getElementById("team-select");
-  teamSelectEl.onchange = function () {
-    teamResource = teamSelectEl.value;
-    if (teamResource) enableAuthorize(); else disableAuthorize();
+  const orgSelectEl = document.getElementById("org-select");
+  orgSelectEl.onchange = function () {
+    orgResource = orgSelectEl.value;
+    if (orgResource) enableAuthorize(); else disableAuthorize();
   };
 
   document.getElementById("btn-auth").onclick = async () => {
     hideError(); spinner(true);
-    if (authBtn().disabled) { spinner(false); showError("Resolving your team… retry in a moment."); return; }
+    if (authBtn().disabled) { spinner(false); showError("Resolving your org… retry in a moment."); return; }
     const { data } = await supabaseClient.auth.getSession();
     if (!data.session) { spinner(false); showSignin(); return; }
     const doPost = async (accessToken) => fetch("/oauth/consent", {
@@ -1599,7 +1599,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
         code_challenge_method: PARAMS.code_challenge_method,
         state: PARAMS.state,
         scope: PARAMS.scope,
-        resource: teamResource || PARAMS.resource || null,
+        resource: orgResource || PARAMS.resource || null,
       }),
     });
     try {

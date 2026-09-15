@@ -1,10 +1,10 @@
 """Session-endpoint auth — Supabase JWT verification via JWKS (D1, plan §5.3 #2b).
 
 The two-tier auth model (plan §5.3 #2/#2b): session endpoints (E1–E8:
-/session/key, /teams, /graphs, /invites, member management) authenticate with
+/session/key, /organizations, /graphs, /invites, member management) authenticate with
 a Supabase access token verified server-side via JWKS. The data-plane
 (/v1/points, /v1/search, /v1/sessions, /v1/team, /v1/team/keys, MCP) stays on
-`tt_` keys via get_current_team.
+`tt_` keys via get_current_org.
 
 Verification: fetch `{SUPABASE_URL}/auth/v1/.well-known/jwks.json`, verify the
 RS256 **or ES256** signature (alg dispatch per token header — #1460: this
