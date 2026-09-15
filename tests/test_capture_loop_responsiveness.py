@@ -302,9 +302,11 @@ def test_health_answers_while_the_default_executor_is_saturated(
     The contract asserted is therefore not "the probe runs on the request
     path" (the pre-#2850 assertion) but "the request path performs NO DB I/O
     and NO executor / thread hand-off while every shared-executor worker is
-    saturated". THREE independent assertions cover that contract, each
-    witnessing a different seam — no single one covers every shape, so the
-    split is stated explicitly rather than attributed to one witness:
+    saturated". THREE independent assertions guard the seams this test can
+    actually SEE — the ``_probe_db`` coordinator seam and the event loop's
+    executor entry point, WITHIN the request window. No single one covers every
+    shape, so the split is stated explicitly rather than attributed to one
+    witness, and the limits are listed under WHAT IS NOT COVERED:
 
     * BUDGET (``elapsed < HEALTH_BUDGET_S``, via ``wait_for``). Catches a probe
       that runs SYNCHRONOUSLY on the loop and an UNBOUNDED
@@ -340,11 +342,28 @@ def test_health_answers_while_the_default_executor_is_saturated(
       promptly that worker would have been scheduled.
 
     WHAT IS NOT COVERED (stated so the claim stays true): this guards the
-    ``_probe_db``/coordinator seam and the event loop's executor entry point.
-    Request-path DB I/O that reaches the database by another route — a direct
-    ``_get_proj().g.query(...)``, or a new probe callable that does not resolve
-    ``ha_mod._probe_db`` — is witnessed by NEITHER record; it is caught only if
-    it blocks the handler past the budget. Recording every caller (rather than
+    ``_probe_db``/coordinator seam and the event loop's executor entry point,
+    and the submission record is scoped to the REQUEST WINDOW.
+
+      * An executor hand-off the request path INITIATES but SUBMITS after the
+        response is unwitnessed. The patch is uninstalled by then, and the
+        saturated pool means the invocation witness never fires either. A
+        deferred submit is caught only if it would have blocked the handler
+        past the budget, which by construction it does not. Concretely, this
+        shape passes all three assertions:
+            loop.call_later(0.5, lambda: loop.run_in_executor(None, _probe_db))
+      * DB I/O reaching the database by neither the ``_probe_db`` seam nor an
+        executor submission — a direct ``_get_proj().g.query(...)``, or a
+        callable handed to a ``ThreadPoolExecutor.submit()`` (which does NOT
+        route through ``run_in_executor``) — is witnessed by neither record;
+        it is caught only if it blocks the handler past the budget.
+
+    NOT a gap, contrary to an earlier draft of this note: the submission witness
+    records by ENTRY POINT, not by callable identity, so a NEW probe callable
+    wired through ``asyncio.to_thread``/``run_in_executor`` IS caught whether or
+    not it resolves ``ha_mod._probe_db``.
+
+    Recording every caller (rather than
     filtering out the refresher's thread NAME) is deliberate: the one name a
     filter excludes is exactly the worker the module's own ``wait()``/``run()``
     start, so a ``_HEALTH_PROBE.wait()`` in the handler — or a hand-off that
