@@ -461,41 +461,51 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
 
     holder = threading.Thread(target=_hold_lock, name="lock-holder", daemon=True)
     holder.start()
-    assert holder_ready.wait(5.0), "could not take _EMBEDDED_CONSTRUCTION_LOCK"
-
     outcome: list[BaseException] = []
 
-    def _construct() -> None:
-        try:
-            FalkorProjection(db_path, graph_name=GRAPH_NAME)
-        except BaseException as exc:  # the probe sentinel, or a real fault
-            outcome.append(exc)
-
-    worker = threading.Thread(target=_construct, name="constructor", daemon=True)
-    worker.start()
+    # The try/finally starts BEFORE the holder_ready assertion: if that wait
+    # fails (or anything between here and the worker's own try raises), the
+    # holder would otherwise keep `_EMBEDDED_CONSTRUCTION_LOCK` for its full
+    # 30s event wait, and the module-scoped autouse fixture serializes EVERY
+    # in-process `FalkorProjection.__init__` on that same lock — one false RED
+    # would then stall every subsequent construction in this file.
     try:
-        worker.join(1.0)
-        assert not body_entered.is_set(), (
-            "#3505: FalkorProjection.__init__ reached its body while "
-            "_EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
-            "the construction serialization is missing or bypassed."
+        assert holder_ready.wait(5.0), "could not take _EMBEDDED_CONSTRUCTION_LOCK"
+
+        def _construct() -> None:
+            try:
+                FalkorProjection(db_path, graph_name=GRAPH_NAME)
+            except BaseException as exc:  # the probe sentinel, or a real fault
+                outcome.append(exc)
+
+        worker = threading.Thread(target=_construct, name="constructor", daemon=True)
+        worker.start()
+        try:
+            worker.join(1.0)
+            assert not body_entered.is_set(), (
+                "#3505: FalkorProjection.__init__ reached its body while "
+                "_EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
+                "the construction serialization is missing or bypassed."
+            )
+            assert worker.is_alive(), (
+                "#3505: the constructor finished (or raised) while the lock was "
+                "held — the serialization did not gate it."
+            )
+        finally:
+            release_holder.set()
+
+        worker.join(10.0)
+        assert not worker.is_alive(), "constructor never unblocked after release"
+        assert body_entered.is_set(), (
+            "#3505: after release the construction never reached the embedded "
+            "branch — the probe wiring, not the lock, is what this run measured"
         )
-        assert worker.is_alive(), (
-            "#3505: the constructor finished (or raised) while the lock was "
-            "held — the serialization did not gate it."
+        assert len(outcome) == 1 and isinstance(outcome[0], _ProbeFalkorDBReached), (
+            f"#3505: unexpected construction outcome after release: {outcome!r}"
         )
     finally:
         release_holder.set()
-
-    worker.join(10.0)
-    assert not worker.is_alive(), "constructor never unblocked after release"
-    assert body_entered.is_set(), (
-        "#3505: after release the construction never reached the embedded "
-        "branch — the probe wiring, not the lock, is what this run measured"
-    )
-    assert len(outcome) == 1 and isinstance(outcome[0], _ProbeFalkorDBReached), (
-        f"#3505: unexpected construction outcome after release: {outcome!r}"
-    )
+        holder.join(10.0)
 
 
 # ── artifact builder (the tortoise-export-v1 envelope #1388 produces) ──────

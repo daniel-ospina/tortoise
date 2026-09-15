@@ -300,17 +300,25 @@ def test_health_answers_while_the_default_executor_is_saturated(
     regression here.
 
     Independently of the budget, the coordinator's DB probe itself is replaced
-    with a stand-in that BLOCKS for twice the budget AND records every
-    invocation that is not the background refresher's own worker. A
-    request-path probe re-introduced in the SYNCHRONOUS or shared-pool shape
-    cannot answer inside the budget, so the budget assertion alone catches it;
-    a BOUNDED HAND-OFF (submit to a dedicated executor, wait with a timeout,
-    fall back to the cached snapshot — the pre-#2850 `_HEALTH_PROBE_EXECUTOR`
-    shape) can still answer inside the budget by timing out, and its failure is
-    then stranded on a Future nobody retrieves. The recorded witness is what
-    catches THAT shape, independent of timing: any off-worker probe call is
-    asserted absent after the request. Together they pin the "no request-path
-    I/O, no thread hand-off" contract (#2850) without overstating either one.
+    with a stand-in that BLOCKS for twice the budget AND records EVERY
+    invocation, whatever thread makes it. A request-path probe re-introduced in
+    the SYNCHRONOUS or shared-pool shape cannot answer inside the budget, so
+    the budget assertion alone catches it; a BOUNDED HAND-OFF (submit to a
+    dedicated executor, wait with a timeout, fall back to the cached snapshot —
+    the pre-#2850 `_HEALTH_PROBE_EXECUTOR` shape) can still answer inside the
+    budget by timing out, and its failure is then stranded on a Future nobody
+    retrieves. The recorded witness is what catches THAT shape, independent of
+    timing: ANY probe call is asserted absent after the request. Recording
+    every caller (rather than filtering out the refresher's thread NAME) is
+    deliberate: the one name a filter excludes is exactly the worker the
+    module's own `wait()`/`run()` start, so a `_HEALTH_PROBE.wait()` in the
+    handler — or a hand-off that simply names its thread
+    `HEALTH_PROBE_THREAD_NAME` — walked straight through the previous
+    revision. The record is only sound because the background refresher is
+    QUIESCED for the window (see the quiesce note below), so an invocation can
+    only come from the request path. Together with the budget bound this pins
+    the "no request-path I/O, no thread hand-off" contract (#2850) without
+    overstating either one.
     """
     import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import _HEALTH_PROBE, app
@@ -341,7 +349,6 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # production probe budget (5s), so the verdict comes from design, not
     # timer ordering.
     from tortoise.monitoring import (
-        HEALTH_PROBE_THREAD_NAME,
         PROBE_RETRY_DELAY,
         PROBE_TIMEOUT,
     )
@@ -353,43 +360,51 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # a regression that probed on the request path from a DEDICATED executor
     # and waited with a bounded timeout would time out, fall back to the cached
     # snapshot, and still answer inside budget, stranding its failure on a
-    # Future nobody retrieves. Make a request-path probe impossible to hide BOTH
-    # ways: the coordinator's `_probe_db` seam resolves `ha_mod._probe_db` at
-    # call time (the lambda in `_HEALTH_PROBE`), so replacing it here makes ANY
-    # probe that reaches the DB block for twice the budget, whichever pool it
-    # was submitted to; and any invocation that is NOT the background
-    # refresher's own worker is RECORDED in `probe_off_worker` (a witness that
-    # timing cannot erase and a stranded exception cannot raise away), asserted
-    # empty after the request.
+    # Future nobody retrieves. The witness closes that: the coordinator's
+    # `_probe_db` seam resolves `ha_mod._probe_db` at call time (the lambda in
+    # `_HEALTH_PROBE`), so replacing it here makes ANY probe that reaches the DB
+    # block far past the budget AND get RECORDED, whichever pool or thread it
+    # was submitted to, and it records EVERY invocation — no thread-name filter.
+    # A filter is exactly what the previous revision's two review falsifications
+    # walked through: `_HEALTH_PROBE.wait()` starts a probe on the
+    # `HEALTH_PROBE_THREAD_NAME` worker itself, and a hand-off can simply name
+    # its thread `tortoise-health-probe`.
     #
-    # The stand-in is only reachable by the request path, and that is engineered,
-    # not assumed. `snapshot()`'s self-heal is `begin(if_stale=True)`, gated on
-    # `HealthProbe._refresh_budget_now()` (the refresher's period, default 10s
-    # from `_health_probe_interval`); `primed` above just completed a probe, so
-    # the request reads the cache and starts nothing — the refresh budget is what
-    # stops the READ path from probing. The background refresher
-    # (`_health_probe_loop`) is periodic (10s), not request-driven, and its next
-    # tick is far outside this test's sub-second window; if it did land in the
-    # window its worker is answered healthily rather than failed, so a timer
-    # coincidence can never corrupt `db.ok` for an unrelated reason. Every OTHER
-    # caller — the only place a request-path probe can come from — raises.
-    probe_off_worker: list[str] = []
+    # QUIESCE THE REFRESHER — verified, not assumed. This test enters the
+    # `client` fixture, and that fixture wraps the app in `TestClient(app)`,
+    # which RUNS the lifespan: `_lifespan` arms `_health_probe_loop` as
+    # `app.state._health_probe_task`. Instrumented on this very test, that task
+    # is live and pending (`<Task pending ... coro=<_health_probe_loop()>>`)
+    # throughout the body — so the background refresher IS armed, and its
+    # `run()` calls `begin()` UNCONDITIONALLY (`snapshot()`'s read path is the
+    # gated one). Neutralise that entry point and pin the refresh budget, so no
+    # legitimate non-request caller can start a probe in the window at ANY
+    # configured interval. The request path uses `snapshot()` and the prime used
+    # `wait()` — never `run()` — so neither is affected. With the refresher
+    # quiesced and `primed` above just completing a probe, nothing but the
+    # request path can reach the seam, so an empty record is a real guarantee.
+    probe_calls: list[str] = []
+
+    async def _no_refresher_probe(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(ha_mod._HEALTH_PROBE, "run", _no_refresher_probe)
+    # Pin the refresh budget far above this window: `snapshot()`'s
+    # `begin(if_stale=True)` self-heal must not start a probe either, which at
+    # a small operator period it otherwise legitimately could.
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
 
     def _blocking_probe(*args, **kwargs):
         # WITNESS — independent of timing and impossible to raise away: record
-        # any invocation that is NOT the background refresher's own worker
-        # BEFORE the sleep. A bounded hand-off that the handler times out of
-        # leaves its AssertionError stranded on an unretrieved Future, so the
-        # raise alone cannot prove the request path was clean; this can.
-        if threading.current_thread().name != HEALTH_PROBE_THREAD_NAME:
-            probe_off_worker.append(threading.current_thread().name)
+        # EVERY invocation BEFORE the sleep. A bounded hand-off that the handler
+        # times out of leaves its AssertionError stranded on an unretrieved
+        # Future, so the raise alone cannot prove the request path was clean;
+        # this can. No thread-name filter — the refresher is quiesced above, so
+        # any caller here is the request path.
+        probe_calls.append(threading.current_thread().name)
         # Any request-path probe that reaches the DB now blocks far past the
         # budget.
         time.sleep(HEALTH_BUDGET_S * 2)
-        if threading.current_thread().name == HEALTH_PROBE_THREAD_NAME:
-            # The background refresher's own worker running on schedule: do not
-            # poison the shared result with a failure it did not earn.
-            return {"ok": True, "latency_ms": 0.0, "error": None}
         raise AssertionError(
             "the /health REQUEST PATH invoked the DB probe "
             "(#2850: it must not)")
@@ -447,10 +462,9 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # the last of those.
     assert r.json()["probe"].get("result_age_s") is not None, r.text
     assert r.json()["db"]["ok"] is True, r.text
-    assert not probe_off_worker, (
-        f"/health invoked the DB probe off the coordinator worker: "
-        f"{probe_off_worker} (#2850: the request path must take no I/O and no "
-        f"thread hand-off)")
+    assert not probe_calls, (
+        f"/health invoked the DB probe on the request path: {probe_calls} "
+        f"(#2850: the request path must take no I/O and no thread hand-off)")
     assert elapsed < HEALTH_BUDGET_S, (
         f"/health took {elapsed:.2f}s (budget {HEALTH_BUDGET_S}s) while every "
         f"default-executor worker was busy — /health must serve from the "
