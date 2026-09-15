@@ -236,15 +236,19 @@ def test_merge_with_no_new_ids_returns_the_base_pool_unchanged():
 
 def test_c5_recap_keeps_base_chunks_first_so_injection_cannot_evict_them():
     # s1 already holds 3 base chunks at the C5 ceiling: the injected chunk
-    # is anchored after the last base hit and dropped by the re-cap.
+    # is anchored after the last base hit and dropped by the re-cap. The
+    # property must hold in BOTH guard configurations — the measured arm
+    # runs guard=True, where the session-diverse reorder is the step that
+    # could otherwise move an injected chunk ahead of a base one.
     pool = [_chunk("a1", "s1", idx=0), _chunk("a2", "s1", idx=1),
             _chunk("a3", "s1", idx=2), _point("b0", "s2")]
     added = {"s1": [_chunk("a4", "s1", idx=3)]}
-    out = reinjection_merge_order(
-        pool, added, guard=False, max_chunks_per_session=3)
-    ids = [h["id"] for h in out]
-    assert "a1" in ids and "a2" in ids and "a3" in ids
-    assert "a4" not in ids
+    for guard in (False, True):
+        out = reinjection_merge_order(
+            pool, added, guard=guard, max_chunks_per_session=3)
+        ids = [h["id"] for h in out]
+        assert "a1" in ids and "a2" in ids and "a3" in ids, (guard, ids)
+        assert "a4" not in ids, (guard, ids)
 
 
 # ── shared contract: guard_and_recap_pool ───────────────────────────────
@@ -329,10 +333,12 @@ def test_chunk_kind_is_single_sourced_across_all_four_consumers():
 
     assert SESSION_TRANSCRIPT_KIND == "session-transcript"
     assert _ingest_kind == SESSION_TRANSCRIPT_KIND
-    assert CHUNK_KIND_FILTER == (
+    expected_chunk = (
         f"coalesce(p.pointKind, '') = {SESSION_TRANSCRIPT_KIND!r}")
-    assert D5_POINTKIND_FILTER == (
+    expected_exclusion = (
         f"coalesce(p.pointKind, '') <> {SESSION_TRANSCRIPT_KIND!r}")
+    assert expected_chunk == CHUNK_KIND_FILTER
+    assert expected_exclusion == D5_POINTKIND_FILTER
     assert is_raw_chunk({"point_kind": SESSION_TRANSCRIPT_KIND}) is True
     assert is_raw_chunk({"point_kind": "statement"}) is False
 

@@ -1700,16 +1700,22 @@ def retrieve_for_question(
                 sr_total_cap_hit = bool(_fetch.get("total_cap_hit"))
                 _added_by_session: dict[str, list[dict]] = {}
                 if sr_fetch_ok:
-                    for _sid, _rows in (_fetch.get("by_session")
-                                        or {}).items():
-                        _ids = [r["id"] for r in _rows]
-                        if not _ids:
-                            continue
+                    # ONE annotation pass over ALL fetched ids (the C3-1
+                    # precedent) — not one props+speaker pair per seeded
+                    # session, which made the cost model "1 batched query"
+                    # false at up to 5 seeds.
+                    _all_ids = [r["id"]
+                                for _rows in (_fetch.get("by_session")
+                                              or {}).values()
+                                for r in _rows]
+                    _by_annotated: dict[str, dict] = {}
+                    if _all_ids:
                         # annotate on the SAME surface as the base pool
                         # (props → speaker derivation → annotation) and
                         # stamp the driver's OWN leg ("session"), never a
                         # borrowed "fts".
-                        _props = point_props_for_hits(sdk._get_proj(), _ids)
+                        _props = point_props_for_hits(
+                            sdk._get_proj(), _all_ids)
                         _turn_ids = [
                             p.get("source_turn_id")
                             for p in _props.values()
@@ -1725,11 +1731,16 @@ def retrieve_for_question(
                             {"id": pid,
                              "content": (_props.get(pid) or {}).get(
                                  "content", "")}
-                            for pid in _ids]
+                            for pid in _all_ids]
                         _hits = annotate_pool_additions(
                             _raw, _props, dates, match_source="session")
-                        if _hits:
-                            _added_by_session[_sid] = _hits
+                        _by_annotated = {h["id"]: h for h in _hits}
+                    for _sid, _rows in (_fetch.get("by_session")
+                                        or {}).items():
+                        _group = [_by_annotated[r["id"]] for r in _rows
+                                  if r["id"] in _by_annotated]
+                        if _group:
+                            _added_by_session[_sid] = _group
                     if _added_by_session:
                         _merged = _sr.reinjection_merge_order(
                             pool, _added_by_session,
@@ -1751,13 +1762,14 @@ def retrieve_for_question(
                         pool = _merged
         except Exception:  # noqa: BLE001, RUF100
             # fail-open: any failure (fetch OR merge stage) keeps the
-            # ORIGINAL pool — byte-identical to the one-shot result.
+            # ORIGINAL pool — byte-identical to the one-shot result. The
+            # SEED census is NOT wiped: "seeded but the fetch failed" must
+            # stay distinguishable from "nothing seeded" (a systematically
+            # broken fetch would otherwise read as an honest null).
             import logging as _logging
             _logging.getLogger(__name__).warning(
                 "C4 source-session re-injection failed for %s — keeping "
                 "the original pool (fail-open)", qid, exc_info=True)
-            sr_seeds = []
-            sr_seeded = 0
             sr_injected_per_session = {}
             sr_injected_total = 0
             sr_injected_per_session_merged = {}
@@ -2211,7 +2223,7 @@ def retrieve_for_question(
             "marked_chunks_in_pool": len(depth_marked_chunk_ranks),
         },
         "retrieval_latency_ms": round(
-            latency_ms + rerank_ms + loop_latency_ms, 2),
+            latency_ms + rerank_ms + loop_latency_ms + sr_latency_ms, 2),
     }
     # R6 (#1545) D6: the rerank pass is recorded ADDITIVELY — the leg-mix
     # ``rerank`` bucket counts selection-loss only (the ``mmr_dropped`` hits),

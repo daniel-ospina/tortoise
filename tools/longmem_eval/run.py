@@ -1252,7 +1252,7 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # convention), so a pre-feature checkpoint refuses
                        # on resume and an arm/guard flip can never cross.
                        session_reinjection: bool = False,
-                       session_reinjection_guard: bool = False,
+                       session_reinjection_guard: bool = True,
                        # C5 (#2521, #2513): the aggregative-intent coverage-
                        # check arm — conditional presence like the other C2/C5
                        # knobs (a flagged checkpoint resumed without the arm

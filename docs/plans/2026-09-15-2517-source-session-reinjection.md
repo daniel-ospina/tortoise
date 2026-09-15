@@ -261,8 +261,10 @@ resolved bools, ALWAYS present** — matching every sibling boolean arm
 resolved arm bool; `session_reinjection_guard` = the resolved guard bool (present
 whenever the arm key is present, i.e. governed by the **arm's** OFF, not the
 guard's). `tests/test_eval_resume_retry_failed.py::_resume_fingerprint()` gains
-`session_reinjection=False` + `session_reinjection_guard=False` (the #2649 heal
-shape), so a checkpoint written by one arm refuses under another (the
+`session_reinjection=False` + `session_reinjection_guard=True` (the #2649 heal
+shape — the guard is the RESOLVED value: `run_evaluation` maps unset/None to
+True, and the hand-written fixture must match the run path or the resume is
+refused as stale), so a checkpoint written by one arm refuses under another (the
 `CheckpointStaleError` contract). **Consequence, stated honestly:** because the keys
 are always present on a new run, a **pre-feature checkpoint refuses on resume**
 (`CheckpointStaleError`) — the same safe direction as every arm added since #1745.
@@ -426,7 +428,7 @@ base pool unchanged; (d) caps hold (C5 + injected budget + reader item/token);
 (e) TR excluded; (f) the guard is a no-op on a single-session pool; (g) guard OFF
 still re-caps **through the same function**. Registry mirrors:
 `tests/test_eval_resume_retry_failed.py` (hand-built resume fingerprint — add
-`session_reinjection=False` + `session_reinjection_guard=False`),
+`session_reinjection=False` + `session_reinjection_guard=True`, the resolved value),
 `tests/test_uri_env_mutations_declared.py` (**required**, not optional: this file
 necessarily mutates `TORTOISE_DB_URI` via the `_probe` suffix, exactly as
 `test_coverage_loop.py` does at `:71`). *(`tests/test_longmem_runner.py`'s golden

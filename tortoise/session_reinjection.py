@@ -40,7 +40,8 @@ census, not hidden).
 
 Coupling: ``retrieval → coverage_loop`` is the pinned one-way direction;
 this module imports the shared contract from ``tortoise.retrieval`` only
-(no new edge). OFF by default; the eval arms it via
+(the ``DEFAULT_POOL_*`` aliases resolve there) — it adds NO new module
+edge. OFF by default; the eval arms it via
 ``--session-reinjection`` / ``TORTOISE_LME_SESSION_REINJECTION``.
 """
 from __future__ import annotations
@@ -50,11 +51,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from tortoise.coverage_loop import (
-    DEFAULT_LOOP_GUARD_WINDOW,
-    DEFAULT_LOOP_SESSION_CAP,
-)
 from tortoise.retrieval import (
+    DEFAULT_POOL_GUARD_WINDOW,
+    DEFAULT_POOL_SESSION_CAP,
     SESSION_TRANSCRIPT_KIND,
     guard_and_recap_pool,
     session_key_of,
@@ -204,8 +203,8 @@ def reinjection_merge_order(
         seed_order: list[str] | None = None,
         session_key: Callable[[dict], str] | None = None,
         guard: bool = True,
-        guard_window: int = DEFAULT_LOOP_GUARD_WINDOW,
-        per_session_cap: int = DEFAULT_LOOP_SESSION_CAP,
+        guard_window: int = DEFAULT_POOL_GUARD_WINDOW,
+        per_session_cap: int = DEFAULT_POOL_SESSION_CAP,
         max_chunks_per_session: int) -> list[dict]:
     """MERGE (pure, additive): splice each seeded session's injected group
     immediately after that session's LAST base rank in the pool, in

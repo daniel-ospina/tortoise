@@ -272,6 +272,11 @@ def test_fetch_failure_keeps_the_base_pool(seeded_sdk, monkeypatch):
                                 pool_size=60, session_reinjection=True)
     assert [h["id"] for h in ret["hits"]] == base
     st = ret["session_reinjection_stats"]
+    # the SEED census survives the fail-open: "seeded but the fetch failed"
+    # is distinguishable from "nothing seeded" (falsifier 4's honest null)
+    assert st["seed_sessions"] == [SR_A, SR_B]
+    assert st["seeded"] == 2
+    assert st["fetch_ok"] is False
     assert st["injected_total"] == 0 and st["injected_merged"] == 0
 
 
@@ -341,7 +346,10 @@ def test_c5_per_session_chunk_cap_holds_on_the_reinjected_pool(seeded_sdk):
                      if h.get("point_kind") == "session-transcript"
                      and h.get("session_id") == SR_A)
     assert n_chunks_a <= 2
-    assert ret["session_reinjection_stats"]["dropped_by_cap"] >= 1
+    st = ret["session_reinjection_stats"]
+    # the re-cap's OWN signal (not the fetch budget's dropped_by_cap):
+    # fewer injected chunks survived than were merged in
+    assert st["injected_merged"] < st["injected_total"]
 
 
 # ── (e) TR exclusion ─────────────────────────────────────────────────────
@@ -389,14 +397,16 @@ def test_guard_off_still_recaps(seeded_sdk):
                                 id=f"srAc{i}", session_id=SR_A,
                                 status="draft")
     _stamp_chunk_props(seeded_sdk)
+    # max_chunks_per_session=2 is TIGHTER than the fetch budget (3), so the
+    # retained count can only be 2 if the re-cap actually ran.
     ret = retrieve_for_question(
         seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
         session_reinjection=True, session_reinjection_guard=False,
-        max_chunks_per_session=3)
+        max_chunks_per_session=2)
     n_chunks_a = sum(1 for h in ret["hits"]
                      if h.get("point_kind") == "session-transcript"
                      and h.get("session_id") == SR_A)
-    assert n_chunks_a <= 3
+    assert n_chunks_a == 2
 
 
 # ── (h) census keys + env gate + CLI + fingerprint + abort ───────────────
