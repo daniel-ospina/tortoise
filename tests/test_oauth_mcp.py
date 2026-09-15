@@ -912,7 +912,7 @@ class TestRedirectUriParserDifferential:
 
 
 class TestCursorPrivateUseRedirectScheme:
-    """#2849 — Cursor IDE's MCP OAuth DCR sends a private-use callback scheme
+    """#3579 — Cursor IDE's MCP OAuth DCR sends a private-use callback scheme
     (RFC 8252 §7.1). Registration is all-or-nothing, so before this change a
     single `cursor://` entry rejected the WHOLE request: Cursor got no
     client_id, never reached /oauth/authorize, and a Cursor tester had no way
@@ -964,9 +964,17 @@ class TestCursorPrivateUseRedirectScheme:
     def test_fragment_refused_for_https_and_loopback_too(self):
         """RFC 6749 §3.1.2. The error message already promised this; the check
         now matches it for every scheme (registration-time only, so no existing
-        registered client is affected)."""
+        registered client is affected).
+
+        The BARE trailing `#` is the case review caught: `parsed.fragment` is
+        empty for it, so a value testing only `parsed.fragment` was a false
+        PASS on this very check."""
         assert _valid_redirect_uri("https://app.example.com/cb#frag") is False
         assert _valid_redirect_uri("http://localhost:8787/cb#frag") is False
+        assert _valid_redirect_uri("https://app.example.com/cb#") is False
+        assert _valid_redirect_uri("http://localhost:8787/cb#") is False
+        assert _valid_redirect_uri("https://app.example.com/cb?#") is False
+        assert _valid_redirect_uri(self.CURSOR_CB + "#") is False
         assert _valid_redirect_uri("https://app.example.com/cb") is True
 
     def test_cursor_scheme_still_matches_exactly_at_authorize(self):
@@ -978,6 +986,10 @@ class TestCursorPrivateUseRedirectScheme:
         assert not m(self.CURSOR_CB, "cursor://evil.example/oauth/callback")
         assert not m(self.CURSOR_CB,
                      "cursor://anysphere.cursor-mcp/oauth/other")
+        assert not m("http://localhost:8787/callback",
+                     "http://localhost:8787/callback#")
+        assert not m("http://localhost:8787/callback#frag",
+                     "http://localhost:8787/callback#other")
         assert not m(self.CURSOR_CB,
                      "cursor://anysphere.cursor-mcp/oauth/callback?x=1")
 
@@ -1044,7 +1056,8 @@ class TestCursorPrivateUseRedirectScheme:
                     "cursor://anysphere.cursor-mcp/oauth/other",
                     "https://anysphere.cursor-mcp/oauth/callback",
                     self.CURSOR_CB + "?x=1",
-                    self.CURSOR_CB + "#frag"):
+                    self.CURSOR_CB + "#frag",
+                    self.CURSOR_CB + "#"):
             r = tc.get("/oauth/authorize", params={
                 "client_id": reg["client_id"], "redirect_uri": bad,
                 "response_type": "code", "code_challenge": "x" * 60,
