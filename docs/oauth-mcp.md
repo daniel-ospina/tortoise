@@ -45,7 +45,7 @@ needs no client_id paste.
    `code_challenge` (PKCE, S256 only), `redirect_uri`, and an optional
    RFC 8707 `resource`.
 
-   **`redirect_uri` acceptance at registration (#2849).** An entry is accepted
+   **`redirect_uri` acceptance at registration (#3579).** An entry is accepted
    when it is `https`, an `http` loopback URI, or a **private-use URI scheme**
    listed in `_NATIVE_REDIRECT_SCHEMES` — currently `cursor` alone, per
    RFC 8252 §7.1, because Cursor IDE's MCP OAuth DCR still sends
@@ -54,7 +54,8 @@ needs no client_id paste.
    costs the client its `client_id`, and with it every sign-in path), and the
    consent page hands the code over by navigating to the raw value, so a scheme
    a browser executes (`javascript:`, `data:`) must never be registrable. A
-   fragment is refused for every scheme (RFC 6749 §3.1.2).
+   fragment is refused for every scheme (RFC 6749 §3.1.2) — tested as the raw
+   `#` delimiter, so a bare trailing `#` (an empty fragment) is refused too.
 
    **`redirect_uri` matching (#2846).** For **loopback** redirect URIs the port
    is ignored when matching the registered value (RFC 8252 §7.3 — a native

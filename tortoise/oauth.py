@@ -301,11 +301,15 @@ def _valid_redirect_uri(uri: str) -> bool:
         parsed = urlparse(uri)
     except ValueError:
         return False
-    if parsed.fragment:
+    if "#" in uri:
         # RFC 6749 §3.1.2 — a fragment is never a valid redirect component, and
-        # this function's error message already promises rejection. Enforced
-        # for every scheme so no registered value can smuggle one past the
-        # consent page's `redirect_uri + "?code=…"` navigation.
+        # this function's error message already promises rejection. Tested as
+        # the literal delimiter, NOT `parsed.fragment`: a bare trailing `#`
+        # parses to an EMPTY fragment, so `if parsed.fragment:` let it through
+        # while it still made the consent page's `redirect_uri + "?code=…"`
+        # navigation land the code inside the fragment (caught in review — both
+        # reviewers, independently). `#` can only ever begin the fragment
+        # (RFC 3986 pchar excludes it), so presence is the correct predicate.
         return False
     if parsed.scheme == "https" and parsed.hostname:
         return True
@@ -373,7 +377,14 @@ def _redirect_uri_matches(registered: str | None,
         and reg.path == pre.path
         and reg.params == pre.params
         and reg.query == pre.query
-        and reg.fragment == pre.fragment
+        # A `#` can no longer be REGISTERED (see `_valid_redirect_uri`), so a
+        # value carrying one here is a legacy row or an attack: the port
+        # relaxation is refused for it outright rather than comparing the
+        # (possibly empty) fragments — a bare trailing `#` parses to an EMPTY
+        # fragment, compared equal to "no fragment", and matched a registration
+        # without one (review round 1). Identical strings still match via the
+        # exact-equality shortcut above, preserving legacy rows.
+        and "#" not in registered and "#" not in presented
     )
 
 
