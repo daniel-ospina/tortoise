@@ -299,14 +299,10 @@ def test_health_answers_while_the_default_executor_is_saturated(
     single bounded daemon thread and is pinned off for this window (see the
     quiesce note below), so it cannot mask or counterfeit a regression here.
 
-    The contract asserted is therefore not "the probe runs on the request
-    path" (the pre-#2850 assertion) but "the request path performs NO DB I/O
-    and NO executor / thread hand-off while every shared-executor worker is
-    saturated". THREE independent assertions guard the seams this test can
-    actually SEE — the ``_probe_db`` coordinator seam and the event loop's
-    executor entry point, WITHIN the request window. No single one covers every
-    shape, so the split is stated explicitly rather than attributed to one
-    witness, and the limits are listed under WHAT IS NOT COVERED:
+    The contract asserted is not "the probe runs on the request path" (the
+    pre-#2850 assertion) but "the request path takes no DB I/O and no executor
+    hand-off that reaches either witnessed seam, inside the request window".
+    Three assertions guard that contract; none covers every shape:
 
     * BUDGET (``elapsed < HEALTH_BUDGET_S``, via ``wait_for``). Catches a probe
       that runs SYNCHRONOUSLY on the loop and an UNBOUNDED
@@ -341,33 +337,17 @@ def test_health_answers_while_the_default_executor_is_saturated(
       on the worker ever running — which is what makes it independent of how
       promptly that worker would have been scheduled.
 
-    WHAT IS NOT COVERED (stated so the claim stays true): this guards the
-    ``_probe_db``/coordinator seam and the event loop's executor entry point,
-    and the submission record is scoped to the REQUEST WINDOW.
-
-      * The request window is a WINDOW, not an instant: a submission made AFTER
-        the response is outside it, and the submission record cannot see it.
-        Such a submit is usually caught anyway — not by the submission record
-        (the patch is uninstalled), but by the INVOCATION witness, because the
-        hogs are released as soon as the window closes, so a post-window worker
-        DOES start and its probe is recorded. That recovery is a test-lifetime
-        accident, not a guarantee: it holds only while the loop is still alive
-        when the deferred callback fires. This shape escapes precisely because
-        its timer never fires before the assertions run:
-            loop.call_later(0.5, lambda: loop.run_in_executor(None, _probe_db))
-      * DB I/O reaching the database through neither witnessed seam — a direct
-        ``_get_proj().g.query(...)``, or a callable that does its OWN DB I/O
-        (i.e. does not resolve ``ha_mod._probe_db``, so the invocation witness
-        cannot see it) handed to a raw ``threading.Thread`` or a
-        ``ThreadPoolExecutor`` — is covered by the budget alone, so it is
-        caught only if it blocks the handler past the budget. (A
-        ``.submit(_probe_db)`` IS caught — see the INVOCATION bullet above: it
-        starts a worker, and the record is taken before the sleep.)
-
-    NOT a gap, contrary to an earlier draft of this note: the submission witness
-    records by ENTRY POINT, not by callable identity, so a NEW probe callable
-    wired through ``asyncio.to_thread``/``run_in_executor`` IS caught whether or
-    not it resolves ``ha_mod._probe_db``.
+    OUT OF SCOPE (not "gaps" in the guard, just its edge): I/O or a hand-off
+    that reaches neither seam and does not block the handler — a direct
+    ``_get_proj().g.query(...)``, a callable doing its own DB I/O handed to a
+    raw thread or a separate executor, or any submission made after the request
+    window (the patch is uninstalled). The budget catches those only if the
+    handler blocks. The deferred ``loop.call_later(0.5, ...)`` shape escapes
+    because its timer does not fire before the loop closes; a post-window
+    submit that DOES fire is caught by the INVOCATION witness once the pooled
+    hogs are released — an accident of test lifetime, not a guarantee. The
+    submission witness records by ENTRY POINT, not callable identity, so a NEW
+    callable routed through ``to_thread``/``run_in_executor`` IS caught.
 
     Recording every caller (rather than
     filtering out the refresher's thread NAME) is deliberate: the one name a
@@ -427,7 +407,7 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # plus 1s slack, so a slow-but-healthy probe can never red the suite and
     # the bound stays honest if those symbols change (review finding: a
     # hardcoded 4.0 sat 0.9s above the design's own worst case). Below the
-    # production probe budget (5s), so the verdict comes from design, not
+    # production probe budget (5.6s), so the verdict comes from design, not
     # timer ordering.
     from tortoise.monitoring import (
         PROBE_RETRY_DELAY,
@@ -447,7 +427,7 @@ def test_health_answers_while_the_default_executor_is_saturated(
     # reaches THIS seam is recorded (every invocation, no thread-name filter),
     # then blocks far past the budget and raises. It does NOT cover DB I/O on
     # the request path that reaches the database by another route (see the
-    # docstring's WHAT IS NOT COVERED).
+    # docstring's OUT OF SCOPE paragraph).
     #
     # QUIESCE THE REFRESHER — verified, not assumed. This test enters the
     # `client` fixture, and that fixture wraps the app in `TestClient(app)`,
