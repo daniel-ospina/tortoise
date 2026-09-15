@@ -151,6 +151,18 @@ or `${TORTOISE_API_KEY}`); Desktop/Web configs stay literal-with-privacy-note
 the HOSTED connect — self-hosted agents apply the §3a delta to the same
 rows.
 
+**Transport `type` (canonical):** the hosted endpoint is Streamable HTTP.
+Where a client requires a `type`, use `"http"` — the protocol's spec name is
+Streamable HTTP, but `"streamable-http"` is only a Claude Code alias:
+Cursor's IDE may tolerate it while the Cursor CLI can drop the whole config
+file, and Pi ignores `type` entirely. Never teach `"streamable-http"`;
+`"http"` is the only universally safe value.
+Claude Code **requires** `"type": "http"` in a JSON `.mcp.json` entry (a
+`url` with no `type` is read as stdio and the server is skipped); Cursor and
+Pi infer the transport from `url` and carry **no** `type` — that is also the
+tested shape in `tortoise/__main__.py::_harness_mcp_config` and the
+dashboard wizard (`website/apps/dashboard/src/harnesses.js`).
+
 ### Claude Code (self-install)
 
 ```bash
