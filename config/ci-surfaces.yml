@@ -624,6 +624,23 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_signup_form_safety.py
+  # #3501: the BFF auth suites. These stand up a real `wrangler pages dev` +
+  # a dependency-free mock Supabase, so they are the only tests that exercise
+  # the server-held-session flow end to end (cookie attributes, PKCE,
+  # refresh, the /api/v1 proxy, and 401-vs-503 semantics). Registered under
+  # `onboarding` because that surface already owns the website/auth HTML
+  # contract tests (test_signup_form_safety, test_welcome_url_consolidation,
+  # test_website_static) — the BFF suites are the same surface, executed for
+  # real instead of asserted statically.
+  - auth/test_bff_flow.py
+  - auth/test_proxy.py
+  - auth/test_welcome_and_password.py
+  # #3501: the migration-backlog gate. Static, repo-wide, and the acceptance
+  # criterion for #3559 — asserts that no browser surface reads or holds
+  # session material and that client data calls go through the same-origin
+  # BFF. Lives at the tests/ root because it scans all of website/, not just
+  # the onboarding pages.
+  - test_no_legacy_token_path.py
   - test_waitlist_form.py
   - test_w7_publish.py
   - test_welcome_url_consolidation.py

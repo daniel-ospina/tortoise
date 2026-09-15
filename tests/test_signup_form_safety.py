@@ -29,6 +29,23 @@ SIGNIN = (WEBSITE / "signin.html").read_text()
 WELCOME = (WEBSITE / "welcome.html").read_text()
 
 
+def _strip_html_comments(text: str) -> str:
+    """Remove HTML and JS comments from a page source.
+
+    Absence assertions MUST run against comment-stripped source. welcome.html
+    explains the #3501 removal in a comment that names the very markers those
+    assertions forbid (`createTortoiseSupabaseClient`, `runSessionBridge`), so
+    an unstripped check fails on the documentation of the fix rather than on a
+    reintroduction of the bug.
+    """
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"^[ \t]*//.*$", "", text, flags=re.M)
+
+
+WELCOME_CODE = _strip_html_comments(WELCOME)
+
+
 # ── Form safety: method=post + explicit action kills the GET echo ──────────
 
 
@@ -183,16 +200,50 @@ def test_recovery_flow_present() -> None:
     recovery_form = re.search(r'<form[^>]*id="recovery-form"[^>]*>', SIGNIN).group(0)
     assert re.search(r'method="post"', recovery_form), "recovery form must be method=post"
     assert re.search(r'action="/signin"', recovery_form), "recovery form must action=/signin"
-    # welcome.html: recovery-landing reset panel
+    # welcome.html: recovery-landing reset panel.
+    #
+    # #3501 replaced the client-side reset (a supabase-js `updateUser` call on a
+    # JavaScript-readable session) with a same-origin POST to the BFF. The
+    # assertions below pin the NEW contract; the ABSENCE assertions after them
+    # are the load-bearing half — a regression that reintroduces the bridge
+    # would pass every positive pin here while restoring the #3485 login loop.
     assert 'id="reset-form"' in WELCOME
     assert 'id="reset-error"' in WELCOME
     assert 'id="btn-reset"' in WELCOME
-    assert "PASSWORD_RECOVERY" in WELCOME
-    assert "updateUser" in WELCOME
-    assert "resetInFlight" in WELCOME
-    # recovery mode must short-circuit the session bridge (no team mint mid-reset)
-    assert "runSessionBridge" in WELCOME
-    assert "recoveryMode" in WELCOME
+    assert 'action="/auth/update-password"' in WELCOME
+    assert 'fetch("/auth/update-password"' in WELCOME_CODE
+    assert 'credentials: "same-origin"' in WELCOME_CODE
+    # #527 form-safety contract still holds on the new form: method=post with
+    # an explicit same-origin action (the native form must not GET-echo the
+    # password in a query string if JS fails).
+    reset_form = re.search(r'<form[^>]*id="reset-form"[^>]*>', WELCOME).group(0)
+    assert re.search(r'method="post"', reset_form), "reset form must be method=post"
+    assert re.search(r'action="/auth/update-password"', reset_form), (
+        "reset form must action=/auth/update-password"
+    )
+    # Double-submit guard (bucket burn): the in-flight latch must survive.
+    assert "var inFlight = false" in WELCOME_CODE
+    assert "if (inFlight) return" in WELCOME_CODE
+    # 401 vs 503 must stay DISTINCT. 401 = the recovery link is dead; the
+    # catch-all must say "try again", never "you are signed out" — conflating
+    # store/fault with signed-out is the #3485 class.
+    assert "r.status === 401" in WELCOME_CODE
+    assert "This reset link has expired or is invalid" in WELCOME_CODE
+    assert "sign in with your new password" in WELCOME_CODE
+    # The legacy client bridge is GONE. It could not read an HttpOnly session
+    # cookie, so its no-session branch fired on EVERY successful login and
+    # bounced the user back to /auth.
+    for legacy in (
+        "runSessionBridge",
+        "createTortoiseSupabaseClient",
+        "PASSWORD_RECOVERY",
+        "updateUser",
+        "supabase",
+    ):
+        assert legacy not in WELCOME_CODE, (
+            f"welcome.html still contains {legacy!r} — the client session "
+            "bridge was removed in #3501 and must not come back"
+        )
     assert "This reset link has expired or is invalid. Request a new one." in WELCOME
 
 
@@ -300,16 +351,30 @@ def test_inline_scripts_pass_node_syntax_check(fname: str) -> None:
 # ── Welcome page: defensive session wait (the "No active session" bounce) ──
 
 
-def test_welcome_waits_for_session_before_erroring() -> None:
-    """welcome.html must give the email-confirmation / OAuth callback a
-    bounded wait for the session (SIGNED_IN / getSession) before redirecting
-    an unauthenticated visitor to the single auth page (/auth) — prevents
-    bouncing legitimate callbacks to a dead state on older/cached
-    supabase-js builds."""
-    assert "waitForSession" in WELCOME
-    assert "SIGNED_IN" in WELCOME
-    # #1494: the no-session redirect uses location.replace — hard gate,
-    # Back cannot return to /welcome; the head gate covers the immediate
-    # cookie-missing case, this is the async-callback fallback.
-    assert 'window.location.replace("/auth"' in WELCOME
-    assert 'window.location.replace("/auth" + window.location.search + landingHash)' in WELCOME
+def test_welcome_does_not_wait_for_a_client_session() -> None:
+    """#3501: welcome.html must NOT wait for, or read, a client-side session.
+
+    This replaces the pre-#3501 assertion that the page ran a bounded
+    `waitForSession`/`SIGNED_IN` wait. Under the BFF there is no
+    JavaScript-readable session, so that wait could only ever time out — and
+    its no-session branch bounced every successfully-authenticated visitor back
+    to /auth. That was the #3485 login loop, reproduced by construction for
+    every user.
+
+    The decision now happens SERVER-side in `functions/welcome.ts`, which reads
+    the HttpOnly cookie and redirects before any HTML is served (pinned by
+    `tests/auth/test_welcome_and_password.py`). This test pins the ABSENCE of
+    the client-side implementation, so a regression fails here instead of in
+    production.
+    """
+    for legacy in ("waitForSession", "SIGNED_IN", "getSession"):
+        assert legacy not in WELCOME_CODE, (
+            f"welcome.html still contains {legacy!r} — the client-side session "
+            "wait was the #3485 login loop and must stay removed (#3501)"
+        )
+    # The page must not issue the auth redirect at all; that is the server's
+    # job now. A `location.replace`/`href` to /auth here would mean the
+    # decision moved back into JavaScript.
+    assert "/auth'" not in WELCOME_CODE
+    assert '"/auth"' not in WELCOME_CODE
+    assert "location.replace" not in WELCOME_CODE
