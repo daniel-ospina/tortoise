@@ -123,7 +123,7 @@ jobs:
                   # #3501: the BFF auth suites live here and had NO path entry,
                   # so a PR touching only them could not trigger the job that
                   # runs them — the job would be skipped, not failed.
-                  startswith("tests/auth/"),
+                  startswith("tests/e2e/auth/"),
                   isfile("tests/test_no_legacy_token_path.py"),
                   isfile("tests/e2e/test_auth_bff_clickthrough.py",
                          "tests/e2e/test_auth_cross_origin_cookie.py"),
@@ -638,7 +638,7 @@ jobs:
           npx --yes wrangler@4 pages dev --help >/dev/null
       # #3501: the auth suites resolve wrangler via `shutil.which("wrangler")` and
       # SKIP when it is missing — which is exactly what happened on a fresh
-      # runner: PATH had no wrangler, so `pytest tests/auth/` reported
+      # runner: PATH had no wrangler, so `pytest tests/e2e/auth/` reported
       # "33 skipped", exit 0, and the step was green while asserting nothing.
       # Verified with a wrangler-less PATH. The npx pre-warm above does NOT put
       # wrangler on PATH; this does.
@@ -705,7 +705,7 @@ jobs:
       # real ES256 JWKS verification, real PKCE. Ports are claimed at runtime so
       # this can never silently no-op on a busy runner.
       - name: BFF auth flow + proxy suites (#3501)
-        run: python -m pytest tests/auth/ -q -rs -p no:cacheprovider
+        run: python -m pytest tests/e2e/auth/ -q -rs -p no:cacheprovider
         env:
           TORTOISE_TEST_CARVE_OUT: "1"
       # Browser-level: the ONLY place the security property is asserted as a

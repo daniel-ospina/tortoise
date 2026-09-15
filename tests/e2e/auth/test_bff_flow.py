@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 from bff_test_helpers import require_toolchain
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 WEBSITE_DIR = REPO_ROOT / "website"
 MOCK = Path(__file__).resolve().parent / "mock_supabase.mjs"
 

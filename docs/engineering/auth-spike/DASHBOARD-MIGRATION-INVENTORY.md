@@ -24,12 +24,12 @@ dashboard keeps working on the current model until this lands as one coherent un
 The D1 row stores no profile data (§8.1 excludes `user_metadata`), so the BFF asks GoTrue with
 the token it holds. A profile-lookup failure is **non-fatal** — identity degrades to id-only;
 it must never sign the user out over a cosmetic lookup.
-Verified by `tests/auth/test_bff_flow.py::test_session_contract_includes_profile_for_the_chrome`.
+Verified by `tests/e2e/auth/test_bff_flow.py::test_session_contract_includes_profile_for_the_chrome`.
 
 ## Prerequisite — DONE
 
 The W6 proxy exists: `functions/api/v1/[[path]].ts` (+ `_shared/auth/token.ts`).
-Verified by `tests/auth/test_proxy.py` (6 tests).
+Verified by `tests/e2e/auth/test_proxy.py` (6 tests).
 
 ## Change list
 

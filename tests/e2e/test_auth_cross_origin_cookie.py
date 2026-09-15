@@ -30,7 +30,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WEBSITE_DIR = REPO_ROOT / "website"
-MOCK = REPO_ROOT / "tests" / "auth" / "mock_supabase.mjs"
+MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
 APP_PORT = int(os.environ.get("AUTH_CX_APP_PORT", "8993"))
 API_PORT = int(os.environ.get("AUTH_CX_API_PORT", "9101"))

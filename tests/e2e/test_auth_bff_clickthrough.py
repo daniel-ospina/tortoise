@@ -1,7 +1,7 @@
 """
 Real-browser clickthrough for the #3501 BFF auth flow.
 
-Unlike `tests/auth/test_bff_flow.py` (HTTP-level), this drives an actual
+Unlike `tests/e2e/auth/test_bff_flow.py` (HTTP-level), this drives an actual
 Chromium through the flow and asserts the properties that only a browser can
 demonstrate:
 
@@ -29,7 +29,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WEBSITE_DIR = REPO_ROOT / "website"
-MOCK = REPO_ROOT / "tests" / "auth" / "mock_supabase.mjs"
+MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
 # Ports are claimed at runtime. Both e2e modules previously defaulted to the
 # SAME pair (8993/8994) and are run in one pytest invocation in CI, and

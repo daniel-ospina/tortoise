@@ -24,9 +24,9 @@ from pathlib import Path
 import pytest
 from bff_test_helpers import pick_free_port, require_toolchain, stop
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 WEBSITE_DIR = REPO_ROOT / "website"
-MOCK = REPO_ROOT / "tests" / "auth" / "mock_supabase.mjs"
+MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
 APP_PORT = int(os.environ.get("AUTH_PROXY_APP_PORT", "8995"))
 MOCK_PORT = int(os.environ.get("AUTH_PROXY_MOCK_PORT", "8996"))
