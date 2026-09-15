@@ -44,9 +44,9 @@ from tortoise.hosted_api import (
     _require_owner_admin,
     _suspended_detail,
     app,
-    get_current_team,
-    get_current_team_session,
-    get_current_team_session_ungated,
+    get_current_org,
+    get_current_org_session,
+    get_current_org_session_ungated,
     get_current_user,
 )
 from tortoise.sdk import TortoiseSDK
@@ -479,12 +479,12 @@ class TestCreatedByOnKeysList:
              "created_via": None,  # legacy row — NO created_by key at all
              "created_at": "2026-01-01T00:00:00Z", "revoked_at": None},
         ])
-        app.dependency_overrides[get_current_team_session_ungated] = \
+        app.dependency_overrides[get_current_org_session_ungated] = \
             lambda: _list_override(_SB_TEAM)
         try:
             r = tc.get("/v1/team/keys")
         finally:
-            app.dependency_overrides.pop(get_current_team_session_ungated, None)
+            app.dependency_overrides.pop(get_current_org_session_ungated, None)
         assert r.status_code == 200, r.text
         by_id = {k["id"]: k for k in r.json()["keys"]}
         assert by_id["k-modern"]["created_by"] == _U2
@@ -503,12 +503,12 @@ class TestCreatedByOnKeysList:
             "CREATE (k:APIKey {id:'k-legacy', org_id:'team-r', "
             "key_hash:'h', key_prefix:'tt_x', created_at:'2026-01-01T00:00:00Z'})",
         )
-        app.dependency_overrides[get_current_team_session_ungated] = \
+        app.dependency_overrides[get_current_org_session_ungated] = \
             lambda: _list_override("team-r")
         try:
             r = tc.get("/v1/team/keys")
         finally:
-            app.dependency_overrides.pop(get_current_team_session_ungated, None)
+            app.dependency_overrides.pop(get_current_org_session_ungated, None)
         assert r.status_code == 200, r.text
         by_id = {k["id"]: k for k in r.json()["keys"]}
         assert by_id["k-modern"]["created_by"] == _U2
@@ -532,12 +532,12 @@ class TestCreatedByOnKeysList:
             "created_at:'2026-01-01T00:00:00Z'})",
             params={"cb": _U3},
         )
-        app.dependency_overrides[get_current_team_session_ungated] = \
+        app.dependency_overrides[get_current_org_session_ungated] = \
             lambda: _list_override("team-r")
         try:
             r = tc.get("/v1/team/keys", params={"graph_id": "g1"})
         finally:
-            app.dependency_overrides.pop(get_current_team_session_ungated, None)
+            app.dependency_overrides.pop(get_current_org_session_ungated, None)
         assert r.status_code == 200, r.text
         keys = r.json()["keys"]
         assert [k["id"] for k in keys] == ["k-g1"]  # g2 filtered out
@@ -667,7 +667,7 @@ _SESSION_HEADERS = [(b"authorization", b"Bearer eyJ.sess")]
 class TestLaneMarkers:
     def test_supabase_session_dict_carries_session_user_id_and_auth_lane(
             self, sb, monkeypatch):
-        """Production JWT branch of get_current_team_session attaches
+        """Production JWT branch of get_current_org_session attaches
         session_user_id (the #2297/#2380 gate predicate) + the explicit
         auth_lane='session' documentation marker — in Supabase mode."""
         _, fake = sb
@@ -679,7 +679,7 @@ class TestLaneMarkers:
 
         monkeypatch.setattr(sa, "verify_session_jwt", _fake_verify)
         team = asyncio.run(
-            get_current_team_session_ungated(_make_request(_SESSION_HEADERS)))
+            get_current_org_session_ungated(_make_request(_SESSION_HEADERS)))
         assert team["session_user_id"] == _U1
         assert team["auth_lane"] == "session"
         assert team["org_id"] == _SB_TEAM
@@ -689,15 +689,15 @@ class TestLaneMarkers:
         no markers fabricated. A test that injects session_user_id keeps the
         role gate live (the ⛔ invariant — the predicate is session_user_id
         presence, never the auth_lane marker)."""
-        app.dependency_overrides[get_current_team] = lambda: {
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": _SB_TEAM, "key_id": "key-1", "tier": "free",
             "scopes": [], "legacy_full_access": True,
         }
         try:
             team = asyncio.run(
-                get_current_team_session_ungated(_make_request(_SESSION_HEADERS)))
+                get_current_org_session_ungated(_make_request(_SESSION_HEADERS)))
         finally:
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
         assert "session_user_id" not in team  # key-auth shape → pass-through
         assert "auth_lane" not in team
 
@@ -707,7 +707,7 @@ class TestLaneMarkers:
         still run the #2297/#2380 role gate: member face → mint 403."""
         tc, fake = sb
         _sb_membership(fake, _SB_TEAM, _U1, "member")
-        app.dependency_overrides[get_current_team_session] = lambda: {
+        app.dependency_overrides[get_current_org_session] = lambda: {
             "org_id": _SB_TEAM, "tier": "free", "key_id": None,
             "scopes": [], "legacy_full_access": True,
             "delegation_depth": None, "session_user_id": _U1,
@@ -716,7 +716,7 @@ class TestLaneMarkers:
         try:
             r = tc.post("/v1/team/keys", json={})
         finally:
-            app.dependency_overrides.pop(get_current_team_session, None)
+            app.dependency_overrides.pop(get_current_org_session, None)
         _assert_role_403(r)
         assert fake.tables["api_keys"] == []  # nothing minted
 
@@ -725,7 +725,7 @@ class TestLaneMarkers:
         CLASS gates only — the #2297/#2380 role gate must NOT fire (mint
         200, created_by falls back to 'api' as documented)."""
         tc, fake = sb
-        app.dependency_overrides[get_current_team_session] = lambda: {
+        app.dependency_overrides[get_current_org_session] = lambda: {
             "org_id": _SB_TEAM, "tier": "free", "key_id": "key-1",
             "scopes": [], "legacy_full_access": True,
             "delegation_depth": None, "graph_id": None,
@@ -734,7 +734,7 @@ class TestLaneMarkers:
         try:
             r = tc.post("/v1/team/keys", json={})
         finally:
-            app.dependency_overrides.pop(get_current_team_session, None)
+            app.dependency_overrides.pop(get_current_org_session, None)
         assert r.status_code == 200, r.text
         assert fake.tables["api_keys"][0]["created_by"] == "api"
 
@@ -755,7 +755,7 @@ class TestLaneMarkers:
         )
         headers = [(b"authorization", f"Bearer {token}".encode())]
         team = asyncio.run(
-            get_current_team_session_ungated(_make_request(headers)))
+            get_current_org_session_ungated(_make_request(headers)))
         assert team["key_id"] is not None  # key-auth lane resolved a key
         assert "session_user_id" not in team
         assert "auth_lane" not in team

@@ -3613,7 +3613,7 @@ function claimIntentInFlight() {
     // the overview cards + header tier badge read /v1/team, which resolves
     // the team from the session + pinned ?org_id=.
     // #2246 (ADR-010): the read rides the SESSION JWT (dual-auth
-    // get_current_team_session) + pinned ?org_id= so multi-membership users
+    // get_current_org_session) + pinned ?org_id= so multi-membership users
     // resolve the SELECTED team, not the first membership. The key param is
     // unused in session mode — the key-only fallback callers (stored-key
     // reuse / switchTeam with a fresh mint) were deleted with the held key;
@@ -4026,7 +4026,7 @@ function claimIntentInFlight() {
     const _teamAtCall = orgIdRef.current // Round-10: staleness guard — a rapid
                                           // A→B→C switch must not land B's data
                                           // under team C's header
-    // #1828: overview reads ride the SESSION JWT (get_current_team_session
+    // #1828: overview reads ride the SESSION JWT (get_current_org_session
     // dual-auth) instead of the freshly-minted bootstrap key — the Team /
     // Keys / Sessions cards render without a key mint, and the review-P1
     // ungated reads keep tt_ keys working on flag-off teams, so the
@@ -5208,10 +5208,10 @@ function claimIntentInFlight() {
     // sends NO key header — the old shape team-scoped by the KEY header
     // (a zero-key session whose selected team ≠ first membership rendered
     // the first membership's backups: /backups is ungated server-side, so
-    // _session_user_team resolves memberships[0] without the param).
+    // _session_user_org resolves memberships[0] without the param).
     // Key-mode (authMode 'apikey' — no session JWT exists there) keeps the
     // key header as its authenticator.
-    // #1842 P1-2: /backups is session-dual-auth (get_current_team_session_ungated).
+    // #1842 P1-2: /backups is session-dual-auth (get_current_org_session_ungated).
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
       const b = await api(`/backups${q}`, sessionTokenRef.current

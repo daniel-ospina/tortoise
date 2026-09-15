@@ -128,7 +128,7 @@ per-graph key → resolve_api_key → org_id + graph_id + graph_namespace + scop
   → app-layer ownership check on select_graph (authoritative — works with ACL OFF)
   → graph namespace selected; writes/reads land in the graph only
   → team-wide/legacy key (graph_id NULL) → default graph (back-compat)
-  → suspended team: 403 on BOTH control and data plane (existing get_current_team /
+  → suspended team: 403 on BOTH control and data plane (existing get_current_org /
        key-resolution contract, #1853/#1828 parity); the /v1/team/alerts appeal flow stays open
 Failure modes: cross-graph attempt (401/403 at app layer + NOPERM at ACL layer), read-only key write (403), deleted graph key (401), legacy key on multi-graph team (default graph only), suspended team (403 everywhere except alerts).
 ```

@@ -16,7 +16,7 @@ Two layers:
      /v1/team/keys half matching the client tripwire's URL boundary, plus
      the server-contract dashboard-login entry the client boundary excludes)
      must still resolve ?org_id= through
-     a recognized seam (the get_current_team_session DI, or the shared
+     a recognized seam (the get_current_org_session DI, or the shared
      _session_pinned_team / _ensure_key_in_pinned_team helpers), and every
      such route must be enumerated in KEY_WRITE_HANDLERS. NOT a whole-file
      scan: a FUTURE session key-write endpoint on a NEW prefix must
@@ -33,7 +33,7 @@ Route-coverage matrix (also documented above the helpers in hosted_api.py):
 
 | Route                            | Handler               | Pin seam              |
 |----------------------------------|-----------------------|-----------------------|
-| POST   /v1/team/keys             | create_api_key        | DI (get_current_team  |
+| POST   /v1/team/keys             | create_api_key        | DI (get_current_org  |
 |                                  |                       |   _session)           |
 | PATCH  /v1/team/keys/{key_id}    | toggle_api_key_enabled| inline helpers        |
 | DELETE /v1/team/keys/{key_id}    | revoke_api_key        | DI + fail-closed      |
@@ -82,14 +82,14 @@ _SUPABASE_URL = "https://pinparity.supabase.co"
 # dashboard-login entry the client boundary excludes). Each maps to the pin
 # seam that MUST appear in its source body.
 KEY_WRITE_HANDLERS: dict[str, tuple[str, ...]] = {
-    # DI seam — get_current_team_session → _session_user_team membership-gates
+    # DI seam — get_current_org_session → _session_user_org membership-gates
     # the pin and resolves the team from it.
-    "create_api_key": ("get_current_team_session",),
+    "create_api_key": ("get_current_org_session",),
     # Inline seam — the shared helpers (membership gate + fail-closed).
     "toggle_api_key_enabled": ("_session_pinned_team", "_ensure_key_in_pinned_team"),
     "toggle_dashboard_login": ("_session_pinned_team", "_require_owner_admin"),
     # DI seam + the shared fail-closed helper on the key lookup.
-    "revoke_api_key": ("get_current_team_session", "_ensure_key_in_pinned_team"),
+    "revoke_api_key": ("get_current_org_session", "_ensure_key_in_pinned_team"),
 }
 # Route decorator paths that carry key-write semantics (GET list is a read and
 # is deliberately excluded — same boundary as the client tripwire's scan of

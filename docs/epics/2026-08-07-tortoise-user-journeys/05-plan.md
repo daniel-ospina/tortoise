@@ -206,7 +206,7 @@ Rotate: mint new via E1 → grace overlap (optional) → revoke old → clients 
 
 **Automation:** all CRUD automated. **Manual:** none.
 **Failure modes:** rate-limit on minting (abuse posture); revoking only key → warn/block; key_prefix collision (uuid hex — negligible).
-**⚠ Dependency (P2-4):** `get_current_team` (hosted_api.py:455) only accepts Bearer `tt_` keys. Recovery requires a **NEW API-side auth path** — Supabase JWT → user_id → Membership → team resolution — so a keyless user can mint via **`POST /v1/session/key` (E1)**, then list/revoke via `/v1/team/keys` with the minted key (`/v1/team/keys` stays strictly `tt_`-authed — no JWT auth there). W-3 covers the dashboard-side cookie bridge, not API auth; this new resolution is a required backend piece of the #518 fix.
+**⚠ Dependency (P2-4):** `get_current_org` (hosted_api.py:455) only accepts Bearer `tt_` keys. Recovery requires a **NEW API-side auth path** — Supabase JWT → user_id → Membership → team resolution — so a keyless user can mint via **`POST /v1/session/key` (E1)**, then list/revoke via `/v1/team/keys` with the minted key (`/v1/team/keys` stays strictly `tt_`-authed — no JWT auth there). W-3 covers the dashboard-side cookie bridge, not API auth; this new resolution is a required backend piece of the #518 fix.
 
 ## W-2b: Invitation + RBAC (Team tier — NEW, backs J-4 step 4)
 
@@ -578,7 +578,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 | team↔graph 1:N | App/registry | count `(:Graph {org_id})` vs `max_graphs` |
 | max_users per team | SDK | `membership_create` (exists) — tier-driven; **invite-accept path uses it too** |
 | max_teams per user | App | **NOT a tier limit** — per-user team-creation rate limit (abuse posture); multi-team is a user capability |
-| key scoping | API | `get_current_team` resolves key→team (exists) |
+| key scoping | API | `get_current_org` resolves key→team (exists) |
 | API key auth bootstrap (session→team) | NEW API | JWT → user_id → membership → team (W-2 dependency) |
 | api_key null-once | DB/API | `reveal_api_key` RPC (4.1b) |
 
@@ -656,7 +656,7 @@ Limits: `max_api_keys` per tier (currently flat 20 via `_check_team_limit` fallb
 | Supabase | Auth, junction table, RLS, reveal RPC | org_memberships | — |
 | tenant-provision edge fn | Signup → provision orchestration | provisioning glue | Supabase, FastAPI internal |
 | hosted_api (FastAPI) | Multi-tenant API, tier enforcement, key lifecycle | /v1/* + /internal/* | FalkorDB registry |
-| MCP sub-app | Agent-facing MCP surface | /mcp (58 tools) | hosted_api auth (shared — in-process middleware stack: `get_current_team` + `TeamResolutionMiddleware` share the FastAPI app; `tt_` key arrives via Authorization header on streamable-HTTP/SSE connect, resolved by TeamResolutionMiddleware) |
+| MCP sub-app | Agent-facing MCP surface | /mcp (58 tools) | hosted_api auth (shared — in-process middleware stack: `get_current_org` + `TeamResolutionMiddleware` share the FastAPI app; `tt_` key arrives via Authorization header on streamable-HTTP/SSE connect, resolved by TeamResolutionMiddleware) |
 | FalkorDB | Registry + tenant graphs | Team/Membership/APIKey/Graph | — |
 
 **Clean boundaries:** browser never touches FalkorDB; dashboard never touches edge fn; edge fn never touches tenant namespaces directly (calls FastAPI). Session auth (Supabase) is orthogonal to API auth (tt_ keys) with the bootstrap bridge.
@@ -726,7 +726,7 @@ Body: { org_id?: string, purpose?: 'bootstrap'|'recovery' }   # purpose defaults
 **Key lifecycle (P1 — three fixes):**
 - **`purpose` param (P1):** `bootstrap` mints the 24h ephemeral session key (dashboard auth); **`recovery` mints a PERSISTENT revocable key (no 24h expiry)** — otherwise the #518 recovery deliverable mints a self-destructing key. Recovery keys count against tier `max_api_keys` (Free 2/Solo 5/Pro 10/Team 20+); bootstrap keys are **EXEMPT** from the cap (counted separately, swept when expired) — else a Free user's 2nd dashboard tab hits 402 and the J-1/J-3 flagship flow breaks.
 - **Reuse-before-mint (P1):** E1 reuses an existing unexpired bootstrap key for (user, team) from sessionStorage before minting — no mint-per-load.
-- `APIKey` node gains `expires_at` + `created_via:'bootstrap'|'recovery'|'dashboard'|'provision'`; `get_current_team` rejects expired keys. SignOut: client-side discard + 24h server backstop. Expired bootstrap keys swept by the reconciliation job. **Orphaned unrevealed provision keys: reconciliation sweep expires/revoles `created_via='provision'` keys not revealed within N hours.**
+- `APIKey` node gains `expires_at` + `created_via:'bootstrap'|'recovery'|'dashboard'|'provision'`; `get_current_org` rejects expired keys. SignOut: client-side discard + 24h server backstop. Expired bootstrap keys swept by the reconciliation job. **Orphaned unrevealed provision keys: reconciliation sweep expires/revoles `created_via='provision'` keys not revealed within N hours.**
 **Purpose:** dashboard primary auth (decision 2), key recovery (J-2), powers E6/E2 context.
 
 ### E2: POST /v1/organizations — team creation (W-2c, J-4 zero-teams)
@@ -833,7 +833,7 @@ Auth: Supabase JWT → team membership
            expires_at,          ← NEW — session keys (E1)
            created_via })        ← NEW — 'bootstrap' | 'recovery' | 'dashboard' | 'provision' (E1 purpose → created_via; 'bootstrap'=24h ephemeral, 'recovery'=persistent revocable)
 ```
-`get_current_team`: reject when `revoked_at IS NOT NULL` **OR** (`expires_at` IS NOT NULL AND `expires_at < now`).
+`get_current_org`: reject when `revoked_at IS NOT NULL` **OR** (`expires_at` IS NOT NULL AND `expires_at < now`).
 
 ---
 
@@ -860,7 +860,7 @@ Each test: **Setup** (concrete preconditions) · **Steps** (verifiable actions) 
 - **Setup:** provisioned user, Supabase session, NO remembered tt_ key
 - **Steps:** 1) dashboard (session-authed) 2) Lost your key? Generate a new one → `POST /v1/session/key` (E1) 3) copy new key 4) revoke old via /v1/team/keys/{id}
 - **Assertions:** new key minted without pre-existing key · shown once · authenticates against /v1/team · **revoked old key fails auth immediately (401) — pin this, no "or grace" ambiguity** · E1 mint at `max_api_keys` cap → 402 (NEW)
-- **Negative:** rate limit on mint (429) · expired session → 401 · **expired bootstrap key rejected by get_current_team (backdated expires_at via fixture → 401)** · **only-key revoke in a SEPARATE single-key scenario: revoking the only key → 409 warn**
+- **Negative:** rate limit on mint (429) · expired session → 401 · **expired bootstrap key rejected by get_current_org (backdated expires_at via fixture → 401)** · **only-key revoke in a SEPARATE single-key scenario: revoking the only key → 409 warn**
 - **#518 property pinned (P2):** recovery key returns `expires_at: null` AND authenticates against /v1/team after 24h; bootstrap key returns `expires_at = +24h` — a regression to 24h recovery keys fails this test
 - **Keyless-at-cap recovery (P2):** user with NO usable key at max_api_keys cap → recovery mint **succeeds** (auto-revokes the oldest orphaned key to free a slot, or exempt from cap with a hard per-identity recovery limit — decision: auto-revoke oldest orphaned) — asserts recovery never dead-ends for the #518 user
 - **Bootstrap-key active backstop (P2):** max active bootstrap keys per (user, team) = 3 (swept by reconciliation) — asserted via fixture

@@ -46,7 +46,7 @@ surface. The slice's real work:
   script pipeline"). The issue's indicator "copies starter packs" should be re-interpreted as **activation
   records (install-state)**, not file copies.
 - **The tenant-context seam already exists:** `tortoise/mcp_auth.py` ships `_current_org_id` /
-  `_current_team_limits` ContextVars set per-request by `TeamResolutionMiddleware`, and `_get_team_sdk()`
+  `_current_org_limits` ContextVars set per-request by `TeamResolutionMiddleware`, and `_get_org_sdk()`
   → `TortoiseSDK(namespace=org_id)`. Per-request tenant context is stdlib `contextvars` (PEP 567) —
   no new dependency; in-repo precedent.
 - **Provisioning is dual-mode** (`supabase_control.py:82-92`): `TORTOISE_CONTROL_PLANE=supabase` →
@@ -139,7 +139,7 @@ GTM confirms starter packs are a default set for all tenants.
 - Verifier B: P0=0, P1=0, P2=2, P3=4, P4=2
 - Controller action: gate PASSES on P2+ only. Incorporated: P2-A1 revised-O/I/T block (done above);
   P2-A2 existing-tenant backfill (added to plan — idempotent re-run of activation); P2-B1 REST tenant
-  identity binding (VERIFIED resolved: `get_current_team` FastAPI dependency, hosted_api.py:820, `Depends`
+  identity binding (VERIFIED resolved: `get_current_org` FastAPI dependency, hosted_api.py:820, `Depends`
   on REST endpoints — the new surface's auth is the existing dependency); P2-B2 singleton-consumer blast
   radius (scope note added: THIS slice keeps vocabulary global — only the introspection/enforcement
   surface is tenant-scoped; per-consumer tenant-scoping deferred to the custom-pack slice). P3/P4 all
@@ -223,7 +223,7 @@ Ontology=low, UX=low, Library-deps=none-new.
 ### Integration Docs (drafted at solution-converge)
 
 - **`contextvars`** — stdlib (PEP 567), Python 3.11+. In-repo precedent: `tortoise/mcp_auth.py`
-  (`_current_org_id`, `_current_team_limits` ContextVars + `TeamResolutionMiddleware`). No new dep.
+  (`_current_org_id`, `_current_org_limits` ContextVars + `TeamResolutionMiddleware`). No new dep.
 - **No new third-party dependencies** in the chosen approach.
 - **Supabase RPC seam** — `provision_team` (migration 0010, `supabase_control.py:1018+`): atomic
   idempotent upserts; pack activation must ride the same transaction OR be an idempotent post-step
@@ -257,7 +257,7 @@ Ontology=low, UX=low, Library-deps=none-new.
   there; this slice deliberately does not thread per-tenant kind resolution.
 - 404-vs-403 existence masking: empty result (no error) is the default posture for cross-tenant pack
   queries (anti-enumeration, Digitorn precedent); 403 reserved for unauthenticated/unauthorized API
-  calls at the auth layer (already enforced by `get_current_team`).
+  calls at the auth layer (already enforced by `get_current_org`).
 
 ### Solution approaches (Phase 4 — diverge)
 
@@ -266,8 +266,8 @@ Ontology=low, UX=low, Library-deps=none-new.
 (`graph_name=org_{id}` — the LANDED isolation boundary). Single `ensure_tenant_packs(sdk)` idempotent
 routine (MERGE per namespace): eager after graph creation in all three provisioning sites, self-healing
 in the introspection surface, operator backfill for existing tenants. New read-only `GET /v1/packs`
-(REST, `Depends(get_current_team)`) + `packs_list` MCP tool (`tool_registry` http_policy=True, uses
-`_get_team_sdk()` contextvar seam). Vocabulary stays global (shared catalog).
+(REST, `Depends(get_current_org)`) + `packs_list` MCP tool (`tool_registry` http_policy=True, uses
+`_get_org_sdk()` contextvar seam). Vocabulary stays global (shared catalog).
 
 **Approach B — Supabase `pack_installs` table + RLS:** new migration; rows inserted in the atomic
 `provision_team` RPC; RLS enforces tenant scope (403 semantics); introspection reads table.
@@ -292,7 +292,7 @@ future extensibility — NOT on diff size:
    step; B requires an RPC backfill; C requires directory copy backfill. (P2-A2 from problem-verify
    resolved by design.)
 3. **No new infra / deps (future extensibility):** A reuses the tenant graph + contextvar seam
-   (mcp_auth) + existing auth (`get_current_team`) — zero new third-party deps (Integration Docs).
+   (mcp_auth) + existing auth (`get_current_org`) — zero new third-party deps (Integration Docs).
 4. **Isolation is architectural, not bolted-on:** install-state lives inside the already-isolated
    graph; cross-tenant access is impossible by construction (a query with tenant B's identity reads
    tenant B's graph). The automated test asserts the introspection surface binds to the correct graph.
@@ -347,19 +347,19 @@ Best-effort (Backlex: failure never blocks signup).
 
 **4. Introspection surface (single ensure-then-read core for BOTH surfaces — REST/MCP symmetry):**
 - **Scoping model (PINNED): auth-only — no tenant_id selector parameter.** Team identity comes
-  EXCLUSIVELY from auth (`get_current_team` REST dependency / `_current_org_id` MCP contextvar).
+  EXCLUSIVELY from auth (`get_current_org` REST dependency / `_current_org_id` MCP contextvar).
   Consequence: cross-tenant access is **structurally impossible** (no request can name another
   tenant's graph), ensure can NEVER be triggered against a foreign team (no selector to abuse),
   and the anti-enumeration requirement rewords to: same-tenant no-installs → empty; two-token test
   asserts no bleed.
-- `GET /v1/packs` (hosted_api): `Depends(get_current_team)`; **rejects with 401 when `org_id is
+- `GET /v1/packs` (hosted_api): `Depends(get_current_org)`; **rejects with 401 when `org_id is
   None`** (SKIP_AUTH/background paths — fail closed, never default-namespace fallback; consistent
-  with existing `get_current_team` 401). **Response matrix (pinned):** no auth → 401; auth + graph
+  with existing `get_current_org` 401). **Response matrix (pinned):** no auth → 401; auth + graph
   unreachable → 503 (never empty-on-outage); auth + no installs (starter set empty/unset or ensure
   failed) → empty list; auth + installs → tenant's pack list. **Self-heal:** on first read with no
   installs, ensure-then-return (convergence safety net).
 - MCP `packs_list` tool (`tool_registry.py` + `mcp_server.py`): `http_policy=True` (per #454
-  allow-list), resolves SDK via `_get_team_sdk()` (mcp_auth contextvar seam), same ensure-then-read
+  allow-list), resolves SDK via `_get_org_sdk()` (mcp_auth contextvar seam), same ensure-then-read
   core as REST (no REST/MCP divergence); fail-closes identically on None team.
 - **Async-context constraint (PINNED, from research):** all ensure-then-read execution goes through
   `asyncio.to_thread` (propagates contextvars, py3.9+) — NEVER `loop.run_in_executor` (does NOT
@@ -466,8 +466,8 @@ against an ontology whitelist that would reject the new label.
 | pack_registry catalog (shared) — `pack_summaries()` helper | Data store/code | Plan §1 | ✅ |
 | `GET /v1/packs` endpoint | API | Plan §4 (auth-only, response matrix) | ✅ |
 | Provisioning hooks — 3 sites: registry-mode `/internal/provision` (~640), self-service (~1660), `v1/teams` (~2906) | API | Plan §3 (enumerated + mode-mapped) | ✅ |
-| Auth (REST) — `get_current_team` dependency, 401/503 semantics | Auth | Plan §4 | ✅ |
-| Auth (MCP) — `mcp_auth` ContextVars + `_get_team_sdk()` seam | Auth | Plan §4 | ✅ |
+| Auth (REST) — `get_current_org` dependency, 401/503 semantics | Auth | Plan §4 | ✅ |
+| Auth (MCP) — `mcp_auth` ContextVars + `_get_org_sdk()` seam | Auth | Plan §4 | ✅ |
 | MCP `packs_list` + `tool_registry` http_policy allow-list (#454) | MCP | Plan §4 | ✅ |
 | Supabase `provision_team` RPC (migration 0010) — external seam | External service | Plan §3 (activation post-RPC in hosted_api layer, both modes) | ✅ |
 | `TORTOISE_STARTER_PACKS` env + `.env.example` | Cross-cutting | Plan §6 | ✅ |

@@ -600,7 +600,7 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
         _current_legacy_full_access,
         _current_scopes,
         _current_org_id,
-        _current_team_limits,
+        _current_org_limits,
     )
     from tortoise.mcp_server import tortoise_session_capture
 
@@ -619,7 +619,7 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
         # The MCP tool reads the RESOLVED team from ContextVars (mcp_auth); a
         # fresh thread starts with an empty context, so set them there (same
         # shape as the delivery-tenancy MCP test).
-        ctx_vars = [_current_org_id, _current_team_limits, _current_graph_id,
+        ctx_vars = [_current_org_id, _current_org_limits, _current_graph_id,
                     _current_graph_namespace, _current_scopes,
                     _current_legacy_full_access]
         toks = [v.set(val) for v, val in zip(

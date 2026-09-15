@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tortoise import hosted_api
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 
 TEAM = {"org_id": "test-team-529", "tier": "free", "key_id": "k1"}
 
@@ -48,7 +48,7 @@ def client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(hosted_api, "_update_onboarding_state", fake_update)
     monkeypatch.setattr(hosted_api, "_team_email", lambda org_id: None)
-    app.dependency_overrides[get_current_team] = lambda: TEAM
+    app.dependency_overrides[get_current_org] = lambda: TEAM
     with TestClient(app) as c:
         c._captured_kwargs = captured_kwargs
         c._jsonl = tmp_path / "analytics_fallback.jsonl"

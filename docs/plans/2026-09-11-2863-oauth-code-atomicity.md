@@ -237,7 +237,7 @@ which the test bodies use:
 
 **The base tables are the part three review cycles kept missing.** Every endpoint path calls
 `_verify_client_auth` → `_client_row` (`oauth_clients`) FIRST, then `_assert_team_usable` (`teams`),
-and the refresh path then `membership_for_user_team` (`org_memberships`, `status=eq.active`).
+and the refresh path then `membership_for_user_org` (`org_memberships`, `status=eq.active`).
 An unseeded table yields 401/403 **before** any injected fault is reached — so the fixture seeds all
 three. `org_memberships.user_id` MUST be a UUID (the fake's `UUID_FILTER_COLUMNS` raises
 `RuntimeError(...HTTP 400)` for a non-UUID, which the pre-mint wrap would convert to a 503 and hide
@@ -1046,7 +1046,7 @@ a raising `_revoke_team_family` or lapsed-membership revoke still propagates the
     ("oauth_clients", None),        # FIRST read on the path — the :726 leak
     ("oauth_refresh_tokens", None), # the refresh-token SELECT
     ("teams", None),                # _assert_team_usable
-    ("org_memberships", None),     # membership_for_user_team — S4 call site #4
+    ("org_memberships", None),     # membership_for_user_org — S4 call site #4
     ("oauth_access_tokens", ["id"]),# prev_access
 ])
 def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select):
@@ -1150,7 +1150,7 @@ def test_row7_prev_access_revoke_failure_delivers_a_USABLE_pair(fault_client, ca
             except Exception as exc:  # noqa: BLE001 — correction #8: the single capture
                 _log_and_capture(exc, where="family revoke")
             raise
-        if membership_for_user_team(cp, row["user_id"], row["org_id"]) is None:
+        if membership_for_user_org(cp, row["user_id"], row["org_id"]) is None:
             try:
                 cp.query("oauth_refresh_tokens", method="PATCH",
                          filters=[("id", "eq", row["id"])],

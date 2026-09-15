@@ -236,7 +236,7 @@ DROP INDEX IF EXISTS public.uq_teams_email;
 -- ============================================================================
 -- 4b) signup idempotency re-anchor — UNIQUE partial index on the reg-
 -- identity, with a pre-scan/abort (20260813000004:44-105 pattern). register
--- hashes sha256(email.lower()) but team_by_email compares case-sensitively,
+-- hashes sha256(email.lower()) but org_by_email compares case-sensitively,
 -- so "A@x.com"/"a@x.com" can already coexist as two unclaimed teams with the
 -- SAME identity — the index would fail to create with a cryptic error.
 -- Scan ALL identities (not just reg-) among unclaimed active owners.

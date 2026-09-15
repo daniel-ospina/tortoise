@@ -73,9 +73,9 @@ Research-backed + user decisions (2026-08-28); no new decisions requiring fresh 
 - Modify: `tortoise/supabase_control.py` (supabase twin, near membership_count_since ~1889), `tortoise/hosted_api.py` (mode-aware wrapper)
 - Test: `tests/test_writer_inventory.py` (or a new focused test)
 
-**Step 1 — Failing tests:** supabase lane (FakeControlPlane): a free team + a paid team → count 1; two free → 2; removed membership excluded; past_due/trialing teams → NOT counted (count 0); a dangling membership (no teams row) → skipped (team_by_id None → not counted, no 500); non-UUID user_id → 0 without querying (shape-gate, #1719). Registry lane (`test_hosted_api.py` env-flip fixture): tier='free' counted, tier='pro' not.
+**Step 1 — Failing tests:** supabase lane (FakeControlPlane): a free team + a paid team → count 1; two free → 2; removed membership excluded; past_due/trialing teams → NOT counted (count 0); a dangling membership (no teams row) → skipped (org_by_id None → not counted, no 500); non-UUID user_id → 0 without querying (shape-gate, #1719). Registry lane (`test_hosted_api.py` env-flip fixture): tier='free' counted, tier='pro' not.
 
-**Step 2 — Implement:** supabase: query active memberships for the user, join team subscription_status via `team_by_id`, count those not in the active set (`{"active", "past_due", "trialing"}`). Registry: Cypher `MATCH (m:Membership {user_id:$uid, status:'active'}) WHERE m.org_id <> '' MATCH (t:Team {id:m.org_id, tier:'free'}) RETURN count(m)`.
+**Step 2 — Implement:** supabase: query active memberships for the user, join team subscription_status via `org_by_id`, count those not in the active set (`{"active", "past_due", "trialing"}`). Registry: Cypher `MATCH (m:Membership {user_id:$uid, status:'active'}) WHERE m.org_id <> '' MATCH (t:Team {id:m.org_id, tier:'free'}) RETURN count(m)`.
 
 **Step 3 — Green.**
 

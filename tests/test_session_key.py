@@ -3,7 +3,7 @@
 Epic: 2026-08-07-tortoise-user-journeys · Issue: #570 (D3)
 Plan §6.2 E1 + §6.6 APIKey extension: bootstrap (24h, cap-exempt, 3-active
 backstop) vs recovery (persistent, revocable, counts against max_api_keys,
-auto-revoke-oldest at cap). get_current_team rejects expired keys.
+auto-revoke-oldest at cap). get_current_org rejects expired keys.
 """
 from __future__ import annotations
 

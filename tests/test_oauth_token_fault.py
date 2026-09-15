@@ -606,7 +606,7 @@ def test_bad_pkce_never_re_arms_the_code(fault_client):
     ("oauth_clients", None),        # FIRST read on the path — the :726 leak
     ("oauth_refresh_tokens", None),  # the refresh-token SELECT
     ("teams", None),                # _assert_team_usable
-    ("org_memberships", None),     # membership_for_user_team — S4 call site #4
+    ("org_memberships", None),     # membership_for_user_org — S4 call site #4
     ("oauth_access_tokens", ["id"]),  # prev_access
 ])
 def test_refresh_pre_mint_read_failure_is_503_not_500(fault_client, table, select):

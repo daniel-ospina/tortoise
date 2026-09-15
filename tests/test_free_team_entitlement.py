@@ -372,12 +372,12 @@ class TestCreateTeamEntitlement:
         """#1877 security P1: the re-entry guard is SERVER-authoritative —
         a PATCH resetting team_created:false must not re-open the
         unlimited-free-sub-team bypass."""
-        from tortoise.hosted_api import get_current_team_session, get_current_team_session_ungated
+        from tortoise.hosted_api import get_current_org_session, get_current_org_session_ungated
         tc, _fake = team_client_factory
         dep = dict(FREE_TEAM, org_id="team-free-001", tier="free",
                    session_user_id=_USER1)
-        app.dependency_overrides[get_current_team_session] = lambda: dict(dep)
-        app.dependency_overrides[get_current_team_session_ungated] = lambda: dict(dep)
+        app.dependency_overrides[get_current_org_session] = lambda: dict(dep)
+        app.dependency_overrides[get_current_org_session_ungated] = lambda: dict(dep)
         r1 = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r1.status_code == 200, r1.text
         # attempt the client reset via the PATCH surface
@@ -392,9 +392,9 @@ class TestCreateTeamEntitlement:
         dependency (no fabricated onboarding_state — the dep dict never
         carries it) reads the PERSISTED team_created state and 409s — no
         unlimited free sub-team minting via this endpoint."""
-        from tortoise.hosted_api import get_current_team_session
+        from tortoise.hosted_api import get_current_org_session
         tc, _fake = team_client_factory
-        app.dependency_overrides[get_current_team_session] = lambda: dict(
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
             FREE_TEAM, org_id="team-free-001", tier="free",
             session_user_id=_USER1)
         r1 = tc.post("/v1/onboarding/team", json={"name": "subteam"})
@@ -408,11 +408,11 @@ class TestCreateTeamEntitlement:
         lane — a free user who already holds an org (>=1 active free
         membership) cannot mint a second org through POST /v1/onboarding/team.
         Reaches the count-402 parity of POST /v1/organizations (lane-uniform)."""
-        from tortoise.hosted_api import get_current_team_session
+        from tortoise.hosted_api import get_current_org_session
         tc, fake = team_client_factory
         _seed_team(fake, "team-free-a")
         _seed_membership(fake, "team-free-a")
-        app.dependency_overrides[get_current_team_session] = lambda: dict(
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
             FREE_TEAM, org_id="team-parent-001", tier="free",
             session_user_id=_USER1)
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
@@ -426,11 +426,11 @@ class TestCreateTeamEntitlement:
         """#2323: a subscriber's memberships are NOT free slots — the paid
         org-B door survives (the former 'sanctioned second team for Q5'
         path, now entitlement-gated like POST /v1/organizations)."""
-        from tortoise.hosted_api import get_current_team_session
+        from tortoise.hosted_api import get_current_org_session
         tc, fake = team_client_factory
         _seed_team(fake, "team-paid", tier="pro", subscription_status="active")
         _seed_membership(fake, "team-paid")
-        app.dependency_overrides[get_current_team_session] = lambda: dict(
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
             FREE_TEAM, org_id="team-parent-001", tier="free",
             session_user_id=_USER1)
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
@@ -441,7 +441,7 @@ class TestCreateTeamEntitlement:
         free user whose one-shot marker is armed gets 409, never 402."""
         from tortoise.hosted_api import (
             _update_onboarding_state,
-            get_current_team_session,
+            get_current_org_session,
         )
         tc, fake = team_client_factory
         _seed_team(fake, "team-free-a")
@@ -452,7 +452,7 @@ class TestCreateTeamEntitlement:
         # row must exist for the onboarding_state write to land.
         _seed_team(fake, "team-parent-001")
         _update_onboarding_state("team-parent-001", team_created=True)
-        app.dependency_overrides[get_current_team_session] = lambda: dict(dep)
+        app.dependency_overrides[get_current_org_session] = lambda: dict(dep)
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 409
         assert "already created" in r.json()["detail"]
@@ -708,7 +708,7 @@ class TestConcurrentTeamCreationTOCTOU:
     concurrent POST /v1/organizations (or /v1/onboarding/team) requests can all
     read count==0 (and the 429 owner-membership count sees 0 too) then all
     provision → multiple free teams. The fix is an in-process per-user
-    asyncio lock (_team_create_lock) around the check+provision in every
+    asyncio lock (_org_create_lock) around the check+provision in every
     create_team lane + the onboarding re-entry guard.
 
     NOTE (review P1, honest framing): the single-process hosted lane's
@@ -754,7 +754,7 @@ class TestConcurrentTeamCreationTOCTOU:
         """Registry (selfhost) lane — same invariant. NOTE: the registry
         lane may run MULTI-PROCESS; the in-process lock is the single-
         process guard, DB-level enforcement is the multi-process backstop
-        (documented in _team_create_lock)."""
+        (documented in _org_create_lock)."""
         _tc, reg = reg_client
         import asyncio
 
@@ -795,9 +795,9 @@ class TestConcurrentTeamCreationTOCTOU:
         concurrent double-call must mint exactly ONE sub-team (second gets
         the 409 "Sub-team already created" — different names so the
         duplicate-name 409 cannot mask the guard)."""
-        from tortoise.hosted_api import get_current_team_session
+        from tortoise.hosted_api import get_current_org_session
         _tc, fake = team_client_factory
-        app.dependency_overrides[get_current_team_session] = lambda: dict(
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
             FREE_TEAM, org_id="team-free-001", tier="free",
             session_user_id=_USER1)
         import asyncio
@@ -835,10 +835,10 @@ class TestConcurrentTeamCreationTOCTOU:
         same user's concurrent check+provision calls serialize; different
         users do NOT share a lock (a single global lock would serialize
         every tenant's team creation)."""
-        from tortoise.hosted_api import _team_create_lock
-        same_a = _team_create_lock("user-a")
-        same_b = _team_create_lock("user-a")
-        other = _team_create_lock("user-b")
+        from tortoise.hosted_api import _org_create_lock
+        same_a = _org_create_lock("user-a")
+        same_b = _org_create_lock("user-a")
+        other = _org_create_lock("user-b")
         assert same_a is same_b, "same user must share the lock"
         assert same_a is not other, "different users must not share a lock"
 
@@ -850,10 +850,10 @@ class TestConcurrentTeamCreationTOCTOU:
         while the first is still inside, and the strict ordering fails."""
         import asyncio
 
-        from tortoise.hosted_api import _team_create_lock
+        from tortoise.hosted_api import _org_create_lock
 
         async def _run():
-            lock = _team_create_lock(_USER1)
+            lock = _org_create_lock(_USER1)
             order = []
 
             async def holder():

@@ -32,8 +32,8 @@ def client(tmp_path):
     # shared-/data/tortoise.db binding on the embedded lane, not a real
     # pass-through. The helper's force-drop + pin is the #1497/#2090 fix.
     with patched_tortoise_sdk(db_path):
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "test-team-1", "tier": "free", "key_id": "k1",
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
         }

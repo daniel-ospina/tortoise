@@ -515,7 +515,7 @@ left the graph absent).
 | 3 | `_iter_registered_teams` + `_purge_deleted_teams` | boot event-retention + deleted-team purge read the registry | Supabase teams (deleted_at IS NULL); purge skips the registry cascade post-flip |
 | 4 | `/health/ready` | the data-plane probe opened the registry namespace | probe the default (`tortoise`) graph |
 | 5 | **metering** (`/v1/team` → `get_current_usage`, `record_write_ops`) | MeteringRecord nodes lived in the registry — every authenticated request recreated it | migration `0014_metering_records` + seam; atomic `metering_increment` RPC |
-| 6 | `quota.resolve_team_limits` (MCP tool enforcement) | read the registry Team node | teams row via the seam (NULL = unlimited parity) |
+| 6 | `quota.resolve_org_limits` (MCP tool enforcement) | read the registry Team node | teams row via the seam (NULL = unlimited parity) |
 
 Also applied during the flip: migration 0014, Edge Function secrets verified,
 `TORTOISE_SUPPRESS_ENUM_DELTA=1` active for the window. **Remaining follow-up:

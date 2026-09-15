@@ -33,7 +33,7 @@ from tortoise.hosted_api import (
     app,
 )
 from tortoise.indexer.github_docs import GitHubDocsIndexer
-from tortoise.quota import QuotaExceededError, count_team_usage
+from tortoise.quota import QuotaExceededError, count_org_usage
 from tortoise.sdk import TortoiseSDK
 
 TEAM_A = "test-docs-team-a"
@@ -103,8 +103,8 @@ def client(tmp_path):
     # runs INSIDE the patched context so in-flight jobs stay bound to THIS
     # fixture's store while it is still patched.
     with patched_tortoise_sdk(db_path):
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": org_id, "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
@@ -175,7 +175,7 @@ def _seed_documents(client, n: int, *, kind: str | None = "brief") -> None:
 
 
 def _docs_count(client) -> int:
-    return count_team_usage(client.org_id, "documents",
+    return count_org_usage(client.org_id, "documents",
                             sdk=_team_sdk(client))
 
 
@@ -462,11 +462,11 @@ def test_docs_job_token_undecryptable(client, ingest_base):
 def test_docs_job_midwalk_quota_hit(provisioned, mock_github, ingest_base,
                                     monkeypatch):
     """The per-repo DOCUMENTS gate (Fix 3) bounds the overshoot to ONE
-    repo's docs, not the whole org: the 3rd enforce_team_limit call
+    repo's docs, not the whole org: the 3rd enforce_org_limit call
     (repo2's pre-ingest check) raises → repo1's 2 docs are ingested, repo2's
     are not, quota_hit is reported honestly."""
     import tortoise.quota as quota_mod
-    real_enforce = quota_mod.enforce_team_limit
+    real_enforce = quota_mod.enforce_org_limit
     calls = {"n": 0}
 
     def _counting_enforce(limits, resource, *, sdk=None):
@@ -475,7 +475,7 @@ def test_docs_job_midwalk_quota_hit(provisioned, mock_github, ingest_base,
             raise QuotaExceededError("documents limit reached (test)")
         return real_enforce(limits, resource, sdk=sdk)
 
-    monkeypatch.setattr(quota_mod, "enforce_team_limit", _counting_enforce)
+    monkeypatch.setattr(quota_mod, "enforce_org_limit", _counting_enforce)
     r = provisioned.tc.post("/v1/index/docs", json={"org": "acme"})
     body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
     assert body["quota_hit"] is True
@@ -625,8 +625,8 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
     r = provisioned.tc.post("/v1/index/docs", json={"org": "acme"})
     job_id = r.json()["job_id"]
     # simulate team B: same app, different dependency-override identity
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
+    from tortoise.hosted_api import get_current_org
+    app.dependency_overrides[get_current_org] = lambda: {
         "org_id": "some-other-team", "tier": "free", "key_id": "k2",
         "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
@@ -634,7 +634,7 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
     rb = provisioned.tc.get(f"/v1/index/docs/{job_id}")
     assert rb.status_code == 404
     # team A still polls fine
-    app.dependency_overrides[get_current_team] = lambda: {
+    app.dependency_overrides[get_current_org] = lambda: {
         "org_id": provisioned.org_id, "tier": "free", "key_id": "k1",
         "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,

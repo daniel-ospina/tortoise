@@ -34,14 +34,14 @@ Epic #2083 child C6 (standard). Depends: #2110 (C1 — `graphs.recording` column
   builds `team = {"org_id", "tier", "key_id": None, "max_points"}` — no graph
   fields → `_data_sdk` treats graph-bound keys as team-wide → capture writes
   the DEFAULT graph (cross-graph write for a graph-bound MCP key). The C5
-  ContextVar graph scope only feeds tools that use `_get_team_sdk()` directly.
+  ContextVar graph scope only feeds tools that use `_get_org_sdk()` directly.
 - Recording storage: registry Graph node has NO recording writer (graph_list
   reads `props.get("recording")` → always None today); supabase `graphs` rows
   carry `recording` (C1 col, NULL default); `graph_metadata`
   (supabase_control:2240) already emits recording per row + default None.
   Supabase DEFAULT graph has NO row (derived from `teams.graph_name`).
 - Graph write patterns: delete_graph (hosted_api:8485 on main) — dual-auth
-  `get_current_team_session` (key face: scope or legacy; session face:
+  `get_current_org_session` (key face: scope or legacy; session face:
   `_membership_team` owner/admin), mode-branch reads kind, then
   `soft_delete_graph` / `sdk.graph_delete`. `_make_sdk(namespace="registry")`
   is the registry handle.
@@ -65,7 +65,7 @@ kind='default' row's recording when present (fallback None).
 
 ### D-C6-2 — PATCH auth + contract (epic §6.3 verbatim)
 `PATCH /v1/graphs/{graph_id}?org_id=…` body `{recording: bool|null}`.
-Dual-auth `get_current_team_session`: key face → `team:manage` scope OR
+Dual-auth `get_current_org_session`: key face → `team:manage` scope OR
 legacy_full_access (owner-minted deleg-NULL) — child policy never mints
 team:manage (C2/C3), so a deleg=0 tk_ key 403s (correct); session face →
 `_membership_team` owner/admin (mirror delete_graph). Suspended team → 403

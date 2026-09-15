@@ -5,7 +5,7 @@ DE2E-11 (self-use org) asserts "member authz enforced" on the W6 surface:
 - GET /v1/sessions/{id} + DELETE /v1/sessions/{id} are dual-auth (#1828):
   a session JWT (the Settings dashboard's lane) OR a tt_ key (agents).
 - A session user must be an ACTIVE member of the ?org_id= team — otherwise
-  403 (the #1148 membership gate, _session_user_team) — and the resolution
+  403 (the #1148 membership gate, _session_user_org) — and the resolution
   happens BEFORE any handler touches the graph (no existence oracle, no
   partial delete).
 - Key auth is team-scoped by resolution: another team's key sees 404, never
@@ -90,9 +90,9 @@ def _team_state(fake, org_id: str) -> dict:
     migration 0006 teams.onboarding_state)."""
     from tortoise.supabase_control import (
         get_control_plane,
-        team_onboarding_state,
+        org_onboarding_state,
     )
-    return team_onboarding_state(get_control_plane(), org_id) or {}
+    return org_onboarding_state(get_control_plane(), org_id) or {}
 
 
 def _capture_key_lane(client, key: str, org_id: str, sid: str):

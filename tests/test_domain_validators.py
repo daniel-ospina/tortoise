@@ -655,15 +655,15 @@ class TestValidateCLI:
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_org_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
     _current_org_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
     _current_org_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_limits.set(None)
 
 
 class TestMCPValidateTool:
@@ -706,13 +706,13 @@ class TestMCPValidateTool:
 @pytest.fixture
 def commit_client():
     from fastapi.testclient import TestClient  # noqa: I001
-    from tortoise.hosted_api import app, get_current_team
+    from tortoise.hosted_api import app, get_current_org
 
     os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
     os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: {
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "test-team-405", "key_id": "k", "legacy_full_access": True, "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
             "max_api_keys": 2, "max_sessions": 1000}

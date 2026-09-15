@@ -46,7 +46,7 @@ from tests.fake_control_plane import FakeControlPlane
 _SUPABASE_URL = "https://claimtest.supabase.co"
 
 # #1719 (Task 3): JWT subjects are real UUIDs — claim_status's
-# membership_for_user_team filters org_memberships.user_id (uuid column);
+# membership_for_user_org filters org_memberships.user_id (uuid column);
 # a non-UUID literal 22P02s (HTTP 400) under the fake's UUID fidelity.
 _U_A = "9f2c1a40-0000-4a00-8000-00000000000a"
 _U_B = "9f2c1a40-0000-4a00-8000-00000000000b"
@@ -312,7 +312,7 @@ class TestClaimEndpoint:
 
     def test_claim_idempotent_same_user(self, client, fake, monkeypatch):
         """P3-FIX-Q: re-claim by the SAME user is a noop 200 (the endpoint's
-        pre-check passes because is_anon_team flips, but the RPC returns
+        pre-check passes because is_anon_org flips, but the RPC returns
         idempotent success — here we exercise the RPC-level idempotency by
         calling claim_membership directly after the first claim)."""
         key, org_id = _provision_anon(client, fake)  # noqa: RUF059
@@ -324,7 +324,7 @@ class TestClaimEndpoint:
             json={"api_key": key},
         )
         assert r.status_code == 200, r.text
-        # second call: is_anon_team is now False → 409 from the endpoint
+        # second call: is_anon_org is now False → 409 from the endpoint
         r2 = client.post(
             "/v1/claim",
             headers={"Authorization": "Bearer abc.def.ghi"},
@@ -548,7 +548,7 @@ class TestAnonCeiling:
     ``anon`` tier; claimed teams lift to full free (same key, same team).
 
     The derivation lives in quota.derived_tier() (shared helper) and is
-    applied at resolve_api_key (auth boundary), resolve_team_limits, and
+    applied at resolve_api_key (auth boundary), resolve_org_limits, and
     team_tier (metering/analytics source). Registry mode NO-OPs (Supabase-
     mode-only ceiling in v1).
     """
@@ -567,8 +567,8 @@ class TestAnonCeiling:
         # anon) — the anon tier is 1/10th of free (1,000 ops).
         assert team.get("write_ops_limit") == 1000, team
         # The reduced CAPS bind at the limits resolution layer.
-        from tortoise.quota import resolve_team_limits
-        lim = resolve_team_limits(org_id)
+        from tortoise.quota import resolve_org_limits
+        lim = resolve_org_limits(org_id)
         assert lim["tier"] == "anon", lim
         assert lim.get("max_points") == 1000, lim  # 1k node cap
         assert lim.get("max_api_keys") == 1, lim  # 1 key on anon tier
@@ -590,8 +590,8 @@ class TestAnonCeiling:
         assert team["tier"] == "free", team
         assert team.get("anon") is False
         assert team.get("write_ops_limit") == 10000, team
-        from tortoise.quota import resolve_team_limits
-        lim = resolve_team_limits(org_id)
+        from tortoise.quota import resolve_org_limits
+        lim = resolve_org_limits(org_id)
         assert lim["tier"] == "free", lim
         assert lim.get("max_points") == 10000, lim
         assert lim.get("max_api_keys") == 2, lim
@@ -632,11 +632,11 @@ class TestAnonCeiling:
     def test_max_points_override_honored_by_resolve_team_limits(
             self, client, fake, monkeypatch):
         """#1859 P3-2: a teams.max_points override (migration
-        20260817000001) binds at resolve_team_limits (supabase lane) with
+        20260817000001) binds at resolve_org_limits (supabase lane) with
         graph_size_cap fallback when NULL — mirroring import_team's
         precedence; anon ceiling still wins (checked in
         test_unclaimed_anon_team_resolves_anon_tier)."""
-        from tortoise.quota import resolve_team_limits
+        from tortoise.quota import resolve_org_limits
         key, org_id = _provision_anon(client, fake)
         user_id = str(uuid.uuid4())
         _patch_verify(monkeypatch, _jwt(user_id, providers=["github"]))
@@ -644,26 +644,26 @@ class TestAnonCeiling:
         assert r.status_code == 200, r.text
         # stored caps (free values) read-time override → 12345 wins
         fake.tables["teams"][0]["max_points"] = 12345
-        lim = resolve_team_limits(org_id)
+        lim = resolve_org_limits(org_id)
         assert lim["max_points"] == 12345, lim
         # NULL override → graph_size_cap fallback (GAP-B)
         fake.tables["teams"][0]["max_points"] = None
-        lim = resolve_team_limits(org_id)
+        lim = resolve_org_limits(org_id)
         assert lim["max_points"] == fake.tables["teams"][0]["graph_size_cap"], lim
 
     def test_parity_claim_rpc_resolve_limits(self, client, fake, monkeypatch):
-        """Parity: the claim RPC's is_anon_team predicate, resolve_api_key,
-        and resolve_team_limits agree on the same fixture (anon then
+        """Parity: the claim RPC's is_anon_org predicate, resolve_api_key,
+        and resolve_org_limits agree on the same fixture (anon then
         claimed) — the drift guard from solution-verify P1-C."""
-        from tortoise.quota import resolve_team_limits
-        from tortoise.supabase_control import is_anon_team
+        from tortoise.quota import resolve_org_limits
+        from tortoise.supabase_control import is_anon_org
 
         key, org_id = _provision_anon(client, fake)
         # Before claim: predicate true, api-key tier anon, limits anon
-        assert is_anon_team(fake, org_id) is True
+        assert is_anon_org(fake, org_id) is True
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r.json()["tier"] == "anon"
-        lim = resolve_team_limits(org_id)
+        lim = resolve_org_limits(org_id)
         assert lim["tier"] == "anon", lim
 
         # After claim: predicate false, api-key tier free, limits free
@@ -671,10 +671,10 @@ class TestAnonCeiling:
         _patch_verify(monkeypatch, _jwt(user_id, providers=["github"]))
         r = client.post("/v1/claim", json={"api_key": key})
         assert r.status_code == 200, r.text
-        assert is_anon_team(fake, org_id) is False
+        assert is_anon_org(fake, org_id) is False
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r.json()["tier"] == "free"
-        lim = resolve_team_limits(org_id)
+        lim = resolve_org_limits(org_id)
         assert lim["tier"] == "free", lim
 
 
@@ -694,7 +694,7 @@ class TestClaimStatusOutage503:
             raise RuntimeError("Supabase control-plane query failed "
                                "(org_memberships): HTTP 500")
 
-        monkeypatch.setattr(sc, "is_anon_team", _boom)
+        monkeypatch.setattr(sc, "is_anon_org", _boom)
         r = client.get(
             "/v1/claim/status",
             headers={"Authorization": "Bearer abc.def.ghi",

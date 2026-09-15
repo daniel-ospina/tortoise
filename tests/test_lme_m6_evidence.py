@@ -1100,7 +1100,7 @@ def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):
     os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
     from tortoise.commit_schema import compute_client_commit_id
-    from tortoise.hosted_api import app, get_current_team
+    from tortoise.hosted_api import app, get_current_org
 
     team = {"org_id": "m6-test-team", "key_id": "k", "legacy_full_access": True, "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
@@ -1114,7 +1114,7 @@ def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):
     # on the embedded lane (#1950).
     import tortoise.hosted_api as ha_mod
     with patched_tortoise_sdk(str(tmp_path / "hosted.db")):
-        app.dependency_overrides[get_current_team] = lambda: dict(team)
+        app.dependency_overrides[get_current_org] = lambda: dict(team)
         payload = {
             "schema_version": "1",
             "session_id": "m6-hosted-session",

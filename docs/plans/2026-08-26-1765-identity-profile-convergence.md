@@ -34,7 +34,7 @@ The platform stores three different "who is the user" facts in three places:
    `20260813000004` P3-FIX-S), written by signup (`provision_team`), the claim
    path (claim RPC Step 6, unconditional P1-FIX-B), and the onboarding email
    seam (`PATCH /v1/onboarding/state`, `hosted_api.py:8204`). It doubles as the
-   signup idempotency key (`team_by_email`, `hosted_api.py:~3003`).
+   signup idempotency key (`org_by_email`, `hosted_api.py:~3003`).
 2. **The user anchor** — `org_memberships.user_id` + GoTrue
    `auth.identities` (provider rows). `#2085`: `updateUser({password})` adds
    password capability WITHOUT an `auth.identities` row, so password is a
@@ -122,7 +122,7 @@ check-and-delete a single server-side critical section.
   teams stop being the user table, the conflation dies at the root.
 - **Why not default:** the probes are falsification-gated precisely because a
   false positive churns the entire signup path (one-way door: `uq_teams_email`
-  drop + `team_by_email` re-anchor + claim Step-6 re-point + `reg-*` anchor
+  drop + `org_by_email` re-anchor + claim Step-6 re-point + `reg-*` anchor
   re-point) for an unproven hypothesis. Shipping it unprobed violates the
   constraint register's own conditional gate.
 - **Adopted from F4:** the C2 invariant ("identity flows never write
@@ -379,7 +379,7 @@ delete it performs. Both must pass.
      states; username valid/invalid/dup; claim `created_by` migration.
 
 2. **`tortoise/supabase_control.py`** — seam helpers mirroring
-   `team_email`/`update_team_email` (lines ~1204): `user_identity_inventory(cp,
+   `org_email`/`update_org_email` (lines ~1204): `user_identity_inventory(cp,
    user_id)`, `reserve_username(cp, user_id, username)`, `release_username(cp,
    user_id, username)`; RPC-exception → Python-error mapping.
 
@@ -458,7 +458,7 @@ e2e link/unlink journeys.
   4. secondary-identity collisions (same email across teams).
   If ALL confirm multi-team demand → execute the C1 branch (see below).
 - **C1 demotion consumer map (already inventoried — ready if probes fire):**
-  `team_by_email` idempotency (`hosted_api.py:~3003`), claim RPC Step 6 email
+  `org_by_email` idempotency (`hosted_api.py:~3003`), claim RPC Step 6 email
   upsert (`20260813000004`), `provision_team` email params (0010:90,
   `20260825214233:92`), `_team_email`/`_write_team_email` seams
   (`hosted_api.py:8436/8452`) + onboarding PATCH (`:8204`), `uq_teams_email`

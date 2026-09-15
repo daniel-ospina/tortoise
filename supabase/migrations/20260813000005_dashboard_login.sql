@@ -24,6 +24,6 @@ ALTER TABLE public.api_keys
     ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true;
 
 -- registry-mode parity: the selfhost Team/APIKey nodes carry the same
--- attributes (read via the registry get_current_team path). Added here as a
+-- attributes (read via the registry get_current_org path). Added here as a
 -- comment anchor — registry mode stores them on the nodes at create time
 -- (see hosted_api.agent_signup / _cmd_signup); no SQL needed.

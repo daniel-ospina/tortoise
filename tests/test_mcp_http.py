@@ -117,16 +117,16 @@ class TestContextVarsAndSdk:
         ma.sdk = None
         token = ma._current_org_id.set(None)
         try:
-            assert ma._get_team_sdk() is ma._get_base_sdk()
+            assert ma._get_org_sdk() is ma._get_base_sdk()
         finally:
             ma._current_org_id.reset(token)
             ma.sdk = None
 
     def test_team_sdk_returns_team_scoped_when_set(self):
-        from tortoise.mcp_auth import _current_org_id, _get_team_sdk
+        from tortoise.mcp_auth import _current_org_id, _get_org_sdk
         token = _current_org_id.set("team-abc")
         try:
-            assert isinstance(_get_team_sdk(), TortoiseSDK)
+            assert isinstance(_get_org_sdk(), TortoiseSDK)
         finally:
             _current_org_id.reset(token)
 
@@ -433,7 +433,7 @@ class TestTeamIsolation:
 class TestComputeConfidenceHTTP:
     """AC7 — the no-arg HTTP disable-contract (#395 delta C).
 
-    The request-scoped SDK (mcp_auth.py _get_team_sdk) has empty in-memory
+    The request-scoped SDK (mcp_auth.py _get_org_sdk) has empty in-memory
     dirty state over HTTP, so the SDK no-arg path would silently return {}
     where today it runs whole-graph EP (the #7288 timeout surface). The
     transport-aware branch lives in the handler: no-arg over HTTP →
@@ -488,7 +488,7 @@ class TestComputeConfidenceHTTP:
             sdk = TortoiseSDK(os.path.join(
                 _tf.mkdtemp(prefix="tt_395_http_"), "http.db"))
             return sdk
-        monkeypatch.setattr(ms, "_get_team_sdk", _fresh_sdk)
+        monkeypatch.setattr(ms, "_get_org_sdk", _fresh_sdk)
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call",
                                   "id": 1,
                                   "params": {"name": "tortoise_compute_confidence",
@@ -517,7 +517,7 @@ class TestComputeConfidenceHTTP:
             orig_cc = lambda *a, **k: seen.update(max_hops=k.get("max_hops")) or {}  # noqa: E731
             sdk.compute_confidence = orig_cc
             return sdk
-        monkeypatch.setattr(ms, "_get_team_sdk", _spy_sdk)
+        monkeypatch.setattr(ms, "_get_org_sdk", _spy_sdk)
         monkeypatch.setattr(ms, "_parse", lambda x: x)
         token = _transport_mode.set("http")
         try:

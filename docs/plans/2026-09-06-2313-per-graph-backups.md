@@ -48,7 +48,7 @@ aboutObjects:
 ### Integration Surface Map (from scoping doc, test-design #2094)
 | Surface | Change | Tests |
 |---|---|---|
-| Team→graphs enumeration (both lanes) | new seam `enumerate_team_graphs` | test_backup_sweep.py (registry dialect + supabase fake) |
+| Team→graphs enumeration (both lanes) | new seam `enumerate_org_graphs` | test_backup_sweep.py (registry dialect + supabase fake) |
 | Storage keys/state/prune/list | graph key segment + per-graph state + per-graph prune; legacy readable | test_hosted_backup.py (extend, don't delete), test_backup.py |
 | Restore | graph derived from backup key/legacy manifest; tombstone guard | test_hosted_backup.py + endpoint tests |
 | Sweep loop + drift guards | per-graph inner loop; incidents carry graph_id; re-baseline graph param; drill optional | test_backup_sweep.py |
@@ -62,14 +62,14 @@ aboutObjects:
 ### Task 1: Graph enumeration seam (both lanes) + default normalization
 
 **Intent:** Give the sweep a deterministic per-team graph list — the substrate every later task consumes.
-**Acceptance:** `enumerate_team_graphs(source, org_id)` returns `[{graph_id, kind, namespace}]` in both dialects: supabase via `graph_metadata` (already default-first, custom active only, default graph_id literal "default"); registry via `graph_list` with `status != 'deleted'` filter and kind-default node mapped to graph_id literal `"default"`. Unit-tested against fakes; zero behavior change elsewhere.
+**Acceptance:** `enumerate_org_graphs(source, org_id)` returns `[{graph_id, kind, namespace}]` in both dialects: supabase via `graph_metadata` (already default-first, custom active only, default graph_id literal "default"); registry via `graph_list` with `status != 'deleted'` filter and kind-default node mapped to graph_id literal `"default"`. Unit-tested against fakes; zero behavior change elsewhere.
 **Files:**
-- Modify: `tortoise/backup_sweep.py` (add seam next to `enumerate_eligible_teams`)
+- Modify: `tortoise/backup_sweep.py` (add seam next to `enumerate_eligible_orgs`)
 - Test: `tests/test_backup_sweep.py`
 
 **Step 1:** Write failing test — supabase fake with a default row + 2 custom rows + 1 deleted row → returns 3 (default id "default", customs by their ids; deleted excluded).
 **Step 2:** Run → FAIL (function missing).
-**Step 3:** Implement `enumerate_team_graphs` with the dialect split; registry lane reads `graph_list`, filters deleted, maps kind default → `"default"`; supabase lane delegates to `graph_metadata` (registry-shaped rows already).
+**Step 3:** Implement `enumerate_org_graphs` with the dialect split; registry lane reads `graph_list`, filters deleted, maps kind default → `"default"`; supabase lane delegates to `graph_metadata` (registry-shaped rows already).
 **Step 4:** Run → PASS. Add registry-dialect test (fake registry graph nodes incl. deleted).
 **Step 5:** Commit.
 

@@ -347,9 +347,9 @@ class TestSessionLogin:
         key = _mint_key(fake, created_by=_OWNER)
         _patch_gotrue(monkeypatch)
         # Post-verify backstop: remove the membership from the fake so the
-        # sanity check fails. Simulated by patching membership_for_user_team
+        # sanity check fails. Simulated by patching membership_for_user_org
         # to return None for the mint-target after the mint.
-        real = sc.membership_for_user_team
+        real = sc.membership_for_user_org
         calls = {"n": 0}
 
         def _flaky(cp, user_id, org_id):
@@ -358,7 +358,7 @@ class TestSessionLogin:
                 return None
             return real(cp, user_id, org_id)
 
-        monkeypatch.setattr(sc, "membership_for_user_team", _flaky)
+        monkeypatch.setattr(sc, "membership_for_user_org", _flaky)
         r = _exchange(client, key)
         assert r.status_code == 403
 
@@ -392,7 +392,7 @@ class TestMintPathOutage503:
     body the client rendered as 'Invalid API key.'."""
 
     def test_mint_path_membership_outage_503(self, client, fake, monkeypatch):
-        """membership_for_user_team raises (outage/schema-cache) on the
+        """membership_for_user_org raises (outage/schema-cache) on the
         mint path → 503 with the error_code, not a raw 500."""
         _seed_team(fake, created_by=_OWNER)
         key = _mint_key(fake, created_by=_OWNER)
@@ -401,7 +401,7 @@ class TestMintPathOutage503:
             raise RuntimeError("Supabase control-plane query failed "
                                "(org_memberships): HTTP 400")
 
-        monkeypatch.setattr(sc, "membership_for_user_team", _boom)
+        monkeypatch.setattr(sc, "membership_for_user_org", _boom)
         r = _exchange(client, key)
         assert r.status_code == 503, r.text
         body = r.json()
@@ -409,7 +409,7 @@ class TestMintPathOutage503:
         assert "temporarily unavailable" in body["detail"]["message"].lower()
 
     def test_mint_path_is_anon_team_outage_503(self, client, fake, monkeypatch):
-        """is_anon_team raises on the anon branch → 503, never a 500."""
+        """is_anon_org raises on the anon branch → 503, never a 500."""
         _seed_team(fake, created_by="anon-abc-identity")  # identity creator
         key = _mint_key(fake, created_by="anon-abc-identity")
 
@@ -417,7 +417,7 @@ class TestMintPathOutage503:
             raise RuntimeError("Supabase control-plane query failed "
                                "(org_memberships): HTTP 500")
 
-        monkeypatch.setattr(sc, "is_anon_team", _boom)
+        monkeypatch.setattr(sc, "is_anon_org", _boom)
         r = _exchange(client, key)
         assert r.status_code == 503, r.text
         assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
@@ -470,19 +470,19 @@ class TestRateLimitChargePoints:
         self._limiter_on(monkeypatch)
         _seed_team(fake, created_by=_OWNER)
         key = _mint_key(fake, created_by=_OWNER)
-        orig = sc.membership_for_user_team
+        orig = sc.membership_for_user_org
 
         def _boom(cp, user_id, org_id):
             raise RuntimeError("Supabase control-plane query failed "
                                "(org_memberships): HTTP 400")
 
-        monkeypatch.setattr(sc, "membership_for_user_team", _boom)
+        monkeypatch.setattr(sc, "membership_for_user_org", _boom)
         r = _exchange(client, key)
         assert r.status_code == 503, r.text  # bucket NOT charged
 
         # Narrow undo: restore ONLY the _boom patch (not the _env fixture's
         # control-plane/GoTrue patches).
-        monkeypatch.setattr(sc, "membership_for_user_team", orig)
+        monkeypatch.setattr(sc, "membership_for_user_org", orig)
         _patch_gotrue(monkeypatch)
         r = _exchange(client, key)
         assert r.status_code == 200, r.text

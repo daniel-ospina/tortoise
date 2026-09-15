@@ -15,7 +15,7 @@ the audit:
 - recovery-at-cap auto-revokes the OLDEST OTHER key (#750.10 — never the
   caller's own key)
 - 422 bad purpose
-- mint → Bearer round-trip through get_current_team (registry lookup path)
+- mint → Bearer round-trip through get_current_org (registry lookup path)
 
 Fixture mirrors tests/test_hosted_api.py (dependency override + temp
 FalkorDBLite DB via TortoiseSDK.__init__ patch).
@@ -622,7 +622,7 @@ class TestMintedKeyRoundTrip:
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 200
         key = r.json()["key"]
-        # Same app, real get_current_team (NOT overridden): the minted key
+        # Same app, real get_current_org (NOT overridden): the minted key
         # resolves via key_prefix + verify_api_key against the registry.
         r2 = client.get("/v1/team/keys", headers={"Authorization": f"Bearer {key}"})
         assert r2.status_code == 200, r2.text
@@ -654,7 +654,7 @@ class TestMintedKeyRoundTrip:
 
 class TestSessionKeyMintConcurrency:
     """#1855 — the REGISTRY (selfhost) mint holds the same per-team lock as
-    the Supabase lane (_team_mint_lock in hosted_api). The embedded store is
+    the Supabase lane (_org_mint_lock in hosted_api). The embedded store is
     single-process (no multi-worker story), so the lock is belt-and-braces
     that makes the serialization explicit. The load-bearing test is
     test_registry_mint_blocks_while_team_lock_held (fails if the with-lock
@@ -670,7 +670,7 @@ class TestSessionKeyMintConcurrency:
         import threading
 
         import tortoise.hosted_api as ha
-        from tortoise.hosted_api import _team_mint_lock
+        from tortoise.hosted_api import _org_mint_lock
 
         async def _noop(*_a, **_k):
             return None
@@ -683,7 +683,7 @@ class TestSessionKeyMintConcurrency:
         monkeypatch.setattr(ha, "_async_audit", _noop)
         monkeypatch.setattr(ha, "_abuse_evaluate_keys", _noop)
 
-        lock = _team_mint_lock(tid)
+        lock = _org_mint_lock(tid)
         lock.acquire()
         done = threading.Event()
         outcome = {}

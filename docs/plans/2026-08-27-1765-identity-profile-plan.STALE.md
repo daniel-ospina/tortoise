@@ -55,7 +55,7 @@ Skipped — zero new third-party dependencies. supabase-js 2.112.2 is vendored (
 
 Identity facts are conflated across three tables:
 
-1. **`teams.email`** — a globally-unique TEAM attribute (`uq_teams_email` partial unique index, 20260813000004:107) used as the signup idempotency key (`team_by_email`, hosted_api:3007) and written by identity-ish flows (claim_membership Step 6, onboarding PATCH :8178-8210).
+1. **`teams.email`** — a globally-unique TEAM attribute (`uq_teams_email` partial unique index, 20260813000004:107) used as the signup idempotency key (`org_by_email`, hosted_api:3007) and written by identity-ish flows (claim_membership Step 6, onboarding PATCH :8178-8210).
 2. **The user anchor** — `org_memberships.user_id` (nullable FK to auth.users, 0009) + GoTrue `auth.identities` (not browser-queryable without RLS/RPC, C14).
 3. **`api_keys.created_by`** — mixed attribution (bootstrap-NULL, agent principals, real user ids, C10).
 

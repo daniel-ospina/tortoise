@@ -367,7 +367,7 @@ Identifier space = `teams.id` (PK, unique) / `Team.id` in the registry.
 - Otherwise append `-2`, `-3`, … (bounded at `-50`), then a 6-char random suffix
   (`-a1b2c3`), then 409.
 - **Atomicity:** the Supabase lane already runs the whole gate+provision chain under
-  `_team_create_lock(user_id)` (`hosted_api.py:9040` def; taken at `:9188`, `:9191`) and the `id` PK is the
+  `_org_create_lock(user_id)` (`hosted_api.py:9040` def; taken at `:9188`, `:9191`) and the `id` PK is the
   DB backstop — a losing racer sees the PK violation and retries the next suffix.
   The registry lane's in-process lock is documented as not multi-process-safe
   (`hosted_api.py:9326-9330`, #1954); the retry-on-`ControlPlaneError` loop over the
@@ -461,7 +461,7 @@ Every one of these is a slice target. Line numbers are `a76f98fb6`.
 | **CLI `key create`** | `tortoise/__main__.py:5660` `_cmd_key_create` — reuses an existing team by **name** (`:5697-5700` loops `MATCH (t:Team) RETURN t.id, t.name` and matches `tname == args.name`) then `sdk.team_create(args.name)` (`:5703`) | treats the display name as identity for idempotency | slice 1: route `args.name` through the shared validator; slice 2: **reuse by derived `id`, never by name** — under D4 two orgs may share a display name and the name-match would silently return another org's team |
 | Name-keyed mutation helper | `tortoise/sdk.py:14932-14941` — dedups `Team` nodes via `MATCH (t:Team {name:$name}) RETURN count(t) > 0` then skips | assumes name → identity | slice 2: key on `id` once display names may repeat (one-shot path, lower materiality than the CLI) |
 | Name-keyed duplicate guard (same file) | `tortoise/sdk.py:14406` — `MATCH (t:Team {name:$name}) RETURN count(t) > 0` inside `team_create` | the create-time name uniqueness guard | slice 2: covered by "the duplicate guard moves from `name` to `id`" |
-| Supabase control plane | `tortoise/supabase_control.py` `provision_team`, `team_by_name`, `team_list`, `_TEAM_BASE_SELECT:82`, reads `:871`, `:1284` | reads/writes `name` | unchanged — `name` is the display name |
+| Supabase control plane | `tortoise/supabase_control.py` `provision_team`, `org_by_name`, `team_list`, `_TEAM_BASE_SELECT:82`, reads `:871`, `:1284` | reads/writes `name` | unchanged — `name` is the display name |
 
 **Dashboard (all of `website/apps/dashboard/src/main.jsx` unless noted)**
 

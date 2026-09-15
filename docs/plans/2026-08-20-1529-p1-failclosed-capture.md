@@ -1145,9 +1145,9 @@ def test_capture_session_blank_over_quota_is_422_not_402(self, client, monkeypat
     est=0 → 2+0 > 1 → gate-after-quota yields 402 while gate-first yields
     422 — the assertion discriminates; non-blank → 2+est > 1 → 402 either
     order (control)."""
-    from tortoise.hosted_api import app, get_current_team
+    from tortoise.hosted_api import app, get_current_org
     import tortoise.hosted_api as ha_mod
-    app.dependency_overrides[get_current_team] = lambda: {
+    app.dependency_overrides[get_current_org] = lambda: {
         **TEST_TEAM, "max_points": 1}   # TEST_TEAM is the fixture's auth dict
     sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     sdk.create_point(kind="statement", content="pre-existing non-episodic point 1")

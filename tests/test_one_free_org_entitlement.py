@@ -486,7 +486,7 @@ class TestWebhookProvisioning:
         assert len(_membership_rows(fake, tid)) == 1
         assert len([e for e in fake.query("webhook_events")
                     if e.get("event_id") == "evt_replay_1"]) == 1
-        # the second delivery short-circuits on team_by_id() and never touches
+        # the second delivery short-circuits on org_by_id() and never touches
         # the graph at all — no second TeamMeta can be minted
         assert len(_creates(statements)) == 1, statements
         assert statements.count("MATCH (m:TeamMeta) RETURN count(m)") == 1
@@ -501,7 +501,7 @@ class TestWebhookProvisioning:
         import tortoise.supabase_control as sc
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: FIXTURE_SUB)
-        real = sc.provision_team
+        real = sc.provision_org
         state = {"n": 0}
 
         def _flaky(cp, **kwargs):

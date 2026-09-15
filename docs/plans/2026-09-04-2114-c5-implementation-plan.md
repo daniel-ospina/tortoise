@@ -4,18 +4,18 @@
 
 ## Summary
 
-C1 built the **resolution point** (`get_current_team`/`resolve_api_key` carry `graph_id`/`graph_namespace`/`scopes`/`legacy_full_access`/`delegation_depth`). C2/C3 minted per-graph keys + graphs. C4 hardened the FalkorDB ACL users. **C5 is the enforcement flip**: a per-graph key's data-plane requests must reach ONLY its own graph, and scope (read-only → write denied) must be enforced at the app layer — verifiable with the ACL layer OFF (the spine stands alone; ACL = defense-in-depth ON).
+C1 built the **resolution point** (`get_current_org`/`resolve_api_key` carry `graph_id`/`graph_namespace`/`scopes`/`legacy_full_access`/`delegation_depth`). C2/C3 minted per-graph keys + graphs. C4 hardened the FalkorDB ACL users. **C5 is the enforcement flip**: a per-graph key's data-plane requests must reach ONLY its own graph, and scope (read-only → write denied) must be enforced at the app layer — verifiable with the ACL layer OFF (the spine stands alone; ACL = defense-in-depth ON).
 
 The C3→C5 boundary restated: deleg-NULL scoped keys are ACTIVE today and currently pass data-plane gates team-wide (C2 plan handoff line 140 documents this). C5 closes that gap: `_require_graph_scope`/`_resolve_data_sdk` become the authoritative pre-filter on every data surface.
 
 ## Current-state seam map (verified on `e2131c68`)
 
-- **Resolution (both lanes, done C1):** `get_current_team` (hosted_api ~1367; registry) + `_get_current_team_supabase` → `resolve_api_key` (supabase_control:494) both return `graph_id` (NULL = team-wide), `graph_namespace` (**FULL DB graph name**: `org_{org_id}` default — from `teams.graph_name` / fallback `org_{org_id}` — or the custom Graph node's `org_{org_id}_{gid}`), `scopes` (flat allowlist), `legacy_full_access` (deleg NULL + `scopes==[]`), `delegation_depth`.
+- **Resolution (both lanes, done C1):** `get_current_org` (hosted_api ~1367; registry) + `_get_current_team_supabase` → `resolve_api_key` (supabase_control:494) both return `graph_id` (NULL = team-wide), `graph_namespace` (**FULL DB graph name**: `org_{org_id}` default — from `teams.graph_name` / fallback `org_{org_id}` — or the custom Graph node's `org_{org_id}_{gid}`), `scopes` (flat allowlist), `legacy_full_access` (deleg NULL + `scopes==[]`), `delegation_depth`.
 - **Data-plane SDK open today:** `_make_sdk(namespace=org_id)` (hosted_api:154) → `TortoiseSDK(namespace=…)` → `graph_name = "team_" + namespace` (sdk.py:1264-1280) → `FalkorProjection.from_uri(uri, graph_name=X)` (sdk.py:1291). **A custom graph's name `org_{tid}_{gid}` cannot be expressed through `namespace`** (the prepend would double `team_`). ~107 `_make_sdk(namespace=` sites in hosted_api; the team-data subset uses `team["org_id"]`/bare `org_id` (~30 data-plane; the rest are `"registry"` control-plane — untouched).
 - **Raw-graph opens already exist** for custom graphs at provisioning (C2 `_provision_graph` runs the init query via `db.select_graph(graph_name)` on the graph's raw name; hosted_api:7603) and drop (`select_graph(target).delete()` ~10635). So the FalkorDB layer handles arbitrary graph names fine — the gap is the SDK/projection entry.
-- **MCP:** `mcp_auth.py` `_current_org_id` ContextVar (line 38) → `_get_team_sdk()` (65) → `TortoiseSDK(namespace=org_id)` (default graph only). No graph scope.
+- **MCP:** `mcp_auth.py` `_current_org_id` ContextVar (line 38) → `_get_org_sdk()` (65) → `TortoiseSDK(namespace=org_id)` (default graph only). No graph scope.
 - **Sweeps:** backup_sweep.py:147-217 enumerates **teams** (`teams.graph_name` = the DEFAULT graph only). dream/consistency/fallback_snapshot workers call `_make_sdk(namespace=org_id)` per team — custom graphs are never swept/backed up.
-- **Session/context:** `/v1/context` GET (hosted_api:11042-ish) + `POST /v1/sessions` resolve `get_current_team` → team-scoped SDK; per-graph session capture is C6's payload work — C5 asserts only the RESOLUTION slice (graph-key → its graph; team-key → default; cross-graph denial).
+- **Session/context:** `/v1/context` GET (hosted_api:11042-ish) + `POST /v1/sessions` resolve `get_current_org` → team-scoped SDK; per-graph session capture is C6's payload work — C5 asserts only the RESOLUTION slice (graph-key → its graph; team-key → default; cross-graph denial).
 - **Metering/quota:** metering.py counts ops against the team `write_ops` pool (per-team, graph-agnostic — stays; no double-count, no bypass).
 
 ## Decisions
@@ -41,13 +41,13 @@ Replacement discipline: every data-plane endpoint that opens the team graph (`na
 Enforcement model (epic §5.4): GET/HEAD→read; POST/PUT/PATCH/DELETE→write + operation-level classification (query-language bodies). One matrix:
 - `legacy_full_access` (deleg NULL, `scopes==[]` — the tt_/tkm_ class + session auth): **all data-plane ops allowed** on the resolved graph — existing flows unchanged.
 - Scoped key (deleg NULL or 0 with `scopes` non-empty): data reads need `graphs:read`; data writes need `graphs:write` (which implies read). `graphs:read`-only key → write endpoint 403.
-- deleg=0 keys: the DI dormancy gate (`get_current_team_gated`, `_reject_minted_delegated_key`) already 403s them off team data until now — C5's `_data_sdk` + `_require_scope` REPLACE that blanket dormancy for deleg=0 keys that carry data scopes (minted child keys minted with `graphs:read`/`graphs:write` become functional on their bound graph); deleg=0 keys WITHOUT data scopes stay 403. `get_current_team_gated` semantics narrow from "no deleg=0 keys at all" to "deleg=0 keys operate only via `_data_sdk` + scope gate".
+- deleg=0 keys: the DI dormancy gate (`get_current_org_gated`, `_reject_minted_delegated_key`) already 403s them off team data until now — C5's `_data_sdk` + `_require_scope` REPLACE that blanket dormancy for deleg=0 keys that carry data scopes (minted child keys minted with `graphs:read`/`graphs:write` become functional on their bound graph); deleg=0 keys WITHOUT data scopes stay 403. `get_current_org_gated` semantics narrow from "no deleg=0 keys at all" to "deleg=0 keys operate only via `_data_sdk` + scope gate".
 
 Surface classification (read vs write) documented in the Task 2 table; the enforcement helper is a pre-filter at the top of each handler (a denied request never materializes results — #2082 principle 7).
 
-### D-C5-4 — MCP graph scope: ContextVar pair + `_get_team_sdk` uses the seam
+### D-C5-4 — MCP graph scope: ContextVar pair + `_get_org_sdk` uses the seam
 
-`mcp_auth.py`: `_current_org_id` stays; add `_current_graph_id`/`_current_graph_namespace` ContextVars (default None). The auth middleware (Bearer → org_id today) also stores the resolved graph scope. `_get_team_sdk()` (65): when `graph_namespace` set → `TortoiseSDK.from_graph_name` on it (same ownership pre-check as D-C5-2); else today's `namespace=org_id`. Tools that only ever wrote team-wide data on the default graph now resolve their graph-bound key's own graph. MCP JSON-RPC 403 (`ERR_*`) on scope denial mirrors REST (write-implies-read).
+`mcp_auth.py`: `_current_org_id` stays; add `_current_graph_id`/`_current_graph_namespace` ContextVars (default None). The auth middleware (Bearer → org_id today) also stores the resolved graph scope. `_get_org_sdk()` (65): when `graph_namespace` set → `TortoiseSDK.from_graph_name` on it (same ownership pre-check as D-C5-2); else today's `namespace=org_id`. Tools that only ever wrote team-wide data on the default graph now resolve their graph-bound key's own graph. MCP JSON-RPC 403 (`ERR_*`) on scope denial mirrors REST (write-implies-read).
 
 ### D-C5-5 — Sweep parity: enumerate graphs, not just teams
 
@@ -79,15 +79,15 @@ metering.py per-team `write_ops` pool: ops from ANY of the team's graphs count o
 
 1. **Seam + resolver (D-C5-1/D-C5-2):** sdk factory; `_data_sdk(team)` + ownership pre-check in hosted_api; `_require_scope(team, op)` + write/read classification helper.
 2. **Surface conversion (the ~30):** audit every data-plane `_make_sdk(namespace=org_id|team["org_id"])` + `select_graph(team graph)` site; table each endpoint (surface, method, read/write, resolver switch, scope class). Rest endpoints: points/search/ask/analyze/packs/sessions/context/demo/backups + graph-data endpoints. MCP tools via D-C5-4.
-3. **MCP (D-C5-4):** ContextVars + `_get_team_sdk` seam + scope denial.
+3. **MCP (D-C5-4):** ContextVars + `_get_org_sdk` seam + scope denial.
 4. **Sweeps (D-C5-5):** graph enumeration in backup_sweep/dream/consistency/fallback_snapshot loops.
 5. **Tests (D-C5-8):** `tests/test_tenancy_spine.py` both-planes suite + regression pins (E2E-5/E2E-10) + quota single-count + sweep coverage. Exact-shape/existing suite green (hosted_api 242 docker + carve-out).
 6. **Docs:** plan review log + C6 handoff (delivery-shape + session_recording override owned by #2115).
 
 ## Review log
 - **Task 2 (data-plane conversion) done**: graph-data + sessions/context/insight/backups route via _data_sdk + _require_scope; team-level surfaces (overview/packs/onboarding/restore) reject graph-bound keys; deleg=0 data-scoped children activate (dormancy pins updated to the C5 contract).
-- **Task 3 (MCP) done**: graph-scope ContextVars + _get_team_sdk custom-graph routing + _enforce_mcp_tool_scope at the call-tool dispatch; C2 MCP pins green under the narrowed gate.
-- **Task 4 (sweeps) PARTIAL**: the dream drain is now per-graph (a custom-graph write's dirty roots drain THAT graph — the old team-keyed drain would dream the DEFAULT graph). **Deferred (documented residual):** backup_sweep + event-retention sweep custom-graph passes need per-graph STATE keying (read_team_state/manifest/drift alarms are team-scoped — a naive per-graph loop would false-drift) + incident semantics review; pinned as a follow-up (C6 handoff / ops) — the default-graph sweep is unchanged and safe.
+- **Task 3 (MCP) done**: graph-scope ContextVars + _get_org_sdk custom-graph routing + _enforce_mcp_tool_scope at the call-tool dispatch; C2 MCP pins green under the narrowed gate.
+- **Task 4 (sweeps) PARTIAL**: the dream drain is now per-graph (a custom-graph write's dirty roots drain THAT graph — the old team-keyed drain would dream the DEFAULT graph). **Deferred (documented residual):** backup_sweep + event-retention sweep custom-graph passes need per-graph STATE keying (read_org_state/manifest/drift alarms are team-scoped — a naive per-graph loop would false-drift) + incident semantics review; pinned as a follow-up (C6 handoff / ops) — the default-graph sweep is unchanged and safe.
 
 ## Risks
 

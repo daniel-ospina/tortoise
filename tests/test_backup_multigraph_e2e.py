@@ -25,7 +25,7 @@ import pytest
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
-    enumerate_team_graphs,
+    enumerate_org_graphs,
     read_graph_state,
     resolve_active_graph,
     run_backup_sweep,
@@ -91,7 +91,7 @@ def _journal_seam_graphs():
 @pytest.fixture(autouse=True)
 def _route_team_graph_name(monkeypatch):
     """Docker lane: registry-mode consumption of the team graph name (the
-    sweep's team_graph_name + the default-graph seam) must resolve to the
+    sweep's org_graph_name + the default-graph seam) must resolve to the
     docker-safe test_* names so seed and consumption agree (same pattern as
     test_backup_sweep's file-wide autouse fixture). Embedded lane: the real
     deterministic org_{id} holds (literals agree)."""
@@ -102,7 +102,7 @@ def _route_team_graph_name(monkeypatch):
     def _seam(source, org_id):
         return _team_graph(org_id)
 
-    monkeypatch.setattr(bs, "team_graph_name", _seam)
+    monkeypatch.setattr(bs, "org_graph_name", _seam)
 
 
 def _seed_team(proj, org_id: str, n_default: int) -> None:
@@ -211,7 +211,7 @@ def test_multigraph_sweep_and_per_graph_restore_e2e(monkeypatch):
 
             # ── tombstone guard: the deleted graph's enumeration row is gone;
             # resolution (drill/restore/re-baseline target) refuses it ──
-            rows = enumerate_team_graphs(reg, org_id)
+            rows = enumerate_org_graphs(reg, org_id)
             assert all(r["graph_id"] != "g_del" for r in rows)
             with pytest.raises(ValueError):
                 resolve_active_graph(reg, org_id, "g_del")

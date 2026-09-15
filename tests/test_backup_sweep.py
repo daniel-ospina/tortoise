@@ -22,16 +22,16 @@ from tortoise.backup_sweep import (
     _write_flat_index_filtered,
     read_purge_flat_ghosts,
     resolve_active_graph,
-    enumerate_eligible_teams,
-    enumerate_teams,
-    enumerate_team_tombstones,
+    enumerate_eligible_orgs,
+    enumerate_orgs,
+    enumerate_org_tombstones,
     list_drill_candidates,
     read_graph_state,
     read_ops_state,
-    read_team_state,
+    read_org_state,
     run_backup_sweep,
     run_graph_purge,
-    team_graph_name,
+    org_graph_name,
 )
 from tortoise.hosted_backup import MemoryStorage, list_backups, source_dialect
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
@@ -46,7 +46,7 @@ from tortoise.projection import FalkorProjection
 # name through guard-passing per-session-unique test_* names under a URI;
 # the embedded lane keeps the historical literals byte-for-byte (P1
 # zero-change). test_team_graph_name_reads_from_teams keeps real-function
-# semantics: its registry-branch assert (team_graph_name(reg, "team_x") ==
+# semantics: its registry-branch assert (org_graph_name(reg, "team_x") ==
 # "team_team_x") is deterministic org_{id} — lane-independent — and its
 # supabase-branch assert follows the SEAMED row (_BETA_GRAPH), so the row
 # literal is replaced by the constant (a literal would leak a non-test graph
@@ -83,7 +83,7 @@ def _team_graph(org_id: str) -> str:
 @pytest.fixture(autouse=True)
 def _route_sweep_team_graph_consumption(monkeypatch, request):
     """Cycle-3 P1-1 / cycle-4 P1-5: route registry-mode CONSUMPTION file-
-    wide — run_backup_sweep's internal team_graph_name (backup_sweep.py:514)
+    wide — run_backup_sweep's internal org_graph_name (backup_sweep.py:514)
     resolves via the module globals, so patching tortoise.backup_sweep's
     attribute routes every registry-mode dump to the seam names (seed and
     consumption agree). FUNCTION-scoped so request.node.name is the TEST
@@ -92,8 +92,8 @@ def _route_sweep_team_graph_consumption(monkeypatch, request):
     REAL function stays (seeds + asserts stay real). Exemption: the one test
     that exercises the REAL function's registry branch keeps it — the real
     function is deterministic (org_{id}) so its L745 assert
-    (team_graph_name(reg, "team_x") == "team_team_x") holds on both lanes.
-    The file's own direct imports of team_graph_name are unaffected by the
+    (org_graph_name(reg, "team_x") == "team_team_x") holds on both lanes.
+    The file's own direct imports of org_graph_name are unaffected by the
     module-attr patch (import-time binding), so the real-function tests
     (test_team_graph_name_reads_from_teams, ..._supabase_fail_closed) keep
     real semantics without extra exemptions.
@@ -104,7 +104,7 @@ def _route_sweep_team_graph_consumption(monkeypatch, request):
         return
     import tortoise.backup_sweep as bs
     from tortoise.hosted_backup import _is_supabase_source
-    _real_team_graph_name = bs.team_graph_name
+    _real_team_graph_name = bs.org_graph_name
 
     def _seam_team_graph_name(source, org_id):
         # Supabase-mode consumption reads graph_name from the teams ROW (the
@@ -117,7 +117,7 @@ def _route_sweep_team_graph_consumption(monkeypatch, request):
             return _real_team_graph_name(source, org_id)
         return _team_graph(org_id)
 
-    monkeypatch.setattr(bs, "team_graph_name", _seam_team_graph_name)
+    monkeypatch.setattr(bs, "org_graph_name", _seam_team_graph_name)
 
 
 @pytest.fixture(autouse=True)
@@ -205,7 +205,7 @@ def test_enumerate_teams_returns_registry_ids(shared_proj):
         reg = proj.db.select_graph(_REGISTRY_GRAPH)
         reg.query("CREATE (t:Team {id:'a'})")
         reg.query("CREATE (t:Team {id:'b'})")
-        assert sorted(enumerate_teams(reg)) == ["a", "b"]
+        assert sorted(enumerate_orgs(reg)) == ["a", "b"]
 
 
 def test_enumerate_teams_fail_closed_on_query_error(shared_proj):
@@ -222,7 +222,7 @@ def test_enumerate_teams_fail_closed_on_query_error(shared_proj):
 
         reg.query = _boom
         with pytest.raises(RuntimeError, match="enumeration failed"):
-            enumerate_teams(reg)
+            enumerate_orgs(reg)
 
 
 def test_sweep_no_teams_is_signal_not_incident(shared_proj):
@@ -349,7 +349,7 @@ def test_sweep_backs_up_team_and_writes_state(shared_proj):
         assert manifest["graph_name"] == _team_graph("team_x")
         assert manifest["node_count"] >= 1
         # Team state persisted for the transition guard.
-        state = read_team_state(store, "team_x")
+        state = read_org_state(store, "team_x")
         assert state["node_count"] == 1
 
 
@@ -390,7 +390,7 @@ def test_sweep_data_loss_candidate_on_transition(shared_proj):
         assert team_res["status"] == "data_loss_candidate"
         assert any(i["kind"] == "DATA_LOSS_CANDIDATE" for i in res2["incidents"])
         # state.json NOT updated on fire (guard ordering).
-        assert read_team_state(store, "team_x")["node_count"] == 1
+        assert read_org_state(store, "team_x")["node_count"] == 1
 
 
 def test_sweep_steady_zero_never_fires(shared_proj):
@@ -462,7 +462,7 @@ def test_enumerate_eligible_teams_filters_by_tier_and_backup_enabled(shared_proj
         reg.query("CREATE (t:Team {id:'pro_x', tier:'pro', backup_enabled:true})")
         # Another eligible team
         reg.query("CREATE (t:Team {id:'pro_y', tier:'enterprise', backup_enabled:true})")
-        result = enumerate_eligible_teams(reg)
+        result = enumerate_eligible_orgs(reg)
         assert sorted(result) == ["pro_x", "pro_y"]
 
 
@@ -477,7 +477,7 @@ def test_enumerate_eligible_teams_empty_when_no_pro_teams(shared_proj):
         reg.query("CREATE (t:Team {id:'free_a', tier:'free', backup_enabled:false})")
         reg.query("CREATE (t:Team {id:'free_b', tier:'free', backup_enabled:true})")
         reg.query("CREATE (t:Team {id:'pro_disabled', tier:'pro', backup_enabled:false})")
-        assert enumerate_eligible_teams(reg) == []
+        assert enumerate_eligible_orgs(reg) == []
 
 
 def test_enumerate_eligible_teams_fail_closed(shared_proj):
@@ -494,7 +494,7 @@ def test_enumerate_eligible_teams_fail_closed(shared_proj):
 
         reg.query = _boom
         with pytest.raises(RuntimeError, match="eligible-team enumeration failed"):
-            enumerate_eligible_teams(reg)
+            enumerate_eligible_orgs(reg)
 
 
 def test_team_sweep_backs_up_pro_team_and_prunes(shared_proj):
@@ -743,7 +743,7 @@ def test_sweep_per_label_drift_catches_small_label_wipe(shared_proj):
             config=_config(),
         )
         assert res1["results"]["team_x"]["status"] == "backed_up"
-        state1 = read_team_state(store, "team_x")
+        state1 = read_org_state(store, "team_x")
         assert state1["node_count"] == 55
         assert state1["label_counts"] == {"Invitation": 5, "Point": 50}
 
@@ -773,7 +773,7 @@ def test_sweep_per_label_drift_catches_small_label_wipe(shared_proj):
         assert breach["drop_pct"] == 40.0
 
         # State was NOT updated (guard ordering — no write on fire).
-        state2 = read_team_state(store, "team_x")
+        state2 = read_org_state(store, "team_x")
         assert state2["node_count"] == 55  # still the first-sweep baseline
 
 
@@ -892,8 +892,8 @@ def _fake_teams() -> FakeControlPlane:
 
 
 def test_enumerate_teams_supabase_dialect():
-    """Supabase source: enumerate_teams returns every teams.id."""
-    assert sorted(enumerate_teams(_fake_teams())) == [
+    """Supabase source: enumerate_orgs returns every teams.id."""
+    assert sorted(enumerate_orgs(_fake_teams())) == [
         "team_a", "team_b", "team_c", "team_d",
     ]
 
@@ -901,12 +901,12 @@ def test_enumerate_teams_supabase_dialect():
 def test_enumerate_teams_supabase_fail_closed():
     """A Supabase query error raises RuntimeError — never a silent [] (NO_TEAMS)."""
     with pytest.raises(RuntimeError, match="team enumeration failed"):
-        enumerate_teams(ErrorControlPlane())
+        enumerate_orgs(ErrorControlPlane())
 
 
 def test_enumerate_eligible_teams_supabase_filters():
     """Supabase equivalent of the #655 predicate: tier != free AND backup_enabled."""
-    assert sorted(enumerate_eligible_teams(_fake_teams())) == ["team_b", "team_c"]
+    assert sorted(enumerate_eligible_orgs(_fake_teams())) == ["team_b", "team_c"]
 
 
 def test_enumerate_teams_refuses_registry_source_in_supabase_lane(monkeypatch):
@@ -929,13 +929,13 @@ def test_enumerate_teams_refuses_registry_source_in_supabase_lane(monkeypatch):
     monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                         lambda: True)
     with pytest.raises(RuntimeError, match="dialect mismatch"):
-        enumerate_teams(_Reg())
+        enumerate_orgs(_Reg())
     with pytest.raises(RuntimeError, match="dialect mismatch"):
-        enumerate_eligible_teams(_Reg())
+        enumerate_eligible_orgs(_Reg())
     # The refusal rides the seam's documented RuntimeError contract, so the
     # callers' `enum_failed` (loud) path handles it — not the `no_teams` path.
     with pytest.raises(RuntimeError, match="team enumeration failed"):
-        enumerate_teams(_Reg())
+        enumerate_orgs(_Reg())
 
 
 def test_enumerate_teams_registry_lane_accepts_registry_source(monkeypatch):
@@ -952,9 +952,9 @@ def test_enumerate_teams_registry_lane_accepts_registry_source(monkeypatch):
 
             return SimpleNamespace(result_set=[["t_reg"]])
 
-    assert enumerate_teams(_Reg()) == ["t_reg"]
-    assert enumerate_teams(_fake_teams())[0] == "team_a"
-    assert sorted(enumerate_eligible_teams(_fake_teams())) == ["team_b", "team_c"]
+    assert enumerate_orgs(_Reg()) == ["t_reg"]
+    assert enumerate_orgs(_fake_teams())[0] == "team_a"
+    assert sorted(enumerate_eligible_orgs(_fake_teams())) == ["team_b", "team_c"]
 
 
 def test_sweep_reports_resolved_source_in_ops_state(shared_proj):
@@ -1037,8 +1037,8 @@ def test_enumerate_teams_empty_supabase_read_is_confirmed_empty(monkeypatch):
     monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                         lambda: True)
     empty = FakeControlPlane().seed("teams", [])
-    assert enumerate_teams(empty) == []
-    assert enumerate_eligible_teams(empty) == []
+    assert enumerate_orgs(empty) == []
+    assert enumerate_eligible_orgs(empty) == []
 
 
 def test_real_supabase_control_plane_is_classified_supabase(monkeypatch):
@@ -1062,13 +1062,13 @@ def test_real_supabase_control_plane_is_classified_supabase(monkeypatch):
 
 def test_enumerate_eligible_teams_supabase_fail_closed():
     with pytest.raises(RuntimeError, match="eligible-team enumeration failed"):
-        enumerate_eligible_teams(ErrorControlPlane())
+        enumerate_eligible_orgs(ErrorControlPlane())
 
 
 def test_team_graph_name_reads_from_teams(shared_proj):
     """Sweep reads graph_name from teams (the column is the source of truth)."""
     cp = _fake_teams()
-    assert team_graph_name(cp, "team_b") == _BETA_GRAPH  # the row value, seamed
+    assert org_graph_name(cp, "team_b") == _BETA_GRAPH  # the row value, seamed
     # Registry mode: deterministic org_{id} (no graph_name stored there).
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
@@ -1076,19 +1076,19 @@ def test_team_graph_name_reads_from_teams(shared_proj):
             return
         wipe(proj)
         reg = proj.db.select_graph(_REGISTRY_GRAPH)
-        assert team_graph_name(reg, "team_x") == "team_team_x"
+        assert org_graph_name(reg, "team_x") == "team_team_x"
         pass  # shared session projection — fixture owns close
 
 
 def test_team_graph_name_supabase_fail_closed():
     """Vanished team / missing graph_name / query error → RuntimeError, never a guess."""
     with pytest.raises(RuntimeError, match="vanished from the control plane"):
-        team_graph_name(_fake_teams(), "team_ghost")
+        org_graph_name(_fake_teams(), "team_ghost")
     with pytest.raises(RuntimeError, match="no graph_name"):
         cp = FakeControlPlane().seed("teams", [{"id": "team_b", "graph_name": None}])
-        team_graph_name(cp, "team_b")
+        org_graph_name(cp, "team_b")
     with pytest.raises(RuntimeError, match="graph-name lookup failed"):
-        team_graph_name(ErrorControlPlane(), "team_b")
+        org_graph_name(ErrorControlPlane(), "team_b")
 
 
 def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
@@ -1358,7 +1358,7 @@ def test_sweep_backs_up_default_plus_custom_graphs(shared_proj):
             state = read_graph_state(store, "team_mg", gid)
             assert state["node_count"] == n
         # default mirrors the legacy team-state file (bridge consumers)
-        assert read_team_state(store, "team_mg") == \
+        assert read_org_state(store, "team_mg") == \
             read_graph_state(store, "team_mg", "default")
 
 
@@ -2021,7 +2021,7 @@ def test_enumerate_team_tombstones_excludes_active_and_purged(shared_proj):
             "kind:'custom', namespace:$ns, status:$st, purged_at:$pa})",
             params={"gid": gid, "ns": f"team_team_x_{gid}",
                     "st": status, "pa": purged_at})
-    tombs = enumerate_team_tombstones(reg, "team_x")
+    tombs = enumerate_org_tombstones(reg, "team_x")
     ids = {t["graph_id"] for t in tombs}
     assert old in ids and fresh in ids
     assert purged not in ids  # purged rows are never re-purged

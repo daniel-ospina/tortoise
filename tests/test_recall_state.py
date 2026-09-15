@@ -501,15 +501,15 @@ def test_recall_state_default_rrf_and_graph_paths_untouched(monkeypatch):
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_org_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
     _current_org_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
     _current_org_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_limits.set(None)
 
 
 def test_tortoise_recall_mode_state_shape():

@@ -476,7 +476,7 @@ def test_team_registry_isolation_across_sequential_tests(server_proj, monkeypatc
     import tortoise.backup_sweep as bs
     fake_org_names = iter(["test_team_0_tortoise", "test_team_1_tortoise"])
     monkeypatch.setattr(
-        bs, "team_graph_name", lambda registry, org_id: next(fake_org_names))
+        bs, "org_graph_name", lambda registry, org_id: next(fake_org_names))
     for i in range(2):
         reg_name = f"test_registry_{i}"
         org_name = f"test_org_{i}_tortoise"
@@ -487,7 +487,7 @@ def test_team_registry_isolation_across_sequential_tests(server_proj, monkeypatc
         reg.query("CREATE (:Team {id:'team_x', tier:'pro'})")
         team.query("CREATE (:Point {id:'pt-0', content:'c', pointKind:'claim'})")
         # the sweep consumes the SEAM name, never the derived team_team_x
-        assert bs.team_graph_name(None, "team_x") == org_name
+        assert bs.org_graph_name(None, "team_x") == org_name
         assert org_name.startswith(("test_", "tortoise_test")), \
             "P0 guard: _backup_team's graph must stay guard-passing"
         _wipe_or(server_proj)

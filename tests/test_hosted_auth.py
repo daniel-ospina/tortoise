@@ -349,7 +349,7 @@ class TestTkPrefixAuth:
         import tempfile
         from unittest.mock import MagicMock
         from tortoise.auth import hash_api_key
-        from tortoise.hosted_api import _make_sdk, get_current_team
+        from tortoise.hosted_api import _make_sdk, get_current_org
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -375,7 +375,7 @@ class TestTkPrefixAuth:
                 request.url.path = "/v1/points"
                 request.headers = {"Authorization": f"Bearer {token}"}
                 request.state = MagicMock()
-                result = asyncio.run(get_current_team(request))
+                result = asyncio.run(get_current_org(request))
                 assert result["org_id"] == "tk-team"
             finally:
                 _restore_tortoise_sdk_init(_orig_init)

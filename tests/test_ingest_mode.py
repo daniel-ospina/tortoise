@@ -393,15 +393,15 @@ class TestGranularInvalidItem:
         # MCP surface: the failure response is the bulk failure shape —
         # {error, code: ERR_BUNDLE_INVALID, violations}, NO results key.
         import tortoise.mcp_server as mcp_mod  # noqa: I001
-        from tortoise.mcp_auth import (_current_org_id, _current_team_limits,
+        from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                        _transport_mode)
         from tortoise.sdk import TortoiseSDK  # noqa: F401
         _transport_mode.set("stdio")
         _current_org_id.set(None)
-        _current_team_limits.set(None)
+        _current_org_limits.set(None)
         db = _fresh_sdk()
-        _orig_get_team_sdk = mcp_mod._get_team_sdk
-        mcp_mod._get_team_sdk = lambda: db
+        _orig_get_team_sdk = mcp_mod._get_org_sdk
+        mcp_mod._get_org_sdk = lambda: db
         try:
             res = mcp_mod.tortoise_ingest(
                 bundle=json.loads(json.dumps(self.INVALID_BUNDLE)),
@@ -409,8 +409,8 @@ class TestGranularInvalidItem:
         finally:
             _transport_mode.set(None)
             _current_org_id.set(None)
-            _current_team_limits.set(None)
-            mcp_mod._get_team_sdk = _orig_get_team_sdk
+            _current_org_limits.set(None)
+            mcp_mod._get_org_sdk = _orig_get_team_sdk
             db.close()
         assert res["code"] == mcp_mod.ERR_BUNDLE_INVALID == -32008
         assert "violations" in res and res["violations"]  # noqa: RUF019
@@ -440,20 +440,20 @@ class TestGranularResultsKeyForKey:
         """A temp SDK wired into the in-process MCP layer (stdio transport,
         no team context — quota skipped). Returns (db, cleanup)."""
         import tortoise.mcp_server as mcp_mod  # noqa: I001
-        from tortoise.mcp_auth import (_current_org_id, _current_team_limits,
+        from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                        _transport_mode)
         _transport_mode.set("stdio")
         _current_org_id.set(None)
-        _current_team_limits.set(None)
+        _current_org_limits.set(None)
         db = _fresh_sdk()
-        _orig_get_team_sdk = mcp_mod._get_team_sdk
-        mcp_mod._get_team_sdk = lambda: db
+        _orig_get_team_sdk = mcp_mod._get_org_sdk
+        mcp_mod._get_org_sdk = lambda: db
 
         def cleanup():
             _transport_mode.set(None)
             _current_org_id.set(None)
-            _current_team_limits.set(None)
-            mcp_mod._get_team_sdk = _orig_get_team_sdk
+            _current_org_limits.set(None)
+            mcp_mod._get_org_sdk = _orig_get_team_sdk
             db.close()
 
         return db, cleanup

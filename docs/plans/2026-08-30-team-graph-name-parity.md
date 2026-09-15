@@ -155,12 +155,12 @@ def test_dashboard_created_team_delete_drops_org_id_graph(self, sb_client, as_us
 
 **Intent:** Prove the backup surface — a dashboard-created team's backup resolves `teams.graph_name` (= org_{org_id}) and dumps the real graph.
 
-**Acceptance:** New test creates a dashboard team via POST /v1/organizations, sets tier='pro' via the `get_current_team` dependency override (mirroring `pro_backup_client`), seeds a point in org_{org_id}, POSTs /backups, and asserts `manifest["graph_name"] == f"org_{org_id}"` + `manifest["node_count"] == 1`, and the dump captured the point (restore round-trip returns the node).
+**Acceptance:** New test creates a dashboard team via POST /v1/organizations, sets tier='pro' via the `get_current_org` dependency override (mirroring `pro_backup_client`), seeds a point in org_{org_id}, POSTs /backups, and asserts `manifest["graph_name"] == f"org_{org_id}"` + `manifest["node_count"] == 1`, and the dump captured the point (restore round-trip returns the node).
 
 **Files:**
 - Modify: `tests/test_writer_inventory.py`
 
-**Step 1:** Add to `TestCreateTeam` (uses `user_client` fixture; mirrors the `pro_backup_client` setup at :1006-1031 — BACKUP_KEY + MemoryStorage + `get_current_team` override, since POST /backups is key-auth (`get_current_team`) and tier comes from the dependency dict, not the fake row):
+**Step 1:** Add to `TestCreateTeam` (uses `user_client` fixture; mirrors the `pro_backup_client` setup at :1006-1031 — BACKUP_KEY + MemoryStorage + `get_current_org` override, since POST /backups is key-auth (`get_current_org`) and tier comes from the dependency dict, not the fake row):
 ```python
 def test_backup_round_trip_dashboard_created_team(self, user_client, monkeypatch):
     import base64 as _b64
@@ -178,10 +178,10 @@ def test_backup_round_trip_dashboard_created_team(self, user_client, monkeypatch
     assert r.status_code == 200, r.text
     org_id = r.json()["org_id"]
     assert r.json()["graph_name"] == f"org_{org_id}"
-    # POST /backups is key-auth (get_current_team); tier comes from the
-    # dependency dict. get_current_team_session honors this override too
+    # POST /backups is key-auth (get_current_org); tier comes from the
+    # dependency dict. get_current_org_session honors this override too
     # (hosted_api.py:1549), so one override covers create + restore.
-    app.dependency_overrides[get_current_team] = lambda: dict(
+    app.dependency_overrides[get_current_org] = lambda: dict(
         TEST_TEAM, org_id=org_id, tier="pro", backup_enabled=True)
     # seed the real data graph (namespace=org_id binds org_{org_id})
     sdk = ha_mod._make_sdk(namespace=org_id)

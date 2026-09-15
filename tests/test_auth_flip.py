@@ -1,7 +1,7 @@
 """REST + MCP auth-flip tests (#767, plan Task 3) — Supabase-backed resolution.
 
 Covers the flip end-to-end with the in-memory FakeControlPlane (zero network):
-- REST get_current_team: valid key auths, revoked key 401, registry-only key
+- REST get_current_org: valid key auths, revoked key 401, registry-only key
   401 (E2E-7-negative), Supabase error → 500 (fail-closed), header semantics.
 - E2E-2 session-key round-trip: /v1/session/key mint → api_keys row
   (lookup_hash/created_via/expires_at) → resolves on REST → revoked rejected.
@@ -27,7 +27,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tortoise.auth import lookup_hash  # noqa: I001
-from tortoise.hosted_api import app, get_current_team, get_current_user  # noqa: F401
+from tortoise.hosted_api import app, get_current_org, get_current_user  # noqa: F401
 from tortoise.mcp_server import create_http_app
 
 from tests._http_fixtures import patched_tortoise_sdk
@@ -68,7 +68,7 @@ def supabase_fake() -> FakeControlPlane:
 
 @pytest.fixture
 def rest_client(monkeypatch, supabase_fake):
-    """TestClient over the real app with REAL get_current_team (no override)
+    """TestClient over the real app with REAL get_current_org (no override)
     resolving against the fake Supabase control plane."""
     _enable_supabase(monkeypatch, supabase_fake)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -801,7 +801,7 @@ class TestMcpAuthFlip:
 
 class TestSessionKeyMintConcurrency:
     """#1855 — the session-key mint critical section (cap read → revoke →
-    recheck → insert) runs under a per-team in-process lock (_team_mint_lock
+    recheck → insert) runs under a per-team in-process lock (_org_mint_lock
     in hosted_api). The load-bearing pair is test_supabase_mint_blocks_while_
     team_lock_held + the lock mechanics tests (they FAIL if the with-lock
     wrapping is removed); the gather E2E tests are regression guards for the
@@ -821,9 +821,9 @@ class TestSessionKeyMintConcurrency:
         acquire must fail while held and succeed after release)."""
         import threading
 
-        from tortoise.hosted_api import _team_mint_lock
+        from tortoise.hosted_api import _org_mint_lock
 
-        lock = _team_mint_lock("team-lock-same")
+        lock = _org_mint_lock("team-lock-same")
         inside = threading.Event()
         release = threading.Event()
 
@@ -845,17 +845,17 @@ class TestSessionKeyMintConcurrency:
 
     def test_team_mint_lock_isolates_different_teams(self):
         """Locks are per-TEAM — a mint for team A never blocks team B."""
-        from tortoise.hosted_api import _team_mint_lock
+        from tortoise.hosted_api import _org_mint_lock
 
-        lock_a = _team_mint_lock("team-lock-iso-a")
-        lock_b = _team_mint_lock("team-lock-iso-b")
+        lock_a = _org_mint_lock("team-lock-iso-a")
+        lock_b = _org_mint_lock("team-lock-iso-b")
         assert lock_a is not lock_b
         with lock_a:
             assert lock_b.acquire(blocking=False), \
                 "team B's mint blocked by team A's lock"
             lock_b.release()
         # cache is stable: same team → same lock object
-        assert _team_mint_lock("team-lock-iso-a") is lock_a
+        assert _org_mint_lock("team-lock-iso-a") is lock_a
 
     def test_supabase_mint_blocks_while_team_lock_held(self, monkeypatch,
                                                        rest_client,
@@ -868,7 +868,7 @@ class TestSessionKeyMintConcurrency:
         import threading
 
         import tortoise.hosted_api as ha
-        from tortoise.hosted_api import _team_mint_lock
+        from tortoise.hosted_api import _org_mint_lock
 
         async def _noop(*_a, **_k):
             return None
@@ -882,7 +882,7 @@ class TestSessionKeyMintConcurrency:
         monkeypatch.setattr(ha, "_async_audit", _noop)
         monkeypatch.setattr(ha, "_abuse_evaluate_keys", _noop)
 
-        lock = _team_mint_lock(tid)
+        lock = _org_mint_lock(tid)
         lock.acquire()
         done = threading.Event()
         outcome = {}

@@ -52,7 +52,7 @@ from tortoise.oauth import (  # noqa: E402, RUF100
     _sha256,
     _valid_redirect_uri,
     mcp_resource_url,
-    team_resource_url,
+    org_resource_url,
 )
 
 # #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
@@ -924,7 +924,7 @@ class TestConsentPreview:
         tc, _ = api_client
         session_user(_U1)
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         assert r.json()["org_id"] == "team-free-001"
@@ -933,7 +933,7 @@ class TestConsentPreview:
         tc, _ = api_client
         session_user(_U1)
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-team-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-team-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
 
@@ -956,7 +956,7 @@ class TestConsentPreview:
         assert [m["org_id"] for m in body["memberships"]] == [
             "team-free-001", "team-team-001"]  # deterministic sort
         for m in body["memberships"]:
-            assert m["resource"] == team_resource_url(TEST_BASE, m["org_id"])
+            assert m["resource"] == org_resource_url(TEST_BASE, m["org_id"])
             assert m["org_name"]
 
     def test_preview_multi_team_origin_root_echo_returns_memberships(self, api_client, session_user):
@@ -995,7 +995,7 @@ class TestConsentPreview:
         assert r.status_code == 200
         body = r.json()
         assert body["org_id"] == "team-free-001"
-        assert body["resource"] == team_resource_url(TEST_BASE, "team-free-001")
+        assert body["resource"] == org_resource_url(TEST_BASE, "team-free-001")
 
     def test_preview_memberships_exclude_suspended_teams(self, api_client, session_user):
         """2 active + 1 suspended membership → the chooser lists only the two
@@ -1045,7 +1045,7 @@ class TestConsentPreview:
         session_user(_U1)
         cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
         assert r.json()["error"] == "invalid_grant"
@@ -1266,7 +1266,7 @@ class TestParseResource:
 
     def test_team_scoped_still_parses(self):
         from tortoise.oauth import parse_resource
-        resource = team_resource_url(TEST_BASE, "team-free-001")
+        resource = org_resource_url(TEST_BASE, "team-free-001")
         canonical, org_id = parse_resource(TEST_BASE, resource)
         assert canonical == resource
         assert org_id == "team-free-001"
@@ -1279,7 +1279,7 @@ class TestRfc8707Mapping:
         # user-1 joins the second team
         cp.tables["org_memberships"].append(
             _member(_U1, "team-team-001", "member"))
-        resource = team_resource_url(TEST_BASE, "team-team-001")
+        resource = org_resource_url(TEST_BASE, "team-team-001")
         flow = _auth_code_flow(tc, cp, resource=resource)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"], resource=resource)
@@ -1305,7 +1305,7 @@ class TestRfc8707Mapping:
     def test_resource_for_non_member_team_rejected(self, api_client, session_user):
         tc, cp = api_client  # noqa: RUF059
         session_user(_U1)
-        resource = team_resource_url(TEST_BASE, "team-team-001")  # not a member
+        resource = org_resource_url(TEST_BASE, "team-team-001")  # not a member
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -1321,7 +1321,7 @@ class TestRfc8707Mapping:
         tc, cp = api_client
         session_user(_U1)
         flow = _auth_code_flow(tc, cp)  # bound to team-free-001
-        other = team_resource_url(TEST_BASE, "team-team-001")
+        other = org_resource_url(TEST_BASE, "team-team-001")
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"], resource=other)
         assert r.status_code == 400
@@ -1520,7 +1520,7 @@ class TestSuspensionRevocation:
             "redirect_uri": REDIRECT, "response_type": "code",
             "code_challenge": "x" * 60, "code_challenge_method": "S256",
             "scope": "mcp",
-            "resource": team_resource_url(TEST_BASE, "team-free-001")},
+            "resource": org_resource_url(TEST_BASE, "team-free-001")},
             headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
         assert r.json()["error"] == "invalid_grant"

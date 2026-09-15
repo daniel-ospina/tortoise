@@ -87,7 +87,7 @@ def _seed_membership(fake, org_id: str, user_id: str, role: str = "owner"):
     """Seed an active membership row with an explicit role (owner/admin/member).
 
     #2297: the member-role row is what lets a session user RESOLVE the team
-    (get_current_team_session → _session_user_team) while _require_owner_admin
+    (get_current_org_session → _session_user_org) while _require_owner_admin
     still 403s — same helper shape as test_onboarding_w6_member_authz.
     """
     fake.tables.setdefault("org_memberships", []).append({
@@ -452,8 +452,8 @@ class TestDashboardLoginGate:
 
     def test_session_jwt_bypasses_gate_when_disabled(self, client, fake, monkeypatch):
         # #1148 review P1-2: the gate must NOT lock out the signed-in owner.
-        # get_current_team_session accepts a session JWT (via
-        # _session_user_team) and skips the dashboard-login gate — so a
+        # get_current_org_session accepts a session JWT (via
+        # _session_user_org) and skips the dashboard-login gate — so a
         # session user can still mint keys even with dashboard_key_login=false.
         key, org_id = _provision_anon(client, fake)
         user_id = str(uuid.uuid4())
@@ -469,7 +469,7 @@ class TestDashboardLoginGate:
 
     def test_session_mgmt_degrades_under_0015_drift(self, client, fake,
                                                     monkeypatch, caplog):
-        """#1096: the session branch (_session_user_team) routes through the
+        """#1096: the session branch (_session_user_org) routes through the
         fail-soft seam — under 0015 drift session-authed management degrades
         (200, never 500) and logs the WARNING tripwire. Pins the contract the
         plan's surface map states (a revert to the raw combined query would
@@ -490,7 +490,7 @@ class TestDashboardLoginGate:
 
     def test_session_mgmt_degrades_under_phantom_import_columns(
             self, client, fake, monkeypatch, caplog):
-        """#1832: the session branch (_session_user_team) must degrade when
+        """#1832: the session branch (_session_user_org) must degrade when
         the #1230 import columns (last_import_sha256 / max_points — real
         since migration 20260817000001; missing_columns here simulates a
         schema one migration behind, i.e. DRIFT rather than the original
@@ -531,8 +531,8 @@ class TestClaimEmail:
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "claimed"
         # team no longer anon
-        from tortoise.supabase_control import is_anon_team
-        assert is_anon_team(fake, org_id) is False
+        from tortoise.supabase_control import is_anon_org
+        assert is_anon_org(fake, org_id) is False
 
     def test_claim_email_rejects_claimed_team(self, client, fake, monkeypatch):
         key, org_id = _provision_anon(client, fake)  # noqa: RUF059
@@ -556,7 +556,7 @@ class TestClaimEmail:
 class TestCrossTeamMintProtection:
     """#1148 gate-closing P1: a session user must NOT mint keys / restore
     backups / open billing for a team they don't belong to via ?org_id=.
-    (get_current_team_session → _session_user_team membership check.)"""
+    (get_current_org_session → _session_user_org membership check.)"""
 
     def test_session_cannot_mint_key_for_other_team(self, client, fake, monkeypatch):
         # two anon teams
@@ -610,7 +610,7 @@ class TestKeyManagementTeamPins:
     membership) could not revoke B's key — the session resolved A and DELETE
     403'd "Not your API key" — and its PATCH pins were SILENTLY IGNORED (a
     wrong-team key_id mutated whenever the user owned both teams). DELETE
-    resolves the pin via get_current_team_session → _session_user_team;
+    resolves the pin via get_current_org_session → _session_user_org;
     PATCH (session-only, get_current_user + intrinsic key team) now enforces
     the pin in the supabase lane: membership-check first (same 403 as the
     mint/list pins), then fail closed on a key outside the pinned team with
@@ -673,7 +673,7 @@ class TestKeyManagementTeamPins:
         assert r.json()["detail"] == "Not your API key"
 
     def test_delete_pinned_unrelated_team_403(self, client, fake, monkeypatch):
-        """Membership gate on the pin (mirrors _session_user_team): a user
+        """Membership gate on the pin (mirrors _session_user_org): a user
         pinning a team they don't belong to gets the mint/list 403 — no
         existence oracle, no cross-team revoke."""
         teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
@@ -797,7 +797,7 @@ class TestKeyManagementOwnerAdminGate:
 
     Fixture: a claimed team whose session owner seeded an OWNER membership and
     a separate MEMBER membership (the member resolves the team via
-    get_current_team_session — same shape as w6's _seed_membership).
+    get_current_org_session — same shape as w6's _seed_membership).
     """
 
     def _owner_team_with_member(self, client, fake, monkeypatch):
@@ -971,7 +971,7 @@ class TestBackupsSessionAuth:
     """#1831 P2-4: GET /backups rides the session dual-auth (#1828).
 
     loadBackups calls api('/backups') with NO key when a recoverable mint
-    failure (#1830) left apiKey empty — a bare get_current_team dependency
+    failure (#1830) left apiKey empty — a bare get_current_org dependency
     would 401 and the Backups card silently vanished for Pro users. The
     ungated dual-auth accepts session JWT OR tt_ key; only org_id is read.
     """

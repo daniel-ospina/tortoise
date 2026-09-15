@@ -174,7 +174,7 @@ def test_patch_recording_auth_matrix(spine_env):
                  headers={"Authorization": f"Bearer {ro}"})
     assert r.status_code == 403, r.text
     # deleg=0 minted (even with team:manage — the C2/C3 child policy never
-    # stamps it, and get_current_team_session rejects deleg=0) → 403
+    # stamps it, and get_current_org_session rejects deleg=0) → 403
     minted = _mint_key(sdk, tid, scopes=["team:manage"], deleg=0)
     r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True},
@@ -208,7 +208,7 @@ def test_patch_recording_session_non_owner_403(spine_env):
     _sdk, tid, g, tc, _def_pt = spine_env
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import TEST_TEAM
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
         lambda: dict(TEST_TEAM, org_id=tid, key_id=None,
                      session_user_id="not-owner", role="member")
     r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
@@ -449,18 +449,18 @@ def _run_mcp_graph_capture(tmp_path, db):
         _current_legacy_full_access,
         _current_scopes,
         _current_org_id,
-        _current_team_limits,
+        _current_org_limits,
     )
     from tortoise.mcp_server import tortoise_session_capture
     toks = [
         _current_org_id.set(tid),
-        _current_team_limits.set({"tier": "pro", "max_points": 100000}),
+        _current_org_limits.set({"tier": "pro", "max_points": 100000}),
         _current_graph_id.set(g["graph_id"]),
         _current_graph_namespace.set(g["namespace"]),
         _current_scopes.set(["graphs:read", "graphs:write"]),
         _current_legacy_full_access.set(False),
     ]
-    _ctx_vars = [_current_org_id, _current_team_limits,
+    _ctx_vars = [_current_org_id, _current_org_limits,
                  _current_graph_id, _current_graph_namespace,
                  _current_scopes, _current_legacy_full_access]
     try:
@@ -539,7 +539,7 @@ def _run_with_mcp_ctx(tid, fn, *, scopes, legacy=False, graph=None,
         _current_legacy_full_access,
         _current_scopes,
         _current_org_id,
-        _current_team_limits,
+        _current_org_limits,
     )
     toks = []
 
@@ -547,7 +547,7 @@ def _run_with_mcp_ctx(tid, fn, *, scopes, legacy=False, graph=None,
         toks.append((var, var.set(val)))
 
     _push(_current_org_id, tid)
-    _push(_current_team_limits, {"tier": "pro", "max_points": max_points})
+    _push(_current_org_limits, {"tier": "pro", "max_points": max_points})
     if graph is not None:
         _push(_current_graph_id, graph["graph_id"])
         _push(_current_graph_namespace, graph["namespace"])
@@ -839,12 +839,12 @@ def test_patch_rename_session_owner_ok_member_403(spine_env):
             params={"u": uid, "tid": tid, "r": role},
         )
     base = dict(TEST_TEAM, org_id=tid, key_id=None)
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
         lambda: dict(base, session_user_id="owner-1", role="owner")
     r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "owner-renamed"})
     assert r.status_code == 200, r.text
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
         lambda: dict(base, session_user_id="member-1", role="member")
     r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "member-nope"})
@@ -974,7 +974,7 @@ def _sb_env(monkeypatch, fake_cls=None):
     patched.__enter__()
     tc = TestClient(ha_mod.app)
     tc.__enter__()
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
         lambda: {"org_id": _SB_TEAM, "key_id": None,
                  "session_user_id": _SB_OWNER, "role": "owner"}
     return tc, fake, (patched, ha_mod)

@@ -44,7 +44,7 @@ from fastapi.testclient import TestClient
 import tortoise.hosted_api as ha_mod
 import tortoise.sdk as sdk_mod
 from tests._http_fixtures import patched_tortoise_sdk
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 
 TEST_ORG_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
@@ -140,7 +140,7 @@ def mock_extractor(monkeypatch):
 def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk).
         # sdk_mod.TortoiseSDK is hosted_api.TortoiseSDK (same class object) —
         # the helper's hosted_api patch applies identically; it adds the
@@ -292,7 +292,7 @@ class TestCrossTenantNegative:
 
             _orig = sdk_mod.TortoiseSDK.__init__
             sdk_mod.TortoiseSDK.__init__ = _route_patch
-            app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
             try:
                 c_a = TestClient(app)
                 assert _upload(c_a, VALID_MANIFEST) == 201
@@ -309,7 +309,7 @@ class TestCrossTenantNegative:
 
                 # Tenant B captures the same conversation.
                 mock_extractor.s2_prompts = []
-                app.dependency_overrides[get_current_team] = \
+                app.dependency_overrides[get_current_org] = \
                     lambda: dict(TEST_TEAM_B)
                 c_b = TestClient(app)
                 r_b = c_b.post("/v1/sessions", json={"conversation": conv})

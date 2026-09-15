@@ -48,8 +48,8 @@ def client(tmp_path):
     # the single source of truth now. The override must stay inside the
     # helper so its exit clear covers failure paths too.
     with patched_tortoise_sdk(fixture_db_path):
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "test-team-1", "tier": "free", "key_id": "k1",
             # C5 #2114: key_id-bearing dicts must carry the C2 owner class —
             # deleg-NULL + scopes [] resolves legacy_full_access True at auth
@@ -63,7 +63,7 @@ def client(tmp_path):
             "max_points": 10000,
             # #1748: the onboarding sub-team is provisioned on the USER path
             # — the session user becomes the owner member
-            # (get_current_team_session attaches session_user_id for session
+            # (get_current_org_session attaches session_user_id for session
             # JWT auth; tests seed it here).
             "session_user_id": "user-1",
         }
@@ -135,9 +135,9 @@ class TestPublicDemo:
         (the per-path redirect derivation isolates it)."""
         import uuid
 
-        from tortoise.hosted_api import _make_sdk, app, get_current_team
+        from tortoise.hosted_api import _make_sdk, app, get_current_org
         tid = f"team-demo-{uuid.uuid4().hex[:8]}"
-        app.dependency_overrides[get_current_team] = lambda tid=tid: {
+        app.dependency_overrides[get_current_org] = lambda tid=tid: {
             "org_id": tid, "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
@@ -164,9 +164,9 @@ class TestPublicDemo:
         per-path server graph (see test_demo_seed_402_at_cap)."""
         import uuid
 
-        from tortoise.hosted_api import _make_sdk, app, get_current_team
+        from tortoise.hosted_api import _make_sdk, app, get_current_org
         tid = f"team-demo-{uuid.uuid4().hex[:8]}"
-        app.dependency_overrides[get_current_team] = lambda tid=tid: {
+        app.dependency_overrides[get_current_org] = lambda tid=tid: {
             "org_id": tid, "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
@@ -279,7 +279,7 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
     # (same discipline as _invoke_session_recording_tool's restore) — the
     # shared binding while ACTIVE is the deliberate pass-through; the anchor
     # no longer survives into the next test.
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE, get_current_team
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE, get_current_org
     from tortoise.hosted_api import app as _app
     orig_init = TortoiseSDK.__init__
 
@@ -288,7 +288,7 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
                   namespace=namespace, **kw)
 
     TortoiseSDK.__init__ = _patched
-    _app.dependency_overrides[get_current_team] = lambda: {
+    _app.dependency_overrides[get_current_org] = lambda: {
         "org_id": "team-1728-q3", "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
     }
@@ -555,8 +555,8 @@ class TestOnboardingTeam:
     def test_create_team_requires_session_user_registry(self, client):
         """#1748: no session user on the team context → 403 (never an
         owner-less orphan sub-team)."""
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "test-team-1", "tier": "free", "key_id": "k1",
             # C5 #2114: key_id-bearing dicts must carry the C2 owner class —
             # deleg-NULL + scopes [] resolves legacy_full_access True at auth
@@ -876,7 +876,7 @@ def test_install_probe_round_trip(client):
     install_probe_{harness} REGISTERED state key (harness + server timestamp
     only — no content) and reads back. The probe is NOT consent-gated (it's
     install telemetry, so the dashboard can show install status before
-    consent), but it IS get_current_team-gated (auth required — probes are
+    consent), but it IS get_current_org-gated (auth required — probes are
     per-team state)."""
     # Provision the Team node so state writes persist (the state writer is
     # MATCH...SET — a silent no-op without the node).
@@ -920,7 +920,7 @@ def test_install_probe_unregistered_harness_422(client):
 
 
 def test_install_probe_requires_auth(unauth_client):
-    """Task 14: the probe is get_current_team-gated — no auth, no probe."""
+    """Task 14: the probe is get_current_org-gated — no auth, no probe."""
     r = unauth_client.post("/v1/sessions/install-probe",
                            json={"harness": "claude"})
     assert r.status_code == 401, r.text

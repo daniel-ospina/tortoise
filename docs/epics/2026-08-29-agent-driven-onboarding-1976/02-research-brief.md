@@ -103,7 +103,7 @@ aboutObjects: tortoise
 | Wizard (5-step, #1643) | Dashboard (website/apps/dashboard) | **This epic shrinks/archives** — harness chooser, skills primer, GitHub connect, STATE seed, done |
 | Onboarding prompt (single source) | `tortoise/onboarding/AGENT_ONBOARDING.md` (deployed via #540) | W2's SKILL.md is its SUCCESSOR — archive old + deployed copy, never two live scripts (M8) |
 | Harness copy blocks | `website/apps/dashboard/src/harnesses.js` (HARNESS_NAMES, per-harness config) | 6 harnesses; per-harness copy; no universal command |
-| Onboarding state (current store) | Supabase `teams.onboarding_state` jsonb (`supabase_control.py` `team_onboarding_state`/`update_onboarding_state`) + `hosted_api.py` `_get/_update_onboarding_state` (registered-keys allowlist) | W5/W9 SUPERSEDE → graph-held `OnboardingState` node (endpoint stays as read surface) |
+| Onboarding state (current store) | Supabase `teams.onboarding_state` jsonb (`supabase_control.py` `org_onboarding_state`/`update_onboarding_state`) + `hosted_api.py` `_get/_update_onboarding_state` (registered-keys allowlist) | W5/W9 SUPERSEDE → graph-held `OnboardingState` node (endpoint stays as read surface) |
 | Onboarding endpoints | `/v1/onboarding/state` + `tortoise_onboarding_*` MCP tools (tool_registry.py group "onboarding") | Keep read surface; change store |
 | Invite infra | `/v1/invites`, `/v1/invites/info`, `/v1/invites/accept`, `/v1/invites/pending`, `/v1/invites/pending/{id}/accept`, `DELETE /v1/invites/pending/{id}` (hosted_api.py) | W7 BUILDS ON these (fusion, atomic accept, pending affordance) — do NOT re-create (M6) |
 | Tool registry | `tortoise/tool_registry.py` (ToolAnnotations, curation groups) | W8 EXTENDS this for the pullable catalog (R2-9) |

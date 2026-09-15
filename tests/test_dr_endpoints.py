@@ -671,7 +671,7 @@ class TestSupabaseLaneSeam:
                 "node_count": 1, "edge_count": 0, "sha256": "0" * 64,
             }).encode())
         ha_mod.app.dependency_overrides[
-            ha_mod.get_current_team_session_ungated
+            ha_mod.get_current_org_session_ungated
         ] = lambda: {"org_id": "team_s1"}
         try:
             r = client.get("/backups", headers=INTERNAL_HEADERS)

@@ -44,8 +44,8 @@ def client(tmp_path, monkeypatch):
             params={"name": "e2e-team"}).result_set
         team = {"id": rows[0][0]}
     real_org_id = team["id"]
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
+    from tortoise.hosted_api import get_current_org
+    app.dependency_overrides[get_current_org] = lambda: {
         "org_id": real_org_id, "tier": "free", "key_id": "k1",
         # C5 #2114: C2 owner class (deleg-NULL + scopes [] → legacy full
         # access) — the E2E journey uses the register-minted tt_ key.

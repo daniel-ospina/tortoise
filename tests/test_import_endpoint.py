@@ -164,7 +164,7 @@ def capture_audit(monkeypatch):
 def _seed_team(fake, *, role: str = "owner", deleted_at: str | None = None,
                max_points: int | None = None) -> None:
     """Seed the Supabase control plane with a team (incl. graph_name so the
-    import's team_graph_name seam resolves) + owner membership."""
+    import's org_graph_name seam resolves) + owner membership."""
     team = dict(FREE_TEAM, graph_name=GRAPH_NAME)
     if max_points is not None:
         team["max_points"] = max_points

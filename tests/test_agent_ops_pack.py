@@ -35,7 +35,7 @@ from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import extractor_v2 as v2
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 from tortoise.sdk import TortoiseSDK
 
 # ── Test constants ───────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ def client():
     the patched SDK's path= construction to the server)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
         # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
         # clear at enter; pop-pin → restore __init__ → deterministic anchor

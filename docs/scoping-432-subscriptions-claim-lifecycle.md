@@ -67,7 +67,7 @@ Single-session inline execution (per exec constraints — no sub-agent dispatch,
 **Best fit if:** an external system (not an MCP client) must react to graph changes — a Phase-2 delivery mode, not the v1 surface.
 
 ### Claim-state model placement options (orthogonal axis)
-- **SDK-first** (recommended): the SDK is the shared choke point both MCP tools and REST route through (`_get_team_sdk()`, mcp_auth.py) — one enforcement location covers all consumers. `update_point` already validates status (sdk.py:545-548); extend the valid-set + add transition guards there.
+- **SDK-first** (recommended): the SDK is the shared choke point both MCP tools and REST route through (`_get_org_sdk()`, mcp_auth.py) — one enforcement location covers all consumers. `update_point` already validates status (sdk.py:545-548); extend the valid-set + add transition guards there.
 - **API-first:** enforce only in `EventAPI` (CLI/ingest path) — leaves hosted SDK path unenforced (the exact gap this issue exists to close). Rejected.
 - **Parallel:** build subscriptions before the state model — delivers notifications of a lifecycle that doesn't exist. Rejected (issue's own indicator ordering makes this a non-sequitur).
 

@@ -1,8 +1,8 @@
 """#1852: seed/index ACTION endpoints accept the session JWT (dual-auth).
 
-The #1833 read set was converted to ``get_current_team_session_ungated``;
+The #1833 read set was converted to ``get_current_org_session_ungated``;
 these 8 action/write endpoints were missed — a dashboard session JWT
-(eyJ...) hit ``get_current_team``'s tt_-only gate → 401 "Invalid API key
+(eyJ...) hit ``get_current_org``'s tt_-only gate → 401 "Invalid API key
 format" for OAuth users (wizard "Seed my graph" + MemorySources re-index +
 job-status polls).
 
@@ -89,7 +89,7 @@ def _patch_session_user(monkeypatch, user_id: str):
 
 
 def _seed_owner_membership(fake, org_id: str, user_id: str):
-    """Give the session user an owner membership so _session_user_team's
+    """Give the session user an owner membership so _session_user_org's
     membership resolution + ?org_id= ownership check pass."""
     fake.tables.setdefault("org_memberships", []).append({
         "id": str(uuid.uuid4()), "org_id": org_id, "user_id": user_id,
@@ -212,7 +212,7 @@ class TestCreateEndpointsDualAuth:
         assert r.status_code == 402, r.text
 
     def test_create_point_session_jwt_no_membership_403(self, env, monkeypatch):
-        """The session lane's cross-tenant guard (_session_user_team) holds on
+        """The session lane's cross-tenant guard (_session_user_org) holds on
         the action surface: a valid session user WITHOUT a team membership is
         403 — never a keyless write into someone's graph."""
         client, _ = env
@@ -220,7 +220,7 @@ class TestCreateEndpointsDualAuth:
         user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         # deliberately NO _seed_owner_membership — the session user has no
-        # membership in any team → _session_user_team 403s
+        # membership in any team → _session_user_org 403s
         r = client.post("/v1/points", headers={"Authorization": "Bearer eyJ.sess"},
                         json={"content": "no-membership point", "kind": "statement"})
         assert r.status_code == 403, r.text

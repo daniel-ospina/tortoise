@@ -156,7 +156,7 @@ def test_suspended_team_403_passthrough(client):
 
     def _suspended(request: _AskRequest):
         raise HTTPException(status_code=403, detail=_suspended_detail())
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team] = _suspended
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org] = _suspended
     try:
         r = client.post("/v1/ask", json={"question": "q"})
         assert r.status_code == 403
@@ -427,7 +427,7 @@ def test_ask_exec_floor_guarantees_execution(monkeypatch):
 
 def test_metered_exactly_once_per_hosted_ask(client, monkeypatch):
     """Meter record written exactly once per hosted ask (the single call
-    site: sdk.ask with org_id from get_current_team)."""
+    site: sdk.ask with org_id from get_current_org)."""
     _seed_point(client)
     _FakeReaderFactory().install(monkeypatch)
     from tortoise.metering import get_ask_usage

@@ -214,7 +214,7 @@ slug, and the two lanes finally agree on `org_{identifier}`.
      the control plane. Guarding only the derived path leaves that reachable. Then
      uniqueness on `id`; taken → **409 naming it**. Absent → `slugify_id(name)` +
      `resolve_id` against the taken set, inside the existing
-     `_team_create_lock(user_id)` (def `:9040`; taken at `:9188`, `:9191`).
+     `_org_create_lock(user_id)` (def `:9040`; taken at `:9188`, `:9191`).
    - `_create_team_supabase_lane` (`:9242`): the `uuid4().hex[:26]` mint at `:9284`
      is replaced by the resolved id; `provision_team(p_org_id=…,
      p_graph_name=f"org_{id}")` shape unchanged.

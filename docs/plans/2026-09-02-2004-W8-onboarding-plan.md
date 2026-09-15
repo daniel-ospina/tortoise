@@ -67,7 +67,7 @@ def capability_catalog() -> list[dict]:
 
 ### D2 — Endpoint (`tortoise/hosted_api.py`)
 
-`GET /v1/capabilities` — hand-written route modeled on `GET /v1/onboarding/state`: `Depends(get_current_team_session_ungated)` (dual-auth; any authed team context — the catalog is org-independent static registry data), returns the accessor rows. **No MCP tool** (I-7 contract is the HTTP read; adding a tool would force `GROUP_BY_NAME` + `mcp_server.py` handler wiring for zero required surface). No graph touch → never 'unavailable'.
+`GET /v1/capabilities` — hand-written route modeled on `GET /v1/onboarding/state`: `Depends(get_current_org_session_ungated)` (dual-auth; any authed team context — the catalog is org-independent static registry data), returns the accessor rows. **No MCP tool** (I-7 contract is the HTTP read; adding a tool would force `GROUP_BY_NAME` + `mcp_server.py` handler wiring for zero required surface). No graph touch → never 'unavailable'.
 
 ### D3 — Dashboard (W1's placeholder SOURCE replaced)
 

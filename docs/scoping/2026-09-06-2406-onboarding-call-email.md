@@ -226,7 +226,7 @@ gate is a candidate follow-up.
 | File | Change |
 |---|---|
 | `tortoise/email_notify.py` | + onboarding send profile: copy constants (verbatim, exact URL), **awaited** `send_onboarding_offer_email(email, display_name, org_name, org_id) -> dict` ({status: sent\|skipped\|failed, message_id}); budget reserve/refund around the awaited call; provider `Idempotency-Key: onboarding:{org_id}`; from `RESEND_ONBOARDING_FROM_EMAIL` default `daniel@premiselabs.co`; `_send_resend` gains optional `from_addr` param (default `_from_address()` — invite/OTP untouched); greeting-name helper `_onboarding_greeting_name` (display_name → email local-part w/ role-mailbox denylist → org token → "there"); html/text templates (html.escape, paragraph-faithful copy). |
-| `tortoise/supabase_control.py` | + `set_team_onboarding_email_sent(cp, org_id) -> bool` (rowcount-gated PATCH `onboarding_email_sent_at=now()` WHERE id AND IS NULL, return=representation), + `team_onboarding_email_sent(cp, org_id) -> bool` (marker read), + add column to `team_by_id` select / additive select tier. |
+| `tortoise/supabase_control.py` | + `set_org_onboarding_email_sent(cp, org_id) -> bool` (rowcount-gated PATCH `onboarding_email_sent_at=now()` WHERE id AND IS NULL, return=representation), + `org_onboarding_email_sent(cp, org_id) -> bool` (marker read), + add column to `org_by_id` select / additive select tier. |
 | `tortoise/hosted_api.py` | + `POST /internal/onboarding-email` (internal-key `_check_internal`), body `{org_id, display_name?}`; skip matrix (mode/team/email/marker/in-flight); awaits the send; stamps marker on accept; in-flight set; catches everything → structured `{status}` response, never a surprise 500 to the edge fn. |
 | `supabase/migrations/20260907000001_onboarding_email_sent.sql` | + `ALTER TABLE teams ADD COLUMN IF NOT EXISTS onboarding_email_sent_at timestamptz;` (additive; no RLS/column-grant change — not sensitive). ⚠️ Deploy ORDER: this migration must apply BEFORE the FastAPI + edge-fn code ships (a PGRST204 missing-column error degrades fail-soft to a logged miss). |
 | `supabase/functions/tenant-provision/index.ts` | + fire `POST /internal/onboarding-email` body `{org_id, display_name}` where display_name = the edge fn's person display_name (caller/body, index.ts:~312) — NEVER `safeName`; fires independently of the demo seed (separate try/catch), 2 attempts 0s/+2s, bound + log non-ok, never fails provisioning. |
@@ -239,7 +239,7 @@ gate is a candidate follow-up.
 
 | Touch point | Type | Covered by |
 |---|---|---|
-| Supabase teams row (email, name, marker column) | data | migration + supabase_control helpers + team_by_id select |
+| Supabase teams row (email, name, marker column) | data | migration + supabase_control helpers + org_by_id select |
 | tenant-provision edge fn | external trigger | index.ts + source-guard tests |
 | FastAPI internal surface | API | new `/internal/onboarding-email` + `_check_internal` |
 | Resend outbound | external service | email_notify (existing client/budget/redaction + from_addr param) |

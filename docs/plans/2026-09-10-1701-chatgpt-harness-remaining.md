@@ -57,7 +57,7 @@ created: 2026-09-10
 
 **Step 1: Failing tests first** — add to `tests/test_oauth_mcp.py`:
 - `parse_resource` boundary: `TEST_BASE` and `TEST_BASE + "/"` → bare MCP, no team; `TEST_BASE + "/v1/keys"` → 400 `invalid_resource`; `"https://evil.example/mcp"` → 400; `TEST_BASE + "/mcp/"` → bare MCP.
-- `test_preview_multi_team_no_resource_returns_memberships` (2 active teams) → 200, `org_id is None`, `memberships` length 2, each row has a `team_resource_url` `resource`.
+- `test_preview_multi_team_no_resource_returns_memberships` (2 active teams) → 200, `org_id is None`, `memberships` length 2, each row has a `org_resource_url` `resource`.
 - `test_preview_multi_team_origin_root_echo_returns_memberships` (resource=`TEST_BASE`) → same as above (origin-root echo is treated as no-team-scope).
 - `test_preview_single_team_origin_root_echo_binds_sole_team` → 200, `org_id == team-free-001`, no `memberships` key.
 - `test_preview_excludes_suspended_teams` — split spec: (a) 2 memberships, 1 suspended → single-team auto-bind shape: `org_id == <active team>`, NO `memberships` key; (b) 3 memberships (2 active + 1 suspended) → `memberships` lists exactly the 2 active rows with scoped resources and the suspended team absent.
@@ -65,7 +65,7 @@ created: 2026-09-10
 - `test_consent_mint_refuses_suspended_team`: suspend the team AFTER a successful preview (mid-consent race), then POST the picked team's resource → 403 `invalid_grant`, no code issued.
 - `test_exchange_guard_still_rejects_mint_then_suspend_race`: mint a code while the team is ACTIVE, then set `teams.suspended_at` BEFORE the code exchange → `POST /oauth/token` 403 `invalid_grant`, no tokens issued (pins the surviving exchange-time `_assert_team_usable` backstop, which the reworked consent test would otherwise orphan).
 - `test_preview_all_teams_suspended_403`: 2 memberships, both teams suspended → preview 403 `invalid_grant` (0-active-after-exclusion branch).
-- `test_preview_declared_bare_mcp_resource_keeps_resource_field`: single team, client declares the PRM value `{base}/mcp` (truthy) → preview keeps today's `resource: team_resource_url(base, org_id)` (byte-identical contract pin).
+- `test_preview_declared_bare_mcp_resource_keeps_resource_field`: single team, client declares the PRM value `{base}/mcp` (truthy) → preview keeps today's `resource: org_resource_url(base, org_id)` (byte-identical contract pin).
 - `test_multi_team_default_requires_declaration` (existing, both teams active) stays 400.
 - `test_suspended_team_rejects_code_exchange` (existing): update — the suspension now rejects at the CONSENT POST (code never minted), so rework the test to assert the consent 403 and keep the exchange-level assertion for the refresh path only.
 
@@ -94,7 +94,7 @@ def _default_team(cp, user_id: str) -> str:
     raise OAuthError(400, "invalid_resource",
                      "This account belongs to multiple teams — the MCP client "
                      "must declare a team-scoped resource indicator "
-                     f"({team_resource_url('<base>', '<org_id>')} form).")
+                     f"({org_resource_url('<base>', '<org_id>')} form).")
 ```
 3. `_selectable_teams`:
 ```python
@@ -127,15 +127,15 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
     """
     _, org_id = parse_resource(base, resource)
     if org_id is not None:
-        from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(cp, user_id, org_id) is None:
+        from tortoise.supabase_control import membership_for_user_org
+        if membership_for_user_org(cp, user_id, org_id) is None:
             raise OAuthError(403, "invalid_resource",
                              "Not a member of the requested team.")
         _assert_team_usable(cp, org_id)   # suspended → 403 invalid_grant
         return {
             "org_id": org_id,
             "org_name": _org_name(cp, org_id),
-            "resource": (team_resource_url(base, org_id) if resource
+            "resource": (org_resource_url(base, org_id) if resource
                          else mcp_resource_url(base)),
         }
     teams = _selectable_teams(cp, user_id)
@@ -145,7 +145,7 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
             "org_name": teams[0]["org_name"],
             # byte-identical with today: a truthy declared resource (bare MCP
             # or origin echo) keeps the team-scoped resource field.
-            "resource": (team_resource_url(base, teams[0]["org_id"])
+            "resource": (org_resource_url(base, teams[0]["org_id"])
                          if resource else mcp_resource_url(base)),
         }
     if len(teams) > 1:
@@ -154,7 +154,7 @@ def consent_preview(cp, user_id: str, base: str, resource: str | None) -> dict:
             "org_name": None,
             "resource": mcp_resource_url(base),
             "memberships": [
-                {**t, "resource": team_resource_url(base, t["org_id"])}
+                {**t, "resource": org_resource_url(base, t["org_id"])}
                 for t in teams
             ],
         }

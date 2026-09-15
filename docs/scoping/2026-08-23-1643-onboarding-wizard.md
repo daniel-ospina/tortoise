@@ -39,7 +39,7 @@ Use the EXISTING `/v1/onboarding/state` model (onboarding_complete, github_conne
 The chooser lives in welcome.html (HARNESS_* data with copy analytics wired to /v1/onboarding/state harness/section enums) — NOT docs.html's static cards. Port from welcome.html's data + the backend enums.
 
 ### Anon teams + OAuth specifics
-- STEP 0 is session-gated; define wizard behavior for key-login anon teams (claim funnel first; the D4/D5 endpoints accept tt_ keys via get_current_team, so steps 4–7 are reachable).
+- STEP 0 is session-gated; define wizard behavior for key-login anon teams (claim funnel first; the D4/D5 endpoints accept tt_ keys via get_current_org, so steps 4–7 are reachable).
 - STEP 5 needs the OAuth popup + state restore (the GITHUB_STATES TTL pattern).
 
 ## Key decisions

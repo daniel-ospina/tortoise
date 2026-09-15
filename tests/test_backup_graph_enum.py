@@ -1,10 +1,10 @@
-"""Unit tests for backup_sweep.enumerate_team_graphs — the per-graph sweep
+"""Unit tests for backup_sweep.enumerate_org_graphs — the per-graph sweep
 seam (#2313). Pure fakes, no DB: runs identically on the embedded and docker
 lanes (never mints real graphs)."""
 
 from __future__ import annotations
 
-from tortoise.backup_sweep import enumerate_team_graphs
+from tortoise.backup_sweep import enumerate_org_graphs
 
 
 class _ResultSet:
@@ -58,7 +58,7 @@ def _supabase_source(teams_row=None, graphs_rows=None):
 
 def test_supabase_default_only():
     src = _supabase_source()
-    out = enumerate_team_graphs(src, "t1")
+    out = enumerate_org_graphs(src, "t1")
     assert out == [{"graph_id": "default", "kind": "default",
                     "namespace": "team_t1"}]
 
@@ -75,7 +75,7 @@ def test_supabase_default_plus_customs_excludes_deleted_and_default_rows():
          "namespace": "team_t1_g_del", "status": "deleted",
          "recording": None, "created_at": "2026-09-03T00:00:00Z"},
     ])
-    out = enumerate_team_graphs(src, "t1")
+    out = enumerate_org_graphs(src, "t1")
     assert [g["graph_id"] for g in out] == ["default", "g_a", "g_b"]
     assert all(g["kind"] != "deleted" for g in out)
 
@@ -89,7 +89,7 @@ def test_registry_default_normalized_and_deleted_filtered():
         {"id": "g_y", "org_id": "t1", "name": "y", "kind": "custom",
          "namespace": "team_t1_g_y", "status": "deleted"},
     ])
-    out = enumerate_team_graphs(src, "t1")
+    out = enumerate_org_graphs(src, "t1")
     assert out[0]["graph_id"] == "default"  # normalized from random gid
     assert [g["graph_id"] for g in out] == ["default", "g_x"]
     assert out[1]["namespace"] == "team_t1_g_x"
@@ -102,5 +102,5 @@ def test_registry_pre_c1_nodes_default_to_active():
         {"id": "g_legacy", "org_id": "t1", "name": "legacy",
          "kind": "custom", "namespace": "team_t1_g_legacy"},
     ])
-    out = enumerate_team_graphs(src, "t1")
+    out = enumerate_org_graphs(src, "t1")
     assert [g["graph_id"] for g in out] == ["g_legacy"]

@@ -52,7 +52,7 @@ aboutObjects: tortoise, dashboard, backup-pipeline, hosted-api
 | The dashboard already receives that data but discards all but `count` + `latest` | `[validated]` — `main.jsx:4860-4862` |
 | Only deleted (trash) graphs have a per-graph backup UI today | `[validated]` — `main.jsx:7566-7615` |
 | Custom-graph self-service restore does not exist yet | `[validated]` — #2339 open; `hosted_api.py:19488-19492` |
-| `GET /backups` is **not** tier-gated, so free users see the same empty `none` | `[validated]` — `hosted_api.py:19187` uses `get_current_team_session_ungated`, no `_require_backup_tier` |
+| `GET /backups` is **not** tier-gated, so free users see the same empty `none` | `[validated]` — `hosted_api.py:19187` uses `get_current_org_session_ungated`, no `_require_backup_tier` |
 | Production `hourly_backups` is `true` for Pro/Team | `[unverified]` — repo `pricing.json` says `"planned"` (`product/pricing.json:82,105`) |
 
 **Reverse-the-problem:** What if the dashboard showed *no* aggregate backup number at all, and instead the **Graphs tab told you per-graph protection status**? That constraint dissolves the relocation question entirely — it is the framing this brief adopts.
@@ -77,7 +77,7 @@ aboutObjects: tortoise, dashboard, backup-pipeline, hosted-api
 ### 1.2 Backup API surface — exact field semantics
 
 **`GET /backups`** — `hosted_api.py:19186-19248`
-- Auth: `get_current_team_session_ungated` (`:19187`) — session JWT **or** `tt_` key; **no tier gate**. Team-scoped by `team["org_id"]` only.
+- Auth: `get_current_org_session_ungated` (`:19187`) — session JWT **or** `tt_` key; **no tier gate**. Team-scoped by `team["org_id"]` only.
 - Body: `{"backups": [ <manifest>, … ]}` (`:19241-19244`), newest-first (`hosted_backup.py:958`).
 - Each manifest is the raw `create_backup` payload (`hosted_backup.py:894-909`) **enriched** by `_manifest_graph` (`hosted_api.py:19116-19135`) with:
   - `backup_id` — `{org_id}/{graph_id}/{ts}_{rnd}` (`hosted_backup.py:794-804`)

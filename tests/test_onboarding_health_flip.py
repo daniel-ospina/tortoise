@@ -1,6 +1,6 @@
 """Supabase-mode onboarding/GitHub/health flip tests (#764, plan Tasks 6-7).
 
-Endpoint-level (TestClient over the real app, REAL get_current_team resolving
+Endpoint-level (TestClient over the real app, REAL get_current_org resolving
 against the in-memory FakeControlPlane) coverage of the Task 6-7 seams:
 
 - onboarding_state read-patch round-trips from teams (jsonb — no string
@@ -102,7 +102,7 @@ class TestOnboardingStateFlip:
     def test_session_recording_toggle_accepts_session_jwt(self, supabase_client,
                                                           monkeypatch):
         """#1859 P3-3: POST /v1/onboarding/session-recording accepts a
-        session JWT (dual-auth — converted from key-only get_current_team).
+        session JWT (dual-auth — converted from key-only get_current_org).
         The MCP tool registry still drives this endpoint with a tt_ key; the
         dashboard's session JWT must work too (same ungated dual-auth as
         GET/PATCH /v1/onboarding/state)."""

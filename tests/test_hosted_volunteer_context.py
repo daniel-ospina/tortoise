@@ -23,8 +23,8 @@ from fastapi.testclient import TestClient
 
 from tortoise.hosted_api import (
     app,
-    get_current_team,
-    get_current_team_gated,
+    get_current_org,
+    get_current_org_gated,
 )
 from tortoise.sdk import TortoiseSDK
 
@@ -39,7 +39,7 @@ def client():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             {"org_id": TEST_ORG_ID, "tier": "free", "key_id": None})
         _orig_init = ha_mod.TortoiseSDK.__init__
 
@@ -322,7 +322,7 @@ def test_429_rate_limit_retry_after_backoff_safe(monkeypatch):
     async def _team():
         return {"org_id": TEST_ORG_ID, "tier": "free", "key_id": None}
 
-    mini.dependency_overrides[get_current_team_gated] = _team
+    mini.dependency_overrides[get_current_org_gated] = _team
     mini.add_api_route("/v1/context", ha_mod.volunteer_context,
                        methods=["POST"])
     with TestClient(mini) as tc:
@@ -345,7 +345,7 @@ class _RealAuthLane:
     teams' registry rows and the hosted app's lookups land on the same
     redirect-derived server graphs (the test-mode redirect hashes
     session+path+graph_name).  Requests then authenticate through the REAL
-    get_current_team path (no auth override — never a mock)."""
+    get_current_org path (no auth override — never a mock)."""
 
     def __init__(self, tmp_path):
         import tortoise.hosted_api as ha_mod
@@ -382,7 +382,7 @@ def _mint_api_key(real_auth, provisioned: dict) -> str:
     """Mint a REAL APIKey node in the registry control plane the hosted
     auth reads (``namespace="registry"`` — where POST /v1/team/keys writes;
     schema parity: hash_api_key + key_prefix token[:10] + expires_at null).
-    The Bearer token authenticates through the REAL get_current_team verify
+    The Bearer token authenticates through the REAL get_current_org verify
     path (PBKDF2 + prefix scan + team resolution + suspension check) and the
     per-request _data_sdk(namespace=org_id) tenancy path.
 
@@ -523,7 +523,7 @@ def test_suspended_team_403(provision_test_user, real_auth):
     token = _mint_api_key(real_auth, team)
     from datetime import UTC, datetime
     # The suspension check reads the Team node from the REGISTRY control
-    # plane (get_current_team's team fetch) — mirror the provisioned team
+    # plane (get_current_org's team fetch) — mirror the provisioned team
     # row there (the real signup path creates it) and suspend it.
     reg = real_auth.ha_mod._make_sdk(namespace="registry")._get_registry()
     reg.query(

@@ -321,7 +321,7 @@ class TestEmailSignupClaim:
         identity = "reg-" + hashlib.sha256(reg_email.encode()).hexdigest()[:12]
         org_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
         api_key = f"tt_{_uuid.uuid4().hex}"
-        sc.provision_team(fake, **{
+        sc.provision_org(fake, **{
             "p_user_id": None, "p_identity": identity,
             "p_org_id": org_id, "p_org_name": f"Reg {org_id}",
             "p_api_key": api_key, "p_key_hash": _hash(api_key),
@@ -380,7 +380,7 @@ class TestRegisterIdempotencyReanchor:
         email = "dup-reg@example.com"
         # simulate the leftover from a first register: the reg- owner row
         # exists but the graph mint was never completed / client never
-        # finished signup — the exact case team_by_email alone misses.
+        # finished signup — the exact case org_by_email alone misses.
         identity = "reg-" + hashlib.sha256(email.lower().encode()).hexdigest()[:12]
         import uuid as _uuid
 
@@ -388,7 +388,7 @@ class TestRegisterIdempotencyReanchor:
         from tortoise.auth import hash_api_key as _hash
         from tortoise.auth import lookup_hash as _lh
         fake = sc.get_control_plane()
-        sc.provision_team(fake, **{
+        sc.provision_org(fake, **{
             "p_user_id": None, "p_identity": identity,
             "p_org_id": f"team-regdup-{_uuid.uuid4().hex[:10]}",
             "p_org_name": "RegDup", "p_api_key": f"tt_{_uuid.uuid4().hex}",

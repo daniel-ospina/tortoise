@@ -27,7 +27,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tortoise.hosted_api import (  # noqa: I001
     app,
-    get_current_team,
+    get_current_org,
     get_current_user,
     ForwardedProtoMiddleware,
 )
@@ -53,7 +53,7 @@ _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
 _U2 = "9f2c1a40-0000-4a00-8000-000000000002"
 _U9 = "9f2c1a40-0000-4a00-8000-000000000009"
 _U_INTRUDER = "9f2c1a40-0000-4a00-8000-00000000000d"
-  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
+  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while org_graph_name resolves team_team-001 (backup dump divergence)
 TEST_TEAM = {
     "org_id": TEST_ORG_ID,
     "key_id": "test-key-001",
@@ -65,7 +65,7 @@ TEST_TEAM = {
     "legacy_full_access": True,
     "delegation_depth": None,
     "created_by_key_id": None,
-    # get_current_team always resolves the full limits dict — test stubs must
+    # get_current_org always resolves the full limits dict — test stubs must
     # match, or fail-closed quota enforcement 500s instead of passing (#310).
     "max_users": 1,
     "max_graphs": 1,
@@ -189,7 +189,7 @@ def client():
         db_path = os.path.join(tmpdir, "test.db")
 
         # Override auth — skip API key lookup
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
 
         # Patch SDK to use temp DB file
         _orig_init = _patch_tortoise_sdk_init(db_path)
@@ -1027,11 +1027,11 @@ class TestLastUsedAtTracking:
     """API key last_used_at is set on successful authentication."""
 
     def test_last_used_at_set_on_successful_auth(self):
-        """#685: get_current_team updates key.last_used_at on valid auth."""
+        """#685: get_current_org updates key.last_used_at on valid auth."""
         import asyncio  # noqa: I001
         from unittest.mock import MagicMock
         from tortoise.auth import hash_api_key
-        from tortoise.hosted_api import _make_sdk, get_current_team
+        from tortoise.hosted_api import _make_sdk, get_current_org
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -1039,7 +1039,7 @@ class TestLastUsedAtTracking:
             try:
                 sdk = _make_sdk(namespace="registry")
 
-                # Seed a Team node (get_current_team queries Team after auth)
+                # Seed a Team node (get_current_org queries Team after auth)
                 sdk._get_registry().query(
                     "CREATE (t:Team {id: $id, tier: 'free'})",
                     params={"id": "test-team-lua"},
@@ -1066,7 +1066,7 @@ class TestLastUsedAtTracking:
                 request.headers = {"Authorization": f"Bearer {key_token}"}
                 request.state = MagicMock()
 
-                result = asyncio.run(get_current_team(request))
+                result = asyncio.run(get_current_org(request))
 
                 assert result["org_id"] == "test-team-lua"
                 assert result["key_id"] == "test-key-lua"
@@ -1097,7 +1097,7 @@ class TestLastUsedAtTracking:
         import asyncio  # noqa: I001
         from unittest.mock import MagicMock
         from tortoise.auth import hash_api_key
-        from tortoise.hosted_api import _make_sdk, get_current_team
+        from tortoise.hosted_api import _make_sdk, get_current_org
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -1125,7 +1125,7 @@ class TestLastUsedAtTracking:
                 request.headers = {
                     "Authorization": f"Bearer {legacy_token}"}
                 request.state = MagicMock()
-                result = asyncio.run(get_current_team(request))
+                result = asyncio.run(get_current_org(request))
                 assert result["org_id"] == "legacy-team"
                 assert result["graph_id"] is None
                 assert result["graph_namespace"] == "team_legacy-team"  # default
@@ -1156,7 +1156,7 @@ class TestLastUsedAtTracking:
                 )
                 request.headers = {
                     "Authorization": f"Bearer {minted_token}"}
-                result2 = asyncio.run(get_current_team(request))
+                result2 = asyncio.run(get_current_org(request))
                 assert result2["graph_id"] == "g_abc123def4567890"
                 assert result2["graph_namespace"] == \
                     "team_legacy-team_g_g_abc123def4567890"
@@ -1180,7 +1180,7 @@ class TestLastUsedAtTracking:
                 )
                 request.headers = {
                     "Authorization": f"Bearer {orphan_token}"}
-                result3 = asyncio.run(get_current_team(request))
+                result3 = asyncio.run(get_current_org(request))
                 assert result3["graph_id"] == "g_ghost000000000000"
                 assert result3["graph_namespace"] is None  # fail-closed
                 assert result3["legacy_full_access"] is False
@@ -1197,7 +1197,7 @@ class TestLastUsedAtTracking:
                     params={"kh": hash_api_key(pt_token), "kp": pt_token[:10]},
                 )
                 request.headers = {"Authorization": f"Bearer {pt_token}"}
-                result4 = asyncio.run(get_current_team(request))
+                result4 = asyncio.run(get_current_org(request))
                 assert result4["graph_namespace"] == "team_pt-team"  # derived
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
@@ -1929,14 +1929,14 @@ class TestKeysRename:
         """#1709: the registry-lane agent_signup mint now WRITES created_via/
         expires_at props (parity with the Supabase lane) — the list endpoint
         round-trips them (no longer None). The client fixture overrides
-        get_current_team → TEST_TEAM, so re-point the override at the minted
+        get_current_org → TEST_TEAM, so re-point the override at the minted
         team before GET (list_api_keys is team-scoped; the signup key lives
         under its own fresh org_id)."""
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         r = client.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
         signup_team = r.json()["org_id"]
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, org_id=signup_team)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id=signup_team)
         r = client.get("/v1/team/keys")
         keys = r.json()["keys"]
         assert keys, "signup team should have exactly one key"
@@ -1960,7 +1960,7 @@ class TestKeysRename:
 
 
 class TestListApiKeysSupabase:
-    """#1708 D7: Supabase lane — team_api_keys reads created_via/expires_at
+    """#1708 D7: Supabase lane — org_api_keys reads created_via/expires_at
     through the seam; real-key auth pins the disabled/expired → 401 contract
     the CLI reuse path (401 → re-mint) depends on. Reuses the client fixture
     (lifespan/MCP-mount + SDK-init patch + _FALLBACK_KEEPALIVE hygiene)."""
@@ -1981,7 +1981,7 @@ class TestListApiKeysSupabase:
             "created_via": "bootstrap", "expires_at": "2026-08-02T00:00:00Z",
         }])
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, org_id="team-001")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id="team-001")
         yield fake
         app.dependency_overrides.clear()
 
@@ -1999,7 +1999,7 @@ class TestListApiKeysSupabase:
         (enabled column absent), the drift-tolerant seam re-authenticates a
         disabled key — accepted degrade window, documented in the PR body."""
         fake = _supabase_env
-        app.dependency_overrides.pop(get_current_team, None)  # real key auth
+        app.dependency_overrides.pop(get_current_org, None)  # real key auth
         from tortoise.auth import lookup_hash
         token = "tt_disabled_0000000000000000001"
         fake.seed("api_keys", [{
@@ -2016,7 +2016,7 @@ class TestListApiKeysSupabase:
     def test_expired_key_401_on_team(self, client, _supabase_env, monkeypatch):
         """Same contract pin for past-expires_at keys (24h bootstrap expiry)."""
         fake = _supabase_env
-        app.dependency_overrides.pop(get_current_team, None)  # real key auth
+        app.dependency_overrides.pop(get_current_org, None)  # real key auth
         from tortoise.auth import lookup_hash
         token = "tt_expired_00000000000000000001"
         fake.seed("api_keys", [{
@@ -2465,8 +2465,8 @@ class TestSessionCapture:
         422 — the assertion discriminates; non-blank → 2+est > 1 → 402 either
         order (control)."""
         import tortoise.hosted_api as ha_mod
-        from tortoise.hosted_api import app, get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
+        from tortoise.hosted_api import app, get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
             **TEST_TEAM, "max_points": 1}
         sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         sdk.create_point(kind="statement", content="pre-existing non-episodic point 1")
@@ -3102,7 +3102,7 @@ def internal_client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
 
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         _orig_init = _patch_tortoise_sdk_init(db_path)
         # C3 (#2112): seed the Team node the auth override bypasses — the
         # registry mint path (sdk.apikey_create) validates the team exists
@@ -3377,7 +3377,7 @@ class TestIssueInsightAPI:
         }
 
         # Team B: different org_id -> different namespace, same DB file.
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, org_id="team-002")
         sdk_b = _make_sdk(namespace="team-002")
         sdk_b.create_point(
@@ -3602,21 +3602,21 @@ class TestBackupEndpoints:
         monkeypatch.setattr(
             _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, tier="pro")
         # Epic #1647 (docker lane): the backup/restore seam resolves the team
-        # graph via team_graph_name() → "org_{id}" — but on the server lane
+        # graph via org_graph_name() → "org_{id}" — but on the server lane
         # the team SDK writes to the REDIRECT-derived guard-passing graph
         # (test_<stem>_<hash12(session+path+name)>). Without a seam, restore's
         # live_name ("team_team-001") is empty on the server → the
         # empty-backup-over-live 409 guard sees 0 live nodes and restore
         # succeeds over live data (the #1635 guard is DEFEATED). Route
-        # team_graph_name to the SDK's actual graph in BOTH lanes (embedded:
+        # org_graph_name to the SDK's actual graph in BOTH lanes (embedded:
         # the fixture-patched db_path SDK resolves team_team-001 verbatim;
         # server: the derived graph). The registry-source arg is unused by the
         # seam (the registry stamp is the historical literal either way).
         import tortoise.backup_sweep as _bs
         _sdk_graph = _ha._make_sdk(namespace=TEST_ORG_ID)._get_proj().graph_name
-        monkeypatch.setattr(_bs, "team_graph_name",
+        monkeypatch.setattr(_bs, "org_graph_name",
                             lambda source, tid: _sdk_graph)
         yield client
         app.dependency_overrides.clear()
@@ -3634,7 +3634,7 @@ class TestBackupEndpoints:
         Regression test for #656 — the old gate blocked only (None, 'free'),
         so a solo-tier team would have slipped past the backups gate.
         """
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, tier="solo"
         )
         try:
@@ -3672,7 +3672,7 @@ class TestBackupEndpoints:
         ]
         # Every tier in pricing.json behaves per its hourly_backups flag.
         for tier in expected_allowed:
-            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+            app.dependency_overrides[get_current_org] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
             )
             try:
@@ -3683,7 +3683,7 @@ class TestBackupEndpoints:
             finally:
                 app.dependency_overrides.clear()
         for tier in expected_blocked:
-            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+            app.dependency_overrides[get_current_org] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
             )
             try:
@@ -3695,7 +3695,7 @@ class TestBackupEndpoints:
                 app.dependency_overrides.clear()
 
         # Unknown tier → 402 (falls back to free limits).
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, tier="enterprise"
         )
         try:
@@ -3926,7 +3926,7 @@ class TestQuotaFailClosed:
     """Verify that quota check failures surface as 500, never silently pass."""
 
     def test_quota_check_error_returns_500(self, client, monkeypatch):
-        """When enforce_team_limit raises QuotaCheckError, the endpoint
+        """When enforce_org_limit raises QuotaCheckError, the endpoint
         returns 500 with a descriptive detail — fail-closed, never silent."""
         from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
@@ -3934,7 +3934,7 @@ class TestQuotaFailClosed:
         def _fail_count(_limits, _resource, sdk=None):
             raise QuotaCheckError("simulated count query failure")
 
-        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_count)
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_count)
 
         r = client.post("/v1/points", json={"content": "should fail"})
         assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text[:200]}"
@@ -3944,7 +3944,7 @@ class TestQuotaFailClosed:
         )
 
     def test_quota_exceeded_returns_402(self, client, monkeypatch):
-        """When enforce_team_limit raises QuotaExceededError, the endpoint
+        """When enforce_org_limit raises QuotaExceededError, the endpoint
         returns 402 (payment required) — normal over-limit behavior."""
         from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
@@ -3952,7 +3952,7 @@ class TestQuotaFailClosed:
         def _fail_exceeded(_limits, _resource, sdk=None):
             raise QuotaExceededError("Team points limit reached (1000)")
 
-        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_exceeded)
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_exceeded)
 
         r = client.post("/v1/points", json={"content": "should be over limit"})
         assert r.status_code == 402, f"expected 402, got {r.status_code}: {r.text[:200]}"
@@ -4291,7 +4291,7 @@ class TestInviteEndpointsRegistry:
 
     @pytest.fixture
     def session_user(self):
-        """JWT session user (get_current_user is NOT the get_current_team
+        """JWT session user (get_current_user is NOT the get_current_org
         override the client fixture applies)."""
 
         def _set(user_id: str, email: str | None = None):
@@ -5228,7 +5228,7 @@ class TestV2SessionFloodGate:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # #2600 (Phase 1, Task 2) — Session.actor_user_id stamp via the REAL registry
-# auth face. POST /v1/sessions is key-only (get_current_team_gated) — on the
+# auth face. POST /v1/sessions is key-only (get_current_org_gated) — on the
 # docker lane (registry CP) the two "members" are registry-seeded keys with
 # distinct UUID creators (sdk.apikey_create(created_by=<uuid>)), authenticated
 # with the real tt_ keys (NO DI override — an override dict bypasses the
@@ -6014,7 +6014,7 @@ class TestProvisioningService:
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {token}"})
             assert r.status_code == 403, r.text
-            # The centralized deleg gate in get_current_team_session fires
+            # The centralized deleg gate in get_current_org_session fires
             # (KEY_NOT_USER_MINTED) — minted keys cannot manage the team.
             detail = r.json()["detail"]
             if isinstance(detail, dict):
@@ -6436,7 +6436,7 @@ class TestGraphLifecycle:
         try:
             app.dependency_overrides[ha_mod.get_current_user] = \
                 lambda: {"user_id": "list-owner", "email": "o@x.com"}
-            app.dependency_overrides[get_current_team] = \
+            app.dependency_overrides[get_current_org] = \
                 lambda: dict(TEST_TEAM, org_id=tid)
             sdk._get_registry().query(
                 "MERGE (m:Membership {user_id:'list-owner', org_id:$tid, "
@@ -6483,7 +6483,7 @@ class TestGraphLifecycle:
             assert dr.json()["key_id"] == kid
         finally:
             app.dependency_overrides.pop(ha_mod.get_current_user, None)
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             gen.close()
 
 
@@ -6574,7 +6574,7 @@ class TestC3KeyLifecycle:
             _restore_tortoise_sdk_init(_orig)
             # C3 hygiene: this class bypasses the module client fixture, so
             # nothing else clears dependency_overrides — a leaked
-            # get_current_user/get_current_team override would bleed into the
+            # get_current_user/get_current_org override would bleed into the
             # NEXT test file in the same pytest process (dashboard_login's
             # Supabase-mode owner check 403s on the stale user).
             app.dependency_overrides.clear()
@@ -6586,7 +6586,7 @@ class TestC3KeyLifecycle:
         team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
         team_dict.pop("key_id", None)
         team_dict.pop("delegation_depth", None)
-        app.dependency_overrides[get_current_team] = lambda: team_dict
+        app.dependency_overrides[get_current_org] = lambda: team_dict
         import tortoise.hosted_api as ha_mod
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
@@ -6644,7 +6644,7 @@ class TestC3KeyLifecycle:
             owner = sdk.apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
-            app.dependency_overrides.pop(get_current_team, None)  # real key auth
+            app.dependency_overrides.pop(get_current_org, None)  # real key auth
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {owner}"},
                         json={"scopes": ["graphs:read", "graphs:write"]})
@@ -6673,7 +6673,7 @@ class TestC3KeyLifecycle:
             owner = sdk.apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {owner}"},
                         json={"scopes": ["graphs:read", "keys:manage"]})
@@ -6690,7 +6690,7 @@ class TestC3KeyLifecycle:
             reader = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"],
             )["api_key"]
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {reader}"},
                         json={"scopes": ["graphs:read"]})
@@ -6765,7 +6765,7 @@ class TestC3KeyLifecycle:
             # Custom graph + two keys (one bound to it).
             g = sdk._graph_create(tid, "acme", kind="custom")
             gid = g["graph_id"]
-            app.dependency_overrides[get_current_team] = \
+            app.dependency_overrides[get_current_org] = \
                 lambda: dict(TEST_TEAM, org_id=tid, session_user_id=_U1, key_id=None)
             # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
             # owner Membership (pre-#2297 the mint had no role check, so this
@@ -6802,7 +6802,7 @@ class TestC3KeyLifecycle:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides[get_current_team] = \
+            app.dependency_overrides[get_current_org] = \
                 lambda: dict(TEST_TEAM, org_id=tid, session_user_id=_U1, key_id=None)
             import tortoise.hosted_api as ha_mod
             ha_mod._make_sdk(namespace="registry")._get_registry().query(
@@ -6836,7 +6836,7 @@ class TestC3KeyLifecycle:
 
     def test_minted_deleg0_key_cannot_manage_403(self, tmp_path):
         """E2E-4 half: a deleg=0 child key hitting mint/revoke → 403 (the
-        central deleg gate in get_current_team_session fires first). Shrink
+        central deleg gate in get_current_org_session fires first). Shrink
         is session-gated (E2E-12 surface — get_current_user dep), so a key
         face 401s there rather than reaching the deleg gate; E2E-4's
         management set is create/delete/mint/revoke — shrink is not in it."""
@@ -6846,7 +6846,7 @@ class TestC3KeyLifecycle:
             owner = sdk.apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             child = tc.post("/v1/team/keys",
                             headers={"Authorization": f"Bearer {owner}"},
                             json={"scopes": ["graphs:read"]}).json()["key"]
@@ -6879,7 +6879,7 @@ class TestC3KeyCapAndEscalationBackstop:
             sdk.apikey_create(tid, "owner-test")
             team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
             team_dict.pop("key_id", None)
-            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: team_dict
             # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
             # owner Membership (pre-#2297 the mint had no role check, so this
             # override never needed it; same pattern as _session_mint).
@@ -6925,7 +6925,7 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             # Reader key (graphs:read only) → {} mint 403 (no mint capability).
             reader = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])["api_key"]
@@ -6964,7 +6964,7 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             legacy = sdk.apikey_create(tid, "owner-test")  # {} default = legacy
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {legacy['api_key']}"},
@@ -6984,7 +6984,7 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             legacy = sdk.apikey_create(tid, "owner-test")
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {legacy['api_key']}"},
@@ -7012,14 +7012,14 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             # deleg-NULL scoped owner key.
             scoped = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read", "graphs:write"])
             # shrink to [] via session face (owner admin).
             team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: team_dict
             app.dependency_overrides[get_current_user] = lambda: {
                 "user_id": _U1, "email": "owner@example.com"}
             sdk._get_registry().query(
@@ -7049,7 +7049,7 @@ class TestC3KeyCapAndEscalationBackstop:
             sdk.apikey_create(tid, "owner-test")  # fill cap
             team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: team_dict
             # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
             # owner Membership (pre-#2297 the mint had no role check, so this
             # override never needed it; same pattern as _session_mint).
@@ -7077,7 +7077,7 @@ class TestC3ReviewGatePins:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             owner = sdk.apikey_create(tid, "owner-test")  # legacy full-access
             reader = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])["api_key"]
@@ -7121,13 +7121,13 @@ class TestC3ReviewGatePins:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             scoped = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])
             # session face owner
             team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: team_dict
             app.dependency_overrides[get_current_user] = lambda: {
                 "user_id": _U1, "email": "owner@example.com"}
             sdk._get_registry().query(
@@ -7168,7 +7168,7 @@ class TestC3ReviewGatePins:
         import tortoise.hosted_api as ha_mod
         team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
         team_dict.pop("key_id", None)
-        app.dependency_overrides[get_current_team] = lambda: team_dict
+        app.dependency_overrides[get_current_org] = lambda: team_dict
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
             "MERGE (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
@@ -8171,7 +8171,7 @@ class TestActorDisplayMap2600:
     """Direct unit coverage of the SHARED _actor_display_map helper — the
     registry-lane HTTP tests above exercise only the raw-id branch (docker
     CP has no membership email). These pin the SUPABASE email seam against
-    FakeControlPlane rows of the REAL team_members output shape, the
+    FakeControlPlane rows of the REAL org_members output shape, the
     any-actor gate, and full fail-soft — without an HTTP round trip."""
 
     def test_registry_lane_returns_empty(self, monkeypatch):
@@ -8193,7 +8193,7 @@ class TestActorDisplayMap2600:
         assert ha_mod._actor_display_map([], "team-x") == {}
 
     def test_supabase_email_seam_real_shape(self, monkeypatch):
-        """FakeControlPlane rows of the REAL team_members output shape:
+        """FakeControlPlane rows of the REAL org_members output shape:
         accepted-invite ACTIVE row that retained invited_email → email
         shown; active row WITHOUT invited_email → not in map (raw id);
         invite-pending row (user_id None) → filtered (raw id); unknown id →
@@ -8221,7 +8221,7 @@ class TestActorDisplayMap2600:
         # B (no email) + unknown id absent → caller falls back to raw id
 
     def test_fail_soft_members_fetch_raising(self, monkeypatch):
-        """team_members raising (CP outage) → {} (never a doomed call, never
+        """org_members raising (CP outage) → {} (never a doomed call, never
         a 500) → caller falls back to raw id."""
         import tortoise.hosted_api as ha_mod
         import tortoise.supabase_control as sc_mod
@@ -8523,7 +8523,7 @@ class TestE2E5TwoActorDedup2600:
 # the email case is structurally impossible there). Drives list_sessions +
 # get_session_detail through the REAL supabase auth face (FakeControlPlane
 # + a real tt_ key minted in api_keys) and seeds Sessions directly in the
-# team graph. The email seam shape is the REAL one team_members produces:
+# team graph. The email seam shape is the REAL one org_members produces:
 # an accepted-invite ACTIVE row that retained invited_email → email shown;
 # a row without invited_email / an unknown id → raw id; legacy null-actor →
 # actor_display null.

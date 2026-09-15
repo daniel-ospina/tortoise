@@ -98,8 +98,8 @@ def client(tmp_path):
     # (the old comment's "/data/tortoise.db positional split" hazard) and
     # the forced drop keeps every construction on it.
     with patched_tortoise_sdk(db_path):
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": org_id, "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,

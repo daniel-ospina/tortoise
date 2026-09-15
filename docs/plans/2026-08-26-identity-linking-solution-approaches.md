@@ -34,7 +34,7 @@ Verified against `docs/auth-architecture.md`, `supabase/migrations/*`,
 | C12 | Dashboard is router-less single-file React (main.jsx ≈ 3.2k lines); banner state at :93 | main.jsx |
 | C13 | supabase-js **2.112.2 vendored** with `linkIdentity`/`unlinkIdentity` support unused | public/vendor/supabase-2.112.2.min.js |
 | C14 | `auth.identities` not browser-queryable without RLS/RPC → bounded RPC or backend read | scoping |
-| C15 | `teams.email` is the signup idempotency key (`team_by_email`, hosted_api ~3003) + `uq_teams_email` partial unique index (20260813000004 P3-FIX-S); `reg-<sha256(email)[:12]>` identity rows exist WITHOUT `auth.users` rows | hosted_api / 20260813000004 |
+| C15 | `teams.email` is the signup idempotency key (`org_by_email`, hosted_api ~3003) + `uq_teams_email` partial unique index (20260813000004 P3-FIX-S); `reg-<sha256(email)[:12]>` identity rows exist WITHOUT `auth.users` rows | hosted_api / 20260813000004 |
 | C16 | `supabase-session.js` shared helper must stay byte-parity across dashboard + website (static test `test_cross_subdomain_cookie_sync.py`) | tests/ |
 | C17 | Ops surfaces: hosted `enable_manual_linking`, OAuth redirect URLs, email confirmations (`enable_confirmations = true` — OTP available) | config.toml |
 | C18 | RPC precedent: mutations are SECURITY DEFINER + service_role-only (claim_membership/provision_team, auth binding INSIDE the RPC — never client-supplied org_id); reads are `auth.uid()`-bounded; audit via `audit_events.detail` jsonb | migrations |
@@ -250,7 +250,7 @@ permanently — no GoTrue-table reads in the browser path) and separates
 demand):**
 - Migration: drop `uq_teams_email` (20260813000004 P3-FIX-S); `teams.email`
   becomes a nullable, non-unique per-team contact/display field; the signup
-  idempotency key re-anchors from `team_by_email` (hosted_api ~3003) to "any
+  idempotency key re-anchors from `org_by_email` (hosted_api ~3003) to "any
   verified identity for this email" (query `user_emails` / service-role
   `auth.identities`). `/v1/register`'s `reg-<sha256(email)[:12]>` anchor
   (C15) re-points at the mirror for the user path; agent/anon rows stay
@@ -271,7 +271,7 @@ demand):**
 
 - `supabase/migrations/<new>.sql` — mirror table + trigger on `auth.identities` + backfill; (C1) drop `uq_teams_email`, re-anchor indexes; (C2) invariant test only.
 - `tortoise/hosted_api.py` — `/v1/register` idempotency re-anchor (C1); `GET /v1/user/identity` on the mirror; claim-path email-upsert re-point (0004's email logic — C1).
-- `tortoise/supabase_control.py` — mirror reads; `team_by_email` re-anchor or retention-as-signup-only (C2).
+- `tortoise/supabase_control.py` — mirror reads; `org_by_email` re-anchor or retention-as-signup-only (C2).
 - `supabase/migrations/20260813000004_claim_membership.sql` — touched ONLY in C1 (email uniqueness semantics).
 - `website/apps/dashboard/src/main.jsx` — banner + `#profile` (same UX as A/B, data now from the corrected model).
 - `supabase/config.toml` + ops runbook (C17) — unchanged role from A/B (P2 still needs the toggle).
@@ -282,7 +282,7 @@ demand):**
 ```
 auth.identities ──trigger──> public.user_emails (mirror; RLS: user_id = auth.uid())
 teams.email (C1: contact field, non-unique) | (C2: signup registry only, never written by identity flows)
-/register idempotency: (C1) mirror query | (C2) team_by_email unchanged
+/register idempotency: (C1) mirror query | (C2) org_by_email unchanged
 profile/banner ──> /v1/user/identity ──> mirror + password-capability + keys (C10-filtered)
 ```
 

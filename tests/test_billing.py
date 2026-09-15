@@ -1,5 +1,5 @@
 """Tests for tortoise.billing (#310) — StripeClient, PriceCatalog,
-effective_tier, apply_limits, reconcile_team, plus (Tasks 5/7/8) the
+effective_tier, apply_limits, reconcile_org, plus (Tasks 5/7/8) the
 checkout/portal endpoints and the webhook handler.
 
 External Stripe calls are NEVER made: StripeClient is monkeypatched at the
@@ -30,7 +30,7 @@ from tortoise.billing import (
     StripeClient,
     apply_limits,
     effective_tier,
-    reconcile_team,
+    reconcile_org,
 )
 
 # ── Shared fixtures (module-level, used across Tasks 2/5/7/8) ───────────────
@@ -307,7 +307,7 @@ class TestEffectiveTier:
         assert effective_tier(team) == "solo"
 
 
-# ── apply_limits / reconcile_team (registry mirror) ─────────────────────────
+# ── apply_limits / reconcile_org (registry mirror) ─────────────────────────
 
 class TestApplyLimitsAndReconcile:
     def test_apply_limits_writes_tier_and_limits_atomically(self, monkeypatch, billing_sdk):
@@ -341,7 +341,7 @@ class TestApplyLimitsAndReconcile:
         )
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: dict(FIXTURE_SUB))
-        reconcile_team(sdk, team["id"])
+        reconcile_org(sdk, team["id"])
         t = sdk.team_get(team["id"])
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000
@@ -364,7 +364,7 @@ class TestApplyLimitsAndReconcile:
                   "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [inactive, active])
-        reconcile_team(sdk, team["id"])
+        reconcile_org(sdk, team["id"])
         t = sdk.team_get(team["id"])
         assert t["tier"] == "team"
         assert t["subscription_status"] == "active"
@@ -372,7 +372,7 @@ class TestApplyLimitsAndReconcile:
     def test_reconcile_noop_without_identifiers(self, stripe_env, billing_sdk):
         sdk = billing_sdk
         team = sdk.team_create("noop-team")
-        reconcile_team(sdk, team["id"])  # no subscription_id / customer_id → no-op
+        reconcile_org(sdk, team["id"])  # no subscription_id / customer_id → no-op
         t = sdk.team_get(team["id"])
         assert t["tier"] == "free"
 
@@ -390,7 +390,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: sub)
         with pytest.raises(BillingError, match="unknown price"):
-            reconcile_team(sdk, team["id"])
+            reconcile_org(sdk, team["id"])
         t = sdk.team_get(team["id"])
         assert t["tier"] == "pro"  # preserved — never downgraded on unparseable price
         assert t["subscription_status"] == "active"
@@ -871,7 +871,7 @@ class TestBootReconcile:
         monkeypatch.setattr(bl.StripeClient, "get_subscription",
                             lambda self, sid: {"id": "sub_1", "status": "active",
                                                "items": {"data": [{"price": {"id": "price_100soloM"}}]}})
-        summary = bl.reconcile_team(sdk, org_id)
+        summary = bl.reconcile_org(sdk, org_id)
         assert summary["action"] == "mirror_subscription"
         row = sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) RETURN t.tier", params={"id": org_id}).result_set
@@ -889,7 +889,7 @@ class TestBootReconcile:
         monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
                             lambda self, cid: [{"id": "sub_x", "status": "active",
                                                 "items": {"data": [{"price": {"id": "price_200proMM"}}]}}])
-        summary = bl.reconcile_team(sdk, org_id)
+        summary = bl.reconcile_org(sdk, org_id)
         assert summary["action"] == "mirror_customer_first_active"
         row = sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) RETURN t.tier, t.subscription_status",
@@ -909,7 +909,7 @@ class TestBootReconcile:
         # catches + logs — non-fatality lives at the boot boundary.
         import pytest
         with pytest.raises(bl.StripeAPIError):
-            bl.reconcile_team(billing_client["sdk"], org_id)
+            bl.reconcile_org(billing_client["sdk"], org_id)
 
     def test_boot_reconcile_hanging_stripe_never_blocks_boot(self, monkeypatch, billing_client):
         """review fix 3: the reconcile thread is daemon + budgeted — lifespan

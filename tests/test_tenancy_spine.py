@@ -198,7 +198,7 @@ def test_vanished_graph_fails_closed(spine_env):
 
 def test_backup_vanished_graph_fails_closed(spine_env):
     """Final-gate P1: a graph-bound key whose graph is GONE must NOT back up
-    the team DEFAULT graph (the old 'or team_graph_name' fallback widened a
+    the team DEFAULT graph (the old 'or org_graph_name' fallback widened a
     ghost key onto the default — a cross-graph read dump). Fails closed 403
     GRAPH_NOT_FOUND (not a 500)."""
     sdk, tid, _g, tc, _def_pt = spine_env

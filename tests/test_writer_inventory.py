@@ -32,7 +32,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 
 from tortoise.auth import lookup_hash  # noqa: I001
-from tortoise.hosted_api import app, get_current_team, get_current_user
+from tortoise.hosted_api import app, get_current_org, get_current_user
 
 from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
@@ -137,9 +137,9 @@ def client(monkeypatch, supabase_env, spy):
 
 @pytest.fixture
 def team_client(client):
-    """Client with get_current_team overridden (authenticated team dict)."""
+    """Client with get_current_org overridden (authenticated team dict)."""
     tc, fake, spy = client
-    app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+    app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
     return tc, fake, spy
 
 
@@ -217,7 +217,7 @@ class TestCreateApiKey:
         import tortoise.supabase_control as sc
         monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
         tc, _, _ = client
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         r = tc.post("/v1/team/keys")
         assert r.status_code == 500
 
@@ -742,7 +742,7 @@ class TestCreateTeam:
         teams.graph_name (= org_{org_id} post-fix) and dumps the REAL data
         graph (manifest node_count + restore round-trip capture the seeded
         point). Mirrors the pro_backup_client setup (:1006-1031) — POST
-        /backups is key-auth (get_current_team) and the tier gate reads the
+        /backups is key-auth (get_current_org) and the tier gate reads the
         dependency dict."""
         import base64 as _b64  # noqa: I001
         import tortoise.hosted_api as ha_mod
@@ -762,9 +762,9 @@ class TestCreateTeam:
         assert r.status_code == 200, r.text
         org_id = r.json()["org_id"]
         assert r.json()["graph_name"] == f"org_{org_id}"
-        # get_current_team_session honors the get_current_team override
+        # get_current_org_session honors the get_current_org override
         # (hosted_api.py:1540-1548), so one override covers create + restore.
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, org_id=org_id, tier="pro", backup_enabled=True)
         # seed the real data graph: bind the raw handle to the EXPLICIT
         # org_{org_id} graph (the same graph the backup dump reads via
@@ -1112,9 +1112,9 @@ class TestInternalProvisionDisabled:
 class TestOnboardingTeam:
     def test_subteam_provisions_via_rpc(self, team_client):
         tc, fake, _ = team_client
-        # #1748: seed the session-user context (get_current_team_session
+        # #1748: seed the session-user context (get_current_org_session
         # carries session_user_id for JWT auth; tests override the dep).
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id="user-1")
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
@@ -1163,7 +1163,7 @@ class TestOnboardingTeam:
         """#1748: no session user on the team context (session_user_id or
         key created_by) → 403 — never a throwaway-identity orphan team."""
         tc, fake, _ = team_client
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id=None)
         r = tc.post("/v1/onboarding/team", json={"name": "orphan"})
         assert r.status_code == 403, r.text
@@ -1208,7 +1208,7 @@ class TestOnboardingTeam:
         resolves on REST. The sub-team is listable and deletable by its
         owner — the full #1716 escape hatch, now actually reachable."""
         tc, fake, _ = team_client
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id=_USER1)
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _USER1, "email": "user-1@example.com"}
@@ -1257,7 +1257,7 @@ class TestOnboardingTeam:
         tc, _, _ = team_client
         # #1748: the onboarding sub-team is provisioned on the USER path —
         # seed the session-user context so the write takes the RPC path.
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id="user-1")
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
@@ -1300,7 +1300,7 @@ class TestZeroRegistryInventory:
         # #1748: seed the session user on the team context (onboarding
         # sub-team provisioning takes the USER path → the sweep exercises
         # the real RPC write, not a 403 short-circuit).
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, session_user_id=_USER1)
         fake.seed("org_memberships", [
             _owner_membership(),
@@ -1323,7 +1323,7 @@ class TestZeroRegistryInventory:
 
 class TestBackupEndpointsSupabaseGraphName:
     """#924: the on-demand backup endpoints resolve the graph name from the
-    control plane via the SAME seam as the sweep (backup_sweep.team_graph_name)
+    control plane via the SAME seam as the sweep (backup_sweep.org_graph_name)
     — Supabase mode reads teams.graph_name (SDK team creation names graphs
     org_{name}, NOT org_{id}; #768), registry mode is org_{id}. The old
     org_{id} hardcode targeted a nonexistent graph for SDK-created teams
@@ -1357,7 +1357,7 @@ class TestBackupEndpointsSupabaseGraphName:
             "id": "team-pro-924", "name": "myapp",
             "graph_name": "team_myapp", "tier": "pro", "backup_enabled": True,
         }])
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, org_id="team-pro-924", tier="pro")
         yield tc, fake, store
         app.dependency_overrides.clear()
@@ -1448,7 +1448,7 @@ class TestBackupEndpointsSupabaseGraphName:
         """A team missing from teams (or without graph_name) 503s — never a
         backup of a guessed/wrong graph."""
         tc, fake, _ = pro_backup_client  # noqa: RUF059
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, org_id="team-ghost", tier="pro")
         try:
             r = tc.post("/backups")

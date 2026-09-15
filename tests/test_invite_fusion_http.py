@@ -666,8 +666,8 @@ class TestMemberProgressArming:
         team = {"org_id": "team-m3", "session_user_id": _U_BOB,
                 "graph_name": "team_team-m3"}
         app.dependency_overrides.clear()  # checkpoint is dual-auth via team dep
-        from tortoise.hosted_api import get_current_team_session_ungated
-        app.dependency_overrides[get_current_team_session_ungated] = lambda: team
+        from tortoise.hosted_api import get_current_org_session_ungated
+        app.dependency_overrides[get_current_org_session_ungated] = lambda: team
         r = client.post("/v1/onboarding/state/checkpoint",
                         json={"member_progress": {_U_BOB: ["harness-connected"]}})
         assert r.status_code == 200, r.text

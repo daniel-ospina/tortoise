@@ -22,15 +22,15 @@ def _transport_context():
     context (quota skipped). Restore after each test.
     """
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_org_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
     _current_org_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
     _current_org_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_limits.set(None)
 
 
 def test_stdio_embedded_banner(monkeypatch, capsys, tmp_path):
@@ -143,10 +143,10 @@ class _StubQuerySDK:
 
 @pytest.fixture
 def query_sdk(monkeypatch):
-    """Swap _get_team_sdk for a stub; return the stub to assert on calls."""
+    """Swap _get_org_sdk for a stub; return the stub to assert on calls."""
     from tortoise import mcp_server
     stub = _StubQuerySDK()
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: stub)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: stub)
     return stub
 
 
@@ -814,7 +814,7 @@ class TestEventsTools:
         db = os.path.join(str(tmp_path), "evt.db")
         sdk = TortoiseSDK(db)
         sdk.create_point("statement", "hello from mcp")
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_events_poll()
@@ -828,7 +828,7 @@ class TestEventsTools:
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt2.db"))
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_events_poll(types=["Nope"])
@@ -842,7 +842,7 @@ class TestEventsTools:
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt3.db"))
         p = sdk.create_point("statement", "retract me")
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
             result = tortoise_retract_point(p["id"])
@@ -931,7 +931,7 @@ class TestIngestPromotionPolicy:
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "ing.db"))
         request.addfinalizer(sdk.close)  # match repo teardown convention
-        monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         conn = {"from": "pA", "to": "pB", "operator": "IMPL"}
         if reify:
             # §8 (INGEST_CONTRACT): reify:true anchors a REAL operator node

@@ -648,7 +648,7 @@ residue.
 | Direct-edge writer | `tortoise/sdk.py` (`create_direct_edge`, planned) |
 | `tortoise_ingest` MCP tool | `tortoise/mcp_server.py` |
 | Error constants | `tortoise/mcp_auth.py` (`ERR_UNAUTHORIZED`, `ERR_REGISTRY`, `-32099`), `tortoise/mcp_server.py` (`ERR_QUOTA`, `ERR_QUOTA_SERVER`, `ERR_INVALID`; `ERR_BUNDLE_INVALID` planned) |
-| Quota | `tortoise/quota.py` (`enforce_team_limit`, `_count_resource`, `resolve_team_limits`) |
+| Quota | `tortoise/quota.py` (`enforce_org_limit`, `_count_resource`, `resolve_org_limits`) |
 | Lifecycle (draft→live) | `tortoise/sdk.py` (`update_point`, `create_operator` `promote_source`) |
 | Recovery (supersede / retract) | `tortoise/sdk.py` (`supersede_point`, `retract_point`) |
 | Read-back | `tortoise/sdk.py` (`recall_subgraph`, `query`) |

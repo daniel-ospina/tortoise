@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 from tests._http_fixtures import patched_tortoise_sdk
-from tortoise.hosted_api import app, get_current_team, get_current_user
+from tortoise.hosted_api import app, get_current_org, get_current_user
 
 TEST_ORG_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
@@ -76,7 +76,7 @@ connectors:
 def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk).
         # Patching tortoise.sdk.TortoiseSDK == hosted_api.TortoiseSDK (same
         # class object) — the helper's hosted_api patch applies identically;
@@ -91,7 +91,7 @@ def client_b():
     """Second tenant (isolation probe)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test_b.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM_B)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM_B)
         # #2127: shared helper (see client).
         with patched_tortoise_sdk(db_path):
             yield TestClient(app)
@@ -223,7 +223,7 @@ class TestUploadEndpoint:
         assert r.json()["detail"] == "manifest exceeds 64KB"
 
     def test_upload_401_unauthenticated(self):
-        from tortoise.hosted_api import get_current_team as _gt
+        from tortoise.hosted_api import get_current_org as _gt
         app.dependency_overrides.pop(_gt, None)
         with tempfile.TemporaryDirectory() as tmpdir, \
                 patched_tortoise_sdk(os.path.join(tmpdir, "t.db")):
@@ -334,18 +334,18 @@ class TestUploadRateLimit:
         """Unauthenticated POSTs (dependency 401, before the body) must not
         burn the per-IP budget — a shared-IP spammer can't lock out the
         tenant (the limiter lives in the endpoint body, after the
-        get_current_team dependency)."""
+        get_current_org dependency)."""
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "pack_manifest", 1)
         ha_mod._SENSITIVE_BUCKETS.clear()
-        app.dependency_overrides.pop(get_current_team, None)
+        app.dependency_overrides.pop(get_current_org, None)
         try:
             for _ in range(3):
                 r = client.post("/v1/packs/manifests",
                                 json={"manifest_yaml": VALID_MANIFEST})
                 assert r.status_code == 401
             # bucket untouched → a legitimate upload still succeeds
-            app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
             r = client.post("/v1/packs/manifests",
                             json={"manifest_yaml": VALID_MANIFEST})
             assert r.status_code == 201, r.text
@@ -572,13 +572,13 @@ class TestIsolation:
             import tortoise.sdk as sdk_mod
             _orig = sdk_mod.TortoiseSDK.__init__
             sdk_mod.TortoiseSDK.__init__ = _route_patch
-            app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+            app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
             try:
                 c_a = TestClient(app)
                 r = c_a.post("/v1/packs/manifests",
                              json={"manifest_yaml": VALID_MANIFEST})
                 assert r.status_code == 201, r.text
-                app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM_B)
+                app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM_B)
                 c_b = TestClient(app)
                 r_b = c_b.get("/v1/packs")
                 ns = [p["namespace"] for p in r_b.json()["packs"]]

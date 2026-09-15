@@ -84,7 +84,7 @@ aboutObjects: tortoise-hosted-platform
 
 **Intent:** Selfhost (registry mode) carries the same properties and returns the same resolve shape, so consumers are mode-agnostic (plan §4.2 + surface 10).
 
-**Acceptance:** `_graph_create` registry branch stores `status:'active'` (+ recording:null absent → default); `api_key_create` stores optional graph_id/scopes/created_by_key_id/delegation_depth; registry resolve path (hosted_api get_current_team registry branch) returns the same five new dict keys with the same D2 legacy rule; nodes without the props (pre-C1 selfhost graphs) resolve with safe defaults.
+**Acceptance:** `_graph_create` registry branch stores `status:'active'` (+ recording:null absent → default); `api_key_create` stores optional graph_id/scopes/created_by_key_id/delegation_depth; registry resolve path (hosted_api get_current_org registry branch) returns the same five new dict keys with the same D2 legacy rule; nodes without the props (pre-C1 selfhost graphs) resolve with safe defaults.
 
 **Files:**
 - Modify: `tortoise/sdk.py` (`_graph_create` :12078, `api_key_create` :12450/12605, `apikey_list` :12482)

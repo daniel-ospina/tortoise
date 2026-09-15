@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import hosted_api as _ha
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 from tortoise.sdk import TortoiseSDK
 
 # #2242 concurrency test docker-lane guard — mirrors
@@ -3410,7 +3410,7 @@ def consent_client(tmp_path, monkeypatch):
     # (this fixture was already #1950-canonical — pin + close present; the
     # helper is the single source of truth now).
     with patched_tortoise_sdk(str(tmp_path / "c.db")):
-        app.dependency_overrides[get_current_team] = lambda: dict(_CONSENT_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(_CONSENT_TEAM)
         _provision_team(_CONSENT_TEAM["org_id"])
         with TestClient(app) as tc:
             yield tc
@@ -3850,7 +3850,7 @@ def _mcp_team_context(tmp_path, monkeypatch, *, org_id="team-1727-mcp",
 
     @contextmanager
     def _ctx():
-        from tortoise.mcp_auth import _current_org_id, _current_team_limits, _transport_mode
+        from tortoise.mcp_auth import _current_org_id, _current_org_limits, _transport_mode
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
         # #2127 wave 2: shared helper — the old enter/exit plain-clear (no
         # pin, no anchor close) is the #1950 clear-without-close gap this
@@ -3863,14 +3863,14 @@ def _mcp_team_context(tmp_path, monkeypatch, *, org_id="team-1727-mcp",
             if seed_recording:
                 _ha._update_onboarding_state(org_id, session_recording=True)
             tok_t = _current_org_id.set(org_id)
-            tok_l = _current_team_limits.set(
+            tok_l = _current_org_limits.set(
                 {"org_id": org_id, "tier": "free", "max_points": 100000})
             tok_m = _transport_mode.set("http")
             try:
                 yield org_id
             finally:
                 _current_org_id.reset(tok_t)
-                _current_team_limits.reset(tok_l)
+                _current_org_limits.reset(tok_l)
                 _transport_mode.reset(tok_m)
 
     return _ctx()
@@ -3917,7 +3917,7 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     """Task 13 + #1927: the MCP tool carries the SAME off-switch as the REST
     path — a team with recording disabled gets the clear 409-style error
     (stops ingestion), never a silent capture or the old 403."""
-    from tortoise.mcp_auth import _current_org_id, _current_team_limits
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
     from tortoise.mcp_server import tortoise_session_capture
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     # #2127 wave 2: shared helper (same pin + deterministic-close upgrade
@@ -3927,7 +3927,7 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
         _ha._update_onboarding_state("team-1727-mcp-opt",
                                      session_recording=False)
         tok_t = _current_org_id.set("team-1727-mcp-opt")
-        tok_l = _current_team_limits.set(
+        tok_l = _current_org_limits.set(
             {"org_id": "team-1727-mcp-opt", "tier": "free",
              "max_points": 100000})
         try:
@@ -3935,7 +3935,7 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
             st = _ha._get_onboarding_state("team-1727-mcp-opt")
         finally:
             _current_org_id.reset(tok_t)
-            _current_team_limits.reset(tok_l)
+            _current_org_limits.reset(tok_l)
     assert result.get("status") == 409, result
     assert "disabled" in result.get("error", ""), result
     assert st.get("session_capture_last_error_pi"), \
@@ -4225,10 +4225,10 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
     the SAME detail text; neither writes a Session; each harness's per-harness
     last-error is recorded. Recording ON ⇒ both 2xx with ``surfaced`` marker
     data + per-harness receipts."""
-    from tortoise.hosted_api import get_current_team as _get_current_team
+    from tortoise.hosted_api import get_current_org as _get_current_team
     from tortoise.mcp_auth import (
         _current_org_id,
-        _current_team_limits,
+        _current_org_limits,
         _transport_mode,
     )
     from tortoise.mcp_server import tortoise_session_capture
@@ -4248,7 +4248,7 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
                 "legacy_full_access": True, "max_points": 100000}
         app.dependency_overrides[_get_current_team] = lambda: dict(team)
         tok_t = _current_org_id.set(org_id)
-        tok_l = _current_team_limits.set(
+        tok_l = _current_org_limits.set(
             {"org_id": org_id, "tier": "free", "max_points": 100000})
         tok_m = _transport_mode.set("http")
         try:
@@ -4298,7 +4298,7 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
                 assert st2.get("session_capture_last_error_pi") is None
         finally:
             _current_org_id.reset(tok_t)
-            _current_team_limits.reset(tok_l)
+            _current_org_limits.reset(tok_l)
             _transport_mode.reset(tok_m)
 
 

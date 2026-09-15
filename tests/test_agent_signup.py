@@ -347,7 +347,7 @@ class TestAgentSignupClaim:
         from tortoise.auth import lookup_hash as _lh, hash_api_key as _hash
         org_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
         api_key = f"tt_{_uuid.uuid4().hex}"
-        sc.provision_team(fake, **{
+        sc.provision_org(fake, **{
             "p_user_id": None, "p_identity": f"reg-{_uuid.uuid4().hex[:12]}",
             "p_org_id": org_id, "p_org_name": f"Reg {org_id}",
             "p_api_key": api_key, "p_key_hash": _hash(api_key),

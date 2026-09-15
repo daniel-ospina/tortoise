@@ -444,7 +444,7 @@ class TestMcpBoundaryStripAndIgnore:
         success (no 4xx) and the node carries no forged key. Run with a
         minimal hosted team context."""
         from tortoise.mcp_auth import (  # noqa: I001
-            _current_org_id, _current_team_limits, _transport_mode)
+            _current_org_id, _current_org_limits, _transport_mode)
         from tortoise.mcp_server import tortoise_create_point
         import os
         os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
@@ -455,7 +455,7 @@ class TestMcpBoundaryStripAndIgnore:
                 "CREATE (t:Team {id:$id})",
                 params={"id": "team-strip-2600"})
             tok_t = _current_org_id.set("team-strip-2600")
-            tok_l = _current_team_limits.set(
+            tok_l = _current_org_limits.set(
                 {"org_id": "team-strip-2600", "tier": "free",
                  "max_points": 100000})
             tok_m = _transport_mode.set("http")
@@ -474,7 +474,7 @@ class TestMcpBoundaryStripAndIgnore:
                     f"forged claims must never reach the node: {rows}"
             finally:
                 _current_org_id.reset(tok_t)
-                _current_team_limits.reset(tok_l)
+                _current_org_limits.reset(tok_l)
                 _transport_mode.reset(tok_m)
 
 
@@ -490,7 +490,7 @@ class TestMcpToolSweepStripActor:
         import os
 
         from tests._http_fixtures import patched_tortoise_sdk
-        from tortoise.mcp_auth import _current_org_id, _current_team_limits, _transport_mode
+        from tortoise.mcp_auth import _current_org_id, _current_org_limits, _transport_mode
         os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
 
         @contextlib.contextmanager
@@ -501,7 +501,7 @@ class TestMcpToolSweepStripActor:
                     "CREATE (t:Team {id:$id})",
                     params={"id": "team-sweep-2600"})
                 tok_t = _current_org_id.set("team-sweep-2600")
-                tok_l = _current_team_limits.set(
+                tok_l = _current_org_limits.set(
                     {"org_id": "team-sweep-2600", "tier": "free",
                      "max_points": 100000})
                 tok_m = _transport_mode.set("http")
@@ -509,7 +509,7 @@ class TestMcpToolSweepStripActor:
                     yield
                 finally:
                     _current_org_id.reset(tok_t)
-                    _current_team_limits.reset(tok_l)
+                    _current_org_limits.reset(tok_l)
                     _transport_mode.reset(tok_m)
         return _mgr()
 

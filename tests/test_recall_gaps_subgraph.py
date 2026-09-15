@@ -498,15 +498,15 @@ def test_subgraph_max_nodes_truncation():
 @pytest.fixture(autouse=True)
 def _transport_context():
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_org_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
     _current_org_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
     _current_org_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_limits.set(None)
 
 
 def test_tortoise_recall_mode_routing():

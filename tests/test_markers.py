@@ -32,7 +32,7 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 # dict[file, dict[literal, disposition]]. Dispositions:
 #   "prod-coupled"     — the literal is the canonical namespace PROD code
 #                        resolves (quota.py/metering.py/hosted_api.py
-#                        `_make_sdk(namespace="registry")`, team_graph_name).
+#                        `_make_sdk(namespace="registry")`, org_graph_name).
 #                        Renaming would break the seed→resolution coupling
 #                        (VERIFIED this task: the rename makes the test's
 #                        seed land on a verbatim test_* graph while prod

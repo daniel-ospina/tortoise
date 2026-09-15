@@ -1,7 +1,7 @@
 """#1853 — suspended-team lockdown parity on the session-auth surface.
 
 Bug-hunt 2026-08-28 (P2): the key-auth path and the session team-resolution
-path (_session_user_team) both 403 SUSPENDED, but every endpoint gated by
+path (_session_user_org) both 403 SUSPENDED, but every endpoint gated by
 _membership_team / _require_owner / _require_owner_admin resolved the team
 row without checking `suspended_at` — a suspended team could create graphs,
 list graph names, export the full artifact, import a full-graph overwrite,
@@ -208,13 +208,13 @@ class TestSuspendedTeamLockdown:
         import tortoise.hosted_api as ha_mod
         team_dict = {"org_id": ORG_ID, "tier": "free", "key_id": None,
                      "session_user_id": OWNER}
-        app.dependency_overrides[ha_mod.get_current_team_session] = \
+        app.dependency_overrides[ha_mod.get_current_org_session] = \
             lambda: dict(team_dict)
         try:
             r = tc.delete(f"/v1/graphs/g_doesnotexist?org_id={ORG_ID}")
             _assert_suspended(r)
         finally:
-            app.dependency_overrides.pop(ha_mod.get_current_team_session,
+            app.dependency_overrides.pop(ha_mod.get_current_org_session,
                                          None)
 
     def test_list_my_teams_403(self, sb_client, as_user):
@@ -438,7 +438,7 @@ class TestHealthyTeamControl:
     def test_delete_graph_session_owner_204(self, sb_client, as_user):
         """C2 session face (E2E-8): an OWNER session user can delete a
         custom graph. The delete endpoint resolves the session via
-        get_current_team_session (the key-only dependency would 401 an eyJ
+        get_current_org_session (the key-only dependency would 401 an eyJ
         token at the format gate) — the session team dict carries
         session_user_id, which the endpoint reads for the role check."""
         tc, fake, _ = sb_client
@@ -449,13 +449,13 @@ class TestHealthyTeamControl:
         r = tc.post("/v1/graphs", json={"org_id": ORG_ID, "name": "g1"})
         assert r.status_code == 201, r.text
         gid = r.json()["graph"]["id"]
-        # Session-authed delete: override get_current_team_session (the
+        # Session-authed delete: override get_current_org_session (the
         # established dual-auth session pattern — the dep dict carries
         # session_user_id, set by the real dependency's JWT lane).
         import tortoise.hosted_api as ha_mod
         team_dict = {"org_id": ORG_ID, "tier": "pro", "key_id": None,
                      "session_user_id": OWNER}
-        app.dependency_overrides[ha_mod.get_current_team_session] = \
+        app.dependency_overrides[ha_mod.get_current_org_session] = \
             lambda: dict(team_dict)
         try:
             r = tc.delete(f"/v1/graphs/{gid}?org_id={ORG_ID}")
@@ -464,7 +464,7 @@ class TestHealthyTeamControl:
                               filters=[("id", "eq", gid)])
             assert rows[0]["status"] == "deleted"
         finally:
-            app.dependency_overrides.pop(ha_mod.get_current_team_session,
+            app.dependency_overrides.pop(ha_mod.get_current_org_session,
                                          None)
 
     def test_delete_graph_session_member_403(self, sb_client, as_user):
@@ -483,13 +483,13 @@ class TestHealthyTeamControl:
         import tortoise.hosted_api as ha_mod
         team_dict = {"org_id": ORG_ID, "tier": "pro", "key_id": None,
                      "session_user_id": OWNER}
-        app.dependency_overrides[ha_mod.get_current_team_session] = \
+        app.dependency_overrides[ha_mod.get_current_org_session] = \
             lambda: dict(team_dict)
         try:
             r = tc.delete(f"/v1/graphs/{gid}?org_id={ORG_ID}")
             assert r.status_code == 403, r.text
         finally:
-            app.dependency_overrides.pop(ha_mod.get_current_team_session,
+            app.dependency_overrides.pop(ha_mod.get_current_org_session,
                                          None)
 
     def test_list_my_teams_still_works(self, sb_client, as_user):

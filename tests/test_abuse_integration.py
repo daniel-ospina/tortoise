@@ -395,8 +395,8 @@ class TestGeo:
 class TestSessionLane:
     """#1913: the session-JWT REST lane runs the same post-auth abuse
     evaluation as the key lanes (R3 read velocity + R4 geo). The key lanes
-    call _abuse_post_auth (get_current_team / _get_current_team_supabase);
-    _session_user_team — the session lane — never did: session-driven GETs
+    call _abuse_post_auth (get_current_org / _get_current_team_supabase);
+    _session_user_org — the session lane — never did: session-driven GETs
     from a new country recorded no auth_ip event and didn't count toward R3.
     """
 
@@ -415,7 +415,7 @@ class TestSessionLane:
         from starlette.datastructures import Headers
         from starlette.requests import Request
 
-        from tortoise.hosted_api import _session_user_team
+        from tortoise.hosted_api import _session_user_org
         fake = env["fake"]
         self._seed_membership(fake)
         # Direct unit call — the exact function the #1913 fix touches. A
@@ -427,7 +427,7 @@ class TestSessionLane:
             "query_string": b"",
             "headers": Headers({"cf-ipcountry": "MX"}).raw,
         })
-        team = asyncio.run(_session_user_team(request, {"user_id": _U1}))
+        team = asyncio.run(_session_user_org(request, {"user_id": _U1}))
         assert team["org_id"] == TEAM
         # R4: the new-country session request recorded auth_ip + notified
         assert {e["country"] for e in self._ip_events(fake)} == {"MX"}
@@ -693,7 +693,7 @@ class TestIntrospection:
         def _wrap_window(method):
             # exact wrap-site match (method + comma) — a bare prefix would
             # let e.g. ingest_corpus masquerade as ingest
-            i = src.find(f"_get_team_sdk().{method},")
+            i = src.find(f"_get_org_sdk().{method},")
             assert i != -1, f"wrap site for {method} not found"
             return src[i:i + 260]
 
@@ -718,7 +718,7 @@ class TestIntrospection:
         import tortoise.mcp_server as ms
         src = Path(ms.__file__).read_text()
         wrapped_methods = set(re.findall(
-            r"_quota_gated\(_get_team_sdk\(\)\.(\w+)", src))
+            r"_quota_gated\(_get_org_sdk\(\)\.(\w+)", src))
         # pinned method→tool map (the write surface as designed)
         method_to_tool = {
             "create_point": "tortoise_create_point",
@@ -839,9 +839,9 @@ class TestIntrospection:
         # tripwire: a renamed SDK return key fails here, not in production)
         import tortoise.mcp_server as ms
         src = Path(ms.__file__).read_text()
-        i_ingest = src.find("_get_team_sdk().ingest,")
+        i_ingest = src.find("_get_org_sdk().ingest,")
         assert i_ingest != -1 and '.get("points")' in src[i_ingest:i_ingest + 400]
-        i_ckpt = src.find("_get_team_sdk().checkpoint,")
+        i_ckpt = src.find("_get_org_sdk().checkpoint,")
         assert i_ckpt != -1 and '.get("filed")' in src[i_ckpt:i_ckpt + 400]
         # capture_session weight lives in hosted_api (REST seam)
         import tortoise.hosted_api as ha

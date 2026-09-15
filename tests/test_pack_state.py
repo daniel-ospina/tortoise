@@ -435,7 +435,7 @@ def supabase_client(monkeypatch):
     """TestClient in SUPABASE control-plane mode with a FakeControlPlane
     (zero network) + a temp embedded DB — mirrors test_writer_inventory."""
     from fastapi.testclient import TestClient  # noqa: I001
-    from tortoise.hosted_api import app, get_current_team, get_current_user  # noqa: F401
+    from tortoise.hosted_api import app, get_current_org, get_current_user  # noqa: F401
     from tests.fake_control_plane import FakeControlPlane
     from tests.test_supabase_control import FREE_TEAM
 
@@ -522,31 +522,31 @@ class TestProvisioningHooks:
 
 class TestGetV1Packs:
     def test_requires_auth(self, supabase_client):
-        from tortoise.hosted_api import app, get_current_team  # noqa: F401
+        from tortoise.hosted_api import app, get_current_org  # noqa: F401
         tc, _, _ = supabase_client
         r = tc.get("/v1/packs")
-        # get_current_team 401s first (no Authorization header)
+        # get_current_org 401s first (no Authorization header)
         assert r.status_code == 401
 
     def test_returns_tenant_packs_with_auth(self, supabase_client):
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_org
         tc, _, _ = supabase_client
-        app.dependency_overrides[get_current_team] = lambda: {
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "team-free-001", "key_id": "k1", "tier": "free"}
         r = tc.get("/v1/packs")
         assert r.status_code == 200, r.text
         packs = r.json()["packs"]
-        # get_current_team override team has no graph data yet → self-heal
+        # get_current_org override team has no graph data yet → self-heal
         assert sorted(p["namespace"] for p in packs) == sorted(_expected_defaults())
 
     def test_empty_masking_when_nothing_to_see(self, supabase_client, monkeypatch):
         """D6: same-tenant no-installs (self-heal disabled + empty starter
         set) → empty list, 200 — never an error."""
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_org
         monkeypatch.setenv("PACK_STATE_DISABLE_SELF_HEAL", "1")
         monkeypatch.setenv("TORTOISE_STARTER_PACKS", "")
         tc, _, _ = supabase_client
-        app.dependency_overrides[get_current_team] = lambda: {
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "team-free-001", "key_id": "k1", "tier": "free"}
         r = tc.get("/v1/packs")
         assert r.status_code == 200, r.text
@@ -555,9 +555,9 @@ class TestGetV1Packs:
     def test_org_id_none_fails_closed(self, supabase_client):
         """org_id None (SKIP_AUTH/background shape) → 401, never a
         default-namespace fallback."""
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_org
         tc, _, _ = supabase_client
-        app.dependency_overrides[get_current_team] = lambda: {
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": None, "tier": "free", "key_id": None}
         r = tc.get("/v1/packs")
         assert r.status_code == 401
@@ -565,7 +565,7 @@ class TestGetV1Packs:
     def test_two_tokens_no_bleed(self, supabase_client, monkeypatch):
         """AC2 (isolation): tenant A's surface returns A's set; a second
         team (different namespace) returns its own set — no bleed."""
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_org
         tc, _, db_path = supabase_client
         # Seed two distinct tenant graphs with distinct starter sets.
         sdk_a = TortoiseSDK(db_path=db_path, namespace="tenant-a")
@@ -573,13 +573,13 @@ class TestGetV1Packs:
         ensure_tenant_packs(sdk_a, starter=["dev"])
         ensure_tenant_packs(sdk_b, starter=["marketing"])
 
-        app.dependency_overrides[get_current_team] = lambda: {
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "tenant-a", "key_id": "k-a", "tier": "free"}
         r_a = tc.get("/v1/packs")
         assert r_a.status_code == 200
         assert [p["namespace"] for p in r_a.json()["packs"]] == ["dev"]
 
-        app.dependency_overrides[get_current_team] = lambda: {
+        app.dependency_overrides[get_current_org] = lambda: {
             "org_id": "tenant-b", "key_id": "k-b", "tier": "free"}
         r_b = tc.get("/v1/packs")
         assert r_b.status_code == 200
@@ -609,7 +609,7 @@ class TestMcpPacksList:
         db = str(tmp_path / "mcp.db")
         sdk = TortoiseSDK(db_path=db, namespace="mcp-team")
         ensure_tenant_packs(sdk, starter=["dev", "pm"])
-        monkeypatch.setattr(ms, "_get_team_sdk",
+        monkeypatch.setattr(ms, "_get_org_sdk",
                             lambda: TortoiseSDK(db_path=db,
                                                 namespace=mcp_auth._current_org_id.get()))
         t_mode = mcp_auth._transport_mode.set("stdio")
@@ -651,11 +651,11 @@ class TestMcpPacksList:
         sdk_team = TortoiseSDK(db_path=db, namespace=team["id"])
         ensure_tenant_packs(sdk_team, starter=["dev", "marketing"])
 
-        # the tool handler resolves _get_team_sdk from mcp_server's module
+        # the tool handler resolves _get_org_sdk from mcp_server's module
         # namespace — patch that name (not mcp_auth's) so the team SDK
         # targets the shared embedded DB.
         monkeypatch.setattr(
-            ms, "_get_team_sdk",
+            ms, "_get_org_sdk",
             lambda: TortoiseSDK(db_path=db,
                                 namespace=mcp_auth._current_org_id.get()))
 
