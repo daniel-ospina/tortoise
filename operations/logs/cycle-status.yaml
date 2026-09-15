@@ -12,7 +12,7 @@ tier: medium-high
 reviewers: 3                      # #1 Structural & Efficiency, #2 Integration, #4 Failure Mode Auditor; + #5 advisory
 max_cycles: 5                     # HISTORICAL tier bound; extended by human authorization, not auto-renewed
 
-issues_per_cycle: [24, 20, 13, 22, 22, 12, 13, 12, 27, 26, 25, 24, 28, 18, 23, 11]
+issues_per_cycle: [24, 20, 13, 22, 22, 12, 13, 12, 27, 26, 25, 24, 28, 18, 23, 11]  # DISTINCT-after-dedup basis, NOT raw. The per-cycle headings report both bases (c7 "13 raw / 9 distinct" but 13 here; c9 "27 raw / ~20 distinct"), so the array must be read as one basis: distinct. On that basis cycles 3-5 are 13 -> 22 -> 22 and the honest-stuck predicate is met; on a RAW basis cycle 4 is 23 and 13 -> 23 -> 22 is NOT non-decreasing, so the predicate would not fire. The distinct basis is deliberate — do not mix.
 plan_modified_per_cycle: [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true]
 detector_fired: none              # since the extension; 'honest-stuck' fired at 13→22→22 (cycles 3-5) and is the
                                   # reason the extension was sought. 12→13→12 is oscillation, not a stall.
@@ -38,7 +38,7 @@ fingerprint_recurrence_last_cycle: 0.3   # hand-computed on (location, severity)
 severity_trend: "3 P0s (c1) → 0 P0s (c3..c8) → P0s RETURN (c9, c14=2, c15=1, c16=1); the mid-run P0-free stretch ended at c8 — each later P0 was found inside the previous cycle's own fix, and the surviving findings are progressively narrower"
 residual:
   unreviewed: true
-  carried_forward: "17 cycle-12 fixes, applied after the cycle-12 review"
+  carried_forward: "17 cycle-12 fixes applied after the cycle-12 review AND unreviewed; plus cycle 16's P0 (fix pass applied and claim-checked 25/25 but NEVER re-reviewed) — see exit_reason"
   requires_human_acknowledgement: false   # the standing authorization covers the next cycle
   note: "the cycle-6 CHANGELOG claimed a fix (#110) that was never applied; caught by two reviewers in cycle 8.
          A CHANGELOG row is a claim about the artifact, not a receipt for an intention."
