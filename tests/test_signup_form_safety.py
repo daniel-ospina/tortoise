@@ -36,10 +36,15 @@ def _strip_html_comments(text: str) -> str:
     explains the #3501 removal in a comment that names
     `createTortoiseSupabaseClient`, so an unstripped check fails on the
     documentation of the fix rather than on a reintroduction of the bug.
+
+    TRAILING `//` comments are stripped too, not just line-start ones: a future
+    `x = 1; // … location` would otherwise fail the navigation guard on a
+    comment. The `//` must be preceded by whitespace, `;`, `)` or line start, so
+    a URL's `//` (preceded by `:`) is left intact.
     """
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"^[ \t]*//.*$", "", text, flags=re.M)
+    return re.sub(r"(?m)(^|[;\s])//[^\n]*", r"\1", text)
 
 
 WELCOME_CODE = _strip_html_comments(WELCOME)
@@ -374,24 +379,49 @@ def test_welcome_does_not_wait_for_a_client_session() -> None:
     # The page must not perform a client-side navigation; that is the server's
     # job now, and a JS bounce back to /auth IS the #3485 loop.
     #
-    # Ban the TOKENS rather than enumerating spellings. Two earlier attempts at
-    # a regex were both wrong in opposite directions: the first keyed on
-    # `location.href =` and missed the call form `location.replace(...)`; the
-    # second keyed on `location.(replace|assign|href)\s*[(=]` and missed bracket
-    # access `location['href'] = ...` and `location = '/auth'` — which the
-    # naive substring form it replaced had actually CAUGHT, so it traded
-    # coverage away rather than only adding it. Enumerating spellings is
-    # unwinnable; the page has no legitimate use for these tokens, so a token
-    # ban is both simpler and strictly stronger.
+    # Ban the NAVIGATION MECHANISMS rather than enumerating spellings. Three
+    # attempts got this wrong before settling here:
     #
-    # Case-INSENSITIVE: `LOCATION.HREF='/auth'` is valid JS and escaped a
-    # case-sensitive version of this check. `history` covers
-    # `history.pushState({}, '', '/auth')`, which navigates without ever
-    # naming `location`.
+    #   v1  `"/auth'"` substring      caught bracket access; missed the call form;
+    #                                 and fired on the page's own legitimate
+    #                                 `action="/auth/update-password"`
+    #   v2  `location\.(…)[(=]` regex  caught the call form; MISSED
+    #                                 `location['href'] = …` and
+    #                                 `location = '/auth'` — a coverage
+    #                                 regression against v1
+    #   v3  token ban                  strictly stronger than v2
+    #
+    # Scope, stated precisely: v3 is a strict superset of v2, but it does NOT
+    # restore v1's `/auth`-literal assertions — those were dropped deliberately
+    # (they were the false-positive source that fired on the reset form). The
+    # mechanisms below cover what those literals caught without that cost.
+    #
+    # The patterns use `\b` where the bare token would false-fire on prose
+    # (`relocation`, `allocation`) and match case-insensitively, because
+    # `LOCATION.HREF='/auth'` is valid JS and escaped a case-sensitive draft of
+    # this very check. Known limitation, stated rather than implied: a static
+    # gate cannot catch every obfuscation (`window['loc'+'ation']`,
+    # `loca\u0074ion`); it pins the plausible reintroductions, and the
+    # behavioural proof is `tests/auth/test_welcome_and_password.py`.
     code_lower = WELCOME_CODE.lower()
-    for forbidden in ("location", "window.open", "http-equiv", "history"):
-        assert forbidden not in code_lower, (
-            f"welcome.html must not contain {forbidden!r} — the page must not "
-            "navigate client-side (#3501); the auth decision is the server's, "
-            "and a client-side bounce back to /auth is the #3485 login loop"
+    banned = {
+        r"\blocation\b": "read or assign `location`",
+        r"\bhistory\b": "navigate via `history`",
+        r"http-equiv": "embed a meta-refresh redirect",
+        r"\bopen\s*\(": "open a window",
+        r"\.\s*submit\s*\(": "submit a form programmatically",
+        r"\.\s*click\s*\(": "click an element programmatically",
+        # Bracket/quoted method access (`window['open']('/auth')`) evades the
+        # dotted patterns above, and is a plausible reintroduction rather than
+        # exotic obfuscation. Require the INVOCATION (`'](` after the quoted
+        # name) so legitimate `type="submit"` and
+        # `addEventListener("submit", …)` are not caught.
+        r"['\"]\s*(?:open|submit|click)\s*['\"]\s*\]?\s*\(": "invoke a navigation method by name",
+    }
+    for pattern, what in banned.items():
+        assert not re.search(pattern, code_lower), (
+            f"welcome.html must not {what} (matched {pattern!r}) — the page "
+            "must not navigate client-side (#3501). The auth decision is the "
+            "server's, and a client-side bounce back to /auth is the #3485 "
+            "login loop."
         )

@@ -858,14 +858,19 @@ durations:
   # `@pytest.fixture(scope="module")` wrangler server (THREE separate boots, not
   # one shared), and the first boot in a process pays the cold npx/workerd
   # cost that its siblings then reuse. `test_no_legacy_token_path.py` boots no
-  # wrangler at all (a static 158-file scan) and is still 53s standalone,
-  # because importing the repo's conftest pulls the heavy tortoise deps.
+  # wrangler at all (a static scan of 136 browser sources) and still ran 53s
+  # standalone in that sample — see the variance note below before reading
+  # anything into that number.
   #
-  # Values below are the combined 106s apportioned by the standalone ratios, so
-  # they sum to what a real invocation costs and the LPT splitter does not
-  # model 4 x 2.0s of work. They are an approximation of a high-variance,
-  # boot-dominated quantity — treat them as order-of-magnitude, and re-measure
+  # These are SINGLE SAMPLES of a high-variance quantity, and the variance is
+  # not attributable to any one cause: repeated runs of the static suite alone
+  # measured 4.6s-90.9s, and the two auth suites 6.8s-101s. Cold vs warm npx /
+  # workerd caches dominate. Do not treat the values as precise, and re-measure
   # rather than trusting them if the wrangler boot path changes.
+  #
+  # Values are the best single combined measurement (106s for all four in one
+  # invocation) apportioned by the standalone ratios, so they sum to a real
+  # invocation cost and the LPT splitter does not model 4 x 2.0s of work.
   #
   # Keys are the manifest MEMBER strings, not bare basenames: the three auth
   # suites are registered as `auth/...`, and classify_test_file checks the
