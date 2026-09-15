@@ -187,6 +187,71 @@ class TestDe2e3:
         r2 = sdk.checkpoint([{"wing": "w", "room": "r", "content": "hello dedup"}])
         assert r2["filed"] == 0 and r2["duplicates"] == 1
 
+    def test_2892_hashless_fallback_after_rebuild(self, sdk, tmp_path):
+        """#2892: a JSONL rebuild leaves every ``content_hash`` NULL, so the
+        bare hash MATCH in ``_content_exists`` returned None and
+        ``checkpoint()``'s Tier-1 dedup gate re-filed already-present content
+        as a NEW duplicate. The A10 content+kind fallback (shared with
+        ``create_point``) must resolve the ORIGINAL id."""
+        content = "the rebuilt graph must not duplicate this checkpoint item"
+        first = sdk.checkpoint(
+            [{"wing": "w", "room": "r", "content": content}], threshold=1.0)
+        assert first == {"filed": 1, "duplicates": 0}
+        pid = sdk.query(kind="checkpoint-item")[0]["id"]
+
+        rebuilt = sdk._get_proj().rebuild_all(str(tmp_path))
+        assert rebuilt["events"] > 0
+        # Precondition (guard against a vacuous pass if rebuild ever starts
+        # restoring content_hash): the hash is gone, the content is intact.
+        row = sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.content",
+            params={"id": pid},
+        ).result_set[0]
+        assert row[0] is None, "rebuild left a content_hash — fixture stale"
+        assert row[1] == content
+
+        # The regression: resolve by content+kind, not None.
+        assert sdk._content_exists(content) == pid
+        # And Tier-1 dedup must reject the re-file (threshold=1.0 disables the
+        # Tier-2 semantic tier so only the hash gate is under test).
+        second = sdk.checkpoint(
+            [{"wing": "w", "room": "r", "content": content}], threshold=1.0)
+        assert second == {"filed": 0, "duplicates": 1}, second
+        count = sdk._get_proj().g.query(
+            "MATCH (n:Point {content:$c}) RETURN count(n)",
+            params={"c": content},
+        ).result_set[0][0]
+        assert count == 1, f"checkpoint filed a duplicate after rebuild ({count})"
+
+    def test_2949_hybrid_nonoperator_dedups_but_legacy_operator_excluded(
+            self, sdk):
+        """#2949 review: the shared ``_find_point_by_content`` predicate must
+        (a) still MATCH a non-operator Point that carries ``op_type`` — main's
+        inline ``n.is_operator = false`` did, and a bare ``op_type IS NULL``
+        conjunct made ``create_point(dedup=True)`` mint a DUPLICATE on an
+        idempotent re-write (exactly-once violated) — and (b) still EXCLUDE a
+        LEGACY operator (``op_type`` set, ``is_operator`` property ABSENT,
+        #943) so a dedup never resolves onto an operator node."""
+        # (a) hybrid non-operator: is_operator=false AND op_type set.
+        first = sdk.create_point("statement", "hybrid dedup probe",
+                                 dedup=True, op_type="IMPL")
+        second = sdk.create_point("statement", "hybrid dedup probe",
+                                  dedup=True, op_type="IMPL")
+        assert first["id"] == second["id"], (first["id"], second["id"])
+        hybrid_count = sdk._get_proj().g.query(
+            "MATCH (n:Point {content:'hybrid dedup probe'}) RETURN count(n)",
+        ).result_set[0][0]
+        assert hybrid_count == 1, f"hybrid non-operator duplicated ({hybrid_count})"
+
+        # (b) legacy operator: op_type set, is_operator property ABSENT.
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:'legacy-op-2949', content:'legacy op probe', "
+            "pointKind:'statement', op_type:'NAND'})"
+        )
+        assert sdk._find_point_by_content(
+            "legacy op probe", pointKind="statement") is None
+        assert sdk._content_exists("legacy op probe") is None
+
 
 class TestDe2e3ReviewFixes:
     """#1071 code-review regressions."""
