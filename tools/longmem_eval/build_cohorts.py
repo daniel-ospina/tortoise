@@ -51,6 +51,13 @@ TAIL_SLICE = (150, 250)
 HEAD_TYPE = "single-session-user"
 HEAD_N = 50
 
+#: The per-cohort selector, keyed by cohort name — a sidecar records only
+#: ITS cohort's entry, so it can never advertise a sibling's.
+SELECTORS: dict[str, list] = {
+    "tail": list(TAIL_SLICE),
+    "head": [HEAD_TYPE, HEAD_N],
+}
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -115,7 +122,9 @@ def build_cohorts(source: Path) -> dict[str, list[dict]]:
 
 def _write_provenance(out_dir: Path, *, name: str, source: Path,
                       source_sha256: str, verified: bool,
-                      cohort_sha256: str, questions: int) -> Path:
+                      cohort_sha256: str, questions: int,
+                      selector: list,
+                      all_selectors: dict[str, list]) -> Path:
     """Persist how ONE cohort was built, next to that cohort file.
 
     The cohort payload stays the plain list-of-questions shape ``--data``
@@ -138,10 +147,12 @@ def _write_provenance(out_dir: Path, *, name: str, source: Path,
         "source": str(source),
         "source_sha256": source_sha256,
         "verified": verified,
-        "selectors": {
-            "tail": list(TAIL_SLICE),
-            "head": [HEAD_TYPE, HEAD_N],
-        },
+        # THIS sidecar's own selector (the one that produced the payload
+        # whose ``cohort_sha256`` is pinned above). The full pinned map is
+        # reported separately, so a reader never attributes a sibling
+        # cohort's selector to this payload.
+        "selector": selector,
+        "selectors_pinned": all_selectors,
     }, indent=1) + "\n", encoding="utf-8")
     return prov
 
@@ -184,7 +195,9 @@ def main(argv: list[str] | None = None) -> int:
             verified=verified,
             cohort_sha256=hashlib.sha256(
                 payload.encode("utf-8")).hexdigest(),
-            questions=len(cohorts[name]))
+            questions=len(cohorts[name]),
+            selector=SELECTORS[name],
+            all_selectors={k: list(v) for k, v in SELECTORS.items()})
         print(f"provenance: {prov}")
     print(f"source: {source} sha256={digest} "
           f"verified={str(verified).lower()}")

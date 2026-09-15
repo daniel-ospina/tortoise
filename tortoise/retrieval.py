@@ -1006,7 +1006,10 @@ def _pkg_differ_value_critical(a: str, b: str) -> bool:
 def _pkg_session(h: dict) -> str:
     """Slice A: a hit's session identity (the same bucket key the ask lane
     passes ``dedup_pool`` — session_id first, session_date, lme index
-    fallback; distinct sessions never share a bucket)."""
+    fallback). Distinct IDENTIFIED sessions never share a bucket; hits
+    carrying NONE of the three keys share the single bucket ``idx:-1``
+    (see :func:`session_key_of`, the retrieval-pool authority; the same
+    collapse is tracked in #3591)."""
     return (h.get("session_id")
             or h.get("session_date")
             or f"idx:{h.get('lme_session_index', -1)}")

@@ -112,8 +112,12 @@ def test_main_writes_a_per_cohort_provenance_sidecar(tmp_path, monkeypatch):
     assert prov["cohort"] == "tail"
     assert prov["source"] == str(src)
     assert prov["source_sha256"] == bc._sha256(src)
-    assert prov["selectors"]["tail"] == list(bc.TAIL_SLICE)
+    assert prov["selector"] == list(bc.TAIL_SLICE)
+    assert prov["selectors_pinned"]["tail"] == list(bc.TAIL_SLICE)
     assert prov["questions"] == len(json.loads(cohort_file.read_text()))
+    # this sidecar pins only ITS OWN selector
+    assert prov["selector"] == list(bc.TAIL_SLICE)
+    assert prov["selectors_pinned"]["head"] == [bc.HEAD_TYPE, bc.HEAD_N]
     # the cohort payload's OWN digest — a reader validates it independently
     assert prov["cohort_sha256"] == hashlib.sha256(
         cohort_file.read_bytes()).hexdigest()
@@ -143,6 +147,8 @@ def test_a_later_cohort_build_cannot_relabel_an_earlier_one(
         (tmp_path / "longmemeval_2517_head.provenance.json").read_text())
     assert tail_prov["verified"] is False
     assert head_prov["verified"] is True
+    assert tail_prov["selector"] == list(bc.TAIL_SLICE)
+    assert head_prov["selector"] == [bc.HEAD_TYPE, bc.HEAD_N]
     assert tail_prov["source_sha256"] == bc._sha256(unpinned)
     assert head_prov["source_sha256"] == bc._sha256(pinned)
 
