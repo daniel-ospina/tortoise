@@ -28,8 +28,9 @@ Usage::
 Writes ``longmemeval_2517_<cohort>.json`` (the same list-of-question shape
 ``--data`` consumes), a per-cohort provenance sidecar
 ``longmemeval_2517_<cohort>.provenance.json`` (source, source sha256,
-``verified``, selectors, the cohort's own sha256), and prints the absolute
-paths.
+``verified``, ``selector`` — this cohort's own — and ``selectors_pinned`` —
+the full pinned map —, and the cohort's own sha256), and prints the
+absolute paths.
 """
 from __future__ import annotations
 
