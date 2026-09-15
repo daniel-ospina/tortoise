@@ -312,3 +312,57 @@ def test_no_import_cycle_under_either_import_order():
              "import tortoise.coverage_loop; import tortoise.session_reinjection"],
             cwd=str(ROOT), capture_output=True, text=True)
         assert proc.returncode == 0, (first, proc.stderr[-2000:])
+
+
+# ── chunk-kind single source (all four consumers) ───────────────────────
+def test_chunk_kind_is_single_sourced_across_all_four_consumers():
+    """#2517: the product constant is the ONE source — is_raw_chunk, the
+    D5 exclusion twin, the equality filter the chunk-count Cypher binds,
+    and the ingest re-export all derive from it; drift fails closed."""
+    from tools.longmem_eval.ingest import (
+        SESSION_TRANSCRIPT_KIND as _ingest_kind,
+    )
+    from tools.longmem_eval.retrieve import (
+        CHUNK_KIND_FILTER,
+        D5_POINTKIND_FILTER,
+    )
+
+    assert SESSION_TRANSCRIPT_KIND == "session-transcript"
+    assert _ingest_kind == SESSION_TRANSCRIPT_KIND
+    assert CHUNK_KIND_FILTER == (
+        f"coalesce(p.pointKind, '') = {SESSION_TRANSCRIPT_KIND!r}")
+    assert D5_POINTKIND_FILTER == (
+        f"coalesce(p.pointKind, '') <> {SESSION_TRANSCRIPT_KIND!r}")
+    assert is_raw_chunk({"point_kind": SESSION_TRANSCRIPT_KIND}) is True
+    assert is_raw_chunk({"point_kind": "statement"}) is False
+
+
+# ── annotate_pool_additions: the whole-dict no-regression proof ─────────
+def test_annotate_pool_additions_is_whole_dict_identical_except_leg():
+    """#2517: the C3-1 annotation extraction must reproduce EVERY annotated
+    key (17), not a subset — ``session_date`` in particular is derived from
+    the QUESTION's ``haystack_dates`` via ``lme_session_index``, so a
+    4-field golden would pass while it silently emptied."""
+    from tools.longmem_eval.retrieve import (
+        _annotate_hits,
+        annotate_pool_additions,
+    )
+
+    hits = [{"id": "p1", "content": "c1", "match_source": "fts"}]
+    props = {"p1": {"session_id": "s1", "lme_session_index": 1,
+                    "has_answer": True, "content": "c1", "quote": "q",
+                    "search_keys": ["k"], "source_turn_id": "t1",
+                    "speaker": "user", "point_kind": "event"}}
+    dates = ["2026-01-01", "2026-01-02"]
+    base = _annotate_hits([dict(hits[0])], props, dates)[0]
+    added = annotate_pool_additions(
+        [dict(hits[0])], props, dates, match_source="session")[0]
+    assert len(base) == 17 and len(added) == 17
+    assert set(base) == set(added)
+    for key in base:
+        if key == "match_source":
+            continue
+        assert added[key] == base[key], key
+    assert added["session_date"] == "2026-01-02"
+    assert added["match_source"] == "session"
+    assert base["match_source"] == "fts"
