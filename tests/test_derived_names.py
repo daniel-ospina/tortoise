@@ -218,6 +218,22 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # module availability probe (construct + RETURN 1 + close, no DETACH)
     "test_indexes.py": [r"from_uri\(_uri\)"],
     "test_search_engine_gaps.py": [r"from_uri\(_uri\)"],
+    # #3154: module live-FalkorDB availability probe over candidate URIs
+    # (construct + RETURN 1 + close, never DETACHs), plus the per-test `db`
+    # fixture. SAFETY IS NOT "both are test-prefixed" — the fixture's
+    # ``from_uri(_uri())`` resolves to the SHARED env-URI graph
+    # (tortoise_test_matrix) or its fallback, NOT a _name() per-test graph
+    # (from_uri passes graph_name=, not path=, so the redirect seam cannot
+    # apply). It is safe only because that shared handle is never bulk-DETACHed:
+    # every DETACH DELETE in this file targets a `graph_name=`-qualified
+    # per-test projection built from _name() -> test_graphcopy3154_<stem>_<uuid>.
+    # A future bulk DETACH on the fixture handle would be a real clobber, and
+    # these patterns would NOT catch it — the regex is deliberately narrow to
+    # the two call shapes that exist today so a new one reds instead.
+    "test_graphcopy_boolean_index_3154.py": [
+        r"from_uri\(_uri\)",
+        r"from_uri\(_uri\(\)\)",
+    ],
     "test_session_capture_e2e.py": [r"from_uri\(os\.environ\[.TORTOISE_DB_URI.\]\)"],
     "test_ingest.py": [
         # module availability probe (env pre-set to a test-prefixed URI)
