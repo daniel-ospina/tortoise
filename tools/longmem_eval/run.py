@@ -1246,6 +1246,13 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # the fingerprint gate; the 2×2 with #2518 stays
                        # reconstructable).
                        coverage_loop: bool | None = None,
+                       # C4 (#2517/#2568, #2513): the source-session
+                       # re-injection arm + its guard ablation — ALWAYS
+                       # present as resolved bools (the sibling-arm
+                       # convention), so a pre-feature checkpoint refuses
+                       # on resume and an arm/guard flip can never cross.
+                       session_reinjection: bool = False,
+                       session_reinjection_guard: bool = True,
                        # C5 (#2521, #2513): the aggregative-intent coverage-
                        # check arm — conditional presence like the other C2/C5
                        # knobs (a flagged checkpoint resumed without the arm
@@ -1372,6 +1379,15 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "ingest_question_retries": ingest_question_retries,
         "resume_attempts_cap": resume_attempts_cap,
         "session_workers": session_workers,
+        # C4 (#2517/#2568, #2513): the source-session re-injection arm +
+        # its guard ablation — ALWAYS present (the retry-constant
+        # precedent): a pre-feature checkpoint carries no key, so ANY
+        # resume under the new defaults refuses via CheckpointStaleError
+        # (the safe direction) instead of silently crossing the arm; an
+        # arm-ON checkpoint can never be resumed with the arm OFF, nor
+        # the guard flipped either way.
+        "session_reinjection": session_reinjection,
+        "session_reinjection_guard": session_reinjection_guard,
     } | {
         # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
         # knobs ride the fingerprint (present only when the caller passes
@@ -2337,6 +2353,22 @@ class CheckpointPersistError(RuntimeError):
     The run aborts with a DISTINCT ``checkpoint_abort`` marker on the
     checkpoint (never a bare traceback); a resume refuses it (Task 2).
     """
+
+
+class ArmConflictError(RuntimeError):
+    """Two arms that own the SAME pool order are armed together (#2517 §0.2).
+
+    C3-1's guard and C4's guard both re-order the pool, and the stage order
+    between them is arbitrary — rather than let a run be order-dependent,
+    the run REFUSES the combination. Raised at ARM RESOLUTION (before the
+    question loop, outside every fail-open region) so it can never be
+    swallowed into N per-question "non-fatal" failures, and re-raised by the
+    per-question handler and ``_run_main`` so it always aborts the run.
+    """
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
 
 
 #: Watchdog rolling-window length (questions) — the latency and gate-red
@@ -3349,6 +3381,16 @@ def run_evaluation(
     # methodology — a looped checkpoint resumed without the arm is refused
     # by the fingerprint gate (same contract as evidence_boost).
     coverage_loop: bool | None = None,
+    # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
+    # (explicit flag > ``TORTOISE_LME_SESSION_REINJECTION`` env > OFF, the
+    # #1745 fail-safe default), plus the guard ablation
+    # (``session_reinjection_guard``; None = ON). Resolved once,
+    # fingerprinted (always-present resolved bools), and recorded in the
+    # methodology. A both-arms-ON run (coverage_loop AND
+    # session_reinjection) is REFUSED at resolution — two owners of the
+    # same pool order are never left order-dependent.
+    session_reinjection: bool | None = None,
+    session_reinjection_guard: bool | None = None,
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (explicit flag > ``TORTOISE_LME_AGGREGATIVE_FLAG``
     # env > OFF, the #1745 fail-safe default). The A/B switch that MEASURES
@@ -3499,6 +3541,24 @@ def run_evaluation(
     if coverage_loop is None:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C4 (#2517/#2568, #2513): resolve the source-session re-injection arm
+    # + its guard ablation ONCE, before the loop — same contract as the
+    # sibling arms (methodology == actual == fingerprint; fail-safe OFF:
+    # only 1/true/yes/on enables).
+    if session_reinjection is None:
+        sr_env = (os.environ.get("TORTOISE_LME_SESSION_REINJECTION") or "")
+        session_reinjection = sr_env.strip().lower() in _TRUTHY
+    if session_reinjection_guard is None:
+        session_reinjection_guard = True
+    # §0.2: C3-1 and C4 both own the pool order — REFUSE the both-ON
+    # combination HERE (arm resolution, before the question loop and
+    # outside every fail-open region), so the refusal aborts the run
+    # instead of degrading into per-question failures.
+    if coverage_loop and session_reinjection:
+        raise ArmConflictError(
+            "coverage_loop (C3-1) and session_reinjection (C4) both re-order "
+            "the retrieval pool — arm them separately (this run refuses the "
+            "combination at arm resolution)")
     # C5 (#2521, #2513): resolve the aggregative-intent coverage-check arm
     # tri-state ONCE, before the loop — same contract as the C2 knobs: a
     # None with the TORTOISE_LME_AGGREGATIVE_FLAG env set must not record
@@ -3621,6 +3681,14 @@ def run_evaluation(
         # fingerprint — a looped checkpoint resumed without the arm is
         # refused by the fingerprint gate (2×2 arm isolation with #2518).
         coverage_loop=bool(coverage_loop),
+        # C4 (#2517/#2568, #2513): the resolved re-injection arm + guard
+        # ablation ride the fingerprint as ALWAYS-PRESENT resolved bools
+        # (the sibling-arm convention) — a pre-feature checkpoint refuses
+        # on resume (CheckpointStaleError, the safe direction), and an
+        # arm-ON checkpoint can never be resumed with the arm OFF or the
+        # guard flipped.
+        session_reinjection=bool(session_reinjection),
+        session_reinjection_guard=bool(session_reinjection_guard),
         # C5 (#2521, #2513): the resolved aggregative-check arm rides the
         # fingerprint — a flagged checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
@@ -4071,6 +4139,12 @@ def run_evaluation(
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
                             coverage_loop=coverage_loop,
+                            # C4 (#2517/#2568, #2513): the source-session
+                            # re-injection arm + guard ablation (resolved
+                            # above; OFF by default — the sealed A/B
+                            # decides adoption).
+                            session_reinjection=session_reinjection,
+                            session_reinjection_guard=session_reinjection_guard,
                             # C5 (#2521, #2513): the aggregative-intent
                             # coverage-check arm (resolved above; OFF by
                             # default — records the per-outcome verdict
@@ -4299,6 +4373,18 @@ def run_evaluation(
                         # pre-feature checkpoints).
                         "coverage_loop": ret.get("coverage_loop"),
                         "coverage_loop_stats": ret.get("coverage_loop_stats"),
+                        # C4 (#2517/#2568, #2513): the source-session
+                        # re-injection arm marker + per-outcome census
+                        # (seeded sessions, injected/merged counts per
+                        # session, dropped-by-cap, fetch health, total-cap
+                        # hit, the resolved guard bool, latency) — the
+                        # flip census and the guard ablation both read it
+                        # (read via .get — absent on pre-feature
+                        # checkpoints).
+                        "session_reinjection": ret.get(
+                            "session_reinjection"),
+                        "session_reinjection_stats": ret.get(
+                            "session_reinjection_stats"),
                         # C5 (#2521, #2513): the aggregative-check arm marker
                         # + the per-outcome verdict — the marker reconstructs
                         # which arm ran; the verdict (present under the arm
@@ -4489,7 +4575,8 @@ def run_evaluation(
                     # record a bogus failure entry and continue the run — the
                     # watchdog would never abort). Re-raise so the dispatch
                     # handler records the run-level marker and aborts.
-                    if isinstance(e, (WatchdogAbortError, CheckpointPersistError)):
+                    if isinstance(e, (WatchdogAbortError, CheckpointPersistError,
+                                      ArmConflictError)):
                         raise
                     # M2 (#1523, D4): a fatal-class provider error mid-run means the
                     # key died (billing cap hit, revocation) — continuing would
@@ -4736,6 +4823,12 @@ def run_evaluation(
             # which of the 2×2 arms produced them; the §5 gate deltas are
             # denominated on the recorded arm).
             "coverage_loop": bool(coverage_loop),
+            # C4 (#2517/#2568, #2513): the source-session re-injection arm
+            # + its guard ablation — recorded verbatim in the methodology
+            # (published numbers carry which arm produced them; the guard
+            # bool distinguishes the injection-only ablation).
+            "session_reinjection": bool(session_reinjection),
+            "session_reinjection_guard": bool(session_reinjection_guard),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them; OFF by default — the C3-3
@@ -4921,6 +5014,10 @@ def outcomes_to_report(
                 # the §8 per-outcome markers ride the projection (read via
                 # o.get — absent on pre-feature checkpoints).
                 "coverage_loop", "coverage_loop_stats",
+                # C4 (#2517/#2568, #2513): the source-session re-injection
+                # arm marker + per-outcome census ride the projection
+                # (read via o.get — absent on pre-feature checkpoints).
+                "session_reinjection", "session_reinjection_stats",
                 # C5 (#2521, #2513): the aggregative-check arm marker + the
                 # per-outcome verdict ride the projection (read via o.get —
                 # absent until the outcome carries them; pre-feature
@@ -5418,6 +5515,42 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="disable the C3-1 coverage-completeness loop even "
                          "when TORTOISE_LME_COVERAGE_LOOP is set (tri-state: "
                          "explicit flags beat the env)")
+    # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
+    # --session-reinjection / --no-session-reinjection (None default so the
+    # TORTOISE_LME_SESSION_REINJECTION env still applies; OFF by default in
+    # code). The A/B switch for the reader-surface + pool-rank-cut lever;
+    # the guard ablation (--no-session-reinjection-guard) still re-caps
+    # through the shared contract but skips the session-diverse reorder, so
+    # a flip is attributable to the guard rather than the fetched chunks.
+    # A both-arms-ON run (this + --coverage-loop) is REFUSED at arm
+    # resolution (both own the pool order).
+    sr = p.add_mutually_exclusive_group()
+    sr.add_argument("--session-reinjection", dest="session_reinjection",
+                    action="store_true", default=None,
+                    help="enable the C4 source-session re-injection "
+                         "(seed the reader-reachable pool head by rank, "
+                         "fetch each seeded session's remaining raw chunks "
+                         "in ONE batched query, splice them additively "
+                         "after the session's last base hit; default: env "
+                         "TORTOISE_LME_SESSION_REINJECTION — OFF by default "
+                         "in code, #2517)")
+    sr.add_argument("--no-session-reinjection", dest="session_reinjection",
+                    action="store_false", default=None,
+                    help="disable the C4 source-session re-injection even "
+                         "when TORTOISE_LME_SESSION_REINJECTION is set "
+                         "(tri-state: explicit flags beat the env)")
+    srg = p.add_mutually_exclusive_group()
+    srg.add_argument("--session-reinjection-guard",
+                     dest="session_reinjection_guard", action="store_true",
+                     default=None,
+                     help="apply the C4 session-diverse window guard "
+                          "(default: ON — --no-session-reinjection-guard is "
+                          "the injection-only ablation)")
+    srg.add_argument("--no-session-reinjection-guard",
+                     dest="session_reinjection_guard", action="store_false",
+                     help="skip the C4 session-diverse reorder (the "
+                          "injection-only ablation; the C5 re-cap still "
+                          "applies through the same shared contract)")
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state --aggregative-flag / --no-aggregative-flag (None
     # default so the TORTOISE_LME_AGGREGATIVE_FLAG env still applies; OFF
@@ -5949,6 +6082,24 @@ def _run_main(parser: argparse.ArgumentParser, args,
     else:
         cl_env = (os.environ.get("TORTOISE_LME_COVERAGE_LOOP") or "")
         coverage_loop = cl_env.strip().lower() in _TRUTHY
+    # C4 (#2517/#2568, #2513): source-session re-injection + guard
+    # ablation — tri-state (CLI flag > TORTOISE_LME_SESSION_REINJECTION env
+    # > OFF — fail-safe: only 1/true/yes/on enables, mirroring the sibling
+    # arms). Resolved once and threaded into run_evaluation (methodology ==
+    # actual).
+    if args.session_reinjection is not None:
+        session_reinjection = args.session_reinjection
+    else:
+        sr_env = (os.environ.get("TORTOISE_LME_SESSION_REINJECTION") or "")
+        session_reinjection = sr_env.strip().lower() in _TRUTHY
+    if args.session_reinjection_guard is not None:
+        session_reinjection_guard = args.session_reinjection_guard
+    else:
+        session_reinjection_guard = True
+    # §0.2: the both-arms-ON refusal is raised by ``run_evaluation`` at arm
+    # resolution (before the question loop) and caught in ``_run_main`` —
+    # kept in ONE place so the check cannot diverge from the driver's env
+    # resolution.
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (CLI flag > TORTOISE_LME_AGGREGATIVE_FLAG env >
     # OFF — fail-safe: only 1/true/yes/on enables, mirroring the C2 gates
@@ -6160,6 +6311,11 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # (tri-state resolved above; OFF by default — the sealed
                 # #2519 A/B decides adoption).
                 coverage_loop=coverage_loop,
+                # C4 (#2517/#2568, #2513): the source-session re-injection
+                # arm + guard ablation (tri-state resolved above; OFF by
+                # default — the sealed A/B decides adoption).
+                session_reinjection=session_reinjection,
+                session_reinjection_guard=session_reinjection_guard,
                 # C5 (#2521, #2513): the aggregative-intent coverage-check
                 # arm (tri-state resolved above; OFF by default — records
                 # the per-outcome verdict under the arm; the C3-3 routing
@@ -6222,6 +6378,13 @@ def _run_main(parser: argparse.ArgumentParser, args,
                   f"{MODEL_ENCODE_FAILED_EXIT} (never report empty recall as a "
                   f"result)", file=sys.stderr)
             raise SystemExit(MODEL_ENCODE_FAILED_EXIT) from e
+        except ArmConflictError as e:
+            # §0.2: the arm-resolution refusal must ABORT with a clean
+            # message + non-zero exit — never a bare traceback, never N
+            # per-question "non-fatal" failure entries.
+            print("[longmem_eval] RUN ABORTED — arm conflict: "
+                  f"{e}", file=sys.stderr)
+            raise SystemExit(1) from e
 
         out = args.output or str(default_report_path(args.split))
         save_report(report, out)
