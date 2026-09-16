@@ -1896,16 +1896,21 @@ def tortoise_health() -> dict:
     Alias → overview(section='health') (epic #888 W3).
 
     #2202 (health-truthful): probes the SDK THIS server actually serves —
-    the request-scoped org SDK over HTTP (selfhost daemon: the org_selfhost
-    graph, the SAME namespace /health probes; hosted: the calling org's
-    graph on the SAME FalkorDB server /health deep-checks) and the base SDK
-    over stdio — so a live probe here reaches the same verdict as /health's
-    live probe about a DEAD DB (for /health's own cached-verdict staleness
-    window see #3062). Their budgets differ by design since #3143 — see below
-    — so the two may legitimately disagree when the graph is reachable but its
-    cold-start PLUS query exceed /health's single shared fast-degrade budget:
-    this tool gives the reachability query a fresh PROBE_TIMEOUT, /health
-    spends one budget across both phases.
+    the request-scoped org SDK over HTTP and the base SDK over stdio — so the
+    report reflects the caller's own graph, never monitoring's module-global
+    handle.
+    #3143 correction: this tool and hosted /health do NOT probe the same
+    graph, so they can disagree about reachability. This tool probes the
+    CALLER'S ORG graph (``_get_org_sdk()``); hosted /health probes the
+    DEFAULT graph (``_make_sdk(namespace=None)`` through
+    ``hosted_api._probe_db()``). They share a FalkorDB SERVER, not a graph,
+    and the probe is not a bare reachability check: ``_probe_once`` runs
+    ``sdk._get_proj()`` (connect + version probe + ``_ensure_indexes()``),
+    whose cost scales with the PROBED graph. So an org graph can time out
+    while the default graph answers ok — #3143 is that case. Their budgets
+    differ by design too: this tool gives the reachability query a fresh
+    ``PROBE_TIMEOUT``, /health spends one shared budget across both phases
+    (its cached-verdict staleness window is #3062).
     The pre-#2202 code probed monitoring's module-global handle, which ONLY
     the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
     surfaces it stayed None and every call reported degraded/no_sdk_registered

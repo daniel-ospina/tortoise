@@ -1007,44 +1007,34 @@ class TestProbeQueueIsolation:
         assert result["db"]["ok"] is True, result
         assert result["graph_size"] == 9019
 
-    def test_zero_leftover_does_not_skip_the_slot_wait_guard(
+    def test_zero_leftover_with_a_free_slot_reports_the_reachable_graph(
             self, monkeypatch):
-        """#3143 review P1 (BOUNDARY): at EXACTLY zero leftover the slot-wait
-        guard must still FIRE — a float-truthiness sentinel silently disables it.
+        """#3143 P1 (BOUNDARY, opposite pin): at EXACTLY zero leftover with a
+        FREE slot, a REACHABLE graph must still be reported ``ok``.
 
-        ``slot_wait_budget = max(0.0, setup_timeout - elapsed)`` is a FLOAT, so
-        ``if slot_wait_budget`` reads an exactly-zero leftover as "no wait" and
-        SKIPS the guard. The query then falls straight through to
-        ``query.result(timeout=PROBE_TIMEOUT)`` with its QUEUE WAIT charged to
-        the reachability budget — the #3143 P1 shape (a query that never RAN,
-        reported as a QUERY timeout) reappearing at the clamp boundary. The
-        combined shape's ``None`` is the real "no slot wait" sentinel, so the
-        explicit shape must be tested with ``is not None``; ``0.0`` is a
-        MEANINGFUL budget ("no allowance left to wait"), not the sentinel.
+        ``slot_wait_budget = max(0.0, setup_timeout - elapsed)`` is a FLOAT that
+        clamps to exactly ``0.0`` when the cold-start finishes at/just past its
+        allowance. Firing the guard on ``slot_wait_budget is not None`` rather
+        than on truthiness turns that clamp into a false-FAIL: ``wait(0.0)``
+        cannot let the worker run (the caller has not yielded the GIL, and a
+        zero-timeout lock acquire does not yield), so a query submitted
+        microseconds earlier is GUARANTEED to look un-started and the probe
+        returns the setup spelling for a perfectly healthy, reachable graph —
+        the #3143 symptom this branch exists to remove.
 
         Determinism: the probe clock is frozen and the cold-start advances it by
         EXACTLY the allowance, so the leftover is exactly ``0.0`` (not merely
-        small). The single #3062 slot is occupied by a holder slipped directly
-        ahead of the query, so the query cannot be picked up inside the zero
-        leftover.
+        small). NOTHING is interposed ahead of the query, so the #3062 slot is
+        FREE: as soon as the caller blocks in ``Future.result`` — which DOES
+        release the GIL, unlike ``wait(0.0)`` — the worker runs the query and
+        the REAL graph size is reported.
 
-        The discriminator is NOT that ``Event.wait(0.0)`` is instant — it
-        always is, so "the wait did not block" would prove nothing. It is
-        whether the guard RAN AT ALL: only the fixed code can return BEFORE
-        ``query.result(timeout=PROBE_TIMEOUT)`` is ever reached, hence the SETUP
-        spelling ("one spelling per phase") and a return in ~0 rather than a
-        full ``PROBE_TIMEOUT`` spent queued.
-
-        HONESTY NOTE: the zero-leftover outcome is STILL ``degraded`` /
-        ``graph_size 0`` — that residual is by design on this branch (the
-        ``4f543768a`` "still degraded/0, just a different string" change). What
-        this test pins is that the failure is attributed to the SETUP phase
-        that actually ran out of allowance, not falsely to a query that never
-        ran; asserting a non-degraded status here would contradict the code's
-        own acknowledged residual and could not go green.
+        The slot being free is what makes the zero leftover benign: with no
+        queue there is no queue WAIT for the reachability budget to absorb, so
+        the guard is not needed at all. (The occupied-slot counterpart, where
+        the guard IS needed, is
+        ``test_query_queued_behind_a_slow_setup_is_not_reported_degraded``.)
         """
-        import threading
-
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.4)
         clock = SimpleNamespace(t=0.0)
         monkeypatch.setattr(monitoring, "time", SimpleNamespace(
@@ -1070,57 +1060,20 @@ class TestProbeQueueIsolation:
             def taxonomy(self):
                 return {"Point": 9019}
 
-        real_worker = monitoring._probe_worker()
-        release = threading.Event()
-        submits = {"n": 0}
+        result = monitoring.metrics(sdk=BoundarySDK(), setup_timeout=ALLOWANCE)
 
-        def _hold():
-            release.wait(5.0)
-
-        class InterposingWorker:
-            """Slip a slot holder in AHEAD of the reachability query (submit
-            #2). The worker is single-slot FIFO, so the interleave is
-            deterministic."""
-
-            def submit(self, fn):
-                submits["n"] += 1
-                if submits["n"] == 2:
-                    real_worker.submit(_hold)
-                return real_worker.submit(fn)
-
-        monkeypatch.setattr(monitoring, "_probe_worker",
-                            lambda: InterposingWorker())
-        try:
-            started = time.monotonic()
-            result = monitoring.metrics(sdk=BoundarySDK(),
-                                        setup_timeout=ALLOWANCE)
-            elapsed = time.monotonic() - started
-            ran_before_release = list(ran)
-        finally:
-            release.set()
-
-        # Sanity: the setup AND the query were both submitted; the holder was
-        # interposed exactly once, ahead of the query.
-        assert submits["n"] == 2, submits
-        # THE DISCRIMINATOR. The pre-fix code skipped the guard, handed the
-        # queued query the full PROBE_TIMEOUT, and reported the QUERY spelling
-        # ("probe timeout after 0.4s") — falsely claiming the query was
-        # reached. The fix fires the guard, so the phase at fault is SETUP.
-        assert result["db"]["error"] == \
-            f"probe setup timeout after {ALLOWANCE}s", result
-        assert not result["db"]["error"].startswith("probe timeout"), result
-        assert ran_before_release == [], (
-            "the reachability query must not have executed before the guard "
-            f"returned (got {ran_before_release})"
+        # THE DISCRIMINATOR: the slot is free, so the query RAN and the graph
+        # is reachable with its real size. A guard that fires at a zero
+        # leftover fails this same healthy probe with
+        # "probe setup timeout after 3.0s" / degraded / graph_size 0.
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True, result
+        assert result["db"]["error"] is None, result
+        assert result["graph_size"] == 9019, result
+        assert ran == [1.0], (
+            "the reachability query never ran — a zero leftover must not fail "
+            "a FREE-slot probe"
         )
-        assert elapsed < 0.2, (
-            f"the probe spent {elapsed:.3f}s queued — the zero-leftover guard "
-            "did not fire and the reachability budget absorbed the queue wait"
-        )
-        # The documented residual (see the docstring): still degraded/0, but
-        # with the HONEST phase spelling, never the P1 "probe timeout".
-        assert result["status"] == "degraded", result
-        assert result["graph_size"] == 0, result
 
 
 class TestProbeSetupBudgetIntegration:
