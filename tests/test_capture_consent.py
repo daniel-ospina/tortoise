@@ -220,9 +220,10 @@ def test_non_terminal_run_never_consumes_the_notice(tmp_path, transcript, capsys
     notice, and the next session START printed it into /dev/null and stamped it
     shown: the human's single sighting was consumed on exactly the hosts the
     migration exists for. `volunteer` (whose hook relays only prefixed lines)
-    had the same hole. A non-terminal stderr is the one thing every unattended
-    consumer has in common, so gating on it closes the class rather than
-    extending the list.
+    had the same hole. A non-terminal stderr is what the DEFAULT unattended
+    consumers share, so gating on it closes that path rather than extending the
+    list — a pty-allocating non-human caller is the declared residual (see
+    `tortoise.__main__._stderr_is_human_facing`).
     """
     from tortoise.__main__ import _flush_pending_capture_notice, _stderr_is_human_facing
 

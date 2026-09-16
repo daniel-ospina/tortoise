@@ -134,9 +134,14 @@ if [ "$CAPTURE_ENABLED" != "1" ]; then
     NOTICE_MARKER="${HOME:-/nonexistent}/.tortoise/capture-consent-notice"
     if [ ! -f "$NOTICE_MARKER" ]; then
       mkdir -p "$(dirname "$NOTICE_MARKER")" 2>/dev/null || true
+      # `2>/dev/null` MUST precede `> "$NOTICE_MARKER"`: a failed redirect
+      # setup is reported to the shell's CURRENT stderr, so with the stdout
+      # redirect first a non-writable ~/.tortoise leaks a raw bash error line
+      # on every session close. Ordering stderr first suppresses the setup
+      # failure too (`|| true` only rescues the exit status).
       printf '%s\n' \
         "Tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." \
-        > "$NOTICE_MARKER" 2>/dev/null || true
+        2>/dev/null > "$NOTICE_MARKER" || true
     fi
     printf '%s\n' \
       "tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." >&2 || true
