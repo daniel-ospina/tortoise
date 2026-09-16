@@ -2513,3 +2513,234 @@ class TestDcrCapacityPolicy:
         keys = list(_ha_mod._OAUTH_DCR_BUCKETS)
         assert keys == ["2001:db8:aaaa::/48"], keys
         assert len(_ha_mod._OAUTH_DCR_BUCKETS[keys[0]]) == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2847 — CIMD: a client obtains an identity WITHOUT POST /register
+#
+# The SSRF control set behind the fetch is covered by tests/test_cimd_ssrf.py.
+# This class is the *integration* half of the issue's indicator: the AS metadata
+# advertises a non-DCR client-identity path, and the full consent → code → token
+# flow completes with every registration entry point sabotaged.
+# ═══════════════════════════════════════════════════════════════════════════
+
+CIMD_CLIENT_ID = "https://claude.ai/.well-known/oauth-client-metadata"
+
+
+def _cimd_document(**overrides) -> dict:
+    doc = {
+        "client_id": CIMD_CLIENT_ID,
+        # Deliberately self-asserted nonsense: the AS must display the HOST.
+        "client_name": "Totally Not Claude",
+        "redirect_uris": [REDIRECT],          # loopback → same-origin exempt
+    }
+    doc.update(overrides)
+    return doc
+
+
+@pytest.fixture
+def cimd_document(monkeypatch):
+    """Serve the CIMD document from memory; the fetch itself is out of scope
+    here (see tests/test_cimd_ssrf.py)."""
+    from tortoise import cimd
+
+    cimd._cache_reset()
+    cimd._rate_limit_reset()
+    doc = _cimd_document()
+    monkeypatch.setattr(cimd, "fetch_client_metadata", lambda _client_id: doc)
+    yield doc
+    cimd._cache_reset()
+    cimd._rate_limit_reset()
+
+
+@pytest.fixture
+def register_forbidden(monkeypatch):
+    """The indicator, enforced: any registration call is a hard failure.
+
+    The DCR stores are reset here because ``conftest._reset_ip_rate_limits``
+    does NOT touch ``_OAUTH_DCR_BUCKETS`` (only the in-file ``_dcr_reset``
+    does) — without this, the "no DCR charge" assertion below would depend on
+    pytest's test order.
+    """
+    def _boom(*_a, **_k):
+        raise AssertionError("POST /register (DCR) must not be reached")
+
+    monkeypatch.setattr("tortoise.oauth.register_client", _boom)
+    monkeypatch.setattr("tortoise.hosted_api._check_oauth_dcr_rate_limit", _boom)
+    _dcr_reset()
+    return _boom
+
+
+class TestCimdClientIdentity:
+    def test_metadata_advertises_a_non_dcr_path(self, api_client):
+        """Both values, in one place: Claude selects CIMD only when the flag AND
+        `"none"` are present, otherwise it falls back to DCR."""
+        tc, _ = api_client
+        body = tc.get("/.well-known/oauth-authorization-server").json()
+        assert body["client_id_metadata_document_supported"] is True
+        assert "none" in body["token_endpoint_auth_methods_supported"]
+
+    def test_metadata_flag_follows_the_env_lever(self, api_client, monkeypatch):
+        monkeypatch.setenv("TORTOISE_OAUTH_CIMD", "0")
+        tc, _ = api_client
+        body = tc.get("/.well-known/oauth-authorization-server").json()
+        assert body["client_id_metadata_document_supported"] is False
+
+    def test_identity_without_register(self, api_client, session_user,
+                                      cimd_document, register_forbidden):
+        """consent → code → token, with the registry path unreachable and no DCR
+        budget consumed."""
+        tc, cp = api_client
+        session_user(_U1)
+        verifier, challenge = _pkce()
+        r = _consent(tc, client_id=CIMD_CLIENT_ID, redirect_uri=REDIRECT,
+                     challenge=challenge)
+        assert r.status_code == 200, r.text
+        tok = _exchange(tc, client_id=CIMD_CLIENT_ID, code=r.json()["code"],
+                        verifier=verifier)
+        assert tok.status_code == 200, tok.text
+        assert tok.json()["access_token"].startswith(ACCESS_TOKEN_PREFIX)
+        assert not _ha_mod._OAUTH_DCR_BUCKETS, "no DCR charge may be incurred"
+        # The FK on oauth_codes/oauth_access_tokens requires a client row.
+        rows = cp.tables["oauth_clients"]
+        assert [row["id"] for row in rows] == [CIMD_CLIENT_ID]
+
+    def test_provisioned_row_is_the_host_and_is_deduplicated(
+            self, api_client, session_user, cimd_document, register_forbidden):
+        """Growth bound: ONE row per distinct client_id URL — O(client
+        implementations), not DCR's O(connections)."""
+        tc, cp = api_client
+        session_user(_U1)
+        for _ in range(3):
+            verifier, challenge = _pkce()
+            r = _consent(tc, client_id=CIMD_CLIENT_ID, redirect_uri=REDIRECT,
+                         challenge=challenge)
+            assert r.status_code == 200, r.text
+            assert _exchange(tc, client_id=CIMD_CLIENT_ID,
+                             code=r.json()["code"],
+                             verifier=verifier).status_code == 200
+        rows = cp.tables["oauth_clients"]
+        assert len(rows) == 1, "three connections must not mint three clients"
+        assert rows[0]["client_name"] == "claude.ai", (
+            "the consent screen must show the client_id HOST, never the "
+            "document's self-asserted client_name")
+        assert rows[0]["token_endpoint_auth_method"] == "none"
+        assert rows[0]["client_secret_hash"] is None
+
+    def test_consent_page_shows_the_host_not_the_document_name(
+            self, api_client, cimd_document):
+        tc, _ = api_client
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 200, r.text
+        assert "claude.ai" in r.text
+        assert "Totally Not Claude" not in r.text
+
+    def test_unresolvable_document_is_an_oauth_error_not_a_5xx(
+            self, api_client, monkeypatch):
+        from tortoise import cimd
+
+        def _refuse(_client_id):
+            raise cimd.CimdError("refused")
+
+        monkeypatch.setattr(cimd, "fetch_client_metadata", _refuse)
+        tc, _ = api_client
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_request"
+
+    def test_disabled_cimd_falls_back_to_unknown_client(
+            self, api_client, monkeypatch, cimd_document):
+        monkeypatch.setenv("TORTOISE_OAUTH_CIMD", "0")
+        tc, _ = api_client
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_request"
+
+    def test_registry_client_still_wins_over_cimd(
+            self, api_client, session_user, cimd_document):
+        """A DCR/operator-issued row must be untouched by the CIMD path."""
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        assert flow["client_id"].startswith("ct_")
+        assert _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                         verifier=flow["verifier"]).status_code == 200
+        assert all(row["id"].startswith("ct_")
+                   for row in cp.tables["oauth_clients"])
+
+    def test_revoked_cimd_client_is_refused(self, api_client, session_user,
+                                           cimd_document):
+        """#2847 review P1 (revocation fail-open).
+
+        `_persist_cimd_client`'s duplicate re-read uses the RAW `_client_row`,
+        so a revoked CIMD client came back non-None while the registry path
+        returned None — authorizing a revoked integration and minting
+        `oauth_codes`. The guard belongs in `resolve_client`, on the one
+        resolver both paths share.
+        """
+        tc, cp = api_client
+        session_user(_U1)
+        cp.tables.setdefault("oauth_clients", []).append({
+            "id": CIMD_CLIENT_ID, "client_secret_hash": None,
+            "client_name": "claude.ai", "redirect_uris": [REDIRECT],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none", "scope": "mcp",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "revoked_at": "2026-01-02T00:00:00+00:00"})
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_request"
+        consent = _consent(tc, client_id=CIMD_CLIENT_ID,
+                           redirect_uri=REDIRECT, challenge=challenge)
+        assert consent.status_code == 400, consent.text
+        assert not cp.tables.get("oauth_codes"), "no code may be minted"
+
+    def test_provisioning_write_failure_is_not_a_5xx(self, api_client,
+                                                     cimd_document,
+                                                     monkeypatch):
+        """#2847 review P2 — the provisioning insert sits INSIDE
+        `resolve_client`'s guard, so a control-plane write failure is an
+        unknown-client 400, never a 500 (the fetch is attacker-reachable, so
+        its failures must not become an availability oracle).
+
+        Without the guard this raises out of `/oauth/authorize` as a 500.
+        """
+        tc, cp = api_client
+        original = cp.query
+
+        def _fail_post(table, **kwargs):
+            if table == "oauth_clients" and kwargs.get("method") == "POST":
+                raise RuntimeError("control plane 500")
+            return original(table, **kwargs)
+
+        monkeypatch.setattr(cp, "query", _fail_post)
+        verifier, challenge = _pkce()  # noqa: RUF059
+        r = tc.get("/oauth/authorize", params={
+            "client_id": CIMD_CLIENT_ID, "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 400, r.text
+        assert r.status_code < 500
+        assert r.json()["error"] == "invalid_request"
