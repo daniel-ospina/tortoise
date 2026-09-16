@@ -887,7 +887,7 @@ def org_by_id(cp, org_id: str) -> dict | None:
     return _orgs_row_fail_soft(
         cp, org_id,
         select=["id", "name", "tier", "email", "graph_name", "max_users",  # noqa: RUF005
-                "max_teams", "max_graphs", "ops_allowance", "graph_size_cap",
+                "max_orgs", "max_graphs", "ops_allowance", "graph_size_cap",
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _ORG_ADDITIVE_SELECT,

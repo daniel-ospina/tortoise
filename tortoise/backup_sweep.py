@@ -1566,10 +1566,12 @@ def _purge_tombstone(source, db, storage, org_id: str, tomb: dict[str, Any],
          between enumeration and this call when the sweep runs without the
          lock seam) — a restored graph is LIVE: never drop its namespace.
       2. Ownership guard — only drop the namespace when it still maps to
-         THIS graph id (org_{tid}_{gid}); a mismatch means the namespace
+         THIS graph id and org id; a mismatch means the namespace
          was re-occupied by a live graph (name-based reuse / drift) — the
          guard trips and the namespace is RETAINED (residual: operator
-         review — the live occupant owns it now).
+         review — the live occupant owns it now). Two prefixes are accepted:
+         `org_{tid}_{gid}` (current) and `team_{tid}_{gid}` (namespaces
+         written before the #3543 rename, which no data migration rewrites).
       3. GRAPH.DELETE the namespace (absent-tolerant; real failures raise
          → the row stays the retry anchor).
       4. Delete the backup artifacts (best-effort per family).
@@ -1581,7 +1583,13 @@ def _purge_tombstone(source, db, storage, org_id: str, tomb: dict[str, Any],
         return {"status": "skipped", "graph_id": gid,
                 "reason": "row_restored_or_gone"}
     expected = f"org_{org_id}_{gid}"
-    residual = (not ns) or ns != expected
+    # #3543: the derivation uses the 4-char `org_` prefix, but stored
+    # namespaces written before the rename still carry `team_` and no data
+    # migration rewrites them. Accept both so a legacy tombstone's namespace
+    # is still droppable — the ownership property the guard protects ("the
+    # namespace derives from THIS graph id") holds either way.
+    legacy = f"team_{org_id}_{gid}"
+    residual = (not ns) or ns not in (expected, legacy)
     if residual:
         # Ownership guard tripped (verifier P1): never GRAPH.DELETE a
         # namespace that does not derive from this graph id — it may host a
