@@ -192,8 +192,49 @@ if _OriginalFalkorDB is not None:
             exit. Idempotent via ``_t_release_owner``'s per-client flag, so
             the ``_t_close`` path (which calls ``close()`` and then
             releases) stays correct.
+
+            #3653: redislite's ``_cleanup`` deletes the socket dir whenever
+            its own ``_connection_count() <= 1``, but that count is 0 once
+            the shared ``.settings`` registry file is gone — so closing one
+            client tore down a LIVE shared server (killing co-tenants'
+            seeded state, and surfacing as ``redis.socket ... No such file
+            or directory`` / a start-time ``FATAL CONFIG FILE ERROR``). Guard
+            the destructive path with the registry-independent co-tenant
+            test; a shared server gets a pool disconnect only, exactly like
+            redislite's own shared-server branch.
+
+            #3653 F1: the guard above only covers THIS seam. redislite's
+            OWN atexit-registered ``_cleanup`` and ``__del__`` still run,
+            and with the shared registry file gone its
+            ``_connection_count()`` reads 0 — so they would stop the live
+            server and ``rmtree`` its socket dir from under a live
+            co-tenant after all. Neutralize them on the shared path too.
+            #3653 F3: redislite's ``_cleanup`` only rmtrees inside
+            ``if self.pid:``, so a server that was already dead strands its
+            ephemeral dir — reclaim it here.
             """
             try:
+                inner = getattr(self, "client", None)
+                if inner is not None:
+                    from tortoise.embedded_lifecycle import (
+                        _neutralize_redislite_cleanup,
+                        _remove_ephemeral_socket_dir,
+                        _server_pid,
+                        cotenant_holds_server,
+                        disconnect_only,
+                    )
+                    if cotenant_holds_server(inner):
+                        disconnect_only(inner)
+                        _neutralize_redislite_cleanup(inner)
+                        return None
+                    rdir = getattr(inner, "redis_dir", None)
+                    sock_path = getattr(inner, "socket_file", None)
+                    pid_before = _server_pid(inner)
+                    try:
+                        return super().close(*args, **kwargs)
+                    finally:
+                        if not pid_before:
+                            _remove_ephemeral_socket_dir(rdir, sock_path)
                 return super().close(*args, **kwargs)
             finally:
                 self._t_release_owner()
