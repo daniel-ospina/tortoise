@@ -10,7 +10,7 @@ Rules (env-overridable thresholds):
 - R3  reads:        > 100 / 5min per-key OR per-org -> notify Owner only
 - R4  geo:          first unseen CF-IPCountry per org -> notify Owner
 - R8 signup_velocity: N anon signups/IP/window (breach >= threshold) ->
-                     notify ops only (BILLING_NOTIFY_TO; never suspends)
+                     notify ops only (Telegram; never suspends)
 
 Two-stage staging with EPISODE semantics (scoping delta 13 + code-review
 fixes): flags are PER-RULE (flag event rows carry the rule). Stage 2
@@ -591,9 +591,9 @@ class ReadVelocityTracker:
 
     In-memory by design (the 5-min window bounds deploy-reset damage);
     notify-only per the issue — R3 never suspends. The notification goes to
-    the org OWNER (email resolved via the engine store) with the ops inbox
-    as fallback; a best-effort read_velocity event row surfaces the alert in
-    the dashboard list.
+    the ops Telegram channel (abuse alerts are Telegram-only since #3639, so
+    there is no email recipient to resolve); a best-effort read_velocity event
+    row surfaces the alert in the dashboard list.
     """
 
     def __init__(self, threshold: int | None = None, window_s: int | None = None):
@@ -687,8 +687,9 @@ class SignupVelocityTracker:
     """>N anonymous signups per IP per window → notify ops once per window.
 
     Anon orgs have NULL user_id, so R3/R4 owner-notify resolves nothing —
-    R8 is the OPS-visible farming signal (BILLING_NOTIFY_TO fallback, the
-    documented anon path, notify.py:153). In-memory by design (mirrors
+    R8 is the OPS-visible farming signal (abuse alerts are Telegram-only since
+    #3639, so the anon case needs no recipient resolution at all). In-memory
+    by design (mirrors
     ReadVelocityTracker/R3): R8 NEVER suspends, so deploy-reset damage is
     bounded to a notify. The durable multi-instance sweeper over audit_events
     is a documented follow-on (idx_audit_ip_time ships in #1081; sweeper
@@ -791,7 +792,8 @@ class SignupVelocityTracker:
             logger.debug("signup-velocity event record failed (%s)", ip)
         try:
             from tortoise.notify import notify_abuse
-            # anon org → no email → BILLING_NOTIFY_TO ops fallback
+            # org_id is None for anon orgs; the Telegram alert needs no
+            # recipient resolution (#3639 — abuse alerts are Telegram-only)
             notify_abuse("abuse_signup_velocity",
                          {"org_id": org_id, "email": None},
                          {"ip": ip, "reason": reason,
