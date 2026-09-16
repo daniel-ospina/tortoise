@@ -8,7 +8,7 @@ from tortoise.connectors.linear import LinearConnector, _now_iso
 # ── Issue → Event mapping ────────────────────────────────────────
 
 def test_issue_to_event_basic():
-    lc = LinearConnector(config={"api_key": "lin_api_test", "org_id": "team-1"})
+    lc = LinearConnector(config={"api_key": "lin_api_test", "team_id": "team-1"})
     issue = {
         "identifier": "TEAM-42",
         "title": "Fix login flow",
@@ -186,11 +186,11 @@ def test_query_without_api_key_returns_empty():
 # ── #331: undeclared GraphQL variable + swallowed HTTP errors ──────
 
 def test_cycles_query_uses_schema_valid_team_filter():
-    """#331 (review r5): Query.cycles has no orgId argument in the Linear
+    """#331 (review r5): Query.cycles has no teamId argument in the Linear
     schema — team filtering must go through filter: CycleFilter (same
-    pattern as _poll_issues). A direct orgId argument is a GraphQL
+    pattern as _poll_issues). A direct teamId argument is a GraphQL
     validation error in every configuration."""
-    lc = LinearConnector(config={"api_key": "lin_api_test", "org_id": "team-1"})
+    lc = LinearConnector(config={"api_key": "lin_api_test", "team_id": "team-1"})
     captured: dict = {}
 
     def fake_query(query, variables=None):
@@ -205,12 +205,12 @@ def test_cycles_query_uses_schema_valid_team_filter():
         "query must declare $filter: CycleFilter"
     assert "filter: $filter" in captured["query"], \
         "query must pass filter: $filter to cycles()"
-    assert "orgId" not in captured["query"], \
-        "orgId is not a valid Query.cycles argument in the Linear schema"
+    assert "teamId" not in captured["query"], \
+        "teamId is not a valid Query.cycles argument in the Linear schema"
 
 
-def test_cycles_query_no_filter_without_org_id():
-    """#331 (review r5): without a configured org_id the Cycles query must
+def test_cycles_query_no_filter_without_team_id():
+    """#331 (review r5): without a configured team_id the Cycles query must
     not send a filter variable (all cycles, schema-valid)."""
     lc = LinearConnector(config={"api_key": "lin_api_test"})
     captured: dict = {}
@@ -276,7 +276,7 @@ def test_query_logs_graphql_errors(caplog):
     lc = LinearConnector(config={"api_key": "lin_api_test"})
     resp = mock.MagicMock()
     resp.read.return_value = _json.dumps(
-        {"errors": [{"message": "Variable $orgId is not declared"}]}
+        {"errors": [{"message": "Variable $teamId is not declared"}]}
     ).encode()
     cm = resp.__enter__.return_value
     cm.read.return_value = resp.read.return_value
