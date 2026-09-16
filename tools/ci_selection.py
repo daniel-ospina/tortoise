@@ -171,6 +171,13 @@ SOURCE_PATTERNS = {
              "tools/embedder_probe.py", "tools/calibrate_thresholds.py",
              "tools/pair_label_runner.py", "benchmarks/",
              "graph-scripts/backfill_embeddings.py",
+             # #3359: the per-session cost report CLI consumes the eval-owned
+             # versioned PRICING_MAP (tools/longmem_eval/costing.py) and is
+             # exercised by tests/test_capture_cost_measurement.py — without
+             # this entry a report-CLI-only change selects NO surface
+             # (surfaces=[], full=False) and that test never runs on the PR
+             # that owns the launch-gate number (the #3616 pattern).
+             "tools/capture_cost_report.py",
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).

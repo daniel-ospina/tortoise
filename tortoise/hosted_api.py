@@ -8568,11 +8568,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt.
         _record_write_op(org)
-        # #3359: one capture_cost row per successful capture (calibration
-        # data only — the bill is unchanged). Idempotent for free: this is
-        # the SAME replay guard the write-op meter uses, so a zero-node
-        # re-POST writes no second row. Best-effort — analytics must never
-        # block a committed capture.
+        # #3359: one capture_cost row per capture ATTEMPT that ran an
+        # extraction (successful or errored — a failed extraction that made
+        # provider calls has real spend, and the deadline/deadline_aborts
+        # disclosure depends on that row existing). Replay/M2 captures carry
+        # no extractor telemetry and emit nothing. Idempotent for free: this
+        # sits behind the SAME replay guard the write-op meter uses, so a
+        # zero-node re-POST writes no second row; a genuine retry (#2335
+        # WI-2b) does write a second row, which is why the report aggregates
+        # by session_id before percentiling. Best-effort — analytics must
+        # never block a committed capture.
         try:
             _cost_props = _capture_cost_props(session_id, meta)
             if _cost_props is not None:
@@ -19267,7 +19272,8 @@ _ALLOWED_ANALYTICS_PROPS = {
     # only; never on the billing path). All measured fields must survive
     # the PII filter or the measurement is silently lost.
     "calls", "retries", "prompt_tokens", "completion_tokens",
-    "cost_usd", "calls_without_cost", "by_stage",
+    "cost_usd", "calls_without_cost", "calls_without_usage",
+    "deadline_aborts", "by_stage",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -19328,8 +19334,11 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     ``calls_without_cost`` disclosure counter, and the per-stage/
     per-route ``by_stage`` envelope (repricable at report time).
 
-    Returns ``None`` when the extractor produced no LLM roll-up (replayed /
-    M2 / error captures) — no measurement exists, so no row is written.
+    Returns ``None`` when the extractor produced no LLM roll-up (a
+    replayed / M2 capture: ``meta["stats"]`` is ``{}``) — no measurement
+    exists, so no row is written. A capture whose extraction ERRORED does
+    carry a roll-up (and therefore a row): the provider calls were made and
+    their spend is real.
     """
     llm = ((meta.get("stats") or {}).get("llm") or {})
     if not llm:
@@ -19342,6 +19351,15 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         "completion_tokens": int(llm.get("completion_tokens", 0) or 0),
         "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
         "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
+        # #3359: a call that returned NO usage block at all (no tokens, no
+        # charge) is a distinct disclosure from one that returned tokens but
+        # no charge — both ride the row, so neither is silently a clean $0.
+        "calls_without_usage": int(llm.get("calls_without_usage", 0) or 0),
+        # #3359: deadline-killed generations are BILLED upstream but produce
+        # no tokens, so they are spend this measurement cannot price. Carried
+        # on the row so the report can disclose it instead of reading the
+        # session as a clean $0 (#1787 P2-L is the counter's origin).
+        "deadline_aborts": int(llm.get("deadline_aborts", 0) or 0),
         "by_stage": llm.get("by_stage") or {},
     }
 

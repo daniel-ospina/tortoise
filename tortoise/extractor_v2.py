@@ -2615,7 +2615,7 @@ def _resolution_prompt(existing: list[dict], new_names: list[str]) -> str:
 
 
 def resolve_entities(entity_refs: list[dict], search: dict,
-                     model=None) -> dict:
+                     model=None, stats: dict | None = None) -> dict:
     """D3: two-phase entity resolution — returns
     {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
     "mode"}], "warnings": [...]}.
@@ -2658,7 +2658,7 @@ def resolve_entities(entity_refs: list[dict], search: dict,
             prompt = _resolution_prompt(
                 existing, [u["name"] for u in unmatched])
             resp = _complete(model, _RESOLUTION_SYSTEM, prompt,
-                             max_tokens=500)
+                             max_tokens=500, stats=stats)
             parsed = _parse_json(resp)
             unmatched_names = {u["name"] for u in unmatched}
             for item in (parsed.get("resolutions") or []):
@@ -4395,6 +4395,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                       # #3359: the cost driver (calibration data only)
                       "prompt_tokens": 0, "completion_tokens": 0,
                       "cost_usd": 0.0, "calls_without_cost": 0,
+                      "calls_without_usage": 0,
                       "by_stage": {}}
     recovery_stats: dict[str, int] = {}
     error_census: dict[str, int] = {}
@@ -4599,6 +4600,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # (nothing to resolve against). Never blocks capture (P1).
     resolution_records: list[dict] = []
     resolution_warnings: list[str] = []
+    # #3359: the D3 entity-resolution LLM fallback makes a REAL provider
+    # call. Without a stats dict it contributed nothing to the session cost
+    # roll-up — silently understating spend for every session that hit it.
+    # A dedicated per-stage accumulator fixes that, and the roll-up runs
+    # after the try/except so a resolution failure still reports the spend
+    # it already made.
+    resolution_stats: dict = {}
     if search and not search.get("degraded") and (search.get("entities") or []):
         ent_refs = [{"name": str(e.get("name", "")).strip(),
                      "kind": str(e.get("kind", "")).strip()}
@@ -4606,7 +4614,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     if isinstance(e, dict) and e.get("name")]
         if ent_refs:
             try:
-                res = resolve_entities(ent_refs, search, model=model)
+                res = resolve_entities(ent_refs, search, model=model,
+                                       stats=resolution_stats)
                 if res.get("map"):
                     complete_list = _apply_entity_resolution(
                         complete_list, res["map"])
@@ -4625,6 +4634,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # D1 (#1746): deterministic class for the previously-
                 # uncensused resolution failure path.
                 _bump_census_class(error_census, "entity_resolution_failed")
+    # #3359: roll the D3 resolution stage's cost driver into the session
+    # roll-up — outside the try/except so the spend already made is reported
+    # even when the resolution itself failed. A resolve_entities call that
+    # never reached the LLM leaves ``resolution_stats`` empty, so this is a
+    # no-op for the deterministic (phase-1-only) path.
+    _rollup_llm(llm_stats, resolution_stats, "resolve")
 
     # ── chain enforcement (#1695 Task 1): DETERMINISTIC rewire between the
     # resolution pass and S5 — the prompts' advisory "TRY TO REPAIR" becomes
@@ -5076,6 +5091,9 @@ def _merge_cost_accumulator(tgt_stats: dict, src_stats: dict) -> None:
     acc["calls_without_cost"] = (
         int(acc.get("calls_without_cost", 0))
         + int(src.get("calls_without_cost", 0) or 0))
+    acc["calls_without_usage"] = (
+        int(acc.get("calls_without_usage", 0))
+        + int(src.get("calls_without_usage", 0) or 0))
     for provider, models in (src.get("by_route") or {}).items():
         for model, bucket in (models or {}).items():
             _merge_cost_bucket(
@@ -5122,6 +5140,8 @@ def _accumulate_call_cost(stats: dict, *, prompt_tokens, completion_tokens,
     else:
         lane["cost_usd"] = round(lane["cost_usd"] + float(cost_usd), 6)
     if not has_usage:
+        acc["calls_without_usage"] = (
+            int(acc.get("calls_without_usage", 0)) + 1)
         lane["calls_without_usage"] += 1
     lane["usage_present"] = bool(lane["usage_present"] and has_usage)
 
@@ -5138,7 +5158,10 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     provider's own reported charge, and the ``calls_without_cost`` /
     ``calls_without_usage`` disclosure counters — from the stage's cost
     accumulator (``stage_stats["cost"]``, written per successful call by
-    ``_accumulate_call_cost``). Each call keeps the ``(provider, model)``
+    ``_accumulate_call_cost``). Both counters roll to the session level here
+    so a provider that reported no charge, or a call that carried no usage
+    block at all, is disclosed on the emitted row instead of surviving only
+    inside ``by_stage``. Each call keeps the ``(provider, model)``
     route that served it, so a mid-stage failover is never misattributed to
     the configured primary. The ``by_stage`` buckets use the
     pricing-envelope shape (``tools/longmem_eval/usage.py`` /
@@ -5163,6 +5186,12 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict,
     llm_stats["calls_without_cost"] = (
         llm_stats.get("calls_without_cost", 0)
         + int(cost.get("calls_without_cost", 0) or 0))
+    # #3359: a call that returned NO usage block at all (no tokens, no
+    # charge) is a different disclosure from one that returned tokens but no
+    # charge — roll it too, so the emitted row can say so at session level.
+    llm_stats["calls_without_usage"] = (
+        llm_stats.get("calls_without_usage", 0)
+        + int(cost.get("calls_without_usage", 0) or 0))
 
     by_stage = llm_stats.setdefault("by_stage", {})
     for provider, models in (cost.get("by_route") or {}).items():
@@ -5183,12 +5212,14 @@ def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
 def _call_once(model, system: str, user: str, *, deadline_s: int,
                max_tokens: int | None,
                stats: dict | None
-               ) -> tuple[str | None, object | None, int, int]:
+               ) -> tuple[str | None, object | None, int, int,
+                          float | None, str | None, str | None]:
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
 
-    Returns ``(resp, finish_reason, prompt_tokens, completion_tokens)`` — the
-    finish reason AND per-call token counts captured in the calling thread
+    Returns ``(resp, finish_reason, prompt_tokens, completion_tokens,
+    cost_usd, provider, model)`` — the finish reason AND per-call token
+    counts captured in the calling thread
     right after ``complete()`` returns (F4 #1780; token capture #2134
     Task 0 — never read the shared adapter attrs from the caller thread).
 
@@ -5196,9 +5227,12 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
     reported charge (``last_cost_usd`` — ``None`` when the route reports
     none) and the SERVING route (``last_route``/``route``/``provider``,
     never the configured primary — a mid-call failover must not be
-    misattributed) plus the wire model id, and publishes them into ``stats``
-    on the JOINED success path only — an abandoned deadline thread must
-    never write into a stats dict that was already rolled up.
+    misattributed) plus the wire model id, and returns all three in the
+    RETURN TUPLE. They are deliberately NOT written into ``stats``: that
+    dict is shared with the lock-guarded ``deadline_aborts`` counter
+    precisely because it may be shared across worker threads, so a
+    publish-then-pop hand-off there would be a non-atomic
+    read-modify-write. Only the joined success path reaches the return.
 
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
@@ -5319,16 +5353,19 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
 
     if "exc" in box:
         raise box["exc"]
-    # #3359: publish the cost-driver capture into the caller's per-call
-    # stats (the token counts travel back in the return tuple; the cost +
-    # route ride the same dict the stage roll-up already reads). Only the
-    # joined success path reaches here — the deadline-abort path raised above.
-    if stats is not None:
-        stats["cost_usd"] = box.get("cost_usd")
-        stats["cost_provider"] = box.get("cost_provider")
-        stats["cost_model"] = box.get("cost_model")
+    # #3359: the cost driver travels back in the RETURN TUPLE, not via a
+    # mutation of the caller's ``stats`` dict. That dict is shared with the
+    # deadline-abort counter (which is lock-guarded precisely because it MAY
+    # be shared), so publishing here and popping in ``_complete`` would be a
+    # non-atomic read-modify-write — under a shared dict one call could pop
+    # another call's charge and attribute it to its own tokens/route. The
+    # tuple has no such window. Only the joined success path reaches here
+    # (the deadline-abort path raised above), so an abandoned thread never
+    # writes into a stats dict that was already rolled up.
     return (box.get("resp"), box.get("finish_reason"),
-            box.get("prompt_tokens", 0), box.get("completion_tokens", 0))
+            box.get("prompt_tokens", 0), box.get("completion_tokens", 0),
+            box.get("cost_usd"), box.get("cost_provider"),
+            box.get("cost_model"))
 
 
 def _scaled_deadline(base: int, max_tokens: int | None) -> int:
@@ -5393,7 +5430,8 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
     for attempt in range(1, retries + 2):
         try:
             (resp, finish_reason,
-             prompt_tokens, completion_tokens) = _call_once(
+             prompt_tokens, completion_tokens,
+             call_cost_usd, call_provider, call_model) = _call_once(
                  model, system, user, deadline_s=deadline_s,
                  max_tokens=max_tokens, stats=stats)
             truncated = finish_reason == "length"
@@ -5404,17 +5442,19 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                              prompt_tokens=prompt_tokens,
                              completion_tokens=completion_tokens)
                 # #3359: accumulate THIS call's cost driver into the stage
-                # accumulator (the pop also clears the per-call markers so a
-                # later failed attempt can never re-count them). The token
-                # fields above stay per-call (``run_s1`` / ``_complete_parsed``
-                # read them as a snapshot); the accumulator is what the
-                # session roll-up sums.
+                # accumulator. The token fields above stay per-call
+                # (``run_s1`` / ``_complete_parsed`` read them as a
+                # snapshot); the accumulator is what the session roll-up
+                # sums, so a re-entrant call (escalation / parse retry) adds
+                # to the base call's spend instead of overwriting it. The
+                # values come from ``_call_once``'s own return tuple — this
+                # call's capture, never another thread's.
                 _accumulate_call_cost(
                     stats, prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
-                    cost_usd=stats.pop("cost_usd", None),
-                    provider=stats.pop("cost_provider", None),
-                    model=stats.pop("cost_model", None))
+                    cost_usd=call_cost_usd,
+                    provider=call_provider,
+                    model=call_model)
                 # #2134 Task 0 (P1-22): the truncation-token read surface —
                 # a length-truncated call's emitted tokens are the lower
                 # bound on the true list size (the model filled its budget
@@ -5427,7 +5467,9 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
                 # truncating call across the extractor seams (S1 chunks, S2,
                 # S4 — the kind_classifier adjudication seam does NOT reach
                 # this surface: its finally forwards only
-                # attempts/retries/truncated/deadline_aborts, and escalation
+                # attempts/retries/truncated/deadline_aborts plus the #3359
+                # cost accumulator (via _merge_cost_accumulator), and never
+                # recovery.*, and escalation
                 # is scoped out there via escalate=False, so its 1500-cap
                 # truncations are counted in llm.truncated only). The
                 # per-seam keys are accumulated at the

@@ -340,8 +340,13 @@ class KindClassifier:
         any exception → kNN top-1 fallback + ``classify_error`` census.
 
         Returns ``(calls, usage)`` — ``usage`` is the accumulated LLM spend
-        across batches (``{"calls", "attempts", "retries", "truncated"}``,
-        rollable into the session llm_stats via ``_rollup_llm``), so the
+        across batches (``{"calls", "attempts", "retries", "truncated",
+        "deadline_aborts"}`` plus ``"cost"`` — the ``#3359`` per-route
+        cost accumulator merged in by ``_merge_cost_accumulator``, carrying
+        ``by_route`` lanes with prompt/completion tokens, the provider's own
+        reported charge, and the ``calls_without_cost`` /
+        ``calls_without_usage`` disclosures). The whole dict is rollable
+        into the session llm_stats via ``_rollup_llm``, so the
         adjudication tail's cost is never invisible to the A/B gate.
         ``usage["calls"]`` is the BATCH count (one per adjudication call),
         ``usage["attempts"]`` the total adapter-call attempts across
