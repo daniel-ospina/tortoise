@@ -36,12 +36,35 @@
 #              raises 401 "Missing session token" with zero network I/O when
 #              the Authorization header is absent). 2xx and 401 both mean "the
 #              app answered"; only 000/5xx mean it did not.
-#              KNOWN BLIND SPOTS: this probes ONE route, and only its
-#              UNAUTHENTICATED branch — an outage that leaves /v1/organizations
-#              answering while other routes fail reads as UP, and so does an
-#              auth-leg break that rejects every real token (the probe sends
-#              none). It proves liveness + route presence, not end-to-end
-#              authenticated traffic. See the runbook §6.8.
+#              TWO PRODUCTION TARGETS (#3628). The Fly API probe is the default;
+#              the workflow adds a SECOND step for the Cloudflare Pages auth
+#              surface (`GET /auth/start`). During the #3616 sign-in outage only
+#              /auth/start revealed it: /welcome answered 302 and /api/session
+#              answered 401 the whole time, so a bare liveness probe of either
+#              was GREEN while nobody could sign in. That step is a DEDICATED
+#              step (not a target list) and uses three additive knobs:
+#                * PROBE_EXPECT_STATUS=302 — an allow-list that replaces the
+#                  hardcoded UP arms ONLY (000/5xx stay DOWN, other stays
+#                  UNEXPECTED). Without it a healthy 302 is UNEXPECTED and the
+#                  probe would page on a healthy site.
+#                * PROBE_REQUIRE_HEADER=code_challenge_method=s256 — proof the
+#                  PKCE flow row was actually written; a 302 without it is an
+#                  ANSWERED-BUT-WRONG (UNEXPECTED) verdict, not an outage.
+#                * its own PROBE_HOST_LABEL — the incident TITLE is the dedupe
+#                  key, so two production targets with one label would fight
+#                  over a single issue.
+#              The auth target is in PROD_PROBE_URLS (so it files a PROD-titled
+#              incident and pages) but NOT in RESTARTABLE_PROBE_URLS: it has no
+#              Fly machine, and a 503 there means a missing binding, which a
+#              restart cannot fix (`disarmed:no_machine`). `is_prod` is decided
+#              by SET MEMBERSHIP (fail closed: an unrecognised URL stays a
+#              DRILL), never by a boolean flag.
+#              KNOWN BLIND SPOTS: each probe covers ONE route, and the API
+#              probe only its UNAUTHENTICATED branch — an outage that leaves
+#              /v1/organizations answering while other routes fail reads as UP,
+#              and so does an auth-leg break that rejects every real token (the
+#              probe sends none). It proves liveness + route presence, not
+#              end-to-end authenticated traffic. See the runbook §6.8/§7.
 #   2. ALERT   Files exactly ONE GitHub issue per incident, keyed by title, and
 #              comments with an incremented count on later runs. On recovery it
 #              confirms the recovery, comments and closes. This is the fix for
@@ -124,13 +147,18 @@
 #     secret (FLY_API_TOKEN — the name already used by deploy-hosted.yml).
 #     Absent → the restart leg is skipped with a clear log line + escalation,
 #     and alerting still works.
-#   * A non-default PROBE_URL (a drill) DISARMS the restart leg AND gets its
+#   * A non-member PROBE_URL (a drill) DISARMS the restart leg AND gets its
 #     OWN incident identity (`[monitor] DRILL DOWN` + a `[DRILL]` suffix on the
 #     host in the title): a
 #     drill must never restart production, never mutate a production incident
 #     (its body carries the cooldown/cap ledger), and never close one. Without
 #     that separate identity a typo'd drill host files a MISLABELLED production
 #     incident (and the next production run would then "recover" it).
+#   * A PRODUCTION URL with no Fly machine behind it (the Pages auth surface) is
+#     ALWAYS restart-disarmed (`disarmed:no_machine`): a 503 there means a
+#     missing binding, and restarting the API app would restart an unrelated
+#     service. This is a property of the URL SET, not of the failure class, so
+#     no per-run misconfiguration can arm it.
 #   * A failed issue SEARCH refuses to file (never duplicate) and fails the
 #     run; a non-numeric issue id is refused the same way. The monitor cannot
 #     go silently deaf in the alerting direction.
@@ -189,16 +217,51 @@
 set -euo pipefail
 
 # ── configuration (all overridable — the test harness drives these) ─────────
+# The Fly API surface. The workflow passes an EMPTY PROBE_URL on the scheduled
+# path so this default applies (see availability-watchdog.yml).
 DEFAULT_PROBE_URL="https://api.premiselabs.co/v1/organizations"
-# ONE literal, referenced twice: the workflow passes an EMPTY PROBE_URL on the
-# scheduled path so this default applies (see availability-watchdog.yml), and
-# `is_prod` is decided by comparing PROBE_URL to DEFAULT_PROBE_URL. A second
-# copy of the production URL is how a drift turns every production run into a
-# silent drill (no restarts, [DRILL]-titled incidents).
+# The Pages auth surface (#3616 outage / #3628 gap): `GET /auth/start` is the
+# ONE route that revealed the 35-minute sign-in outage — during it `/welcome`
+# answered 302 and `/api/session` answered 401 the whole time, so a bare
+# liveness probe of either was GREEN while nobody could sign in. The workflow
+# drives this URL as a SECOND, DEDICATED STEP with its own expected status and
+# required header; the probe is deliberately NOT generalised into a target
+# list (that would rewrite safety-critical restart logic for no gain).
+AUTH_PROBE_URL="https://tortoise.premiselabs.co/auth/start"
+# The SET of production probe URLs. `is_prod` is decided by SET MEMBERSHIP, not
+# by a boolean flag: an unrecognised URL is ALWAYS a drill, so a typo'd or
+# forgotten flag can never arm self-heal against an unexpected host (fail
+# closed in the no-restart direction). A trailing `/` is normalised away.
+PROD_PROBE_URLS="${PROD_PROBE_URLS:-$DEFAULT_PROBE_URL $AUTH_PROBE_URL}"
+# Which production URLs have a Fly machine behind them and may therefore arm
+# the restart leg. The auth surface is PRODUCTION for alerting and incident
+# identity, but it is served by Cloudflare Pages: a 503 there means a missing
+# binding, and `flyctl machine restart` on the API app cannot repair it — it
+# would restart an unrelated service. Membership again (fail closed): a new
+# production URL is non-restartable until explicitly added here.
+RESTARTABLE_PROBE_URLS="${RESTARTABLE_PROBE_URLS:-$DEFAULT_PROBE_URL}"
 PROBE_URL="${PROBE_URL:-$DEFAULT_PROBE_URL}"
 # Display name in titles/logs. Deliberately NOT derived from PROBE_URL: the
 # title is the dedupe key and must not move when a drill overrides the URL.
+# TWO production targets MUST pass DIFFERENT labels (the workflow's auth step
+# sets its own) — a shared label shares ONE dedupe key, and the two surfaces
+# would then fight over a single incident issue.
 PROBE_HOST_LABEL="${PROBE_HOST_LABEL:-api.premiselabs.co}"
+# OPTIONAL per-target expectation knobs (both empty = the built-in API
+# contract below, so the existing target is byte-for-byte unchanged).
+# PROBE_EXPECT_STATUS: a SPACE-SEPARATED allow-list of HTTP status codes that
+#   mean UP. The 000/5xx=DOWN arm is checked FIRST and cannot be overridden —
+#   listing a 5xx here does NOT make it healthy — so a target can declare "302
+#   is healthy" on the Pages auth route without disarming the outage class.
+#   Other answered codes stay UNEXPECTED. A malformed list fails closed.
+# PROBE_REQUIRE_HEADER: a case-insensitive SUBSTRING that the RESPONSE HEADERS
+#   must carry for an otherwise-UP answer to count as UP. The auth target asks
+#   for `code_challenge_method=s256` — proof the PKCE flow row was actually
+#   written. A healthy-looking status with the header missing is an
+#   ANSWERED-BUT-WRONG verdict (not an outage). NEVER put a secret here: the
+#   requirement is published in the incident body (the header DUMP is not).
+PROBE_EXPECT_STATUS="${PROBE_EXPECT_STATUS:-}"
+PROBE_REQUIRE_HEADER="${PROBE_REQUIRE_HEADER:-}"
 PROBE_TIMEOUT_S="${PROBE_TIMEOUT_S:-25}"          # per-request --max-time
 PROBE_CONNECT_TIMEOUT_S="${PROBE_CONNECT_TIMEOUT_S:-10}"
 PROBE_ATTEMPTS="${PROBE_ATTEMPTS:-3}"             # retries before DOWN
@@ -308,6 +371,9 @@ probe_host_label() { # <url>
 # production run would then "recover".
 set_incident_identity() { # <is_prod>
   if [ "$1" = "1" ]; then
+    # A per-target label is REQUIRED when more than one production target
+    # exists: the title is the dedupe key. The workflow's auth step therefore
+    # passes PROBE_HOST_LABEL=tortoise.premiselabs.co explicitly.
     PROBE_HOST_LABEL="${PROBE_HOST_LABEL:-api.premiselabs.co}"
     DOWN_MARKER="[monitor] PROD DOWN"
     DEGRADED_MARKER="[monitor] PROD DEGRADED"
@@ -498,8 +564,27 @@ scrub_output() { # <text> <max>
 # UNEXPECTED — it answered something else: a 3xx (curl does not follow
 #              redirects, so a moved route shows up) or a 4xx-other (404 = the
 #              route is GONE — a deploy regression, not an outage).
-classify_code() {
-  case "$1" in
+classify_code() { # <status>
+  local code="$1" want
+  # EXPLICIT ALLOW-LIST (PROBE_EXPECT_STATUS set): only the listed codes are UP.
+  # The 000/5xx DOWN arm is checked FIRST and is NOT overridable by the list — a
+  # 5xx or 000 must never be listable as healthy, so a malformed list fails
+  # CLOSED (a genuine outage still alerts) instead of silently disarming the
+  # probe. The list can only widen which ANSWERED codes count as UP. Other
+  # answered codes stay UNEXPECTED. This is the #3628 fix: the hardcoded `2??`
+  # arm classified the Pages auth route's healthy 302 as UNEXPECTED, so a naive
+  # probe of /auth/start would have paged on a perfectly healthy site.
+  if [ -n "$PROBE_EXPECT_STATUS" ]; then
+    case "$code" in
+      000|5??)     printf 'DOWN'; return 0 ;;
+    esac
+    for want in $PROBE_EXPECT_STATUS; do
+      if [ "$code" = "$want" ]; then printf 'UP'; return 0; fi
+    done
+    printf 'UNEXPECTED'
+    return 0
+  fi
+  case "$code" in
     2??)         printf 'UP' ;;
     401|403|429) printf 'UP' ;;
     000|5??)     printf 'DOWN' ;;
@@ -557,6 +642,52 @@ restartable_failure() { # <class>
   esac
 }
 
+# Case-insensitive SUBSTRING match over a captured response-header dump. The
+# requirement is matched against the whole dump (status line + every header),
+# so `code_challenge_method=s256` matches the `Location:` header of a 302
+# whatever the header-name or value casing (S256). The dump itself is NEVER
+# published: response headers carry Set-Cookie and other session material and
+# the incident body is public. An empty needle never fails a healthy target —
+# the caller checks for one first.
+header_satisfied() { # <file> <needle>
+  local needle
+  needle="$(printf '%s' "$2" | tr 'A-Z' 'a-z')"
+  [ -n "$needle" ] || return 0
+  case "$(tr 'A-Z' 'a-z' < "$1" 2>/dev/null || true)" in
+    *"$needle"*) return 0 ;;
+    *)           return 1 ;;
+  esac
+}
+
+# ── production-target classification ────────────────────────────────────────
+# SET MEMBERSHIP, deliberately not a boolean flag (#3628). The workflow drives
+# TWO production targets (the Fly API and the Pages auth surface); a
+# forgotten/typo'd `IS_PROD=1` on a new target would arm self-heal against an
+# unexpected host. With membership an unrecognised URL is ALWAYS a drill — the
+# failure direction is "no restart, [DRILL]-titled incident", never "restart an
+# unknown host". A trailing `/` is normalised away on both sides.
+is_production_url() { # <url>
+  local u p
+  u="${1%/}"
+  for p in $PROD_PROBE_URLS; do
+    if [ "$u" = "${p%/}" ]; then return 0; fi
+  done
+  return 1
+}
+
+# Which production targets may arm the restart leg. A target that is production
+# for alerting but has no Fly machine (the Pages auth surface) must NEVER
+# restart; membership again keeps a new production URL non-restartable until it
+# is explicitly listed here.
+is_restartable_url() { # <url>
+  local u p
+  u="${1%/}"
+  for p in $RESTARTABLE_PROBE_URLS; do
+    if [ "$u" = "${p%/}" ]; then return 0; fi
+  done
+  return 1
+}
+
 # Human-readable form of a failure class, for the public issue body.
 failure_label() { # <class>
   case "$1" in
@@ -577,7 +708,7 @@ failure_label() { # <class>
 # Retries DOWN verdicts (transient blips) — an UNEXPECTED verdict is a
 # deterministic answer, so it stops immediately.
 probe() {
-  local attempt code timing body_file err_file err_raw err_body v="" rc=0
+  local attempt code timing body_file err_file hdr_file err_raw err_body v="" rc=0
   PROBE_EVIDENCE=""
   PROBE_CODE="000"
   PROBE_FAILURE_CLASS="none"
@@ -586,13 +717,19 @@ probe() {
   while [ "$attempt" -le "$PROBE_ATTEMPTS" ]; do
     body_file="$RUN_TMP/body.$attempt"
     err_file="$RUN_TMP/err.$attempt"
+    hdr_file="$RUN_TMP/headers.$attempt"
     : > "$body_file"
     : > "$err_file"
+    : > "$hdr_file"
     # Capture curl's EXIT CODE, not just its -w output: an HTTP 000 is emitted
     # for a DNS failure, a TLS failure, a refusal and a timeout alike, and the
     # exit code is the only thing that tells them apart (see classify_failure).
+    # `-D` dumps the RESPONSE HEADERS to a file so a target can require one
+    # (PROBE_REQUIRE_HEADER). curl still does NOT follow redirects (-L is
+    # absent), so a 302's own headers — including `Location` — are what land
+    # here. The dump is never published (Set-Cookie).
     rc=0
-    timing="$(curl -sS -o "$body_file" -w '%{http_code} %{time_total}' \
+    timing="$(curl -sS -D "$hdr_file" -o "$body_file" -w '%{http_code} %{time_total}' \
       --connect-timeout "$PROBE_CONNECT_TIMEOUT_S" \
       --max-time "$PROBE_TIMEOUT_S" "$PROBE_URL" 2>"$err_file")" || rc=$?
     code="${timing%% *}"
@@ -608,6 +745,17 @@ probe() {
     PROBE_EVIDENCE="${PROBE_EVIDENCE}"$'\n'
 
     v="$(classify_code "$code")"
+    # An EXPLICIT header requirement turns an otherwise-UP answer into an
+    # ANSWERED-BUT-WRONG verdict: the status looked healthy but the flow did
+    # not initialise. Deterministic (a missing header will not appear on a
+    # retry), so it returns immediately like any other UNEXPECTED rather than
+    # burning the retry budget.
+    if [ "$v" = "UP" ] && [ -n "$PROBE_REQUIRE_HEADER" ]; then
+      if ! header_satisfied "$hdr_file" "$PROBE_REQUIRE_HEADER"; then
+        PROBE_EVIDENCE="${PROBE_EVIDENCE}required response header NOT found: \"$(scrub_output "$PROBE_REQUIRE_HEADER" 120)\" (HTTP ${code}) — the route answered, so this is not the outage class, but the flow did not initialise"$'\n'
+        v="UNEXPECTED"
+      fi
+    fi
     if [ "$v" = "UP" ]; then
       PROBE_VERDICT="UP"
       return 0
@@ -1106,14 +1254,53 @@ state_block() { # <kind>
     "$(restart_history)"
 }
 
+# What this target's UP contract IS, in words, for the incident body. Prose
+# only — the logic is classify_code + header_satisfied.
+probe_up_contract() {
+  if [ -n "$PROBE_EXPECT_STATUS" ]; then
+    printf '%s' "$PROBE_EXPECT_STATUS"
+  else
+    printf '2xx/401/403/429'
+  fi
+}
+
 render_body() { # <kind> <kindlabel> <selfheal-note>
-  local kind="$1" kindlabel="$2" heal="$3" summary what
+  local kind="$1" kindlabel="$2" heal="$3" summary what assertion
   if [ "$kind" = "DOWN" ]; then
     summary="🔴 **${PROBE_HOST_LABEL} is DOWN** — the probe got no answer from the app."
     what="no answer (timeout / connection error / 5xx) after ${PROBE_ATTEMPTS} attempts"
   else
     summary="🟠 **${PROBE_HOST_LABEL} answered unexpectedly** — the probe reached the app, but not with an expected response."
-    what="an unexpected HTTP status (not 2xx/401/403/429, not 5xx)"
+    what="an unexpected HTTP status (not $(probe_up_contract), not 5xx)"
+  fi
+  # The assertion paragraph is per-target: the API probe's contract and the
+  # Pages auth probe's contract are different, and an incident body that
+  # describes the WRONG contract sends the operator looking in the wrong place.
+  # The "no Fly machine" clause is keyed on RESTARTABILITY (not on the presence
+  # of PROBE_EXPECT_STATUS): setting an expectation knob on a restartable target
+  # must not make the public body claim nothing will restart when it could.
+  if [ -n "$PROBE_EXPECT_STATUS" ]; then
+    assertion="The probe asserts a **specific contract**, not just that a socket is
+open: \`GET $(redact_url "$PROBE_URL")\` must answer one of \`$(probe_up_contract)\`"
+    if [ -n "$PROBE_REQUIRE_HEADER" ]; then
+      assertion="${assertion} **and** its response headers must carry
+\`$(scrub_output "$PROBE_REQUIRE_HEADER" 120)\`. A healthy-looking status with the required
+header missing means the route answered while the flow did not actually
+initialise."
+    else
+      assertion="${assertion}."
+    fi
+    if ! is_restartable_url "$PROBE_URL"; then
+      assertion="${assertion} This surface has **no Fly machine** behind it (it is served by
+Cloudflare Pages): an automated restart is not a possible remediation here and
+is hard-disarmed. This is the #3616 class, where only \`/auth/start\` revealed
+the outage and \`/welcome\` (302) and \`/api/session\` (401) stayed green
+throughout."
+    fi
+  else
+    assertion="The probe asserts the **real user path**, not just that a socket is open: an
+authenticated API route served by the app. \`2xx\`/\`401\`/\`403\`/\`429\` all mean
+\"the app answered\"; a timeout, a connection error or a 5xx mean it did not."
   fi
   cat <<EOF
 $(state_block "$kind")
@@ -1135,9 +1322,7 @@ ${INCIDENT_STATE_MARKER}
 | **Failing probe runs** | ${STATE_DOWN_RUNS} (scheduled every 5 min; last at $(fmt_iso "$STATE_LAST_DOWN_TS")) |
 | **Restart attempts in the rolling hour (may include a prior incident)** | $(if [ -n "$(restart_history)" ]; then printf '%s' "$(restart_history)"; else printf 'none'; fi) |
 
-The probe asserts the **real user path**, not just that a socket is open: an
-authenticated API route served by the app. \`2xx\`/\`401\`/\`403\`/\`429\` all mean
-"the app answered"; a timeout, a connection error or a 5xx mean it did not.
+${assertion}
 Sentry cannot see this class of failure at all — it runs inside the process,
 and a process that is alive-but-not-serving raises no exception.
 
@@ -1263,9 +1448,10 @@ main() {
   [ "$default_min_runs" -ge 2 ] || default_min_runs=2
   SUSTAINED_MIN_RUNS="$(int_or "${SUSTAINED_MIN_RUNS:-}" "$default_min_runs" 1)"
 
-  # A non-default probe URL is a DRILL: it must not restart production AND must
-  # not resolve (close/comment) a production incident.
-  [ "${PROBE_URL%/}" = "${DEFAULT_PROBE_URL%/}" ] && is_prod=1
+  # A URL that is not a member of PROD_PROBE_URLS is a DRILL: it must not
+  # restart production AND must not resolve (close/comment) a production
+  # incident. SET MEMBERSHIP, not a boolean flag — see is_production_url.
+  if is_production_url "$PROBE_URL"; then is_prod=1; fi
   # …and it gets its OWN incident identity (marker/title/label). See
   # set_incident_identity — a shared marker would make a drill write its state
   # INTO the live production incident.
@@ -1383,13 +1569,20 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
   fi
 
   # UNEXPECTED never restarts (a restart cannot fix a 404 / a redirect), a
-  # non-default PROBE_URL is a drill, and a DNS/TLS failure is not a restart's
+  # non-member URL is a drill, and a DNS/TLS failure is not a restart's
   # business (see restartable_failure).
   local restart_mode="$kind"
   if [ "$kind" = "DEGRADED" ]; then
     restart_mode="disarmed:unexpected"
   elif [ "$is_prod" != 1 ]; then
     restart_mode="disarmed:drill"
+  elif ! is_restartable_url "$PROBE_URL"; then
+    # #3628: a PRODUCTION surface with no Fly machine behind it (the Pages
+    # auth route). A restart of the API app cannot repair a missing binding
+    # and would restart an unrelated service — hard disarm, not a judgement
+    # call, so it does not depend on the failure class.
+    restart_mode="disarmed:no_machine"
+    log "probe target is a production surface with no Fly machine — NOT restartable; the incident will be reported without a restart"
   elif ! restartable_failure "$PROBE_FAILURE_CLASS"; then
     # No machine restart repairs a name-resolution or certificate problem; it
     # would only spend the restart budget and add noise. The incident is still
@@ -1699,7 +1892,11 @@ A restart is a **symptom fix** — if this recurs, the root cause is still live 
   else
     case "$restart_mode" in
       disarmed:drill)
-        heal_note="🔒 Self-healing is **disarmed for this run** because \`PROBE_URL\` is not the production endpoint (a drill must never restart production). Recovery is NOT resolved from a drill either."
+        heal_note="🔒 Self-healing is **disarmed for this run** because \`PROBE_URL\` is not a production endpoint (a drill must never restart production). Recovery is NOT resolved from a drill either."
+        transition_kind="disarmed"
+        ;;
+      disarmed:no_machine)
+        heal_note="🔒 **No restart attempted — this is a production surface with NO Fly machine behind it.** \`$(redact_url "$PROBE_URL")\` is served by Cloudflare Pages; the automated restart leg targets the Fly API app (\`${FLY_APP}\`), so restarting it would restart an unrelated service and could not repair this failure. A \`503\` on the Pages auth surface usually means a missing/renamed binding (D1/KV) or a Pages routing change — check the Cloudflare Pages deployment, its bindings, and the last deploy (the deploy gate added in #3618 prevents deploying this class of fault; this probe catches the fault appearing AFTER a deploy). Runbook § *Out-of-band availability watchdog*."
         transition_kind="disarmed"
         ;;
       disarmed:unexpected)
