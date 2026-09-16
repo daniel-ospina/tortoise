@@ -1538,6 +1538,15 @@ class TestRealQueryParamEncoding:
         cp.query("t", filters=[("a", "eq", 'he said "hi"'), ("a", "neq", 1)])
         assert seen["params"]["and"] == '(a.eq."he said \\"hi\\"",a.neq.1)', seen["params"]
 
+    def test_a_SINGLE_condition_on_and_is_refused(self):
+        """Cycle 3 widened the guard from multi-condition-only to every count.
+        Without this case the narrower form passes the suite (review cycle 4
+        mutation-verified), because the multi-condition test is rejected by
+        BOTH forms."""
+        cp, _ = self._capturing_cp()
+        with pytest.raises(ValueError, match="collides"):
+            cp.query("t", filters=[("and", "eq", "x")])
+
     def test_a_grouped_column_named_and_is_refused(self):
         """``and`` is the logic-tree key itself; grouping onto it would silently
         drop the flat ``and=`` condition."""

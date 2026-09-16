@@ -70,7 +70,8 @@ it was built to fix.
 write-path repair. Nothing records when the repair landed, so such a window is
 indistinguishable from a window in which no tool call happened — it reports
 ``measured 0``, not ``null``. Reconcile a zero against the deploy time before
-citing it. (Same shape: a configured-but-REJECTED credential.)
+citing it. (A rejected credential is NOT the same shape: it fails this read
+too and surfaces as `unavailable`, not as a zero — see ``LIMITATIONS``.)
 
 MEASURABILITY DEPENDS ON REPAIRS OUTSIDE THIS MODULE
 ----------------------------------------------------
@@ -84,8 +85,10 @@ JSONL file on ephemeral disk. Two consequences the caller must not hide:
   events were dropped and are unrecoverable. This surface **cannot detect
   that**: nothing records when the repair landed, so such a window reports
   ``measured 0``. Reconcile a zero against the deploy time before citing it (see
-  ``LIMITATIONS``). Equally, a *configured* writer is not a *working* one — a
-  present-but-rejected credential also reports ``measured 0``.
+  ``LIMITATIONS``). Equally, a *configured* writer is not a *working* one: a
+  failure that rejects the WRITE while letting this READ succeed reports
+  ``measured 0`` (a revoked key would fail both, and surfaces as
+  ``unavailable`` — see ``LIMITATIONS``).
 * Stage 4 is observed only where the telemetry is emitted: a client talking to
   the HOSTED MCP dispatch point. A locally-hosted (stdio) MCP server, and the
   REST recall surface, emit no per-call event.
@@ -608,11 +611,14 @@ LIMITATIONS: tuple[str, ...] = (
     "This surface cannot detect a window that predates the repair, so such a "
     "window reports `measured 0`, not `unavailable`: reconcile against the "
     "deploy time before citing a zero that straddles it.",
-    "The analytics write path being CONFIGURED is not proof it WORKS. A "
-    "present-but-rejected credential (rotated/revoked key, a 4xx from the "
-    "store) drops every event with no fallback and no signal, so a "
-    "configured-but-dark writer reads as `measured 0`. Detectability is "
-    "tracked in #3677.",
+    "The analytics write path being CONFIGURED is not proof it WORKS — but "
+    "the failure direction is narrower than it looks. This read and the "
+    "telemetry WRITE use the SAME credential in the SAME process, so a "
+    "rotated/revoked key fails the read too and surfaces honestly as "
+    "`unavailable` (`analytics_store_unreachable`), not as a false zero. A "
+    "false `measured 0` needs a failure that rejects the WRITE while letting "
+    "the READ succeed (an INSERT-only RLS denial, a partial/limited role, a "
+    "silent PostgREST drop). Detectability is tracked in #3677.",
     "Extraction outcome (capture_ok / capture_extractor) is recorded on the "
     "Session but exposed by no read surface (owned by #3520).",
     "The analytics leg's interval is EXCLUSIVE at both ends (created_at gt "

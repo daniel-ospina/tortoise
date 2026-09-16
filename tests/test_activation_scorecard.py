@@ -1038,13 +1038,27 @@ class TestCohortGuards:
     pinned them — a regression would have been silent."""
 
     def test_https_is_required(self):
+        """Every entry below is load-bearing: review cycle 4 reverted the guard
+        to the earlier `netloc`-prefix form and the whole suite stayed green,
+        because the original list only held cases BOTH forms reject. These are
+        the cases the hardening was written for.
+
+        `https://:443` is the dangerous one — netloc is `:443` with an EMPTY
+        hostname, so the request goes to localhost:443 with the tenant key."""
         from tools.activation_cohort import _assert_https
         for bad in ("http://api.example", "ftp://h", "api.example",
-                    "https://", "https://h?x=", "https://h#f", ""):
+                    "https://", "https://h?x=", "https://h#f", "",
+                    # netloc non-empty but NO host:
+                    "https://@", "https://:443",
+                    # EMPTY query/fragment (urlsplit reports query=''), which
+                    # still swallow the joined scorecard path:
+                    "https://host?", "https://host#",
+                    # credentials in the URL, and a non-numeric port:
+                    "https://user:pass@host", "https://host:abc", "https://h:99999"):
             with pytest.raises(SystemExit):
                 _assert_https(bad)
         for good in ("https://api.premiselabs.co", "https://host:8443",
-                     "HTTPS://host"):
+                     "HTTPS://host", "https://[::1]:8443", "https://host/path"):
             _assert_https(good)
 
     def test_header_illegal_key_is_refused_without_echoing_it(self):

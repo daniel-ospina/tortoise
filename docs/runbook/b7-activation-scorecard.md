@@ -178,12 +178,14 @@ Until step 3 is observed, `recall_attempted` reads `unavailable`
 
 ### Two ways a zero here can still mislead
 
-**A configured writer is not a working writer.** The pre-check is a *config*
-probe (URL + a service key), not a liveness probe. A present-but-rejected
-credential (rotated/revoked key, a 4xx from the store) drops every event with no
-fallback and no signal, so a configured-but-dark writer reads as `measured 0`.
-Detectability is #3677 — do not read a post-deploy zero as "no recall happened"
-until `mcp_tool_call` rows are actually observed landing.
+**A configured writer is not a working writer — but check the direction.** The
+pre-check is a *config* probe (URL + a service key), not a liveness probe. Note
+that this read and the telemetry **write** use the *same* credential in the
+*same* process, so a rotated/revoked key fails the read too and surfaces
+honestly as `unavailable` (`analytics_store_unreachable`) — **not** as a false
+zero. A false `measured 0` needs a failure that rejects the WRITE while letting
+the READ succeed: an INSERT-only RLS denial, a partial/limited role, or a silent
+PostgREST drop. Detectability is #3677.
 
 **A window predating the repair cannot be told apart from a window with no
 events.** Every event written before the repair is gone (ephemeral disk), and
