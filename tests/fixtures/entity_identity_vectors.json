@@ -1,0 +1,155 @@
+{
+  "_comment": "Shared entity-identity vectors (#3590, Slice 0). One vector file consumed by tests/test_rebuild_live_invariant.py and tests/identity_vectors.py, per the #3589 shared-fixture mechanism (in-repo precedent: tests/fixtures/org_naming_vectors.json, #2779). Vectors are NOT inline test bodies: a vector with \"harness\": true is driven through the live SDK and asserted against the `rebuild == live` + empty-non-folded-set invariant (R8/R9) on every apply-based engine; \"harness\": false marks a shape that needs a later slice's mechanism (or a dedicated non-harness test). verdict is one of pass (green at S0), xfail (known-bad today; strict xfail with an owner), pending (no executable test yet — owner required). An xfail/pending vector without an owner is a permanently-skipped test with no owner, which #3589 forbids.",
+  "vectors": [
+    {
+      "id": "create_object_twice",
+      "description": "Two create_object calls for one name are idempotent (the #452 dedup contract) and replay identically.",
+      "steps": ["create_object('Acme')", "create_object('Acme')"],
+      "expect_live": "one live Object node",
+      "expect_replay": "the same one Object node, byte-identical",
+      "verdict": "pass",
+      "owner": null,
+      "harness": true
+    },
+    {
+      "id": "create_subject_twice",
+      "description": "The Subject twin of create_object_twice.",
+      "steps": ["create_subject('Acme')", "create_subject('Acme')"],
+      "expect_live": "one live Subject node",
+      "expect_replay": "the same one Subject node, byte-identical",
+      "verdict": "pass",
+      "owner": null,
+      "harness": true
+    },
+    {
+      "id": "event_about_object_by_id",
+      "description": "An Event whose aboutObject is the Object's id must resolve the edge on live AND replay.",
+      "steps": ["oid = create_object('Acme')['id']", "create_event('Meeting', 'meeting', aboutObject=oid)"],
+      "expect_live": "Event node + (Event)-[:aboutObject]->(Object) edge",
+      "expect_replay": "the same Event, Object and edge — TODAY the edge is live-only",
+      "verdict": "xfail",
+      "owner": "#2296",
+      "harness": true
+    },
+    {
+      "id": "event_about_subject_by_name",
+      "description": "An Event whose aboutSubject is a bare name must resolve the edge on live AND replay.",
+      "steps": ["create_subject('Acme')", "create_event('Meeting', 'meeting', aboutSubject='Acme')"],
+      "expect_live": "Event node + (Event)-[:aboutSubject]->(Subject) edge",
+      "expect_replay": "the same Event, Subject and edge — TODAY the edge is live-only",
+      "verdict": "xfail",
+      "owner": "#2296",
+      "harness": true
+    },
+    {
+      "id": "delete_object",
+      "description": "Deleting an Object must not resurrect on replay. TODAY _delete_entity is a bare DETACH DELETE and the journal has no delete event, so the node vanishes live and comes back on rebuild.",
+      "steps": ["node = create_object('DeleteMe')", "_delete_entity(node['id'])"],
+      "expect_live": "no Object node",
+      "expect_replay": "the Object resurrected from its ObjectRegistered line",
+      "verdict": "xfail",
+      "owner": "#3573",
+      "harness": true
+    },
+    {
+      "id": "delete_then_recreate",
+      "description": "Delete then re-create must not replay the first incarnation. TODAY it does: the second ObjectRegistered replays first-wins on createdAt.",
+      "steps": ["node = create_object('Recreate')", "_delete_entity(node['id'])", "create_object('Recreate')"],
+      "expect_live": "one Object node carrying the SECOND registration's createdAt",
+      "expect_replay": "one Object node carrying the FIRST registration's createdAt",
+      "verdict": "xfail",
+      "owner": "#3573",
+      "harness": true
+    },
+    {
+      "id": "rename_then_rebuild",
+      "description": "A rename must survive replay. TODAY update_entity(name=...) mutates the live node only and journals no Renamed line, so replay restores the old name.",
+      "steps": ["node = create_object('OldName')", "_update_entity(node['id'], name='NewName')"],
+      "expect_live": "Object named NewName",
+      "expect_replay": "Object named OldName",
+      "verdict": "xfail",
+      "owner": "#3377",
+      "harness": true
+    },
+    {
+      "id": "connector_bare_name_object",
+      "description": "A bare-name EventRecorded reference must be replay-deterministic (D9). S0 pinned this xfail because the projection minted a random-ULID stub live and a DIFFERENT random ULID on replay; #3590 S1 keys the stub on the canonical entity key (_entity_key), so live and replay mint the SAME ids and the vector PASSES. S2 owns the other half of D9 (producers must register what they reference, and a projection-side reference to an unregistered name must refuse) and must re-derive this shape when it lands — the refusal becomes a non-folded entry and this all-green vector no longer describes it.",
+      "steps": ["create_event('BareEvent', 'meeting', subject='BareSubject', object='BareObject')"],
+      "expect_live": "Event + stubbed Subject/Object under their canonical entity keys",
+      "expect_replay": "the SAME ids (deterministic key, not a random ulid)",
+      "verdict": "pass",
+      "owner": null,
+      "harness": true
+    },
+    {
+      "id": "delete_then_replay_vs_never_created",
+      "description": "A deleted entity and a never-created name must not compare equal. TODAY live-after-delete materialises nothing and a never-created name materialises nothing, so {} == {} — the distinction only exists once deletion is a tombstone (S2).",
+      "steps": ["node = create_object('Gone')", "_delete_entity(node['id'])", "verify the tombstone differs from an empty graph"],
+      "expect_live": "after S2: a status='retracted' tombstone, distinct from no node at all",
+      "expect_replay": "same tombstone on replay, still distinct from the never-created side",
+      "verdict": "xfail",
+      "owner": "#3573",
+      "harness": true
+    },
+    {
+      "id": "mixed_id_and_name_reference",
+      "description": "The #3573 P1-A shape: an id-keyed reference and a name-keyed reference to the same supposed entity land on two nodes. Must not exist after S2; the explicit-id channel the vector needs is S2's.",
+      "steps": ["create_object with an explicit connector id", "create_object by name with no id"],
+      "expect_live": "one node (the id and the name refer to one entity)",
+      "expect_replay": "replay must reproduce exactly that one node",
+      "verdict": "pending",
+      "owner": "#3590/S2",
+      "harness": false
+    },
+    {
+      "id": "id_reuse_after_delete",
+      "description": "R5: re-registering a journaled-deleted id must fail closed on live (IdReuseError) and record a non-folded id-reuse entry on replay. The enforcement lands in S2.",
+      "steps": ["ObjectRegistered(cid)", "delete cid", "ObjectRegistered(cid) again via an explicit-id channel"],
+      "expect_live": "IdReuseError",
+      "expect_replay": "non-folded id-reuse entry, no resurrect",
+      "verdict": "pending",
+      "owner": "#3590/S2",
+      "harness": false
+    },
+    {
+      "id": "one_live_one_terminal_holder",
+      "description": "D2 live-holder predicate: one live + one superseded holder is NOT ambiguous; a reference resolves to the live one. Needs the S1/S2 resolver.",
+      "steps": ["create_object('X') (live)", "mark a second X superseded", "resolve 'X'"],
+      "expect_live": "the live id, never the terminal one",
+      "expect_replay": "identical",
+      "verdict": "pending",
+      "owner": "#3590/S2",
+      "harness": false
+    },
+    {
+      "id": "single_terminal_holder_reference",
+      "description": "D2: a name whose only holder is terminal must be REFUSED on a reference surface, never returned as a live id.",
+      "steps": ["create_object('X')", "mark it terminal", "resolve 'X' as a reference"],
+      "expect_live": "refusal",
+      "expect_replay": "identical",
+      "verdict": "pending",
+      "owner": "#3590/S2",
+      "harness": false
+    },
+    {
+      "id": "null_status_with_outdated_flag",
+      "description": "D2: status IS NULL AND outdated=true must be treated as DEAD. The vector fails if the predicate is reverted to the hand-rolled `status IS NULL OR NOT (status IN ...)` literal.",
+      "steps": ["create an entity with status=NULL, outdated=true", "resolve it"],
+      "expect_live": "not a live holder",
+      "expect_replay": "identical",
+      "verdict": "pending",
+      "owner": "#3590/S2",
+      "harness": false
+    },
+    {
+      "id": "unknown_event_type_in_journal",
+      "description": "An event type with no dispatch branch is recorded as a shape='unhandled-event-type' non-fold naming its journal position (S0), and must fail the run on every engine (S2). Covered by the dedicated non-harness tests test_unknown_event_type_is_recorded / test_unknown_event_type_fails_the_run_on_replay.",
+      "steps": ["append an ObjectRegistered line plus a NoSuchEventType line to the journal", "rebuild"],
+      "expect_live": "nothing to see (the line is journal-only)",
+      "expect_replay": "non-folded entry {journal_pos, shape='unhandled-event-type'}",
+      "verdict": "pass",
+      "owner": null,
+      "harness": false
+    }
+  ]
+}

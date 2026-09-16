@@ -923,3 +923,16 @@ def force_sparse_tfidf(monkeypatch):
     monkeypatch.setattr(EmbeddingModel, "get", classmethod(
         lambda cls, load_timeout=None: None))
     return None
+
+
+# The #3590 S0 replay engines the `rebuild == live` invariant must hold on.
+# `fold`/`_apply_one` (projection/__init__.py) is deliberately NOT here: it is
+# Object-blind by design, so it cannot see the entity class the invariant is
+# built to protect (its exclusion is a decision, not an oversight).
+REPLAY_ENGINES = ("rebuild", "rebuild_all", "recover_from_log")
+
+
+@pytest.fixture(params=REPLAY_ENGINES)
+def replay_engine(request):
+    """#3590 S0: parametrise a test over every apply-based replay engine."""
+    return request.param

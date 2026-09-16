@@ -245,25 +245,58 @@ class EventAPI:
         return ev["event_id"]
 
     def add_subject(self, name: str, subject_kind: str = "other") -> str:
-        """Emit SubjectAdded event. Returns the subject's id."""
-        sid = ulid()
+        """Emit SubjectAdded event. Returns the subject's id.
+
+        #3590 S1: the projection is keyed on ``id``, so minting a fresh
+        ``ulid()`` for every mention would land a SECOND live node for an
+        already-known name — the #3389 "second carrier" class S1 closes. The
+        default id therefore resolves the name to its single live holder
+        first, then keys on the canonical entity key; only a name no one
+        holds is keyed fresh. (S2 replaces the key with the minted ULID +
+        the ambiguity refusal.)
+        """
+        sid = self._mention_id("Subject", name)
         self._emit("SubjectAdded", id=sid, name=name,
                    subject_kind=subject_kind,
                    createdAt=now_iso())
         return sid
 
+    def _mention_id(self, label: str, name: str) -> str:
+        """The id a NAME-ONLY mention must key on (#3590 S1 mention resolver).
+
+        ``_resolve_or_key`` first — the single LIVE holder of *name*, else the
+        canonical entity key — so a bare mention lands on the node that
+        already carries the name instead of minting a twin (the P1-3 fix).
+        With no projection there is nothing to resolve, so the key alone.
+        An EMPTY name keeps the legacy ``ulid()``: there is no natural key to
+        key on, and folding every nameless mention onto one shared id would
+        be a new behaviour in an untested corner.
+
+        The predicate is the shared ``entities._resolve_or_key`` (one
+        definition, so the resolver cannot drift from the read surfaces).
+        S2 swaps the key fallback for the minted ULID + the ambiguity
+        refusal.
+        """
+        if not name:
+            return ulid()
+        from .projection.entities import _entity_key, _resolve_or_key
+        if self.projection is None:
+            return _entity_key(label, name)
+        return _resolve_or_key(self.projection.g, label, name)
+
     def add_object(self, name: str, object_kind: str = "other", *,
                    id: str | None = None, **props) -> str:
         """Emit ObjectRegistered event. Returns the object's id.
 
-        ``id``: deterministic canonical id override (epic #264 plan §4.1 —
-        obj_sha256 scheme); default ulid() unchanged (back-compat). Extra props
-        (e.g. canonical_name, title) are persisted by the projection's
-        extra-props handler. The projection MERGEs Object by name — a re-run
-        with the same name never creates a duplicate node (idempotent
-        reification, DE2E-1/DE2E-8).
+        ``id``: explicit canonical id override (epic #264 plan §4.1). Its
+        ABSENCE resolves the name to its single live holder, else the
+        canonical entity key (#3590 S1 — the projection keys on id, so a
+        fresh ulid per mention would create a second same-name node). Extra
+        props (e.g. canonical_name, title) are persisted by the projection's
+        extra-props handler. A re-mention with the same name resolves to the
+        same node (idempotent reification, DE2E-1/DE2E-8).
         """
-        oid = id or ulid()
+        oid = id or self._mention_id("Object", name)
         self._emit("ObjectRegistered", id=oid, name=name,
                    object_kind=object_kind, createdAt=now_iso(), **props)
         return oid

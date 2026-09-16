@@ -10,7 +10,6 @@ back-compatible extended return keys of mine_conversation/mine_corpus.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 import sys
 import tempfile
@@ -52,13 +51,19 @@ EXPECTED = {
 
 
 def _expected_object_id(name: str) -> str:
-    """Plan §4.1: obj_ + sha256(domain-separated canonical name)[:16] (64-bit
-    prefix — DE2E-review: the old [:12] 48-bit truncation collided once
-    punctuation-stripping canonicalization was added)."""
-    canonical = name.lower().strip()
-    for ch in ",.!?;:'\"()[]{}":
-        canonical = canonical.replace(ch, "")
-    return "obj_" + hashlib.sha256(f"obj:{canonical}".encode()).hexdigest()[:16]
+    """The Object's id as the writer now assigns it (#3590 S1, P1-B).
+
+    S1 moved every Object/Subject write onto the ONE entity key
+    (``projection.entities._entity_key`` -> ``sdk._entity_name_id``), retiring
+    mining's private ``obj_<16hex>`` derivation so mining's channel and the
+    SDK's ``create_object`` land on ONE node. (Historical: the old
+    ``obj_ + sha256('obj:'+canonical)[:16]`` scheme came from the DE2E review,
+    where [:12]'s 48 bits collided once punctuation-stripping canonicalization
+    was added.) S2 replaces this expectation with "the id the resolve-or-mint
+    resolver returned" and deletes ``ConversationMiner._object_id``.
+    """
+    from tortoise.projection.entities import _entity_key
+    return _entity_key("Object", name)
 
 
 # ── DE2E-1: Session → Entity Objects with provenance ──────────────
@@ -360,35 +365,46 @@ def test_de2e1_duplicate_session_primary_only():
 
 
 def test_de2e1_canonical_whitespace_collapse():
-    """'port  16379' (doubled whitespace) canonicalizes to the SAME Object as
-    'port 16379' — whitespace-collapsed canonicalization + ≥16-hex id scheme.
+    """Name canonicalization: 'port  16379' (doubled whitespace) collapses to
+    'port 16379' — whitespace/punctuation normalization is an extractor
+    concern and is unchanged by #3590 S1.
+
+    S1 re-derivation: the Object's identity is now the ONE entity key
+    (``_entity_key``), not mining's private ``obj_<hash16>`` derivation — so
+    the graph half pins what S1 actually guarantees: a second mention of the
+    same (already-canonical) name RESOLVES to the one existing Object node
+    instead of minting a carrier. The old graph assertion
+    (``count(o {id: base_id}) >= 1`` after an explicit ``_object_id`` id) was
+    already vacuous — the base node alone satisfied it — and pinned an id
+    scheme no node uses any more. S2's resolve-or-mint resolver takes over
+    this path and re-derives the expectation from the resolved id.
     """
     from tortoise.extractor import _canonical_name
-    from tortoise.mining import ConversationMiner
+    from tortoise.projection.entities import _entity_key
 
     assert _canonical_name("port  16379") == _canonical_name("port 16379") == "port 16379"
-    assert ConversationMiner._object_id("port  16379") == \
-        ConversationMiner._object_id("port 16379")
-    oid = ConversationMiner._object_id("port 16379")
-    assert oid.startswith("obj_") and len(oid) - len("obj_") >= 16, oid
 
-    # graph-level: a variant-mention reification resolves to the same Object
-    # node as the base mention (identical deterministic id, MERGE-by-name)
+    # graph-level: mining reifies under the ONE entity key, and a second
+    # mention resolves to the SAME node (no carrier).
     api, proj = _proj_api()
     try:
         mine_conversation(TRANSCRIPT, "s1", api, entity_stage=entity_stage_fixture())
         g = proj.g
+        base_id = _entity_key("Object", "port 16379")
         rows = g.query("MATCH (o:Object {name:'port 16379'}) RETURN o.id").result_set
         assert rows, "base Object missing"
-        base_id = rows[0][0]
-        # reify the doubled-whitespace variant with the same canonical id
+        assert rows[0][0] == base_id, (
+            f"mining must key on the ONE entity key: {rows[0][0]} != {base_id}")
+        # a re-mention with no explicit id resolves, it does not mint
         api2 = EventAPI(api.log, initiated_by="extractor", agent_id="test",
                         projection=proj)
-        api2.add_object("port  16379", "other", id=ConversationMiner._object_id("port  16379"),
-                        canonical_name=_canonical_name("port  16379"), title="port  16379")
-        rows = g.query("MATCH (o:Object {id:$id}) RETURN count(o)",
-                       params={"id": base_id}).result_set
-        assert rows[0][0] >= 1, "variant did not resolve to the same Object"
+        api2.add_object("port 16379", "other",
+                        canonical_name=_canonical_name("port  16379"),
+                        title="port  16379")
+        rows = g.query("MATCH (o:Object {name:$n}) RETURN o.id",
+                       params={"n": "port 16379"}).result_set
+        assert len(rows) == 1 and rows[0][0] == base_id, (
+            f"the re-mention minted a carrier instead of resolving: {rows}")
     finally:
         proj.close()
     print("PASS test_de2e1_canonical_whitespace_collapse")

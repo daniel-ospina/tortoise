@@ -4116,13 +4116,18 @@ class TortoiseSDK:
                 pid = resolved
                 if dedup == DEDUP_NEW:
                     canonical_by_hash[_content_hash(content)] = pid
+                    from tortoise.projection.entities import _resolve_name
                     for name in (pt.get("about_entities") or []):
                         if isinstance(name, str) and name.strip():
-                            proj.g.query(
-                                "MATCH (p:Point {id:$pid}), "
-                                "(o:Object {name:$n}) "
-                                "MERGE (p)-[:aboutObject]->(o)",
-                                params={"pid": pid, "n": name.strip()})
+                            # #3590 S1 step 6: resolve the name to the single
+                            # live Object id instead of a name-keyed MATCH.
+                            _obj_id = _resolve_name(proj.g, "Object", name.strip())
+                            if _obj_id:
+                                proj.g.query(
+                                    "MATCH (p:Point {id:$pid}), "
+                                    "(o:Object {id:$oid}) "
+                                    "MERGE (p)-[:aboutObject]->(o)",
+                                    params={"pid": pid, "oid": _obj_id})
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
@@ -7842,17 +7847,18 @@ class TortoiseSDK:
                 if isinstance(item.get(key), str) and item[key] in refs:
                     item[key] = refs[item[key]]
             if etype == "subject":
-                existed = proj.g.query(
-                    "MATCH (n:Subject {name:$name}) RETURN n.id",
-                    params={"name": name},
-                ).result_set
+                # #3590 S1 step 6: the dedup probe is a name→id resolution
+                # through the ONE live-holder predicate (a terminal holder is
+                # not an "existed" hit) rather than a bare name MATCH.
+                from tortoise.projection.entities import _resolve_name
+                _existing = _resolve_name(proj.g, "Subject", name)
+                existed = [_existing] if _existing else []
                 node = self.create_subject(name, **item)
                 canonical = node.get("id") or name
             elif etype == "object":
-                existed = proj.g.query(
-                    "MATCH (n:Object {name:$name}) RETURN n.id",
-                    params={"name": name},
-                ).result_set
+                from tortoise.projection.entities import _resolve_name
+                _existing = _resolve_name(proj.g, "Object", name)
+                existed = [_existing] if _existing else []
                 node = self.create_object(name, **item)
                 canonical = node.get("id") or name
             elif etype == "event":
@@ -16998,20 +17004,23 @@ class TortoiseSDK:
                                 "event_id", "ts", "initiated_by",
                                 "projection_version")},
             )
-        # #452: Subject/Object MERGE by name (content-hash dedup).
-        # When the name already exists, the fresh id_val never lands on the
-        # node (ON CREATE never fires).  Re-fetch the canonical id from the
-        # graph so callers get a usable return value — matching create_point
-        # dedup behavior which returns the existing point id.
+        # #3590 S1 step 3b (the "ninth-cycle seed"): the name-keyed
+        # canonical-id re-fetch that used to live here is DELETED.
+        #
+        # It was `MATCH (n:{label} {name:$name}) RETURN n.id` over a bare
+        # name pattern with NO status filter, taking `result_set[0][0]` — an
+        # ARBITRARY ROW once two carriers can share a name. Under the
+        # id-keyed MERGE the fresh id always lands (no ON MATCH id write), so
+        # the re-fetch's premise ("MERGE by name -> a fresh id never lands")
+        # is dead, and the only correct return is the canonical id this write
+        # used. Both final reviewers independently flagged this block as the
+        # piece that would re-open the whole #3573 burial class (it can hand
+        # back a `status='retracted'` tombstone and wire authoredBy/ownedBy/
+        # managedBy onto the dead node), and its f-string label hid it from
+        # every literal-grep sweep. `_get_entity` resolves `id` through
+        # `_resolve_entity`'s indexed branches, so the return contract is
+        # unchanged.
         canonical_id = id_val
-        if label in ("Subject", "Object") and "name" in event:
-            name = event["name"]
-            r = proj.g.query(
-                f"MATCH (n:{label} {{name: $name}}) RETURN n.id",
-                params={"name": name},
-            )
-            if r.result_set and r.result_set[0]:
-                canonical_id = r.result_set[0][0]
         # Wire edges after entity exists in graph (use canonical id)
         if props.get("authoredBy"):
             proj.create_authored_by(canonical_id, props["authoredBy"])
@@ -19453,9 +19462,16 @@ class TortoiseSDK:
                     issue_number = None
                     url = None
                 if not oid:
-                    # Deterministic hash (builtin hash() is salted per-process →
-                    # would create duplicate Objects on every run).
-                    oid = f"{key.rstrip('s')}_{hashlib.sha256(name.encode()).hexdigest()[:8]}"
+                    # #3590 S1: resolve the name to its live holder, else key
+                    # through the ONE entity key helper — not a name-derived
+                    # `issue_<sha8>` — so this channel lands on the same node
+                    # `create_object(name)` does (key parity, P1-B) instead of
+                    # shadowing it. The derivation is deleted in S2, when the
+                    # resolver owns the mint. (builtin hash() was salted
+                    # per-process -> duplicate Objects on every run; that
+                    # reason still holds.)
+                    from tortoise.projection.entities import _resolve_or_key
+                    oid = _resolve_or_key(proj.g, "Object", name)
                 okind = "pr" if key == "prs" else "issue"
                 proj.g.query(
                     "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
