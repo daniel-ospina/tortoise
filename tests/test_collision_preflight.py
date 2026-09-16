@@ -17,6 +17,10 @@ Coverage:
     CLEAN; a body closing reference (`Closes #N`) is still a strong hit
   * PR lists are completeness-checked: a list longer than its cap is reported
     TRUNCATED and the run is INCOMPLETE (exit 2), never CLEAN
+  * the closed-PR surface is fetched over the REST API (`gh api --paginate`),
+    not the `gh pr list` GraphQL path that resets on this host (#3587). A
+    non-zero exit or a truncated stream is INCOMPLETE — partial output is never
+    salvaged into a short-but-clean list — and a complete enumeration is CLEAN
   * keyword hits match name-like fields only (`.worktrees/` structural token
     in a title does not collide)
   * an unqueryable surface (gh / git / keyword source) -> INCOMPLETE, exit 2,
@@ -50,12 +54,28 @@ for a in "$@"; do
   prev="$a"
 done
 case "$1 $2" in
-  "pr list")   f="$d/${state:-open}_prs.json" ;;
+  "pr list")
+    # #3587: the `gh pr list` GraphQL path for CLOSED PRs resets on this host
+    # ("read: connection reset by peer") while the REST endpoint works. The
+    # tool must use REST for the closed surface; if it ever regresses to the
+    # GraphQL path, fail loudly exactly as production does.
+    if [ "${state:-open}" = "closed" ] && [ "${GH_STUB_CLOSED_PR_LIST_FAILS:-1}" != "0" ]; then
+      echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
+      exit 1
+    fi
+    f="$d/${state:-open}_prs.json" ;;
+  "api --paginate") f="$d/closed_prs.json"; printf '%s\n' "$@" > "$d/api-argv.txt" ;;
   "issue view") f="$d/issue.json" ;;
   *) echo "gh-stub: unexpected argv: $*" >&2; exit 64 ;;
 esac
 if [ ! -f "$f" ]; then echo "gh-stub: no fixture: $f" >&2; exit 1; fi
 cat "$f"
+# Mid-enumeration transport failure: pages were already printed, the exit is
+# non-zero. Partial output must never be salvaged into a "complete" list.
+if [ "$1 $2" = "api --paginate" ] && [ "${GH_STUB_API_FAIL_AFTER_OUTPUT:-0}" = "1" ]; then
+  echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
+  exit 1
+fi
 """
 
 GIT_STUB = r"""#!/usr/bin/env bash
@@ -545,6 +565,111 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("VERDICT: CLEAN", out)
         self.assertIn("1 PR(s) enumerated (complete, cap 5)", out)
 
+    # ── closed-PR REST transport (#3587) ────────────────────────────────────
+
+    def test_closed_pr_surface_uses_rest_not_the_resetting_graphql_path(self):
+        # REGRESSION GUARD (#3587). The stub reproduces production exactly: the
+        # `gh pr list` GraphQL path FAILS for closed PRs while the REST
+        # endpoint serves them. A closed-PR hit must still be found over REST
+        # and the surface must be complete — not INCOMPLETE. Before the fix
+        # (GraphQL transport) this run was exit 2 with no hit found.
+        self.gh_fixtures(closed_prs=[{
+            "number": 9998, "title": "time-dependent ranking",
+            "body": "", "headRefName": "fix/3061-fts-determinism",
+        }])
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("matched issue-number (3061) in branch", out)
+        self.assertNotIn("INCOMPLETE", out)
+        self.assertIn("1 PR(s) enumerated (complete, cap 5000)", out)
+
+    def test_closed_pr_rest_complete_enumeration_is_clean(self):
+        # The gate becoming SATISFIABLE again: a non-empty, fully enumerated
+        # closed-PR list with no hit is CLEAN (exit 0), not INCOMPLETE.
+        self.gh_fixtures(closed_prs=[
+            {"number": 3, "title": "a", "body": "", "headRefName": "chore/a"},
+            {"number": 4, "title": "b", "body": "", "headRefName": "chore/b"},
+        ])
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("INCOMPLETE", out)
+        self.assertIn("2 PR(s) enumerated (complete, cap 5000)", out)
+
+    def test_closed_pr_rest_partial_output_on_failure_is_not_salvaged(self):
+        # A mid-enumeration transport failure prints the pages already fetched
+        # and exits non-zero. Salvaging them would be a SILENT SHORT
+        # ENUMERATION — the fail-open class this tool exists to prevent. The
+        # planted hit IS in the printed rows; the surface must still read
+        # INCOMPLETE and record NO hit from that partial data.
+        self.gh_fixtures(closed_prs=[{
+            "number": 9998, "title": "fix: 3061 planted",
+            "body": "", "headRefName": "fix/3061-planted",
+        }])
+        rc, out = self.run_tool(env_extra={"GH_STUB_API_FAIL_AFTER_OUTPUT": "1"})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("connection reset by peer", out)
+        # The positive claim: the printed rows were NOT scanned into hits.
+        self.assertNotIn("[recently-closed PRs] PR", out)
+
+    def test_closed_pr_rest_empty_output_is_incomplete_not_clean(self):
+        # rc 0 + EMPTY stdout is not an empty closed-PR list: a wrapper/proxy
+        # that swallows the body would otherwise read as
+        # "0 PR(s) enumerated (complete)" -> CLEAN, a fail-open on the gate's
+        # primary contract. A genuinely exhausted list still emits one `[]`.
+        (self.gh_dir / "closed_prs.json").write_text("")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("empty stream", out)
+
+    def test_closed_pr_rest_truncated_stream_is_incomplete(self):
+        # A truncated JSON stream (partial write) is not a short-but-valid
+        # list. It must raise -> INCOMPLETE, never be parsed as "fewer PRs".
+        (self.gh_dir / "closed_prs.json").write_text(
+            '[{"number": 1, "title": "a", "body": "", "headRefName": "chore/a"},'
+            '{"number": 2, "title": "b"'
+        )
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("[recently-closed PRs]", out)
+        self.assertIn("truncated/malformed JSON stream", out)
+
+    def test_closed_pr_rest_multi_page_stream_is_fully_scanned(self):
+        # `--paginate` emits ONE JSON ARRAY PER PAGE. A decoder that stopped at
+        # the first value would short-enumerate silently; the hit below lives on
+        # the SECOND page, so only a parser that accumulates every page in the
+        # stream can find it and report the full count.
+        (self.gh_dir / "closed_prs.json").write_text(
+            '[{"number": 1, "title": "a", "body": "", "headRefName": "chore/a"}]\n'
+            '[{"number": 9998, "title": "b", "body": "", "headRefName": "fix/3061-page2"}]'
+        )
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("matched issue-number (3061) in branch", out)
+        self.assertIn("2 PR(s) enumerated (complete, cap 5000)", out)
+
+    def test_closed_pr_rest_requests_the_projected_fields(self):
+        # The REST response nests the branch under `head.ref` while the scanner
+        # reads `headRefName`; the re-keying lives ONLY in the `--jq` filter.
+        # The stub cannot run jq, so assert the filter actually asks for it —
+        # otherwise a typo would silently disable ALL closed-PR branch matching
+        # while every other test stayed green.
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        argv = (self.gh_dir / "api-argv.txt").read_text()
+        self.assertIn("state=closed", argv)
+        self.assertIn("--paginate", argv)
+        self.assertIn("headRefName: .head.ref", argv)
+
     # ── partial-run prevention ──────────────────────────────────────────────
 
     def test_every_surface_is_always_evaluated(self):
@@ -558,6 +683,44 @@ class CollisionPreflightTest(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+
+    def test_usage_error_on_bad_closed_pr_timeout(self):
+        proc = subprocess.run(
+            [PYTHON, str(TOOL), str(ISSUE), "--repo", str(self.repo),
+             "--closed-pr-timeout", "0"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+        self.assertIn("--closed-pr-timeout must be > 0", proc.stderr)
+
+    def test_usage_error_on_non_finite_closed_pr_timeout(self):
+        # `nan` / `inf` defeat a bare positivity check (`nan <= 0` and
+        # `inf <= 0` are BOTH False) and then raise inside
+        # subprocess.run(timeout=…) — an uncaught ValueError/OverflowError, so
+        # the run ends exit 1 (the COLLISION code) with a traceback and no
+        # VERDICT at all. They must be EXIT_USAGE.
+        # `--closed-pr-timeout -inf` (space-separated) is rejected by argparse
+        # itself as an option-like token, so the `=` form is used to reach the
+        # validator under test.
+        for bad in ("nan", "inf", "-inf", "abc", "60s"):
+            with self.subTest(bad=bad):
+                rc, out = self.run_tool(extra_args=[f"--closed-pr-timeout={bad}"])
+                self.assertEqual(rc, 3, f"{bad}: {out}")
+                self.assertIn("--closed-pr-timeout", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_usage_error_on_bad_closed_pr_timeout_env(self):
+        # The env seam is a documented input too. The old eager
+        # `float(os.environ[...])` ran at add_argument time, so a typo'd or
+        # empty variable raised an uncaught ValueError -> exit 1 + traceback,
+        # i.e. a misconfiguration reported as a phantom COLLISION.
+        for bad in ("abc", "nan", "inf", "0", ""):
+            with self.subTest(bad=bad):
+                rc, out = self.run_tool(
+                    env_extra={"COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT": bad})
+                self.assertEqual(rc, 3, f"{bad}: {out}")
+                self.assertIn("--closed-pr-timeout", out)
+                self.assertNotIn("Traceback", out)
 
 
 if __name__ == "__main__":
