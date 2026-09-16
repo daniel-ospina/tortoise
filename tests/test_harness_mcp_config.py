@@ -241,9 +241,15 @@ class TestCommittedRepoMcpJson:
     documented `tortoise serve --http --auth tenant`.
 
     Covers all five fields of the entry: `url`, `type`, `headers`, the absence
-    of a stdio `env`/`command`/`args`, and no literal credential anywhere in the
-    file -- the Tortoise token families in the raw text, and every `env`/
-    `headers` value of every server required to be a `${VAR}` expression.
+    of a stdio `env`/`command`/`args`, and no literal credential in the file.
+    "No literal credential" is scoped deliberately: every `env` and `headers`
+    value of EVERY server must be structurally env-indirect (those are the
+    values a client actually sends), and every token family this repo mints is
+    forbidden anywhere in the file -- including prose, since a key pasted into
+    a `_comment` is the same leak. A third-party secret pasted into PROSE (a
+    `_comment`) is out of scope: distinguishing a secret from ordinary prose
+    needs a heuristic that hyphenated keys defeat, so that check would be
+    theatre.
     Reads the file on disk (the committed blob in any clean checkout /
     CI). This class pins what the repo SHIPS, so it is deliberately not
     override-aware: a self-hoster who follows the entry's `_comment` and points
@@ -254,10 +260,34 @@ class TestCommittedRepoMcpJson:
     """
 
     COMMITTED = REPO_ROOT / ".mcp.json"
+    # Scheme words that may precede a ${...} expression in a header value.
+    GLUE = ("", "Bearer ", "Token ", "Basic ", "ApiKey ")
+
+    @staticmethod
+    def _strip_env_spans(value: str) -> str:
+        """`value` with every ${...} span removed -- what is left is literal."""
+        return re.sub(r"\$\{[^}]*\}", "", value)
+
+    def _parse_strict(self, text: str) -> dict:
+        """Parse the way the CLIENT does.
+
+        `JSON.parse` rejects the non-standard `NaN`/`Infinity` tokens that
+        Python's `json` accepts, and the pi client treats a read failure as
+        "skipping MCP" -- i.e. every server, `tortoise` included, silently
+        stops working. Same failure class as #3601, so the guard has to see it.
+        """
+
+        def _reject(token: str):
+            raise AssertionError(
+                f"committed .mcp.json contains the non-JSON token {token!r} -- "
+                f"JSON.parse rejects it, so the client skips the whole file"
+            )
+
+        return json.loads(text, parse_constant=_reject)
 
     def _servers(self) -> dict:
         assert self.COMMITTED.is_file(), f"committed {self.COMMITTED} is missing"
-        cfg = json.loads(self.COMMITTED.read_text(encoding="utf-8"))
+        cfg = self._parse_strict(self.COMMITTED.read_text(encoding="utf-8"))
         servers = cfg.get("mcpServers")
         assert isinstance(servers, dict), (
             f"committed .mcp.json has no mcpServers object (got {type(servers).__name__})"
@@ -337,55 +367,47 @@ class TestCommittedRepoMcpJson:
     def test_no_literal_api_key_in_committed_config(self):
         # This file ships to users -- a literal credential leaks one.
         text = self.COMMITTED.read_text(encoding="utf-8")
-        # (a) Tortoise token families anywhere in the raw text: a key pasted
-        # into a `_comment` is the same leak. The prefixes are the
-        # MCP-bearer-accepted minting sources (tortoise/mcp_auth.py accepts
-        # API_KEY_PREFIXES or `oat_`), so a family minted there is covered
-        # without editing this test. Families that are not bearer-reachable
-        # (the client id/secret `ct_`/`cs_` minted inline in tortoise/oauth.py)
-        # are deliberately not listed -- (b) still catches them in a value.
+        # (a) Every token family this repo MINTS, anywhere in the raw text: a
+        # key pasted into a `_comment` is the same leak. `tt_`/`tk_` come from
+        # tortoise/auth.py, `oat_`/`ort_` from tortoise/oauth.py, and `ct_`/
+        # `cs_` are minted inline there too (client id / client secret).
         #
         # Anchored to a token START -- which is how every consumer checks these
         # prefixes (str.startswith, never a substring search) -- so ordinary
         # prose cannot red the guard: "support_ticket" and "float_value"
         # contain "ort_"/"oat_" mid-word and are not tokens.
-        prefixes = "|".join(
-            re.escape(p)
-            for p in (*API_KEY_PREFIXES, ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX)
-        )
+        families = (*API_KEY_PREFIXES, ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX, "ct_", "cs_")
+        prefixes = "|".join(re.escape(p) for p in families)
         leak = re.search(rf"(?<![A-Za-z0-9_])(?:{prefixes})", text)
         assert leak is None, (
             f"literal key material in committed .mcp.json (found "
             f"{leak.group(0)!r}) -- keys must stay env-indirect"
         )
-        # (b) Every `env` and `headers` VALUE of EVERY server must be an env
-        # expression. This is the file's shape (all credentials are `${VAR}`),
-        # and it is where the likeliest real leak lands: the sibling servers
-        # invite a literal swap while debugging. It reads PARSED values, so a
-        # JSON-escaped literal the raw-text scan cannot see is still caught,
-        # and any token family is caught.
+        # (b) Every `env` and `headers` VALUE of EVERY server must be
+        # STRUCTURALLY indirect. Substring checks are not enough: a value like
+        # `Bearer ${KEY}sk-live-...` contains `${` yet ships a literal, so the
+        # test is what remains after every `${...}` span is removed. Reads
+        # PARSED values, so a JSON-escaped literal the raw-text scan cannot see
+        # is caught too, and any token family is caught.
         for server, entry in self._servers().items():
+            if not isinstance(entry, dict):
+                continue
             for section in ("env", "headers"):
-                if not isinstance(entry, dict):
-                    continue
-                for key, value in (entry.get(section) or {}).items():
+                values = entry.get(section)
+                assert values is None or isinstance(values, dict), (
+                    f"committed .mcp.json {server}.{section} must be an object "
+                    f"-- got {type(values).__name__}"
+                )
+                for key, value in (values or {}).items():
                     if not isinstance(value, str) or not value:
                         continue
-                    assert "${" in value, (
-                        f"committed .mcp.json {server}.{section}.{key} is a "
-                        f"literal ({value!r}) -- a user-shipped config must "
-                        f"reference credentials as a ${{VAR}} expression, "
-                        f"never inline"
-                    )
-        # (c) Supplement: a literal Bearer smuggled into a header value that
-        # otherwise contains a `${VAR}` (which (b) alone would pass) still
-        # fails -- every `Bearer ` must introduce the expression.
-        headers = self._tortoise().get("headers")
-        if isinstance(headers, dict):
-            for name, value in headers.items():
-                if isinstance(value, str) and "Bearer " in value:
-                    assert value.count("Bearer ") == value.count("Bearer ${"), (
-                        f"committed .mcp.json header {name!r} carries a literal "
-                        f"Bearer token -- every `Bearer ` in a user-shipped "
-                        f"config must be followed by a ${{VAR}} expression"
+                    if section == "env":
+                        direct = re.fullmatch(r"\$\{[^}]+\}", value) is not None
+                    else:
+                        direct = self._strip_env_spans(value) in self.GLUE
+                    assert direct, (
+                        f"committed .mcp.json {server}.{section}.{key} is not "
+                        f"env-indirect ({value!r}) -- a user-shipped value must "
+                        f"be a ${{VAR}} expression, with at most a scheme word "
+                        f"around it"
                     )
