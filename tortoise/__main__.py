@@ -2987,13 +2987,16 @@ def _cmd_sessions_import(args) -> int:
     re-POST without a local receipt converges server-side (same session_id ⇒
     zero new nodes). pi parses its own record shape (#3667 — it no longer
     aliases the codex parser, which returned 0 turns for real Pi sessions).
+    The parsed conversation is windowed to the hosted 1000-turn limit (the
+    SAME bound the live Pi capture extension applies) keeping the most recent
+    turns, with the truncation reported — never a silent drop.
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    from tortoise.session_import import parse_transcript
+    from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
 
     file_path = Path(args.file)
     if not file_path.exists():
@@ -3011,6 +3014,20 @@ def _cmd_sessions_import(args) -> int:
     if not turns:
         print("No conversation turns parsed from session file.", file=_sys.stderr)
         return 1
+
+    # Hosted SessionRequest.conversation is max_length=1000; the live capture
+    # extension caps at the same bound, so this backfill leg must too — an
+    # over-long file would 422 the POST and write no receipt. Keep the MOST
+    # RECENT turns and REPORT the truncation (never a silent drop).
+    parsed_total = len(turns)
+    turns, dropped_turns = window_turns(turns)
+    if dropped_turns:
+        print(
+            f"Session has {parsed_total} turns; truncating to the most recent "
+            f"{MAX_TURNS} ({dropped_turns} older turns dropped — hosted "
+            f"conversation limit).",
+            file=_sys.stderr,
+        )
 
     raw = file_path.read_bytes()
     session_id = args.session_id or (

@@ -44,6 +44,14 @@ export const MAX_TURNS = 1000;
 export const TURN_MAX_CHARS = 5000;
 /** Bounded network budget — Pi must never be blocked by a capture. */
 export const REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * Install-probe budget — MUCH shorter than the capture's, because Pi AWAITS
+ * `session_start` (`AgentSession.bindExtensions` → `await emit("session_start")`),
+ * so a probe that hangs stalls startup. An endpoint that BLACKHOLES (SYN
+ * dropped by a firewall / VPN / captive portal — not refused) would otherwise
+ * burn the full capture budget on every start. Best-effort telemetry only.
+ */
+export const PROBE_TIMEOUT_MS = 2_000;
 
 export interface CaptureConfig {
   apiUrl: string;
@@ -73,6 +81,13 @@ export type FetchLike = (
  * Resolve apiUrl/apiKey: env first, then `~/.pi/agent/tortoise-config.json`.
  * The Pi install already exports both into the launching shell, so the happy
  * path needs no config file at all.
+ *
+ * CO-SOURCE (#2369 D1.1, mirrored from `tortoise/__main__.py::_resolve_config_path`):
+ * one identity = one source chain. When the KEY came from the env, the env
+ * `TORTOISE_API_URL` may apply (default when unset). When the key came from
+ * the FILE, its URL resolves from the SAME file or the built-in default ONLY —
+ * a poisoned env must never redirect a stored `tt_…` credential (and every
+ * captured conversation with it) to an attacker host.
  */
 export function resolveConfig(
   env: Env = typeof process === "undefined" ? {} : process.env,
@@ -85,9 +100,16 @@ export function resolveConfig(
   } catch {
     // absent / unreadable config — env vars or defaults apply
   }
-  const key = env.TORTOISE_API_KEY || (file.apiKey as string) || "";
-  const url = env.TORTOISE_API_URL || (file.apiUrl as string) || DEFAULT_API_URL;
-  return { apiKey: String(key).trim(), apiUrl: String(url).replace(/\/+$/, "") };
+  // Empty/whitespace env keys are treated as unset (the CLI's strip rule) so a
+  // blank env key can never shadow a stored one or join a split-brain chain.
+  const envKey = String(env.TORTOISE_API_KEY ?? "").trim();
+  const fileKey = typeof file.apiKey === "string" ? file.apiKey.trim() : "";
+  const fileUrl = typeof file.apiUrl === "string" ? file.apiUrl : "";
+
+  const apiKey = envKey || fileKey;
+  // ENV key → env URL chain; FILE key → file URL chain (never env).
+  const apiUrl = (envKey ? env.TORTOISE_API_URL : fileUrl) || DEFAULT_API_URL;
+  return { apiKey, apiUrl: String(apiUrl).replace(/\/+$/, "") };
 }
 
 /**
@@ -193,10 +215,11 @@ async function post(
   path: string,
   body: Record<string, unknown>,
   fetchImpl: FetchLike,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
 ): Promise<PostResult> {
   if (!cfg.apiKey) return { ok: false, detail: "no TORTOISE_API_KEY configured" };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetchImpl(`${cfg.apiUrl}${path}`, {
       method: "POST",
@@ -218,7 +241,7 @@ async function post(
     return { ok: false, status: res.status, detail };
   } catch (err) {
     const reason = err instanceof Error && err.name === "AbortError"
-      ? `timed out after ${REQUEST_TIMEOUT_MS / 1000}s`
+      ? `timed out after ${timeoutMs / 1000}s`
       : err instanceof Error
         ? err.message
         : String(err);
@@ -228,12 +251,16 @@ async function post(
   }
 }
 
-/** Install-probe beacon — harness + timestamp ONLY, zero conversation content. */
+/**
+ * Install-probe beacon — harness + timestamp ONLY, zero conversation content.
+ * Budgeted at PROBE_TIMEOUT_MS: it is best-effort install telemetry, and Pi
+ * awaits `session_start`, so it must never hold up startup.
+ */
 export function postInstallProbe(
   cfg: CaptureConfig,
   fetchImpl: FetchLike = fetch as unknown as FetchLike,
 ): Promise<PostResult> {
-  return post(cfg, "/v1/sessions/install-probe", { harness: HARNESS }, fetchImpl);
+  return post(cfg, "/v1/sessions/install-probe", { harness: HARNESS }, fetchImpl, PROBE_TIMEOUT_MS);
 }
 
 /** File one session — the server upserts on `session_id`. */
@@ -274,15 +301,25 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
   // #1727 T2-P1: the SERVER-VISIBLE install signal — the extension-on-load
   // probe the server's install-probe route documents. Fired per session start
   // (startup/reload/new/resume/fork), matching Claude's SessionStart hook.
-  pi.on("session_start", async () => {
-    const res = await postInstallProbe(cfg, doFetch);
-    if (res.ok) {
-      log(`install probe recorded (harness=${HARNESS})`);
-    } else if (res.detail === "no TORTOISE_API_KEY configured") {
-      // Already warned at load; the probe is best-effort install telemetry.
-    } else {
-      warn(`install probe failed (${res.detail ?? res.status}) — capture status may stay "not installed yet"`);
-    }
+  //
+  // FIRE-AND-FORGET: Pi AWAITS this handler (AgentSession.bindExtensions →
+  // `await emit("session_start")`), so awaiting the probe would stall startup
+  // on a blackholed endpoint. The probe is best-effort telemetry — it is
+  // dispatched with a short budget and its result is reported when it lands.
+  pi.on("session_start", () => {
+    void postInstallProbe(cfg, doFetch)
+      .then((res) => {
+        if (res.ok) {
+          log(`install probe recorded (harness=${HARNESS})`);
+        } else if (res.detail === "no TORTOISE_API_KEY configured") {
+          // Already warned at load; the probe is best-effort install telemetry.
+        } else {
+          warn(`install probe failed (${res.detail ?? res.status}) — capture status may stay "not installed yet"`);
+        }
+      })
+      .catch((err) => {
+        warn(`install probe error: ${err instanceof Error ? err.message : String(err)}`);
+      });
   });
 
   // File the session when it ENDS. A reload keeps the SAME session alive

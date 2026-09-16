@@ -13,6 +13,8 @@ non-message noise skipping (tool calls, system prompts never become turns).
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -181,3 +183,114 @@ def test_codex_parser_broken_lines_skipped(tmp_path):
 def test_codex_parser_missing_file_raises(tmp_path):
     with pytest.raises(ValueError, match="cannot read"):
         parse_codex(tmp_path / "nope.jsonl")
+
+
+# ── #3575 P2: the backfill leg must apply the SAME 1000-turn window the live
+# Pi capture extension applies (SessionRequest.conversation max_length=1000).
+# An over-long file would POST >1000 turns → HTTP 422 → NO receipt, and the
+# longest sessions would silently never be imported (measured: 21/369 real
+# local Pi sessions exceed the bound, max 2555).
+
+
+def _pi_turns_file(tmp_path, n: int):
+    lines = []
+    for i in range(n):
+        role = "user" if i % 2 == 0 else "assistant"
+        lines.append(json.dumps({
+            "type": "message",
+            "message": {"role": role, "content": f"turn {i}"},
+        }))
+    p = tmp_path / f"pi-{n}-turns.jsonl"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def test_sessions_import_windows_to_last_1000_turns(tmp_path, monkeypatch, capsys):
+    """A >1000-turn session POSTs the LAST 1000 turns — the payload passes
+    the real SessionRequest boundary (no 422) and the truncation is reported."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.hosted_api import SessionRequest
+    from tortoise.session_import import MAX_TURNS
+
+    assert MAX_TURNS == 1000, "the window must mirror the hosted max_length"
+
+    p = _pi_turns_file(tmp_path, 1005)
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    captured: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"session_id": "s-1"}'
+
+    def _fake_urlopen(req, timeout=None):
+        captured["conversation"] = json.loads(req.data.decode())["conversation"]
+        return _Resp()
+
+    args = SimpleNamespace(file=str(p), harness="pi", session_id=None)
+    with mock.patch("urllib.request.urlopen", _fake_urlopen):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 0
+    conv = captured["conversation"]
+    assert len(conv) == MAX_TURNS
+    # the LAST turns win — recent context is what memory wants
+    assert conv[0]["content"] == "turn 5"
+    assert conv[-1]["content"] == "turn 1004"
+    # the payload passes the REAL hosted boundary (pre-fix: 422, no receipt)
+    SessionRequest(conversation=conv)
+    # ...and the receipt is written for what was actually sent
+    receipts = list((tmp_path / "receipts").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["turns"] == MAX_TURNS
+    # never a silent drop
+    err = capsys.readouterr().err.lower()
+    assert "truncat" in err and "5 older turns dropped" in err
+
+
+def test_sessions_import_window_is_a_noop_at_or_below_the_limit(tmp_path, monkeypatch, capsys):
+    """A session of exactly MAX_TURNS is sent whole and reports no truncation."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.session_import import MAX_TURNS
+
+    p = _pi_turns_file(tmp_path, MAX_TURNS)
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    captured: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"session_id": "s-2"}'
+
+    def _fake_urlopen(req, timeout=None):
+        captured["conversation"] = json.loads(req.data.decode())["conversation"]
+        return _Resp()
+
+    args = SimpleNamespace(file=str(p), harness="pi", session_id=None)
+    with mock.patch("urllib.request.urlopen", _fake_urlopen):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 0
+    assert len(captured["conversation"]) == MAX_TURNS
+    assert captured["conversation"][0]["content"] == "turn 0"
+    assert "truncat" not in capsys.readouterr().err.lower()

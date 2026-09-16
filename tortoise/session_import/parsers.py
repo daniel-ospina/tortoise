@@ -41,6 +41,26 @@ _logger = logging.getLogger("tortoise.session_import")
 # …) is context noise for the capture surface — skipped, never coerced.
 _KEEP_ROLES = {"user", "assistant"}
 
+# Hosted POST /v1/sessions contract: ``SessionRequest.conversation`` is
+# ``max_length=1000`` (tortoise/hosted_api.py). The live Pi capture extension
+# caps at the same bound (``MAX_TURNS`` in tortoise/pi-hooks/tortoise-capture.ts);
+# the backfill leg must agree or the two legs of the same seam diverge — a
+# >1000-turn file 422s the POST and writes NO receipt. Measured on the real
+# local Pi corpus: 21/369 files (>5%) exceed 1000 turns (max 2555).
+MAX_TURNS = 1000
+
+
+def window_turns(turns: list[dict]) -> tuple[list[dict], int]:
+    """Cap a parsed conversation at the hosted 1000-turn limit.
+
+    Keeps the **LAST** ``MAX_TURNS`` turns — recent context is what memory
+    wants — and returns ``(windowed, dropped)`` so the caller can report the
+    truncation instead of losing turns silently.
+    """
+    if len(turns) <= MAX_TURNS:
+        return turns, 0
+    return turns[-MAX_TURNS:], len(turns) - MAX_TURNS
+
 
 def _text_from_parts(parts) -> str:
     """Flatten an LLM content array (codex input_text/output_text, Claude
