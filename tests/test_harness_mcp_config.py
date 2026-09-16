@@ -241,8 +241,10 @@ class TestCommittedRepoMcpJson:
     documented `tortoise serve --http --auth tenant`.
 
     Covers all five fields of the entry: `url`, `type`, `headers`, the absence
-    of a stdio `env`/`command`/`args`, and no literal token anywhere in the
-    file. Reads the file on disk (the committed blob in any clean checkout /
+    of a stdio `env`/`command`/`args`, and no literal credential anywhere in the
+    file -- the Tortoise token families in the raw text, and every `env`/
+    `headers` value of every server required to be a `${VAR}` expression.
+    Reads the file on disk (the committed blob in any clean checkout /
     CI). This class pins what the repo SHIPS, so it is deliberately not
     override-aware: a self-hoster who follows the entry's `_comment` and points
     `url` at their own daemon WILL see `test_tortoise_entry_targets_hosted_endpoint`
@@ -253,13 +255,17 @@ class TestCommittedRepoMcpJson:
 
     COMMITTED = REPO_ROOT / ".mcp.json"
 
-    def _tortoise(self) -> dict:
+    def _servers(self) -> dict:
         assert self.COMMITTED.is_file(), f"committed {self.COMMITTED} is missing"
         cfg = json.loads(self.COMMITTED.read_text(encoding="utf-8"))
         servers = cfg.get("mcpServers")
         assert isinstance(servers, dict), (
             f"committed .mcp.json has no mcpServers object (got {type(servers).__name__})"
         )
+        return servers
+
+    def _tortoise(self) -> dict:
+        servers = self._servers()
         server = servers.get("tortoise")
         assert isinstance(server, dict), (
             f"committed .mcp.json has no 'tortoise' entry (have {sorted(servers)}); "
@@ -276,12 +282,11 @@ class TestCommittedRepoMcpJson:
         )
 
     def test_tortoise_entry_keeps_http_type(self):
-        # This root file also serves Claude Code, which SKIPS a url entry with
-        # no `type` (see module docstring); pi ignores `type` and picks the
+        # This root file also serves Claude Code, whose schema treats `type` as
+        # load-bearing for a url entry; pi ignores `type` and picks the
         # transport from url-vs-command. Pinned because the sibling doc
         # docs/quickstart-cloud.md:47 names a DIFFERENT value (streamable-http)
-        # for the same object -- drifting this field silently disables the
-        # server for Claude Code with no other test failing.
+        # for the same object, and nothing else pins this field.
         assert self._tortoise().get("type") == "http", (
             f"committed .mcp.json tortoise entry must keep type='http' -- got "
             f"{self._tortoise().get('type')!r}"
@@ -330,14 +335,15 @@ class TestCommittedRepoMcpJson:
             )
 
     def test_no_literal_api_key_in_committed_config(self):
-        # This file ships to users -- a literal token leaks a credential.
+        # This file ships to users -- a literal credential leaks one.
         text = self.COMMITTED.read_text(encoding="utf-8")
-        # (a) Prefix scan over the whole file: a token pasted into a `_comment`
-        # is the same leak. The prefixes are the MCP-bearer-accepted minting
-        # sources (tortoise/mcp_auth.py accepts API_KEY_PREFIXES or `oat_`), so
-        # a family minted there is covered without editing this test. Families
-        # that are not bearer-reachable (the client id/secret `ct_`/`cs_` minted
-        # inline in tortoise/oauth.py) are deliberately not listed.
+        # (a) Tortoise token families anywhere in the raw text: a key pasted
+        # into a `_comment` is the same leak. The prefixes are the
+        # MCP-bearer-accepted minting sources (tortoise/mcp_auth.py accepts
+        # API_KEY_PREFIXES or `oat_`), so a family minted there is covered
+        # without editing this test. Families that are not bearer-reachable
+        # (the client id/secret `ct_`/`cs_` minted inline in tortoise/oauth.py)
+        # are deliberately not listed -- (b) still catches them in a value.
         #
         # Anchored to a token START -- which is how every consumer checks these
         # prefixes (str.startswith, never a substring search) -- so ordinary
@@ -352,11 +358,28 @@ class TestCommittedRepoMcpJson:
             f"literal key material in committed .mcp.json (found "
             f"{leak.group(0)!r}) -- keys must stay env-indirect"
         )
-        # (b) Structural backstop over the PARSED HEADER VALUES, not the raw
-        # text: the Authorization header is where a credential would actually
-        # be presented, and prose in a `_comment` that merely says "Bearer "
-        # must not trip the guard. Catches any token family, including one this
-        # test has never heard of.
+        # (b) Every `env` and `headers` VALUE of EVERY server must be an env
+        # expression. This is the file's shape (all credentials are `${VAR}`),
+        # and it is where the likeliest real leak lands: the sibling servers
+        # invite a literal swap while debugging. It reads PARSED values, so a
+        # JSON-escaped literal the raw-text scan cannot see is still caught,
+        # and any token family is caught.
+        for server, entry in self._servers().items():
+            for section in ("env", "headers"):
+                if not isinstance(entry, dict):
+                    continue
+                for key, value in (entry.get(section) or {}).items():
+                    if not isinstance(value, str) or not value:
+                        continue
+                    assert "${" in value, (
+                        f"committed .mcp.json {server}.{section}.{key} is a "
+                        f"literal ({value!r}) -- a user-shipped config must "
+                        f"reference credentials as a ${{VAR}} expression, "
+                        f"never inline"
+                    )
+        # (c) Supplement: a literal Bearer smuggled into a header value that
+        # otherwise contains a `${VAR}` (which (b) alone would pass) still
+        # fails -- every `Bearer ` must introduce the expression.
         headers = self._tortoise().get("headers")
         if isinstance(headers, dict):
             for name, value in headers.items():
