@@ -572,9 +572,18 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     """#2514: every completed run carries the planted-operator (layer-2)
     audit — the corpus-wide mechanical grade of whether the extractor wired
     the RIGHT operator edge between the anchored claims. On the deterministic
-    m2 echo lane the numbers are structural (no relation extraction ⇒ 0/4
-    edges, 3/4 endpoint-anchor pairs content-present), recorded as an
-    additive audit dimension + note + receipt field — never a gated metric."""
+    m2 echo lane the operator EDGES do not match the planted semantics (the
+    M2 MockModel relation stage is a cue-word heuristic, not the product
+    extractor) — 0/4 edges, 4/4 endpoint-anchor pairs content-present —
+    recorded as an additive audit dimension + note + receipt field, never a
+    gated metric.
+
+    #2552 (layer-2 WIRE): the m2 lane DOES commit operators; the structural
+    fix makes them retrievable — every committed operator node carries the
+    sessionCaptured eventId and enters the eventId-keyed memory layer
+    (``operators_provenanced == operators_total``). The pre-fix signature was
+    ``operators_total == 0`` on the retrievable surface with a silently empty
+    ``operator_counts``."""
     root = _tmp_corpus(tmp_path)
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
@@ -583,10 +592,14 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     audit = report["operator_audit"]
     assert audit is not None
     assert audit["planted"] == 4  # wp06 (1) + wp07 (3) seeded operator edges
-    assert audit["edge_correct"] == 0  # structural: the echo lane writes no operators
+    assert audit["edge_correct"] == 0  # m2 cue-word relations ≠ planted semantics
     assert 1 <= audit["content_ok"] <= audit["planted"]
+    # #2552: the committed operator topology entered the retrievable layer.
+    assert audit["operators_total"] > 0
+    assert audit["operators_provenanced"] == audit["operators_total"]
     notes = "\n".join(report.get("notes", []))
     assert "operator-edge audit (#2514)" in notes
+    assert "operator persistence (#2552)" in notes
     # Per-session detail rides the owning session's result (the cross-session
     # SUPERSEDE is owned by wp07; its to-anchor lives in wp06's memory layer).
     owned_by = {
@@ -602,3 +615,5 @@ def test_run_carries_operator_edge_audit_dimension(tmp_path, monkeypatch):
     assert runner.validate_receipt(receipt) == []
     assert receipt["operator_audit"]["planted"] == 4
     assert receipt["operator_audit"]["edge_correct"] == 0
+    assert (receipt["operator_audit"]["operators_provenanced"]
+            == receipt["operator_audit"]["operators_total"] > 0)

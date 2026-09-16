@@ -87,7 +87,7 @@ def _mock_bootstrap_200(route, url: str, json_mod, team: dict | None = None) -> 
     shell loads instead of 401-ing into the generic error card. Returns True
     if the request was handled. ``json_mod`` is the caller's json module
     (each handle imports its own); ``team`` overrides the /v1/team payload.
-    #1828: the shell pins ?team_id= on these reads — match query-tolerant."""
+    #1828: the shell pins ?org_id= on these reads — match query-tolerant."""
     path = url.split("?", 1)[0]
     if path.endswith("/v1/team/keys"):
         route.fulfill(status=200, content_type="application/json", body="[]")
@@ -100,7 +100,7 @@ def _mock_bootstrap_200(route, url: str, json_mod, team: dict | None = None) -> 
                       body=json_mod.dumps({"backups": []}))
         return True
     if path.endswith("/v1/team"):
-        t = team or {"team_id": "team_m429", "name": "M429", "tier": "free", "anon": False}
+        t = team or {"org_id": "team_m429", "name": "M429", "tier": "free", "anon": False}
         route.fulfill(status=200, content_type="application/json",
                       body=json_mod.dumps(t))
         return True
@@ -238,9 +238,9 @@ def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> 
                 route.fulfill(status=500, content_type="application/json",
                               body=_json.dumps({"detail": "#2167 zero-mint tripwire"}))
                 return
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=_json.dumps([{"team_id": "team_m429", "name": "M429"}]))
+                              body=_json.dumps([{"org_id": "team_m429", "name": "M429"}]))
                 return
             if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
@@ -253,7 +253,7 @@ def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> 
                 return
             # session-only render mocks (query-tolerant, #1828)
             if _mock_bootstrap_200(route, url, _json,
-                                   team={"team_id": "team_m429", "team_name": "M429",
+                                   team={"org_id": "team_m429", "org_name": "M429",
                                          "tier": "free", "anon": False, "graph_ready": True,
                                          "point_count": 0}):
                 return
@@ -304,7 +304,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 # First-timer: no teams → the app provisions.
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
@@ -312,7 +312,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                 # #1885: the shell calls this FIRST (re-fired per #1847) — a
                 # 401 catch-all shows the generic error card before the flow.
                 # #2356 (review): query-strip — the post-provision re-fire
-                # pins ?team_id= once a team exists (#1828), mirroring the
+                # pins ?org_id= once a team exists (#1828), mirroring the
                 # returning-visit branch below.
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"onboarding": {}}))
@@ -325,7 +325,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                 # page on the fork step). 200 no-op is the keyed-MERGE replay
                 # shape (handleWizardFork never reads the body); the payload
                 # is captured below so the set-once fork write is pinned.
-                # Query-strip (the shell pins ?team_id= once a team exists —
+                # Query-strip (the shell pins ?org_id= once a team exists —
                 # #1828) like the onboarding-state branches.
                 fork_payloads.append(json.loads(route.request.post_data or "{}"))
                 route.fulfill(status=200, content_type="application/json",
@@ -338,19 +338,19 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                                                "keys_tier": 0, "banner": {"show": False}}))
                 return
             if _mock_bootstrap_200(route, url, json,
-                                   team={"team_id": "team_w", "team_name": "Welcome Team",
+                                   team={"org_id": "team_w", "org_name": "Welcome Team",
                                          "tier": "free", "anon": False}):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if "functions/v1/tenant-provision" in url and route.request.method == "POST":
             route.fulfill(status=201, content_type="application/json",
-                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                          body=json.dumps({"org_id": "team_w", "org_name": "Welcome Team",
                                            "api_key": "tt_welcome_key_1234567890abcdef"}))
             return
-        if "team_memberships" in url and route.request.method == "GET":
+        if "org_memberships" in url and route.request.method == "GET":
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                          body=json.dumps({"org_id": "team_w", "org_name": "Welcome Team",
                                            "graph_name": "team_w", "status": "active"}))
             return
         if "rpc/reveal_api_key" in url and route.request.method == "POST":
@@ -372,7 +372,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     _goto_local_dashboard(page)
     # #2323 (Option B): teamless first-timer → welcome card (orientation
     # removed per epic #2534), no key anywhere yet.
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
     expect(page.locator("body")).not_to_contain_text("tt_welcome_key_1234567890abcdef")
     # Orientation removed — directly on org-create step (was Step 1).
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
@@ -393,7 +393,8 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # exactly one reveal, and the connect step renders welcomeKey with no
     # further reveal (ADR-010 single-consumption). If a future delivery
     # change makes the 201 body primary, this pin fails loudly.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    # #3218: the self-fork option is first-person now ('For my internal setup').
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=15_000)
     assert reveal_calls["n"] == 1, \
@@ -423,18 +424,18 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
             route.fulfill(status=500, content_type="application/json",
                           body=json.dumps({"detail": "#2167 zero-mint tripwire"}))
             return
-        if url.endswith("/v1/teams"):
+        if url.endswith("/v1/organizations"):
             # #1885: returning visit — the team EXISTS now; the shared handle
             # mocks teams→[] (first-timer), which would re-trigger provisioning.
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps([{"team_id": "team_w", "team_name": "Welcome Team",
+                          body=json.dumps([{"org_id": "team_w", "org_name": "Welcome Team",
                                             "tier": "free"}]))
             return
         _path_ret = url.split("?", 1)[0]
         if _path_ret.endswith("/v1/onboarding/state") and route.request.method == "GET":
             # #1885: returning visit — onboarding is COMPLETE (the shared handle
             # returns an empty onboarding dict → the setup wizard re-appears).
-            # Query-strip: the post-#1828 shell pins ?team_id= on this read.
+            # Query-strip: the post-#1828 shell pins ?org_id= on this read.
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"onboarding": {"onboarding_complete": True}}))
             return
@@ -490,7 +491,7 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
                 else:
                     route.fulfill(status=200, content_type="application/json", body="{}")
                 return
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             if url.endswith("/v1/user/identity") and route.request.method == "GET":
@@ -499,19 +500,19 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
                                                "keys_tier": 0, "banner": {"show": False}}))
                 return
             if _mock_bootstrap_200(route, url, json,
-                                   team={"team_id": "team_w", "team_name": "Welcome Team",
+                                   team={"org_id": "team_w", "org_name": "Welcome Team",
                                          "tier": "free", "anon": False}):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if "functions/v1/tenant-provision" in url and route.request.method == "POST":
             route.fulfill(status=201, content_type="application/json",
-                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                          body=json.dumps({"org_id": "team_w", "org_name": "Welcome Team",
                                            "api_key": "tt_welcome_key_1234567890abcdef"}))
             return
-        if "team_memberships" in url and route.request.method == "GET":
+        if "org_memberships" in url and route.request.method == "GET":
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                          body=json.dumps({"org_id": "team_w", "org_name": "Welcome Team",
                                            "graph_name": "team_w", "status": "active"}))
             return
         if "rpc/reveal_api_key" in url and route.request.method == "POST":
@@ -530,7 +531,7 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
 
     page.route("**/*", handle)
     _goto_local_dashboard(page)
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
     # #2744/#2534: the orientation step was removed — the first-timer welcome
     # card renders the org-create form DIRECTLY (no `Continue →`; the stale
     # click timed out and stranded these specs).
@@ -540,12 +541,12 @@ def test_welcome_mode_fork_503_stays_and_recovers(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=20_000)
     # 503 on the fork checkpoint: STAY on the fork step, surface the inline
     # error, recover the buttons — no advance, no strand.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("The graph is temporarily unavailable — try again in a moment.", timeout=10_000)
     expect(page.locator("body")).not_to_contain_text("Connect your agent")
-    expect(page.get_by_role("button", name="Use it for your own agents")).to_be_enabled(timeout=5_000)
+    expect(page.get_by_role("button", name="For my internal setup")).to_be_enabled(timeout=5_000)
     # Retry against the 2xx: the fork persists and the wizard advances.
-    page.get_by_role("button", name="Use it for your own agents").click()
+    page.get_by_role("button", name="For my internal setup").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=15_000)
     assert checkpoint_calls["n"] == 2, f"exactly one 503 + one 2xx checkpoint write, got {checkpoint_calls['n']}"
 
@@ -566,7 +567,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
@@ -590,7 +591,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
     # #2323: provisioning fires on the org-create SUBMIT (mount no longer
     # provisions) — the 500 surfaces the inline step-1 error; the busy flags
     # reset so the submit button recovers and a retry is possible.
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
     # #2744/#2534: no orientation step — org-create renders directly.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
@@ -618,7 +619,7 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
                 return
             if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
@@ -646,7 +647,7 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     _goto_local_dashboard(page)
     # #2323: the stale-session 401 now surfaces on the org-create SUBMIT
     # (mount no longer provisions). Drive to it, then expect the /auth bounce.
-    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=20_000)
     # #2744/#2534: no orientation step — org-create renders directly.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_label("Organization name").fill("acme")
@@ -685,12 +686,12 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if "api.premiselabs.co" in url:
-            # #1828: loadAll pins ?team_id= on overview reads — match on the
-            # query-stripped path so /v1/team/keys?team_id=… still resolves.
+            # #1828: loadAll pins ?org_id= on overview reads — match on the
+            # query-stripped path so /v1/team/keys?org_id=… still resolves.
             path = urllib.parse.urlsplit(url).path
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([{"team_id": "team_frag", "name": "Frag Team"}]))
+                              body=json.dumps([{"org_id": "team_frag", "name": "Frag Team"}]))
                 return
             if path.endswith("/v1/session/key"):
                 # #2167: a fragment-auth first landing never mints (no stored
@@ -700,7 +701,7 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_frag", "name": "Frag Team", "tier": "free"}))
+                              body=json.dumps({"org_id": "team_frag", "name": "Frag Team", "tier": "free"}))
                 return
             if path.endswith("/v1/team/keys"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"keys": []}))
@@ -738,7 +739,7 @@ def _mock_session_shell(route, url: str, json_mod, mint_calls: list | None = Non
     identity inventory, keys/sessions/backups (query-tolerant #1828) — 200
     empty so the chrome renders on the session JWT alone. POST /v1/session/key
     is a loud-500 + counter zero-mint tripwire. Returns True if handled (the
-    caller's /v1/teams + /v1/team branches run first)."""
+    caller's /v1/organizations + /v1/team branches run first)."""
     path = url.split("?", 1)[0]
     if path.endswith("/v1/session/key"):
         if mint_calls is not None:
@@ -788,9 +789,9 @@ def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
         url = route.request.url
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([{"team_id": "team_ok", "name": "OK", "tier": "free"}]))
+                              body=json.dumps([{"org_id": "team_ok", "name": "OK", "tier": "free"}]))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 # #2246: NO key-lane probe exists — every /v1/team read is
@@ -799,7 +800,7 @@ def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
                 if auth.startswith("Bearer tt_"):
                     key_authed.append(url)
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_ok", "team_name": "OK",
+                              body=json.dumps({"org_id": "team_ok", "org_name": "OK",
                                                "tier": "free", "anon": False, "graph_ready": True,
                                                "point_count": 1}))
                 return
@@ -832,7 +833,7 @@ def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
 
 def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> None:
     """#2167 rule 9 + F8 (the ACTUAL fresh-login suspension mechanism): an
-    ALL-suspended membership set makes the server 403 the /v1/teams LIST
+    ALL-suspended membership set makes the server 403 the /v1/organizations LIST
     with the _suspended_detail() dict (list_my_teams — hosted_api.py).
     #2246: the mount NEVER probes stored keys — the session-mount residue
     purge runs at session resolution (before the teams fetch), so even a
@@ -857,7 +858,7 @@ def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> 
             path = url.split("?", 1)[0]
             if (route.request.headers.get("authorization") or "").startswith("Bearer tt_"):
                 key_authed.append(url)
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 # the REAL contract: every membership suspended → 403 dict
                 route.fulfill(status=403, content_type="application/json",
                               body=json.dumps({"detail": {"code": "SUSPENDED",
@@ -892,7 +893,7 @@ def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> 
 
 def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
     """#2167 rule 9 + F8 (fresh login, NO stored key): an ALL-suspended
-    membership set 403s the /v1/teams LIST with the _suspended_detail() dict
+    membership set 403s the /v1/organizations LIST with the _suspended_detail() dict
     (list_my_teams) — the session-authed teams fetch IS the fresh-login
     suspension vector post-mint-removal. The catch parses the dict → the
     appeal banner renders. (Distinct from the stored-durable test above.)"""
@@ -909,7 +910,7 @@ def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
         url = route.request.url
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 # the REAL contract: every membership suspended → 403 dict
                 route.fulfill(status=403, content_type="application/json",
                               body=json.dumps({"detail": {"code": "SUSPENDED",
@@ -956,18 +957,18 @@ def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> 
         url = route.request.url
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 # suspended FIRST membership + healthy second (#1912)
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([
-                                  {"team_id": "team_sus", "name": "Suspended Co",
+                                  {"org_id": "team_sus", "name": "Suspended Co",
                                    "tier": "free", "suspended_at": "2026-09-01T00:00:00Z"},
-                                  {"team_id": "team_ok", "name": "Healthy Co", "tier": "free"},
+                                  {"org_id": "team_ok", "name": "Healthy Co", "tier": "free"},
                               ]))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-                tid = (qs.get("team_id") or [""] )[0]
+                tid = (qs.get("org_id") or [""] )[0]
                 if tid == "team_sus":
                     route.fulfill(status=403, content_type="application/json",
                                   body=json.dumps({"detail": {"code": "SUSPENDED",
@@ -975,7 +976,7 @@ def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> 
                                                                 "appeal_url": "https://premise-labs.dev/appeal"}}))
                     return
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": tid or "team_ok", "team_name": "Healthy Co",
+                              body=json.dumps({"org_id": tid or "team_ok", "org_name": "Healthy Co",
                                                "tier": "free", "anon": False, "graph_ready": True,
                                                "point_count": 1}))
                 return
@@ -1028,17 +1029,17 @@ def test_stored_residue_on_suspended_team_lands_healthy_alternate(page: Page) ->
             path = url.split("?", 1)[0]
             if (route.request.headers.get("authorization") or "").startswith("Bearer tt_"):
                 key_authed.append(url)
-            if path.endswith("/v1/teams"):
+            if path.endswith("/v1/organizations"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([
-                                  {"team_id": "team_sus", "name": "Suspended Co",
+                                  {"org_id": "team_sus", "name": "Suspended Co",
                                    "suspended_at": "2026-09-01T00:00:00Z"},
-                                  {"team_id": "team_ok", "name": "Healthy Co", "tier": "free"},
+                                  {"org_id": "team_ok", "name": "Healthy Co", "tier": "free"},
                               ]))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-                tid = (qs.get("team_id") or ["team_ok"])[0]
+                tid = (qs.get("org_id") or ["team_ok"])[0]
                 if tid == "team_sus":
                     route.fulfill(status=403, content_type="application/json",
                                   body=json.dumps({"detail": {"code": "SUSPENDED",
@@ -1046,7 +1047,7 @@ def test_stored_residue_on_suspended_team_lands_healthy_alternate(page: Page) ->
                                                                 "appeal_url": "https://premise-labs.dev/appeal"}}))
                     return
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": tid or "team_ok", "team_name": "Healthy Co",
+                              body=json.dumps({"org_id": tid or "team_ok", "org_name": "Healthy Co",
                                                "tier": "free", "anon": False, "graph_ready": True,
                                                "point_count": 1}))
                 return

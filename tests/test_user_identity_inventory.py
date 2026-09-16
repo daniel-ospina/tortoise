@@ -147,9 +147,9 @@ def test_keys_tier_excludes_agent_principals_via_api(client, monkeypatch, fake):
                         "email_confirmed_at": "2026-08-01T00:00:00Z",
                         "encrypted_password": None}]
     fake.seed("api_keys", [
-        {"id": "k1", "team_id": "t1", "created_by": "u-keys", "revoked_at": None, "enabled": True},
-        {"id": "k2", "team_id": "t2", "created_by": "st_agent", "revoked_at": None, "enabled": True},
-        {"id": "k3", "team_id": "t3", "created_by": "anon-x", "revoked_at": None, "enabled": True},
+        {"id": "k1", "org_id": "t1", "created_by": "u-keys", "revoked_at": None, "enabled": True},
+        {"id": "k2", "org_id": "t2", "created_by": "st_agent", "revoked_at": None, "enabled": True},
+        {"id": "k3", "org_id": "t3", "created_by": "anon-x", "revoked_at": None, "enabled": True},
     ])
     r = client.get("/v1/user/identity")
     assert r.json()["keys_tier"] == 1  # only the user-minted key

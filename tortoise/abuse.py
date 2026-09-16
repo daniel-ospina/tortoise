@@ -2,15 +2,15 @@
 
 Durable substrate (migration 0015): ``abuse_events`` rows + ``teams.
 suspended_at``/``flagged_at`` + ``api_keys`` INSERT trigger (the only seam
-that sees BOTH dashboard mints and the signup ``provision_team`` RPC).
+that sees BOTH dashboard mints and the signup ``provision_org`` RPC).
 
 Rules (env-overridable thresholds):
 - R1  point_create: SUM(weight) > 500 / 1h   -> stage-1 flag, stage-2 suspend
 - R2  key_create:   count    > 10  / 24h     -> stage-1 flag, stage-2 suspend
-- R3  reads:        > 100 / 5min per-key OR per-team -> notify Owner only
-- R4  geo:          first unseen CF-IPCountry per team -> notify Owner
+- R3  reads:        > 100 / 5min per-key OR per-org -> notify Owner only
+- R4  geo:          first unseen CF-IPCountry per org -> notify Owner
 - R8 signup_velocity: N anon signups/IP/window (breach >= threshold) ->
-                     notify ops only (BILLING_NOTIFY_TO; never suspends)
+                     notify ops only (Telegram; never suspends)
 
 Two-stage staging with EPISODE semantics (scoping delta 13 + code-review
 fixes): flags are PER-RULE (flag event rows carry the rule). Stage 2
@@ -80,7 +80,7 @@ def appeal_url() -> str:
 
 def suspended_message() -> str:
     return (
-        "This team has been suspended due to unusual activity. "
+        "This organization has been suspended due to unusual activity. "
         f"Appeal: {appeal_url()}"
     )
 
@@ -90,20 +90,20 @@ _SUSPENDED_SIGNAL: set[str] = set()
 _SIGNAL_LOCK = threading.Lock()
 
 
-def mark_suspended(team_id: str) -> None:
-    if team_id:
+def mark_suspended(org_id: str) -> None:
+    if org_id:
         with _SIGNAL_LOCK:
-            _SUSPENDED_SIGNAL.add(team_id)
+            _SUSPENDED_SIGNAL.add(org_id)
 
 
-def clear_suspended(team_id: str) -> None:
+def clear_suspended(org_id: str) -> None:
     with _SIGNAL_LOCK:
-        _SUSPENDED_SIGNAL.discard(team_id)
+        _SUSPENDED_SIGNAL.discard(org_id)
 
 
-def is_suspended_signal(team_id: str) -> bool:
+def is_suspended_signal(org_id: str) -> bool:
     with _SIGNAL_LOCK:
-        return team_id in _SUSPENDED_SIGNAL
+        return org_id in _SUSPENDED_SIGNAL
 
 
 def _utcnow(now: datetime | None = None) -> datetime:
@@ -130,10 +130,10 @@ def _parse_ts(value) -> datetime | None:
     return _ensure_aware(parsed)
 
 
-def _team_email(store, team_id: str) -> str | None:
+def _org_email(store, org_id: str) -> str | None:
     """Best-effort owner email so R3/R4 notify the OWNER, not just ops."""
     try:
-        return store.team_email(team_id) if team_id else None
+        return store.org_email(org_id) if org_id else None
     except Exception:
         return None
 
@@ -144,8 +144,8 @@ class MemoryAbuseStore:
     """In-memory store: registry/selfhost mode + tests.
 
     Optional ``registry_write`` callback makes enforcement durable in
-    selfhost: ``registry_write(team_id, suspended_at, flagged_at)`` writes
-    the Team node props (scoping delta 4). Deploy-reset semantics apply to
+    selfhost: ``registry_write(org_id, suspended_at, flagged_at)`` writes
+    the Org node props (scoping delta 4). Deploy-reset semantics apply to
     the in-memory rows themselves (documented degradation).
     """
 
@@ -153,52 +153,52 @@ class MemoryAbuseStore:
         self.rows: list[dict] = []
         self.flags: dict[str, datetime] = {}
         self.suspended: dict[str, datetime] = {}
-        self.team_emails: dict[str, str | None] = {}
+        self.org_emails: dict[str, str | None] = {}
         self._registry_write = registry_write
         self._lock = threading.Lock()
 
-    def _append(self, team_id: str, event_type: str, *, weight: int = 1,
+    def _append(self, org_id: str, event_type: str, *, weight: int = 1,
                 key_id: str | None = None, country: str | None = None,
                 rule: str | None = None, details: dict | None = None,
                 created_at: datetime | None = None) -> None:
         with self._lock:
             self.rows.append({
-                "team_id": team_id, "event_type": event_type,
+                "org_id": org_id, "event_type": event_type,
                 "weight": int(weight), "key_id": key_id, "country": country,
                 "rule": rule, "details": details or {},
                 "created_at": _ensure_aware(_utcnow(created_at)),
             })
 
-    def record_event(self, team_id: str, event_type: str, *, weight: int = 1,
+    def record_event(self, org_id: str, event_type: str, *, weight: int = 1,
                      key_id: str | None = None, country: str | None = None,
                      rule: str | None = None, details: dict | None = None,
                      created_at: datetime | None = None) -> None:
-        self._append(team_id, event_type, weight=weight, key_id=key_id,
+        self._append(org_id, event_type, weight=weight, key_id=key_id,
                      country=country, rule=rule, details=details,
                      created_at=created_at)
 
-    def window_sum(self, team_id: str, event_type: str, window_s: int,
+    def window_sum(self, org_id: str, event_type: str, window_s: int,
                    now: datetime | None = None) -> int:
         now = _ensure_aware(_utcnow(now))
         cutoff = now - timedelta(seconds=window_s)
         with self._lock:
             return sum(
                 int(r.get("weight") or 1) for r in self.rows
-                if r["team_id"] == team_id and r["event_type"] == event_type
+                if r["org_id"] == org_id and r["event_type"] == event_type
                 and r["created_at"] > cutoff
             )
 
-    def latest_flag_at(self, team_id: str, rule: str) -> datetime | None:
+    def latest_flag_at(self, org_id: str, rule: str) -> datetime | None:
         """ACTIVE per-rule flag-episode anchor: the newest flag row, or None
         when a flag_clear (clean evaluation or un-suspend) ended the
         episode after it."""
         with self._lock:
             flags = [r["created_at"] for r in self.rows
-                     if r["team_id"] == team_id
+                     if r["org_id"] == org_id
                      and r["event_type"] == EVENT_FLAG
                      and r.get("rule") == rule]
             clears = [r["created_at"] for r in self.rows
-                      if r["team_id"] == team_id
+                      if r["org_id"] == org_id
                       and r["event_type"] == EVENT_FLAG_CLEAR
                       and r.get("rule") == rule]
         if not flags:
@@ -208,95 +208,95 @@ class MemoryAbuseStore:
             return None  # episode ended
         return newest_flag
 
-    def flag_clear(self, team_id: str, rule: str,
+    def flag_clear(self, org_id: str, rule: str,
                    now: datetime | None = None) -> None:
         """End a flag episode (clean evaluation or recovery)."""
         now = _ensure_aware(_utcnow(now))
-        self._append(team_id, EVENT_FLAG_CLEAR, rule=rule, created_at=now)
-        # teams.flagged_at is the team-level chip: clear only when NO rule
+        self._append(org_id, EVENT_FLAG_CLEAR, rule=rule, created_at=now)
+        # teams.flagged_at is the org-level chip: clear only when NO rule
         # still has an active episode.
         other_active = any(
-            self.latest_flag_at(team_id, r) is not None
+            self.latest_flag_at(org_id, r) is not None
             for r in (EVENT_POINT_CREATE, EVENT_KEY_CREATE) if r != rule)
         if not other_active:
-            self.flags.pop(team_id, None)
-            self._durable(team_id, "flagged_at", None)
+            self.flags.pop(org_id, None)
+            self._durable(org_id, "flagged_at", None)
 
-    def rule_event_between(self, team_id: str, rule: str, after: datetime,
+    def rule_event_between(self, org_id: str, rule: str, after: datetime,
                           before: datetime) -> bool:
         """Continuity evidence: any rule event in (after, before]."""
         after, before = _ensure_aware(after), _ensure_aware(before)
         with self._lock:
-            return any(r["team_id"] == team_id and r["event_type"] == rule
+            return any(r["org_id"] == org_id and r["event_type"] == rule
                        and after < r["created_at"] <= before
                        for r in self.rows)
 
-    def team_flagged_at(self, team_id: str) -> datetime | None:
-        return self.flags.get(team_id)
+    def org_flagged_at(self, org_id: str) -> datetime | None:
+        return self.flags.get(org_id)
 
-    def flag_team(self, team_id: str, rule: str,
+    def flag_org(self, org_id: str, rule: str,
                   details: dict | None = None,
                   now: datetime | None = None) -> None:
         now = _ensure_aware(_utcnow(now))
-        self.flags[team_id] = now
-        self._append(team_id, EVENT_FLAG, rule=rule, details={
+        self.flags[org_id] = now
+        self._append(org_id, EVENT_FLAG, rule=rule, details={
             **(details or {}), "rule": rule}, created_at=now)
-        self._durable(team_id, "flagged_at", now.isoformat())
+        self._durable(org_id, "flagged_at", now.isoformat())
 
 
 
-    def suspend_team(self, team_id: str, details: dict | None = None,
+    def suspend_org(self, org_id: str, details: dict | None = None,
                      now: datetime | None = None) -> None:
         now = _ensure_aware(_utcnow(now))
-        self.suspended[team_id] = now
-        self._append(team_id, EVENT_SUSPEND,
+        self.suspended[org_id] = now
+        self._append(org_id, EVENT_SUSPEND,
                      rule=(details or {}).get("rule"),
                      details=details or {}, created_at=now)
-        self._durable(team_id, "suspended_at", now.isoformat())
+        self._durable(org_id, "suspended_at", now.isoformat())
 
-    def unsuspend_team(self, team_id: str, now: datetime | None = None) -> None:
+    def unsuspend_org(self, org_id: str, now: datetime | None = None) -> None:
         now = _ensure_aware(_utcnow(now))
-        self.suspended.pop(team_id, None)
-        self.flags.pop(team_id, None)
-        self._append(team_id, EVENT_UNSUSPEND, created_at=now)
-        # end every flag episode — a recovered team starts clean, so its
+        self.suspended.pop(org_id, None)
+        self.flags.pop(org_id, None)
+        self._append(org_id, EVENT_UNSUSPEND, created_at=now)
+        # end every flag episode — a recovered org starts clean, so its
         # first post-recovery burst re-flags instead of auto-suspending
         for rule in (EVENT_POINT_CREATE, EVENT_KEY_CREATE):
-            self._append(team_id, EVENT_FLAG_CLEAR, rule=rule, created_at=now)
-        self._durable(team_id, "suspended_at", None)
-        self._durable(team_id, "flagged_at", None)
+            self._append(org_id, EVENT_FLAG_CLEAR, rule=rule, created_at=now)
+        self._durable(org_id, "suspended_at", None)
+        self._durable(org_id, "flagged_at", None)
 
-    def team_suspended(self, team_id: str) -> bool:
-        return team_id in self.suspended
+    def org_suspended(self, org_id: str) -> bool:
+        return org_id in self.suspended
 
-    def team_email(self, team_id: str) -> str | None:
-        return self.team_emails.get(team_id)
+    def org_email(self, org_id: str) -> str | None:
+        return self.org_emails.get(org_id)
 
-    def seen_countries(self, team_id: str) -> set[str]:
+    def seen_countries(self, org_id: str) -> set[str]:
         with self._lock:
             return {r["country"] for r in self.rows
-                    if r["team_id"] == team_id
+                    if r["org_id"] == org_id
                     and r["event_type"] == EVENT_AUTH_IP and r["country"]}
 
-    def recent_alerts(self, team_id: str, limit: int = 20) -> list[dict]:
+    def recent_alerts(self, org_id: str, limit: int = 20) -> list[dict]:
         with self._lock:
             rows = [r for r in self.rows
-                    if r["team_id"] == team_id
+                    if r["org_id"] == org_id
                     and r["event_type"] in ALERT_TYPES]
         rows.sort(key=lambda r: r["created_at"], reverse=True)
         return [_alert_dict(r) for r in rows[:limit]]
 
-    def _durable(self, team_id: str, field: str, value) -> None:
-        """Field-scoped write-through to the registry Team node when a
+    def _durable(self, org_id: str, field: str, value) -> None:
+        """Field-scoped write-through to the registry Org node when a
         callback is wired (selfhost durability, scoping delta 4). Writing
         ONLY the changed field means a concurrent flag/suspend can never
         clobber the other prop (code-review P2). Best-effort."""
         if self._registry_write is None:
             return
         try:
-            self._registry_write(team_id, field, value)
+            self._registry_write(org_id, field, value)
         except Exception:
-            logger.debug("abuse registry write-through failed for %s", team_id)
+            logger.debug("abuse registry write-through failed for %s", org_id)
 
 
 class SupabaseAbuseStore:
@@ -305,11 +305,11 @@ class SupabaseAbuseStore:
     def __init__(self, cp):
         self._cp = cp
 
-    def record_event(self, team_id: str, event_type: str, *, weight: int = 1,
+    def record_event(self, org_id: str, event_type: str, *, weight: int = 1,
                      key_id: str | None = None, country: str | None = None,
                      rule: str | None = None, details: dict | None = None,
                      created_at: datetime | None = None) -> None:
-        body = {"team_id": team_id, "event_type": event_type,
+        body = {"org_id": org_id, "event_type": event_type,
                 "weight": int(weight)}
         if key_id is not None:
             body["key_id"] = key_id
@@ -321,24 +321,24 @@ class SupabaseAbuseStore:
             body["details"] = details
         self._cp.query("abuse_events", method="POST", json_body=body)
 
-    def window_sum(self, team_id: str, event_type: str, window_s: int,
+    def window_sum(self, org_id: str, event_type: str, window_s: int,
                    now: datetime | None = None) -> int:
         cutoff = (_ensure_aware(_utcnow(now))
                   - timedelta(seconds=window_s)).isoformat()
         rows = self._cp.query(
             "abuse_events", select=["weight"],
-            filters=[("team_id", "eq", team_id),
+            filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", event_type),
                      ("created_at", "gt", cutoff)],
         )
         return sum(int(r.get("weight") or 1) for r in rows)
 
-    def latest_flag_at(self, team_id: str, rule: str) -> datetime | None:
+    def latest_flag_at(self, org_id: str, rule: str) -> datetime | None:
         """ACTIVE per-rule flag-episode anchor (None when a flag_clear ended
         the episode after the newest flag)."""
         rows = self._cp.query(
             "abuse_events", select=["created_at"],
-            filters=[("team_id", "eq", team_id),
+            filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", EVENT_FLAG),
                      ("rule", "eq", rule)],
             order="-created_at", limit=1,
@@ -348,7 +348,7 @@ class SupabaseAbuseStore:
         newest_flag = _parse_ts(rows[0].get("created_at"))
         clears = self._cp.query(
             "abuse_events", select=["created_at"],
-            filters=[("team_id", "eq", team_id),
+            filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", EVENT_FLAG_CLEAR),
                      ("rule", "eq", rule)],
             order="-created_at", limit=1,
@@ -360,22 +360,22 @@ class SupabaseAbuseStore:
                 return None  # episode ended
         return newest_flag
 
-    def flag_clear(self, team_id: str, rule: str,
+    def flag_clear(self, org_id: str, rule: str,
                    now: datetime | None = None) -> None:
-        """End a flag episode; clear the team-level chip only when no other
+        """End a flag episode; clear the org-level chip only when no other
         rule keeps an active episode."""
-        self.record_event(team_id, EVENT_FLAG_CLEAR, rule=rule)
+        self.record_event(org_id, EVENT_FLAG_CLEAR, rule=rule)
         other_active = any(
-            self.latest_flag_at(team_id, r) is not None
+            self.latest_flag_at(org_id, r) is not None
             for r in (EVENT_POINT_CREATE, EVENT_KEY_CREATE) if r != rule)
         if not other_active:
-            self.clear_flag(team_id)
+            self.clear_flag(org_id)
 
-    def rule_event_between(self, team_id: str, rule: str, after: datetime,
+    def rule_event_between(self, org_id: str, rule: str, after: datetime,
                           before: datetime) -> bool:
         rows = self._cp.query(
             "abuse_events", select=["created_at"],
-            filters=[("team_id", "eq", team_id),
+            filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", rule),
                      ("created_at", "gt", _ensure_aware(after).isoformat()),
                      ("created_at", "lte", _ensure_aware(before).isoformat())],
@@ -383,65 +383,65 @@ class SupabaseAbuseStore:
         )
         return bool(rows)
 
-    def _team_field(self, team_id: str, field: str):
-        rows = self._cp.query("teams", select=[field],
-                              filters=[("id", "eq", team_id)])
+    def _org_field(self, org_id: str, field: str):
+        rows = self._cp.query("organizations", select=[field],
+                              filters=[("id", "eq", org_id)])
         return rows[0].get(field) if rows else None
 
-    def team_flagged_at(self, team_id: str) -> datetime | None:
-        return _parse_ts(self._team_field(team_id, "flagged_at"))
+    def org_flagged_at(self, org_id: str) -> datetime | None:
+        return _parse_ts(self._org_field(org_id, "flagged_at"))
 
-    def flag_team(self, team_id: str, rule: str,
+    def flag_org(self, org_id: str, rule: str,
                   details: dict | None = None,
                   now: datetime | None = None) -> None:
         self._cp.query(
-            "teams", method="PATCH", filters=[("id", "eq", team_id)],
+            "organizations", method="PATCH", filters=[("id", "eq", org_id)],
             json_body={"flagged_at": _ensure_aware(_utcnow(now)).isoformat()},
         )
-        self.record_event(team_id, EVENT_FLAG, rule=rule,
+        self.record_event(org_id, EVENT_FLAG, rule=rule,
                           details={**(details or {}), "rule": rule})
 
-    def clear_flag(self, team_id: str) -> None:
-        self._cp.query("teams", method="PATCH",
-                       filters=[("id", "eq", team_id)],
+    def clear_flag(self, org_id: str) -> None:
+        self._cp.query("organizations", method="PATCH",
+                       filters=[("id", "eq", org_id)],
                        json_body={"flagged_at": None})
 
-    def suspend_team(self, team_id: str, details: dict | None = None,
+    def suspend_org(self, org_id: str, details: dict | None = None,
                      now: datetime | None = None) -> None:
         # The RPC sets suspended_at (DB-side now()) AND records the suspend
         # event atomically; ``now`` accepted for store-protocol parity.
-        self._cp.rpc("abuse_suspend", {"p_team_id": team_id})
+        self._cp.rpc("abuse_suspend", {"p_org_id": org_id})
 
-    def unsuspend_team(self, team_id: str, now: datetime | None = None) -> None:
-        self._cp.rpc("abuse_unsuspend", {"p_team_id": team_id})
+    def unsuspend_org(self, org_id: str, now: datetime | None = None) -> None:
+        self._cp.rpc("abuse_unsuspend", {"p_org_id": org_id})
 
-    def team_suspended(self, team_id: str) -> bool:
-        return self._team_field(team_id, "suspended_at") is not None
+    def org_suspended(self, org_id: str) -> bool:
+        return self._org_field(org_id, "suspended_at") is not None
 
-    def team_email(self, team_id: str) -> str | None:
+    def org_email(self, org_id: str) -> str | None:
         # #1765 demotion re-point: prefer the owner's USER email (teams.email
         # is no longer synced by claim), fall back to the contact field.
         from tortoise.supabase_control import owner_email
         try:
-            owner = owner_email(self._cp, team_id)
+            owner = owner_email(self._cp, org_id)
         except Exception:
             owner = None
-        return owner or self._team_field(team_id, "email")
+        return owner or self._org_field(org_id, "email")
 
-    def seen_countries(self, team_id: str) -> set[str]:
+    def seen_countries(self, org_id: str) -> set[str]:
         rows = self._cp.query(
             "abuse_events", select=["country"],
-            filters=[("team_id", "eq", team_id),
+            filters=[("org_id", "eq", org_id),
                      ("event_type", "eq", EVENT_AUTH_IP)],
         )
         return {r["country"] for r in rows if r.get("country")}
 
-    def recent_alerts(self, team_id: str, limit: int = 20) -> list[dict]:
+    def recent_alerts(self, org_id: str, limit: int = 20) -> list[dict]:
         rows = self._cp.query(
             "abuse_events",
             select=["event_type", "created_at", "country", "key_id",
                     "details"],
-            filters=[("team_id", "eq", team_id)],
+            filters=[("org_id", "eq", org_id)],
             order="-created_at", limit=100,
         )
         out = [_alert_dict(r) for r in rows
@@ -454,7 +454,7 @@ def _alert_dict(row: dict) -> dict:
     details = row.get("details") or {}
     messages = {
         EVENT_FLAG: f"Suspicious activity flagged ({details.get('rule', 'rule')})",
-        EVENT_SUSPEND: "Team auto-suspended due to unusual activity",
+        EVENT_SUSPEND: "Organization auto-suspended due to unusual activity",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
         EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",
         EVENT_SIGNUP_VELOCITY: f"Signup velocity breach: {details.get('count', '?')} anon signups from {details.get('ip', '?')}",
@@ -487,58 +487,58 @@ class AbuseEngine:
     def key_window_s(self) -> int:
         return _int_env("TORTOISE_ABUSE_KEY_WINDOW_S", 86400)
 
-    def record_point_create(self, team_id: str, n: int = 1,
+    def record_point_create(self, org_id: str, n: int = 1,
                             now: datetime | None = None) -> str | None:
         """R1 recording + evaluation. Piggybacks R2 evaluation (delta-13 fix:
         trigger-recorded key_create events have no app request of their own —
-        they evaluate on the team's next hooked request)."""
-        if abuse_disabled() or not team_id or n <= 0:
+        they evaluate on the org's next hooked request)."""
+        if abuse_disabled() or not org_id or n <= 0:
             return None
         now = _ensure_aware(_utcnow(now))
         try:
-            self.store.record_event(team_id, EVENT_POINT_CREATE, weight=n,
+            self.store.record_event(org_id, EVENT_POINT_CREATE, weight=n,
                                     created_at=now)
         except Exception:
-            logger.debug("abuse record_point_create failed for %s", team_id)
-        r1 = self._evaluate(team_id, EVENT_POINT_CREATE,
+            logger.debug("abuse record_point_create failed for %s", org_id)
+        r1 = self._evaluate(org_id, EVENT_POINT_CREATE,
                             self.point_threshold(), self.point_window_s(), now)
-        r2 = self._evaluate(team_id, EVENT_KEY_CREATE,
+        r2 = self._evaluate(org_id, EVENT_KEY_CREATE,
                             self.key_threshold(), self.key_window_s(), now)
         return "suspend" if "suspend" in (r1, r2) else (r1 or r2)
 
-    def evaluate_key_creates(self, team_id: str,
+    def evaluate_key_creates(self, org_id: str,
                              now: datetime | None = None) -> str | None:
         """R2 evaluation (key_create events land via the DB trigger)."""
-        if abuse_disabled() or not team_id:
+        if abuse_disabled() or not org_id:
             return None
-        return self._evaluate(team_id, EVENT_KEY_CREATE,
+        return self._evaluate(org_id, EVENT_KEY_CREATE,
                               self.key_threshold(), self.key_window_s(),
                               _ensure_aware(_utcnow(now)))
 
-    def _evaluate(self, team_id: str, rule: str, threshold: int,
+    def _evaluate(self, org_id: str, rule: str, threshold: int,
                   window_s: int, now: datetime) -> str | None:
         try:
-            total = self.store.window_sum(team_id, rule, window_s, now)
+            total = self.store.window_sum(org_id, rule, window_s, now)
         except Exception:
-            logger.debug("abuse window_sum failed for %s/%s", team_id, rule)
+            logger.debug("abuse window_sum failed for %s/%s", org_id, rule)
             return None
         if total <= threshold:
             # Clean window → end any active flag episode for this rule, so a
             # later burst starts fresh (re-flag, never a stale-flag suspend).
             try:
-                if self.store.latest_flag_at(team_id, rule) is not None:
-                    self.store.flag_clear(team_id, rule, now=now)
+                if self.store.latest_flag_at(org_id, rule) is not None:
+                    self.store.flag_clear(org_id, rule, now=now)
             except Exception:
-                logger.debug("abuse flag_clear failed for %s/%s", team_id, rule)
+                logger.debug("abuse flag_clear failed for %s/%s", org_id, rule)
             return None
         details = {"rule": rule, "count": total,
                    "threshold": threshold, "window_s": window_s}
         try:
-            flagged_at = self.store.latest_flag_at(team_id, rule)
+            flagged_at = self.store.latest_flag_at(org_id, rule)
         except Exception:
             flagged_at = None
         if flagged_at is None:
-            return self._flag(team_id, rule, details, now)
+            return self._flag(org_id, rule, details, now)
         flagged_at = _ensure_aware(flagged_at)
         age_s = (now - flagged_at).total_seconds()
         if age_s < window_s:
@@ -549,51 +549,51 @@ class AbuseEngine:
         # re-flag, never suspend (code-review fix; delta-13 guarantee).
         try:
             continuity = self.store.rule_event_between(
-                team_id, rule, flagged_at,
+                org_id, rule, flagged_at,
                 now - timedelta(seconds=window_s))
         except Exception:
             continuity = True  # fail-safe toward the conservative path
         if not continuity:
-            return self._flag(team_id, rule, details, now)
+            return self._flag(org_id, rule, details, now)
         try:
-            self.store.suspend_team(team_id, details, now=now)
+            self.store.suspend_org(org_id, details, now=now)
         except Exception:
-            logger.debug("abuse suspend_team failed for %s", team_id)
+            logger.debug("abuse suspend_team failed for %s", org_id)
             return "breach"
-        mark_suspended(team_id)
-        self._notify("abuse_suspended", team_id, details)
+        mark_suspended(org_id)
+        self._notify("abuse_suspended", org_id, details)
         return "suspend"
 
-    def _flag(self, team_id: str, rule: str, details: dict,
+    def _flag(self, org_id: str, rule: str, details: dict,
               now: datetime) -> str:
         try:
-            self.store.flag_team(team_id, rule, details, now=now)
+            self.store.flag_org(org_id, rule, details, now=now)
         except Exception:
-            logger.debug("abuse flag_team failed for %s", team_id)
-        self._notify("abuse_flag", team_id, details)
+            logger.debug("abuse flag_team failed for %s", org_id)
+        self._notify("abuse_flag", org_id, details)
         return "flag"
 
-    def _notify(self, kind: str, team_id: str, details: dict) -> None:
+    def _notify(self, kind: str, org_id: str, details: dict) -> None:
         try:
             from tortoise.notify import notify_abuse
             notify_abuse(kind,
-                         {"team_id": team_id,
-                          "email": _team_email(self.store, team_id)},
+                         {"org_id": org_id,
+                          "email": _org_email(self.store, org_id)},
                          {**details, "appeal_url": appeal_url()})
         except Exception:
-            logger.debug("abuse notify failed (%s, %s)", kind, team_id)
+            logger.debug("abuse notify failed (%s, %s)", kind, org_id)
 
 
 # ── R3: read-velocity tracker (in-memory, notify-only) ─────────────────────
 
 class ReadVelocityTracker:
-    """>100 reads / 5min per-key OR per-team → notify once per window.
+    """>100 reads / 5min per-key OR per-org → notify once per window.
 
     In-memory by design (the 5-min window bounds deploy-reset damage);
     notify-only per the issue — R3 never suspends. The notification goes to
-    the team OWNER (email resolved via the engine store) with the ops inbox
-    as fallback; a best-effort read_velocity event row surfaces the alert in
-    the dashboard list.
+    the ops Telegram channel (abuse alerts are Telegram-only since #3639, so
+    there is no email recipient to resolve); a best-effort read_velocity event
+    row surfaces the alert in the dashboard list.
     """
 
     def __init__(self, threshold: int | None = None, window_s: int | None = None):
@@ -602,13 +602,13 @@ class ReadVelocityTracker:
         self.window_s = window_s if window_s is not None else _int_env(
             "TORTOISE_ABUSE_READ_WINDOW_S", 300)
         self._by_key: dict[str, list[float]] = defaultdict(list)
-        self._by_team: dict[str, list[float]] = defaultdict(list)
+        self._by_org: dict[str, list[float]] = defaultdict(list)
         self._notified: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
 
-    def record_read(self, key_id: str | None, team_id: str | None,
+    def record_read(self, key_id: str | None, org_id: str | None,
                     now: float | None = None) -> tuple[str, str] | None:
-        """Returns ('key'|'team', id) on breach, else None. Notify dedup is
+        """Returns ('key'|'org', id) on breach, else None. Notify dedup is
         once per window per (scope, id)."""
         if abuse_disabled():
             return None
@@ -622,18 +622,18 @@ class ReadVelocityTracker:
                 kb.append(now)
                 if len(kb) > self.threshold:
                     breach = ("key", key_id)
-            if team_id:
-                tb = self._by_team[team_id]
+            if org_id:
+                tb = self._by_org[org_id]
                 tb[:] = [t for t in tb if t > cutoff]
                 tb.append(now)
                 if breach is None and len(tb) > self.threshold:
-                    breach = ("team", team_id)
+                    breach = ("team", org_id)
             # bound memory growth (mirrors _register_buckets hygiene)
             if len(self._by_key) > 10_000:
                 self._by_key = {k: v for k, v in self._by_key.items()
                                 if any(t > cutoff for t in v)}
-            if len(self._by_team) > 10_000:
-                self._by_team = {k: v for k, v in self._by_team.items()
+            if len(self._by_org) > 10_000:
+                self._by_org = {k: v for k, v in self._by_org.items()
                                  if any(t > cutoff for t in v)}
             # prune the notify-dedup map too (code-review P3)
             self._notified = {k: t for k, t in self._notified.items()
@@ -644,26 +644,26 @@ class ReadVelocityTracker:
                     return None  # already notified this window
                 self._notified[breach] = now
         if breach is not None:
-            self._notify(breach, team_id)
+            self._notify(breach, org_id)
         return breach
 
-    def _notify(self, breach: tuple[str, str], team_id: str | None) -> None:
+    def _notify(self, breach: tuple[str, str], org_id: str | None) -> None:
         scope, ident = breach
         # Dashboard alert row (best-effort; same dedup gate as the notify)
         store = None
         try:
             from tortoise.supabase_control import get_abuse_store
             store = get_abuse_store()
-            if team_id:
-                store.record_event(team_id, EVENT_READ_VELOCITY,
+            if org_id:
+                store.record_event(org_id, EVENT_READ_VELOCITY,
                                    details={"scope": scope, "id": ident})
         except Exception:
             logger.debug("read-velocity event record failed (%s)", breach)
         try:
             from tortoise.notify import notify_abuse
             notify_abuse("abuse_read_velocity",
-                         {"team_id": team_id,
-                          "email": _team_email(store, team_id)},
+                         {"org_id": org_id,
+                          "email": _org_email(store, org_id)},
                          {"scope": scope, "id": ident,
                           "threshold": self.threshold,
                           "window_s": self.window_s,
@@ -675,10 +675,10 @@ class ReadVelocityTracker:
 READ_TRACKER = ReadVelocityTracker()
 
 
-def record_read(key_id: str | None, team_id: str | None,
+def record_read(key_id: str | None, org_id: str | None,
                 now: float | None = None):
     """Module-level seam (monkeypatchable) over the shared tracker."""
-    return READ_TRACKER.record_read(key_id, team_id, now)
+    return READ_TRACKER.record_read(key_id, org_id, now)
 
 
 # ── R8: signup-velocity tracker (in-memory, notify-only) ───────────────────
@@ -686,9 +686,10 @@ def record_read(key_id: str | None, team_id: str | None,
 class SignupVelocityTracker:
     """>N anonymous signups per IP per window → notify ops once per window.
 
-    Anon teams have NULL user_id, so R3/R4 owner-notify resolves nothing —
-    R8 is the OPS-visible farming signal (BILLING_NOTIFY_TO fallback, the
-    documented anon path, notify.py:153). In-memory by design (mirrors
+    Anon orgs have NULL user_id, so R3/R4 owner-notify resolves nothing —
+    R8 is the OPS-visible farming signal (abuse alerts are Telegram-only since
+    #3639, so the anon case needs no recipient resolution at all). In-memory
+    by design (mirrors
     ReadVelocityTracker/R3): R8 NEVER suspends, so deploy-reset damage is
     bounded to a notify. The durable multi-instance sweeper over audit_events
     is a documented follow-on (idx_audit_ip_time ships in #1081; sweeper
@@ -721,9 +722,9 @@ class SignupVelocityTracker:
             self._by_ip.clear()
             self._notified.clear()
 
-    def record_signup(self, ip: str | None, team_id: str | None = None,
+    def record_signup(self, ip: str | None, org_id: str | None = None,
                       now: float | None = None) -> tuple[str, str] | None:
-        """Success-path feed: count minted teams per IP per window.
+        """Success-path feed: count minted orgs per IP per window.
         Returns ('ip', ip) on breach (len >= threshold), else None. Notify
         dedup once per window per IP (bare-ip key, shared with block path)."""
         if abuse_disabled() or not ip:
@@ -752,10 +753,10 @@ class SignupVelocityTracker:
                     return None  # already notified this window
                 self._notified[ip] = now
         if breach is not None:
-            self._notify("velocity", ip, team_id, {"count": len(bucket)})
+            self._notify("velocity", ip, org_id, {"count": len(bucket)})
         return breach
 
-    def record_block(self, ip: str | None, team_id: str | None = None,
+    def record_block(self, ip: str | None, org_id: str | None = None,
                      now: float | None = None) -> None:
         """Block-path feed: the signup limiter 429'd this IP. Same dedup key
         (bare ip) as the success feed — the 429 after a 2-mint allowance is
@@ -770,30 +771,31 @@ class SignupVelocityTracker:
             if last is not None and now - last < self.window_s:
                 return
             self._notified[ip] = now
-        self._notify("blocked", ip, team_id, {})
+        self._notify("blocked", ip, org_id, {})
 
-    def _notify(self, reason: str, ip: str, team_id: str | None,
+    def _notify(self, reason: str, ip: str, org_id: str | None,
                 details: dict) -> None:
         # P4-FIX: payload carries count ALWAYS (block path details={} → count
         # 0 is fine; _alert_dict reads details.get('count')).
         details = dict(details)  # do not mutate caller's dict
         details.setdefault("count", 0)
-        # Dashboard alert row (best-effort; minted team anchors the FK).
+        # Dashboard alert row (best-effort; minted org anchors the FK).
         store = None
         try:
             from tortoise.supabase_control import get_abuse_store
             store = get_abuse_store()
-            if team_id:
+            if org_id:
                 store.record_event(
-                    team_id, EVENT_SIGNUP_VELOCITY,
+                    org_id, EVENT_SIGNUP_VELOCITY,
                     details={"ip": ip, "reason": reason, **details})
         except Exception:
             logger.debug("signup-velocity event record failed (%s)", ip)
         try:
             from tortoise.notify import notify_abuse
-            # anon team → no email → BILLING_NOTIFY_TO ops fallback
+            # org_id is None for anon orgs; the Telegram alert needs no
+            # recipient resolution (#3639 — abuse alerts are Telegram-only)
             notify_abuse("abuse_signup_velocity",
-                         {"team_id": team_id, "email": None},
+                         {"org_id": org_id, "email": None},
                          {"ip": ip, "reason": reason,
                           "count": details.get("count", 0),
                           "threshold": self.threshold,
@@ -806,16 +808,16 @@ class SignupVelocityTracker:
 SIGNUP_TRACKER = SignupVelocityTracker()
 
 
-def record_signup(ip: str | None, team_id: str | None = None,
+def record_signup(ip: str | None, org_id: str | None = None,
                   now: float | None = None) -> tuple[str, str] | None:
     """Module-level seam (monkeypatchable) over the shared tracker."""
-    return SIGNUP_TRACKER.record_signup(ip, team_id, now)
+    return SIGNUP_TRACKER.record_signup(ip, org_id, now)
 
 
-def record_signup_block(ip: str | None, team_id: str | None = None,
+def record_signup_block(ip: str | None, org_id: str | None = None,
                         now: float | None = None) -> None:
     """Module-level seam for the 429 path."""
-    SIGNUP_TRACKER.record_block(ip, team_id, now)
+    SIGNUP_TRACKER.record_block(ip, org_id, now)
 
 
 class RecoveryVelocityTracker:
@@ -848,7 +850,7 @@ class RecoveryVelocityTracker:
             self._by_ip.clear()
             self._notified.clear()
 
-    def record(self, ip: str | None, team_id: str | None = None,
+    def record(self, ip: str | None, org_id: str | None = None,
                now: float | None = None) -> tuple[str, str] | None:
         """Success-path feed: count recovery mints per IP per window.
         Returns ('ip', ip) on breach (len >= threshold), else None."""
@@ -875,10 +877,10 @@ class RecoveryVelocityTracker:
                     return None  # already notified this window
                 self._notified[ip] = now
         if breach is not None:
-            self._notify("velocity", ip, team_id, {"count": len(bucket)})
+            self._notify("velocity", ip, org_id, {"count": len(bucket)})
         return breach
 
-    def _notify(self, reason: str, ip: str, team_id: str | None,
+    def _notify(self, reason: str, ip: str, org_id: str | None,
                 details: dict) -> None:
         details = dict(details)
         details.setdefault("count", 0)
@@ -886,16 +888,16 @@ class RecoveryVelocityTracker:
         try:
             from tortoise.supabase_control import get_abuse_store
             store = get_abuse_store()
-            if team_id:
+            if org_id:
                 store.record_event(
-                    team_id, EVENT_RECOVERY_VELOCITY,
+                    org_id, EVENT_RECOVERY_VELOCITY,
                     details={"ip": ip, "reason": reason, **details})
         except Exception:
             logger.debug("recovery-velocity event record failed (%s)", ip)
         try:
             from tortoise.notify import notify_abuse
             notify_abuse("abuse_recovery_velocity",
-                         {"team_id": team_id, "email": None},
+                         {"org_id": org_id, "email": None},
                          {"ip": ip, "reason": reason,
                           "count": details.get("count", 0),
                           "threshold": self.threshold,
@@ -908,10 +910,10 @@ class RecoveryVelocityTracker:
 RECOVERY_TRACKER = RecoveryVelocityTracker()
 
 
-def record_recovery(ip: str | None, team_id: str | None = None,
+def record_recovery(ip: str | None, org_id: str | None = None,
                     now: float | None = None) -> tuple[str, str] | None:
     """Module-level seam (monkeypatchable) over the shared recovery tracker."""
-    return RECOVERY_TRACKER.record(ip, team_id, now)
+    return RECOVERY_TRACKER.record(ip, org_id, now)
 
 
 # ── R4: geo (CF-IPCountry header, fail-open) ───────────────────────────────
@@ -919,8 +921,8 @@ def record_recovery(ip: str | None, team_id: str | None = None,
 _GEO_CACHE: dict[str, tuple[float, set[str]]] = {}
 _GEO_TTL_S = 86400
 _GEO_LOCK = threading.Lock()
-# per-team geo-notify flood cap (CF-IPCountry is spoofable on Fly-direct —
-# security review): at most N new-country notifications per team per 24h.
+# per-org geo-notify flood cap (CF-IPCountry is spoofable on Fly-direct —
+# security review): at most N new-country notifications per org per 24h.
 _GEO_NOTIFY_MAX_PER_DAY = 10
 _GEO_NOTIFIED: dict[str, list[float]] = defaultdict(list)
 
@@ -936,23 +938,23 @@ def resolve_country(headers) -> str | None:
     return value.upper() or None
 
 
-def check_new_country(team_id: str, country: str | None, store,
+def check_new_country(org_id: str, country: str | None, store,
                       now: float | None = None) -> bool:
-    """True when the country is new for the team (records auth_ip + notifies
+    """True when the country is new for the org (records auth_ip + notifies
     the OWNER, flood-capped). Seen-set cached in-process (24h TTL); durable
     lookup on cache miss."""
-    if abuse_disabled() or not team_id or not country:
+    if abuse_disabled() or not org_id or not country:
         return False
     now = now if now is not None else time.time()
     with _GEO_LOCK:
-        cached = _GEO_CACHE.get(team_id)
+        cached = _GEO_CACHE.get(org_id)
         if cached is None or now - cached[0] > _GEO_TTL_S:
             try:
-                seen = set(store.seen_countries(team_id))
+                seen = set(store.seen_countries(org_id))
             except Exception:
                 return False  # fail-open: unseen-set unavailable → inactive
             cached = (now, seen)
-            _GEO_CACHE[team_id] = cached
+            _GEO_CACHE[org_id] = cached
             # evict other expired entries (bounded memory)
             expired = [t for t, (ts, _) in _GEO_CACHE.items()
                        if now - ts > _GEO_TTL_S]
@@ -963,32 +965,32 @@ def check_new_country(team_id: str, country: str | None, store,
         if country in seen:
             return False
         # flood cap before recording anything
-        stamps = [t for t in _GEO_NOTIFIED[team_id] if now - t < _GEO_TTL_S]
-        _GEO_NOTIFIED[team_id] = stamps
+        stamps = [t for t in _GEO_NOTIFIED[org_id] if now - t < _GEO_TTL_S]
+        _GEO_NOTIFIED[org_id] = stamps
         if len(stamps) >= _GEO_NOTIFY_MAX_PER_DAY:
             seen.add(country)  # still track it; just don't notify/event
             return False
     try:
-        store.record_event(team_id, EVENT_AUTH_IP, country=country)
+        store.record_event(org_id, EVENT_AUTH_IP, country=country)
     except Exception:
         # Unrecorded → not marked seen → retried on a later request (and
         # NOT notified: a notify without a durable event would re-fire on
         # every request until the store recovers — code-review P3).
-        logger.debug("geo event record failed for %s", team_id)
+        logger.debug("geo event record failed for %s", org_id)
         return False
     with _GEO_LOCK:
-        cached2 = _GEO_CACHE.get(team_id)
+        cached2 = _GEO_CACHE.get(org_id)
         if cached2 is not None:
             cached2[1].add(country)
-        _GEO_NOTIFIED[team_id].append(now)
+        _GEO_NOTIFIED[org_id].append(now)
     try:
         from tortoise.notify import notify_abuse
         notify_abuse("abuse_new_ip",
-                     {"team_id": team_id,
-                      "email": _team_email(store, team_id)},
+                     {"org_id": org_id,
+                      "email": _org_email(store, org_id)},
                      {"country": country, "appeal_url": appeal_url()})
     except Exception:
-        logger.debug("geo notify failed for %s", team_id)
+        logger.debug("geo notify failed for %s", org_id)
     return True
 
 

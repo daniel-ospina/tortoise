@@ -249,7 +249,7 @@ def _goto_local_auth(page: Page) -> None:
 
 def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
                        exchange_ctype: str = "application/json",
-                       team_row=None, billing_routes=False) -> None:
+                       org_row=None, billing_routes=False) -> None:
     """Simulate the prod domains: tortoise → :8788 (auth site),
     app → :8790 (dashboard), api → mocked exchange + a deterministic
     session/team surface so the dashboard app shell renders after a
@@ -264,16 +264,16 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
     {checkout_url}/{portal_url}) so Upgrade/Manage CTAs resolve instead of
     hitting the 401 fallback.
     """
-    base_team_row = {"team_id": "team_loop", "name": "Loop Test", "tier": "free",
+    base_team_row = {"org_id": "team_loop", "name": "Loop Test", "tier": "free",
                      "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
                      "ops_allowance": 1000, "email": "loop@premise-labs.dev"}
-    team_row = {**base_team_row, **team_row} if team_row else base_team_row
+    org_row = {**base_team_row, **org_row} if org_row else base_team_row
 
     def handle(route):
         url = route.request.url
         if url.startswith(API_HOST):
-            # #1828: loadAll pins ?team_id= on overview reads — match on the
-            # query-stripped path so /v1/team/keys?team_id=… still resolves.
+            # #1828: loadAll pins ?org_id= on overview reads — match on the
+            # query-stripped path so /v1/team/keys?org_id=… still resolves.
             path = url.split("?", 1)[0]
             if url.endswith("/v1/session/login") and route.request.method == "POST":
                 route.fulfill(status=exchange_status,
@@ -296,9 +296,9 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"portal_url": "https://billing.stripe.com/p/session/test_123"}))
                 return
-            if path.endswith("/v1/teams") and route.request.method == "GET":
+            if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([team_row]))
+                              body=json.dumps([org_row]))
                 return
             if path.endswith("/v1/team/keys"):
                 route.fulfill(status=200, content_type="application/json",
@@ -314,7 +314,7 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps(team_row))
+                              body=json.dumps(org_row))
                 return
             # Everything else the dashboard calls — a deterministic 401 so the
             # app shell renders without a real network round trip.

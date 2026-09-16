@@ -1,18 +1,23 @@
 // Tenant provisioning Edge Function
 // Triggered on auth.users INSERT via the Supabase Auth `after_user_created`
-// webhook. Writes the master list into Supabase ONLY — teams +
-// team_memberships + api_keys in ONE atomic transaction via the
+// webhook. Writes the master list into Supabase ONLY — organizations +
+// org_memberships + api_keys in ONE atomic transaction via the
 // provision_team SECURITY DEFINER RPC (migration 0010, #669 plan Task 2 /
-// #770), then seeds the team's demo knowledge graph via the FastAPI data
-// plane (/internal/demo — FalkorDB knowledge graphs stay untouched; the
-// control_plane registry graph is NEVER written here: E2E-1).
+// #770), then seeds the org's REAL starter graph via the FastAPI data
+// plane (/internal/starter-seed — #2360 re-spec: the signing-up user as a
+// Subject + their Organization as a Subject, connected memberOf; the old
+// demo sample auto-seed is GONE — sample content is never auto-seeded
+// into a fresh org, so the Overview digest never counts fake demo points
+// as the user's own filings). FalkorDB knowledge graphs stay
+// untouched by the registry; the control_plane registry graph is NEVER
+// written here (E2E-1).
 //
 // ── CALLER AUTH (#802) ─────────────────────────────────────────────────
 // The function MUST be deployed with verify_jwt=false (--no-verify-jwt):
 // Supabase Auth hooks carry NO user JWT — the platform signs the hook
 // request itself with the hook secret (Standard Webhooks / Svix signature).
 // Because of that the function verifies the caller itself, and the public
-// anon key alone is NOT sufficient to mint teams/API keys:
+// anon key alone is NOT sufficient to mint orgs/API keys:
 //
 //   1. Auth-hook calls → raw-body Standard-Webhooks signature verified
 //      against AUTH_HOOK_SECRET (the secret configured on the
@@ -48,7 +53,7 @@ interface HookPayload {
   email?: string;
   display_name?: string;
   // #2323 (Option B): wizard-typed org name for name-first provisioning.
-  team_name?: string;
+  org_name?: string;
 }
 
 // Caller identity established by authentication (hook signature or JWT).
@@ -59,8 +64,8 @@ interface CallerIdentity {
 }
 
 interface ProvisionResponse {
-  team_id: string;
-  team_name: string;
+  org_id: string;
+  org_name: string;
   api_key: string;
   graph_name: string;
 }
@@ -137,7 +142,7 @@ async function authenticateCaller(
   // ── Path 1: user JWT (direct callers) ────────────────────────────────
   // Verify the token against Supabase Auth. The identity match against the
   // provisioning target is enforced by the caller (see handler) so user A
-  // cannot mint teams/keys for user B.
+  // cannot mint orgs/keys for user B.
   const authz = req.headers.get("authorization") ?? "";
   if (authz.startsWith("Bearer ")) {
     const token = authz.slice("Bearer ".length).trim();
@@ -271,7 +276,7 @@ Deno.serve(async (req: Request) => {
       (parsedObj.user_id === undefined || isStr(parsedObj.user_id)) &&
       (parsedObj.email === undefined || isStr(parsedObj.email)) &&
       (parsedObj.display_name === undefined || isStr(parsedObj.display_name)) &&
-      (parsedObj.team_name === undefined || isStr(parsedObj.team_name));
+      (parsedObj.org_name === undefined || isStr(parsedObj.org_name));
     if (!bodyOk) {
       return json({ error: "invalid JSON body" }, 400, corsOrigin);
     }
@@ -279,7 +284,7 @@ Deno.serve(async (req: Request) => {
 
     // The provisioning target must BE the authenticated caller. A signed
     // hook payload only ever names the user GoTrue just created, and a JWT
-    // caller may only provision for themselves — user A cannot mint teams
+    // caller may only provision for themselves — user A cannot mint orgs
     // or API keys for user B (#802).
     const targetId = (body.user?.id || body.user_id || "").toLowerCase();
     const targetEmail = (body.user?.email || body.email || "").toLowerCase();
@@ -305,7 +310,7 @@ Deno.serve(async (req: Request) => {
     const email = caller.email;
     // display_name may arrive type-confused from PROVIDER metadata
     // (user_metadata.display_name is unvalidated — e.g. a numeric value from
-    // a social provider). Coerce to a string or drop it so the team-name
+    // a social provider). Coerce to a string or drop it so the org-name
     // derivation falls back to the email prefix instead of crashing
     // rawName.toLowerCase() → 500 (issue #1132). body.display_name is
     // already string-guarded by the #1111 post-parse type guard.
@@ -321,45 +326,45 @@ Deno.serve(async (req: Request) => {
       return json({ error: "invalid user_id format" }, 400, corsOrigin);
     }
 
-    // Generate team name from the wizard-typed name (#2323 Option B: name-first
+    // Generate the org name from the wizard-typed name (#2323 Option B: name-first
     // provisioning — the org-create step is the provisioning door, so a fresh
     // user never sees a display-name phantom org), falling back to provider
     // display name / email prefix when the caller is an older client that sends
-    // no team_name.
+    // no org_name.
     // The override is validated here with the same regex POST
     // /v1/onboarding/team enforces; an invalid/absent override falls back
     // (never 500s) so a stale caller cannot regress. An override that passes
     // the regex needs NO further sanitization and keeps its case ("Acme" stays
     // "Acme" — code-review P3: the display-name fallback keeps lowercasing).
-    const bodyTeamName =
-      typeof body.team_name === "string" ? body.team_name.trim() : "";
-    const TEAM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/;
+    const bodyOrgName =
+      typeof body.org_name === "string" ? body.org_name.trim() : "";
+    const ORG_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/;
     let safeName = "";
-    if (bodyTeamName && TEAM_NAME_RE.test(bodyTeamName)) {
-      safeName = bodyTeamName;
+    if (bodyOrgName && ORG_NAME_RE.test(bodyOrgName)) {
+      safeName = bodyOrgName;
     } else {
       const rawName = display_name || email.split("@")[0];
-      const teamName = rawName
+      const orgName = rawName
         .toLowerCase()
         .replace(/[^a-zA-Z0-9_-]/g, "-")
         .replace(/^-+|-+$/g, "")
         .substring(0, 64) || "user";
-      // Ensure starts with alphanumeric per Team.name regex
-      safeName = /^[a-zA-Z0-9]/.test(teamName) ? teamName : `u-${teamName}`;
+      // Ensure starts with alphanumeric per Organization.name regex
+      safeName = /^[a-zA-Z0-9]/.test(orgName) ? orgName : `u-${orgName}`;
     }
 
-    // Generate a DETERMINISTIC team_id per user — SHA-256(user_id) truncated
+    // Generate a DETERMINISTIC org_id per user — SHA-256(user_id) truncated
     // to 26 hex chars. Retries (hook redelivery after a lost response, or a
     // direct-JWT re-invocation) must be true same-payload retries: a fresh
     // random id on every call would let provision_team's step-3 INSERT create
-    // a SECOND team + membership + api_keys row (code-review P2, PR #847 —
+    // a SECOND org + membership + api_keys row (code-review P2, PR #847 —
     // the old update_user_team placeholder-only UPDATE could never duplicate,
     // so this is a new idempotency requirement introduced by the RPC).
-    const teamIdDigest = await crypto.subtle.digest(
+    const orgIdDigest = await crypto.subtle.digest(
       "SHA-256",
       new TextEncoder().encode(user_id)
     );
-    const teamId = Array.from(new Uint8Array(teamIdDigest))
+    const orgId = Array.from(new Uint8Array(orgIdDigest))
       .map(b => b.toString(16).padStart(2, "0"))
       .join("")
       .substring(0, 26);
@@ -394,11 +399,11 @@ Deno.serve(async (req: Request) => {
     // fail the signup. display_name is the PERSON display name (caller/body),
     // never safeName (the org slug) — the greeting heuristic is server-side.
     async function fireOnboardingEmail(
-      teamId: string,
+      orgId: string,
       personDisplayName: string | undefined,
     ): Promise<void> {
       const body = JSON.stringify({
-        team_id: teamId,
+        org_id: orgId,
         display_name: personDisplayName ?? undefined,
       });
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -459,18 +464,18 @@ Deno.serve(async (req: Request) => {
       );
     }
     // ── Fix #7852/#770: write the master list to Supabase in ONE atomic
-    // transaction (teams + team_memberships + api_keys) via the
+    // transaction (organizations + org_memberships + api_keys) via the
     // provision_team SECURITY DEFINER RPC (migration 0010). The RPC is
     // idempotent: it reconciles the on_auth_user_created placeholder row
-    // (team_id='' / key_hash='pending') in place, so exactly one membership
-    // row and one api_keys row exist per provisioned team (plan §4.1 step 6,
+    // (org_id='' / key_hash='pending') in place, so exactly one membership
+    // row and one api_keys row exist per provisioned org (plan §4.1 step 6,
     // P2-5 concurrency contract). key_hash (salted PBKDF2, continuity) and
     // lookup_hash (SHA-256(pepper + key) — the auth lookup anchor, E2E-6)
     // are computed HERE, never in SQL (the pepper lives in app code only).
     //
     // Failure is FATAL now (unlike the old best-effort update_user_team
     // write): the FalkorDB registry is no longer written, so without this
-    // transaction the team exists NOWHERE. The user can retry — the RPC is
+    // transaction the org exists NOWHERE. The user can retry — the RPC is
     // idempotent.
     const keyHash = await hashApiKey(apiKey);
     const lookupHashHex = await lookupHash(apiKey, pepper);
@@ -482,12 +487,12 @@ Deno.serve(async (req: Request) => {
     const { error: provisionError } = await supabase.rpc("provision_team", {
       p_user_id: user_id,
       p_identity: null,
-      p_team_id: teamId,
-      p_team_name: safeName,
+      p_org_id: orgId,
+      p_org_name: safeName,
       p_api_key: apiKey, // plaintext — shown once on welcome page, then nulled
       p_key_hash: keyHash,
       p_lookup_hash: lookupHashHex,
-      p_graph_name: `team_${teamId}`,
+      p_graph_name: `org_${orgId}`,
       p_email: email,
       p_key_prefix: apiKey.slice(0, 10),
     });
@@ -499,41 +504,58 @@ Deno.serve(async (req: Request) => {
       return json({ error: "Provisioning failed. Please try again." }, 502, corsOrigin);
     }
 
-    // ── Fix #7854: Trigger demo graph seeding ──────────────────────────
-    // Data plane ONLY: /internal/demo writes the team's knowledge graph
-    // (FalkorDB, graph team_{team_id} — created on first write). It never
-    // touches the control_plane registry graph (E2E-1: zero registry
-    // writes). The old /internal/provision call is GONE — it wrote the
-    // registry (Team/APIKey/Membership nodes), which the plan moves to
-    // Supabase entirely. AbortSignal.timeout bounds the await so a slow
-    // demo seed can never blow the hook deadline mid-retry (code-review P2,
-    // PR #847 — the RPC has already committed at this point; the hook
-    // redelivers the whole request, and deterministic team_id makes that a
+    // ── #2360: REAL starter seed (supersedes the demo auto-seed) ──────
+    // Data plane ONLY: /internal/starter-seed files the org's REAL starter
+    // graph (FalkorDB, graph org_{org_id} — created on first write): the
+    // signing-up user as a naturalPerson Subject + their Organization as an
+    // organization Subject, connected memberOf (canonical two-anchor seed,
+    // tortoise/onboarding/seed.py). The old demo auto-seed wrote
+    // 12 fake demo Points + a _demo_sentinel into every fresh org — sample
+    // content the Overview digest counted as the user's own activity
+    // (#2360). Identity data here is the VERIFIED caller's own: org_name =
+    // the user-confirmed org name, person_name = the user's auth display
+    // name when present (never silently email-derived — the interactive W3
+    // seed completes the person anchor with a user-confirmed name when no
+    // display name exists). Never touches the control_plane registry graph
+    // (E2E-1: zero registry writes). AbortSignal.timeout bounds the await so
+    // a slow seed can never blow the hook deadline mid-retry (code-review
+    // P2, PR #847 — the RPC has already committed at this point; the hook
+    // redelivers the whole request, and deterministic org_id makes that a
     // harmless no-op).
     // #1860 (P3-1): bind the response — a non-2xx body used to resolve
     // "successfully" (the old .catch() only handled transport/abort), so a
-    // failed seed left the first-timer's graph silently missing demo data.
-    const demoRes = await fetch(`${fastApiUrl}/internal/demo`, {
+    // failed seed left the first-timer's graph silently missing starter
+    // data.
+    const starterBody: Record<string, string> = {
+      org_id: orgId,
+      org_name: safeName,
+      person_user_id: user_id,
+      person_email: email,
+    };
+    if (typeof display_name === "string" && display_name.trim()) {
+      starterBody.person_name = display_name.trim();
+    }
+    const starterRes = await fetch(`${fastApiUrl}/internal/starter-seed`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${fastApiKey}`,
       },
-      body: JSON.stringify({ team_id: teamId }),
+      body: JSON.stringify(starterBody),
       signal: AbortSignal.timeout(10_000),
     }).catch((e) => {
-      console.error("Demo seed failed:", e);
+      console.error("Starter seed failed:", e);
       return null;
     });
-    if (demoRes && !demoRes.ok) {
+    if (starterRes && !starterRes.ok) {
       // HTTP error (4xx/5xx) — the provision RPC already committed, so the
-      // team exists but its graph lacks demo data. Log loudly (incl. the
-      // error body, which also drains the connection back to the pool); do
-      // NOT fail the whole provisioning (the user can still be onboarded).
-      const demoErrBody = await demoRes.text().catch(() => "");
+      // org exists but its graph lacks the starter seed. Log loudly (incl.
+      // the error body, which also drains the connection back to the pool);
+      // do NOT fail the whole provisioning (the user can still be onboarded).
+      const starterErrBody = await starterRes.text().catch(() => "");
       console.error(
-        "Demo seed failed: /internal/demo returned " + demoRes.status +
-          (demoErrBody ? ": " + demoErrBody : "")
+        "Starter seed failed: /internal/starter-seed returned " + starterRes.status +
+          (starterErrBody ? ": " + starterErrBody : "")
       );
     }
 
@@ -543,14 +565,14 @@ Deno.serve(async (req: Request) => {
     // committed provisioning into a 500 for the user. Exactly-once is the
     // server's job (marker + in-flight gate + provider Idempotency-Key); the
     // +2s retry covers the lost-response / transient-provider window.
-    await fireOnboardingEmail(teamId, display_name);
+    await fireOnboardingEmail(orgId, display_name);
 
     const response: ProvisionResponse = {
-      team_id: teamId,
-      team_name: safeName,
+      org_id: orgId,
+      org_name: safeName,
       api_key: apiKey,
-      // Must match the value upserted into team_memberships above (team_${teamId}).
-      graph_name: `team_${teamId}`,
+      // Must match the value upserted into org_memberships above (org_${orgId}).
+      graph_name: `org_${orgId}`,
     };
 
     return json(response, 201, corsOrigin);

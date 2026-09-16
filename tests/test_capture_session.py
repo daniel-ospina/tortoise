@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import hosted_api as _ha
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 from tortoise.sdk import TortoiseSDK
 
 # #2242 concurrency test docker-lane guard — mirrors
@@ -381,13 +381,52 @@ def test_capture_session_creates_event(sdk):
         "MATCH ()-[r:aboutEvent]->(:Event {eventKind:'sessionCaptured'}) RETURN count(r)"
     ).result_set
     assert no_edges[0][0] == 0, "capture path must not mint aboutEvent provenance"
-    stamps = proj.g.query(
-        "MATCH (n:Point) WHERE n.eventId = $eid RETURN count(n)",
-        params={"eid": eid},
+    # #2552: the stamp now also covers the capture's reified operator Points,
+    # so a count-by-eventId can exceed ``extracted`` when operators exist.
+    # Gate on the EXTRACTED ids carrying the eventId (the actual predicate).
+    point_ids = [p["id"] for p in res["points"]]
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.eventId",
+        params={"ids": point_ids},
     ).result_set
-    assert stamps[0][0] == res["extracted"], (
+    assert len(rows) == len(point_ids)
+    assert all(r[0] == eid for r in rows), (
         "every extracted point must carry the sessionCaptured eventId"
     )
+
+
+def test_capture_session_stamps_operator_event_ids(sdk, monkeypatch):
+    """#2552 (layer-2 WIRE — the structural leg): the capture path stamps the
+    sessionCaptured eventId on the reified operator Points it writes,
+    mirroring the point path, so a committed operator node enters the
+    eventId-keyed retrievable memory layer (``WHERE p.eventId IN $eids``).
+    Pre-fix operators carried no eventId — the memory layer never admitted
+    them and ``operator_counts`` was silently ``{}`` on every real run."""
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "The auth dead-end is the top issue "
+                                     "because it blocks every deploy."},
+        {"role": "assistant", "content": "Therefore we should ship serve "
+                                           "--http first."},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["ok"] is True, res
+    proj = sdk._get_proj()
+    eid = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId"
+    ).result_set[0][0]
+    rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true}) RETURN o.id, o.eventId, o.status"
+    ).result_set
+    assert rows, "the cue-word conversation must produce capture operators"
+    assert all(r[1] == eid for r in rows), (
+        f"every reified operator must carry the sessionCaptured eventId: {rows}")
+    # ... and the eventId-keyed memory layer admits them (retrievable).
+    n = proj.g.query(
+        "MATCH (p:Point) WHERE p.eventId = $eid AND p.is_operator = true "
+        "RETURN count(p)", params={"eid": eid},
+    ).result_set[0][0]
+    assert n == len(rows)
 
 
 def test_capture_session_source_is_agent_session(sdk):
@@ -3336,18 +3375,18 @@ def test_client_commit_id_capture_parity(sdk, monkeypatch):
 
 
 _CONSENT_TEAM = {
-    "team_id": "team-1727-consent", "tier": "free", "key_id": "k-1727",
+    "org_id": "team-1727-consent", "tier": "free", "key_id": "k-1727",
     # C5 #2114: C2 owner class (legacy tt_ key) — scope-less key_id dicts
     # 403 the capture gates otherwise.
     "legacy_full_access": True, "max_points": 100000,
 }
 
 
-def _provision_team(team_id: str) -> None:
+def _provision_team(org_id: str) -> None:
     """Create the registry Team node (onboarding state lives on it)."""
     _ha._make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
-        params={"id": team_id, "st": "{}"},
+        params={"id": org_id, "st": "{}"},
     )
 
 
@@ -3371,34 +3410,34 @@ def consent_client(tmp_path, monkeypatch):
     # (this fixture was already #1950-canonical — pin + close present; the
     # helper is the single source of truth now).
     with patched_tortoise_sdk(str(tmp_path / "c.db")):
-        app.dependency_overrides[get_current_team] = lambda: dict(_CONSENT_TEAM)
-        _provision_team(_CONSENT_TEAM["team_id"])
+        app.dependency_overrides[get_current_org] = lambda: dict(_CONSENT_TEAM)
+        _provision_team(_CONSENT_TEAM["org_id"])
         with TestClient(app) as tc:
             yield tc
 
 
-def _opt_in(team_id: str = _CONSENT_TEAM["team_id"], enabled: bool = True):
-    _ha._update_onboarding_state(team_id, session_recording=enabled)
+def _opt_in(org_id: str = _CONSENT_TEAM["org_id"], enabled: bool = True):
+    _ha._update_onboarding_state(org_id, session_recording=enabled)
     # #1950: self-verify — read back through the same registry path the
     # consent gate uses. A silently-no-op seed would surface as a confusing
     # 403 downstream; fail loud HERE with the actual persisted state.
-    readback = _ha._get_onboarding_state(team_id)
+    readback = _ha._get_onboarding_state(org_id)
     assert readback.get("session_recording") is enabled, (
-        f"consent seed not visible to gate read (team={team_id}): {readback}"
+        f"consent seed not visible to gate read (team={org_id}): {readback}"
     )
     return readback
 
 
-def _state(team_id: str = _CONSENT_TEAM["team_id"]) -> dict:
-    return _ha._get_onboarding_state(team_id)
+def _state(org_id: str = _CONSENT_TEAM["org_id"]) -> dict:
+    return _ha._get_onboarding_state(org_id)
 
 
-def _graph(team_id: str = _CONSENT_TEAM["team_id"]):
-    return _ha._make_sdk(namespace=team_id)._get_proj()
+def _graph(org_id: str = _CONSENT_TEAM["org_id"]):
+    return _ha._make_sdk(namespace=org_id)._get_proj()
 
 
-def _session_count(team_id: str = _CONSENT_TEAM["team_id"]) -> int:
-    rows = _graph(team_id).g.query(
+def _session_count(org_id: str = _CONSENT_TEAM["org_id"]) -> int:
+    rows = _graph(org_id).g.query(
         "MATCH (s:Session) RETURN count(s)").result_set
     return int(rows[0][0])
 
@@ -3519,11 +3558,11 @@ def test_receipt_requires_durable_data(consent_client):
 
     real_update = _ha._update_onboarding_state
 
-    def failing_update(team_id, **fields):
+    def failing_update(org_id, **fields):
         if any(k.startswith("session_capture_receipt") for k in fields):
             calls["receipt_writes"] += 1
             raise RuntimeError("simulated receipt PATCH failure")
-        return real_update(team_id, **fields)
+        return real_update(org_id, **fields)
 
     import tortoise.hosted_api as ha_mod
     ha_mod._update_onboarding_state = failing_update
@@ -3786,7 +3825,7 @@ def test_session_links_resolve_after_index(consent_client):
         "no entity yet — honest no-match at capture time"
     # Index lands → entity materializes → re-link resolves.
     _object(proj, "github-issue-test/repo-99", "test/repo#99")
-    _ha._relink_sessions_after_index(_CONSENT_TEAM["team_id"])
+    _ha._relink_sessions_after_index(_CONSENT_TEAM["org_id"])
     assert _link_edges(proj, "Session", "s-link-late") == \
         {"github-issue-test/repo-99"}, "re-link on index completion must resolve"
     rows = proj.g.query(
@@ -3799,7 +3838,7 @@ def test_session_links_resolve_after_index(consent_client):
 # #1727 Slice 2 (Task 13) — tortoise_session_capture MCP tool.
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp",
+def _mcp_team_context(tmp_path, monkeypatch, *, org_id="team-1727-mcp",
                        seed_recording: bool = True):
     """Set the MCP auth ContextVars (hosted-tenant shape) + provision the
     team, so the tool's hosted pipeline runs against the temp DB.
@@ -3811,7 +3850,7 @@ def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp",
 
     @contextmanager
     def _ctx():
-        from tortoise.mcp_auth import _current_team_id, _current_team_limits, _transport_mode
+        from tortoise.mcp_auth import _current_org_id, _current_org_limits, _transport_mode
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
         # #2127 wave 2: shared helper — the old enter/exit plain-clear (no
         # pin, no anchor close) is the #1950 clear-without-close gap this
@@ -3820,18 +3859,18 @@ def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp",
         # fixture-owned INSIDE the helper (they are per-call tokens, not SDK
         # state).
         with patched_tortoise_sdk(str(tmp_path / "mcp.db")):
-            _provision_team(team_id)
+            _provision_team(org_id)
             if seed_recording:
-                _ha._update_onboarding_state(team_id, session_recording=True)
-            tok_t = _current_team_id.set(team_id)
-            tok_l = _current_team_limits.set(
-                {"team_id": team_id, "tier": "free", "max_points": 100000})
+                _ha._update_onboarding_state(org_id, session_recording=True)
+            tok_t = _current_org_id.set(org_id)
+            tok_l = _current_org_limits.set(
+                {"org_id": org_id, "tier": "free", "max_points": 100000})
             tok_m = _transport_mode.set("http")
             try:
-                yield team_id
+                yield org_id
             finally:
-                _current_team_id.reset(tok_t)
-                _current_team_limits.reset(tok_l)
+                _current_org_id.reset(tok_t)
+                _current_org_limits.reset(tok_l)
                 _transport_mode.reset(tok_m)
 
     return _ctx()
@@ -3878,7 +3917,7 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     """Task 13 + #1927: the MCP tool carries the SAME off-switch as the REST
     path — a team with recording disabled gets the clear 409-style error
     (stops ingestion), never a silent capture or the old 403."""
-    from tortoise.mcp_auth import _current_team_id, _current_team_limits
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
     from tortoise.mcp_server import tortoise_session_capture
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     # #2127 wave 2: shared helper (same pin + deterministic-close upgrade
@@ -3887,16 +3926,16 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
         _provision_team("team-1727-mcp-opt")
         _ha._update_onboarding_state("team-1727-mcp-opt",
                                      session_recording=False)
-        tok_t = _current_team_id.set("team-1727-mcp-opt")
-        tok_l = _current_team_limits.set(
-            {"team_id": "team-1727-mcp-opt", "tier": "free",
+        tok_t = _current_org_id.set("team-1727-mcp-opt")
+        tok_l = _current_org_limits.set(
+            {"org_id": "team-1727-mcp-opt", "tier": "free",
              "max_points": 100000})
         try:
             result = tortoise_session_capture(conversation=_CONV, harness="pi")
             st = _ha._get_onboarding_state("team-1727-mcp-opt")
         finally:
-            _current_team_id.reset(tok_t)
-            _current_team_limits.reset(tok_l)
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
     assert result.get("status") == 409, result
     assert "disabled" in result.get("error", ""), result
     assert st.get("session_capture_last_error_pi"), \
@@ -3907,13 +3946,13 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
 def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
     """Task 13: stdio (no team context / selfhost) → honest 'requires hosted
     mode' error — no local fallback that bypasses the gates."""
-    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+    from tortoise.mcp_auth import SELFHOST_ORG_ID, _current_org_id
     from tortoise.mcp_server import tortoise_session_capture
-    tok = _current_team_id.set(SELFHOST_TEAM_ID)
+    tok = _current_org_id.set(SELFHOST_ORG_ID)
     try:
         result = tortoise_session_capture(conversation=_CONV, harness="claude")
     finally:
-        _current_team_id.reset(tok)
+        _current_org_id.reset(tok)
     assert "error" in result, result
     assert "hosted mode" in result["error"], result
 
@@ -3930,8 +3969,8 @@ def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
 # actor from the RESOLVED team dict (registry/session branches alias it),
 # not from a test-set var.
 
-def _session_actor(team_id: str, session_id: str):
-    rows = _ha._make_sdk(namespace=team_id)._get_proj().g.query(
+def _session_actor(org_id: str, session_id: str):
+    rows = _ha._make_sdk(namespace=org_id)._get_proj().g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
         params={"sid": session_id},
     ).result_set
@@ -4186,15 +4225,15 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
     the SAME detail text; neither writes a Session; each harness's per-harness
     last-error is recorded. Recording ON ⇒ both 2xx with ``surfaced`` marker
     data + per-harness receipts."""
-    from tortoise.hosted_api import get_current_team as _get_current_team
+    from tortoise.hosted_api import get_current_org as _get_current_team
     from tortoise.mcp_auth import (
-        _current_team_id,
-        _current_team_limits,
+        _current_org_id,
+        _current_org_limits,
         _transport_mode,
     )
     from tortoise.mcp_server import tortoise_session_capture
 
-    team_id = "team-phase-e-drift"
+    org_id = "team-phase-e-drift"
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     # m2 lane: claims are echo-derived from each conversation's OWN content,
     # so the REST and MCP captures below mint DISTINCT claims (the v2 mock is
@@ -4203,14 +4242,14 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
     # surfaced: [] and prove nothing about marker data on the MCP path).
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     with patched_tortoise_sdk(str(tmp_path / "drift.db")):
-        _provision_team(team_id)
-        _opt_in(team_id, enabled=False)  # OFF first
-        team = {"team_id": team_id, "tier": "free", "key_id": "k-1727",
+        _provision_team(org_id)
+        _opt_in(org_id, enabled=False)  # OFF first
+        team = {"org_id": org_id, "tier": "free", "key_id": "k-1727",
                 "legacy_full_access": True, "max_points": 100000}
         app.dependency_overrides[_get_current_team] = lambda: dict(team)
-        tok_t = _current_team_id.set(team_id)
-        tok_l = _current_team_limits.set(
-            {"team_id": team_id, "tier": "free", "max_points": 100000})
+        tok_t = _current_org_id.set(org_id)
+        tok_l = _current_org_limits.set(
+            {"org_id": org_id, "tier": "free", "max_points": 100000})
         tok_m = _transport_mode.set("http")
         try:
             with TestClient(app) as tc:
@@ -4226,9 +4265,9 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
                     "REST + MCP must surface the SAME recording-off message "
                     f"(shared impl): REST={rest_detail!r} MCP={mcp_res!r}")
                 assert "disabled" in rest_detail
-                assert _session_count(team_id) == 0, \
+                assert _session_count(org_id) == 0, \
                     "recording OFF must not write a Session on either surface"
-                st = _state(team_id)
+                st = _state(org_id)
                 assert st.get("session_capture_last_error_claude"), \
                     "REST 409 must record its per-harness last error"
                 assert st.get("session_capture_last_error_pi"), \
@@ -4240,7 +4279,7 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
                 # (a same-content re-capture would be a content-hash fold and
                 # honestly report surfaced: [] — that anti-gaming is pinned in
                 # test_phase_e_surfaced_cross_session_reingest_counts_zero_added).
-                _opt_in(team_id, enabled=True)
+                _opt_in(org_id, enabled=True)
                 r2 = tc.post("/v1/sessions",
                              json={"conversation": _CONV, "harness": "claude",
                                    "session_id": "s-drift-rest"})
@@ -4252,14 +4291,14 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
                 assert not mcp_res2.get("error"), mcp_res2
                 assert mcp_res2.get("surfaced"), mcp_res2
                 assert mcp_res2.get("protocol_version") == "memory_write_v1"
-                st2 = _state(team_id)
+                st2 = _state(org_id)
                 assert st2.get("session_capture_receipt_claude"), st2
                 assert st2.get("session_capture_receipt_pi"), st2
                 assert st2.get("session_capture_last_error_claude") is None
                 assert st2.get("session_capture_last_error_pi") is None
         finally:
-            _current_team_id.reset(tok_t)
-            _current_team_limits.reset(tok_l)
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
             _transport_mode.reset(tok_m)
 
 

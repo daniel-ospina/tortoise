@@ -337,7 +337,7 @@ def test_mcp_handler_delegates(sdk, monkeypatch):
                 "truncated": False, "routing": kw.get("routing")}
 
     monkeypatch.setattr(sdk, "get_cross_lens_candidates", fake_sdk_method)
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates(
         threshold=0.5, max_candidates=50, routing="relevance", top_k=7)
     assert captured == {"threshold": 0.5, "max_candidates": 50,
@@ -349,7 +349,7 @@ def test_mcp_tool_integration(sdk, monkeypatch):
     """MCP tool end-to-end against the real embedded SDK (read-only)."""
     from tortoise import mcp_server
     _seed_two_streams(sdk)
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     n_before = _node_count(sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates()
     assert out["count"] == 1
@@ -363,6 +363,6 @@ def test_mcp_tool_error_surfaces(sdk, monkeypatch):
     from tortoise import mcp_server
     monkeypatch.setattr(sdk, "get_cross_lens_candidates",
                         lambda **kw: (_ for _ in ()).throw(ValueError("boom")))
-    monkeypatch.setattr(mcp_server, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(mcp_server, "_get_org_sdk", lambda: sdk)
     out = mcp_server.tortoise_find_cross_lens_candidates()
     assert isinstance(out, dict) and "error" in out and "boom" in out["error"]

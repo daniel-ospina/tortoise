@@ -22,6 +22,20 @@ dependencies = [
     "scipy>=1.10",
     "falkordb>=1.0",
     "falkordblite>=0.10",
+    # redis is declared DIRECTLY (it is otherwise transitive) because both
+    # dependents' floors are open-ended — `falkordblite 0.10.0 -> redis>=4.5`,
+    # `falkordb 1.6.2 -> redis>=7.1.0` — so a bare floor let a fresh resolve
+    # silently move to falkordb 1.7.1 + redis 8.1.0, an unverified pairing.
+    # This bounds redis to the newest line both verified dependents accept.
+    #
+    # Not a preference: the bound is what the declared constraints resolve to
+    # (falkordb 1.7.1 is excluded only because it demands redis 8). What would
+    # have to change to LIFT it is a constraint change — redis 8 verified
+    # end-to-end here, or a dependent's floor moving — not taste.
+    #
+    # FLOOR only: dependency hygiene, NOT the fix for #3459. Durable owner
+    # decision (2026-09-13). Full rationale: PR #3476.
+    "redis>=7.1,<8",
     "pyyaml>=6.0",
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",

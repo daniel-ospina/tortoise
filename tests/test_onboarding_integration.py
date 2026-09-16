@@ -36,17 +36,17 @@ def client(tmp_path, monkeypatch):
     from tortoise.hosted_api import _make_sdk
     sdk = _make_sdk(namespace="registry")
     try:
-        team = sdk.team_create("e2e-team")
+        team = sdk.org_create("e2e-team")
     except Exception:
         # Already exists — look it up
         rows = sdk._get_registry().query(
             "MATCH (t:Team {name: $name}) RETURN t.id",
             params={"name": "e2e-team"}).result_set
         team = {"id": rows[0][0]}
-    real_team_id = team["id"]
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": real_team_id, "tier": "free", "key_id": "k1",
+    real_org_id = team["id"]
+    from tortoise.hosted_api import get_current_org
+    app.dependency_overrides[get_current_org] = lambda: {
+        "org_id": real_org_id, "tier": "free", "key_id": "k1",
         # C5 #2114: C2 owner class (deleg-NULL + scopes [] → legacy full
         # access) — the E2E journey uses the register-minted tt_ key.
         "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
@@ -70,7 +70,7 @@ class TestOnboardingJourney:
         assert r.status_code == 200
         body = r.json()
         assert "api_key" in body and body["api_key"].startswith("tt_")
-        assert "team_id" in body
+        assert "org_id" in body
 
     def test_e2e_register_idempotent(self, client):
         """Registering twice returns already_registered (409) without re-key."""
@@ -165,12 +165,12 @@ class TestReAskStateKeyCompat:
         rows = sdk._get_registry().query(
             "MATCH (t:Team {name: $name}) RETURN t.id",
             params={"name": "e2e-team"}).result_set
-        team_id = rows[0][0]
+        org_id = rows[0][0]
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.onboarding_state = $st",
-            params={"id": team_id, "st": "{}"},
+            params={"id": org_id, "st": "{}"},
         )
-        _update_onboarding_state(team_id, **extra)
+        _update_onboarding_state(org_id, **extra)
 
     def test_reask_keys_roundtrip(self, client):
         """The backward-compat keys persist through the allowlisted state

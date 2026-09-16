@@ -32,7 +32,7 @@ from tortoise.sdk import TortoiseSDK
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
 # api_keys.created_by stays TEXT and remains non-UUID.
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
@@ -329,10 +329,10 @@ class TestPackInstallLockSerialization:
     def test_ensure_keys_lock_on_resolved_graph(self, tmp_path, monkeypatch):
         """conf 75 (PR #1312): ensure_tenant_packs keys the lock on the
         RESOLVED graph name, not the passed string. ``graph_name=None``
-        (hosted provision) and ``graph_name='team_team-k'`` (backfill read
+        (hosted provision) and ``graph_name='org_team-k'`` (backfill read
         target) hit the SAME physical graph and MUST use the same lock.
         Pre-fix keying (``graph_name or 'default'``) produced 'default' vs
-        'team_team-k' — a split lock on one graph (and one shared 'default'
+        'org_team-k' — a split lock on one graph (and one shared 'default'
         lock across all None callers)."""
         import tortoise.pack_state as ps
         sdk = TortoiseSDK(db_path=str(tmp_path / "k.db"), namespace="team-k")
@@ -345,7 +345,7 @@ class TestPackInstallLockSerialization:
 
         monkeypatch.setattr(ps, "_pack_install_lock", _spy)
         ensure_tenant_packs(sdk, graph_name=None, starter=["dev"])
-        ensure_tenant_packs(sdk, graph_name="team_team-k", starter=["dev"])
+        ensure_tenant_packs(sdk, graph_name="org_team-k", starter=["dev"])
         assert seen, "lock must be consulted for every activation"
         assert seen[0] == seen[1], (
             f"lock keyed on different graphs: {seen}")
@@ -358,7 +358,7 @@ class TestPackInstallLockSerialization:
             assert seen[0].startswith("test_"), (
                 f"docker lane must lock the derived graph, got {seen[0]}")
         else:
-            assert seen == ["team_team-k", "team_team-k"], (
+            assert seen == ["org_team-k", "org_team-k"], (
                 f"lock keyed on passed string, not resolved graph: {seen}")
 
     def test_race_seam_reproduces_duplicates_without_serialization(
@@ -435,14 +435,14 @@ def supabase_client(monkeypatch):
     """TestClient in SUPABASE control-plane mode with a FakeControlPlane
     (zero network) + a temp embedded DB — mirrors test_writer_inventory."""
     from fastapi.testclient import TestClient  # noqa: I001
-    from tortoise.hosted_api import app, get_current_team, get_current_user  # noqa: F401
+    from tortoise.hosted_api import app, get_current_org, get_current_user  # noqa: F401
     from tests.fake_control_plane import FakeControlPlane
     from tests.test_supabase_control import FREE_TEAM
 
     fake = FakeControlPlane({
         "api_keys": [],
-        "team_memberships": [],
-        "teams": [dict(FREE_TEAM)],
+        "org_memberships": [],
+        "organizations": [dict(FREE_TEAM)],
         "invitations": [],
     })
     monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
@@ -466,22 +466,22 @@ class TestProvisioningHooks:
         the tenant graph immediately (pre-GET — pure eager path)."""
         tc, db_path = registry_client
         r = tc.post("/internal/provision", headers=_INTERNAL_HEADERS, json={
-            "team_id": "t-reg-1", "team_name": "Reg One",
+            "org_id": "t-reg-1", "org_name": "Reg One",
             "api_key_hash": "abc", "created_by": "user-1",
         })
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
-        sdk = TortoiseSDK(db_path=db_path, namespace=team_id)
+        org_id = r.json()["org_id"]
+        sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
         rows = _read_installs(sdk)
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
 
     def test_internal_provision_idempotent_rerun(self, registry_client):
         tc, db_path = registry_client
-        body = {"team_id": "t-reg-2", "team_name": "Reg Two",
+        body = {"org_id": "t-reg-2", "org_name": "Reg Two",
                 "api_key_hash": "abc", "created_by": "user-1"}
         assert tc.post("/internal/provision", headers=_INTERNAL_HEADERS,
                        json=body).status_code == 200
-        # re-provisioning with the same team_id re-activates via the
+        # re-provisioning with the same org_id re-activates via the
         # idempotent path (graph deletion wipes installs; re-provision heals)
         r2 = tc.post("/internal/provision", headers=_INTERNAL_HEADERS, json=body)
         assert r2.status_code == 200
@@ -496,23 +496,23 @@ class TestProvisioningHooks:
         r = tc.post("/v1/register", json={
             "email": "founder@example.com", "password": "hunter2secret"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
+        org_id = r.json()["org_id"]
         assert fake.rpc_calls[0][0] == "provision_team"
-        sdk = TortoiseSDK(db_path=db_path, namespace=team_id)
+        sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
         rows = _read_installs(sdk)
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
 
     def test_create_team_activates_packs_supabase_mode(self, supabase_client):
-        """Site 2 (/v1/teams): activation rides the provision_team RPC hook."""
+        """Site 2 (/v1/organizations): activation rides the provision_team RPC hook."""
         from tortoise.hosted_api import app, get_current_user
         tc, fake, db_path = supabase_client
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _U1, "email": "user-1@example.com"}
-        r = tc.post("/v1/teams", json={"name": "acme"})
+        r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
+        org_id = r.json()["org_id"]
         assert fake.rpc_calls[0][0] == "provision_team"
-        sdk = TortoiseSDK(db_path=db_path, namespace=team_id)
+        sdk = TortoiseSDK(db_path=db_path, namespace=org_id)
         rows = _read_installs(sdk)
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
 
@@ -522,50 +522,50 @@ class TestProvisioningHooks:
 
 class TestGetV1Packs:
     def test_requires_auth(self, supabase_client):
-        from tortoise.hosted_api import app, get_current_team  # noqa: F401
+        from tortoise.hosted_api import app, get_current_org  # noqa: F401
         tc, _, _ = supabase_client
         r = tc.get("/v1/packs")
-        # get_current_team 401s first (no Authorization header)
+        # get_current_org 401s first (no Authorization header)
         assert r.status_code == 401
 
     def test_returns_tenant_packs_with_auth(self, supabase_client):
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_org
         tc, _, _ = supabase_client
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "team-free-001", "key_id": "k1", "tier": "free"}
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": "team-free-001", "key_id": "k1", "tier": "free"}
         r = tc.get("/v1/packs")
         assert r.status_code == 200, r.text
         packs = r.json()["packs"]
-        # get_current_team override team has no graph data yet → self-heal
+        # get_current_org override team has no graph data yet → self-heal
         assert sorted(p["namespace"] for p in packs) == sorted(_expected_defaults())
 
     def test_empty_masking_when_nothing_to_see(self, supabase_client, monkeypatch):
         """D6: same-tenant no-installs (self-heal disabled + empty starter
         set) → empty list, 200 — never an error."""
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_org
         monkeypatch.setenv("PACK_STATE_DISABLE_SELF_HEAL", "1")
         monkeypatch.setenv("TORTOISE_STARTER_PACKS", "")
         tc, _, _ = supabase_client
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "team-free-001", "key_id": "k1", "tier": "free"}
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": "team-free-001", "key_id": "k1", "tier": "free"}
         r = tc.get("/v1/packs")
         assert r.status_code == 200, r.text
         assert r.json() == {"packs": []}
 
-    def test_team_id_none_fails_closed(self, supabase_client):
-        """team_id None (SKIP_AUTH/background shape) → 401, never a
+    def test_org_id_none_fails_closed(self, supabase_client):
+        """org_id None (SKIP_AUTH/background shape) → 401, never a
         default-namespace fallback."""
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_org
         tc, _, _ = supabase_client
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": None, "tier": "free", "key_id": None}
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": None, "tier": "free", "key_id": None}
         r = tc.get("/v1/packs")
         assert r.status_code == 401
 
     def test_two_tokens_no_bleed(self, supabase_client, monkeypatch):
         """AC2 (isolation): tenant A's surface returns A's set; a second
         team (different namespace) returns its own set — no bleed."""
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_org
         tc, _, db_path = supabase_client
         # Seed two distinct tenant graphs with distinct starter sets.
         sdk_a = TortoiseSDK(db_path=db_path, namespace="tenant-a")
@@ -573,14 +573,14 @@ class TestGetV1Packs:
         ensure_tenant_packs(sdk_a, starter=["dev"])
         ensure_tenant_packs(sdk_b, starter=["marketing"])
 
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "tenant-a", "key_id": "k-a", "tier": "free"}
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": "tenant-a", "key_id": "k-a", "tier": "free"}
         r_a = tc.get("/v1/packs")
         assert r_a.status_code == 200
         assert [p["namespace"] for p in r_a.json()["packs"]] == ["dev"]
 
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "tenant-b", "key_id": "k-b", "tier": "free"}
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": "tenant-b", "key_id": "k-b", "tier": "free"}
         r_b = tc.get("/v1/packs")
         assert r_b.status_code == 200
         assert [p["namespace"] for p in r_b.json()["packs"]] == ["marketing"]
@@ -609,15 +609,15 @@ class TestMcpPacksList:
         db = str(tmp_path / "mcp.db")
         sdk = TortoiseSDK(db_path=db, namespace="mcp-team")
         ensure_tenant_packs(sdk, starter=["dev", "pm"])
-        monkeypatch.setattr(ms, "_get_team_sdk",
+        monkeypatch.setattr(ms, "_get_org_sdk",
                             lambda: TortoiseSDK(db_path=db,
-                                                namespace=mcp_auth._current_team_id.get()))
+                                                namespace=mcp_auth._current_org_id.get()))
         t_mode = mcp_auth._transport_mode.set("stdio")
-        token = mcp_auth._current_team_id.set("mcp-team")
+        token = mcp_auth._current_org_id.set("mcp-team")
         try:
             packs = ms.tortoise_packs_list()
         finally:
-            mcp_auth._current_team_id.reset(token)
+            mcp_auth._current_org_id.reset(token)
             mcp_auth._transport_mode.reset(t_mode)
         assert [p["namespace"] for p in packs] == ["dev", "pm"]
 
@@ -625,11 +625,11 @@ class TestMcpPacksList:
         from tortoise import mcp_auth  # noqa: I001
         import tortoise.mcp_server as ms
         token = mcp_auth._transport_mode.set("http")
-        t2 = mcp_auth._current_team_id.set(None)
+        t2 = mcp_auth._current_org_id.set(None)
         try:
             out = ms.tortoise_packs_list()
         finally:
-            mcp_auth._current_team_id.reset(t2)
+            mcp_auth._current_org_id.reset(t2)
             mcp_auth._transport_mode.reset(token)
         assert out.get("error") and "team context" in out["error"].lower()
 
@@ -646,18 +646,18 @@ class TestMcpPacksList:
         # registry SDK (auth resolution) + team SDK share one embedded DB
         db = str(tmp_path / "mcp-http.db")
         reg_sdk = TortoiseSDK(db_path=db, namespace=f"test_pack_registry_{os.urandom(4).hex()}")
-        team = reg_sdk.team_create("test-team")
+        team = reg_sdk.org_create("test-team")
         key_info = reg_sdk.apikey_create(team["id"], "test-fixture")
-        sdk_team = TortoiseSDK(db_path=db, namespace=team["id"])
-        ensure_tenant_packs(sdk_team, starter=["dev", "marketing"])
+        sdk_org = TortoiseSDK(db_path=db, namespace=team["id"])
+        ensure_tenant_packs(sdk_org, starter=["dev", "marketing"])
 
-        # the tool handler resolves _get_team_sdk from mcp_server's module
+        # the tool handler resolves _get_org_sdk from mcp_server's module
         # namespace — patch that name (not mcp_auth's) so the team SDK
         # targets the shared embedded DB.
         monkeypatch.setattr(
-            ms, "_get_team_sdk",
+            ms, "_get_org_sdk",
             lambda: TortoiseSDK(db_path=db,
-                                namespace=mcp_auth._current_team_id.get()))
+                                namespace=mcp_auth._current_org_id.get()))
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
                               _registry_sdk=reg_sdk)
@@ -740,7 +740,7 @@ class TestBackfillScript:
                 # activation writes the starter set)
                 r = tc.post("/internal/provision",
                             headers=_INTERNAL_HEADERS, json={
-                                "team_id": "t-bf-1", "team_name": "BF",
+                                "org_id": "t-bf-1", "org_name": "BF",
                                 "api_key_hash": "abc",
                                 "created_by": "user-1"})
                 assert r.status_code == 200, r.text
@@ -759,8 +759,8 @@ class TestBackfillScript:
     def test_apply_writes_to_introspection_read_target(self, tmp_path,
                                                       monkeypatch):
         """conf 70 (PR #1261): --apply lands installs in the READ TARGET
-        (team_{team_id}) even for a legacy team whose recorded graph_name is
-        team_{name} — the read surface (get_tenant_packs) must see the
+        (org_{org_id}) even for a legacy team whose recorded graph_name is
+        org_{name} — the read surface (get_tenant_packs) must see the
         backfilled records, and the legacy graph must stay untouched."""
         import importlib.machinery
         import importlib.util
@@ -782,16 +782,16 @@ class TestBackfillScript:
             db_path = os.path.join(tmpdir, "bf.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
             # Seed a LEGACY pre-#318 team via sdk.team_create: records
-            # graph_name team_{name} on the Team node and activates NO packs
+            # graph_name org_{name} on the Team node and activates NO packs
             # (no eager install-state — exactly a legacy tenant). Namespace=None
             # SDK: registry graph is `control_plane`, matching the backfill's
             # _iter_teams enumeration (TortoiseSDK() → control_plane) — a
             # namespace="registry" SDK would write to registry_control_plane
             # and the backfill would never see the team.
-            created = TortoiseSDK(db_path=db_path).team_create("LegacyCo")
-            team_id, legacy_graph = created["id"], created["graph_name"]
-            assert legacy_graph == "team_LegacyCo"
-            sdk_legacy = TortoiseSDK(db_path=db_path, namespace=team_id)
+            created = TortoiseSDK(db_path=db_path).org_create("LegacyCo")
+            org_id, legacy_graph = created["id"], created["graph_name"]
+            assert legacy_graph == "org_LegacyCo"
+            sdk_legacy = TortoiseSDK(db_path=db_path, namespace=org_id)
             assert _read_installs(sdk_legacy) == []  # legacy: no installs
 
             # --apply: backfill the legacy team's starter set
@@ -804,13 +804,13 @@ class TestBackfillScript:
             # [] — the conf-70 bug; self-heal would mask it, so it's disabled).
             monkeypatch.setenv("PACK_STATE_DISABLE_SELF_HEAL", "1")
             packs = get_tenant_packs(TortoiseSDK(db_path=db_path,
-                                                 namespace=team_id))
+                                                 namespace=org_id))
             assert sorted(p["namespace"] for p in packs) == \
                 sorted(_expected_defaults())
-            # installs landed in the READ TARGET team_{team_id} graph...
+            # installs landed in the READ TARGET org_{org_id} graph...
             assert sorted(r[0] for r in _read_installs(sdk_legacy)) == \
                 sorted(_expected_defaults())
-            # ...and the legacy team_{name} graph stays untouched (no invisible
+            # ...and the legacy org_{name} graph stays untouched (no invisible
             # duplicate set the self-heal would otherwise mint).
             legacy_rows = sdk_legacy._get_proj().db.select_graph(
                 legacy_graph).query(
