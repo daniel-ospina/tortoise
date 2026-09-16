@@ -1042,7 +1042,7 @@ class TestCursorPrivateUseRedirectScheme:
         # consent chose, and the MCP boundary resolves it to THAT team only.
         team = resolve_oauth_access_token(cp, access)
         assert team is not None
-        assert team["team_id"] == "team-free-001"
+        assert team["org_id"] == "team-free-001"
 
     def test_cursor_mismatch_is_refused_on_the_authorize_endpoint(
             self, api_client, session_user):
