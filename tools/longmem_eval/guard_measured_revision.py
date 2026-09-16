@@ -7,22 +7,29 @@ the check that makes the claim in ``docs/scoping/receipts/*.json``
 receipt be built, or a claim be made, when the measured surface drifted after
 measurement — "re-measure rather than re-label".
 
-Failure modes this closes, each one reproduced by review before it was fixed:
+Failure modes this closes, each one reproduced by review. The first two were
+reproduced against this check's PRE-COMMIT form (a builder script in the lane's
+scratch directory); they were already closed when the check was committed. The
+third was reproduced against the committed form and is what forced the rewrite.
 
 * **Comparison against ``HEAD`` only.** ``git diff <rev> HEAD`` ignores the
-  working tree, so an uncommitted executable edit passed while the guard
+  working tree, so an uncommitted executable edit passed while the check
   printed that all differences were comment-only.
 * **Failing open when git cannot compare.** With an unresolvable or GC'd
   ``<rev>``, every ``git`` call exits non-zero with *empty* stdout; the
-  changed-file list came back empty and the guard printed OK. Every git call
+  changed-file list came back empty and the check printed OK. Every git call
   here is exit-checked and ``<rev>`` is resolved up front.
-* **Defeating the scan through git's own output filters.** ``git diff`` is
-  defeated by ``assume-unchanged`` / ``skip-worktree`` (the file's dirty state
-  is suppressed), collapses renames (the old path is never examined), and
-  ``ls-files --others --exclude-standard`` honours ignore rules (a ``.gitignore``
-  entry hid an untracked surface file). All three were demonstrated to yield
-  ``rc=0`` on a genuinely drifted tree, so this guard never diffs: it enumerates
-  the surface from git's records and compares **content**.
+* **Defeating the scan through git's own output filters** (committed form,
+  demonstrated on a drifted tree): ``git diff`` is defeated by
+  ``assume-unchanged`` / ``skip-worktree`` (a file's dirty state is
+  suppressed), collapses renames (the old path is never examined), and
+  ``ls-files --others --exclude-standard`` honours ignore rules (a
+  ``.gitignore`` entry hid an untracked surface file). So this guard never
+  diffs: it enumerates the surface from git's records and compares **content**.
+* **Content is not the whole of "executable".** A ``chmod -x`` on a hook, or a
+  regular file replaced by a symlink of the same bytes, executes differently
+  while the content compare passes. The tracked mode and the on-disk file type
+  are compared too.
 
 CONTRACT (declared surface — what is and is not covered):
 
@@ -38,8 +45,17 @@ CONTRACT (declared surface — what is and is not covered):
 
 Untracked scanning deliberately does **not** honour ``.gitignore``: an ignore
 rule is a way to hide a file from the check. The only files excused are those in
-``NOISE_DIRS`` / ``NOISE_SUFFIXES`` (byte-caches and editor droppings), and they
-are reported in the output rather than silently accepted.
+``NOISE_DIRS`` / ``NOISE_SUFFIXES``, reported in the output rather than silently
+accepted. Those are editor/VCS droppings **plus byte-caches** — and a ``.pyc``
+IS executable code that CPython will run in preference to the ``.py`` beside it,
+so this check does NOT cover it. That is a deliberate, stated limit: a
+byte-code-free measured run (``python -B`` or ``PYTHONDONTWRITEBYTECODE=1``) is
+what makes the content compare meaningful, and ``--strict-bytecode`` refuses any
+``.pyc`` under the surface for callers who want that enforced rather than
+assumed.
+
+``--paths`` that matches nothing is refused rather than reported as clean: an
+empty surface must not read as a passing check.
 
 Out of scope by construction: a changed file does not have to be *reachable*
 from the measured command — the guard proves absence of executable change on the
@@ -59,6 +75,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -66,9 +84,11 @@ from typing import NamedTuple
 
 DEFAULT_PATHS = ("tortoise/", "tools/")
 
-#: Directory components that never carry executed code.
+#: Byte-cache directories. NOTE: their contents ARE executed code — excused
+#: here only because a normal working tree is full of them; see --strict-bytecode.
 NOISE_DIRS = ("__pycache__/",)
-#: Basenames / suffixes that never carry executed code (editor + VCS droppings).
+#: Basenames / suffixes excused from the untracked refusal (editor/VCS
+#: droppings, and byte-caches — see NOISE_DIRS).
 NOISE_SUFFIXES = (
     ".pyc",
     ".pyo",
@@ -140,7 +160,17 @@ def _is_noise(rel: str) -> bool:
     return rel.endswith(NOISE_SUFFIXES)
 
 
-def _compare(worktree: Path, rev: str, rel: str) -> bool:
+def _modes_at_rev(worktree: Path, rev: str, paths: tuple[str, ...]) -> dict[str, str]:
+    """``{path: git mode}`` for every file at ``rev`` under the surface."""
+    modes: dict[str, str] = {}
+    for line in _git(worktree, "ls-tree", "-r", rev, "--", *paths).splitlines():
+        meta, _, path = line.partition("\t")
+        if path:
+            modes[path] = meta.split()[0]
+    return modes
+
+
+def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
     """Refuse unless ``rel`` is executably unchanged since ``rev``.
 
     Returns True when the file differs from ``rev`` only in comments,
@@ -149,12 +179,31 @@ def _compare(worktree: Path, rev: str, rel: str) -> bool:
     from ``git diff`` — see the module docstring on index flags and renames.
     """
     on_disk = worktree / rel
-    if not on_disk.exists():
+    try:
+        st = os.lstat(on_disk)
+    except OSError as exc:
         raise GuardRefused(
-            f"guard: {rel} exists at {rev} but not in the working tree "
-            "(deleted) — re-measure rather than re-label"
+            f"guard: {rel} exists at {rev} but cannot be read in the working "
+            f"tree ({exc}) — re-measure rather than re-label"
+        ) from None
+    rev_is_link = rev_mode == "120000"
+    if stat.S_ISLNK(st.st_mode) != rev_is_link:
+        raise GuardRefused(
+            f"guard: {rel} changed type since {rev} (symlink <-> regular "
+            "file), which changes what executes even when the bytes match — "
+            "re-measure rather than re-label"
         )
-    on_disk_bytes = on_disk.read_bytes()
+    if rev_is_link:
+        on_disk_bytes = os.readlink(on_disk).encode()
+    else:
+        rev_is_exec = rev_mode == "100755"
+        if bool(st.st_mode & 0o111) != rev_is_exec:
+            raise GuardRefused(
+                f"guard: {rel} changed executable permission since {rev} "
+                "(a hook that can no longer run still has identical bytes) — "
+                "re-measure rather than re-label"
+            )
+        on_disk_bytes = on_disk.read_bytes()
     at_rev_bytes = _git_bytes(worktree, "cat-file", "blob", f"{rev}:{rel}")
     if on_disk_bytes == at_rev_bytes:
         return False
@@ -188,20 +237,38 @@ class Scan(NamedTuple):
 
 
 def guard(
-    worktree: Path, rev: str, paths: tuple[str, ...] = DEFAULT_PATHS
+    worktree: Path,
+    rev: str,
+    paths: tuple[str, ...] = DEFAULT_PATHS,
+    *,
+    allow_bytecode: bool = True,
 ) -> Scan:
     """Return a :class:`Scan`, or raise :class:`GuardRefused` on drift."""
     worktree = Path(worktree)
     _git(worktree, "rev-parse", "--verify", f"{rev}^{{commit}}")
 
-    at_rev = _git(
-        worktree, "ls-tree", "-r", "--name-only", rev, "--", *paths
-    ).split()
+    modes_at_rev = _modes_at_rev(worktree, rev, paths)
+    at_rev = list(modes_at_rev)
     tracked = _git(worktree, "ls-files", "--", *paths).split()
+    if not at_rev and not tracked:
+        raise GuardRefused(
+            f"guard: --paths {' '.join(paths)} matches no file at {rev} and "
+            "nothing in the index — refusing rather than reporting an empty "
+            "surface as clean"
+        )
     # NO --exclude-standard: an ignore rule must not hide a file from the check.
     untracked = _git(worktree, "ls-files", "--others", "--", *paths).split()
 
     noise = [f for f in untracked if _is_noise(f)]
+    if not allow_bytecode:
+        pyc = [f for f in noise if f.endswith((".pyc", ".pyo"))]
+        if pyc:
+            raise GuardRefused(
+                f"guard: {len(pyc)} byte-cache file(s) under the surface "
+                f"(e.g. {pyc[:3]}) — a .pyc is executable code that this "
+                "content compare does not verify; re-run the measurement "
+                "byte-code-free (python -B / PYTHONDONTWRITEBYTECODE=1)"
+            )
     hidden = [f for f in untracked if not _is_noise(f)]
     if hidden:
         raise GuardRefused(
@@ -219,7 +286,7 @@ def guard(
             added.append(rel)  # did not exist during the measured run
             continue
         checked += 1
-        if _compare(worktree, rev, rel):
+        if _compare(worktree, rev, rel, modes_at_rev[rel]):
             comment_only.append(rel)
     for rel in at_rev:
         if rel in set(tracked):
@@ -248,9 +315,20 @@ def main(argv: list[str] | None = None) -> int:
         default=list(DEFAULT_PATHS),
         help=f"measured surface (default: {' '.join(DEFAULT_PATHS)})",
     )
+    ap.add_argument(
+        "--strict-bytecode",
+        action="store_true",
+        help="refuse any .pyc under the surface instead of excusing it "
+        "(a .pyc is executable and is not content-verified)",
+    )
     args = ap.parse_args(argv)
     try:
-        scan = guard(args.worktree, args.rev, tuple(args.paths))
+        scan = guard(
+            args.worktree,
+            args.rev,
+            tuple(args.paths),
+            allow_bytecode=not args.strict_bytecode,
+        )
     except GuardRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
