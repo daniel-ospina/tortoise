@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -302,11 +303,15 @@ class TestCommittedRepoMcpJson:
             f"committed .mcp.json Authorization must be a string -- got "
             f"{type(auth).__name__}"
         )
-        # Env-indirect only: the wizard/CLI copy never writes a literal key.
-        assert auth.startswith("Bearer ${") and auth.endswith("}"), (
-            f"committed .mcp.json Authorization must be env-indirect, got {auth!r}"
+        # Exact value, not a substring: a lookalike env var
+        # (`${TORTOISE_API_KEY_ALT}`) is unset in practice and expands to
+        # `Bearer ` -- a silent 401 that a substring check would pass. Matches
+        # what the emitted-config classes pin for the same header.
+        assert auth == "Bearer ${TORTOISE_API_KEY}", (
+            f"committed .mcp.json Authorization must be exactly "
+            f"'Bearer ${{TORTOISE_API_KEY}}' (env-indirect, no literal key) -- "
+            f"got {auth!r}"
         )
-        assert "TORTOISE_API_KEY" in auth, auth
 
     def test_tortoise_entry_is_http_only(self):
         # The entry must stay an HTTP entry. `_comment` and
@@ -330,11 +335,20 @@ class TestCommittedRepoMcpJson:
         # a family minted there is covered without editing this test. Families
         # that are not bearer-reachable (the client id/secret `ct_`/`cs_` minted
         # inline in tortoise/oauth.py) are deliberately not listed.
-        for marker in (*API_KEY_PREFIXES, ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX):
-            assert marker not in text, (
-                f"literal {marker!r} key material in committed .mcp.json -- "
-                f"keys must stay env-indirect"
-            )
+        #
+        # Anchored to a token START -- which is how every consumer checks these
+        # prefixes (str.startswith, never a substring search) -- so ordinary
+        # prose cannot red the guard: "support_ticket" and "float_value"
+        # contain "ort_"/"oat_" mid-word and are not tokens.
+        prefixes = "|".join(
+            re.escape(p)
+            for p in (*API_KEY_PREFIXES, ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX)
+        )
+        leak = re.search(rf"(?<![A-Za-z0-9_])(?:{prefixes})", text)
+        assert leak is None, (
+            f"literal key material in committed .mcp.json (found "
+            f"{leak.group(0)!r}) -- keys must stay env-indirect"
+        )
         # (b) Structural backstop over the PARSED HEADER VALUES, not the raw
         # text: the Authorization header is where a credential would actually
         # be presented, and prose in a `_comment` that merely says "Bearer "

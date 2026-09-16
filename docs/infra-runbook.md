@@ -116,9 +116,10 @@ install defeats the purpose of hosting locally.
 - Local tooling (MCP server, SDK scripts, graph-scripts) resolves its DB target
   from `TORTOISE_DB_URI` — canonical local form
   `docker://:falkordb@localhost:6379/tortoise` (compose publishes 127.0.0.1:6379;
-  `.env.example`). A self-hosted/stdio MCP entry sets its own `env` block; the
-  committed repo-root `.mcp.json`'s `tortoise` entry carries no `env` at all
-  (see the exception above). The legacy `FALKORDB_*` trio defaults to the
+  `.env.example`). A **stdio** MCP entry sets its own `env` block; the compose
+  daemon resolves `TORTOISE_DB_URI` from its own environment, and the committed
+  repo-root `.mcp.json`'s `tortoise` entry carries no `env` at all (see the
+  exception above). The legacy `FALKORDB_*` trio defaults to the
   same port (`FALKORDB_PORT=6379` in `.env.example`; code defaults stay
   on the legacy port — env-overridable — for backward compat with older local containers).
 - The MCP server loads a repo-root `.env` if present and **fails loud** when the
