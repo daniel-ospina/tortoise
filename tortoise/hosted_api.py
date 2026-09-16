@@ -8595,7 +8595,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         link_result = link_session_entities(
             proj, session_id, link_texts,
             turn_ids=[f"{session_id}_t{i}"
-                      for i in range(len(link_texts))])
+                      for i in range(len(link_texts))],
+            sdk=sdk)
         if link_result["attempted"]:
             proj.g.query(
                 "MATCH (s:Session {id:$sid}) SET "
@@ -20231,7 +20232,11 @@ def _relink_sessions_after_index(org_id: str) -> None:
     """
     try:
         from .session_link import link_session_entities
-        proj = _make_sdk(namespace=org_id)._get_proj()
+        # #3664: build the SDK (not just its projection) so the re-linked
+        # edges are journaled as EntityLinked records — a session linked only
+        # after the index lands must also survive rebuild_all.
+        _link_sdk = _make_sdk(namespace=org_id)
+        proj = _link_sdk._get_proj()
         rows = proj.g.query(
             "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
             "WHERE t.pointKind='event' "
@@ -20242,7 +20247,8 @@ def _relink_sessions_after_index(org_id: str) -> None:
             by_session[sid][0].append(str(content or ""))
             by_session[sid][1].append(tid)
         for sid, (texts, tids) in by_session.items():
-            result = link_session_entities(proj, sid, texts, turn_ids=tids)
+            result = link_session_entities(proj, sid, texts, turn_ids=tids,
+                                           sdk=_link_sdk)
             if result["attempted"]:
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}) SET "
