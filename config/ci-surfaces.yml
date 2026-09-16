@@ -472,6 +472,7 @@ surfaces:
   - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
   - test_session_reinjection_rules.py  # #2517: source-session re-injection hermetic rules (C4)
   - test_build_cohorts_2517.py  # #2517: cohort-builder selectors + digest refusal + provenance sidecar (hermetic)
+  - test_guard_measured_revision.py  # #2517: measured-revision guard — one test per declared bypass class (hermetic)
   - test_session_reinjection.py  # #2517: source-session re-injection E2E (C4, docker-lane)
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_evidence_assembly.py      # #2683: Slice-A evidence-package assembly hermetic rules
@@ -660,6 +661,7 @@ surfaces:
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
   - test_build_cohorts_2517.py  # #2517 (hermetic cohort-builder leg, mirrors test_retrieval.py)
+  - test_guard_measured_revision.py  # #2517 (hermetic guard leg: the surface audit + the receipt's machine check)
   - test_session_reinjection.py  # #2517 (docker-lane leg, mirrors test_retrieval.py)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
@@ -736,6 +738,7 @@ surfaces:
   - test_session_reinjection_rules.py
   - test_session_reinjection.py
   - test_build_cohorts_2517.py
+  - test_guard_measured_revision.py
   - test_embedder_probe.py
   - test_eval_extraction_health.py
   - test_labeled_pairs_schema.py
