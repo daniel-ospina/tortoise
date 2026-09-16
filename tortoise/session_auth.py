@@ -18,9 +18,12 @@ outside the ``_fetch_jwks`` seam) rather than httpx's per-phase timeout, and
 ``prefetch_jwks()`` warms the cache at process start so the first request does
 NOT normally pay the fetch. The warm-up makes its bounded attempt with
 ``arm_cooldown=False``: a boot-time blip therefore does not arm the
-request-path cooldown, and the first request still makes its own bounded
-attempt (the bound, not the warm-up, is the #3284 guarantee). Every 503
-carries ``Retry-After``.
+request-path cooldown, so the first request still makes its own bounded
+attempt — UNLESS the request-path failure/miss cooldown is already armed (it
+is a module global, so it survives lifespans), in which case that request is
+answered from the cooldown with NO fetch, not with its own attempt. The bound,
+not the warm-up, is the #3284 guarantee, and every 503 carries
+``Retry-After``.
 
 Issue #1460: the verifier previously only handled RS256 (`jwk["n"]` KeyError
 on the EC JWKS → unhandled 500 → no CORS headers → browser CORS-wall →
@@ -216,7 +219,10 @@ class _JWKSCache:
           bounded attempt but does not arm the request-path cooldown, so a
           boot-time blip cannot refuse every request for ``_COOLDOWN_S``
           without trying. The first real request then makes its own (still
-          bounded) attempt — the #3284 guarantee is untouched.
+          bounded) attempt — UNLESS that cooldown is already armed (it is a
+          module global, so it survives lifespans), in which case the request
+          is answered from the cooldown with NO fetch. The #3284 guarantee is
+          untouched.
 
         WHY the returned set was served (fresh fetch vs a stale last-good
         serve) is available from ``get_with_origin``; ``get`` is the thin
@@ -301,7 +307,8 @@ class _JWKSCache:
                         headers={"Retry-After": str(self._retry_after_s())},
                     )
                 # A TTL-fresh set is not made stale by an armed cooldown.
-                # Reachable only from ``force=True`` (the boot warm-up):
+                # Reachable from any force=True caller (the boot warm-up; also
+                # verify_session_jwt's R16 kid-miss refetch):
                 # ``force=False`` already took the TTL fast path above, so the
                 # cache here is milliseconds old and will serve the first
                 # request at zero fetch cost — reporting it ``stale`` was a
@@ -453,15 +460,17 @@ async def prefetch_jwks() -> dict:
     allowed and then refuse every request for ``_COOLDOWN_S`` without trying.
     The warm-up still makes its bounded attempt; it just does not arm the
     request-path cooldown, so the first real request makes its own bounded
-    attempt (the #3284 bound is untouched) and recovers as soon as the upstream
-    does.
+    attempt and recovers as soon as the upstream does (the #3284 bound is
+    untouched) — UNLESS the cooldown is already armed (it is a module global,
+    so it survives lifespans), in which case the first real request is
+    answered from the cooldown with NO fetch, not with its own attempt.
 
     Deliberately NON-RAISING — the caller runs it as a background task behind
     the listener, and a warm-up must never break boot. The report carries an
     ``outcome`` so the boot log can be TRUTHFUL about which case it was:
 
-    * ``"ready"`` — a FRESH key set was fetched and cached; the first request
-      pays nothing;
+    * ``"ready"`` — a FRESH, usable key set is being served (fetched by this
+      call, or already within the TTL), and the first request pays nothing;
     * ``"empty"`` — a 200 with ZERO usable keys (bad rotation / empty body)
       against a COLD cache. This is NOT a transport outage: a zero-key body is
       cached as ``{}`` and verifies as an unknown kid, so the request answers

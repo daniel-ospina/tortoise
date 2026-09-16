@@ -796,7 +796,10 @@ probe (`hosted_api.CONTROL_PLANE_PROBE_PHASES`).
   control-plane probe in Supabase mode. Registry/self-host does neither. A
   failed warm-up deliberately does **not** arm the request-path cooldown (it
   would otherwise refuse every request for `TORTOISE_JWKS_COOLDOWN` after a
-  single boot-time blip) — the first request makes its own bounded attempt.
+  single boot-time blip) — the first request makes its own bounded attempt,
+  UNLESS the request-path cooldown is already armed (`_last_failure_at` is a
+  module global, so it survives lifespans), in which case that request is
+  answered from the cooldown with **no fetch**.
   An empty key set (`200 {"keys": []}`) is reported as its own outcome, not as
   a transport failure: it answers 401, not 503.
 - Every session-auth **503 now carries `Retry-After`** (the remaining cooldown
