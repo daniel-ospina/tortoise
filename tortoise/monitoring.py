@@ -147,9 +147,10 @@ def probe_setup_timeout() -> float:
 # `PROBE_STALE_AFTER` is when an in-flight probe is presumed wedged and its
 # last good result must stop being reported as live. `PROBE_HARD_TIMEOUT` —
 # the ``HealthProbe`` constructor DEFAULT — is defined below next to
-# ``PROBE_DB_TOTAL_TIMEOUT``, because the default is DERIVED from the DB
-# probes' statically-known inner total rather than chosen independently (the
-# pre-#2988 2.0s literal sat below the 3.1s total — see PROBE_HARD_TIMEOUT).
+# ``PROBE_DB_TOTAL_TIMEOUT``, because the default is DERIVED from that loose
+# outer-alignment over-estimate of the DB probes' platform-shape total rather
+# than chosen independently (the pre-#2988 2.0s literal sat below the 3.1s
+# total — see PROBE_HARD_TIMEOUT).
 # Deriving it lifts the default above the part of the inner path that IS
 # statically bound; it does NOT make the outer>inner ordering provable (see
 # the guarantee summary at ``PROBE_MAX_SUPERSEDES``).
@@ -274,7 +275,8 @@ PROBE_DB_TOTAL_TIMEOUT = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY
 PROBE_SDK_ACQUISITION_BUDGET = 2.0
 
 #: Safety margin so a DB coordinator's outer bound sits STRICTLY above the
-#: statically-known inner total. A bound EXACTLY equal to that total is still
+#: loose outer-alignment figure (``PROBE_DB_TOTAL_TIMEOUT``), NOT the probes'
+#: exact inner total. A bound EXACTLY equal to that figure is still
 #: a race — the worker's own timeout and the coordinator's deadline fire at
 #: the same instant — and after the inner bound fires the worker still needs a
 #: moment to store and notify its result. 0.5s is ~25x ``PROBE_POLL_INTERVAL``
@@ -797,9 +799,10 @@ class HealthProbe:
        that wedges, recovers and wedges again can strand up to
        ``max_supersedes`` threads per episode. What keeps the steady state
        bounded in practice is the caller's LAYERED TIMEOUT — keep ``timeout``
-       ABOVE the probe function's own statically-known TOTAL bound (stated in
-       full once, at ``PROBE_DB_TOTAL_TIMEOUT``; the per-attempt figure is
-       NEVER the right one) so the inner timeout normally fires first and the
+       ABOVE the probe function's own total for THAT caller's shape (for the
+       platform shape ~``PROBE_TIMEOUT``; ``PROBE_DB_TOTAL_TIMEOUT`` is only a
+       loose outer-alignment figure, and the per-attempt figure is NEVER the
+       right one) so the inner timeout normally fires first and the
        worker returns by itself, making abandonment the exception instead of
        the norm. This is a BEST-EFFORT ALIGNMENT, not a proven ordering — the
        inner worst case is unbounded; see the guarantee summary at
