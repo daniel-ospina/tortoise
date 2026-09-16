@@ -1,18 +1,41 @@
 ---
-title: "Tortoise — Canonical Ontology v3.11"
+title: "Tortoise — Canonical Ontology v3.12"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-12
+updated: 2026-09-15
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.11
+# Tortoise — Canonical Ontology v3.12
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.12 (2026-09-15, issue #3642 — declared temporal model):**
+> - §4.7: rewritten as the canonical statement of the temporal model — two
+>   orthogonal axes (valid time `validFrom`/`validTo`; transaction time
+>   `createdAt`/`expiredAt`), supersession as a **third, separate fact**
+>   (`supersededAt` on Object; `outdated` + `CORRECTS` on Point), one canonical
+>   name per slot, Event's `startedAt`/`endedAt` declared a named alias of the
+>   valid-time pair, and a per-type presence matrix. **Fixes the contradiction
+>   with §4.5:** the old map's `createdAt` row mapped Event's record-creation to
+>   `startedAt`; Event's transaction-time start is `capturedAt`.
+> - §4.1: `expiredAt` description split — transaction-time expiry (the record
+>   stopped being current) is not "when a supersession/withdrawal terminated the
+>   record"; supersession is a separate fact (`outdated` flag + `CORRECTS`) and
+>   both can apply.
+> - §4.2/§4.3/§4.6: `validFrom`/`validTo` + `expiredAt` declared (❌ — the model
+>   is declared, not built; implementation tracked separately).
+> - §4.4: Document declared to inherit the Object temporal fields (no duplicate
+>   rows).
+> - §4.5: `capturedAt` moved from planned(❌) to the declared transaction-time
+>   start (⚠️ — written by the hosted capture/commit + session-index paths, not
+>   yet on every Event write path); cross-references §4.7.
+> - §12: temporal standards mapping added — `prov:generatedAtTime`/
+>   `prov:invalidatedAtTime`, OWL-Time, and the Graphiti/Zep bi-temporal lineage.
 >
 > **Changelog v3.11 (2026-09-12, issue #3263 — provenance written by construction):**
 > - §3.3: `extractedFrom` cardinality amended **`many→1` → `many→many`**. The
@@ -381,8 +404,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
-| `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window |
-| `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — when a supersession/withdrawal terminated the record (written by `supersede_point`/`invalidate_point`, E6 #1538; complements the valid-window end `validTo` with the graph-write time) |
+| `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window — the valid-time axis (§4.7) |
+| `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as the `outdated` flag + the `CORRECTS` edge (Point has no `supersededAt`), so a superseded Point is both `outdated` and `expiredAt`-stamped. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
 | `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Indexed via the plain `:Point(lastDreamedAt)` index, created idempotently at init on ALL engines — `is_operator` is never indexed (#522 embedded stale bool type table; #3154 docker/server `GRAPH.COPY` drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it, and leaving the copy destination unable to rebuild it) |
 | `embedding` | vector | — | — | ✅ | Semantic embedding (FTS + vector search) |
@@ -397,6 +420,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `name` | string | ✅ | `foaf:name` / `schema:name` | ⚠️ | Human-readable name |
 | `subjectKind` | string | ✅ | `dcterms:type` | ✅ | organization, team, role, legalPerson, naturalPerson, other |
 | `status` | string | — | `pav:status` | ⚠️ | Lifecycle: draft, live, superseded, deprecated, archived — **projection-owned status is planned, NOT yet implemented on Subject**; SDK-created subjects currently carry `status: "live"` via the extra-props path (`_persist_extra_props` — `status` ∉ `_SUBJECT_HANDLED`, #2295): `_upsert_subject` itself writes only `id`/`subjectKind`/`createdAt`/`embedding` |
+| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | Valid-time window — when the Subject held in the world (declared §4.7, #3642; not yet written by `_upsert_subject`) |
+| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of the Subject stopped being current (declared §4.7, #3642) |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE; adopted ON MATCH only when absent — #2295) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_subject`** — planned follow-up |
 
@@ -413,8 +438,10 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, Problem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
 | `title` | string | — | `dc:title` | ✅ | Display title (what `_upsert_object` actually stores) |
 | `status` | string | — | `pav:status` | ✅ | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; connector work-item events→in_progress/completed) — **the event stream is the truth (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)** |
-| `supersededAt` | ISO8601 | — | — | ✅ | The fold TIMESTAMP written by the supersession fold (`apply_supersessions` / `ObjectSuperseded` projection, pinned after the fold via `SET o.supersededAt` for byte-reproducible state headers). R17 P3-1 (#2165): `supersededAt` is the connected-assembly state-header's date source — **byte-golden renders depend on it being a pinned story date, never a wall-clock fold time** (Task-1 fixture pins `2026-09-01T00:00:00Z`). Absent on non-superseded Objects. |
+| `supersededAt` | ISO8601 | — | — | ✅ | The fold TIMESTAMP written by the supersession fold (`apply_supersessions` / `ObjectSuperseded` projection, pinned after the fold via `SET o.supersededAt` for byte-reproducible state headers). R17 P3-1 (#2165): `supersededAt` is the connected-assembly state-header's date source — **byte-golden renders depend on it being a pinned story date, never a wall-clock fold time** (Task-1 fixture pins `2026-09-01T00:00:00Z`). Absent on non-superseded Objects. A separate fact from `expiredAt` — "replaced by a successor" and "our record stopped being current" are independent, and both can apply (§4.7). |
 | `supersededBy` | string | — | — | ✅ | Successor name written by the supersession fold (see `status`); the connected-assembly successor probe verifies a VISIBLE (non-recall-excluded) Object exists before rendering a full supersession clause — a never-created / excluded / empty successor renders a NAME-ONLY annotation, never a fabricated link (R12/C6, #2165 Task 5). |
+| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | Valid-time window — when the Object held in the world (declared §4.7, #3642; not yet written by `_upsert_object`) |
+| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of the Object stopped being current. **Separate from `supersededAt`** (see that row; §4.7) |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE; adopted ON MATCH only when absent — #2194) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
@@ -424,7 +451,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 
 ### §4.4 Document (subclass of Object)
 
-> **Document is an Object** (`objectKind: document`) — a core subclass (§6). Inherits all Object fields; additions below. Graph label is `:Document` (matching `_upsert_document`'s `MERGE (d:Document {id:$id})`); the subclass relationship to Object is expressed via `objectKind: document`, not via a second graph label. Do not create a separate `:Object` label for Documents. `documentKind` is the subclass-of-Document vocabulary (BIBO-aligned).
+> **Document is an Object** (`objectKind: document`) — a core subclass (§6). Inherits all Object fields — **including the Object temporal fields `validFrom`/`validTo`/`expiredAt` (§4.7)**; additions below. Graph label is `:Document` (matching `_upsert_document`'s `MERGE (d:Document {id:$id})`); the subclass relationship to Object is expressed via `objectKind: document`, not via a second graph label. Do not create a separate `:Object` label for Documents. `documentKind` is the subclass-of-Document vocabulary (BIBO-aligned).
 
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
@@ -449,8 +476,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `eventId` | ULID / content-addressed | ✅ | `dc:identifier` | ✅ | Unique occurrence ID — ULID by default; the **agentSession Event uses a content-addressed form** (hash of session_id + captured_at — deterministic MERGE anchor, #909 §4.3 #3) |
 | `eventKind` | string | ✅ | — | ✅ | meeting, decision, experiment, deployment, review, friction, extraction, documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession + pack eventKinds |
 | `format` | string | — | `dc:format` | ✅ | Storage format (jsonl default, markdown) |
-| `startedAt` / `endedAt` | ISO8601 | — | `prov:startedAtTime` / `schema:startDate` | ✅ | Temporal extent |
-| `capturedAt` | ISO8601 | — | — | ❌ | Transaction time of the capture — bi-temporal complement to `startedAt`/`endedAt` (valid time). Registered #909 §4.3 #2; written by the agentSession capture path (endpoint payload field, slice 5) |
+| `startedAt` / `endedAt` | ISO8601 | — | `prov:startedAtTime` / `schema:startDate` | ✅ | Valid-time extent — Event's **named alias** of `validFrom`/`validTo` (§4.7), not a distinct axis |
+| `capturedAt` | ISO8601 | — | — | ⚠️ | Event's **transaction-time start** (§4.7) — when our record of the occurrence was captured, the bi-temporal complement to `startedAt`/`endedAt` (valid time). Registered #909 §4.3 #2; written on `AgentSession` (+ extracted-occurrence) Events by the hosted capture/commit endpoint and the session indexer; not yet on every Event write path |
 | `started_at` | ISO date ≤40 | — | `prov:startedAtTime` | ⚠️ | **Payload-level** valid time on extracted-occurrence events (E1, #1533): the extractor emits it from the session-date anchor; graph property stays `startedAt` (coalesce `started_at → captured_at → now` server-side). Registered #1533 E1; the extractor path gates it via `_valid_iso_date` |
 | `subject` | SubjectID | — | `prov:wasAssociatedWith` (inverse) | ✅ | Who performed the event (mirrors `performs` edge) |
 | `object_name` / `object_type` | string | — | `prov:used` | ✅ | What was acted on / produced |
@@ -468,8 +495,10 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `credibilityTier` | string | — | — | ✅ | T0-T4 credibility tier — the property the inheritance adapter reads (v3.2) |
 | `contentHash` | string | ✅ | `premis:messageDigest` | ✅ | Idempotency anchor — skip re-extraction if unchanged |
 | `title` | string | — | `dc:title` | ⚠️ | Human-readable label. Defaults to url |
-| `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source |
+| `ingestedAt` | ISO8601 | ✅ | `pav:importedOn` | ✅ | When Tortoise first saw this source — **Source's spelling of the canonical transaction-time start `createdAt`** (§4.7) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ✅ | Last modified (set ON MATCH by `_upsert_source`) |
+| `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | ❌ | Valid-time window — when the source content held in the world (declared §4.7, #3642; not yet written by `_upsert_source`) |
+| `expiredAt` | ISO8601 | — | — | ❌ | Transaction-time expiry — when our record of the Source stopped being current (declared §4.7, #3642) |
 | `externalId` | string | — | `dc:identifier` (external) | ⚠️ | System-of-record ID (Slack ts, GitHub issue #) |
 | `sourceDate` | ISO8601 | — | `dc:date` | ⚠️ | Evidence-age clock for recency decay (falls back to `ingestedAt` — the pipeline-arrival proxy, #398) |
 | `provenance_spans` | JSON | — | — | ❌ | Window spans derived from the capture path's `provenance_refs` (plan-defined, #909 §4.3 #6; written by the capture path, slice 5+) |
@@ -478,14 +507,67 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `reliabilityComponents` | JSON | — | — | ⚠️ | Cache metadata: tier, decay, factor, assessment_count, derivation time (#398) |
 | `reliability_derived_at` | ISO8601 | — | — | ⚠️ | Cache freshness stamp (#398) |
 
-### §4.7 Cross-Entity Field Map
+### §4.7 Temporal Model (canonical)
+
+**Every entity answers two orthogonal temporal questions, and supersession is a
+third, separate fact. One canonical name per slot (issue #3642).** This section
+is authoritative — never infer a temporal slot from a field's spelling.
+
+**Axis 1 — Valid time: "when did this hold in the world?"** The fact's own
+window, independent of when Tortoise learned it. Canonical pair:
+`validFrom` / `validTo`.
+
+| Slot | Canonical name | Standard | Notes |
+|------|----------------|----------|-------|
+| start | `validFrom` | `prov:generatedAtTime` | Stamped on Point create; falls back to the graph-write clock when the fact is undated |
+| end | `validTo` | `prov:invalidatedAtTime` | On supersession set to the successor's `validFrom` — **contiguous Graphiti (Zep) windows: the old fact stops being true exactly when the new one starts being true** (`supersede_point`, E6 #1538) |
+
+**Axis 2 — Transaction time: "when did our record of it exist?"** The
+graph-write clock. Canonical pair: `createdAt` / `expiredAt`.
+
+| Slot | Canonical name | Standard | Notes |
+|------|----------------|----------|-------|
+| start | `createdAt` | graph-write clock (not a PROV time property) | `ingestedAt` is **Source's** spelling of this slot; `capturedAt` is **Event's** — both are this slot, never a second axis |
+| end | `expiredAt` | graph-write clock (not a PROV time property) | When our **record** stopped being current (termination), not *why* it did |
+
+**Event's named alias (deliberate — do NOT rename).** Event spells the
+valid-time pair `startedAt` / `endedAt`: for an occurrence, "started/ended" is
+the natural reading. It is **the same concept as `validFrom`/`validTo`** — an
+explicit alias, mapped to OWL-Time and `prov:startedAtTime` (§12) — not a third
+axis. Event's transaction-time start is `capturedAt` (§4.5); Event declares no
+transaction-time end.
+
+**Supersession — a third, separate fact.** "When was it replaced?" (implies a
+successor) is **not** the expiry axis. `supersededAt` (Object) is its own
+concept and **coexists with `expiredAt`** — an Object can be superseded at T1
+and expire at T2, so both apply and neither implies the other. Points record
+the same fact differently: the `outdated` flag + the `CORRECTS` edge, **not**
+`supersededAt` (§4.1, §3.1).
+
+**Per-type presence (canonical matrix)** — ✅ implemented · ⚠️ partial · ❌
+declared, not built (implementation is tracked separately):
+
+| Slot | Point | Subject | Object | Document | Event | Source |
+|------|-------|---------|--------|----------|-------|--------|
+| valid start | `validFrom` ✅ | `validFrom` ❌ | `validFrom` ❌ | **inherits Object** | `startedAt` ✅ (alias) | `validFrom` ❌ |
+| valid end | `validTo` ✅ | `validTo` ❌ | `validTo` ❌ | **inherits Object** | `endedAt` ✅ (alias) | `validTo` ❌ |
+| txn start | `createdAt` ✅ | `createdAt` ✅ | `createdAt` ✅ | **inherits Object** | `capturedAt` ⚠️ | `ingestedAt` ✅ |
+| txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | **inherits Object** | — | `expiredAt` ❌ |
+| supersession | `outdated` + `CORRECTS` ✅ | — | `supersededAt` ✅ | **inherits Object** | — | — |
+
+> **Document** is an Object (`objectKind: document`, `:Document` label, §4.4) and
+declares no temporal rows of its own — it inherits the Object column.
+
+**Cross-Entity Field Map** (non-temporal fields; the matrix above is
+authoritative for the temporal slots. The pre-v3.12 map's `createdAt` row mapped
+Event's record-creation to `startedAt` — that contradicted §4.5 and is corrected
+here: Event's transaction-time start is `capturedAt`.)
 
 | Field | Point | Subject | Object | Document | Event | Source |
 |-------|-------|---------|--------|----------|-------|--------|
 | `id` | ✅ | ✅ | ✅ | ✅ | ✅ eventId | ✅ url |
 | kind tag | pointKind | subjectKind | objectKind | documentKind | eventKind | sourceKind |
 | name/title | — | name | name | title | — | title |
-| createdAt | ✅ | ✅ | ✅ | ✅ | ✅ startedAt | ✅ ingestedAt |
 | updatedAt | ✅ | ❌ | ❌ | ✅ | — | ✅ |
 | status | status | ⚠️ SDK extra-prop (projection-owned planned, #2295) | ✅ (fold cache — event-derived) | doc_status | — | — |
 | responsibility | authoredBy | — | edge (§3.5) | — | — | — |
@@ -493,7 +575,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | management | — | — | edge (§3.5) | — | — | — |
 | format | — | — | — | format | format | — |
 | aboutEdges | ✅ | — | ✅ | ✅ | ✅ | — |
-| temporal | validFrom/To + when | — | — | — | startedAt/endedAt | — |
+| occurrence date | `when` | — | — | — | — | — |
 | is_episodic | ✅ | — | ❌ | — | ✅ | ✅ |
 | passes_frequency_gate | — | — | ❌ | ❌ (inherits Object) | — | — |
 
@@ -910,8 +992,9 @@ the bottom of the recursion (leaf confidence = mean EP of attached points).
 
 | Standard | Alignment |
 |----------|-----------|
-| **PROV-O** | Subject→Agent, Event→Activity, Object→Entity. `uses`=prov:used (Activity→Entity, direction-identical), `produces`=prov:wasGeneratedBy inverse, `wasDerivedFrom`=prov:wasDerivedFrom, `performs`=inverse of prov:wasAssociatedWith (PROV names Activity→Agent accountability; we name the Agent→Activity doing verb). |
+| **PROV-O** | Subject→Agent, Event→Activity, Object→Entity. `uses`=prov:used (Activity→Entity, direction-identical), `produces`=prov:wasGeneratedBy inverse, `wasDerivedFrom`=prov:wasDerivedFrom, `performs`=inverse of prov:wasAssociatedWith (PROV names Activity→Agent accountability; we name the Agent→Activity doing verb). **Temporal:** the valid-time window (`validFrom`/`validTo`) ≈ `prov:generatedAtTime`/`prov:invalidatedAtTime` (the entity's existence window); transaction time (`createdAt`/`expiredAt`, Source `ingestedAt`, Event `capturedAt`) is the graph-write clock — a record-reification clock, not a PROV time property. |
 | **Schema.org** | Event with startTime/endTime. Action pattern: `performs`=schema:agent inverse (the "direct performer or driver of the action"), `produces`=schema:result, `uses`=schema:instrument (mechanisms) / schema:input. |
 | **BIBO** | Document subclasses — `documentKind` vocabulary. |
-| **OWL-Time** | Event is the temporal entity (startedAt/endedAt). |
+| **OWL-Time** | Event is the temporal entity (`startedAt`/`endedAt` = the valid-time alias, §4.7). Non-event validity windows (`validFrom`/`validTo`) are intervals on the same axis. Transaction time is the record clock, not an OWL-Time interval. |
+| **Bi-temporal (Graphiti/Zep)** | Two orthogonal axes — **valid time** (`validFrom`/`validTo`) and **transaction time** (`createdAt`/`expiredAt`) — plus supersession as a third, separate fact (`supersededAt` on Object; `outdated` + `CORRECTS` on Point). Contiguous windows: `validTo` = the successor's `validFrom` (§4.7). |
 | **RDF-star** | Operators are reified edges with metadata (label + confidence) — RDF-star-like reification for epistemic edges. |
