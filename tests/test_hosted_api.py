@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import threading
@@ -8739,3 +8740,158 @@ class TestE2E10ReadPathDisplaySupabase2600:
             assert rd.json()["actor_display"] is None, rd.json()
         finally:
             gen.close()
+
+
+class _StubProbe:
+    """Minimal ``HealthProbe`` stand-in.
+
+    Needs ``reset()`` because the autouse probe fixture resets the three real
+    coordinators at teardown (``_HEALTH_PROBE`` / ``_READY_PROBE`` /
+    ``_CONTROL_PLANE_PROBE``) and cannot tell that this one was swapped in.
+    """
+
+    def __init__(self, result=None, exc: Exception | None = None):
+        self.result = result if result is not None else {
+            "ok": True, "latency_ms": 1.0, "error": None}
+        self.exc = exc
+        self.calls = 0
+
+    async def run(self):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+    def reset(self) -> None:
+        pass
+
+
+class TestFirstContactPrewarm:
+    """#3284 Move A + the HTTP-level bound on the cold-start first request.
+
+    ``session_auth`` owns the JWKS cache and its hard fetch bound; this class
+    pins the two things ``hosted_api`` owes it: the warm-up is SCHEDULED (as a
+    background task, behind the listener) and the bounded failure reaches the
+    client as a real HTTP response — JSON body + ``Retry-After`` — never a
+    zero-byte hang.
+    """
+
+    def test_lifespan_schedules_the_prewarm_as_a_task(self, client):
+        """The task must exist on app.state (it is a task because uvicorn
+        binds only after the startup half returns — #2953)."""
+        import tortoise.hosted_api as ha_mod
+
+        task = getattr(ha_mod.app.state, "_first_contact_task", None)
+        assert task is not None, "lifespan did not schedule the first-contact pre-warm"
+
+    def test_prewarm_warms_jwks_and_the_control_plane_in_supabase_mode(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        calls = {"jwks": 0, "control": 0}
+
+        async def _fake_fetch() -> bytes:
+            calls["jwks"] += 1
+            return b'{"keys": [{"kid": "kid-1", "kty": "EC"}]}'
+
+        class _Probe(_StubProbe):
+            pass
+
+        probe = _Probe()
+        monkeypatch.setattr(sa, "_fetch_jwks", _fake_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", probe)
+
+        asyncio.run(ha_mod._first_contact_prewarm())
+
+        assert calls["jwks"] == 1
+        assert probe.calls == 1
+        assert sa._jwks._keys == {"kid-1": {"kid": "kid-1", "kty": "EC"}}
+
+    def test_prewarm_is_inert_in_registry_mode(self, monkeypatch):
+        """No Supabase session auth / no control plane → no network at boot.
+        The FalkorDB plane is already pre-paid by the health refresher."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        calls = {"jwks": 0}
+
+        async def _fake_fetch() -> bytes:
+            calls["jwks"] += 1
+            return b'{"keys": []}'
+
+        probe = _StubProbe(exc=AssertionError(
+            "control plane probed in registry mode"))
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _fake_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", probe)
+
+        asyncio.run(ha_mod._first_contact_prewarm())
+        assert calls["jwks"] == 0
+        assert probe.calls == 0
+        assert sa._jwks._keys is None
+
+    def test_prewarm_never_raises_when_the_probe_explodes(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise RuntimeError("jwks unreachable")
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE",
+                            _StubProbe(exc=RuntimeError("control plane unreachable")))
+
+        asyncio.run(ha_mod._first_contact_prewarm())  # must not raise
+
+    def test_slow_dead_jwks_still_yields_a_bounded_503_with_retry_after(
+            self, unauth_client, monkeypatch):
+        """The #3284 regression on the REAL HTTP surface.
+
+        A session-authenticated request (``Bearer eyJ…`` → the session-auth
+        lane) against a JWKS endpoint that outlives its budget must come back
+        as a bounded 503 carrying a JSON body and ``Retry-After`` — the exact
+        contract the issue asks for, and the one a client with a 10s budget can
+        act on. Pre-fix the request waited the fetch out (unbounded).
+        """
+        import time as _time
+
+        import tortoise.session_auth as sa
+        from tests import _session_jwt_utils as _jwt
+
+        # raising=False: pre-fix the knob does not exist, so this test fails on
+        # the BEHAVIOUR (the request waits the fetch out, and the 503 carries
+        # no Retry-After) rather than on a missing attribute.
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", 0.25, raising=False)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+
+        async def _slow_dead_fetch() -> bytes:
+            await asyncio.sleep(5.0)  # far past every budget
+            raise OSError("jwks unreachable")
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _slow_dead_fetch)
+        priv, _pub = _jwt.make_ec_keypair()
+        token = _jwt.mint_es256_token(priv, "kid-1", {
+            "sub": "user-3144", "aud": "authenticated", "email": "u@example.com",
+            "exp": int(_time.time()) + 600, "iat": int(_time.time()),
+        })
+
+        t0 = _time.monotonic()
+        r = unauth_client.get("/v1/onboarding/state",
+                              headers={"Authorization": f"Bearer {token}"})
+        elapsed = _time.monotonic() - t0
+
+        assert r.status_code == 503, r.text[:300]
+        assert elapsed < 1.0, f"cold request took {elapsed:.3f}s — not bounded"
+        assert r.content, "zero-byte response body"
+        assert r.json().get("detail"), r.text[:200]
+        assert int(r.headers["Retry-After"]) >= 1

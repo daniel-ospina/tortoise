@@ -784,6 +784,79 @@ def _health_probe_interval() -> float:
     return v
 
 
+async def _first_contact_prewarm() -> None:
+    """#3284 Move A — pre-pay the process's first contacts, behind the listener.
+
+    Two calls, both already-bounded seams, in ONE background task:
+
+    * the JWKS fetch the first session-authenticated request used to pay
+      inline (``session_auth.prefetch_jwks`` — ``_keys is None`` on a fresh
+      process, so a cold/slow/retried fetch was charged to a user-facing
+      call: a slow 401 the client reads as a hang);
+    * the Supabase control-plane client's first TLS handshake + PostgREST
+      round trip (``_CONTROL_PLANE_PROBE.run``), whose only other caller is
+      ``/health/ready`` — so it too is cold on a fresh process.
+
+    The FalkorDB data plane needs nothing: ``_health_probe_loop`` below already
+    pre-pays it on its first iteration.
+
+    ⛔ This MUST be a task, never awaited before ``yield``: uvicorn binds the
+    listening socket only after ``lifespan.startup()`` returns, so awaiting a
+    warm-up here means the machine accepts NOTHING until it finishes (#2953).
+    It is deliberately started BEFORE the embedding pre-warm thread so the
+    process's first network round trip is not competing with torch for the
+    box — the #545 cold-start failure mode this must not re-create.
+
+    Both halves are gated on Supabase mode (the same predicate
+    ``/health/ready`` uses for its control-plane probe): registry/self-host
+    deployments have no Supabase session JWTs to verify and no control plane,
+    so there is nothing to warm — and no network I/O at boot. It never raises
+    (a warm-up must never break boot) and every skip/failure reason is logged
+    with its own line (#2922: no silently-dead subsystem).
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+        supabase_mode = is_supabase_enabled()
+    except Exception as exc:  # pragma: no cover — import/env edge
+        _logger.warning("first-contact pre-warm skipped (mode undeterminable): %s", exc)
+        return
+    if not supabase_mode:
+        _logger.info(
+            "first-contact pre-warm skipped: registry mode (no Supabase session "
+            "JWTs or control plane to warm)"
+        )
+        return
+
+    try:
+        from tortoise.session_auth import prefetch_jwks
+
+        report = await prefetch_jwks()
+        if report["ok"]:
+            _logger.info(
+                "auth: JWKS pre-warm ready in %.0fms (%d keys)",
+                report["elapsed_ms"],
+                report["keys"],
+            )
+        else:
+            _logger.warning(
+                "auth: JWKS pre-warm failed in %.0fms (%s) — the first "
+                "session-authenticated request will answer a bounded 503 + "
+                "Retry-After instead of fetching inline",
+                report["elapsed_ms"],
+                report["error"],
+            )
+    except Exception as exc:  # a warm-up must never break boot
+        _logger.warning("auth: JWKS pre-warm not run: %s", exc)
+
+    try:
+        report = await _CONTROL_PLANE_PROBE.run()
+        _logger.info("control plane: pre-warm %s in %sms",
+                     "ready" if report.get("ok") else "not ready",
+                     report.get("latency_ms"))
+    except Exception as exc:  # a warm-up must never break boot
+        _logger.warning("control plane: pre-warm not run: %s", exc)
+
+
 async def _health_probe_loop() -> None:
     """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
 
@@ -1005,6 +1078,20 @@ async def _lifespan(app):
         pass
 
     async with mcp_http_app.lifespan(mcp_http_app):
+        # ── #3284 Move A: pre-pay the first contacts, behind the listener.
+        # Two bounded calls (JWKS + control plane) in one background task, so
+        # the FIRST session-authenticated request after a (re)start does not
+        # pay for them. Scheduled BEFORE the embedding pre-warm thread below:
+        # the process's first TLS round trip should not compete with torch for
+        # the CPU (#545). Not awaited — uvicorn binds only after this half
+        # returns (#2953). Inert in registry mode (no Supabase session auth).
+        try:
+            app.state._first_contact_task = asyncio.get_event_loop().create_task(
+                _first_contact_prewarm()
+            )
+        except Exception as exc:
+            _logger.warning("first-contact pre-warm not scheduled: %s", exc)
+
         try:
 
             def _probe_loaded_model_id(model) -> str | None:

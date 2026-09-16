@@ -13,6 +13,11 @@ audience + exp/iat/nbf via PyJWT. JWKS cached with TTL; KID-miss triggers a
 refetch (R16). Shared-HMAC (SUPABASE_JWT_SECRET) is rejected — JWKS is the
 standard, key-rotation-safe path.
 
+#3284: the fetch is bounded by a HARD TOTAL (``_JWKS_FETCH_TOTAL_S``, applied
+outside the ``_fetch_jwks`` seam) rather than httpx's per-phase timeout, and
+``prefetch_jwks()`` warms the cache at process start so the first request does
+not pay the fetch. Every 503 carries ``Retry-After``.
+
 Issue #1460: the verifier previously only handled RS256 (`jwk["n"]` KeyError
 on the EC JWKS → unhandled 500 → no CORS headers → browser CORS-wall →
 dashboard login wall). The verify core now delegates to PyJWT
@@ -42,8 +47,85 @@ logger = logging.getLogger(__name__)
 _SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://ybetwichurajbfswfeqa.supabase.co")
 _JWKS_URL = f"{_SUPABASE_URL.rstrip('/')}/auth/v1/.well-known/jwks.json"
 _JWKS_TTL = float(os.environ.get("TORTOISE_JWKS_TTL", "300"))  # seconds
-_FETCH_TIMEOUT = float(os.environ.get("TORTOISE_JWKS_TIMEOUT", "5"))  # seconds
 _COOLDOWN_S = float(os.environ.get("TORTOISE_JWKS_COOLDOWN", "30"))  # failure/miss cooldown
+
+# ── the JWKS fetch budget: PER-PHASE narrowing under a HARD TOTAL (#3284) ──
+#
+# ``httpx.AsyncClient(timeout=<float>)`` is a PER-PHASE timeout (connect /
+# read / write / pool), NOT a total deadline — verified against httpx 0.28.1:
+# ``Timeout(5.0)`` yields 5.0 for each of the four phases, a 20.0s sum. This is
+# the repo's own recorded lesson, twice: ``hosted_api.CONTROL_PLANE_PROBE_PHASES``
+# exists for exactly this reason. The pre-#3284 code passed a bare ``5`` here,
+# so ONE fetch could burn connect(5) + read(5) ≈ 10s of wall clock, and httpx
+# applies ``read`` PER READ OPERATION (a dribbling upstream outlives the sum
+# indefinitely). The request path pays up to TWO fetches sequentially — a TTL
+# refresh plus a kid-miss refetch (R16, pinned by
+# tests/test_session_auth.py::TestConcurrency::test_ttl_refresh_plus_miss_double_fetch)
+# — hence the 15–35s first request reported in #3284/#3144.
+#
+# Two layers, mirroring the control-plane probe's LAYERED TIMEOUT doctrine:
+#   * the PHASES narrow first, so an ordinary stall unwinds the httpx client's
+#     own machinery (a cancelled socket read, not a worker stranded in one);
+#   * ``_JWKS_FETCH_TOTAL_S`` is the HARD deadline, enforced by
+#     ``asyncio.timeout`` OUTSIDE the ``_fetch_jwks`` seam — so the bound holds
+#     for ANY fetch implementation (a test fake, a future transport swap) and
+#     also covers the DNS lookup, which httpx's connect phase cannot cancel
+#     (anyio runs getaddrinfo in a thread it will not abandon).
+_JWKS_FETCH_PHASES: dict[str, float] = {
+    "connect": 1.5,
+    "read": 1.5,
+    "write": 0.25,
+    "pool": 0.25,
+}
+#: Sum of the phases — deliberately BELOW the hard total so a phase timeout
+#: normally fires first and the fetch unwinds by itself.
+_JWKS_FETCH_PHASE_TOTAL_S = sum(_JWKS_FETCH_PHASES.values())
+#: Margin between the phase sum and the hard total: room for the client to
+#: unwind and the cache to arm its failure cooldown once a phase timeout fires.
+_JWKS_FETCH_MARGIN_S = 0.5
+
+
+def _resolve_fetch_total() -> float:
+    """The HARD per-fetch deadline (seconds) — env-overridable, clamped.
+
+    ``TORTOISE_JWKS_TIMEOUT`` is documented — and, as of #3284, actually
+    IMPLEMENTED — as a TOTAL, not a per-phase timeout. A value below the phase
+    sum would let the hard deadline win the race against the phases and strand
+    the httpx worker in its socket read (CPython #87185 cannot cancel it), so
+    it is clamped up to the phase sum plus the margin and the clamp is logged
+    — the same clamp-and-warn convention as ``hosted_api._health_probe_interval``.
+    """
+    floor = _JWKS_FETCH_PHASE_TOTAL_S + _JWKS_FETCH_MARGIN_S
+    try:
+        v = float(os.environ.get("TORTOISE_JWKS_TIMEOUT", floor))
+    except ValueError:
+        return floor
+    if not v > 0:  # NaN-safe (NaN comparisons are False)
+        return floor
+    if v < floor:
+        logger.warning(
+            "TORTOISE_JWKS_TIMEOUT=%.2fs is below the JWKS phase total "
+            "(%.2fs phases + %.2fs margin) — clamping to %.2fs; a lower total "
+            "would strand the fetch worker instead of letting a phase "
+            "timeout fire",
+            v,
+            _JWKS_FETCH_PHASE_TOTAL_S,
+            _JWKS_FETCH_MARGIN_S,
+            floor,
+        )
+        return floor
+    return v
+
+
+#: The hard deadline one fetch can never outlive (request path included).
+_JWKS_FETCH_TOTAL_S = _resolve_fetch_total()
+#: Documented worst case for key resolution on ONE request: a TTL-refresh fetch
+#: plus a kid-miss refetch (R16). Both are hard-bounded, so the request path is
+#: bounded by construction rather than by upstream good behaviour. The default
+#: (4.0s per fetch → 8.0s) sits inside a 10s client connect budget (#3144
+#: records clients with 10–15s budgets and NO retry).
+_JWKS_RESOLVE_WORST_CASE_S = 2 * _JWKS_FETCH_TOTAL_S
+
 _MAX_JWKS_BYTES = 65536  # post-buffer JWKS body cap (defense-in-depth; httpx buffers first)
 _MAX_TOKEN_BYTES = 16000  # repo-enforced token cap — BELOW the server's ~16KB
 # header-line limit (uvicorn/h11 max_incomplete_event_size) so the repo guard —
@@ -69,13 +151,30 @@ class _JWKSCache:
         self._last_failure_at: float | None = None  # None = never failed (unarmed)
         self._lock = asyncio.Lock()
 
+    def _retry_after_s(self) -> int:
+        """Seconds until the cooldown lets the next fetch attempt through (≥1).
+
+        A 503 here is emitted exactly when verification is unavailable AND the
+        cache will refuse to refetch for the rest of its cooldown window, so
+        the honest RFC 7231 ``Retry-After`` is what is LEFT of that window —
+        not the full period. A client honouring it never wastes a retry on an
+        answer that is already determined (#3284: a 503 with no ``Retry-After``
+        is indistinguishable from a hard outage). The miss path arms
+        ``_last_failure_at`` in the FUTURE (jitter, SEC-001), so the arithmetic
+        is intentionally signed-agnostic: it reports the real remaining window.
+        """
+        if self._last_failure_at is None:
+            return max(1, int(_COOLDOWN_S))
+        return max(1, int(_COOLDOWN_S - (time.monotonic() - self._last_failure_at)))
+
     async def get(self, force: bool = False, kid: str | None = None) -> dict[str, dict]:
         """Return {kid: jwk}.
 
         - TTL-serve when fresh; kid-aware early return when the requested kid
           already resolves (single-flight success path).
         - Cooldown-skipped fetch with no last-good keys → HTTPException 503
-          (never returns None — callers must not crash on a None key set).
+          carrying ``Retry-After`` (never returns None — callers must not
+          crash on a None key set).
         - Fetch failure / zero-usable-keys / miss (force + kid absent after a
           successful refetch) arm the cooldown (`_last_failure_at`).
         - `force` bypasses the TTL but NOT the cooldown.
@@ -95,10 +194,14 @@ class _JWKSCache:
             # one fetch attempt per cooldown window under concurrency).
             if self._last_failure_at is not None and now - self._last_failure_at < _COOLDOWN_S:
                 if self._keys is None:
-                    raise HTTPException(status_code=503, detail="Session verification unavailable")
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Session verification unavailable",
+                        headers={"Retry-After": str(self._retry_after_s())},
+                    )
                 return self._keys
             try:
-                content = await _fetch_jwks()
+                content = await _fetch_jwks_bounded()
                 if len(content) > _MAX_JWKS_BYTES:
                     raise ValueError("JWKS response exceeds size cap")
                 parsed = _parse_jwks(content)
@@ -135,7 +238,9 @@ class _JWKSCache:
                 if self._keys is None:
                     logger.warning("JWKS unavailable (cold) — 503: %s", exc)
                     raise HTTPException(
-                        status_code=503, detail="Session verification unavailable"
+                        status_code=503,
+                        detail="Session verification unavailable",
+                        headers={"Retry-After": str(self._retry_after_s())},
                     ) from exc
                 logger.warning("JWKS fetch failed — serving stale: %s", exc)
             return self._keys
@@ -169,14 +274,82 @@ def _parse_jwks(content: bytes) -> dict[str, dict]:
 
 
 async def _fetch_jwks() -> bytes:
-    """Fetch the JWKS body (bounded timeout). Seam for tests."""
-    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT) as client:
+    """Fetch the JWKS body. Seam for tests.
+
+    The transport gets the explicit PER-PHASE timeout, so an ordinary stall
+    unwinds the client's own machinery first. The HARD total is applied by
+    ``_fetch_jwks_bounded``, OUTSIDE this seam — the bound therefore holds for
+    any implementation of this function, including a test fake.
+    """
+    async with httpx.AsyncClient(timeout=httpx.Timeout(**_JWKS_FETCH_PHASES)) as client:
         resp = await client.get(_JWKS_URL)
         resp.raise_for_status()
         return resp.content
 
 
+async def _fetch_jwks_bounded() -> bytes:
+    """``_fetch_jwks`` under the HARD per-fetch deadline (#3284).
+
+    ``asyncio.timeout`` — not httpx's per-phase knob — is what makes
+    ``TORTOISE_JWKS_TIMEOUT`` a *total*. It covers what the phases cannot:
+    the DNS lookup (anyio resolves in a thread the timeout cannot abandon, so
+    a slow resolver is NOT bounded by httpx's connect phase) and per-read
+    dribbling. A timeout surfaces as ``TimeoutError`` and takes the cache's
+    ordinary failure path: cooldown armed, stale-serve when last-good keys
+    exist, otherwise a bounded ``503`` + ``Retry-After``.
+    """
+    async with asyncio.timeout(_JWKS_FETCH_TOTAL_S):
+        return await _fetch_jwks()
+
+
 _jwks = _JWKSCache()
+
+
+async def prefetch_jwks() -> dict:
+    """Pre-pay the process's first JWKS fetch at startup (#3284 Move A).
+
+    Before this, the FIRST session-authenticated request on a fresh process
+    paid for the fetch inline (``_keys is None``): a cold/slow/retried fetch
+    was charged to a user-facing call, which is how a slow 401 becomes a
+    client-visible hang. Warm-up is the state of the art here (WorkOS, Okta,
+    Auth0 and Clerk all say pre-warm at startup, never lazily fetch on the
+    first user request); our cache already had every OTHER property.
+
+    ``force=True`` (the #3284 design round): the warm-up PAYS for a fresh key
+    set rather than trusting an inherited, possibly stale in-process cache.
+
+    Deliberately NON-RAISING — the caller runs it as a background task behind
+    the listener, and a warm-up must never break boot. On failure the cache's
+    own semantics apply (cooldown armed), so the first request fails FAST with
+    a bounded ``503`` + ``Retry-After`` instead of paying the fetch itself.
+    That is the accepted trade: a failed warm-up converts a slow user-facing
+    call into an honest, retryable error, and recovery is the cooldown lapse.
+
+    Returns a small boot-log report: ``{"ok", "keys", "elapsed_ms", "error"}``.
+    """
+    start = time.monotonic()
+    try:
+        keys = await _jwks.get(force=True)
+    except HTTPException as exc:
+        return {
+            "ok": False,
+            "keys": 0,
+            "elapsed_ms": round((time.monotonic() - start) * 1000, 1),
+            "error": f"HTTPException {exc.status_code}: {exc.detail}",
+        }
+    except Exception as exc:  # a warm-up must never raise
+        return {
+            "ok": False,
+            "keys": 0,
+            "elapsed_ms": round((time.monotonic() - start) * 1000, 1),
+            "error": f"{type(exc).__name__}: {exc}"[:200],
+        }
+    return {
+        "ok": bool(keys),
+        "keys": len(keys),
+        "elapsed_ms": round((time.monotonic() - start) * 1000, 1),
+        "error": None,
+    }
 
 
 def _b64url_decode(part: str) -> bytes:
