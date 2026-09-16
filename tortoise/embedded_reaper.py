@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -1417,14 +1418,22 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     server that is not orphan-CONFIRMED — redislite servers daemonize to
     ppid=1, so _is_detached is True for ALL of them and the reaper cannot
     distinguish a concurrent suite's live test server from a killed-
-    subprocess orphan on pid/detachment alone (#1557). #1642 FIX 3 gives
-    only_safe the discriminator it lacked: a live server is killed only
-    when `_orphan_confirmed` (persisted 0-client CLIENT LIST state >= 10
-    min with no live suite markers — set by _mark_orphan_confirmation in
-    _run_sweep). Path-based (user-data) servers additionally require
-    confirmation in EVERY mode (their data outlives the test tree). This
-    preserves the #1005 guarantee: a concurrent suite's between-tests idle
-    server is never disturbed.
+    subprocess orphan on pid/detachment alone (#1557). A live server is
+    killed only when `_orphan_confirmed`, which post-#3599 means EITHER:
+      - a per-server signal: every owner record in the server's socket dir
+        belongs to a provably-dead pid, and the server is ephemeral
+        (`path_based` False). This confirms on the FIRST sweep and is
+        independent of other suites on the host — that independence is the
+        whole point of #3599, because the global gate below is permanently
+        True on a fleet box; or
+      - the #1642 FIX 3 fallback for uninstrumented spawns (no owner
+        records at all): a persisted 0-client CLIENT LIST state >= 10 min
+        with no live suite markers (set by _mark_orphan_confirmation in
+        _run_sweep).
+    Path-based (user-data) servers additionally require confirmation in
+    EVERY mode (their data outlives the test tree). This preserves the
+    #1005 guarantee: a concurrent suite's between-tests idle server is
+    never disturbed.
     """
     acted = []
     killed = 0
@@ -1530,9 +1539,12 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
 
         # #1642 FIX 3: a CONFIRMED socket-less orphan (socket dir GONE —
         # no client can exist and no probe can succeed) skips the CLIENT
-        # LIST gates: the missing-dir signal is strictly stronger than a
-        # 0-client probe, and the confirmation already required the 10-min
-        # window + (pid, start) identity + no live suite markers.
+        # LIST gates: by the time this branch is reached the missing-dir
+        # signal has satisfied the pre-existing confirmation requirement
+        # (the 10-min window + (pid, start) identity + no live suite
+        # markers) — #3599 deliberately did NOT make a missing dir an
+        # immediate signal, because a live server whose dir was unlinked
+        # still serves established connections.
         socketless = (record.get("_orphan_confirmed")
                       and _socket_dir_missing(record["socket_path"]))
 
@@ -2090,6 +2102,29 @@ def _zero_client_state_write(state: dict) -> None:
         logger.warning("could not persist zero-client state")
 
 
+def _owner_pid_alive(pid: int) -> bool:
+    """Fail-closed liveness for an OWNER pid (#3599 review).
+
+    `_pid_alive` returns False on EPERM as well as ESRCH, because for its
+    original callers ("is this pid a reapable redis-server?") not-being-able-
+    to-signal is the SAFE direction. For an owner record the question is
+    inverted — False means "this owner is dead, so the server is an orphan"
+    — and an owner we merely cannot signal would licence a kill. So a pid
+    that exists but is not ours counts LIVE here, and only a pid this
+    process can positively prove gone counts dead.
+    """
+    if _pid_alive(pid):
+        return True
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True  # exists, other uid/owner — fail closed
+    except (OSError, OverflowError, ValueError):
+        return False
+    # kill(0) succeeded but _pid_alive said no -> zombie (its fds are gone).
+    return False
+
+
 def _owner_records(socket_path: str) -> tuple[int, int] | None:
     """(live_owners, total_owners) recorded for the server at ``socket_path``.
 
@@ -2098,17 +2133,18 @@ def _owner_records(socket_path: str) -> tuple[int, int] | None:
     global suite-marker gate, fail closed).
 
     Only ever used to PROVE orphanhood, never to assume it: a record whose
-    (pid, start) identity cannot be verified (an unreadable start time, or
-    the 'unknown' stamp the writer emits when `ps` was unavailable) counts
-    as LIVE whenever its pid is alive — while a record whose pid is
-    provably DEAD is a stale record and does not count, even if its start
-    is unreadable (otherwise nothing would ever prune it). A file whose
-    name is not an integer pid prefix is a foreign file and is ignored
-    entirely; a bare `<pid>` with no start is treated as an unknown-start
-    record. A shared server is safe by construction — every constructor
-    writes its own record, so a co-tenant that attached after the creator
-    is its own live entry and the server is never confirmed (the #1557
-    kill-a-live-server hazard).
+    (pid, start) identity cannot be verified (an unreadable start time, the
+    `unknown` stamp the writer emits when `ps` was unavailable, or a
+    non-finite/unparsable one) counts as LIVE whenever its pid is alive —
+    while a record whose pid is provably DEAD is a stale record and does
+    not count, even if its start is unreadable (otherwise nothing would
+    ever prune it). A file whose name is not a positive integer pid prefix
+    is a foreign file and is ignored entirely; a bare `<pid>` with no start
+    is treated as an unverifiable-start record. A pid we cannot signal
+    counts LIVE (`_owner_pid_alive`). A shared server is safe by
+    construction — every constructor writes its own record, so a co-tenant
+    that attached after the creator is its own live entry and the server is
+    never confirmed (the #1557 kill-a-live-server hazard).
     """
     d = os.path.join(os.path.dirname(socket_path), OWNERS_DIRNAME)
     try:
@@ -2129,27 +2165,47 @@ def _owner_records(socket_path: str) -> tuple[int, int] | None:
             pid = int(pid_s)
         except ValueError:
             continue
+        if pid <= 0:
+            # #3599 review: `os.kill(0, 0)` targets the caller's OWN process
+            # group and therefore SUCCEEDS, so a file named `0` would read as
+            # a live owner forever and permanently defeat reaping for that
+            # server (the exact accumulation #3599 fixes). A real owner pid
+            # is always >= 1 (`record_owner` writes `os.getpid()`).
+            continue
         total += 1
-        if start_s == "unknown" or not start_s:
-            # #3599 review cycle 2: only the START is unverifiable here —
-            # the pid is known. Counting the record live WITHOUT a liveness
-            # check made it immortal: nothing prunes owner files
-            # (`forget_owner` only matches its own pid prefix), so a
-            # SIGKILLed owner whose `ps` timed out at construction pinned
-            # `owners[0] > 0` forever and the server could never be
-            # orphan-confirmed by the only_safe cron or the conftest
-            # end-sweep. That population IS #3599 (killed lanes on a loaded
-            # host). A dead pid is verifiable even when its identity is
+        # Resolve the stamp to a finite float, or None when it is
+        # UNVERIFIABLE — the 'unknown' sentinel, an empty stamp (a bare
+        # `<pid>` filename), an unparsable one, or a non-finite one.
+        # `float()` happily accepts 'nan'/'inf'/'1e400', and
+        # `abs(current - nan) < 2.0` is False, so a non-finite stamp would
+        # otherwise take the RECYCLED-PID path and count a LIVE owner as
+        # dead — a false orphan verdict, i.e. the reaper killing a live
+        # suite's server (#3599 review, fail-open, reproduced).
+        start: float | None = None
+        if start_s and start_s != "unknown":
+            try:
+                start = float(start_s)
+            except ValueError:
+                start = None
+            else:
+                if not math.isfinite(start):
+                    start = None
+        if start is None:
+            # #3599 review cycle 2 + 5: only the START is unverifiable here —
+            # the pid is known. Gating this on liveness (rather than counting
+            # it live unconditionally) is what keeps a SIGKILLed owner's
+            # record from becoming immortal: nothing prunes owner files
+            # (`forget_owner` only matches its own pid prefix), so an
+            # immortal record pins `owners[0] > 0` forever and the server
+            # can never be orphan-confirmed by the only_safe cron or the
+            # conftest end-sweep. That population IS #3599 (killed lanes on
+            # a loaded host, where a `ps` timeout is how an 'unknown' stamp
+            # arises). A dead pid is verifiable even when its identity is
             # not:
             #   pid dead   -> dead owner (the record is stale)
             #   pid alive  -> LIVE (fail closed; a recycled pid included)
-            if _pid_alive(pid):
+            if _owner_pid_alive(pid):
                 live += 1
-            continue
-        try:
-            start = float(start_s)
-        except ValueError:
-            live += 1  # malformed -> fail closed
             continue
         # #3599 review P0: _pid_identity_matches() is the WRONG primitive
         # here — it returns False both for a recycled pid (provably dead)
@@ -2162,7 +2218,7 @@ def _owner_records(socket_path: str) -> tuple[int, int] | None:
         #   start unreadable (None)  -> LIVE (fail closed)
         #   start matches            -> LIVE
         #   start differs (recycled) -> dead
-        if not _pid_alive(pid):
+        if not _owner_pid_alive(pid):
             continue
         current = _process_start_time(pid)
         if current is None or abs(current - start) < 2.0:
@@ -2181,14 +2237,19 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
     the FIRST signal that proves it, per server:
       1. #3599: no live owner. tortoise.FalkorDB records one owner file per
          owning process inside the server's socket dir; all owners provably
-         dead (or the socket dir gone) => orphan, independent of what other
-         suites on the host are doing. This is the signal that breaks the
-         fleet deadlock: the global gate below is permanently True on a
-         host running many concurrent sessions, so nothing was ever
-         confirmed and the only_safe cron was a no-op (#3599).
-      2. #1642 FIX 3 fallback (uninstrumented spawns — no owner records):
-         the 0-client state must have persisted >= ZERO_CLIENT_CONFIRM_
-         MINUTES across sweeps AND no live suite markers may exist (FIX 4).
+         dead => orphan, independent of what other suites on the host are
+         doing. This is the signal that breaks the fleet deadlock: the
+         global gate below is permanently True on a host running many
+         concurrent sessions, so nothing was ever confirmed and the
+         only_safe cron was a no-op (#3599). Restricted to EPHEMERAL
+         test-tree servers (`path_based` False).
+      2. #1642 FIX 3 fallback (uninstrumented spawns — no owner records, and
+         also the socket-dir-missing case): the 0-client state must have
+         persisted >= ZERO_CLIENT_CONFIRM_MINUTES across sweeps AND no live
+         suite markers may exist (FIX 4). A missing socket dir is NOT an
+         immediate signal: a live server whose dir was unlinked still
+         serves already-established connections, which a path-based CLIENT
+         LIST probe cannot see (the #1557 lifecycle race).
     State is keyed by (pid, process_start_time) so a recycled pid restarts
     the window (FIX 5). Mutates records in place (`_orphan_confirmed`);
     reap() reads the flag. Never raises.
@@ -2235,10 +2296,22 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
         #       blast radius is the disposable leak class this issue
         #       measured; a user-data server keeps the conservative window
         #       (its db outlives the test tree — #1642 FIX 3).
-        #   (c) socket DIR gone -> no client can connect -> orphan.
+        #   (c) socket DIR gone: NOT an immediate signal. It stays on the
+        #       pre-existing conservative path below (window + identity +
+        #       no live suite markers). A live server whose socket dir is
+        #       unlinked still serves clients over already-established
+        #       connections (a unix connection survives unlink and is
+        #       invisible to a CLIENT LIST probe that needs the path), so
+        #       treating a missing dir as instant proof of orphanhood is the
+        #       #1557 test-tempdir lifecycle race that a prior review on this
+        #       file rated P1 (PR #1558). `_socket_dir_missing` is also NOT
+        #       `path_based`-gated, so the immediate arm would have killed
+        #       user-data servers too.
         # NOTE: confirming here cannot itself kill a served server —
         # reap() still requires a verified 0-client CLIENT LIST probe
-        # (before AND after) before any _kill.
+        # (before AND after) before any _kill, EXCEPT on the socketless
+        # fast path (dir gone + confirmed), which is why the dir-missing
+        # signal must keep its window.
         owners = _owner_records(rec["socket_path"])
         if owners is not None and owners[0] > 0:
             if state.pop(rec["socket_path"], None) is not None:
@@ -2246,7 +2319,7 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
             continue
         no_live_owner = (owners is not None and owners[0] == 0
                          and not rec.get("path_based"))
-        if no_live_owner or _socket_dir_missing(rec["socket_path"]):
+        if no_live_owner:
             rec["_orphan_confirmed"] = True
             if state.pop(rec["socket_path"], None) is not None:
                 changed = True
@@ -2258,7 +2331,8 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
             # + no-live-markers hold (the missing-dir signal substitutes for
             # the 0-client probe). A probe failure with the socket dir still
             # present is a transient (loaded server) -> fail closed.
-            continue  # probe failed but dir exists -> fail closed
+            if not _socket_dir_missing(rec["socket_path"]):
+                continue  # probe failed but dir exists -> fail closed
         start = _process_start_time(rec["pid"])
         entry = state.get(rec["socket_path"])
         # #1642 FIX 5 (review P1): compare the process's CURRENT start against
@@ -2317,9 +2391,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Parallel probe workers (default 8)")
     parser.add_argument("--only-safe", action="store_true",
                         help="Concurrent-suite-safe sweep: kill only "
-                             "orphan-CONFIRMED live servers (persisted "
-                             "0-client state) + stale_socket removals "
-                             "(#1642 FIX 3; the scheduled-cron mode)")
+                             "orphan-CONFIRMED live servers — either a "
+                             "per-server all-owners-dead signal (#3599) or "
+                             "the persisted 0-client window with no live "
+                             "suite markers (#1642 FIX 3) — plus "
+                             "stale_socket removals (#1642 FIX 3; the "
+                             "scheduled-cron mode)")
     parser.add_argument("--json", action="store_true",
                         help="Machine-readable JSON output")
     parser.add_argument("--timeout", type=str, default=None,

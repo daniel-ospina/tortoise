@@ -257,6 +257,59 @@ def test_replay_load_workers_write_pressure():
     workers.stop()  # idempotent
 
 
+class _FakeProjQuery:
+    def query(self, *_a, **_k):
+        return None
+
+
+class _FakeProj:
+    g = _FakeProjQuery()
+
+
+class _FakeSDK:
+    def __init__(self):
+        self.closed = 0
+
+    def _get_proj(self):
+        return _FakeProj()
+
+    def close(self):
+        self.closed += 1
+
+
+def test_replay_load_workers_close_sdk_and_run_cleanup():
+    """#3599 (P1 coverage): the worker's `finally` must close the SDK AND run
+    the factory's cleanup. Before #3599 the factory returned only the SDK, its
+    `TemporaryDirectory` was dropped on the floor and the SDK was never
+    closed — one orphaned embedded redislite server per `--load-worker` per
+    run. Deleting that `finally` would otherwise fail no test."""
+    import time
+    calls: list[str] = []
+    sdk = _FakeSDK()
+    workers = _ReplayLoadWorkers(
+        lambda: (sdk, lambda: calls.append("cleanup")), n=1)
+    workers.start()
+    time.sleep(0.2)
+    workers.stop()
+    assert sdk.closed == 1, "the worker must close its SDK"
+    assert calls == ["cleanup"], "the worker must run the factory cleanup"
+
+
+def test_replay_load_workers_tolerate_legacy_bare_sdk_factory():
+    """#3599 (P1 coverage): a legacy factory that returns a bare SDK must not
+    raise `TypeError` into the worker's broad handler (which would silently
+    no-op the whole load worker — the failure mode that made the tuple
+    contract change dangerous)."""
+    import time
+    sdk = _FakeSDK()
+    workers = _ReplayLoadWorkers(lambda: sdk, n=1)
+    workers.start()
+    time.sleep(0.2)
+    workers.stop()
+    assert sdk.closed == 1, (
+        "a bare-SDK factory must still have its SDK closed")
+
+
 class _FakeResult:
     def __init__(self, result_set):
         self.result_set = result_set

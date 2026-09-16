@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,13 +42,53 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 DEFAULT_MAX_ORPHANS = 5
 
 
+def _require_enumerable_pgrep() -> None:
+    """Raise when server enumeration cannot be trusted (#3599 review).
+
+    `tortoise.embedded_reaper._pgrep_redis_servers` swallows a missing OR
+    TIMING-OUT `pgrep` and returns `[]`, which is indistinguishable from "no
+    servers". A census on a host where pgrep times out — precisely the load
+    level #3599 documents — would then print `orphans: 0` and exit 0 while
+    orphans accumulate, i.e. the observability check would fail open.
+
+    So probe the SAME command it runs: rc 0 (matches) and rc 1 (no matches)
+    are both real answers; anything else, including a timeout, is not.
+    """
+    if shutil.which("pgrep") is None:
+        raise RuntimeError(
+            "pgrep is not available — the census cannot distinguish 'no "
+            "servers' from 'could not enumerate'; refusing to report clean")
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", "redislite/bin/redis-server"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(
+            f"pgrep could not enumerate embedded servers ({exc!r}) — the "
+            f"census cannot distinguish 'no servers' from 'could not "
+            f"enumerate'; refusing to report clean") from exc
+    if proc.returncode not in (0, 1):  # 0 = matches, 1 = no matches
+        raise RuntimeError(
+            f"pgrep exited {proc.returncode} — enumeration is unreliable; "
+            f"refusing to report clean")
+
+
 def census(*, deep: bool = False, jobs: int = 8) -> dict:
     """Classify every live embedded server; return the counts.
 
     Never raises for an individual server (per-record isolation, mirroring
     the reaper): an unclassifiable server is counted in `unclassified` and
     is never reported as an orphan (fail closed).
+
+    But it does NOT fail closed on a census that could not RUN: if `pgrep`
+    is missing *or times out* (which `_pgrep_redis_servers` reports as an
+    empty list, indistinguishable from "no servers"), an exit 0 would
+    report the invariant satisfied on a host where orphans may be
+    accumulating. That is the exact fail-open the tool exists to catch, so
+    it raises instead (and `main` maps that to exit 2).
     """
+    _require_enumerable_pgrep()
     from tortoise.embedded_reaper import (
         _PROC_INFO_CACHE,
         _active_client_count,
@@ -150,6 +192,12 @@ def main(argv: list[str] | None = None) -> int:
 
     result["max_orphans"] = args.max_orphans
     result["within_budget"] = result["orphans"] <= args.max_orphans
+    # A census whose every server was unclassifiable learned nothing about
+    # the invariant — reporting exit 0 there is the fail-open this tool
+    # exists to prevent (#3599 review).
+    result["inconclusive"] = (result["live_servers"] > 0
+                              and result["unclassified"]
+                              == result["live_servers"])
     if args.json:
         print(json.dumps(result, indent=2))
     else:
@@ -163,6 +211,11 @@ def main(argv: list[str] | None = None) -> int:
         for o in result["orphan_details"][:20]:
             print(f"  orphan pid={o['pid']} reason={o['reason']} "
                   f"{o['socket_path']}")
+    if result["inconclusive"]:
+        print("embedded_orphans: INCONCLUSIVE — every live server failed "
+              "classification; refusing to report the invariant satisfied",
+              file=sys.stderr)
+        return 2
     return 0 if result["within_budget"] else 1
 
 
