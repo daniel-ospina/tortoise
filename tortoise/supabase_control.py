@@ -176,6 +176,43 @@ def is_supabase_enabled() -> bool:
     return configured
 
 
+_LOGIC_TREE_RESERVED = ',()"'
+
+
+def _quote_in_logic_tree(value: object) -> str:
+    """Quote a value for a PostgREST logic tree.
+
+    Inside ``and=(...)``, a value containing ``,`` ``(`` ``)`` or ``"`` is
+    syntax, not data — ``a.gt.x,y`` is TWO conditions and ``a.gt.x)`` closes
+    the group. PostgREST's escape is to wrap the value in double quotes, with
+    an embedded ``"`` backslash-escaped. A value with none of the reserved
+    characters is emitted bare, so the common timestamp/count case keeps the
+    obvious form (#3686 re-review P2: the grouping added this hazard)."""
+    text = "" if value is None else str(value)
+    if not any(ch in text for ch in _LOGIC_TREE_RESERVED):
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _encode(op: str, value: object, in_logic_tree: bool = False) -> str:
+    """Encode one PostgREST filter condition. ``in_logic_tree`` applies the
+    quoting rule that only applies inside ``and=(...)``."""
+    if op == "is":
+        return "is.null" if value is None else f"is.{value}"
+    if op == "eq":
+        rendered = f"eq.{value}"
+    elif op == "neq":
+        rendered = f"neq.{value}"
+    elif op in ("gt", "lt", "gte", "lte"):
+        rendered = f"{op}.{value}"
+    else:
+        raise ValueError(f"unsupported filter op {op!r}")
+    if in_logic_tree:
+        head, _, tail = rendered.partition(".")
+        return f"{head}.{_quote_in_logic_tree(tail)}"
+    return rendered
+
+
 class SupabaseControlPlane:
     """PostgREST client for control-plane reads/writes (service role).
 
@@ -294,19 +331,6 @@ class SupabaseControlPlane:
         if select:
             params["select"] = ",".join(select)
 
-        def _encode(op: str, value: object) -> str:
-            if op == "is":
-                return "is.null" if value is None else f"is.{value}"
-            if op == "eq":
-                return f"eq.{value}"
-            if op == "neq":
-                return f"neq.{value}"
-            if op in ("gt", "lt"):
-                return f"{op}.{value}"
-            if op == "lte":
-                return f"lte.{value}"
-            raise ValueError(f"unsupported filter op {op!r}")
-
         # ⛔ A PostgREST flat query string carries ONE operator per column, and
         # `params` is keyed by column — so a SECOND condition on the SAME column
         # overwrites the first and SILENTLY DROPS a bound. That is not
@@ -329,7 +353,13 @@ class SupabaseControlPlane:
                 op, value = conds[0]
                 params[col] = _encode(op, value)
             else:
-                grouped.extend(f"{col}.{_encode(op, value)}" for op, value in conds)
+                if col == "and":
+                    raise ValueError(
+                        "filter column 'and' collides with the PostgREST logic-"
+                        "tree key used to combine same-column conditions")
+                grouped.extend(
+                    f"{col}.{_encode(op, value, in_logic_tree=True)}"
+                    for op, value in conds)
         if grouped:
             params["and"] = f"({','.join(grouped)})"
         if order:

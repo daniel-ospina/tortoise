@@ -974,3 +974,102 @@ def test_cohort_refuses_a_payload_that_claims_activation():
     mod = _cohort_module()
     with pytest.raises(SystemExit):
         mod._assert_no_activation_claim({"stages": {"activated": {"value": 1}}})
+
+
+# ── The cohort tool's guards (re-review P2-4: they had zero coverage) ───────
+
+class TestCohortGuards:
+    """`tools/activation_cohort.py` transmits full tenant API keys, so its
+    pre-flight guards are security controls. They behave correctly but nothing
+    pinned them — a regression would have been silent."""
+
+    def test_https_is_required(self):
+        from tools.activation_cohort import _assert_https
+        for bad in ("http://api.example", "ftp://h", "api.example",
+                    "https://", "https://h?x=", "https://h#f", ""):
+            with pytest.raises(SystemExit):
+                _assert_https(bad)
+        for good in ("https://api.premiselabs.co", "https://host:8443",
+                     "HTTPS://host"):
+            _assert_https(good)
+
+    def test_header_illegal_key_is_refused_without_echoing_it(self):
+        from tools.activation_cohort import _validate_key
+        secret = "tt_" + "A" * 40
+        _validate_key("org-1", secret)  # a real key passes
+        for bad in (secret + "\n", secret + "\t", "with space", "ünicode",
+                    "tab\there", ""):
+            with pytest.raises(SystemExit) as exc:
+                _validate_key("org-1", bad)
+            # The whole point: the message names the ORG, never the key. A key
+            # that reaches `putheader` raises a ValueError embedding it whole.
+            assert secret not in str(exc.value), "the key leaked into the error"
+
+    def test_redirects_are_not_followed(self):
+        """CPython's redirect handler copies request headers to the new origin,
+        so following one would hand `Authorization: Bearer <key>` to whatever
+        host answered."""
+        import http.server
+        import threading
+        import urllib.error
+
+        from tools.activation_cohort import _no_redirect_opener
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "https://evil.example/x")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = f"http://127.0.0.1:{srv.server_port}/v1/activation/scorecard"
+            req = urllib.request.Request(
+                url, headers={"Authorization": "Bearer SECRET"})
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _no_redirect_opener().open(req, timeout=5)
+            assert exc.value.code == 302, exc.value
+            assert "evil.example" in str(exc.value)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=5)
+
+    def test_duplicate_org_is_rejected(self):
+        """A copy-paste duplicate would inflate both the cohort number and its
+        denominator."""
+        from tools.activation_cohort import main
+        argv = ["--api-base", "https://api.example",
+                "--org", "org-a=k1", "--org", "org-a=k2"]
+        with pytest.raises(SystemExit):
+            main(argv)
+
+    def test_empty_org_id_is_rejected(self):
+        from tools.activation_cohort import main
+        with pytest.raises(SystemExit):
+            main(["--api-base", "https://api.example", "--org", "=k1"])
+
+    def test_roll_up_arity_mismatch_raises(self):
+        from tools.activation_cohort import roll_up
+        with pytest.raises(ValueError):
+            roll_up(["a", "b"], [None])
+
+    def test_duplicate_orgs_cannot_double_count(self):
+        """Belt and braces: even if a caller bypasses the CLI, the
+        operator-supplied list is echoed verbatim so the inflated cohort is
+        visible rather than silent."""
+        from tools.activation_cohort import roll_up
+        body = {"stages": {n: {"state": "measured", "value": 1, "unit": "x",
+                               "reason": None} for n in (
+            "captured", "stored", "memory_produced", "recall_attempted",
+            "value_confirmed")}}
+        report = roll_up(["a", "a"], [body, body])
+        assert report["cohort_definition"]["orgs"] == ["a", "a"]
+        assert report["cohort_definition"]["size"] == 2
+        # The tool MUST NOT invent a rate; a duplicate stays visible as size=2.
+        assert not any("activat" in k.lower() for k in report)

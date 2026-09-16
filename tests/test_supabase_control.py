@@ -1525,6 +1525,26 @@ class TestRealQueryParamEncoding:
         with pytest.raises(ValueError):
             cp.query("t", filters=[("a", "wat", 1)])
 
+    def test_reserved_chars_in_a_grouped_value_are_quoted(self):
+        """A ``,`` or ``)`` inside a grouped value is PostgREST SYNTAX, not data:
+        ``a.gt.x,y`` is two conditions and ``a.gt.x)`` closes the group. Values
+        are quoted when they carry a reserved character (re-review P2)."""
+        cp, seen = self._capturing_cp()
+        cp.query("t", filters=[("a", "gt", "x,y"), ("a", "lt", "z)")])
+        assert seen["params"]["and"] == '(a.gt."x,y",a.lt."z)")', seen["params"]
+
+    def test_an_embedded_quote_is_escaped(self):
+        cp, seen = self._capturing_cp()
+        cp.query("t", filters=[("a", "eq", 'he said "hi"'), ("a", "neq", 1)])
+        assert seen["params"]["and"] == '(a.eq."he said \\"hi\\"",a.neq.1)', seen["params"]
+
+    def test_a_grouped_column_named_and_is_refused(self):
+        """``and`` is the logic-tree key itself; grouping onto it would silently
+        drop the flat ``and=`` condition."""
+        cp, _ = self._capturing_cp()
+        with pytest.raises(ValueError, match="collides"):
+            cp.query("t", filters=[("and", "gt", 1), ("and", "lt", 2)])
+
 
 # ── Fake adapter semantics (query dialect parity) ───────────────────────────
 

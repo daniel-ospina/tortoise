@@ -79,12 +79,22 @@ def _assert_no_activation_claim(payload: dict) -> None:
 
 
 def _assert_https(api_base: str) -> None:
-    """Refuse a non-https base. The per-org keys are full tenant credentials,
-    so a plain-http base would put them on the wire in cleartext."""
-    if not api_base.lower().startswith("https://"):
+    """Refuse anything that is not a bare ``https://host[:port]`` base.
+
+    The per-org keys are full tenant credentials, so a plain-http base puts
+    them on the wire in cleartext. Parsing (rather than a prefix test) also
+    rejects the shapes a prefix test waves through: ``https://`` with no host,
+    and ``https://host?x=`` — which would be mangled into
+    ``https://host?x=/v1/activation/scorecard``."""
+    parts = urllib.parse.urlsplit(api_base)
+    if parts.scheme != "https" or not parts.netloc:
         raise SystemExit(
-            f"--api-base must be https:// (got {api_base!r}) — this tool sends "
-            f"tenant API keys")
+            f"--api-base must be an https:// URL with a host (got {api_base!r}) "
+            f"— this tool sends tenant API keys")
+    if parts.query or parts.fragment:
+        raise SystemExit(
+            f"--api-base must not carry a query or fragment (got {api_base!r}) "
+            f"— it is joined with the scorecard path")
 
 
 def _validate_key(org_id: str, key: str) -> None:
@@ -157,6 +167,10 @@ def roll_up(orgs: list[str], payloads: list[dict | None],
     is not "there is nothing to measure".
     """
     errors = errors or [None] * len(orgs)
+    if len(payloads) != len(orgs) or len(errors) != len(orgs):
+        raise ValueError(
+            f"roll_up needs one entry per org: {len(orgs)} orgs, "
+            f"{len(payloads)} payloads, {len(errors)} errors")
     stages: dict[str, dict] = {}
     for name in STAGE_NAMES:
         values: list[int] = []
@@ -245,6 +259,12 @@ def main(argv: list[str] | None = None) -> int:
         if "=" not in spec:
             ap.error(f"--org must be ORG_ID=KEY, got {spec!r}")
         org_id, key = spec.split("=", 1)
+        if not org_id:
+            ap.error(f"--org must be ORG_ID=KEY with a non-empty ORG_ID, got {spec!r}")
+        if org_id in orgs:
+            # Silently deduping would hide a copy-paste error; summing both
+            # would inflate the cohort number AND its denominator.
+            ap.error(f"--org {org_id!r} was given more than once")
         _validate_key(org_id, key)
         orgs.append(org_id)
         keys.append(key)

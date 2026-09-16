@@ -75,8 +75,11 @@ provides ``SUPABASE_SERVICE_ROLE_KEY`` — so every event fell through to a
 JSONL file on ephemeral disk. Two consequences the caller must not hide:
 
 * Windows before the repair deployed are **forward-only-unknown** — historical
-  events were dropped and are unrecoverable. Stage 4 says ``unavailable``,
-  never ``0``.
+  events were dropped and are unrecoverable. This surface **cannot detect
+  that**: nothing records when the repair landed, so such a window reports
+  ``measured 0``. Reconcile a zero against the deploy time before citing it (see
+  ``LIMITATIONS``). Equally, a *configured* writer is not a *working* one — a
+  present-but-rejected credential also reports ``measured 0``.
 * Stage 4 is observed only where the telemetry is emitted: a client talking to
   the HOSTED MCP dispatch point. A locally-hosted (stdio) MCP server, and the
   REST recall surface, emit no per-call event.
@@ -482,10 +485,13 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         # A lower bound is not a count: refuse rather than under-report.
         return _stage(None, "calls", "analytics_page_cap_truncated"), detail
 
-    # Same coercion the row timestamps get, so both legs accept exactly the
-    # same value shapes (an epoch int is placeable on the timeline; refusing it
-    # here would brick stage 4 with a misleading reason and no retry would fix
-    # it).
+    # NOTE: this is NOT the same coercion the row timestamps get. The lifetime
+    # value is coerced (``_coerce_created_at``, which accepts an epoch int);
+    # rows go through ``_parse_iso`` in ``_count_allowlisted``, which does not.
+    # The asymmetry is deliberate and fail-closed: an epoch-int ROW timestamp
+    # yields ``unparseable_analytic_rows`` → ``unavailable``, never a silent
+    # drop. A lifetime value is coerced because refusing it would brick stage 4
+    # with a misleading reason that no retry could clear.
     memory_at = _coerce_created_at(first_memory_at)
     if memory_at is None:
         return _stage(None, "calls", "first_memory_at_unparseable"), detail
