@@ -122,6 +122,20 @@ function preFixVariant(fnText) {
   assert.equal(reads, 3,
     'the three post-await re-reads were located (the fix under test) — the pre-fix control ' +
     'cannot be derived from an unrecognised shape')
+  // Mirror loadBranchesExec.test.js: assert the SURGERY really produced the pre-fix shape
+  // before the control is used. Without this, a reformat that leaves the derivation
+  // assertions satisfiable while the output is no longer pre-fix would let the control
+  // "discriminate" for the wrong reason (or silently stop being a control).
+  const tryAt = out.search(/(^|\n)[^\S\n]*try\s*\{/)
+  assert.ok(tryAt > -1, 'the control still opens the `try` block')
+  assert.ok(!/\blet\s+_superseded\b/.test(out),
+    'the control shape really is the pre-fix one: no function-scoped `let _superseded` remains')
+  const constDecl = out.match(/const\s+_superseded\s*=/)
+  assert.ok(constDecl && constDecl.index > tryAt,
+    'the control shape really is the pre-fix one: the sole `const _superseded` declaration ' +
+    'sits INSIDE the try (out of scope in the catch)')
+  assert.equal((out.match(/const\s+_superseded\s*=/g) || []).length, 1,
+    'exactly one try-scoped `const _superseded` declaration in the control')
   return out
 }
 
@@ -375,4 +389,9 @@ test('#3428/#2937 (cycle 9): the pre-fix control still discriminates', async () 
   assert.ok(prefix.error, 'the pre-fix control MUST throw on the same path — otherwise this suite cannot discriminate')
   assert.equal(prefix.error.name, 'ReferenceError',
     `the pre-fix control throws ReferenceError (the unbound/TDZ \`_superseded\`) — got ${prefix.error.name}: ${prefix.error.message}`)
+  // Anchor the discriminator: the error must NAME the binding the surgery moved. A control
+  // that throws for an unrelated reason (a harness mistake, a different identifier) is not a
+  // control — mirror loadBranchesExec.test.js's `assert.match(prefix.error.message, /_teamAtCall/)`.
+  assert.match(prefix.error.message, /_superseded/,
+    `the ReferenceError names the binding the surgery moved \`_superseded\` — got ${prefix.error.message}`)
 })
