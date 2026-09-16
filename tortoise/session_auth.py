@@ -251,9 +251,11 @@ class _JWKSCache:
     ) -> tuple[dict[str, dict], str | None]:
         """Shared body of ``get``/``get_with_origin`` — ``(keys, stale_reason)``.
 
-        ``stale_reason is None`` ⇔ this call fetched a fresh, usable key set.
-        Any non-None value means a previously-cached set is being served, and
-        says why.
+        ``stale_reason is None`` ⇔ a FRESH, usable key set is being served —
+        either fetched by this call, or already within the TTL (the fast path
+        and the kid-hit early return both serve a fresh set without fetching).
+        Any non-None value means a previously-cached set is being served that
+        this call did NOT refresh, and says why.
         """
         now = time.monotonic()
         # The TTL fast path requires a USABLE key set, not just a non-None one:
@@ -285,8 +287,18 @@ class _JWKSCache:
                         detail="Session verification unavailable",
                         headers={"Retry-After": str(self._retry_after_s())},
                     )
-                # A cooldown-skipped fetch did NOT refresh: this is a stale
-                # serve too, so the warm-up must not report it as "ready".
+                # A TTL-fresh set is not made stale by an armed cooldown.
+                # Reachable only from ``force=True`` (the boot warm-up):
+                # ``force=False`` already took the TTL fast path above, so the
+                # cache here is milliseconds old and will serve the first
+                # request at zero fetch cost — reporting it ``stale`` was a
+                # false alarm introduced by the #3284 stale-serve fix. Guarding
+                # on a USABLE set too keeps an empty cache out of the fast path
+                # on a host whose monotonic clock is below the TTL.
+                if self._keys and now - self._fetched_at < _JWKS_TTL:
+                    return self._keys, None
+                # Otherwise a cooldown-skipped fetch did NOT refresh: this is a
+                # stale serve too, so the warm-up must not report it as "ready".
                 return self._keys, (
                     "refetch not attempted — within the "
                     f"{_COOLDOWN_S:.0f}s failure/miss cooldown"
@@ -480,8 +492,16 @@ async def prefetch_jwks() -> dict:
         return _report(False, 0, f"{type(exc).__name__}: {exc}"[:200],
                        "transport_error")
     if not keys:
-        # Every failure must state its reason (#2922), and an empty body is a
-        # DIFFERENT failure from a transport outage — say which one it is.
+        # Every failure must state its reason (#2922). An empty set usually
+        # means a 200 with zero usable keys (bad rotation) — but the cache can
+        # also return ``{}`` because a RAISING fetch had no last-good keys to
+        # serve, or because an armed cooldown blocked the attempt. Key this off
+        # the freshness ORIGIN, not off "did this call fetch?": only
+        # ``stale_reason is None`` proves a successfully parsed empty body.
+        # Keying off the returned set alone threw the real reason away and told
+        # the operator "NOT a transport outage" DURING a transport outage.
+        if stale_reason is not None:
+            return _report(False, 0, stale_reason, "transport_error")
         return _report(
             False, 0,
             "upstream JWKS answered 200 with 0 usable keys "

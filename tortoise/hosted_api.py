@@ -864,12 +864,21 @@ async def _first_contact_prewarm() -> None:
                 report["keys"],
             )
         else:
+            # ``keys == 0`` with no successful parse covers TWO distinct cache
+            # states: COLD (``_keys is None`` — the request path answers a
+            # bounded 503) and EMPTY (``_keys == {}`` from a prior 200 — the
+            # request path answers 401 "Unknown signing key", never 503, since
+            # a keyless set is not a transport failure). The report does not
+            # distinguish them, so naming only 503 here was the #2922 misreport
+            # class for the empty case.
             _logger.warning(
                 "auth: JWKS pre-warm failed in %.0fms (%s) — the first "
                 "session-authenticated request will make its own bounded "
                 "fetch attempt (the warm-up does not arm the request-path "
-                "cooldown) and answer a bounded 503 + Retry-After if the "
-                "upstream is still unreachable",
+                "cooldown) and, if the upstream is still unreachable, answer "
+                "a bounded 503 + Retry-After when no key set has ever been "
+                "cached, or 401 'Unknown signing key' from an empty cached "
+                "set",
                 report["elapsed_ms"],
                 report["error"],
             )

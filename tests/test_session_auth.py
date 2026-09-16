@@ -1364,6 +1364,76 @@ class TestColdStartBound:
         assert report["keys"] == 1, report
         assert "0 usable keys" in report["error"], report
 
+    def test_prefetch_raising_fetch_with_an_empty_cache_reports_transport_error(
+            self, monkeypatch):
+        """A RAISING fetch with an empty cache is an OUTAGE, not an empty 200.
+
+        ``_keys == {}`` is NOT ``None``, so the raise path has no last-good set
+        to serve and returns ``({}, "JWKS fetch failed: …")``. Keyed off
+        ``if not keys`` first, the empty-check swallowed that real reason and
+        reported "upstream JWKS answered 200 with 0 usable keys (empty body /
+        bad rotation)" — which the boot log renders as "NOT a transport
+        outage" during an actual transport outage. ``_jwks`` is a MODULE global
+        that is NOT reset per lifespan (#3284), so a prior empty 200 — or a
+        prior lifespan — leaves exactly this state when the next boot's fetch
+        raises.
+        """
+        stub = FetchStub(error=OSError("network down"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        # An EMPTY (not cold) cache: what a previous empty 200 leaves behind.
+        sa._jwks._keys = {}
+        sa._jwks._fetched_at = time.monotonic()
+
+        report = _run(sa.prefetch_jwks())
+
+        assert report["ok"] is False, report
+        assert report["keys"] == 0, report
+        assert report["outcome"] == "transport_error", report
+        assert "network down" in report["error"], (
+            "the REAL reason must survive, not the empty-rotation story: "
+            + repr(report))
+        assert "0 usable keys" not in report["error"], report
+        assert stub.count == 1
+        assert sa._jwks._last_failure_at is None, (
+            "the boot warm-up must not arm the request-path cooldown")
+
+    def test_prefetch_with_a_fresh_cache_and_armed_cooldown_reports_ready(
+            self, monkeypatch):
+        """A TTL-FRESH set is ``ready`` even when a cooldown blocks the fetch.
+
+        The coverage gap a re-review named: the warm-up passes ``force=True``,
+        so it skips the TTL fast path BY DESIGN; a cooldown armed by an earlier
+        failure then made ``_resolve`` return the "refetch not attempted"
+        reason for a cache that is milliseconds old. The report said ``stale``
+        and the boot log warned "did NOT refresh — serving N last-good key(s)"
+        about a set the first request serves at zero fetch cost. Outcome keys
+        off FRESHNESS, not off "did this call fetch?" — while the separate
+        stale-serve case (an EXPIRED set behind a cooldown) must stay ``stale``
+        (pinned by test_prewarm_that_serves_stale_keys_is_not_reported_ready
+        and its empty-rotation sibling).
+        """
+        priv, pub = u.make_ec_keypair()
+        warm = warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
+        assert warm.count == 1
+        assert sa._jwks._keys, "precondition: a fresh key set is cached"
+        # Arm the request-path cooldown; the cache stays TTL-fresh.
+        sa._jwks._last_failure_at = time.monotonic()
+        stub = FetchStub(error=OSError("must not be fetched"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+
+        report = _run(sa.prefetch_jwks())
+
+        assert report["ok"] is True, report
+        assert report["outcome"] == "ready", report
+        assert report["keys"] == 1, report
+        assert report["error"] is None, report
+        assert stub.count == 0, "a fresh cache needs no fetch"
+
+        # The first request is served from that set at zero fetch cost.
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        assert verify_ok(tok)["user_id"] == "user-123"
+        assert stub.count == 0
+
     def test_prefetch_cannot_raise_even_if_the_cache_explodes(self, monkeypatch):
         class _Exploding:
             async def get(self, *args, **kwargs):
