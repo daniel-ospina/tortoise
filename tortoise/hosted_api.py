@@ -14033,9 +14033,16 @@ def _org_namespace(org_node: dict, org_id: str) -> str:
     Exporting the wrong graph would silently return an empty dump.
     """
     graph_name = org_node.get("graph_name")
-    if (graph_name and str(graph_name).startswith("org_")
-            and len(str(graph_name)) > len("org_")):
-        return str(graph_name)[len("org_"):]
+    if graph_name:
+        # #3543: strip whichever tenant prefix the stored name carries. The
+        # pre-rename prefix was the 5-char `team_` and the S3 value rename
+        # ships no data migration, so a stored `team_{x}` must still resolve
+        # to `x` — returning `org_id` instead would export a different (empty)
+        # graph, the silent-empty-dump failure the stored-name rule exists to
+        # prevent (PR #873).
+        for prefix in ("org_", "team_"):
+            if str(graph_name).startswith(prefix) and len(str(graph_name)) > len(prefix):
+                return str(graph_name)[len(prefix):]
     return org_id
 
 
@@ -17958,7 +17965,11 @@ def _graph_has_org_namespace(org_id: str) -> bool:
     org_{tid} would materialize an absent org graph — a read-path write,
     banned by pin 4). Probes the server-wide graph list via the registry
     seam's projection (list_graphs never mints org_{tid})."""
-    graph_name = f"org_{org_id}"
+    # #3543: probe both tenant prefixes — a graph minted before the rename is
+    # `team_{org_id}`, and no data migration rewrites it. Probing only `org_`
+    # reported "node absent" for every pre-rename org, which made the
+    # onboarding projection take the no-write FLOW-defaults path.
+    graph_names = (f"org_{org_id}", f"team_{org_id}")
     try:
         # #2251 (was #2179 follow-up): the old bare TortoiseSDK(namespace=
         # "registry") resolved config.resolve_db_path() → ~/.tortoise/tortoise.db
@@ -17978,7 +17989,7 @@ def _graph_has_org_namespace(org_id: str) -> bool:
             graphs = sdk._get_proj().db.list_graphs() or []
         finally:
             sdk.close()
-        return graph_name in graphs
+        return any(name in graphs for name in graph_names)
     except Exception:
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
