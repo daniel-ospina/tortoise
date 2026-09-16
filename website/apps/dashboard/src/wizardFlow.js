@@ -68,7 +68,6 @@ export function wizardStageLabel(step, { hasOrg = false, paused = false, connect
     // Skip must still read as connected, never as paused. Checked first so the
     // two flags cannot compose into the false "paused" reading.
     if (connected) return WIZARD_STEPS[3]?.label ?? ''
-    if (paused) return 'Setup paused — your agent is not connected yet'
     // #3428/#2937 (lane B3): step 3's own label ("You're all set") is itself a
     // harness-connected CLAIM — the very claim the deleted human writer used to
     // manufacture. With the writer gone, a user who finishes the connect step
@@ -80,14 +79,23 @@ export function wizardStageLabel(step, { hasOrg = false, paused = false, connect
     // to pass `connected` understates the connection, which is the harmless
     // direction — it can never claim a connection we did not observe.
     //
-    // review cycle 4 (item 13): the build fork's body admits uncertainty
-    // ("we can't tell it's connected yet" — its step 2 is the REST call, which
-    // files no onboarding step), so the categorical "Not connected yet" would
-    // out-claim it. The build arm states what was OBSERVED instead of asserting
-    // the connection is absent; the self fork keeps its label (pinned by the
-    // lane's e2e evidence).
-    if (buildFork) return 'No connection observed yet'
-    return 'Not connected yet'
+    // review cycle 4 (item 13) made the BUILD arm state what was OBSERVED
+    // instead of asserting the connection is absent. review cycle 6 (item 2)
+    // makes the SELF arms do the same, for the same two reasons: its body
+    // refuses to assert the absence too ("we can't tell it's connected yet"),
+    // and the categorical sentence is factually false for a user whose session
+    // was CAPTURED — capture writes Session nodes and extracted points but
+    // files only `capture-disclosed`, never `harness-connected`, so that user
+    // can be connected-and-capturing under a screen reading "Not connected
+    // yet".
+    //
+    // Both forks now print the observation phrasing, so the fork no longer
+    // SELECTS a string here. `buildFork` stays in the signature deliberately:
+    // both call sites pass it (that call shape is pinned in
+    // wizardArchived.test.js) and it records the fork input; it is simply no
+    // longer a discriminator.
+    if (paused) return 'Setup paused — no connection observed yet'
+    return 'No connection observed yet'
   }
   if (step === 0 && hasOrg) return 'Your Organization'
   return WIZARD_STEPS[step]?.label ?? ''

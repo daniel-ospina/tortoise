@@ -412,16 +412,18 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # gate owns completion; accept-and-drop).
     # #2912 (PR-gate UX): skipping = the PAUSED state, so the <h1> names that
     # state. It used to read "You're all set" — the opposite — directly above
-    # the not-connected body.
+    # the not-connected body. review cycle 6 (item 2): the paused wording is the
+    # OBSERVATION phrasing on both forks — the categorical "your agent is not
+    # connected yet" is false for a captured session.
     expect(page.locator(".welcome-title")).to_have_text(
-        "Setup paused — your agent is not connected yet", timeout=10_000)
+        "Setup paused — no connection observed yet", timeout=10_000)
     # #3428/#2937 (lane B3, review cycle 1 P1-2): the old paused body
     # ("…your agent isn't connected yet") was deleted with the human writer;
     # retarget the surviving copy on the VISIBLE final screen.
     # #3428 (lane B3, review cycle 2 P0-1): scope to `div.done` — the wizard
     # progress crumbs render `<span class="wizard-step done">` per completed
     # step, so the bare `.done` selector is ambiguous (strict-mode violation).
-    expect(page.locator("div.done")).to_contain_text("hasn't filed anything", timeout=10_000)
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write yet", timeout=10_000)
     # the done step's exit (wizardComplete) — scoped: the header carries its own
     # exit ("Open my dashboard →"). No longer a same-named twin — review cycle 1
     # (P2-6): the done button was renamed to "Go to dashboard".
@@ -514,12 +516,13 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     # direct test of the fix.
     page.get_by_role("button", name="I've set it up — Continue →").click()
     # #3428 (lane B3, review cycle 1 P1-3): scope the exit evidence to the
-    # VISIBLE final screen. "Not connected yet" is also text inside the sr-only
-    # step announcement (clipped, not display:none), so an unscoped `body`
-    # assertion would still pass if only the `.done` body reverted to the deleted
-    # "Your agent is connected — it files your decisions and findings…" claim.
-    expect(page.locator(".welcome-title")).to_have_text("Not connected yet", timeout=10_000)
-    expect(page.locator("div.done")).to_contain_text("hasn't filed anything")
+    # VISIBLE final screen. review cycle 6 (item 2): "No connection observed
+    # yet" is also text inside the sr-only step announcement (clipped, not
+    # display:none), so an unscoped `body` assertion would still pass if only the
+    # `.done` body reverted to the deleted "Your agent is connected — it files
+    # your decisions and findings…" claim.
+    expect(page.locator(".welcome-title")).to_have_text("No connection observed yet", timeout=10_000)
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write yet")
     assert "Your agent is connected" not in page.locator("div.done").inner_text(), \
         "#3428: the final screen rendered the connection claim with nothing connected"
     assert not any(c.get("step") == "harness-connected" for c in cap["checkpoint"]), \
@@ -553,9 +556,10 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Skip for now").click()
-    # #2912 (PR-gate UX): skipped → paused, and the heading says so.
+    # #2912 (PR-gate UX): skipped → paused, and the heading says so (cycle 6
+    # item 2: the observation phrasing, both forks).
     expect(page.locator(".welcome-title")).to_have_text(
-        "Setup paused — your agent is not connected yet", timeout=10_000)
+        "Setup paused — no connection observed yet", timeout=10_000)
     page.locator(".wizard-actions").get_by_role("button", name="Go to dashboard").click(timeout=15_000)
     _expect_left_wizard(page)
     assert page.locator("[role=dialog]").count() == 0, \
@@ -897,11 +901,11 @@ def test_member_without_key_reaches_keyless_claude_connectors(
     # reachable (the user is never trapped).
     expect(page.locator(".harness-families")).to_have_count(0, timeout=10_000)
     # #3428 (review cycle 1 P1-3): assert the VISIBLE final screen, not the
-    # unscoped body — "Not connected yet" also lives in the sr-only step
+    # unscoped body — the step label also lives in the sr-only step
     # announcement, so a body-wide assertion cannot falsify a `.done`-body
-    # regression.
-    expect(page.locator(".welcome-title")).to_have_text("Not connected yet", timeout=10_000)
-    expect(page.locator("div.done")).to_contain_text("hasn't filed anything")
+    # regression. (cycle 6 item 2: the label is now "No connection observed yet".)
+    expect(page.locator(".welcome-title")).to_have_text("No connection observed yet", timeout=10_000)
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write yet")
     assert not any(c.get("step") == "harness-connected" for c in cap["checkpoint"]), \
         f"#2937/#3428: a key-less advance must NOT write the checkpoint: {cap['checkpoint']}"
     expect(page.locator(".wizard-actions").get_by_role(
@@ -1167,8 +1171,7 @@ def test_connected_screen_states_capture_in_future_tense_without_a_receipt(page:
     expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
     done = page.locator("div.done")
     expect(done).to_contain_text("Connected", timeout=10_000)
-    expect(done).to_contain_text(
-        "Tortoise will capture your agent's sessions as soon as your agent files its first memory.")
+    expect(done).to_contain_text("Tortoise will capture your agent's sessions.")
     assert "Tortoise is capturing your agent's sessions." not in done.inner_text(), \
         "no receipt means the present-tense claim is false"
 
@@ -1207,12 +1210,19 @@ def test_build_fork_done_step_never_claims_a_harness_or_filing(page: Page) -> No
     (The server-side gap — a REST-first org has no server-observed completion
     signal — is a separate defect, filed by the lane orchestrator.)"""
     _seed_cookie(page, "u-b3-build")
-    cap = _wire(page, role="owner")  # GET unmocked → nothing connected
+    _wire(page, role="owner")  # GET unmocked → nothing connected
     _walk_to_fork(page)
     page.get_by_role("button", name=re.compile("Build an application on top")).click()
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
     _advance_to_done(page)
+    # review cycle 5 (item 5): the build fork's SKIP path must not fall through
+    # to a categorical paused arm above a body that refuses to claim it — this
+    # <h1> assertion is what keeps the ordering from silently regressing.
+    # review cycle 6 (item 2): the observation phrasing is now the ONLY paused
+    # string (the self fork prints it too), so this pins the shared wording.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Setup paused — no connection observed yet", timeout=10_000)
     text = page.locator("div.done").inner_text()
     assert "we can't tell it's connected yet" in text, \
         f"the build body must state the honest not-observed case: {text!r}"
@@ -1220,8 +1230,13 @@ def test_build_fork_done_step_never_claims_a_harness_or_filing(page: Page) -> No
         f"#3428 P1-2: the build fork's REST call files a point — this is false: {text!r}"
     assert "Claude Code" not in text, \
         f"#3428 P1-2: the build branch never offers a harness: {text!r}"
-    assert not any(c.get("step") == "harness-connected" for c in cap["checkpoint"]), \
-        f"#3428: the build advance must not write the checkpoint: {cap['checkpoint']}"
+    # review cycle 6 (item 10/T3): the `harness-connected` checkpoint assertion
+    # that used to sit here was VACUOUS — `_advance_to_done()` clicks "Skip for
+    # now", which is state-only and never POSTs a checkpoint, so it could not
+    # fail by construction. The deleted writer is covered by the real
+    # advance-path controls (the owner connect-step Continue test and the
+    # key-less member-advance test) and structurally by
+    # wizardConnectTripwire.test.js + distBundle.test.js.
     # review cycle 3 (P1-E + P1-F): the not-connected body may not point at a
     # REST call this branch never rendered (the curl is key-gated) nor at the
     # fork-aware Setup guide, whose only affordance re-enters the wizard at step
@@ -1245,7 +1260,12 @@ def test_unsure_fork_done_step_names_no_harness(page: Page) -> None:
     page.get_by_role("button", name="Not sure yet — decide later").click()
     expect(page.locator("div.done")).to_be_visible(timeout=10_000)
     text = page.locator("div.done").inner_text()
-    assert "your agent" in text, \
+    # review cycle 6 (item 9): assert the REDIRECT clause, not the substring
+    # "your agent" — the static body already contains "your agent's first write
+    # yet", so the old assertion could not fail. MUTATION: if `doneHarnessName`
+    # leaked a real harness on the no-picker fork (e.g. 'Cursor'), this clause
+    # disappears while the adjacent 'Claude' check would still pass.
+    assert "head back to your agent" in text, \
         f"#3428 P1-A: with no picker the harness degrades to the neutral phrase: {text!r}"
     assert "Claude" not in text, \
         f"#3428 P1-A: the unsure fork never offered Claude: {text!r}"

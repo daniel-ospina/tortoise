@@ -183,26 +183,40 @@ test('#2912 + #3428: wizardStageLabel names the stage, with org-holding, paused 
   // other steps are unaffected by hasOrg (the header used to leak the receipt
   // "Your Organization" above every later step)
   assert.equal(wizardStageLabel(2, { hasOrg: true }), WIZARD_STEPS[2].label)
-  // the paused reconnect: "You're all set" would contradict the step
+  // the paused reconnect: "You're all set" would contradict the step. review
+  // cycle 6 (item 2): the observation phrasing — the categorical "your agent is
+  // not connected yet" is false for a captured session, and the body beneath it
+  // refuses to assert the absence.
   assert.equal(wizardStageLabel(3, { paused: true }),
-    'Setup paused — your agent is not connected yet')
+    'Setup paused — no connection observed yet')
   // #3428/#2937 (lane B3): "You're all set" is a harness-connected CLAIM, and
   // the DELETED human writer used to manufacture it from a click. Step 3 may
   // only say it on a server-observed connection. The default is the honest
   // understatement (fail-honest), so a caller that forgets `connected` can
   // never claim a connection we did not observe.
-  assert.equal(wizardStageLabel(3), 'Not connected yet')
-  assert.equal(wizardStageLabel(3, { connected: false }), 'Not connected yet')
+  //
+  // MUTATION (cycle 6 item 2): reverting either self-fork arm to the categorical
+  // wording ("Not connected yet" / "Setup paused — your agent is not connected
+  // yet") fails here — pinning one arm while the other over-claims is exactly
+  // how the self-fork contradiction survived cycle 5.
+  assert.equal(wizardStageLabel(3), 'No connection observed yet')
+  assert.equal(wizardStageLabel(3, { connected: false }), 'No connection observed yet')
   assert.equal(wizardStageLabel(3, { connected: true }), "You're all set")
-  // review cycle 4 (item 13): the build fork's body says "we can't tell it's
-  // connected yet", so its heading must not out-claim it with the categorical
-  // "Not connected yet". The build arm is explicit; the self fork is unchanged.
+  // review cycle 4 (item 13) + cycle 6 (item 2): BOTH forks state what was
+  // OBSERVED, so the `buildFork` input no longer changes the outcome — it stays
+  // in the signature because both call sites pass it (wizardArchived.test.js
+  // pins that call shape). MUTATION: reintroducing a fork-specific label in
+  // either direction fails the matching assertion below.
   assert.equal(wizardStageLabel(3, { buildFork: true }), 'No connection observed yet')
-  assert.equal(wizardStageLabel(3, { buildFork: false }), 'Not connected yet')
-  // `connected` and `paused` still outrank the fork arm
+  assert.equal(wizardStageLabel(3, { buildFork: false }), 'No connection observed yet')
+  // `connected` outranks every fork/paused arm.
   assert.equal(wizardStageLabel(3, { buildFork: true, connected: true }), "You're all set")
   assert.equal(wizardStageLabel(3, { buildFork: true, paused: true }),
-    'Setup paused — your agent is not connected yet')
+    'Setup paused — no connection observed yet')
+  // the paused arm is fork-INDEPENDENT now (cycle 6 item 2): a self-fork skip
+  // reads the same observation, never the categorical sentence.
+  assert.equal(wizardStageLabel(3, { buildFork: false, paused: true }),
+    'Setup paused — no connection observed yet')
   // a server connection OUTRANKS a local skip (#2361 r3): a connected org that
   // pressed Skip must read as connected, never as paused. The two flags must
   // not compose into the false reading.

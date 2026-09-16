@@ -46,6 +46,23 @@ function slice(startMarker, endMarker, label) {
   return stripBlockAndWholeLineComments(mainJsx.slice(start, end))
 }
 
+// review cycle 7 (item 7): a bounded callback slice — from `marker` (whose last
+// character is its opening brace) to the MATCHING closing brace. Used where a
+// pin is about the callback's CONTENT (both statements present) rather than
+// their incidental order, so a behaviour-identical swap stays green.
+function braceBody(src, marker, label) {
+  const start = src.indexOf(marker)
+  assert.notEqual(start, -1, `${label}: marker not found (${marker})`)
+  const open = src.indexOf('{', start)
+  assert.notEqual(open, -1, `${label}: opening brace not found`)
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1) }
+  }
+  assert.fail(`${label}: unbalanced braces — refusing a slice to EOF`)
+}
+
 // The whole connect step (affordance consts + chooser + numbered blocks).
 // Whole-line comments are stripped (inside slice()) so an explanatory
 // whole-line comment can never satisfy — or break — a code assertion. NOTE:
@@ -421,8 +438,8 @@ test('#2912: the step announcement re-renders when the paused state is resolved'
   // while wizardPaused is true — a non-skipping user's late connection would
   // otherwise leave the announcement (and the <h1>) disagreeing.
   assert.match(stripBlockAndWholeLineComments(mainJsx),
-    /\}, \[wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected\]\)/,
-    'effectivelyPaused AND serverHarnessConnected must be in the step-announcement deps')
+    /\}, \[wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork\]\)/,
+    'effectivelyPaused AND serverHarnessConnected AND isBuildFork must be in the step-announcement deps')
 })
 
 // ── #3428 / #2937 (lane B3): the wizard cannot falsely claim connected ────
@@ -455,6 +472,36 @@ test('#3428: the connect-step advance no longer writes the harness-connected che
     'it refreshes the projection instead, so the done step reports server truth')
   assert.match(body, /setWizardStep\(3\)/,
     'it still advances — the user is never trapped on the connect step')
+})
+
+test('#3428/#2937: exactly the three known checkpoint call sites may exist, each with an allowlisted body', () => {
+  // review cycle 7 (item 1-ii): the dist-level probe audits ONE serialized
+  // literal, so a writer can be reinstated by moving the POST into a small
+  // helper — the body becomes `{step:r}`, the exact probe never appears, and a
+  // reviewer BUILT that mutation: 33/33 tripwire + 4/4 distBundle green with the
+  // click-writer fully reinstated. This is the SOURCE-side backstop: the URL
+  // lives at exactly three call sites — the two `catalog-presented` marks and
+  // the fork write — and each body is allowlisted, so a 4th site fails AND a
+  // helper cannot move the POST out of the asserted body.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const sites = [...src.matchAll(/\/v1\/onboarding\/state\/checkpoint/g)]
+  assert.equal(sites.length, 3,
+    'exactly THREE /v1/onboarding/state/checkpoint call sites may exist ' +
+    '(2 catalog-presented marks + the fork write) — a 4th means a checkpoint writer was re-introduced')
+  const bodies = sites.map((m) => {
+    const window = src.slice(m.index, m.index + 400)
+    const body = window.match(/body: JSON\.stringify\((\{[^}]*\}|body)\)/)
+    assert.ok(body, `the checkpoint call at offset ${m.index} must carry an allowlisted body`)
+    return body[1]
+  })
+  assert.deepEqual(bodies,
+    ["{ step: 'catalog-presented' }", 'body', "{ step: 'catalog-presented' }"],
+    'the checkpoint bodies are exactly the two catalog-presented marks and the fork `body` — ' +
+    'nothing may serialize a harness-connected step, and a parameterized helper changes this list')
+  // the fork site's `body` derivation, so re-pointing the variable at a
+  // harness-connected step cannot hide behind the allowlisted `body` name
+  assert.match(src, /const body = forkId === 'unsure' \? \{ fork_unsure_at: true \} : \{ fork: forkId \}/,
+    'the fork checkpoint body is the fork write, never a harness-connected step')
 })
 
 test('#3428: the done screen is gated on the SERVER-observed connection, not a click', () => {
@@ -602,6 +649,17 @@ test('#3428/#2937: the build-fork done body names no harness and asserts nothing
     'the build remedy must not name a surface that can never render harness setup')
   assert.equal((done.match(/knownHarnessName\(wizardHarness\)/g) || []).length, 0,
     'only the self-fork arms name a harness — the build branch must not')
+  // review cycle 6 (item 1): the stall notice renders on THIS screen too, so the
+  // build arm's standing promise must be keyed on the stall flag exactly as the
+  // self arm's is. MUTATION: restoring the unkeyed "...and it shows up here on
+  // its own." leaves this suite green (cycle 5 keyed only the self arm) while
+  // two sentences on one screen contradict each other.
+  const buildBodyStart = done.indexOf("Your project's graph is set up")
+  assert.ok(buildBodyStart > -1, 'the build not-connected body is located')
+  const buildBody = done.slice(buildBodyStart, done.indexOf('</p>', buildBodyStart))
+  assert.match(buildBody,
+    /wizardConnectPollStalled\n\s*\? "we'll show it as soon as we can check"\n\s*: 'it shows up here on its own'/,
+    'the build arm withdraws the live-update promise while the poll is stalled')
 })
 
 test('#3428/#2937: the step-3 refresh runs while the not-connected promise can still come true', () => {
@@ -634,15 +692,24 @@ test('#3428/#2937: the step-3 refresh runs while the not-connected promise can s
   // `refreshOnboarding()` and the interval wiring in the text and left this
   // suite green (the file header discloses textual pinning, #3102, but the
   // assertion's message claimed more than it proves). Pin the tick's opening
-  // statement instead: the hidden-tab guard must come first, so a dead-code
-  // no-op tick fails here.
-  const tickStart = poll.indexOf('const wizardConnectTick = () => {')
-  const tickGuard = poll.indexOf('if (document.hidden) return')
-  assert.ok(tickStart > -1 && tickGuard > tickStart,
-    'the tick and its opening hidden-tab guard were located')
-  assert.match(poll.slice(tickStart, tickGuard),
-    /const wizardConnectTick = \(\) => \{\s*$/,
-    'the tick opens with the hidden-tab guard — an unconditional return (a no-op tick) fails this')
+  // statements instead: a dead-code no-op tick must fail here.
+  // review cycle 7 (item 2): the FIRST statement is now the teardown guard
+  // (`if (!active) return`), because the tick is a QUEUED interval callback that
+  // can run after the cleanup cleared the handle. It must precede the hidden-tab
+  // guard AND the shared in-flight write.
+  const tickStart = poll.indexOf('const wizardConnectTick = (force = false) => {')
+  const activeGuard = poll.indexOf('if (!active) return', tickStart)
+  const tickGuard = poll.indexOf('if (document.hidden) return', tickStart)
+  assert.ok(tickStart > -1 && activeGuard > tickStart && tickGuard > activeGuard,
+    'the tick and its two opening guards were located')
+  assert.match(poll.slice(tickStart, activeGuard),
+    /const wizardConnectTick = \(force = false\) => \{\s*$/,
+    'the tick opens with the teardown guard — an unconditional return (a no-op tick) fails this')
+  assert.match(poll.slice(activeGuard, tickGuard),
+    /if \(!active\) return\s*$/,
+    'the hidden-tab guard follows the teardown guard')
+  assert.ok(poll.indexOf('wizardConnectPollInFlightRef.current = true', tickStart) > tickGuard,
+    'a queued post-teardown tick returns BEFORE setting the shared in-flight ref')
   assert.match(poll, /refreshOnboarding\(\)/,
     'the tick references refreshOnboarding (textual — the guard-order pin above is what rules out a no-op)')
   // review cycle 3 (P2-9): a hidden tab throttles setInterval to ~1/min, so the
@@ -672,6 +739,182 @@ test('#3428/#2937: the step-3 refresh runs while the not-connected promise can s
   assert.doesNotMatch(poll, /maxTries|attempts/,
     'no try cap — the guard already self-terminates, and a cap is the one thing ' +
     'that makes the live-update promise false')
+})
+
+test('#3428/#2937: the step-3 poll is cancellable and backs off after not-connected successes', () => {
+  // review cycle 5 (items 2 + 3 + 9) — one async contract, three defects:
+  //  - the 15 s race timer was never cleared, so after teardown its callback
+  //    still cleared the in-flight ref (a later generation could then run a
+  //    CONCURRENT check) and could render the stall notice on a healthy poll;
+  //  - the abandoned refresh could apply an OLDER projection and revert the
+  //    connected screen (the monotonic guard in refreshOnboarding);
+  //  - a successful refresh that observed no connection reset the counters, so
+  //    a parked done step polled every 4 s forever (~900 GETs/hour).
+  const poll = slice('const wizardConnectPollRef = React.useRef(null)',
+                     '// #2361 review-r3 (P2-2)', 'wizard connect poll')
+  // item 2 — teardown cancels BOTH the timer and the pending callback.
+  assert.match(poll, /let active = true/,
+    'a locally-scoped active flag guards the async callbacks')
+  assert.match(poll, /connectTimeout = setTimeout\(\(\) => resolve\(false\), 15000\)/,
+    'the 15 s race timer handle is KEPT (it used to be fire-and-forget)')
+  assert.match(poll, /if \(!active\) return/,
+    'a torn-down generation returns before mutating the poll')
+  assert.match(poll, /active = false[\s\S]{0,200}?clearTimeout\(connectTimeout\)/,
+    'the cleanup clears the race timer and flips active')
+  // item 9 — successes without a connection must back off; the forced
+  // visibility/focus tick bypasses the schedule.
+  assert.match(poll, /wizardConnectPollSuccessesRef\.current = successes/,
+    'consecutive not-connected successes are counted')
+  assert.match(poll,
+    /wizardConnectPollNextAtRef\.current = successes >= 3\n\s*\? Date\.now\(\) \+ Math\.min\(4000 \* 2 \*\* \(successes - 2\), 20000\)/,
+    'the success arm backs off exponentially, capped at 20 s (cycle 6 item 7)')
+  // review cycle 6 (item 5): the race timer must be cleared on BOTH paths —
+  // before a new one is armed and again when the check settles. A check that
+  // settled via `refreshOnboarding()` never cleared it, so the next tick
+  // overwrote the handle and the cleanup could only ever clear the newest.
+  // MUTATION: deleting either clear leaves the leak this item is about.
+  assert.match(poll,
+    /if \(connectTimeout\) \{ clearTimeout\(connectTimeout\); connectTimeout = null \}\n\s*const wizardConnectCheck = Promise\.race\(/,
+    'the stale race timer is cleared BEFORE a new one is armed')
+  // review cycle 7 (item 7): the settle clear and the `!active` guard are both
+  // required, but their ORDER is incidental (teardown already cleared the
+  // handle, so either order is leak-free). Assert both are present in the
+  // callback without forcing the sequence — the ORDER pin above (clear-before-
+  // arm) is the semantic one and stays.
+  const settle = braceBody(poll, 'wizardConnectCheck.then((outcome) => {', 'wizardConnectCheck.then')
+  assert.match(settle, /if \(connectTimeout\) \{ clearTimeout\(connectTimeout\); connectTimeout = null \}/,
+    'the race timer is also cleared when the check settles')
+  assert.match(settle, /if \(!active\) return/,
+    'a torn-down generation returns before mutating the poll')
+  // review cycle 6 (item 4): only an APPLIED refresh is a success; a SUPERSEDED
+  // one is NEUTRAL. The old truthy `applied || _superseded` let a discarded
+  // response clear the stall notice and bank a success.
+  assert.match(poll, /if \(outcome && outcome\.superseded\) return/,
+    'a superseded check is neutral in the poll (neither success nor failure)')
+  assert.match(poll, /const landed = !!\(outcome && outcome\.applied\)/,
+    'only an applied projection counts as a landed check')
+  assert.match(poll, /const wizardConnectTick = \(force = false\)/,
+    'the tick accepts a force flag')
+  assert.match(poll, /if \(!force && Date\.now\(\) < wizardConnectPollNextAtRef\.current\) return/,
+    'the schedule guard yields to a forced (focus/visibility) tick')
+  // review cycle 7 (item 2): the visibility/focus handler no-ops after teardown
+  // too (belt-and-braces over the tick's own first statement).
+  assert.match(poll, /onWizardConnectVisible = \(\) => \{ if \(!active\) return; if \(!document\.hidden\) wizardConnectTick\(true\) \}/,
+    'the visibility/focus handler forces the immediate check (and returns on !active first)')
+})
+
+test('#3428/#2937 (cycle 7 item 2): a tick queued by the cleared interval cannot touch the poll after teardown', () => {
+  // The HTML timer spec lets a cleared interval suppress an already-queued
+  // invocation, but does not require it — so the tick itself must be safe to run
+  // after the cleanup. Without the teardown guard a queued tick set the SHARED
+  // in-flight ref, fired a real request, and its `.then` returned on `!active`
+  // BEFORE releasing the ref: every later tick then returned at the in-flight
+  // guard and the poll died silently while the done screen kept asserting the
+  // live-update promise. MUTATION: deleting `if (!active) return` (or moving it
+  // after the in-flight write) fails here.
+  const poll = slice('const wizardConnectPollRef = React.useRef(null)',
+                     '// #2361 review-r3 (P2-2)', 'wizard connect poll')
+  const tick = braceBody(poll, 'const wizardConnectTick = (force = false) => {', 'wizardConnectTick')
+  const activeGuard = tick.indexOf('if (!active) return')
+  const hiddenGuard = tick.indexOf('if (document.hidden) return')
+  const inFlightSet = tick.indexOf('wizardConnectPollInFlightRef.current = true')
+  assert.ok(activeGuard > -1 && hiddenGuard > activeGuard && inFlightSet > activeGuard,
+    'the teardown guard precedes BOTH the hidden-tab guard and the shared in-flight write')
+  assert.ok(inFlightSet > hiddenGuard,
+    'the in-flight write still sits behind the hidden-tab guard')
+  assert.match(tick.slice(0, activeGuard),
+    /const wizardConnectTick = \(force = false\) => \{\s*$/,
+    'the teardown guard is the tick\u2019s FIRST statement — nothing (not even an unconditional return) precedes it')
+  assert.match(poll, /onWizardConnectVisible = \(\) => \{ if \(!active\) return; if \(!document\.hidden\) wizardConnectTick\(true\) \}/,
+    'the visibility/focus handler returns on !active before forcing a tick')
+})
+
+test('#3428/#2937: the live-update promise and the poll cadence agree (cycle 6 item 7)', () => {
+  // The not-connected body makes a STANDING live-update promise while the stall
+  // flag is false, and the forced tick fires only on focus/visibility — which
+  // does NOT fire for a user who keeps the dashboard visible on a second monitor
+  // and works in a terminal. The success backoff is therefore the staleness
+  // bound for a claim of immediacy. MUTATION: raising the cap (the old 60 s) or
+  // dropping a promise string fails here.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src, /it shows up here the moment it does/,
+    'the self arm carries the standing live-update promise')
+  assert.match(src, /it shows up here on its own/,
+    'the build arm carries the same standing promise (cycle 6 item 1)')
+  const cap = src.match(/wizardConnectPollNextAtRef\.current = successes >= 3\n\s*\? Date\.now\(\) \+ Math\.min\(4000 \* 2 \*\* \(successes - 2\), (\d+)\)/)
+  assert.ok(cap, 'the success backoff cap is located')
+  assert.ok(Number(cap[1]) <= 20000,
+    `the success backoff cap (${cap[1]} ms) must not out-run the standing live-update promise: ` +
+    'a parked visible dashboard gets no forced tick, so the cap is the staleness bound')
+})
+
+test('#3428/#2937: every refreshOnboarding exit reports a discriminated outcome', () => {
+  // review cycle 7 (item 3): the success path returned `{ applied, superseded }`
+  // while three early/error exits still returned a bare `false`. The poll
+  // consumes by falsiness, so a superseded REJECTION was charged as a failed
+  // check and cleared the loading flag while the newer refresh was in flight —
+  // contradicting cycle 6's "a superseded response is side-effect-free
+  // everywhere" claim.
+  // MUTATION: a bare `return false` anywhere in the body, or dropping the
+  // `!_superseded` gate from a loading clear, fails here.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const fnStart = src.indexOf('async function refreshOnboarding()')
+  assert.ok(fnStart > -1, 'refreshOnboarding exists')
+  const body = src.slice(fnStart, src.indexOf('React.useEffect(() => { refreshOnboarding() }', fnStart))
+  assert.ok(body.length > 100, 'the refreshOnboarding body is located')
+  assert.doesNotMatch(body, /return false/,
+    'no exit may return a bare boolean — the poll reads applied/superseded')
+  assert.equal((body.match(/return \{ applied: false, superseded: _superseded \}/g) || []).length, 3,
+    'all three early/error exits return the discriminated object')
+  assert.equal((body.match(/if \(!_superseded\) setOnboardingLoading\(false\)/g) || []).length, 3,
+    'every non-applied path gates the loading clear on !_superseded (success + session-missing + catch)')
+})
+
+test('#3428/#2937: a superseded onboarding refresh is never applied', () => {
+  // review cycle 5 (item 3): `Promise.race` abandons the refresh WITHOUT
+  // cancelling it, so its response can land after a newer refresh already
+  // observed the connection — applying the OLDER projection flips
+  // serverHarnessConnected true → false. A monotonic sequence captured at call
+  // time gates the apply, and a superseded response must not be charged as a
+  // failed check.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src, /const _seq = \+\+onboardingRefreshSeqRef\.current/,
+    'each refresh takes a monotonic sequence number at call time')
+  assert.match(src, /const _superseded = _seq < onboardingRefreshSeqRef\.current/,
+    'a response older than the latest issued request is superseded')
+  assert.match(src, /orgIdRef\.current === _teamAtCall && !_superseded\) \{/,
+    'a superseded response is not applied')
+  assert.match(src, /return \{ applied, superseded: _superseded \}/,
+    'the outcome is DISCRIMINATED — a superseded response is not reported as landed (cycle 6 item 4)')
+  assert.match(src, /if \(!_superseded\) setOnboardingLoading\(false\)/,
+    'a superseded response must not clear the loading flag while the newer request is in flight ' +
+    '(cycle 6 item 3)')
+})
+
+test('#3428/#2937: the not-connected body states only the observed fact and the stall notice is announced', () => {
+  // review cycle 5 (items 6 + 7).
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  // item 6 — no graph fact the projection cannot establish.
+  assert.doesNotMatch(src, /hasn't filed anything to this Organization's graph yet/,
+    'the body must not assert a graph fact a captured session can falsify')
+  assert.match(src, /We haven't seen your agent's first write yet/,
+    'it states the missing OBSERVATION instead')
+  // item 7 — the dynamically-inserted notice must be a live region, and the
+  // body's promise must be keyed on the stall flag.
+  // review cycle 7 (items 5 + 6): the notice is now MOUNTED unconditionally
+  // inside the step-3 not-connected arm (an inserted-already-populated live
+  // region is unreliably announced), with its message keyed on the stall flag
+  // INSIDE the region. The match is scoped to THIS site: the unrelated billing
+  // notice (`<p className="dim small" role="status">`, main.jsx ~9100) matched
+  // the old file-wide assertion identically, so removing `role="status"` from
+  // the stall notice left the suite 33/33 green (cycle-6 mutation finding).
+  // MUTATION: dropping `role="status"` (or re-adding the `wizardConnectPollStalled`
+  // mount gate) fails here.
+  assert.match(src,
+    /\{!serverHarnessConnected && \(\s*<p className="dim small" role="status"[^>]*>\s*\{wizardConnectPollStalled\n\s*\?\s*"We haven't been able to check for your connection for a moment[^"]*"\n\s*:\s*''\}/,
+    'the stall notice is a live region MOUNTED at step-3 entry, and the stall message is keyed on the flag inside it')
+  assert.match(src, /wizardConnectPollStalled\n\s*\? "we'll show it as soon as we can check"/,
+    'the live-update promise softens while stalled')
 })
 
 test('#2912: the build-fork blocks own their rhythm (no inline margins stacking on the gap)', () => {
@@ -759,14 +1002,38 @@ test('#3218: the key surfaces state the visibility window + the recovery path, n
 // wizardComplete and the header escape (both drop welcomeKey too) — the
 // build-fork handler this pins is its NO-KEY arm, so this is a drift guard for
 // a future key-present exit, not a leak fix.
-test('#3218: every wizard exit inside the connect step clears the in-memory plaintext', () => {
+test('#3218/#3428: every wizard exit inside the connect step clears the in-memory plaintext and the cap flag', () => {
   const connect = connectStep()
   const exits = [...connect.matchAll(/setWelcomeMode\(false\)/g)]
   assert.ok(exits.length >= 1, 'the connect step has at least one exit')
   for (const m of exits) {
     assert.match(connect.slice(m.index, m.index + 220), /setWizardDurableKey\(''\)/,
       'each connect-step exit must drop the plaintext it was showing')
+    // review cycle 6 (item 6): the same "cannot outlive the step" contract
+    // covers `wizardDurableCapped` — cycle 5 added it to three exits and missed
+    // the "Manage API keys" link, so a capped build-fork owner who left through
+    // it re-entered with the done screen's "(running it creates a fresh key)"
+    // clause permanently dropped. MUTATION: deleting `setWizardDurableCapped(false)`
+    // from any connect-step exit fails here.
+    assert.match(connect.slice(m.index, m.index + 220), /setWizardDurableCapped\(false\)/,
+      'each connect-step exit must also drop the mint-402 cap flag')
   }
+})
+
+test('#3428/#2937: logout drops the connect-step cap flag with the rest of the durable-key state', () => {
+  // review cycle 7 (item 4): the mint-402 cap flag is session/team-scoped, like
+  // the key state beside it. `logout()` was the one connect exit that cleared
+  // the four key flags but not `wizardDurableCapped`.
+  // SCOPED to the logout body — a file-wide cluster match was VACUOUS: the same
+  // five-line clear exists in `wizardComplete`, so the first version of this pin
+  // stayed green when the logout clear was deleted (caught by the cycle-7
+  // mutation run). `slice()` ends at the NEXT `setWelcomeKey('')`, which is the
+  // logout body's own.
+  // MUTATION: deleting `setWizardDurableCapped(false)` from logout fails here.
+  const logout = slice('async function logout() {', "setWelcomeKey('')", 'logout head')
+  assert.match(logout,
+    /setWizardDurableKey\(''\)\n\s*setWizardDurablePaste\(''\)\n\s*setWizardDurableError\(''\)\n\s*setWizardDurableCapped\(false\)\n\s*setWizardShowPaste\(false\)/,
+    'logout clears the mint-402 cap flag alongside the durable-key state')
 })
 
 // #3218 (item 2 follow-up, review cycle 1 P1): the numbered circles and the

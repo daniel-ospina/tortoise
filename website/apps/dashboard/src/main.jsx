@@ -1225,6 +1225,15 @@ function claimIntentInFlight() {
   // blocks the scope hydration effect until the new team's state lands, so
   // the new team never seeds from (or persists over) the old team's scope.
   const onboardingStaleRef = React.useRef(false)
+  // #3428/#2937 (lane B3, review cycle 5 item 3): monotonic guard for
+  // refreshOnboarding. `Promise.race` abandons the 15 s refresh but does not
+  // CANCEL it, so a refresh started before a connection landed could resolve
+  // AFTER a newer refresh that observed it and apply the OLDER projection —
+  // flipping serverHarnessConnected true → false (the connected screen reverted
+  // to "Not connected yet", and the poll charged a failure although a refresh
+  // HAD applied). Every call takes a sequence number here; a response whose
+  // request was superseded by a NEWER issued request is dropped, never applied.
+  const onboardingRefreshSeqRef = React.useRef(0)
   // #1893 (scope-verify P1): PER-KEY pre-hydration touch tracking — a touch
   // on ONE key must never suppress seeding of the OTHER, and must never
   // persist the other key's un-seeded default over its stored server value.
@@ -1395,6 +1404,7 @@ function claimIntentInFlight() {
   // focus) fires one immediate refresh.
   const wizardConnectPollRef = React.useRef(null)
   const wizardConnectPollFailsRef = React.useRef(0)
+  const wizardConnectPollSuccessesRef = React.useRef(0)
   const wizardConnectPollNextAtRef = React.useRef(0)
   const wizardConnectPollInFlightRef = React.useRef(false)
   const [wizardConnectPollStalled, setWizardConnectPollStalled] = React.useState(false)
@@ -1409,12 +1419,33 @@ function claimIntentInFlight() {
     // check by up to 60 s. Reset every ref/flag on setup; the render also gates
     // the notice on `!serverHarnessConnected` (belt and braces).
     wizardConnectPollFailsRef.current = 0
+    wizardConnectPollSuccessesRef.current = 0
     wizardConnectPollNextAtRef.current = 0
     wizardConnectPollInFlightRef.current = false
     setWizardConnectPollStalled(false)
-    const wizardConnectTick = () => {
+    // review cycle 5 (items 2 + 3): this effect's async work must be
+    // CANCELLABLE. `active` is flipped false in the cleanup and every callback
+    // returns on it; `connectTimeout` is the 15 s race timer, now CLEARED on
+    // teardown. Before this the timer always fired — after teardown it could
+    // clear a LATER generation's in-flight guard (starting a concurrent check,
+    // breaking single-flight) and render the stall notice on a healthy poll.
+    let active = true
+    let connectTimeout = null
+    const wizardConnectTick = (force = false) => {
+      // #3428/#2937 (lane B3, review cycle 7 item 2): the tick is a QUEUED
+      // interval callback — clearing the handle in the cleanup cannot recall an
+      // invocation the timer already queued. That stale tick used to set the
+      // SHARED in-flight ref, arm its own closure timer and fire a real request,
+      // then hit `if (!active) return` in its `.then` BEFORE releasing the ref —
+      // so the next generation's every tick returned at the in-flight guard and
+      // the poll died silently while the screen kept asserting a live update.
+      // The teardown guard is the tick's FIRST statement, before any ref write.
+      if (!active) return
       if (document.hidden) return
-      if (Date.now() < wizardConnectPollNextAtRef.current) return
+      // review cycle 5 (item 9): `force` — the visibility/focus handler —
+      // bypasses the schedule below, so a landing connection still surfaces
+      // immediately even while the not-connected success backoff is holding.
+      if (!force && Date.now() < wizardConnectPollNextAtRef.current) return
       // review cycle 4 (item 10): with no in-flight guard every 4 s tick stacked
       // another refresh behind a slow/hung response, and with no timeout a
       // request that never settled left the failure counter untouched — so
@@ -1423,18 +1454,53 @@ function claimIntentInFlight() {
       // at a time, and a 15 s ceiling that counts as a failed check.
       if (wizardConnectPollInFlightRef.current) return
       wizardConnectPollInFlightRef.current = true
+      // review cycle 6 (item 5): the PREVIOUS check's race timer may still be
+      // pending — a check that settled through `refreshOnboarding()` never
+      // cleared it, so the next tick overwrote the handle and the cleanup could
+      // only ever clear the newest one. Drop the stale handle BEFORE arming.
+      if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
       const wizardConnectCheck = Promise.race([
         refreshOnboarding(),
-        new Promise((resolve) => { setTimeout(() => resolve(false), 15000) }),
+        new Promise((resolve) => { connectTimeout = setTimeout(() => resolve(false), 15000) }),
       ]).catch(() => false)  // a rejection must clear the in-flight guard, not freeze the poll
-      wizardConnectCheck.then((landed) => {
+      wizardConnectCheck.then((outcome) => {
+        // review cycle 6 (item 5): clear THIS check's timer the moment it
+        // settles, whichever arm won — the cleanup alone only saw the last handle.
+        if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+        if (!active) return  // review cycle 5 (item 2): a torn-down generation must not mutate a later poll
         wizardConnectPollInFlightRef.current = false
+        // review cycle 6 (item 4): a SUPERSEDED response is NEUTRAL — it did not
+        // land, so it must not bank a success, and it did not fail, so it must
+        // not charge a failure. Either charge makes the stall signal lie: a
+        // genuinely failing endpoint could have its notice suppressed by a
+        // concurrent refresh (a step-3 landing refresh, a job `onDone`, a
+        // toggle) that superseded the poll's own check.
+        if (outcome && outcome.superseded) return
+        const landed = !!(outcome && outcome.applied)
         if (landed) {
           wizardConnectPollFailsRef.current = 0
-          wizardConnectPollNextAtRef.current = 0
           setWizardConnectPollStalled(false)
+          // review cycle 5 (item 9): `landed` means the projection was APPLIED
+          // — while this effect is still mounted it therefore observed NO
+          // connection. A flat 4 s cadence is ~900 GETs/hour for a user parked
+          // on the done step, so after a few consecutive not-connected
+          // successes ease off (capped like the failure arm). A forced tick
+          // (tab focus/visibility) still checks immediately.
+          // review cycle 6 (item 7): the success cap is 20 s, not 60 s. The body
+          // on this screen makes a STANDING promise ("it shows up here the
+          // moment it does") and the stall flag is false here, so the softened
+          // branch never renders; `force` fires only on focus/visibility, which
+          // does NOT fire for a user who keeps the dashboard visible on a second
+          // monitor and works in a terminal. A 60 s cap let the screen assert
+          // immediacy for a whole minute.
+          const successes = wizardConnectPollSuccessesRef.current + 1
+          wizardConnectPollSuccessesRef.current = successes
+          wizardConnectPollNextAtRef.current = successes >= 3
+            ? Date.now() + Math.min(4000 * 2 ** (successes - 2), 20000)
+            : 0
           return
         }
+        wizardConnectPollSuccessesRef.current = 0
         const fails = wizardConnectPollFailsRef.current + 1
         wizardConnectPollFailsRef.current = fails
         wizardConnectPollNextAtRef.current = Date.now() + Math.min(4000 * 2 ** (fails - 1), 60000)
@@ -1442,10 +1508,12 @@ function claimIntentInFlight() {
       })
     }
     wizardConnectPollRef.current = setInterval(wizardConnectTick, 4000)
-    const onWizardConnectVisible = () => { if (!document.hidden) wizardConnectTick() }
+    const onWizardConnectVisible = () => { if (!active) return; if (!document.hidden) wizardConnectTick(true) }
     document.addEventListener('visibilitychange', onWizardConnectVisible)
     window.addEventListener('focus', onWizardConnectVisible)
     return () => {
+      active = false
+      if (connectTimeout) clearTimeout(connectTimeout)
       if (wizardConnectPollRef.current) {
         clearInterval(wizardConnectPollRef.current)
         wizardConnectPollRef.current = null
@@ -1462,6 +1530,19 @@ function claimIntentInFlight() {
   // only, so there is no ref to hoist.
   const [wizardStepAnnounce, setWizardStepAnnounce] = React.useState('')
 
+  // #3428/#2937 (lane B3, review cycle 5 item 4): `wizardForkChosen` and the
+  // `wizardFork` / `isBuildFork` derivation are HOISTED above the step
+  // announcement effect so `isBuildFork` can be a DEP. It was previously read in
+  // the effect BODY only (a later-declared const cannot sit in a deps array
+  // without the #2426/#2621/#2709 TDZ white-screen), so when `onboarding.fork`
+  // flipped to 'build' while the user sat on step 3 the <h1> re-rendered to "No
+  // connection observed yet" while the sr-only announcement kept "Not connected
+  // yet" — none of the effect's other deps change on that flip. Both surfaces
+  // must share the one derivation; declaring the consts here makes the dep legal.
+  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
+  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
+  const isBuildFork = wizardFork === 'build'
+
   // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
   // Step 1 (org input) and step 3 (paste field / copy button) carry their own
   // autofocus targets — the container must not steal from them, so those two
@@ -1469,12 +1550,11 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
-    // review cycle 4 (item 13): `isBuildFork` is declared LATER in this giant
-    // component, so (like welcomeHasOrg/wizardShowPaste above) it is read in the
-    // effect BODY only — a closure that runs post-render — never in the dep
-    // array, which evaluates eagerly during render (#2426 TDZ). The normal path
-    // sets wizardForkChosen in the SAME batch as setWizardStep(3), so the arm is
-    // correct on the render the announcement fires for.
+    // review cycle 5 (item 4): `isBuildFork` is derived ABOVE this effect and
+    // IS a dep (see the dep list), so an `onboarding.fork` flip to 'build' while
+    // the user sits on step 3 re-runs the announcement with the SAME arm the
+    // <h1> just rendered. It used to be body-only (a later-declared const in a
+    // deps array is the #2426 TDZ white-screen), which let the two disagree.
     const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })
     setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
@@ -1503,7 +1583,7 @@ function claimIntentInFlight() {
     // `effectivelyPaused` unchanged, which would leave the announcement saying
     // "Not connected yet" beneath a <h1> that had already flipped to "You're
     // all set": the same disagreement this dep list exists to prevent.
-  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected])
+  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork])
   // ⛔ #2426 e2e catch (P0): welcomeHasOrg (~line 4890) and wizardShowPaste
   // (~1832) are declared LATER in this giant component — a hook dep array
   // evaluates eagerly DURING render, so listing either here threw "Cannot
@@ -2548,6 +2628,10 @@ function claimIntentInFlight() {
     // under team B, and must not clear the switch-stale flag for a stale
     // team). Mirrors the Round-10 _teamAtCall pattern in loadAll/loadGraphs.
     const _teamAtCall = orgIdRef.current
+    // #3428/#2937 (lane B3, review cycle 5 item 3): this call's monotonic
+    // sequence number — captured before the await so a response can be told
+    // apart from one issued LATER (see the apply guard below).
+    const _seq = ++onboardingRefreshSeqRef.current
     try {
       if (!sessionTokenRef.current) {
         // Mount race (#1838): the onboarding-state GET rides the session JWT —
@@ -2568,8 +2652,12 @@ function claimIntentInFlight() {
         if (session && session.access_token && session.expires_at && session.expires_at * 1000 > Date.now()) {
           sessionTokenRef.current = session.access_token
         } else {
-          setOnboardingLoading(false)
-          return false
+          // #3428/#2937 (lane B3, review cycle 7 item 3): this exit and the two
+          // below return the SAME discriminated outcome as the success path —
+          // the poll consumes the shape, and a bare `false` also cleared the
+          // loading flag for a response a newer refresh already superseded.
+          if (!_superseded) setOnboardingLoading(false)
+          return { applied: false, superseded: _superseded }
         }
       }
       // #1893 (code-review P1): pin the SELECTED team so multi-membership
@@ -2593,7 +2681,13 @@ function claimIntentInFlight() {
       // both), so the poll reset its failure counter and cleared the stall
       // notice while the projection never moved.
       let applied = false
-      if (st && st.onboarding && _teamAtCall && orgIdRef.current === _teamAtCall) {
+      // #3428/#2937 (lane B3, review cycle 5 item 3): a SUPERSEDED response is
+      // never applied. If a newer request was issued while this one was in
+      // flight, this one is stale by definition and is dropped; `_superseded`
+      // is returned as a success below so the poll does not count it as a
+      // failed check.
+      const _superseded = _seq < onboardingRefreshSeqRef.current
+      if (st && st.onboarding && _teamAtCall && orgIdRef.current === _teamAtCall && !_superseded) {
         // code-review P1: this response is for the CURRENT team (the team
         // did not move while the GET was in flight) — clear the switch-stale
         // flag so hydration can proceed.
@@ -2602,13 +2696,25 @@ function claimIntentInFlight() {
         if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
         applied = true
       }
-      setOnboardingLoading(false)
+      // review cycle 6 (item 3): the loading flag belongs to THIS request. A
+      // superseded response must not flip it while the newer request is still in
+      // flight — it was the one mutation the monotonic apply guard did not cover.
+      if (!_superseded) setOnboardingLoading(false)
       // #3428/#2937 (lane B3, review cycle 3 P2-8): the step-3 poll has to be
       // able to tell a landed refresh from a failed one, and this function
       // swallows its own errors (the swallow is deliberate — see the catch
       // below), so it RETURNS the outcome instead. Callers that only fire and
       // forget keep working unchanged; the poll counts the `false`s.
-      return applied
+      // review cycle 5 (item 3): a SUPERSEDED response is not a failure of THIS
+      // check, and a newer refresh owns the truth.
+      // review cycle 6 (item 4): it is not a SUCCESS either. The outcome is
+      // DISCRIMINATED — `{ applied, superseded }` — so the poll banks a success
+      // only on `applied` and treats `superseded` as neutral. The old
+      // `applied || _superseded` reported a DISCARDED response as landed
+      // (cycle 4 item 11's defect in a new form): it reset the failure counter,
+      // cleared the stall notice and advanced the success backoff for a
+      // projection that never moved.
+      return { applied, superseded: _superseded }
     } catch (e) {
       // #1847/#2323 (Option B): first-timer org-create race — the mount-time
       // refreshOnboarding() fires BEFORE the org exists (a teamless first-
@@ -2629,9 +2735,12 @@ function claimIntentInFlight() {
       // state leaves the panel in its initial state;
       // finishWelcomeLoads() re-fires this after org-create + provisioning
       // and is the authoritative load.
-      if (e && e.status === 403 && !e.suspended && !orgIdRef.current) return false
-      setOnboardingLoading(false)  // best-effort — the surface renders its error state
-      return false
+      if (e && e.status === 403 && !e.suspended && !orgIdRef.current) return { applied: false, superseded: _superseded }
+      // #3428/#2937 (lane B3, review cycle 7 item 3): a superseded REJECTION is
+      // superseded-aware too — the newer in-flight refresh owns the loading
+      // flag (cycle 6's side-effect-free claim covered only the response path).
+      if (!_superseded) setOnboardingLoading(false)  // best-effort — the surface renders its error state
+      return { applied: false, superseded: _superseded }
     }
   }
   React.useEffect(() => { refreshOnboarding() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -2654,7 +2763,8 @@ function claimIntentInFlight() {
   const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
-  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
+  // `wizardForkChosen` is declared ABOVE the step-announcement effect (review
+  // cycle 5 item 4) so `isBuildFork` can be a DEP of it without a TDZ.
   // #1998 (W2) / #3428 (lane B3): connect-step busy state. The advance no
   // longer WRITES the harness-connected checkpoint — that click-writer was
   // deleted, so this flag covers the refresh that sharpens the done step's read
@@ -3244,6 +3354,10 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // review cycle 5 (item 8): the wizard's OWN mint-402 flag must not out-live
+    // the wizard — an owner who hit the cap, left, and re-entered without a
+    // fresh mint attempt permanently lost the fresh-key clause.
+    setWizardDurableCapped(false)
     setWizardShowPaste(false)    // #2361 review-r2: welcomeKey is the first-timer provisioned plaintext
     // #2710: the wizard never owns the shared key-create modal — clear any
     // queued flag on the way out so it cannot surface on the dashboard. The two
@@ -4099,6 +4213,10 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // #3428/#2937 (lane B3, review cycle 7 item 4): logout is the one connect
+    // exit that missed the mint-402 cap flag; a fresh session must not inherit
+    // it (the flag is session/team-scoped, like the key state beside it).
+    setWizardDurableCapped(false)
     setWizardShowPaste(false)
     // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
     // session-scoped; drop it with the other key state on logout.
@@ -4721,6 +4839,7 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardDurableCapped(false)  // review cycle 5 (item 8): the mint-402 flag is team-scoped too
     setWizardShowPaste(false)
     // #2246 (review, P1): welcomeKey is TEAM-scoped shown-once plaintext — a
     // switch must not leak the previous team's plaintext into the new team's
@@ -6199,9 +6318,9 @@ function claimIntentInFlight() {
   const wizardConnectHarness = wizardHarness
   // #1998 fork-aware connect: the fork choice determines what the connect step
   // shows — 'build' users see API key + SDK code; 'self' users see harness
-  // picker + setup command.
-  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
-  const isBuildFork = wizardFork === 'build'
+  // picker + setup command. `wizardFork` / `isBuildFork` are derived ONCE,
+  // above the step-announcement effect (review cycle 5 item 4), so the <h1>,
+  // the announcement and this render all share ONE derivation.
   // #3428/#2937 (lane B3, review cycle 3 P1-A): the done step may name a
   // harness — and print a per-harness capture sentence — ONLY when the connect
   // step actually offered the chooser that sets `wizardHarness`. Two paths
@@ -6366,7 +6485,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardDurableCapped(false); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -6680,8 +6799,13 @@ function claimIntentInFlight() {
                                   header escape — both of which also drop
                                   welcomeKey. This handler is kept in step with
                                   them so the `wizardDurable*` state can never
-                                  outlive the step on any path. */}
-                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setTab('keys'); finishWelcomeLoads('keys') }}>
+                                  outlive the step on any path. review cycle 6 (item 6): that contract includes
+                                  `wizardDurableCapped` — this was the one exit cycle 5
+                                  missed, so a capped build-fork owner who left via
+                                  this link and re-entered without a fresh mint
+                                  attempt kept the done screen's "(running it
+                                  creates a fresh key)" clause suppressed. */}
+                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardDurableCapped(false); setTab('keys'); finishWelcomeLoads('keys') }}>
                                 Manage API keys →
                               </button>
                             </div>
@@ -7067,11 +7191,19 @@ function claimIntentInFlight() {
                             </p>
                           </>
                         ) : (
+                          // review cycle 6 (item 1): the stall notice below renders
+                          // on THIS screen too — it keys on the poll, not on the
+                          // fork — so the build arm's standing promise must soften
+                          // exactly as the self arm's does. Two sentences on one
+                          // screen cannot both be true (cycle 5 keyed only the
+                          // self arm).
                           <p className="dim" style={{ lineHeight: 1.6 }}>
                             Your project's graph is set up, but we can't tell it's connected yet — Tortoise
                             marks a project connected when a write arrives through its agent tools, not
                             through the <code>/v1/points</code> REST call. Connect an agent to Tortoise
-                            and it shows up here on its own.
+                            and {wizardConnectPollStalled
+                              ? "we'll show it as soon as we can check"
+                              : 'it shows up here on its own'}.
                           </p>
                         )
                       ) : (
@@ -7100,7 +7232,7 @@ function claimIntentInFlight() {
                                     wrong is #3575 (lane B1) — this screen cannot
                                     detect it. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
-                                {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions as soon as your agent files its first memory. "}
+                                {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
                                 You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
                               </p>
                               {/* The redirect is PROSE, not a control: we cannot open
@@ -7122,11 +7254,26 @@ function claimIntentInFlight() {
                             // fresh key on a key-less leaf or to a non-minting role.
                             // review cycle 3 (P1-A): the name is the derived
                             // `doneHarnessName` (neutral when no picker was offered).
+                            // review cycle 5 (item 6): the body may only state what
+                            // was OBSERVED. "hasn't filed anything to this
+                            // Organization's graph yet" was false for a user whose
+                            // CAPTURED SESSION had already written Session nodes and
+                            // extracted points (that path files only the
+                            // `capture-disclosed` checkpoint, never
+                            // `harness-connected`), while Settings → Captured
+                            // sessions listed the session. State the missing
+                            // observation instead of the graph fact.
+                            // review cycle 5 (item 7): the live-update promise is
+                            // keyed on the stall flag — while the poll cannot check,
+                            // the body must not keep asserting the very promise the
+                            // stall notice below withdraws.
                             <p className="dim" style={{ lineHeight: 1.6 }}>
-                              Your agent hasn't filed anything to this Organization's graph yet — so we can't
+                              We haven't seen your agent's first write yet — so we can't
                               tell it's connected. If you haven't finished the setup, {doneSetupRemedy}. If you have,
                               head back to {doneHarnessName} and ask it to file
-                              its first memory; it shows up here the moment it does.
+                              its first memory; {wizardConnectPollStalled
+                                ? "we'll show it as soon as we can check"
+                                : 'it shows up here the moment it does'}.
                             </p>
                           )}
                         </>
@@ -7135,10 +7282,11 @@ function claimIntentInFlight() {
                           backs off after consecutive failures; past its threshold
                           the live-update promise can no longer be kept, so say so
                           quietly instead of leaving the screen asserting it. */}
-                      {wizardConnectPollStalled && !serverHarnessConnected && (
-                        <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                          We haven't been able to check for your connection for a moment — we'll keep
-                          trying. If this persists, reload the page.
+                      {!serverHarnessConnected && (
+                        <p className="dim small" role="status" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                          {wizardConnectPollStalled
+                            ? "We haven't been able to check for your connection for a moment — we'll keep trying. If this persists, reload the page."
+                            : ''}
                         </p>
                       )}
                       <div className="wizard-nav">
