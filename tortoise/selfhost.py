@@ -3,9 +3,9 @@
 Thin single-tenant FastAPI app: MCP Streamable HTTP at /mcp + /health.
 NO Supabase, NO hosted platform machinery (registry auth, tenant
 provisioning, dream queue). The self-host image ships this app — grep gate:
-no hosted_api / supabase / TeamResolutionMiddleware imports reachable from
+no hosted_api / supabase / OrgResolutionMiddleware imports reachable from
 this module (auth_mode is "static"|"none", so create_http_app never imports
-TeamResolutionMiddleware).
+OrgResolutionMiddleware).
 
 Environment:
   TORTOISE_DB_URI        durable FalkorDB (connection string) — recommended

@@ -270,7 +270,7 @@ No new API contracts. Existing endpoints reused:
 
 | Risk | Mitigation |
 |------|------------|
-| `loadTeams()` in `acceptStashedInvite()` races with mount effect `loadTeams()` | Guard with `if (!teamIdRef.current)` to prevent double-load |
+| `loadTeams()` in `acceptStashedInvite()` races with mount effect `loadTeams()` | Guard with `if (!orgIdRef.current)` to prevent double-load |
 | Pending invites fetch adds latency to Step 0 load | Load on Step 0 mount, not on page mount — acceptable since user is on Step 0 for a few seconds |
 | Orientation removal confuses first-time users (no "what happens next" card) | Monitor Step 1 completion rate; add inline context to Step 0 sub-text if drop-off increases |
 | `wizardStep` renumbering breaks wizard guards | All `wizardStep === N` checks must be re-audited; compile error on stale values |

@@ -1,13 +1,13 @@
 """Task 3 tests — durable SDK event emission to :GraphEvent nodes.
 
-Uses the shared sdk_factory fixture (tests/conftest.py, Task 1). No team_id
+Uses the shared sdk_factory fixture (tests/conftest.py, Task 1). No org_id
 property anywhere — the graph namespace IS the team partition (plan-review P2).
 """
 import json
 
 
 def _events(proj):
-    # plan-review P2: no team_id property — the graph namespace IS the partition
+    # plan-review P2: no org_id property — the graph namespace IS the partition
     rows = proj.g.query(
         "MATCH (e:GraphEvent) RETURN properties(e) ORDER BY e.seq").result_set
     return [r[0] for r in rows]

@@ -1,12 +1,12 @@
 """Backup watcher — the driver-disabled leg of the dual-watcher design.
 
 A read-only, in-process daemon (spawned in the app lifespan, Task 7) that
-computes PER-TEAM backup staleness and drives the alert store directly (files
+computes PER-ORG backup staleness and drives the alert store directly (files
 GitHub issues + pushes Telegram itself — it does not depend on any R2 marker
 being read by someone else, so the driver-disabled case is covered by
 construction).
 
-Read-only w.r.t. the graphs: the watcher takes an injected team provider
+Read-only w.r.t. the graphs: the watcher takes an injected org provider
 (default: the registry seam) and NEVER writes to any graph — asserted by the
 absence of any graph handle in the class.
 
@@ -49,14 +49,14 @@ def _read_json(storage, key: str) -> dict[str, Any]:
         return {}
 
 
-def _team_prefixes(storage) -> list[str]:
-    """Top-level team directories under ``backups/`` — app-down-independent."""
-    teams: set[str] = set()
+def _org_prefixes(storage) -> list[str]:
+    """Top-level org directories under ``backups/`` — app-down-independent."""
+    orgs: set[str] = set()
     for k in storage.list("backups/"):
         parts = k.split("/")
         if len(parts) >= 2 and parts[0] == "backups" and parts[1]:
-            teams.add(parts[1])
-    return sorted(teams)
+            orgs.add(parts[1])
+    return sorted(orgs)
 
 
 def _parse_backup_ts(token: str) -> datetime | None:
@@ -70,7 +70,7 @@ def _parse_backup_ts(token: str) -> datetime | None:
     return None
 
 
-def _default_graph_name(storage, team_id: str) -> str | None:
+def _default_graph_name(storage, org_id: str) -> str | None:
     """The DEFAULT graph's dump name, from its per-graph state if present.
 
     Post-#2313 the per-graph sweep writes graph_name into each graph's state
@@ -82,47 +82,47 @@ def _default_graph_name(storage, team_id: str) -> str | None:
     """
     try:
         state = json.loads(storage.download(
-            f"ops/teams/{team_id}/graphs/default/state.json"))
+            f"ops/teams/{org_id}/graphs/default/state.json"))
     except Exception:
         return None
     name = state.get("graph_name") if isinstance(state, dict) else None
     return str(name) if name else None
 
 
-def _default_graph_newest(storage, team_id: str, newest: datetime | None) -> datetime | None:
+def _default_graph_newest(storage, org_id: str, newest: datetime | None) -> datetime | None:
     """Merge the DEFAULT graph's archive freshness into ``newest``.
 
     Post-#2313 the default graph's dumps live under the literal ``default``
-    key segment (``backups/{team}/default/{ts}_{rnd}/…``); pre-#2313 sweep
-    dumps are flat (``backups/{team}/{ts}_{rnd}/…``). Both shapes are the
-    default graph — team-level freshness is the max over the two (#2313 Task
-    4). Custom nested keys (``backups/{team}/{g_..}/…``) are NOT team-level;
+    key segment (``backups/{org}/default/{ts}_{rnd}/…``); pre-#2313 sweep
+    dumps are flat (``backups/{org}/{ts}_{rnd}/…``). Both shapes are the
+    default graph — org-level freshness is the max over the two (#2313 Task
+    4). Custom nested keys (``backups/{org}/{g_..}/…``) are NOT org-level;
     the per-graph surface handles them.
 
     Legacy flat manifests are disambiguated by their manifest ``graph_name``
     when the default's expected name is known (post-#2313 state): a flat
     manifest naming a CUSTOM namespace is a pre-#2313 C5-era on-demand dump
-    — it is NOT the default graph and does not gate team freshness. Before
+    — it is NOT the default graph and does not gate org freshness. Before
     any per-graph state exists (first post-#2313 sweep not yet run) every
     flat manifest is treated as the default (pre-#2313 parity, ≤1h window).
 
     #2370: classification is read from the sweep-written legacy-flat index
-    (ops/legacy-flat-index/{team}.json) — ONE object read per team per poll
+    (ops/legacy-flat-index/{org}.json) — ONE object read per org per poll
     replaces downloading every flat manifest. The index is authoritative
     while present: flats it marks custom (graph_id set, ≠ default) never
-    gate team freshness; default/unresolvable flats count. Index absent
+    gate org freshness; default/unresolvable flats count. Index absent
     (pre-first-sweep) falls back to the per-manifest read. Transient read
     failures NEVER exclude an archive: an unreadable manifest/index counts
     as default for the cycle (pre-#2313 key-derived parity) — excluding it
     fabricated spurious STALE on a one-off read error.
     """
-    default_name = _default_graph_name(storage, team_id)
+    default_name = _default_graph_name(storage, org_id)
     from tortoise.backup_sweep import read_legacy_flat_index
     try:
-        index = read_legacy_flat_index(storage, team_id)
+        index = read_legacy_flat_index(storage, org_id)
     except Exception:
         index = {}  # index read failure → per-manifest fallback below
-    for k in storage.list(f"backups/{team_id}/"):
+    for k in storage.list(f"backups/{org_id}/"):
         if not k.endswith("/manifest.json"):
             continue
         parts = k.split("/")
@@ -156,16 +156,16 @@ def _default_graph_newest(storage, team_id: str, newest: datetime | None) -> dat
     return newest
 
 
-def _newest_backup_ts(storage, team_id: str) -> datetime | None:
-    """Newest archive timestamp for a team's DEFAULT graph from R2 manifest
+def _newest_backup_ts(storage, org_id: str) -> datetime | None:
+    """Newest archive timestamp for an org's DEFAULT graph from R2 manifest
     keys (key-derived, restore-surviving) — legacy flat + ``default`` nested."""
-    return _default_graph_newest(storage, team_id, None)
+    return _default_graph_newest(storage, org_id, None)
 
 
-def _newest_graph_backup_ts(storage, team_id: str, graph_id: str) -> datetime | None:
+def _newest_graph_backup_ts(storage, org_id: str, graph_id: str) -> datetime | None:
     """Newest archive timestamp for ONE graph (#2313 Task 4)."""
     newest: datetime | None = None
-    for k in storage.list(f"backups/{team_id}/{graph_id}/"):
+    for k in storage.list(f"backups/{org_id}/{graph_id}/"):
         if not k.endswith("/manifest.json"):
             continue
         parts = k.split("/")
@@ -180,10 +180,10 @@ def _newest_graph_backup_ts(storage, team_id: str, graph_id: str) -> datetime | 
 def compute_status(
     *,
     now: datetime,
-    teams: list[str],
-    r2_teams: list[str],
-    state_teams: list[str],
-    newest_ts_by_team: dict[str, datetime],
+    orgs: list[str],
+    r2_orgs: list[str],
+    state_orgs: list[str],
+    newest_ts_by_org: dict[str, datetime],
     simulate_age: datetime | None,
     driver_heartbeat_ts: datetime | None,
     r2_ok: bool,
@@ -195,7 +195,7 @@ def compute_status(
 ) -> dict[str, Any]:
     """Pure staleness computation. Returns the watcher's decision surface.
 
-    Per-team statuses: ``never`` (seam team with no R2 archive), ``stale``
+    Per-org statuses: ``never`` (seam org with no R2 archive), ``stale``
     (newest archive older than threshold — a non-expired simulate object
     carries an OLD age and therefore forces the stale evaluation), ``ok``,
     ``stamp_missing`` (archives exist but no state object). ``unknown`` when
@@ -216,29 +216,29 @@ def compute_status(
         return result
     if not r2_ok:
         # Degraded from known-good: evaluate from the cached surface.
-        r2_teams = list(teams)
+        r2_orgs = list(orgs)
 
-    for team in sorted(set(teams + r2_teams)):
-        newest = newest_ts_by_team.get(team)
-        if team not in r2_teams:
-            result["per_team"][team] = "never"
+    for org in sorted(set(orgs + r2_orgs)):
+        newest = newest_ts_by_org.get(org)
+        if org not in r2_orgs:
+            result["per_team"][org] = "never"
             continue
         if newest is None:
-            result["per_team"][team] = "stale"
+            result["per_team"][org] = "stale"
             continue
         if simulate_age is not None and simulate_age < newest:
             newest = simulate_age  # simulate object wins newest-primary selection
         age_min = (now - newest).total_seconds() / 60.0
-        result["per_team"][team] = "stale" if age_min > stale_threshold_min else "ok"
-        if team not in state_teams and team in teams:
-            result["per_team"][team] = "stamp_missing"
+        result["per_team"][org] = "stale" if age_min > stale_threshold_min else "ok"
+        if org not in state_orgs and org in orgs:
+            result["per_team"][org] = "stamp_missing"
 
-    if not teams and not r2_teams:
+    if not orgs and not r2_orgs:
         result["no_teams"] = True
 
-    for team in state_teams:
-        if team not in r2_teams:
-            result["backup_set_missing"].append(team)
+    for org in state_orgs:
+        if org not in r2_orgs:
+            result["backup_set_missing"].append(org)
 
     if driver_heartbeat_ts is not None and not kill_switch_off:
         age_min = (now - driver_heartbeat_ts).total_seconds() / 60.0
@@ -256,7 +256,7 @@ class BackupWatcher:
         storage,
         alert_store: AlertStore,
         *,
-        team_provider: Callable[[], list[str]],
+        org_provider: Callable[[], list[str]],
         state_reader: Callable[[str], dict[str, Any]],
         driver_heartbeat_reader: Callable[[], dict[str, Any]],
         graph_provider: Callable[[str], list[str] | None] | None = None,
@@ -269,14 +269,14 @@ class BackupWatcher:
     ) -> None:
         self._storage = storage
         self._alerts = alert_store
-        self._teams = team_provider
+        self._orgs = org_provider
         self._state_reader = state_reader
-        # #2313: per-team CUSTOM-graph seam (team_id -> active sweep-eligible
+        # #2313: per-org CUSTOM-graph seam (org_id -> active sweep-eligible
         # custom graph ids, or None when the control plane could not be read —
-        # an UNCONFIRMED surface). The DEFAULT graph rides the team-level
+        # an UNCONFIRMED surface). The DEFAULT graph rides the org-level
         # surface (legacy back-compat). None/empty -> no per-graph surface
         # (the pre-#2313 watcher behavior, byte-for-byte).
-        self._graphs_for = graph_provider or (lambda team_id: [])
+        self._graphs_for = graph_provider or (lambda org_id: [])
         self._heartbeat_reader = driver_heartbeat_reader
         self._stale_min = stale_threshold_min
         self._driver_down_min = driver_down_threshold_min
@@ -286,7 +286,7 @@ class BackupWatcher:
         self._now = now or (lambda: datetime.now(timezone.utc))  # noqa: UP017
         self._known_good: bool = False
         self._known_newest: dict[str, datetime] = {}
-        self._known_state_teams: list[str] = []
+        self._known_state_orgs: list[str] = []
         self._known_graph_newest: dict[str, datetime] = {}
         self._known_graph_state: set[str] = set()
         self._last_graph_keys: set[str] = set()
@@ -329,7 +329,7 @@ class BackupWatcher:
     def _poll_inner(self, now: datetime) -> dict[str, Any]:
         # ── R2 read (the only external read the daemon makes). ──
         try:
-            r2_teams = _team_prefixes(self._storage)
+            r2_orgs = _org_prefixes(self._storage)
             state = _read_json(self._storage, "ops/state.json")
             heartbeat = self._heartbeat_reader()
             driver_ts: datetime | None = None
@@ -337,46 +337,46 @@ class BackupWatcher:
                 driver_ts = datetime.fromisoformat(heartbeat.get("ran_at", ""))
             except (ValueError, TypeError):
                 driver_ts = None
-            newest_by_team = {t: _newest_backup_ts(self._storage, t) for t in r2_teams}
-            state_teams = [
+            newest_by_org = {t: _newest_backup_ts(self._storage, t) for t in r2_orgs}
+            state_orgs = [
                 k.split("/")[2]
                 for k in self._storage.list("ops/teams/")
-                # ONLY the 4-segment team mirror (ops/teams/{team}/state.json)
-                # is the team surface. The #2313 per-graph states
-                # (ops/teams/{team}/graphs/{gid}/state.json — 6 segments) ride
+                # ONLY the 4-segment org mirror (ops/teams/{org}/state.json)
+                # is the org surface. The #2313 per-graph states
+                # (ops/teams/{org}/graphs/{gid}/state.json — 6 segments) ride
                 # the per-graph surface and must not suppress the default
                 # graph's METADATA_LOST when its mirror is missing (#2367).
                 if k.endswith("/state.json") and len(k.split("/")) == 4
             ]
             r2_ok = True
             # Cache the last-known-good surface for degraded polls.
-            self._known_newest = newest_by_team
-            self._known_state_teams = state_teams
+            self._known_newest = newest_by_org
+            self._known_state_orgs = state_orgs
         except Exception as e:
             logger.warning("R2 read failed (r2_ok=false): %s", e)
-            r2_teams, state_teams, newest_by_team, driver_ts, r2_ok = [], [], {}, None, False
+            r2_orgs, state_orgs, newest_by_org, driver_ts, r2_ok = [], [], {}, None, False
             if not self._known_good:
                 self._last_status = {"unknown": True, "r2_ok": False}
                 return self._last_status
             # Degraded from known-good: evaluate from the CACHED surface (review
             # P1-2 — never reclassify from an empty cache; that fabricates stale).
-            r2_teams = list(self._last_status.get("per_team", {}).keys())
-            newest_by_team = dict(getattr(self, "_known_newest", {}) or {})
-            state_teams = list(getattr(self, "_known_state_teams", []) or [])
+            r2_orgs = list(self._last_status.get("per_team", {}).keys())
+            newest_by_org = dict(getattr(self, "_known_newest", {}) or {})
+            state_orgs = list(getattr(self, "_known_state_orgs", []) or [])
 
-        teams = self._teams()
+        orgs = self._orgs()
 
         # ── #2313 per-graph surface (custom graphs; the default rides the
-        # team surface). Scans R2 per seam graph; on R2 failure falls back to
+        # org surface). Scans R2 per seam graph; on R2 failure falls back to
         # the last-known-good cache (degraded polls keep the custom surface
-        # honest — same policy as the team surface). ──
+        # honest — same policy as the org surface). ──
         graph_r2_ok = r2_ok
         graph_surface_confirmed = graph_r2_ok
         try:
             graph_newest: dict[str, datetime] = {}
             graph_state: set[str] = set()
             if graph_r2_ok:
-                for t in sorted(set(r2_teams + teams)):
+                for t in sorted(set(r2_orgs + orgs)):
                     gids = self._graphs_for(t)
                     if gids is None:
                         # Control-plane read failed — the custom surface is
@@ -392,7 +392,7 @@ class BackupWatcher:
                             graph_newest[f"{t}:{gid}"] = n
                 for k in self._storage.list("ops/teams/"):
                     parts = k.split("/")
-                    # ops/teams/{team}/graphs/{gid}/state.json → "{team}:{gid}"
+                    # ops/teams/{org}/graphs/{gid}/state.json → "{org}:{gid}"
                     if (k.endswith("/state.json") and len(parts) == 6
                             and parts[3] == "graphs"):
                         graph_state.add(f"{parts[2]}:{parts[4]}")
@@ -416,10 +416,10 @@ class BackupWatcher:
         in_grace = (now - self._start_time).total_seconds() < (self._grace_min * 60)
         status = compute_status(
             now=now,
-            teams=teams,
-            r2_teams=r2_teams,
-            state_teams=state_teams,
-            newest_ts_by_team=newest_by_team,
+            orgs=orgs,
+            r2_orgs=r2_orgs,
+            state_orgs=state_orgs,
+            newest_ts_by_org=newest_by_org,
             simulate_age=simulate_age,
             driver_heartbeat_ts=driver_ts,
             r2_ok=r2_ok,
@@ -432,15 +432,15 @@ class BackupWatcher:
         self._known_good = r2_ok or self._known_good
 
         # ── #2313 per-graph status table (custom graphs; the default rides
-        # the team surface). Mirrors the per-team table's classes. ──
+        # the org surface). Mirrors the per-org table's classes. ──
         per_graph: dict[str, str] = {}
-        for t in sorted(set(teams + r2_teams)):
+        for t in sorted(set(orgs + r2_orgs)):
             gids = self._graphs_for(t)
             if gids is None:
                 # Control-plane read failed — the custom surface is
-                # UNCONFIRMED for this team: never open/resolve custom
+                # UNCONFIRMED for this org: never open/resolve custom
                 # incidents off a fabricated-empty surface, and never crash
-                # the poll (the team-level default surface is the never-
+                # the poll (the org-level default surface is the never-
                 # silent core and must keep evaluating).
                 continue
             for gid in gids:
@@ -452,14 +452,14 @@ class BackupWatcher:
                     # confirmed listing → never. On a DEGRADED surface (R2
                     # down OR the graph scan failed), a cache-miss graph is
                     # UNCONFIRMED — never fabricate NEVER_BACKED_UP; classify
-                    # stale (same as the team table's cache-miss handling) so
+                    # stale (same as the org table's cache-miss handling) so
                     # an unseen graph at worst reads as "can't confirm a
                     # fresh archive".
                     if not graph_r2_ok:
                         per_graph[key] = "stale"
                     elif key in graph_state:
                         # #2374: per-graph state EXISTS but no archives —
-                        # mirror the team surface's backup-set-missing class
+                        # mirror the org surface's backup-set-missing class
                         # (archives lost/pruned), NOT "never" (never backed
                         # up is impossible once state exists: state is
                         # written only after a successful dump). Bulk-deleted
@@ -471,7 +471,7 @@ class BackupWatcher:
                     continue
                 age_min = (now - newest).total_seconds() / 60.0
                 per_graph[key] = "stale" if age_min > self._stale_min else "ok"
-                if key not in graph_state and t in teams:
+                if key not in graph_state and t in orgs:
                     per_graph[key] = "stamp_missing"
         # Universe shrink: graphs no longer on the seam surface (deleted /
         # ineligible) resolve their incidents — but ONLY on a CONFIRMED
@@ -493,23 +493,23 @@ class BackupWatcher:
 
         # ── Drive the alert store (no graph writes anywhere here). ──
         if not status.get("unknown") and not status.get("in_grace"):
-            for team, state in status["per_team"].items():
+            for org, state in status["per_team"].items():
                 if state == "never":
-                    self._alerts.open_incident("NEVER_BACKED_UP", team)
+                    self._alerts.open_incident("NEVER_BACKED_UP", org)
                 elif state == "stale":
-                    self._alerts.open_incident("STALE", team)
+                    self._alerts.open_incident("STALE", org)
                 elif state == "stamp_missing":
-                    self._alerts.open_incident("METADATA_LOST", team)
+                    self._alerts.open_incident("METADATA_LOST", org)
                 else:
-                    self._alerts.resolve_incident("STALE", team)
-                    self._alerts.resolve_incident("NEVER_BACKED_UP", team)
-                    self._alerts.resolve_incident("METADATA_LOST", team)
+                    self._alerts.resolve_incident("STALE", org)
+                    self._alerts.resolve_incident("NEVER_BACKED_UP", org)
+                    self._alerts.resolve_incident("METADATA_LOST", org)
             if status.get("no_teams"):
-                # Resolve the per-team incidents of the last-known surface
-                # (review P2-4: per-team kinds must close on universe shrink).
-                for team in list(self._last_status.get("per_team", {}).keys()):
+                # Resolve the per-org incidents of the last-known surface
+                # (review P2-4: per-org kinds must close on universe shrink).
+                for org in list(self._last_status.get("per_team", {}).keys()):
                     for kind in ("STALE", "NEVER_BACKED_UP", "METADATA_LOST"):
-                        self._alerts.resolve_incident(kind, team)
+                        self._alerts.resolve_incident(kind, org)
             if status.get("driver_down"):
                 self._alerts.open_incident("DRIVER_DOWN")
             else:
@@ -528,12 +528,12 @@ class BackupWatcher:
                     self._alerts.resolve_incident("NEVER_BACKED_UP", key)
                     self._alerts.resolve_incident("METADATA_LOST", key)
                     self._alerts.resolve_incident("BACKUP_SET_MISSING", key)
-            for team in status.get("backup_set_missing", []):
-                self._alerts.open_incident("BACKUP_SET_MISSING", team)
-            # BACKUP_SET_MISSING resolves when the team's archives reappear.
-            for team in status.get("per_team", {}):
-                if team not in status.get("backup_set_missing", []):
-                    self._alerts.resolve_incident("BACKUP_SET_MISSING", team)
+            for org in status.get("backup_set_missing", []):
+                self._alerts.open_incident("BACKUP_SET_MISSING", org)
+            # BACKUP_SET_MISSING resolves when the org's archives reappear.
+            for org in status.get("per_team", {}):
+                if org not in status.get("backup_set_missing", []):
+                    self._alerts.resolve_incident("BACKUP_SET_MISSING", org)
             # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
             if r2_ok is False:
                 self._alerts.open_incident("R2_DOWN")

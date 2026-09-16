@@ -213,7 +213,7 @@ def event_retention_interval() -> int:
     Round-4 review P2 (PRE-EXISTING, fixed here): a bare ``int()`` in both
     call sites accepted ``0``/``-1``. In the hosted retention loop
     ``asyncio.sleep(0)``/``sleep(-1)`` return immediately, hammering
-    ``_sweep_events``/``_purge_deleted_teams`` with no delay; in the SDK lazy
+    ``_sweep_events``/``_purge_deleted_orgs`` with no delay; in the SDK lazy
     purge the gate ``now - _EVENT_PURGE_LAST < interval`` is always false, so
     every ``events_poll`` issued a DELETE. A non-numeric value also raised out
     of the SDK poll. Anything that is not a positive whole number of seconds

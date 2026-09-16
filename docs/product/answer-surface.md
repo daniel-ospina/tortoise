@@ -195,7 +195,7 @@ measurement justifies a change.
 - **Metering:** per-query record via `record_ask_usage` (best-effort,
   non-fatal — metering failures never block the answer). Recorded when the
   SDK call completes successfully (the single call site: the SDK local lane
-  with an explicit `team_id`); zero records when the reader/retrieval call
+  with an explicit `org_id`); zero records when the reader/retrieval call
   FAILS. Selfhost (HTTP MCP + REST + stdio) records nothing — the
   transport-keyed `_selfhost_transport` exemption, never a value-keyed
   "selfhost" check (a hosted team literally named "selfhost" records usage

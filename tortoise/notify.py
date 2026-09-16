@@ -69,12 +69,12 @@ def _skip_channel(channel: str, secret: str) -> bool:
     return False
 
 
-def _email_text(kind: str, team: dict, details: dict) -> str:
-    tier = details.get("tier", team.get("tier", "?"))
+def _email_text(kind: str, org: dict, details: dict) -> str:
+    tier = details.get("tier", org.get("tier", "?"))
     lines = [
         f"Tortoise Billing — {kind}",
         "",
-        f"Team: {team.get('name', team.get('team_id', '?'))} (id {team.get('team_id', '?')})",
+        f"Team: {org.get('name', org.get('org_id', '?'))} (id {org.get('org_id', '?')})",
         f"Tier: {tier}",
     ]
     if details.get("subscription_status"):
@@ -86,9 +86,9 @@ def _email_text(kind: str, team: dict, details: dict) -> str:
     return "\n".join(lines)
 
 
-def _telegram_text(kind: str, team: dict, details: dict) -> str:
-    tier = details.get("tier", team.get("tier", "?"))
-    parts = [f"💰 Tortoise Billing: {kind}", f"Team: {team.get('name', team.get('team_id', '?'))} | Tier: {tier}"]
+def _telegram_text(kind: str, org: dict, details: dict) -> str:
+    tier = details.get("tier", org.get("tier", "?"))
+    parts = [f"💰 Tortoise Billing: {kind}", f"Team: {org.get('name', org.get('org_id', '?'))} | Tier: {tier}"]
     if details.get("subscription_status"):
         parts.append(f"Status: {details['subscription_status']}")
     if details.get("message"):
@@ -107,10 +107,10 @@ def _send_resend(api_key: str, to: str, subject: str, html: str) -> None:
     resp.raise_for_status()
 
 
-def notify_billing_event(kind: str, team: dict, details: dict | None = None) -> None:
+def notify_billing_event(kind: str, org: dict, details: dict | None = None) -> None:
     """Send a billing notification over both channels. NEVER raises.
 
-    kind must be in KINDS. team is the Team node dict (name/team_id/tier).
+    kind must be in KINDS. org is the Org node dict (name/org_id/tier).
     details may carry subscription_status / message / grace_until / tier.
     """
     if kind not in KINDS:
@@ -123,7 +123,7 @@ def notify_billing_event(kind: str, team: dict, details: dict | None = None) -> 
     if not _skip_channel("resend", api_key) and not _skip_channel("resend-recipient", to):
         try:
             subject = f"Tortoise Billing — {kind}"
-            body = _email_text(kind, team, details).replace("\n", "<br>")
+            body = _email_text(kind, org, details).replace("\n", "<br>")
             _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("billing notify: resend failed (%s)", redact_safe(e))
@@ -132,16 +132,16 @@ def notify_billing_event(kind: str, team: dict, details: dict | None = None) -> 
     chat_id = _env("TELEGRAM_CHAT_ID")
     if not _skip_channel("telegram", bot_token) and not _skip_channel("telegram-chat", chat_id):
         try:
-            telegram_send(bot_token, chat_id, _telegram_text(kind, team, details))
+            telegram_send(bot_token, chat_id, _telegram_text(kind, org, details))
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("billing notify: telegram failed (%s)", redact_safe(e))
 
 
-def _abuse_email_text(kind: str, team: dict, details: dict) -> str:
+def _abuse_email_text(kind: str, org: dict, details: dict) -> str:
     lines = [
         f"Tortoise Security — {kind}",
         "",
-        f"Team id: {team.get('team_id', '?')}",
+        f"Team id: {org.get('org_id', '?')}",
     ]
     if details.get("rule"):
         lines.append(f"Rule: {details['rule']}")
@@ -159,12 +159,12 @@ def _abuse_email_text(kind: str, team: dict, details: dict) -> str:
     return "\n".join(lines)
 
 
-def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
+def notify_abuse(kind: str, org: dict, details: dict | None = None) -> None:
     """Abuse notification over both channels (#308). NEVER raises.
 
-    Recipient: ``team.get('email')`` — missing OR NULL both fall back to the
-    BILLING_NOTIFY_TO ops inbox (anon agent-signup teams have no team email;
-    the registry team dict has no 'email' key at all, so .get is mandatory).
+    Recipient: ``org.get('email')`` — missing OR NULL both fall back to the
+    BILLING_NOTIFY_TO ops inbox (anon agent-signup orgs have no org email;
+    the registry org dict has no 'email' key at all, so .get is mandatory).
     Callers in async contexts invoke via asyncio.to_thread (#310 pattern).
     """
     if kind not in KINDS or not kind.startswith("abuse_"):
@@ -173,11 +173,11 @@ def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
     details = details or {}
 
     api_key = _env("RESEND_API_KEY")
-    to = team.get("email") or _env("BILLING_NOTIFY_TO")
+    to = org.get("email") or _env("BILLING_NOTIFY_TO")
     if not _skip_channel("resend", api_key) and not _skip_channel("resend-recipient", to):
         try:
             subject = f"Tortoise Security — {kind}"
-            body = _abuse_email_text(kind, team, details).replace("\n", "<br>")
+            body = _abuse_email_text(kind, org, details).replace("\n", "<br>")
             _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("abuse notify: resend failed (%s)", redact_safe(e))
@@ -187,7 +187,7 @@ def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
     if not _skip_channel("telegram", bot_token) and not _skip_channel("telegram-chat", chat_id):
         try:
             parts = [f"🚨 Tortoise Security: {kind}",
-                     f"Team: {team.get('team_id', '?')}"]
+                     f"Team: {org.get('org_id', '?')}"]
             if details.get("rule"):
                 parts.append(f"Rule: {details['rule']}")
             if details.get("count") is not None:
@@ -211,7 +211,7 @@ def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
             if cfg is not None:
                 store = _ha._alert_store_from(cfg)
                 store.open_incident(
-                    "abuse_suspended", team.get("team_id") or "_",
+                    "abuse_suspended", org.get("org_id") or "_",
                     {"detail": (f"Auto-suspended: {details.get('rule', '?')} "
                                 f"count={details.get('count', '?')}")})
         except Exception as e:  # noqa: BLE001, RUF100

@@ -29,16 +29,16 @@ def _transport_context(monkeypatch):
     mode, dev auth, no team context; restore after each test.
     """
     from tortoise.mcp_auth import (  # noqa: I001
-        _current_team_id, _current_team_limits, _transport_mode,
+        _current_org_id, _current_org_limits, _transport_mode,
     )
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
     yield
     _transport_mode.set(None)
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
 
 
 def _sdk(tmp_path) -> TortoiseSDK:
@@ -48,7 +48,7 @@ def _sdk(tmp_path) -> TortoiseSDK:
 def _dispatch_sdk(monkeypatch, sdk):
     """Route the MCP handler's team-SDK resolution to an isolated embedded DB."""
     import tortoise.mcp_server as ms
-    monkeypatch.setattr(ms, "_get_team_sdk", lambda: sdk)
+    monkeypatch.setattr(ms, "_get_org_sdk", lambda: sdk)
     return ms
 
 

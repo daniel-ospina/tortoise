@@ -9,7 +9,7 @@ import pytest
 
 from tortoise import notify
 
-TEAM = {"name": "Acme", "team_id": "team_123", "tier": "pro"}
+TEAM = {"name": "Acme", "org_id": "team_123", "tier": "pro"}
 DETAILS = {"subscription_status": "past_due", "message": "Payment failed", "grace_until": "2030-01-01T00:00:00Z"}
 
 
@@ -167,7 +167,7 @@ def test_abuse_signup_velocity_kind_allowed_with_ip(monkeypatch):
         sent.update(chat_id=chat_id, text=text)
 
     monkeypatch.setattr("tortoise.notify.telegram_send", fake_telegram_send)
-    notify.notify_abuse("abuse_signup_velocity", {"team_id": "team_123"},
+    notify.notify_abuse("abuse_signup_velocity", {"org_id": "team_123"},
                         {"ip": "203.0.113.7", "count": 3,
                          "threshold": 2, "window_s": 86400})
     assert calls, "resend should be called for a known kind"

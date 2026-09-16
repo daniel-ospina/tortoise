@@ -1,4 +1,4 @@
-"""Transactional email — Resend sender for team invitations (#307).
+"""Transactional email — Resend sender for org invitations (#307).
 
 Invitations-only (2026-08-13): key-recovery email was tied to #265 (client-side
 encryption), now deferred — no customer-held keys, nothing to recover.
@@ -170,24 +170,24 @@ def _refund_send() -> None:
 # ── Templates ────────────────────────────────────────────────────────────────
 
 
-def _invite_html(team_name: str, role: str, link: str) -> str:
-    tn = html.escape(team_name)
+def _invite_html(org_name: str, role: str, link: str) -> str:
+    tn = html.escape(org_name)
     rl = html.escape(role)
     lk = html.escape(link, quote=True)
     return f"""\
 <div style="background:#060b14;padding:32px 16px;font-family:Helvetica,Arial,sans-serif;">
   <div style="max-width:480px;margin:0 auto;background:#0d1a2d;border:1px solid #1e293b;border-radius:12px;padding:28px;">
     <h2 style="color:#e2e8f0;margin:0 0 8px;">You're invited to {tn}</h2>
-    <p style="color:#94a3b8;font-size:14px;margin:0 0 20px;">You've been invited to join the team's memory graph in Tortoise as <strong style="color:#cbd5e1;">{rl}</strong>.</p>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 20px;">You've been invited to join the org's memory graph in Tortoise as <strong style="color:#cbd5e1;">{rl}</strong>.</p>
     <a href="{lk}" style="display:inline-block;background:#06b6d4;color:#04121a;text-decoration:none;font-weight:600;padding:12px 24px;border-radius:8px;">Accept invitation</a>
     <p style="color:#64748b;font-size:12px;margin:24px 0 0;">This invitation expires in 7 days and can only be used once. If you weren't expecting this, you can ignore it.</p>
   </div>
 </div>"""
 
 
-def _invite_text(team_name: str, role: str, link: str) -> str:
+def _invite_text(org_name: str, role: str, link: str) -> str:
     return (
-        f"You're invited to {team_name}\n\n"
+        f"You're invited to {org_name}\n\n"
         f"You've been invited to join the team's memory graph in Tortoise as {role}.\n\n"
         f"Accept: {link}\n\n"
         "This invitation expires in 7 days and can only be used once."
@@ -248,18 +248,18 @@ def _build_invite_link(token: str) -> str:
     return f"{email_link_base()}/invite-accept.html?token={token}"
 
 
-async def _send_invite_attempt(invitee_email: str, team_name: str, role: str,
+async def _send_invite_attempt(invitee_email: str, org_name: str, role: str,
                                token: str, invitation_id: str,
                                on_sent) -> None:
     """One attempt + one 0.5s retry on transient-only. Never raises."""
     link = _build_invite_link(token)
-    subject = f"You're invited to {team_name}"
+    subject = f"You're invited to {org_name}"
     for attempt in (0, 1):
         try:
             result = await _send_resend(
                 invitee_email, subject,
-                _invite_html(team_name, role, link),
-                _invite_text(team_name, role, link),
+                _invite_html(org_name, role, link),
+                _invite_text(org_name, role, link),
                 idempotency_key=f"invite:{invitation_id}",
             )
             message_id = (result or {}).get("id")
@@ -282,7 +282,7 @@ async def _send_invite_attempt(invitee_email: str, team_name: str, role: str,
     _refund_send()  # #1138 P1: provider rejected/failed the POST — free the slot
 
 
-def send_invite_email(team_name: str, invitee_email: str, role: str,
+def send_invite_email(org_name: str, invitee_email: str, role: str,
                       token: str, invitation_id: str, on_sent=None) -> None:
     """Schedule the invite email best-effort (async). NEVER raises.
 
@@ -308,7 +308,7 @@ def send_invite_email(team_name: str, invitee_email: str, role: str,
     _reserve_send()
 
     task = asyncio.create_task(
-        _send_invite_attempt(invitee_email, team_name, role, token, invitation_id, on_sent)
+        _send_invite_attempt(invitee_email, org_name, role, token, invitation_id, on_sent)
     )
     _pending_email_tasks.add(task)
     task.add_done_callback(_pending_email_tasks.discard)
@@ -324,8 +324,8 @@ def send_invite_email(team_name: str, invitee_email: str, role: str,
 # tests/test_invite_fusion_http.py).
 
 
-def _otp_html(team_name: str, code: str) -> str:
-    tn = html.escape(team_name)
+def _otp_html(org_name: str, code: str) -> str:
+    tn = html.escape(org_name)
     return f"""\
 <div style="background:#060b14;padding:32px 16px;font-family:Helvetica,Arial,sans-serif;">
   <div style="max-width:480px;margin:0 auto;background:#0d1a2d;border:1px solid #1e293b;border-radius:12px;padding:28px;">
@@ -337,23 +337,23 @@ def _otp_html(team_name: str, code: str) -> str:
 </div>"""
 
 
-def _otp_text(team_name: str, code: str) -> str:
+def _otp_text(org_name: str, code: str) -> str:
     return (
-        f"Your verification code for {team_name} is: {code}\n\n"
+        f"Your verification code for {org_name} is: {code}\n\n"
         "It expires in 10 minutes and can only be used once."
     )
 
 
-async def _send_otp_attempt(invitee_email: str, team_name: str, code: str,
+async def _send_otp_attempt(invitee_email: str, org_name: str, code: str,
                             on_sent) -> None:
     """One attempt + one 0.5s retry on transient-only. Never raises."""
-    subject = f"Your {team_name} verification code"
+    subject = f"Your {org_name} verification code"
     for attempt in (0, 1):
         try:
             result = await _send_resend(
                 invitee_email, subject,
-                _otp_html(team_name, code),
-                _otp_text(team_name, code),
+                _otp_html(org_name, code),
+                _otp_text(org_name, code),
             )
             message_id = (result or {}).get("id")
             try:
@@ -375,7 +375,7 @@ async def _send_otp_attempt(invitee_email: str, team_name: str, code: str,
     _refund_send()  # #1138: provider rejected/failed the POST — free the slot
 
 
-def send_otp_email(team_name: str, invitee_email: str, code: str,
+def send_otp_email(org_name: str, invitee_email: str, code: str,
                    on_sent=None) -> None:
     """Schedule the OTP proof-of-control email best-effort (async). NEVER
     raises. Mirrors send_invite_email's budget reserve/refund posture."""
@@ -393,7 +393,7 @@ def send_otp_email(team_name: str, invitee_email: str, code: str,
     _reserve_send()
 
     task = asyncio.create_task(
-        _send_otp_attempt(invitee_email, team_name, code, on_sent)
+        _send_otp_attempt(invitee_email, org_name, code, on_sent)
     )
     _pending_email_tasks.add(task)
     task.add_done_callback(_pending_email_tasks.discard)
@@ -450,7 +450,7 @@ def _capitalize_first(token: str) -> str:
 
 def _onboarding_greeting_name(display_name: str | None,
                               email: str | None,
-                              team_name: str | None) -> str:
+                              org_name: str | None) -> str:
     """Best-effort 'Hey [name]' personalization. Never raises."""
     if isinstance(display_name, str) and display_name.strip():
         for token in display_name.split():
@@ -462,8 +462,8 @@ def _onboarding_greeting_name(display_name: str | None,
         if (_name_shape_ok(first)
                 and not _ROLE_MAILBOX_RE.fullmatch(first)):
             return _capitalize_first(first)
-    if isinstance(team_name, str) and team_name.strip():
-        m = _LETTER_RUN_RE.search(team_name)
+    if isinstance(org_name, str) and org_name.strip():
+        m = _LETTER_RUN_RE.search(org_name)
         if m and _name_shape_ok(m.group(0)):
             return _capitalize_first(m.group(0))
     return "there"
@@ -500,7 +500,7 @@ def _onboarding_from() -> str:
 
 
 async def _send_onboarding_attempt(email: str, greeting: str,
-                                   team_id: str) -> dict:
+                                   org_id: str) -> dict:
     """One attempt + one 0.5s retry on transient-only. Raises only into the
     caller's retry loop via the returned status — never leaks exceptions."""
     html_body = _onboarding_html(greeting, ONBOARDING_BOOK_URL)
@@ -510,7 +510,7 @@ async def _send_onboarding_attempt(email: str, greeting: str,
         try:
             result = await _send_resend(
                 email, ONBOARDING_SUBJECT, html_body, text_body,
-                idempotency_key=f"onboarding:{team_id}",
+                idempotency_key=f"onboarding:{org_id}",
                 from_addr=_onboarding_from(),
                 # Awaited inside the provisioning request — bounded so a slow
                 # provider can never stretch the edge fn's retry deadline.
@@ -519,7 +519,7 @@ async def _send_onboarding_attempt(email: str, greeting: str,
             message_id = (result or {}).get("id")
             logger.info(
                 "email notify: onboarding offer accepted by provider "
-                "(team %s, msg %s)", team_id, message_id)
+                "(team %s, msg %s)", org_id, message_id)
             return {"status": "sent", "message_id": message_id}
         except Exception as e:  # noqa: BLE001, RUF100
             last_err = e
@@ -529,15 +529,15 @@ async def _send_onboarding_attempt(email: str, greeting: str,
             break
     logger.warning(
         "email notify: onboarding offer email failed for team %s (%s)",
-        team_id, redact_safe(last_err))
+        org_id, redact_safe(last_err))
     _refund_send()  # #1138: provider rejected/failed the POST — free the slot
     return {"status": "failed"}
 
 
 async def send_onboarding_offer_email(email: str,
                                       display_name: str | None,
-                                      team_name: str | None,
-                                      team_id: str) -> dict:
+                                      org_name: str | None,
+                                      org_id: str) -> dict:
     """Send (AWAITED) the one-time onboarding-call offer email (#2406).
 
     Returns ``{"status": "sent", "message_id"}`` on provider accept,
@@ -557,12 +557,12 @@ async def send_onboarding_offer_email(email: str,
     if exceeded:
         logger.warning(
             "email notify: onboarding offer for team %s SKIPPED — send budget "
-            "exhausted (%s)", team_id, reason)
+            "exhausted (%s)", org_id, reason)
         return {"status": "skipped"}
     _reserve_send()
 
-    greeting = _onboarding_greeting_name(display_name, email, team_name)
-    return await _send_onboarding_attempt(email, greeting, team_id)
+    greeting = _onboarding_greeting_name(display_name, email, org_name)
+    return await _send_onboarding_attempt(email, greeting, org_id)
 
 
 async def drain_pending_sends(timeout: float = 2.0) -> None:
