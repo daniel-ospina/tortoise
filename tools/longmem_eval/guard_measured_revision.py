@@ -7,37 +7,50 @@ the check that makes the claim in ``docs/scoping/receipts/*.json``
 receipt be built, or a claim be made, when the measured surface drifted after
 measurement — "re-measure rather than re-label".
 
-Two failure modes it closes, both reproduced by review:
+Failure modes this closes, each one reproduced by review before it was fixed:
 
 * **Comparison against ``HEAD`` only.** ``git diff <rev> HEAD`` ignores the
-  working tree, so an uncommitted executable edit passed the guard while the
-  guard printed that all differences were comment-only.
+  working tree, so an uncommitted executable edit passed while the guard
+  printed that all differences were comment-only.
 * **Failing open when git cannot compare.** With an unresolvable or GC'd
   ``<rev>``, every ``git`` call exits non-zero with *empty* stdout; the
   changed-file list came back empty and the guard printed OK. Every git call
-  here is exit-checked, and ``<rev>`` is resolved up front.
+  here is exit-checked and ``<rev>`` is resolved up front.
+* **Defeating the scan through git's own output filters.** ``git diff`` is
+  defeated by ``assume-unchanged`` / ``skip-worktree`` (the file's dirty state
+  is suppressed), collapses renames (the old path is never examined), and
+  ``ls-files --others --exclude-standard`` honours ignore rules (a ``.gitignore``
+  entry hid an untracked surface file). All three were demonstrated to yield
+  ``rc=0`` on a genuinely drifted tree, so this guard never diffs: it enumerates
+  the surface from git's records and compares **content**.
 
 CONTRACT (declared surface — what is and is not covered):
 
-* **Refuses** on any git failure; on a surface ``.py`` that is modified or
-  deleted between ``<rev>`` and the **working tree** whose docstring-stripped
-  AST differs; and on **any** changed non-``.py`` file under the surface (a
-  data/config file can change behaviour and is not AST-comparable).
+* **Refuses** when: ``<rev>`` does not resolve, or any git call fails; a file
+  present under the surface at ``<rev>`` is deleted or untracked in the working
+  tree; a tracked surface ``.py`` whose docstring-stripped AST differs from
+  ``<rev>``; a tracked non-``.py`` surface file whose bytes differ; or a
+  non-allowlisted untracked file exists under the surface.
 * **Reports but does not refuse** files *added* after ``<rev>``. They did not
   exist during the run, so they cannot be what the run executed. This is what
-  lets the guard itself be committed to the measured surface.
-* **Ignores** paths outside ``--paths``. An untracked file under the surface
-  is REFUSED rather than ignored: ``git diff`` cannot see it, so the guard
-  cannot prove anything about it.
+  lets the guard itself live on the measured surface.
+* **Ignores** paths outside ``--paths``.
+
+Untracked scanning deliberately does **not** honour ``.gitignore``: an ignore
+rule is a way to hide a file from the check. The only files excused are those in
+``NOISE_DIRS`` / ``NOISE_SUFFIXES`` (byte-caches and editor droppings), and they
+are reported in the output rather than silently accepted.
 
 Out of scope by construction: a changed file does not have to be *reachable*
-from the measured command — the guard proves absence of executable change, not
-that a change was on the executed path. Reachability is the caller's argument.
+from the measured command — the guard proves absence of executable change on the
+declared paths, not that a change was on the executed path, and not that the
+declared paths are the whole import graph (the caller declares the surface; the
+measured command's import graph is the caller's argument).
 
 Usage::
 
     python -m tools.longmem_eval.guard_measured_revision \\
-        --rev c1e6f7f2d --paths tortoise/ tools/longmem_eval/
+        --rev c1e6f7f2d --paths tortoise/ tools/
 
 Exit code 0 means "no executable change"; non-zero means refuse, with the
 reason on stderr.
@@ -49,8 +62,22 @@ import ast
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
-DEFAULT_PATHS = ("tortoise/", "tools/longmem_eval/")
+DEFAULT_PATHS = ("tortoise/", "tools/")
+
+#: Directory components that never carry executed code.
+NOISE_DIRS = ("__pycache__/",)
+#: Basenames / suffixes that never carry executed code (editor + VCS droppings).
+NOISE_SUFFIXES = (
+    ".pyc",
+    ".pyo",
+    ".orig",
+    ".rej",
+    ".swp",
+    ".swo",
+    ".DS_Store",
+)
 
 
 class GuardRefused(SystemExit):
@@ -68,6 +95,19 @@ def _git(worktree: Path, *args: str) -> str:
             f"{cp.stderr.strip()}"
         )
     return cp.stdout.strip()
+
+
+def _git_bytes(worktree: Path, *args: str) -> bytes:
+    """``_git`` for binary payloads (``cat-file blob``)."""
+    cp = subprocess.run(
+        ["git", "-C", str(worktree), *args], capture_output=True
+    )
+    if cp.returncode != 0:
+        raise GuardRefused(
+            f"guard: git {' '.join(args)} failed ({cp.returncode}): "
+            f"{cp.stderr.decode(errors='replace').strip()}"
+        )
+    return cp.stdout
 
 
 def _ast_without_docstrings(source: str) -> str:
@@ -94,57 +134,103 @@ def _ast_without_docstrings(source: str) -> str:
     return ast.dump(tree)
 
 
+def _is_noise(rel: str) -> bool:
+    if any(part in rel for part in NOISE_DIRS):
+        return True
+    return rel.endswith(NOISE_SUFFIXES)
+
+
+def _compare(worktree: Path, rev: str, rel: str) -> bool:
+    """Refuse unless ``rel`` is executably unchanged since ``rev``.
+
+    Returns True when the file differs from ``rev`` only in comments,
+    docstrings or formatting (a benign difference worth reporting), False when
+    it is byte-identical. Content comes from git (``cat-file``/``show``), never
+    from ``git diff`` — see the module docstring on index flags and renames.
+    """
+    on_disk = worktree / rel
+    if not on_disk.exists():
+        raise GuardRefused(
+            f"guard: {rel} exists at {rev} but not in the working tree "
+            "(deleted) — re-measure rather than re-label"
+        )
+    on_disk_bytes = on_disk.read_bytes()
+    at_rev_bytes = _git_bytes(worktree, "cat-file", "blob", f"{rev}:{rel}")
+    if on_disk_bytes == at_rev_bytes:
+        return False
+    if not rel.endswith(".py"):
+        raise GuardRefused(
+            f"guard: non-Python surface file changed since {rev}: {rel} — "
+            "a data/config file can change behaviour, and it cannot be "
+            "compared structurally"
+        )
+    before = _ast_without_docstrings(at_rev_bytes.decode())
+    after = _ast_without_docstrings(on_disk_bytes.decode())
+    if before != after:
+        raise GuardRefused(
+            f"guard: code under test changed since {rev}: {rel} — "
+            "re-measure rather than re-label"
+        )
+    return True
+
+
+class Scan(NamedTuple):
+    """Outcome of a clean scan (``guard`` raises instead on drift)."""
+
+    #: surface files compared at all
+    checked: int
+    #: files differing from ``rev`` in comments/docstrings/formatting only
+    comment_only: list[str]
+    #: files present now but absent at ``rev`` (cannot have been executed)
+    added: list[str]
+    #: cache/editor droppings excused from the untracked refusal
+    noise: list[str]
+
+
 def guard(
     worktree: Path, rev: str, paths: tuple[str, ...] = DEFAULT_PATHS
-) -> tuple[list[str], list[str]]:
-    """Return ``(unchanged_executably, added_after_rev)`` or raise."""
+) -> Scan:
+    """Return a :class:`Scan`, or raise :class:`GuardRefused` on drift."""
     worktree = Path(worktree)
     _git(worktree, "rev-parse", "--verify", f"{rev}^{{commit}}")
 
-    # ``git diff`` only reports TRACKED paths, so an untracked addition under
-    # the surface would be invisible to every check below. Refuse instead.
-    untracked = _git(
-        worktree, "ls-files", "--others", "--exclude-standard", "--", *paths
+    at_rev = _git(
+        worktree, "ls-tree", "-r", "--name-only", rev, "--", *paths
     ).split()
-    if untracked:
+    tracked = _git(worktree, "ls-files", "--", *paths).split()
+    # NO --exclude-standard: an ignore rule must not hide a file from the check.
+    untracked = _git(worktree, "ls-files", "--others", "--", *paths).split()
+
+    noise = [f for f in untracked if _is_noise(f)]
+    hidden = [f for f in untracked if not _is_noise(f)]
+    if hidden:
         raise GuardRefused(
-            "guard: untracked file(s) under the measured surface, which git "
-            f"cannot compare against {rev}: {untracked} — commit or remove "
-            "them"
+            "guard: untracked file(s) under the measured surface, which carry "
+            f"no revision to compare against: {hidden} — commit or remove them "
+            "(a .gitignore entry does not excuse a file from this check)"
         )
 
-    # NOTE: a bare ``<rev>`` (no ``HEAD``) compares against the WORKING TREE,
-    # so staged and unstaged edits are both in scope.
-    changed = _git(worktree, "diff", "--name-only", rev, "--", *paths).split()
-    untouched: list[str] = []
+    comment_only: list[str] = []
     added: list[str] = []
-    for rel in changed:
-        if not rel.endswith(".py"):
-            raise GuardRefused(
-                f"guard: {rel} is not Python, so it cannot be compared "
-                "structurally — refusing (pass it as non-measured if "
-                "intended)"
-            )
-        on_disk = worktree / rel
-        if not on_disk.exists():
-            raise GuardRefused(
-                f"guard: {rel} exists at {rev} but not in the working tree "
-                "(deleted) — re-measure rather than re-label"
-            )
-        try:
-            _git(worktree, "cat-file", "-e", f"{rev}:{rel}")
-        except GuardRefused:
+    checked = 0
+    at_rev_set = set(at_rev)
+    for rel in tracked:
+        if rel not in at_rev_set:
             added.append(rel)  # did not exist during the measured run
             continue
-        before = _ast_without_docstrings(_git(worktree, "show", f"{rev}:{rel}") + "\n")
-        after = _ast_without_docstrings(on_disk.read_text())
-        if before != after:
-            raise GuardRefused(
-                f"guard: code under test changed since {rev}: {rel} — "
-                "re-measure rather than re-label"
-            )
-        untouched.append(rel)
-    return untouched, added
+        checked += 1
+        if _compare(worktree, rev, rel):
+            comment_only.append(rel)
+    for rel in at_rev:
+        if rel in set(tracked):
+            continue
+        # Not tracked now: either deleted, or present but untracked. The
+        # untracked case already refused above; this names the deletion.
+        raise GuardRefused(
+            f"guard: {rel} exists at {rev} but is no longer tracked "
+            "(deleted) — re-measure rather than re-label"
+        )
+    return Scan(checked, comment_only, added, noise)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,16 +250,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
     try:
-        untouched, added = guard(args.worktree, args.rev, tuple(args.paths))
+        scan = guard(args.worktree, args.rev, tuple(args.paths))
     except GuardRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(
-        f"guard OK — {args.rev}..working tree has no executable change on "
+        f"guard OK — no executable change since {args.rev} on "
         f"{' '.join(args.paths)}"
     )
-    print(f"  comment/docstring-only: {untouched or '(none)'}")
-    print(f"  added after {args.rev} (reported, not refused): {added or '(none)'}")
+    print(f"  compared {scan.checked} file(s) present at that revision")
+    print(f"  comment/docstring-only differences: {scan.comment_only or '(none)'}")
+    print(f"  added after that revision (cannot have been executed): {scan.added or '(none)'}")
+    # Byte-caches are the expected noise and would drown the signal; anything
+    # else excused by the allowlist is worth naming.
+    odd = [f for f in scan.noise if not f.endswith((".pyc", ".pyo"))]
+    print(f"  cache/editor noise excused: {len(scan.noise)} file(s)"
+          + (f" — unusual: {odd}" if odd else ""))
     return 0
 
 
