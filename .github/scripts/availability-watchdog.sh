@@ -24,20 +24,20 @@
 # served by the app — not merely that a socket is open.
 #
 # WHAT IT DOES
-#   1. PROBE   `GET <PROBE_URL>` (default GET /v1/teams) with a generous
+#   1. PROBE   `GET <PROBE_URL>` (default GET /v1/organizations) with a generous
 #              per-request timeout and N attempts before declaring failure, so
 #              a transient blip cannot fire a false alarm.
 #              Verdicts (see classify_code):
 #                UP         — the app ANSWERED (2xx | 401 | 403 | 429)
 #                DOWN       — no answer at all (000 timeout/conn) or 5xx
 #                UNEXPECTED — it answered something else (3xx, 404, …)
-#              A 401 is the EXPECTED unauthenticated answer for /v1/teams
+#              A 401 is the EXPECTED unauthenticated answer for /v1/organizations
 #              (source-verified: tortoise/session_auth.py verify_session_jwt
 #              raises 401 "Missing session token" with zero network I/O when
 #              the Authorization header is absent). 2xx and 401 both mean "the
 #              app answered"; only 000/5xx mean it did not.
 #              KNOWN BLIND SPOTS: this probes ONE route, and only its
-#              UNAUTHENTICATED branch — an outage that leaves /v1/teams
+#              UNAUTHENTICATED branch — an outage that leaves /v1/organizations
 #              answering while other routes fail reads as UP, and so does an
 #              auth-leg break that rejects every real token (the probe sends
 #              none). It proves liveness + route presence, not end-to-end
@@ -189,7 +189,7 @@
 set -euo pipefail
 
 # ── configuration (all overridable — the test harness drives these) ─────────
-DEFAULT_PROBE_URL="https://api.premiselabs.co/v1/teams"
+DEFAULT_PROBE_URL="https://api.premiselabs.co/v1/organizations"
 # ONE literal, referenced twice: the workflow passes an EMPTY PROBE_URL on the
 # scheduled path so this default applies (see availability-watchdog.yml), and
 # `is_prod` is decided by comparing PROBE_URL to DEFAULT_PROBE_URL. A second
@@ -491,7 +491,7 @@ scrub_output() { # <text> <max>
 # ── verdict classification ──────────────────────────────────────────────────
 # UP         — the app answered. 2xx is the obvious one; 401/403 mean "the
 #              route exists and the app is enforcing auth" (the expected
-#              unauthenticated answer for /v1/teams); 429 means "the app
+#              unauthenticated answer for /v1/organizations); 429 means "the app
 #              answered and is throttling us" (our probe being throttled is not
 #              an outage).
 # DOWN       — no answer (000: timeout / connection error) or a 5xx.

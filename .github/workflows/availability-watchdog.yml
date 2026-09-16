@@ -11,7 +11,7 @@
 #
 # This workflow is the missing OUT-OF-PROCESS observer: it runs on GitHub
 # Actions (a different failure domain than Fly), every 5 minutes, and asserts
-# the REAL USER PATH — `GET /v1/teams` with no auth, which must answer 401
+# the REAL USER PATH — `GET /v1/organizations` with no auth, which must answer 401
 # (source-verified: tortoise/session_auth.py `verify_session_jwt` raises 401
 # "Missing session token" with zero network I/O when the Authorization header
 # is absent). A 2xx or a 401 both mean "the app answered"; a timeout, a 5xx or

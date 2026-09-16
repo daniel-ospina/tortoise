@@ -39,7 +39,7 @@ def reg_sdk(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     sdk = TortoiseSDK(db, namespace="registry")
     # Create a team with known tier
-    team = sdk.team_create(name="meter-test")
+    team = sdk.org_create(name="meter-test")
     tid = team["id"]
     # Stamp tier on the Team node (pro = overage-eligible)
     sdk._get_registry().query(
@@ -85,8 +85,8 @@ class TestRecordWriteOps:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         sdk = TortoiseSDK(db, namespace="registry")
-        t1 = sdk.team_create(name="team-a")
-        t2 = sdk.team_create(name="team-b")
+        t1 = sdk.org_create(name="team-a")
+        t2 = sdk.org_create(name="team-b")
         sdk._get_registry().query(
             "MATCH (t:Team {id: $tid}) SET t.tier = 'pro'",
             params={"tid": t1["id"]},
@@ -103,7 +103,7 @@ class TestRecordWriteOps:
         assert r2["write_ops"] == 8
         sdk.close()
 
-    def test_none_team_id_is_noop(self):
+    def test_none_org_id_is_noop(self):
         result = record_write_ops("", tier="pro")
         assert result is None
 
@@ -214,7 +214,7 @@ class TestGetCurrentUsage:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         sdk = TortoiseSDK(db, namespace="registry")
-        team = sdk.team_create(name="fresh-team")
+        team = sdk.org_create(name="fresh-team")
         sdk._get_registry().query(
             "MATCH (t:Team {id: $tid}) SET t.tier = 'free'",
             params={"tid": team["id"]},
@@ -263,7 +263,7 @@ class TestGetCurrentUsage:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         sdk = TortoiseSDK(db, namespace="registry")
-        team = sdk.team_create(name="free-team")
+        team = sdk.org_create(name="free-team")
         sdk._get_registry().query(
             "MATCH (t:Team {id: $tid}) SET t.tier = 'free'",
             params={"tid": team["id"]},
@@ -337,7 +337,7 @@ class TestGetCurrentUsageSupabaseDegrade:
                     return self._seeded
                 raise RuntimeError("Supabase down (simulated blip)")
 
-        seeded = [{"team_id": "team-blip-002", "period": _current_period(),
+        seeded = [{"org_id": "team-blip-002", "period": _current_period(),
                    "write_ops": 55000}]
         monkeypatch.setattr(
             "tortoise.supabase_control.get_control_plane",
@@ -363,10 +363,10 @@ class TestGetCurrentUsageSupabaseDegrade:
         # pro tier: 55,000 ops used this period — over the allowance → overage
         fake = FakeControlPlane({
             "metering_records": [
-                {"team_id": "team-1", "period": _current_period(),
+                {"org_id": "team-1", "period": _current_period(),
                  "write_ops": 55000},
             ],
-            "teams": [{"id": "team-1", "tier": "pro"}],
+            "organizations": [{"id": "team-1", "tier": "pro"}],
         })
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
 
@@ -398,25 +398,25 @@ class TestPeriodRollover:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         sdk = TortoiseSDK(db, namespace="registry")
-        team = sdk.team_create(name="period-team")
+        team = sdk.org_create(name="period-team")
         tid = team["id"]
 
         # Simulate writes in two periods by directly manipulating the registry
         reg = sdk._get_registry()
         reg.query(
-            "MERGE (m:MeteringRecord {team_id: $tid, period: '2026-07'}) "
+            "MERGE (m:MeteringRecord {org_id: $tid, period: '2026-07'}) "
             "SET m.write_ops = coalesce(m.write_ops, 0) + 100",
             params={"tid": tid},
         )
         reg.query(
-            "MERGE (m:MeteringRecord {team_id: $tid, period: '2026-08'}) "
+            "MERGE (m:MeteringRecord {org_id: $tid, period: '2026-08'}) "
             "SET m.write_ops = coalesce(m.write_ops, 0) + 50",
             params={"tid": tid},
         )
 
         # Verify separate records exist
         rows = reg.query(
-            "MATCH (m:MeteringRecord {team_id: $tid}) "
+            "MATCH (m:MeteringRecord {org_id: $tid}) "
             "RETURN m.period, m.write_ops ORDER BY m.period",
             params={"tid": tid},
         ).result_set
@@ -473,7 +473,7 @@ class TestAskMetering:
         assert usage["ask_tokens_out"] == 60
         assert abs(usage["ask_cost_usd"] - 0.003) < 1e-9
 
-    def test_none_team_id_noop(self):
+    def test_none_org_id_noop(self):
         from tortoise.metering import get_ask_usage, record_ask_usage
         assert record_ask_usage(None, tokens_in=1) is None
         # registry read for a nonexistent team → zeros
@@ -633,15 +633,21 @@ class TestAskMetering:
     def test_migration_code_contract(self, monkeypatch):
         """Plan Task 6 Step 1: the migration↔code contract — the RPC name
         ``metering_increment_ask`` and the ask_* column set the CODE calls
-        MUST match the real migration file (20260829000001), so a column
-        reword or RPC rename in either direction fails loudly. Covers both
+        MUST match the real migration files, so a column reword or RPC rename
+        in either direction fails loudly. Covers both
         record_ask_usage (supabase branch → RPC body keys) and
-        get_ask_usage (supabase branch → the ask_* select)."""
+        get_ask_usage (supabase branch → the ask_* select).
+
+        #3543: migrations are append-only (``check-migration-append-only``), so
+        the RPC's parameter rename lives in the NEWEST file that redefines it —
+        the tenancy migration (``20260915000001``), which DROPs and recreates
+        the function with ``p_org_id``. The column set is still owned by the
+        original metering migration, which stays byte-identical.
+        """
         import re as _re
         from pathlib import Path
-        mig = (Path(__file__).resolve().parent.parent
-               / "supabase" / "migrations"
-               / "20260829000001_metering_ask_columns.sql").read_text()
+        migdir = Path(__file__).resolve().parent.parent / "supabase" / "migrations"
+        mig = (migdir / "20260829000001_metering_ask_columns.sql").read_text()
         # (a) the ADD COLUMN set the migration defines
         cols = set(_re.findall(r"ADD COLUMN IF NOT EXISTS\s+(\w+)", mig))
         assert cols == {"ask_calls", "ask_tokens_in", "ask_tokens_out",
@@ -650,11 +656,17 @@ class TestAskMetering:
         # envelope is ~10x over the integer range)
         assert "ask_tokens_in   bigint" in mig
         assert "ask_tokens_out  bigint" in mig
-        # (b) the RPC name + parameter set the migration defines
-        rpc = _re.search(r"CREATE OR REPLACE FUNCTION public\.(\w+)\(", mig)
-        assert rpc is not None and rpc.group(1) == "metering_increment_ask"
-        params = set(_re.findall(r"p_(\w+)\s+\w+", mig))
-        assert params == {"team_id", "period", "calls", "tokens_in",
+        # (b) the RPC name + parameter set the EFFECTIVE migration defines —
+        # the newest file that recreates it (append-only: the parameter rename
+        # cannot be an edit to 20260829000001).
+        eff = (migdir / "20260915000001_tenancy_team_to_org.sql").read_text()
+        sig = _re.search(
+            r"CREATE OR REPLACE FUNCTION public\.metering_increment_ask\((.*?)\)\s*RETURNS",
+            eff, _re.S)
+        assert sig is not None, (
+            "the effective migration must recreate metering_increment_ask")
+        params = set(_re.findall(r"p_(\w+)\s+\w+", sig.group(1)))
+        assert params == {"org_id", "period", "calls", "tokens_in",
                           "tokens_out", "cost_usd"}
         # (c) the supabase-mode record path calls the SAME RPC with the
         # SAME p_* body keys (FakeControlPlane records the call body)
@@ -670,12 +682,12 @@ class TestAskMetering:
                          cost_usd=0.001)
         fn, body = fake.rpc_calls[-1]
         assert fn == "metering_increment_ask"
-        assert set(body) == {"p_team_id", "p_period", "p_calls",
+        assert set(body) == {"p_org_id", "p_period", "p_calls",
                              "p_tokens_in", "p_tokens_out", "p_cost_usd"}
-        assert body["p_team_id"] == "team-1"
+        assert body["p_org_id"] == "team-1"
         assert body["p_tokens_in"] == 100 and body["p_tokens_out"] == 50
         # (d) the supabase-mode READ path selects the SAME ask_* columns
-        fake.seed("metering_records", [{"team_id": "team-1",
+        fake.seed("metering_records", [{"org_id": "team-1",
                                          "period": body["p_period"],
                                          "ask_calls": 1,
                                          "ask_tokens_in": 100,

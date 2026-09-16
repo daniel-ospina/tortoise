@@ -27,7 +27,7 @@ Usage:
     --dry-run  report only (DEFAULT — no writes)
     --merge    perform the supersede merges (opt-in)
     Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
-    Hosted multi-tenant: run once per tenant graph (--graph team_<team_id>).
+    Hosted multi-tenant: run once per tenant graph (--graph team_<org_id>).
 """
 from __future__ import annotations
 

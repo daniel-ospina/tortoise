@@ -10,7 +10,7 @@
 # Coverage:
 #   Verdicts
 #     1. 200  → UP, exit 0 (no incident filed)
-#     2. 401  → UP, exit 0 (the EXPECTED unauthenticated /v1/teams answer)
+#     2. 401  → UP, exit 0 (the EXPECTED unauthenticated /v1/organizations answer)
 #     3. 403  → UP, exit 0
 #     4. 429  → UP, exit 0 (the app answered; it is throttling us)
 #     5. 000 (timeout) ×3 → DOWN, exit 1, exactly PROBE_ATTEMPTS probes
@@ -698,7 +698,7 @@ reset_case
 seed_issue down "$((NOW - 1200))" 3 0 ""
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
-export PROBE_URL="https://staging.example.test/v1/teams"
+export PROBE_URL="https://staging.example.test/v1/organizations"
 run_watchdog
 assert_eq "$RC" "1" "drill → still alerts (exit 1)"
 assert_eq "$(count_calls 'FLYCTL')" "0" "drill → restart DISARMED"
@@ -799,7 +799,7 @@ assert_eq "$(count_calls 'CURL telegram')" "0" "cap re-notify window → NO repe
 reset_case
 seed_issue down "$((NOW - 600))" 2 0 ""
 export STUB_PROBE_CODES="200"
-export PROBE_URL="https://staging.example.test/v1/teams"
+export PROBE_URL="https://staging.example.test/v1/organizations"
 run_watchdog
 assert_eq "$RC" "0" "drill UP → exit 0"
 assert_eq "$(count_calls 'GH PATCH repos/.*/issues/42$')" "0" "drill UP → does NOT close the production incident"
@@ -906,7 +906,7 @@ assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "round-trip run → no dupli
 # ── 33: public-body hygiene ─────────────────────────────────────────────────
 reset_case
 export STUB_PROBE_CODES="000"
-export PROBE_URL="https://user:s3cr3t@staging.example.test/v1/teams"
+export PROBE_URL="https://user:s3cr3t@staging.example.test/v1/organizations"
 run_watchdog
 assert_not_contains "$(patched_body)" "s3cr3t" "credentials in PROBE_URL are redacted from the public body"
 assert_not_contains "$(created_json)" "s3cr3t" "credentials in PROBE_URL never reach the public TITLE either"
@@ -915,7 +915,7 @@ assert_contains "$(patched_body)" "<redacted>" "redaction marker present"
 # ── 42: query-string credentials are redacted too ──────────────────────────
 reset_case
 export STUB_PROBE_CODES="000"
-export PROBE_URL="https://api.premiselabs.co/v1/teams?debug=1&token=qs3cr3t"
+export PROBE_URL="https://api.premiselabs.co/v1/organizations?debug=1&token=qs3cr3t"
 run_watchdog
 assert_not_contains "$(patched_body)" "qs3cr3t" "query-string credentials are redacted from the public body"
 assert_contains "$(patched_body)" "?<redacted>" "the query string is redacted"
@@ -1136,7 +1136,7 @@ printf '%s' '{"body":"<!-- watchdog-state kind=down first_failure_ts=1800000000 
 export STUB_SEARCH_MARKER='DRILL%20DOWN'
 export STUB_SEARCH_JSON="$(search_json 777 "$DRILL_DOWN_TITLE_FIXTURE")"
 export STUB_PROBE_CODES="200"
-export PROBE_URL="https://staging.example.test/v1/teams"
+export PROBE_URL="https://staging.example.test/v1/organizations"
 run_watchdog
 assert_eq "$RC" "0" "drill UP → exit 0"
 assert_eq "$(count_calls 'GH PATCH repos/.*/issues/777$')" "1" "drill UP → closes its OWN drill incident (drills cannot accumulate)"
@@ -1374,9 +1374,9 @@ assert_contains "$(comments_all)" "<redacted>" "a wrapped token → the redactio
 # naive "authority, then @-strip" split: `rediss://user:pa/ss@host:6379` made
 # the label `user:pa` — the password prefix.
 assert_eq "$(probe_label 'rediss://user:pa/ss@host:6379')" "<redacted-host>" "a '/' inside the userinfo → the label is REDACTED (not the password prefix)"
-assert_eq "$(probe_label 'https://user:s3cr3t@staging.example.test/v1/teams')" "staging.example.test" "a normal userinfo is stripped from the label"
+assert_eq "$(probe_label 'https://user:s3cr3t@staging.example.test/v1/organizations')" "staging.example.test" "a normal userinfo is stripped from the label"
 assert_eq "$(probe_label 'https://user:s3cr3t@staging.example.test:8443/v1')" "staging.example.test" "the port is stripped with the userinfo"
-assert_eq "$(probe_label 'https://api.premiselabs.co/v1/teams')" "api.premiselabs.co" "a credential-free URL still yields its host"
+assert_eq "$(probe_label 'https://api.premiselabs.co/v1/organizations')" "api.premiselabs.co" "a credential-free URL still yields its host"
 assert_eq "$(probe_label 'https://host/v1?x=a@b')" "<redacted-host>" "an '@' outside the authority fails closed (never publish an unverified cut)"
 # …and the same guard end-to-end: the DRILL issue TITLE must not carry it.
 reset_case
@@ -1611,7 +1611,7 @@ reset_case
 seed_issue down "$((NOW - 1200))" 3 0 ""
 export STUB_PROBE_CODES="000"
 export FLY_API_TOKEN="fly-token"
-export PROBE_URL="https://staging.example.test/v1/teams"
+export PROBE_URL="https://staging.example.test/v1/organizations"
 run_watchdog
 assert_contains "$OUT" "restart decision: disarmed:drill" "a drill logs its disarm reason"
 reset_case

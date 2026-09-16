@@ -51,7 +51,7 @@ Consequences (E2E-5 exit gate):
 **pure-additive**:
 
 ```sql
-CREATE TABLE public.graphs (id, team_id, name, kind, namespace, status,
+CREATE TABLE public.graphs (id, org_id, name, kind, namespace, status,
                             recording, created_at)  + RLS + column grants
 ALTER TABLE public.api_keys ADD COLUMN graph_id text,          -- NULL = team-wide
                             ADD COLUMN scopes jsonb DEFAULT '[]', -- FLAT allowlist
@@ -112,7 +112,7 @@ Local: `npm --prefix supabase/tests/pglite run validate`.
   graph 403s.
 - **Sweeps (#2313 landed):** the hosted backup sweep now enumerates EVERY
   active graph (default + custom) — graph-keyed archives
-  (`backups/{team}/{graph}/{ts}_{rnd}/...`), per-graph state/retention, and
+  (`backups/{org_id}/{graph}/{ts}_{rnd}/...`), per-graph state/retention, and
   per-graph watcher staleness (see `docs/ops/registry-backup-dr.md`).
   Residual: a graph-bound SELF-SERVICE restore surface for custom graphs is
   a follow-up (#2339); the internal DR operators (drill/re-baseline/ACL

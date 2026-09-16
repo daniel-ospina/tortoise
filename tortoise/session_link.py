@@ -157,7 +157,7 @@ def link_session_entities(proj, session_id: str,
     """Link a Session + its turn Points to WorkItem Objects via aboutObject.
 
     Args:
-        proj: the team FalkorProjection.
+        proj: the org FalkorProjection.
         session_id: the :Session node id.
         turn_texts: per-turn text (capture path passes the stored-window
             turn texts; the index-completion re-link passes the stored turn

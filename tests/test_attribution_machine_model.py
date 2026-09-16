@@ -151,16 +151,16 @@ class TestSessionMachineModelStamp:
     Pattern mirrors test_hosted_api.py's TestSessionActorStamp2600.
     """
 
-    _TEAM_ID = "team-2599-mm"
+    _ORG_ID = "team-2599-mm"
 
-    def _data_sdk(self, team_id: str):
+    def _data_sdk(self, org_id: str):
         """Open the TEAM data graph directly."""
         import tortoise.hosted_api as ha_mod
-        return ha_mod._make_sdk(namespace=team_id)
+        return ha_mod._make_sdk(namespace=org_id)
 
-    def _session_fields(self, team_id: str, session_id: str) -> dict:
+    def _session_fields(self, org_id: str, session_id: str) -> dict:
         """Read machine_id and model from the stored Session node."""
-        rows = self._data_sdk(team_id)._get_proj().g.query(
+        rows = self._data_sdk(org_id)._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN "
             "s.machine_id, s.model, s.actor_user_id, s.harness",
             params={"sid": session_id}).result_set
@@ -176,11 +176,11 @@ class TestSessionMachineModelStamp:
         _orig = _patch_tortoise_sdk_init(db_path)
         os.environ["TORTOISE_DB_PATH"] = db_path
         sdk = ha_mod._make_sdk(namespace="registry")
-        _seed_team_graphs(sdk, self._TEAM_ID, "pro", None)
+        _seed_team_graphs(sdk, self._ORG_ID, "pro", None)
         try:
             with TestClient(ha_mod.app,
                             raise_server_exceptions=False) as tc:
-                yield sdk, self._TEAM_ID, tc
+                yield sdk, self._ORG_ID, tc
         finally:
             os.environ.pop("TORTOISE_DB_PATH", None)
             _restore_tortoise_sdk_init(_orig)

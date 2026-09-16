@@ -436,14 +436,14 @@ def test_shared_server_survives_single_gc(tmp_path):
 
 
 def test_team_create_journals_minted_graph(tmp_path, monkeypatch):
-    """#1686: team_create's minted team_{name} graph is journaled via the
+    """#1686: team_create's minted org_{name} graph is journaled via the
     product-side seam (_journal_append_product) so the session-end sweep
     drops it — team_* graphs no longer accumulate on the docker.
 
     Carve-out file → explicit-path constructions stay embedded in BOTH
     lanes (exemption holds under a URI-set process); a temp journal env
     makes the membership assertion exact. team_create writes the registry
-    Team node + mints team_{name} + the graph node, all on the embedded
+    Team node + mints org_{name} + the graph node, all on the embedded
     server."""
     from tests._embedded import _read_journal_file
     from tortoise.sdk import TortoiseSDK
@@ -452,9 +452,9 @@ def test_team_create_journals_minted_graph(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
     sdk = TortoiseSDK(str(tmp_path / "team-create.db"))
     try:
-        res = sdk.team_create("journalled")
-        assert res["graph_name"] == "team_journalled"
-        assert "team_journalled" in _read_journal_file(str(journal)), \
+        res = sdk.org_create("journalled")
+        assert res["graph_name"] == "org_journalled"
+        assert "org_journalled" in _read_journal_file(str(journal)), \
             "team_create mint must be journaled (#1686)"
     finally:
         sdk.close()
@@ -469,7 +469,7 @@ def test_team_create_drops_the_graph_when_the_journal_append_fails(
     The append is forced to fail for the TEAM graph only (the registry append
     must succeed, or _get_registry would raise before anything is created —
     that call site's own contract is that a raise there mints nothing). Then
-    assert: the raise propagated, the ``team_{name}`` graph is GONE (post-fix
+    assert: the raise propagated, the ``org_{name}`` graph is GONE (post-fix
     the failure path calls ``team_graph.delete()``; pre-fix it survived with
     no ownership record, and no sweep could attribute it), and the registry
     Team node was rolled back by team_create's own handler.
@@ -483,7 +483,7 @@ def test_team_create_drops_the_graph_when_the_journal_append_fails(
     real_append = proj_mod._journal_append_product
 
     def _fail_team_only(graph_name):
-        if graph_name == "team_unjournalled":
+        if graph_name == "org_unjournalled":
             raise RuntimeError(f"forced append failure for {graph_name!r}")
         return real_append(graph_name)
 
@@ -491,8 +491,8 @@ def test_team_create_drops_the_graph_when_the_journal_append_fails(
     sdk = TortoiseSDK(str(tmp_path / "team-create-fail.db"))
     try:
         with pytest.raises(RuntimeError, match="forced append failure"):
-            sdk.team_create("unjournalled")
-        assert "team_unjournalled" not in (sdk._get_proj().db.list_graphs() or []), \
+            sdk.org_create("unjournalled")
+        assert "org_unjournalled" not in (sdk._get_proj().db.list_graphs() or []), \
             "team_create must DROP the graph whose ownership it could not record"
         rows = sdk._get_registry().query(
             "MATCH (t:Team {name:$n}) RETURN count(t)",

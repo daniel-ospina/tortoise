@@ -218,12 +218,12 @@ export function graphMintBody(graphId, name) {
 
 // ── #2304 trash derivations (pure) ─────────────────────────────────────────
 // Server contract (branch feat/2304-delete-trash, verified against hosted_api):
-// - GET /v1/graphs/trash?team_id= rows: {graph_id, name, kind: 'custom',
+// - GET /v1/graphs/trash?org_id= rows: {graph_id, name, kind: 'custom',
 //   deleted_at} — owner/admin session only; purged rows never appear; the
 //   default graph can never be here.
-// - POST /v1/graphs/trash/{id}/restore?team_id= → {graph_id, status,
+// - POST /v1/graphs/trash/{id}/restore?org_id= → {graph_id, status,
 //   name, note} or 404/403/409 (live name conflict)/410 (purged).
-// - GET /v1/graphs/trash/{id}/points?team_id= → {archive_count,
+// - GET /v1/graphs/trash/{id}/points?org_id= → {archive_count,
 //   latest_backup: {backup_id, created_at, node_count, edge_count}|null}.
 
 // The server-side recovery window (#2304 default). Client displays it only;

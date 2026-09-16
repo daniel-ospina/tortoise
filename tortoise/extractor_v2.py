@@ -357,7 +357,7 @@ def build_master_list(sdk=None) -> dict:
     tenant's namespaces — so tenant A's pack kinds reach A's extraction
     prompts and write gates while tenant B's never do. The tenant identity
     is the SDK's resolved graph (pass the tenant-scoped SDK,
-    ``_make_sdk(namespace=team_id)`` — no separate identity argument to
+    ``_make_sdk(namespace=org_id)`` — no separate identity argument to
     mismatch). The tenant path NEVER reads or writes the process-global
     ``_MASTER_LIST_CACHE`` (#1154: a tenant-scoped compile must not poison
     the shared memo); the #1350 perf guard rides the tenant-view memo (per
@@ -666,7 +666,7 @@ def _render_chains(master: dict) -> str:
 
 S1_TMPL = """You are the STORY SUMMARIZER for the company/product epistemic memory.
 Read the whole conversation. Produce a NARRATIVE that captures what CHANGED
-about the world we operate in — the state of the product, the team, the
+about the world we operate in — the state of the product, the org, the
 domain — and WHY it changed, at the level of durable meaning, not mechanics.
 
 Use the MEMORY GRANULARITY definitions below as the rule for what to keep
@@ -684,7 +684,7 @@ durable belief, or a reason — or is it how the work was done this hour?"
    or mitigate the relevance (MITIGATES) between points and objects.
 EVENTS (secondary): only as context for why state changed.
 OPERATIONAL KNOWLEDGE (tertiary but DURABLE — do not drop it): cause-effect
-lessons about how the environment behaves and how the team works, when they
+lessons about how the environment behaves and how the org works, when they
 would change future behavior: tool/process behaviors ("the bash tool kills
 child processes when it returns", "setsid does not exist on macOS",
 "pytest-timeout is not installed"), workflow rules ("issues without fractal
@@ -1930,7 +1930,7 @@ You have: (a) the compiled story of the conversation, (b) the S2 embed list,
 any key entities, events, or points that AFFECT THE WORLD MODEL — durable
 objects/subjects, decisions/occurrences, claims whose support/attack
 structure matters, AND durable operational/process lessons (cause-effect
-knowledge about how the environment behaves or how the team works — e.g.
+knowledge about how the environment behaves or how the org works — e.g.
 "backgrounded processes die when the tool returns", "create_point defaults to
 draft mode")? Add them. Do NOT pad with process chatter (the value filter
 applies — same STRICT EXCLUSION as S2: strip the mechanics tokens, keep the

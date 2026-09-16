@@ -41,7 +41,7 @@ import collections
 from datetime import UTC
 
 # ── Ask-lane reader-model cache (#1987 Task 5) ─────────────────────────────
-# Per-namespace cache (keyed by team/namespace — NEVER a module-global
+# Per-namespace cache (keyed by org/namespace — NEVER a module-global
 # model): LRU bound (≤ N entries), in-flight entries NEVER evicted (an LRU
 # eviction can never race an in-flight ask), closed clients on eviction,
 # failed builds never cached, per-key build single-flight. The cache holds
@@ -110,7 +110,7 @@ class _LockedReader:
     ``complete()`` + usage capture under a per-instance ``threading.Lock`` —
     the mutable ``last_completion_tokens`` write at the end of the inner
     adapter's ``complete()`` is closed against cross-thread read-after-write
-    (contention bounded by the per-team in-flight cap 4). Forwards
+    (contention bounded by the per-org in-flight cap 4). Forwards
     ``model``/``provider``/``route``/``last_route``/``last_prompt_tokens``/
     ``last_completion_tokens``/``last_finish_reason`` and ``close()``.
     """
@@ -773,7 +773,7 @@ _logger = logging.getLogger(__name__)
 # ── #2600 server-resolved human actor ───────────────────────────────────────
 # `_current_actor_user_id` carries the server-resolved human actor for
 # session + write-event stamps. SET ONLY at auth seams (mcp_auth
-# TeamResolutionMiddleware dispatch + hosted_api._data_sdk) — NEVER from
+# OrgResolutionMiddleware dispatch + hosted_api._data_sdk) — NEVER from
 # client input. sdk.py is the neutral home: both mcp_auth and hosted_api
 # already import sdk, and sdk must not import either (no import cycle).
 _current_actor_user_id: ContextVar[str | None] = ContextVar(
@@ -805,19 +805,19 @@ def _is_uuid_shape(value: object) -> bool:
         return False
 
 
-def _alias_actor_user_id(team: dict) -> dict:
-    """#2600: canonical ``actor_user_id`` key on a resolved team dict —
+def _alias_actor_user_id(org: dict) -> dict:
+    """#2600: canonical ``actor_user_id`` key on a resolved org dict —
     UUID-gated, never fabricated. Reads the RAW resolver fields (``user_id``
     / ``created_by`` / ``session_user_id`` — each auth lane carries whichever
     applies) and aliases to ``actor_user_id`` ONLY when UUID-shaped. Additive:
-    never removes an existing key. Shared by mcp_auth.TeamResolutionMiddleware
+    never removes an existing key. Shared by mcp_auth.OrgResolutionMiddleware
     and the hosted_api REST DI terminals (single implementation, both planes).
     """
-    raw = team.get("user_id") or team.get("created_by") or team.get(
+    raw = org.get("user_id") or org.get("created_by") or org.get(
         "session_user_id")
     if _is_uuid_shape(raw):
-        team["actor_user_id"] = raw
-    return team
+        org["actor_user_id"] = raw
+    return org
 
 #: C2 (#2518, #2513): max Object-spine anchors resolved from the query text
 #: (the entity/fact-augmented key expansion pass's additive term source).
@@ -1820,12 +1820,12 @@ class TortoiseSDK:
                 )
         self._namespace = namespace
         # C5 #2114 (D-C5-1): explicit FULL graph-name override — the data-plane
-        # tenancy seam. Custom graphs (team_{tid}_{gid}) cannot be expressed
+        # tenancy seam. Custom graphs (org_{tid}_{gid}) cannot be expressed
         # through ``namespace`` (the _get_proj derivation would prepend
-        # ``team_`` → ``team_team_{tid}_{gid}``). When set, _get_proj binds the
+        # ``org_`` → ``org_org_{tid}_{gid}``). When set, _get_proj binds the
         # projection to ``graph_name`` VERBATIM (default-graph callers never
         # pass it — they keep the namespace derivation, byte-identical).
-        # Charset mirrors the namespace rule (+128 len for team_{tid}_{gid});
+        # Charset mirrors the namespace rule (+128 len for org_{tid}_{gid});
         # mutually exclusive with ``namespace`` by construction (the spine
         # passes exactly one).
         if graph_name is not None and not re.match(
@@ -1962,7 +1962,7 @@ class TortoiseSDK:
                 graph_name = "registry_tortoise"
             elif self._graph_name is not None:
                 # C5 #2114 (D-C5-1): explicit graph-name override (a custom
-                # team_{tid}_{gid} graph). Never a namespace derivation — the
+                # org_{tid}_{gid} graph). Never a namespace derivation — the
                 # name is used verbatim.
                 graph_name = self._graph_name
             elif self._namespace:
@@ -1974,18 +1974,18 @@ class TortoiseSDK:
                 elif self._namespace.startswith("test-"):
                     # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-*
                     # family (test-tiers, test-invites, test-hosted, test-e1,
-                    # test-team-722, ...) is a TEST namespace too — normalize
+                    # test-org-722, ...) is a TEST namespace too — normalize
                     # '-' → '_' so it maps to the guard-passing
                     # test_<ns>_tortoise graph (test-tiers →
                     # test_tiers_tortoise). Without the branch it falls
-                    # into team_<ns> (team_test-tiers) — a NON-test graph that
+                    # into org_<ns> (org_test-tiers) — a NON-test graph that
                     # is invisible to `grep -v 'namespace="test_'` and fails
                     # _assert_test_graph on bulk wipe.
                     graph_name = f"{self._namespace.replace('-', '_')}_tortoise"
                 else:
-                    # Team SDK: isolated team graph (matches provision's
-                    # team_{team_id} namespace creation, #7886).
-                    graph_name = f"team_{self._namespace}"
+                    # Org SDK: isolated org graph (matches provision's
+                    # org_{org_id} namespace creation, #7886).
+                    graph_name = f"org_{self._namespace}"
             else:
                 # No namespace: honor the URI's own graph (the conftest
                 # session graph for tests). Fixes #7886 regression that
@@ -2111,12 +2111,12 @@ class TortoiseSDK:
             return
         indexes = [
             ("Team", "name"),
-            ("Membership", "team_id"),
+            ("Membership", "org_id"),
             ("Membership", "user_id"),
-            ("APIKey", "team_id"),
+            ("APIKey", "org_id"),
             ("APIKey", "key_hash"),
             ("APIKey", "key_prefix"),
-            ("Invitation", "team_id"),
+            ("Invitation", "org_id"),
             ("Invitation", "token_hash"),
             ("SignupToken", "lookup_key"),
         ]
@@ -2206,7 +2206,7 @@ class TortoiseSDK:
         after=None → tail (oldest retained). Expired cursor → ValueError(
         'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
         Types are validated against the EventCodec registry (unknown → ValueError).
-        Events live in THIS SDK's graph namespace (the team partition).
+        Events live in THIS SDK's graph namespace (the org partition).
         """
         from .event_store import read_after
 
@@ -8816,14 +8816,14 @@ class TortoiseSDK:
         """List all graph names in the database."""
         return self._get_proj().list_graphs()
 
-    def _audit(self, team_id: str, actor_user_id: str | None,
+    def _audit(self, org_id: str, actor_user_id: str | None,
                 operation: str, **kwargs) -> None:
         """Log an audit event. No-op if audit logger not initialized."""
         if self._audit_logger is None:
             from .audit_events import AuditLogger
             self._audit_logger = AuditLogger()
         self._audit_logger.append(
-            team_id=team_id,
+            org_id=org_id,
             actor_user_id=actor_user_id,
             operation=operation,
             **kwargs,
@@ -8907,7 +8907,7 @@ class TortoiseSDK:
         sub = rows[0][0]
         chain["subject"] = {"id": sub.get("id"), "name": sub.get("name"),
                              "kind": sub.get("subjectKind", "")}
-        # ponytail: follow outgoing rels for Role → Team delegation
+        # ponytail: follow outgoing rels for Role → Org delegation
         rels = proj.g.query(
             "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], properties(n)",
             params={"sid": sub["id"]},
@@ -13696,7 +13696,7 @@ class TortoiseSDK:
                 code=VALIDATION_CODE_BAD_DATE)
 
     def ask(self, question: str, *, question_type: str | None = None,
-            question_date: str | None = None, team_id: str | None = None,
+            question_date: str | None = None, org_id: str | None = None,
             _reader_factory=None, _selfhost_transport: bool = False) -> dict:
         """Answer a question about captured memory (#1987 Task 5) — ONE
         bounded RAG pass locally (or a POST to hosted ``/v1/ask`` when
@@ -13731,7 +13731,7 @@ class TortoiseSDK:
         ``_looks_abstained`` (abstained is ALWAYS the model's written
         decision; the blank→``NO_EVIDENCE_TEXT`` substitution is a
         retired defensive invariant) → best-effort
-        ``record_ask_usage`` (ONLY with an explicit ``team_id``; default
+        ``record_ask_usage`` (ONLY with an explicit ``org_id``; default
         None → no-op).
 
         #2070 retrieval knobs (ask-lane only — the search lane is
@@ -14018,18 +14018,18 @@ class TortoiseSDK:
         if abstained and not answer:
             answer = NO_EVIDENCE_TEXT
 
-        # 7. Metering (best-effort; ONLY with an explicit team_id).
+        # 7. Metering (best-effort; ONLY with an explicit org_id).
         # #2069: the record's cost_usd is metered at the SERVING lane's
         # family rates (``select_ask_meter_rates`` on ``_LockedReader.model``
         # — the strong lane never under-counts at the deepseek envelope).
-        if team_id:
+        if org_id:
             try:
                 from tortoise.metering import record_ask_usage
                 input_tokens = (estimate_tokens_ask(system_prompt_for(qtype))
                                 + estimate_tokens_ask(evidence))
                 out_tokens = reader_out_tokens or 500
                 record_ask_usage(
-                    team_id,
+                    org_id,
                     tokens_in=input_tokens, tokens_out=out_tokens,
                     cost_usd=estimate_ask_cost_usd(
                         input_tokens, out_tokens,
@@ -15222,40 +15222,40 @@ class TortoiseSDK:
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
-    # ── Control Plane: Team CRUD ───────────────────────────────────
+    # ── Control Plane: Org CRUD ───────────────────────────────────
 
-    def team_create(self, name: str, *, idempotency_key: str | None = None,
+    def org_create(self, name: str, *, idempotency_key: str | None = None,
                     mint_key: bool = True, owner_user_id: str | None = None) -> dict:
-        """Create a team with its own graph namespace.
+        """Create an org with its own graph namespace.
 
         Writes to the control_plane registry graph. Creates a tenant
-        graph (team_{name}) for Point/Operator storage.
+        graph (org_{name}) for Point/Operator storage.
 
         Returns {name, graph_name, api_key, id} on first creation; on an
         idempotent re-call (same idempotency_key) returns
         {name, graph_name, id, existing: True} with NO api_key — the caller
         already holds the plaintext from the original creation (#1710).
-        mint_key=False (#1716, onboarding sub-team parity) provisions a
-        KEYLESS team: no tt_ mint and no api_key hash on the Team node — the
-        return dict omits api_key entirely. The team stays keyless until a
+        mint_key=False (#1716, onboarding sub-org parity) provisions a
+        KEYLESS org: no tt_ mint and no api_key hash on the Org node — the
+        return dict omits api_key entirely. The org stays keyless until a
         session-key mint (apikey_create / POST /v1/session/key). A minted
         key whose plaintext is never returned is an unrecoverable dead
         credential.
 
-        owner_user_id (#1748, onboarding sub-team parity): when set, the
+        owner_user_id (#1748, onboarding sub-org parity): when set, the
         user becomes an OWNER member (Membership role=owner/status=active,
-        the registry twin of provision_team's membership upsert) so the
-        keyless team is reachable by session-key mint / team list / owner
-        delete. Without it a keyless team has NO membership — an unmintable,
+        the registry twin of provision_org's membership upsert) so the
+        keyless org is reachable by session-key mint / org list / owner
+        delete. Without it a keyless org has NO membership — an unmintable,
         undeletable orphan. Default None = no membership (back-compat for
         CLI/MCP/embedded callers with no user context).
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): the SDK
         control-plane backend stays REGISTRY-BACKED — the
         TORTOISE_CONTROL_PLANE env gate lives at the hosted layer
-        (hosted_api.py), and the hosted create-team writers (POST /v1/teams,
-        /v1/agent/signup, /v1/register, onboarding sub-team) route their
-        Supabase writes through the atomic provision_team RPC instead of
+        (hosted_api.py), and the hosted create-org writers (POST /v1/organizations,
+        /v1/agent/signup, /v1/register, onboarding sub-org) route their
+        Supabase writes through the atomic provision_org RPC instead of
         this method. Selfhost + embedded (where this SDK runs) have no
         Supabase control plane — the registry IS the control plane there.
         """
@@ -15274,12 +15274,12 @@ class TortoiseSDK:
                 f"Invalid team name: {name!r}. Use alphanumeric, hyphens, underscores, spaces."
             )
 
-        graph_name = f"team_{name}".replace(' ', '_')
+        graph_name = f"org_{name}".replace(' ', '_')
         proj = self._get_proj()
         reg = self._get_registry()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
-        # Idempotency — check registry graph for existing team
+        # Idempotency — check registry graph for existing org
         if idempotency_key:
             existing = reg.query(
                 "MATCH (t:Team {idempotency_key:$ik}) RETURN t.id, t.name",
@@ -15296,10 +15296,10 @@ class TortoiseSDK:
 
         # Mint the key only on the CREATE path (after the idempotency check)
         # so the existing branch never mints or persists anything (#1710).
-        # #1716: mint_key=False provisions a KEYLESS team — no tt_ mint and
-        # no api_key hash on the Team node (the onboarding sub-team path: a
+        # #1716: mint_key=False provisions a KEYLESS org — no tt_ mint and
+        # no api_key hash on the Org node (the onboarding sub-org path: a
         # minted key whose plaintext is never returned is an unrecoverable
-        # dead credential). The team stays keyless until a session-key mint.
+        # dead credential). The org stays keyless until a session-key mint.
         api_key = key_hash = None
         if mint_key:
             api_key = f"tt_{uuid.uuid4().hex}"
@@ -15314,15 +15314,15 @@ class TortoiseSDK:
             raise ControlPlaneError(f"Team {name!r} already exists")
 
         tid = ulid()
-        # Tier-driven limits from product/pricing.json (decision 1d) — no max_teams
-        # field: multi-team is a user-level capability, NOT a tier limit.
+        # Tier-driven limits from product/pricing.json (decision 1d) — no max_orgs
+        # field: multi-org is a user-level capability, NOT a tier limit.
         from tortoise.pricing import tier_limits
         lim = tier_limits("free")  # provision defaults to Free; upgrades = billing epic
-        # #1716 keyless: the api_key property is omitted from the Team node
+        # #1716 keyless: the api_key property is omitted from the Org node
         # (a NULL property is a delete in redisgraph semantics; omitting the
         # attribute + param is the unambiguous keyless shape).
         key_attr = "api_key:$key, " if mint_key else ""
-        team_params = {"id": tid, "name": name, "gn": graph_name,
+        org_params = {"id": tid, "name": name, "gn": graph_name,
                        "now": now,
                        "max_graphs": lim["max_graphs_per_team"],
                        "max_users": lim["max_users_per_team"],
@@ -15330,14 +15330,14 @@ class TortoiseSDK:
                        "ops": lim["included_write_ops_per_month"],
                        "nodes": lim["max_graph_nodes"]}
         if mint_key:
-            team_params["key"] = key_hash
+            org_params["key"] = key_hash
         reg.query(
             "CREATE (t:Team {id:$id, name:$name, " + key_attr
             + "graph_name:$gn, createdAt:$now, tier:'free', "
             + "max_graphs:$max_graphs, max_users:$max_users, "
             + "max_api_keys:$max_keys, ops_allowance:$ops, "
             + "graph_size_cap:$nodes})",
-            params=team_params,
+            params=org_params,
         )
         if idempotency_key:
             reg.query(
@@ -15345,11 +15345,11 @@ class TortoiseSDK:
                 params={"id": tid, "ik": idempotency_key},
             )
         try:
-            team_graph = proj.db.select_graph(graph_name)
+            org_graph = proj.db.select_graph(graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
             # TeamMeta (graph-side atomicity). compact = creator's prior
             # memberships > 0 (registry Membership nodes); fork inherited from
-            # the creator's EARLIEST prior team's OnboardingState.fork with
+            # the creator's EARLIEST prior org's OnboardingState.fork with
             # 'self' fallback (never re-asks the fork card); None when the
             # creator has no prior orgs (fork card asked exactly once) or no
             # user context (CLI/embedded mint).
@@ -15360,16 +15360,16 @@ class TortoiseSDK:
             if owner_user_id:
                 rows = reg.query(
                     "MATCH (m:Membership {user_id:$uid, status:'active'}) "
-                    "WHERE m.team_id <> $org "
-                    "RETURN m.team_id, m.created_at ORDER BY m.created_at",
+                    "WHERE m.org_id <> $org "
+                    "RETURN m.org_id, m.created_at ORDER BY m.created_at",
                     params={"uid": owner_user_id, "org": tid},
                 ).result_set
                 prior_ids = [r[0] for r in rows]
                 prior_fork = None
                 if prior_ids:
                     try:
-                        # registry graphs are team_{name} — resolve the
-                        # earliest prior team's graph before reading its fork.
+                        # registry graphs are org_{name} — resolve the
+                        # earliest prior org's graph before reading its fork.
                         _prior = reg.query(
                             "MATCH (t:Team {id:$id}) RETURN t.graph_name",
                             params={"id": prior_ids[0]},
@@ -15386,30 +15386,30 @@ class TortoiseSDK:
                 "CREATE (:TeamMeta {name:$name, created:$now})",
                 {"name": name, "now": now},
                 org_id=tid, fork=init_fork, compact=init_compact)
-            team_graph.query(_init_q, params=_init_p)
-            # #1686: journal the minted team_{name} graph IMMEDIATELY after
+            org_graph.query(_init_q, params=_init_p)
+            # #1686: journal the minted org_{name} graph IMMEDIATELY after
             # the TeamMeta CREATE succeeds (and before _graph_create, whose
-            # failure rolls back only the registry Team node — the graph is
+            # failure rolls back only the registry Org node — the graph is
             # already minted; journaling before it captures the orphan). The
-            # session-end sweep drops journaled names, so team_* graphs no
+            # session-end sweep drops journaled names, so org_* graphs no
             # longer accumulate on the docker. No-op outside test sessions
             # (journal env absent).
             from tortoise.projection import _journal_append_product
             try:
                 _journal_append_product(graph_name)
             except Exception:
-                # #3214 (review P2): the append raising means the team graph
+                # #3214 (review P2): the append raising means the org graph
                 # created immediately above cannot be recorded as this
                 # session's — no sweep can attribute it, so the raise must
                 # not itself leave an UNOWNED graph behind. Drop it (the
                 # same select_graph(...).delete() rollback the hosted mint
                 # paths use) before re-raising; the outer handler below rolls
-                # the registry Team node back. Best-effort: if the drop fails
+                # the registry Org node back. Best-effort: if the drop fails
                 # too (the backend fault that broke the append), the graph
                 # survives and is named in the WARNING. The general fix —
                 # journal BEFORE the CREATE at every mint site — is #3390.
                 try:
-                    team_graph.delete()
+                    org_graph.delete()
                 except Exception as _drop_err:  # noqa: BLE001, RUF100
                     _logger.warning(
                         "unjournalable team graph %s could not be dropped "
@@ -15417,12 +15417,12 @@ class TortoiseSDK:
                         "and must be removed manually: %r",
                         graph_name, _drop_err)
                 raise
-            # Graph node (team→graph 1:N, product ontology): the default graph
+            # Graph node (org→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
             # #1748: the owner Membership for the session user — INSIDE the
-            # rollback-protected try so a membership failure tears the Team
-            # node down (a keyless team with no membership is an unmintable,
-            # undeletable orphan). Mirrors the Supabase provision_team
+            # rollback-protected try so a membership failure tears the Org
+            # node down (a keyless org with no membership is an unmintable,
+            # undeletable orphan). Mirrors the Supabase provision_org
             # membership upsert (role=owner, status=active, user_id=session
             # user) and membership_create (BELONGS_TO edge).
             if owner_user_id:
@@ -15441,14 +15441,14 @@ class TortoiseSDK:
             result["api_key"] = api_key  # plaintext delivered exactly once
         return result
 
-    def _graph_create(self, team_id: str, name: str, *, kind: str = "custom",
+    def _graph_create(self, org_id: str, name: str, *, kind: str = "custom",
                       namespace: str | None = None) -> dict:
-        """Create a Graph node in the registry (team→graph 1:N).
+        """Create a Graph node in the registry (org→graph 1:N).
 
-        The tenant namespace for a custom graph is team_{team_id}_{graph_id};
+        The tenant namespace for a custom graph is org_{org_id}_{graph_id};
         custom namespaces are NOT minted until a consumer exists (E2E-11
         decision — v1 writes resolve the default graph only). The default
-        graph's namespace is the team namespace itself (back-compat).
+        graph's namespace is the org namespace itself (back-compat).
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): in
         Supabase control-plane mode (TORTOISE_CONTROL_PLANE=supabase / creds
@@ -15457,7 +15457,7 @@ class TortoiseSDK:
         into it is C2/C3 (provisioning service, out of C1 scope), so this
         method still returns the deterministic id WITHOUT persisting; the
         registry-shaped list seam (graph_metadata/graph_list) derives the
-        default graph from teams.graph_name and reads custom rows once they
+        default graph from organizations.graph_name and reads custom rows once they
         exist. Selfhost (registry mode) keeps the registry Graph node. The
         zero-registry-writes cutover contract (registry node count == 0)
         requires this gate.
@@ -15467,54 +15467,54 @@ class TortoiseSDK:
         from datetime import datetime, timezone as _tz
         from tortoise.supabase_control import is_supabase_enabled
         if is_supabase_enabled():
-            # Deterministic per-(team, name) id — stable across calls so a
+            # Deterministic per-(org, name) id — stable across calls so a
             # re-created graph maps to the same display key; namespace shape
-            # matches the registry mode (team_{team_id}_{gid}).
-            gid = f"g_{_hashlib.sha256(f'{team_id}:{name}'.encode()).hexdigest()[:16]}"
-            ns = namespace or f"team_{team_id}_{gid}"
+            # matches the registry mode (org_{org_id}_{gid}).
+            gid = f"g_{_hashlib.sha256(f'{org_id}:{name}'.encode()).hexdigest()[:16]}"
+            ns = namespace or f"org_{org_id}_{gid}"
             return {"graph_id": gid, "name": name, "kind": kind,
                     "namespace": ns}
         reg = self._get_registry()
         gid = f"g_{_uuid.uuid4().hex[:16]}"
-        ns = namespace or f"team_{team_id}_{gid}"
+        ns = namespace or f"org_{org_id}_{gid}"
         now = datetime.now(_tz.utc).isoformat()  # noqa: UP017
         # C1 (#2110): Graph node gains status (v1 lifecycle: active only —
         # delete = soft tombstone; no archive). recording stays absent =
-        # NULL = inherit team default (back-compat with pre-C1 nodes).
+        # NULL = inherit org default (back-compat with pre-C1 nodes).
         reg.query(
-            "CREATE (g:Graph {id:$gid, team_id:$tid, name:$name, kind:$kind, "
+            "CREATE (g:Graph {id:$gid, org_id:$tid, name:$name, kind:$kind, "
             "namespace:$ns, status:'active', created_at:$now})",
-            params={"gid": gid, "tid": team_id, "name": name,
+            params={"gid": gid, "tid": org_id, "name": name,
                     "kind": kind, "ns": ns, "now": now},
         )
         return {"graph_id": gid, "name": name, "kind": kind, "namespace": ns}
 
-    def graph_list(self, team_id: str) -> list[dict]:
-        """List Graph nodes for a team (default graph first).
+    def graph_list(self, org_id: str) -> list[dict]:
+        """List Graph nodes for an org (default graph first).
 
         #765 (plan Task 8 reader inventory): in Supabase control-plane mode
         the default graph is derived from ``teams.graph_name`` via the seam
         (graph_metadata — C1 now also lists custom graphs table rows); the
         registry Graph-node read stays for selfhost. Registry-shaped rows
-        (graph_id/team_id/name/kind/namespace/status) so callers are
+        (graph_id/org_id/name/kind/namespace/status) so callers are
         mode-agnostic.
         """
         from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, graph_metadata, is_supabase_enabled,
         )
         if is_supabase_enabled():
-            return graph_metadata(get_control_plane(), team_id)
+            return graph_metadata(get_control_plane(), org_id)
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN properties(g) "
+            "MATCH (g:Graph {org_id:$tid}) RETURN properties(g) "
             "ORDER BY CASE g.kind WHEN 'default' THEN 0 ELSE 1 END, g.created_at",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         out = []
         for (props,) in rows:
             out.append({
                 "graph_id": props.get("id"),
-                "team_id": props.get("team_id"),
+                "org_id": props.get("org_id"),
                 "name": props.get("name"),
                 "kind": props.get("kind", "custom"),
                 "namespace": props.get("namespace"),
@@ -15523,19 +15523,19 @@ class TortoiseSDK:
                 # with the Supabase seam, which always emits "active"; deep
                 # review P2: a consumer filtering status=='active' must not
                 # silently drop legacy selfhost graphs). recording None =
-                # inherit team default.
+                # inherit org default.
                 "status": props.get("status") or "active",
                 "recording": props.get("recording"),
             })
         return out
 
-    def graph_count(self, team_id: str) -> int:
-        """Graph count for a team — the quota meter's source (C1 #2110).
+    def graph_count(self, org_id: str) -> int:
+        """Graph count for an org — the quota meter's source (C1 #2110).
 
         Supabase mode: 1 (the default graph — always present, derived from
         teams.graph_name) + count(custom active). Deleted rows excluded
         (delete frees the slot; v1 has no archive). Registry mode: the
-        existing MATCH (team_create :12055 creates the kind='default' node,
+        existing MATCH (org_create :12055 creates the kind='default' node,
         so the registry count already includes the default). C2 (#2111):
         registry branch now filters status <> 'deleted' (soft-delete must
         free the slot — E2E-8; pre-C1 nodes without the prop count as
@@ -15549,7 +15549,7 @@ class TortoiseSDK:
             try:
                 rows = cp.query(
                     "graphs", select=["id"],
-                    filters=[("team_id", "eq", team_id),
+                    filters=[("org_id", "eq", org_id),
                              ("kind", "eq", "custom"),
                              ("status", "eq", "active")],
                 )
@@ -15562,13 +15562,13 @@ class TortoiseSDK:
             return 1 + len(rows)
         reg = self._get_registry()
         return reg.query(
-            "MATCH (g:Graph {team_id:$tid}) "
+            "MATCH (g:Graph {org_id:$tid}) "
             "WHERE g.status IS NULL OR g.status <> 'deleted' "
             "RETURN count(g)",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set[0][0]
 
-    def graph_delete(self, team_id: str, graph_id: str) -> bool:
+    def graph_delete(self, org_id: str, graph_id: str) -> bool:
         """Soft-delete a Graph node (status='deleted' tombstone — the v1
         lifecycle, C2 #2111). Returns True when a non-default node was
         tombstoned; False when unknown OR the default (callers map to
@@ -15580,8 +15580,8 @@ class TortoiseSDK:
         """
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
-            params={"gid": graph_id, "tid": team_id},
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.kind",
+            params={"gid": graph_id, "tid": org_id},
         ).result_set
         if not rows:
             return False
@@ -15589,14 +15589,14 @@ class TortoiseSDK:
             return False
         from datetime import datetime
         reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) "
             "SET g.status = 'deleted', g.deleted_at = $ts",
-            params={"gid": graph_id, "tid": team_id,
+            params={"gid": graph_id, "tid": org_id,
                     "ts": datetime.now(UTC).isoformat()},
         )
         return True
 
-    def graph_restore(self, team_id: str, graph_id: str) -> bool:
+    def graph_restore(self, org_id: str, graph_id: str) -> bool:
         """#2304 trash restore: flip a tombstoned custom node back to active
         and clear the deletion stamp. Returns False when nothing matched
         (unknown / active / default / ALREADY PURGED — callers 404/403/410).
@@ -15609,27 +15609,27 @@ class TortoiseSDK:
         # between any pre-read and this write matches 0 nodes, so a purge
         # can never be clobbered by a restore. Returns whether it flipped.
         res = reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) "
             "WHERE g.status = 'deleted' AND g.purged_at IS NULL "
             "AND coalesce(g.kind, 'custom') <> 'default' "
             "SET g.status = 'active' REMOVE g.deleted_at, g.purged_at, "
             "g.purged_residual RETURN count(g)",
-            params={"gid": graph_id, "tid": team_id},
+            params={"gid": graph_id, "tid": org_id},
         ).result_set
         return bool(res and int(res[0][0]) > 0)
 
-    def trash_graphs(self, team_id: str) -> list[dict]:
-        """#2304: tombstoned custom nodes of a team (the trash list) — the
+    def trash_graphs(self, org_id: str) -> list[dict]:
+        """#2304: tombstoned custom nodes of an org (the trash list) — the
         owner restore surface. ``deleted_at`` absent = legacy tombstone
         (predates the prop; purge treats it as past-grace). Purged nodes
         (purged_at set) are excluded — data is physically gone."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {team_id:$tid, status:'deleted'}) "
+            "MATCH (g:Graph {org_id:$tid, status:'deleted'}) "
             "WHERE coalesce(g.kind, 'custom') <> 'default' "
             "AND g.purged_at IS NULL "
             "RETURN g.id, g.name, g.namespace, g.deleted_at",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         return [
             {"graph_id": r[0], "name": r[1], "namespace": r[2],
@@ -15637,24 +15637,24 @@ class TortoiseSDK:
             for r in rows
         ]
 
-    def graph_set_recording(self, team_id: str, graph_id: str,
+    def graph_set_recording(self, org_id: str, graph_id: str,
                             value: bool | None) -> bool:
         """C6 #2115: set the session_recording override on a Graph node.
 
         ``value`` True/False = explicit override; None = remove the override
-        (FalkorDB SET null removes the prop → inherit team default, #1927
+        (FalkorDB SET null removes the prop → inherit org default, #1927
         default-ON preserved). Resolves the literal ``default`` id to the
-        team's kind='default' node (the default graph IS graph 0 — settable
+        org's kind='default' node (the default graph IS graph 0 — settable
         per epic §6.3); real gids match directly. Returns True when the node
         was found (override written/cleared), False on unknown graph —
         callers map to 404."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, "
             "coalesce(g.status, 'active')",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
-        # The literal ``default`` id maps to the team's kind='default' node
+        # The literal ``default`` id maps to the org's kind='default' node
         # (mode-agnostic callers use either); any other id must match a real
         # node exactly. Soft-deleted nodes (status='deleted') are NOT
         # patchable — treat as unknown (mirror list_graphs' tombstone skip).
@@ -15668,24 +15668,24 @@ class TortoiseSDK:
         if node is None:
             return False
         reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.recording = $v",
-            params={"gid": node, "tid": team_id, "v": value},
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.recording = $v",
+            params={"gid": node, "tid": org_id, "v": value},
         )
         return True
 
-    def graph_key_ids(self, team_id: str, graph_id: str) -> list[str]:
+    def graph_key_ids(self, org_id: str, graph_id: str) -> list[str]:
         """APIKey node ids bound to a graph — the delete-cascade source
         (every key dies with the graph, E2E-8). Revoked or not — the
         cascade must revoke rows that are somehow still active AND clean
         up revoked ones (idempotent)."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) RETURN k.id",
-            params={"tid": team_id, "gid": graph_id},
+            "MATCH (k:APIKey {org_id:$tid, graph_id:$gid}) RETURN k.id",
+            params={"tid": org_id, "gid": graph_id},
         ).result_set
         return [r[0] for r in rows]
 
-    def graph_active_key_count(self, team_id: str, graph_id: str) -> int:
+    def graph_active_key_count(self, org_id: str, graph_id: str) -> int:
         """ACTIVE (non-revoked) APIKey nodes bound to a graph — the
         key_count source for GET /v1/graphs (parity with the Supabase
         count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
@@ -15702,13 +15702,13 @@ class TortoiseSDK:
         they stay listable + revocable via the unfiltered key list."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) "
+            "MATCH (k:APIKey {org_id:$tid, graph_id:$gid}) "
             "WHERE k.revoked_at IS NULL RETURN count(k)",
-            params={"tid": team_id, "gid": graph_id},
+            params={"tid": org_id, "gid": graph_id},
         ).result_set
         return int(rows[0][0]) if rows else 0
 
-    def graph_set_name(self, team_id: str, graph_id: str,
+    def graph_set_name(self, org_id: str, graph_id: str,
                        name: str) -> bool:
         """#2701 — rename a graph's DISPLAY name on its registry Graph node.
 
@@ -15716,7 +15716,7 @@ class TortoiseSDK:
         storage key) are untouched, so a rename never orphans points/keys
         (the default graph is renameable too — graph 0's node carries
         ``name`` as a label distinct from ``namespace``). Resolves the
-        literal ``default`` id to the team's kind='default' node (mode-
+        literal ``default`` id to the org's kind='default' node (mode-
         agnostic callers use either); real gids match directly. Returns
         True when the node was found (name written), False on unknown
         graph — callers map to 404. Soft-deleted nodes (status='deleted')
@@ -15724,9 +15724,9 @@ class TortoiseSDK:
         tombstone skip + graph_set_recording)."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, "
             "coalesce(g.status, 'active')",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         if graph_id == "default":
             node = next((r[0] for r in rows
@@ -15738,37 +15738,37 @@ class TortoiseSDK:
         if node is None:
             return False
         reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.name = $name",
-            params={"gid": node, "tid": team_id, "name": name},
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.name = $name",
+            params={"gid": node, "tid": org_id, "name": name},
         )
         return True
 
-    def team_get(self, team_id: str) -> dict | None:
-        """Get a team by ID. Returns None if not found."""
+    def org_get(self, org_id: str) -> dict | None:
+        """Get an org by ID. Returns None if not found."""
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
-            params={"id": team_id},
+            params={"id": org_id},
         ).result_set
         return rows[0][0] if rows else None
 
-    def team_list(self) -> list[dict]:
-        """List all teams."""
+    def org_list(self) -> list[dict]:
+        """List all orgs."""
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (t:Team) RETURN properties(t) ORDER BY t.createdAt"
         ).result_set
         return [r[0] for r in rows]
 
-    def team_update(self, team_id: str, **fields) -> dict:
-        """Update mutable team fields."""
+    def org_update(self, org_id: str, **fields) -> dict:
+        """Update mutable org fields."""
         from .exceptions import ControlPlaneError
         allowed = {
             "name", "tier", "stripe_customer_id", "subscription_id",
             "backup_enabled", "max_users", "max_graphs",
             # #329 relief path: quota limits settable via the control plane so
-            # a team at cap can be upgraded (no REST surface exists yet — the
-            # fields are SDK/registry-level; get_current_team honors them).
+            # an org at cap can be upgraded (no REST surface exists yet — the
+            # fields are SDK/registry-level; get_current_org honors them).
             "max_points", "max_api_keys", "max_sessions",
         }
         invalid = set(fields.keys()) - allowed
@@ -15777,26 +15777,26 @@ class TortoiseSDK:
         reg = self._get_registry()
         reg.query(
             "MATCH (t:Team {id:$id}) SET t += $fields",
-            params={"id": team_id, "fields": fields},
+            params={"id": org_id, "fields": fields},
         )
-        self._audit(team_id, None, "team_update", resource_type="team",
-                     resource_id=team_id)
-        return self.team_get(team_id) or {}
+        self._audit(org_id, None, "team_update", resource_type="team",
+                     resource_id=org_id)
+        return self.org_get(org_id) or {}
 
-    def team_delete(self, team_id: str, *, confirmation: str) -> dict:
-        """Delete a team and all associated control-plane entities.
+    def org_delete(self, org_id: str, *, confirmation: str) -> dict:
+        """Delete an org and all associated control-plane entities.
 
         Cascading: Membership, APIKey, Invitation nodes are deleted.
         Tenant graphs are dropped (best-effort — FalkorDBLite may skip).
         Postgres audit_events are preserved (immutable).
 
-        Requires confirmation matching the team name.
+        Requires confirmation matching the org name.
         """
         from .exceptions import ControlPlaneError
-        team = self.team_get(team_id)
-        if team is None:
-            raise ControlPlaneError(f"Team {team_id!r} not found")
-        if confirmation != team.get("name", ""):
+        org = self.org_get(org_id)
+        if org is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
+        if confirmation != org.get("name", ""):
             raise ControlPlaneError(
                 "Confirmation must match team name exactly"
             )
@@ -15804,24 +15804,24 @@ class TortoiseSDK:
         reg = self._get_registry()
         # Cascade delete: Membership, APIKey, Invitation
         reg.query(
-            "MATCH (m:Membership {team_id:$tid}) DETACH DELETE m",
-            params={"tid": team_id},
+            "MATCH (m:Membership {org_id:$tid}) DETACH DELETE m",
+            params={"tid": org_id},
         )
         reg.query(
-            "MATCH (k:APIKey {team_id:$tid}) DETACH DELETE k",
-            params={"tid": team_id},
+            "MATCH (k:APIKey {org_id:$tid}) DETACH DELETE k",
+            params={"tid": org_id},
         )
         reg.query(
-            "MATCH (i:Invitation {team_id:$tid}) DETACH DELETE i",
-            params={"tid": team_id},
+            "MATCH (i:Invitation {org_id:$tid}) DETACH DELETE i",
+            params={"tid": org_id},
         )
         reg.query(
             "MATCH (t:Team {id:$id}) DETACH DELETE t",
-            params={"id": team_id},
+            params={"id": org_id},
         )
 
         # Best-effort tenant graph deletion
-        graph_name = team.get("graph_name", f"team_{team.get('name', '')}")
+        graph_name = org.get("graph_name", f"org_{org.get('name', '')}")
         proj = self._get_proj()
         try:
             # #2163: proj.db (falkordb.FalkorDB on every lane) has NO
@@ -15842,23 +15842,23 @@ class TortoiseSDK:
                 _logger.debug("Failed to delete tenant graph %s — skipping",
                               graph_name)
 
-        self._audit(team_id, None, "team_delete", resource_type="team",
-                     resource_id=team_id)
-        return {"deleted": True, "team_id": team_id}
+        self._audit(org_id, None, "team_delete", resource_type="team",
+                     resource_id=org_id)
+        return {"deleted": True, "org_id": org_id}
 
-    def migrate_teams_to_registry(self) -> dict:
-        """One-shot: move Team nodes from tortoise graph to control_plane graph.
+    def migrate_orgs_to_registry(self) -> dict:
+        """One-shot: move Org nodes from tortoise graph to control_plane graph.
 
         Idempotent — running twice produces the same state.
-        Existing Team nodes in the tortoise graph are marked as outdated.
+        Existing Org nodes in the tortoise graph are marked as outdated.
         """
         proj = self._get_proj()
         reg = self._get_registry()
-        teams = proj.g.query("MATCH (t:Team) RETURN properties(t)").result_set
+        orgs = proj.g.query("MATCH (t:Team) RETURN properties(t)").result_set
         migrated, skipped = 0, 0
-        for row in teams:
-            team = row[0]
-            name = team.get("name", "")
+        for row in orgs:
+            org = row[0]
+            name = org.get("name", "")
             # Check if already in registry
             existing = reg.query(
                 "MATCH (t:Team {name:$name}) RETURN count(t) > 0",
@@ -15871,11 +15871,11 @@ class TortoiseSDK:
                 "CREATE (t:Team {id:$id, name:$name, api_key:$key, "
                 "graph_name:$gn, createdAt:$now})",
                 params={
-                    "id": team.get("id", ulid()),
+                    "id": org.get("id", ulid()),
                     "name": name,
-                    "key": team.get("api_key", ""),
-                    "gn": team.get("graph_name", f"team_{name}"),
-                    "now": team.get("createdAt", ""),
+                    "key": org.get("api_key", ""),
+                    "gn": org.get("graph_name", f"org_{name}"),
+                    "now": org.get("createdAt", ""),
                 },
             )
             migrated += 1
@@ -15885,11 +15885,11 @@ class TortoiseSDK:
 
     # ── Control Plane: Membership CRUD ─────────────────────────────
 
-    def membership_create(self, team_id: str, user_id: str, role: str) -> dict:
-        """Add a user to a team with a given role.
+    def membership_create(self, org_id: str, user_id: str, role: str) -> dict:
+        """Add a user to an org with a given role.
 
-        Validates role, team existence, and max_users constraint.
-        Creates BELONGS_TO edge to Team.
+        Validates role, org existence, and max_users constraint.
+        Creates BELONGS_TO edge to Org.
         """
         from datetime import datetime, timezone  # noqa: I001
         from .exceptions import ControlPlaneError
@@ -15899,18 +15899,18 @@ class TortoiseSDK:
                 f"Invalid role {role!r}. Must be 'owner', 'admin', or 'member'."
             )
 
-        team = self.team_get(team_id)
-        if team is None:
-            raise ControlPlaneError(f"Team {team_id!r} not found")
+        org = self.org_get(org_id)
+        if org is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
 
         # Check max_users constraint
-        max_users = team.get("max_users")
+        max_users = org.get("max_users")
         if max_users is not None:
             reg = self._get_registry()
             count = reg.query(
-                "MATCH (m:Membership {team_id:$tid}) "
+                "MATCH (m:Membership {org_id:$tid}) "
                 "WHERE m.status = 'active' RETURN count(m)",
-                params={"tid": team_id},
+                params={"tid": org_id},
             ).result_set[0][0]
             if count >= max_users:
                 raise ControlPlaneError(
@@ -15921,21 +15921,21 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         reg = self._get_registry()
         reg.query(
-            "CREATE (m:Membership {id:$id, user_id:$uid, team_id:$tid, "
+            "CREATE (m:Membership {id:$id, user_id:$uid, org_id:$tid, "
             "role:$role, status:'active', joinedAt:$now, created_at:$now})",
-            params={"id": mid, "uid": user_id, "tid": team_id,
+            params={"id": mid, "uid": user_id, "tid": org_id,
                     "role": role, "now": now},
         )
         # Create BELONGS_TO edge
         reg.query(
             "MATCH (m:Membership {id:$mid}), (t:Team {id:$tid}) "
             "CREATE (m)-[:BELONGS_TO]->(t)",
-            params={"mid": mid, "tid": team_id},
+            params={"mid": mid, "tid": org_id},
         )
 
-        self._audit(team_id, user_id, "membership_create",
+        self._audit(org_id, user_id, "membership_create",
                      resource_type="membership", resource_id=mid)
-        return {"id": mid, "team_id": team_id, "user_id": user_id, "role": role}
+        return {"id": mid, "org_id": org_id, "user_id": user_id, "role": role}
 
     def membership_get(self, membership_id: str) -> dict | None:
         """Get a membership by ID."""
@@ -15946,12 +15946,12 @@ class TortoiseSDK:
         ).result_set
         return rows[0][0] if rows else None
 
-    def membership_list(self, team_id: str) -> list[dict]:
-        """List all memberships for a team."""
+    def membership_list(self, org_id: str) -> list[dict]:
+        """List all memberships for an org."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (m:Membership {team_id:$tid}) RETURN properties(m)",
-            params={"tid": team_id},
+            "MATCH (m:Membership {org_id:$tid}) RETURN properties(m)",
+            params={"tid": org_id},
         ).result_set
         return [r[0] for r in rows]
 
@@ -15971,7 +15971,7 @@ class TortoiseSDK:
             "MATCH (m:Membership {id:$id}) SET m.role = $role",
             params={"id": membership_id, "role": new_role},
         )
-        self._audit(m["team_id"], m["user_id"], "membership_update_role",
+        self._audit(m["org_id"], m["user_id"], "membership_update_role",
                      resource_type="membership", resource_id=membership_id)
         return self.membership_get(membership_id) or {}
 
@@ -15985,7 +15985,7 @@ class TortoiseSDK:
             "MATCH (m:Membership {id:$id}) DETACH DELETE m",
             params={"id": membership_id},
         )
-        self._audit(m["team_id"], m["user_id"], "membership_delete",
+        self._audit(m["org_id"], m["user_id"], "membership_delete",
                      resource_type="membership", resource_id=membership_id)
         return {"deleted": True, "membership_id": membership_id}
 
@@ -16002,7 +16002,7 @@ class TortoiseSDK:
         on key_prefix (key[:10] = "tt_<8 hex chars>"). The key_prefix index
         (created in _ensure_registry_indexes) makes this O(1) per lookup.
         Falls back to full scan for legacy provision_tenant keys whose
-        key_prefix was set to team_id[:8] (which won't match token[:10]).
+        key_prefix was set to org_id[:8] (which won't match token[:10]).
         """
         from tortoise.auth import API_KEY_PREFIXES, verify_api_key
         reg = self._get_registry()
@@ -16022,7 +16022,7 @@ class TortoiseSDK:
             if out:
                 return out
             # Fall through to full scan for legacy provision_tenant keys
-            # (key_prefix = team_id[:8] won't match token[:10] = "tt_<8 hex>")
+            # (key_prefix = org_id[:8] won't match token[:10] = "tt_<8 hex>")
 
         rows = reg.query(
             f"MATCH (n:{label}) RETURN n.{prop}, properties(n)"
@@ -16033,7 +16033,7 @@ class TortoiseSDK:
                 out.append(props)
         return out
 
-    def apikey_create(self, team_id: str, created_by: str,
+    def apikey_create(self, org_id: str, created_by: str,
                       *, graph_id: str | None = None,
                       scopes: list | None = None,
                       created_by_key_id: str | None = None,
@@ -16042,12 +16042,12 @@ class TortoiseSDK:
                       name: str | None = None,
                       created_via: str | None = None,
                       expires_at: str | None = None) -> dict:
-        """Generate an API key for a team.
+        """Generate an API key for an org.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
 
         C1 (#2110) tenancy kwargs (all optional — absent = legacy shape,
-        back-compat for existing callers): graph_id (NULL = team-wide key
+        back-compat for existing callers): graph_id (NULL = org-wide key
         → default graph), scopes (FLAT allowlist, default []), mint lineage
         (created_by_key_id + delegation_depth; 0 = minted cannot-escalate,
         NULL = owner-minted). C2 (#2111): ``prefix`` (default "tt_") lets
@@ -16087,9 +16087,9 @@ class TortoiseSDK:
                     _ESCALATION_SCOPES & set(scopes))) + ".",
             )
 
-        team = self.team_get(team_id)
-        if team is None:
-            raise ControlPlaneError(f"Team {team_id!r} not found")
+        org = self.org_get(org_id)
+        if org is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
 
         api_key = f"{prefix}{uuid.uuid4().hex}"
         key_hash = hash_api_key(api_key)
@@ -16103,7 +16103,7 @@ class TortoiseSDK:
         # with safe defaults). C3 (#2112): name/created_via ride the same
         # optional-props pattern.
         extra = ""
-        params = {"id": kid, "tid": team_id, "kh": key_hash,
+        params = {"id": kid, "tid": org_id, "kh": key_hash,
                   "kp": key_prefix, "cb": created_by, "now": now}
         if graph_id is not None:
             extra += ", graph_id:$gid"; params["gid"] = graph_id  # noqa: E702 (baseline #1503)
@@ -16120,7 +16120,7 @@ class TortoiseSDK:
         if expires_at is not None:
             extra += ", expires_at:$ea"; params["ea"] = expires_at  # noqa: E702 (baseline #1503)
         reg.query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"
             + (extra or "") + "})",
             params=params,
@@ -16129,28 +16129,28 @@ class TortoiseSDK:
         reg.query(
             "MATCH (k:APIKey {id:$kid}), (t:Team {id:$tid}) "
             "CREATE (k)-[:BELONGS_TO]->(t)",
-            params={"kid": kid, "tid": team_id},
+            params={"kid": kid, "tid": org_id},
         )
 
-        self._audit(team_id, created_by, "apikey_create",
+        self._audit(org_id, created_by, "apikey_create",
                      resource_type="apikey", resource_id=kid)
         return {"id": kid, "key_prefix": key_prefix, "api_key": api_key,
-                "team_id": team_id, "created_at": now}
+                "org_id": org_id, "created_at": now}
 
-    def apikey_list(self, team_id: str) -> list[dict]:
-        """List API keys for a team (no plaintext or hashes).
+    def apikey_list(self, org_id: str) -> list[dict]:
+        """List API keys for an org (no plaintext or hashes).
 
         C1 (#2110): rows gain the tenancy props (graph_id/scopes/
         delegation_depth/created_by_key_id) — absent on pre-C1 nodes →
-        None-safe defaults (graph_id None = team-wide, scopes [] = legacy).
+        None-safe defaults (graph_id None = org-wide, scopes [] = legacy).
         """
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:$tid}) "
+            "MATCH (k:APIKey {org_id:$tid}) "
             "RETURN k.id, k.key_prefix, k.created_by, k.created_at, "
             "k.last_used_at, k.revoked_at, "
             "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         keys = []
         for r in rows:
@@ -16167,7 +16167,7 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at, k.team_id",
+            "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at, k.org_id",
             params={"id": key_id},
         ).result_set
         if not rows:
@@ -16186,9 +16186,9 @@ class TortoiseSDK:
     def apikey_verify(self, key_plaintext: str) -> dict | None:
         """Verify an API key against stored hashes.
 
-        Returns {team_id, key_id} if valid, None if not found or revoked.
+        Returns {org_id, key_id} if valid, None if not found or revoked.
         C2 (#2111): also returns delegation_depth + scopes when present on
-        the node (MCP's TeamResolutionMiddleware rejects deleg=0 minted
+        the node (MCP's OrgResolutionMiddleware rejects deleg=0 minted
         keys — the REST surface is gated; MCP must not be the fail-open
         lane for handed-out per-graph keys). Uses salted-hash verification
         (per-key salt means exact-hash lookup never matches — see #130,
@@ -16201,8 +16201,8 @@ class TortoiseSDK:
         set on the node) also resolves graph_id + graph_namespace (the
         Graph node's namespace) — the SAME C1 tenancy fields REST's
         registry lane and the Supabase lane (resolve_api_key) carry, so
-        MCP's TeamResolutionMiddleware routes a per-graph key to ITS graph
-        and the team-surface tool gates can reject it. Missing/drifted
+        MCP's OrgResolutionMiddleware routes a per-graph key to ITS graph
+        and the org-surface tool gates can reject it. Missing/drifted
         Graph node → namespace None (graph-delete revokes the graph's keys,
         C3, so a real deleted graph never reaches here) — mirrors REST's
         registry lane, which also resolves None without failing the hash
@@ -16228,8 +16228,8 @@ class TortoiseSDK:
             # (graph_id on the node) ALSO resolves graph_id/graph_namespace
             # (the Graph node's namespace) — the same C1 tenancy fields REST's
             # registry lane and the Supabase lane carry, so MCP's
-            # TeamResolutionMiddleware routes the key to ITS graph and the
-            # team-surface tool gates can reject it. A missing Graph node →
+            # OrgResolutionMiddleware routes the key to ITS graph and the
+            # org-surface tool gates can reject it. A missing Graph node →
             # namespace None (graph-delete revokes the graph's keys — C3 — so
             # a real deleted graph never reaches here; mirrors REST's registry
             # lane, which resolves None without failing the hash auth).
@@ -16237,13 +16237,13 @@ class TortoiseSDK:
             graph_id = m.get("graph_id")
             if graph_id:
                 g_rows = self._get_registry().query(
-                    "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+                    "MATCH (g:Graph {id:$gid, org_id:$tid}) "
                     "RETURN g.namespace",
-                    params={"gid": graph_id, "tid": m["team_id"]},
+                    params={"gid": graph_id, "tid": m["org_id"]},
                 ).result_set
                 graph_namespace = (
                     g_rows[0][0] if (g_rows and g_rows[0][0]) else None)
-            return {"team_id": m["team_id"], "key_id": m["id"],
+            return {"org_id": m["org_id"], "key_id": m["id"],
                     "graph_id": graph_id,
                     "graph_namespace": graph_namespace,
                     "delegation_depth": delegation_depth,
@@ -16281,7 +16281,7 @@ class TortoiseSDK:
             return None
         # [SECOND-MODEL-GATE] P2: exact-match on the deterministic lookup_key
         # (SHA-256+pepper, stored at mint) FIRST — avoids the O(keys) PBKDF2
-        # full-scan per probe (a distributed-IP DoS vector on multi-team
+        # full-scan per probe (a distributed-IP DoS vector on multi-org
         # selfhosts). PBKDF2 verify below is defense-in-depth (the minted
         # node carries both hashes).
         from tortoise.auth import lookup_hash as _lookup_hash
@@ -16299,14 +16299,14 @@ class TortoiseSDK:
         return matches[0] if matches else None
 
     def signup_token_recover(self, token_plaintext: str) -> dict:
-        """Keyless recovery: mint a NEW key on the token's team.
+        """Keyless recovery: mint a NEW key on the token's org.
 
         Registry parity for recover_team_key (Supabase lane). Cap + revoke-
         oldest-non-bootstrap (#750.10 semantics) mirror the SQL; created_by
         is token-attributable ('st_' + left(token_hash, 12)) — never a
-        caller-supplied identity. Returns {api_key, team_id, team_name,
+        caller-supplied identity. Returns {api_key, org_id, org_name,
         tier, graph_name}. Raises ControlPlaneError (→ uniform 422) when the
-        token is unknown/revoked or the team is soft-deleted.
+        token is unknown/revoked or the org is soft-deleted.
         """
         from datetime import datetime, timezone as _tz  # noqa: I001
         from .exceptions import ControlPlaneError
@@ -16314,9 +16314,9 @@ class TortoiseSDK:
         node = self.signup_token_lookup(token_plaintext)
         if node is None:
             raise ControlPlaneError("signup token not found or revoked")
-        team_id = node.get("team_id") or ""
-        team = self.team_get(team_id)
-        if team is None or team.get("deleted_at"):
+        org_id = node.get("org_id") or ""
+        org = self.org_get(org_id)
+        if org is None or org.get("deleted_at"):
             raise ControlPlaneError("signup token team deleted")
 
         import uuid  # noqa: I001
@@ -16331,13 +16331,13 @@ class TortoiseSDK:
             node = self.signup_token_lookup(token_plaintext)
             if node is None:
                 raise ControlPlaneError("signup token not found or revoked")
-            if node.get("team_id") != team_id:
+            if node.get("org_id") != org_id:
                 raise ControlPlaneError("signup token not found or revoked")
             # cap: active non-bootstrap keys; insert FIRST, re-count AFTER,
             # revoke-oldest only when genuinely over cap ([SECOND-MODEL-GATE]
             # P2: mirrors the SQL's self-healing ordering — an unlocked race
             # still converges to <= cap, unlike count-then-revoke-then-insert).
-            max_keys = int(team.get("max_api_keys")
+            max_keys = int(org.get("max_api_keys")
                            or self._default_max_api_keys())
             kid = ulid()
             # C1 (#2110) decision record: the recovery-mint is NOT extended
@@ -16347,10 +16347,10 @@ class TortoiseSDK:
             # intended (E2E-5 zero behavior shift); C3 must NOT assume minted
             # keys are all deleg=0 — recovery keys are owner-class.
             reg.query(
-                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:$cb, created_via:'recovery', "
                 "created_at:$now, expires_at:null})",
-                params={"id": kid, "tid": team_id, "kh": key_hash,
+                params={"id": kid, "tid": org_id, "kh": key_hash,
                         "kp": api_key[:10], "cb": "st_" + token_hash[:12],
                         "now": now_iso},
             )
@@ -16361,39 +16361,39 @@ class TortoiseSDK:
             # let the oldest-LIVE key be the revoke collateral for expired
             # rows above the cap; matches the session-key recovery lanes).
             rows = reg.query(
-                "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                 "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                 "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
-                params={"tid": team_id, "now": now_iso},
+                params={"tid": org_id, "now": now_iso},
             ).result_set
             if len(rows) > max_keys and rows:
                 reg.query(
                     "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
                     params={"id": rows[0][0], "now": now_iso},
                 )
-        self._audit(team_id, "st_" + token_hash[:12], "apikey_create",
+        self._audit(org_id, "st_" + token_hash[:12], "apikey_create",
                      resource_type="apikey", resource_id=kid)
-        return {"api_key": api_key, "team_id": team_id,
-                "team_name": team.get("name"), "tier": team.get("tier") or "free",
-                "graph_name": team.get("graph_name") or f"team_{team_id}"}
+        return {"api_key": api_key, "org_id": org_id,
+                "org_name": org.get("name"), "tier": org.get("tier") or "free",
+                "graph_name": org.get("graph_name") or f"org_{org_id}"}
 
-    def signup_token_revoke(self, token_plaintext: str, team_id: str) -> dict:
+    def signup_token_revoke(self, token_plaintext: str, org_id: str) -> dict:
         """Revoke a signup token (set revoked_at) — registry parity (#1715).
 
-        Team-scoped: the SignupToken node's team_id must match ``team_id`` or
-        the revoke is refused (a caller can only kill their own team's
-        token). Idempotent: an unknown / other-team / already-revoked token
+        Org-scoped: the SignupToken node's org_id must match ``org_id`` or
+        the revoke is refused (a caller can only kill their own org's
+        token). Idempotent: an unknown / other-org / already-revoked token
         is a no-op, never an error. Returns
-        ``{"team_id": str, "status": "revoked" | "already" |
+        ``{"org_id": str, "status": "revoked" | "already" |
         "not_found" | "not_owned"}`` — the endpoint maps status to
         200/404/403 (the no-oracle uniform-422 contract is preserved for
         malformed tokens upstream; an authenticated caller probing a valid
-        token learns only whether it is THEIR team's).
+        token learns only whether it is THEIR org's).
 
-        #1754: (a) the revoke WRITE is atomically team-scoped (parity with
-        the SQL lane's UPDATE ... AND team_id = p_team_id) — the pre-read
-        can never be raced by a foreign-team node; (b) a node carrying only
+        #1754: (a) the revoke WRITE is atomically org-scoped (parity with
+        the SQL lane's UPDATE ... AND org_id = p_org_id) — the pre-read
+        can never be raced by a foreign-org node; (b) a node carrying only
         token_hash (no lookup_key) is found via the PBKDF2 fallback (mirror
         signup_token_lookup) so it is REVOCABLE, not just recoverable.
         """
@@ -16412,32 +16412,32 @@ class TortoiseSDK:
             matches = list(self._verify_hashed_lookup(
                 "SignupToken", "token_hash", token_plaintext))
         if not matches:
-            return {"team_id": team_id, "status": "not_found"}
+            return {"org_id": org_id, "status": "not_found"}
         node = matches[0]
-        if node.get("team_id") != team_id:
-            return {"team_id": team_id, "status": "not_owned"}
+        if node.get("org_id") != org_id:
+            return {"org_id": org_id, "status": "not_owned"}
         if node.get("revoked_at") is not None:
-            return {"team_id": team_id, "status": "already"}
+            return {"org_id": org_id, "status": "already"}
         from datetime import datetime, timezone as _tz  # noqa: I001
         now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
-        # #1754 (a): the MATCH is team-scoped so the write itself can never
-        # revoke a foreign team's node. Hash-only fallback nodes (no
+        # #1754 (a): the MATCH is org-scoped so the write itself can never
+        # revoke a foreign org's node. Hash-only fallback nodes (no
         # lookup_key) are targeted by their stored salted hash — unique per
-        # token (random salt per mint) and team-scoped.
+        # token (random salt per mint) and org-scoped.
         if node.get("lookup_key"):
             self._get_registry().query(
-                "MATCH (n:SignupToken {lookup_key:$lk, team_id:$tid}) "
+                "MATCH (n:SignupToken {lookup_key:$lk, org_id:$tid}) "
                 "SET n.revoked_at = $now",
-                params={"lk": lk, "tid": team_id, "now": now_iso},
+                params={"lk": lk, "tid": org_id, "now": now_iso},
             )
         else:
             self._get_registry().query(
-                "MATCH (n:SignupToken {token_hash:$th, team_id:$tid}) "
+                "MATCH (n:SignupToken {token_hash:$th, org_id:$tid}) "
                 "SET n.revoked_at = $now",
-                params={"th": node["token_hash"], "tid": team_id,
+                params={"th": node["token_hash"], "tid": org_id,
                         "now": now_iso},
             )
-        return {"team_id": team_id, "status": "revoked"}
+        return {"org_id": org_id, "status": "revoked"}
 
     def _default_max_api_keys(self) -> int:
         from tortoise.pricing import tier_limits
@@ -16445,7 +16445,7 @@ class TortoiseSDK:
 
     # ── Control Plane: Invitation CRUD ─────────────────────────────
 
-    def invitation_create(self, team_id: str, email: str, role: str,
+    def invitation_create(self, org_id: str, email: str, role: str,
                           created_by: str) -> dict:
         """Create an invitation with 7-day expiry.
 
@@ -16456,21 +16456,21 @@ class TortoiseSDK:
         from tortoise.auth import hash_api_key
         from .exceptions import ControlPlaneError
 
-        team = self.team_get(team_id)
-        if team is None:
-            raise ControlPlaneError(f"Team {team_id!r} not found")
+        org = self.org_get(org_id)
+        if org is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
         if role not in ("owner", "admin"):
             raise ControlPlaneError(
                 f"Invalid role {role!r}. Must be 'owner' or 'admin'."
             )
 
-        # Reject duplicate pending invitations for same email+team
+        # Reject duplicate pending invitations for same email+org
         reg = self._get_registry()
         dup = reg.query(
-            "MATCH (i:Invitation {team_id:$tid, email:$email}) "
+            "MATCH (i:Invitation {org_id:$tid, email:$email}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') "
             "RETURN count(i) > 0",
-            params={"tid": team_id, "email": email},
+            params={"tid": org_id, "email": email},
         ).result_set[0][0]
         if dup:
             raise ControlPlaneError(
@@ -16484,33 +16484,33 @@ class TortoiseSDK:
         expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # noqa: UP017
 
         reg.query(
-            "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, "
+            "CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, "
             "role:$role, token_hash:$th, created_by:$cb, "
             "created_at:$now, expires_at:$exp, accepted_at:null})",
-            params={"id": iid, "tid": team_id, "email": email,
+            params={"id": iid, "tid": org_id, "email": email,
                     "role": role, "th": token_hash, "cb": created_by,
                     "now": now, "exp": expires_at},
         )
-        # FOR_TEAM edge
+        # FOR_ORG edge
         reg.query(
             "MATCH (i:Invitation {id:$iid}), (t:Team {id:$tid}) "
             "CREATE (i)-[:FOR_TEAM]->(t)",
-            params={"iid": iid, "tid": team_id},
+            params={"iid": iid, "tid": org_id},
         )
 
-        self._audit(team_id, created_by, "invitation_create",
+        self._audit(org_id, created_by, "invitation_create",
                      resource_type="invitation", resource_id=iid)
         return {"id": iid, "email": email, "role": role,
                 "expires_at": expires_at, "token": token}
 
-    def invitation_list(self, team_id: str) -> list[dict]:
-        """List invitations for a team (no token hashes)."""
+    def invitation_list(self, org_id: str) -> list[dict]:
+        """List invitations for an org (no token hashes)."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (i:Invitation {team_id:$tid}) "
+            "MATCH (i:Invitation {org_id:$tid}) "
             "RETURN i.id, i.email, i.role, i.created_by, i.created_at, "
             "i.expires_at, i.accepted_at, i.status",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         invs = []
         for r in rows:
@@ -16560,15 +16560,15 @@ class TortoiseSDK:
         )
 
         membership = self.membership_create(
-            team_id=inv["team_id"],
+            org_id=inv["org_id"],
             user_id=user_id,
             role=inv.get("role", "admin"),
         )
 
-        self._audit(inv["team_id"], user_id, "invitation_accept",
+        self._audit(inv["org_id"], user_id, "invitation_accept",
                      resource_type="invitation", resource_id=invitation_id)
         return {"membership_id": membership["id"],
-                "team_id": inv["team_id"], "accepted_at": now_iso}
+                "org_id": inv["org_id"], "accepted_at": now_iso}
 
     def invitation_get_by_id(self, invitation_id: str) -> dict | None:
         """Get an invitation by its ULID."""
@@ -16592,7 +16592,7 @@ class TortoiseSDK:
             "MATCH (i:Invitation {id:$id}) SET i.status = 'revoked'",
             params={"id": invitation_id},
         )
-        self._audit(inv["team_id"], None, "invitation_revoke",
+        self._audit(inv["org_id"], None, "invitation_revoke",
                      resource_type="invitation", resource_id=invitation_id)
         return {"revoked": True, "invitation_id": invitation_id}
 
@@ -16618,21 +16618,21 @@ class TortoiseSDK:
             "MATCH (i:Invitation) "
             "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
             "AND (i.status IS NULL OR i.status <> 'expired') "
-            "RETURN i.id, i.team_id",
+            "RETURN i.id, i.org_id",
             params={"now": now},
         ).result_set
         deleted = 0
-        for iid, team_id in pending:
+        for iid, org_id in pending:
             try:
                 reg.query(
-                    "MATCH (m:Membership {team_id:$tid, user_id:$fake}) DELETE m",
-                    params={"tid": team_id, "fake": f"invite-{iid}"},
+                    "MATCH (m:Membership {org_id:$tid, user_id:$fake}) DELETE m",
+                    params={"tid": org_id, "fake": f"invite-{iid}"},
                 )
                 deleted += 1
             except Exception as _e:
                 _logger.warning(
                     "invite ghost-cleanup failed for %s on %s (%s)",
-                    iid, team_id, _e)
+                    iid, org_id, _e)
         reg.query(
             "MATCH (i:Invitation) "
             "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
@@ -16666,12 +16666,12 @@ class TortoiseSDK:
         rows = reg.query(
             "MATCH (m:Membership) WHERE m.user_id STARTS WITH 'invite-' "
             "OPTIONAL MATCH (i:Invitation {id: substring(m.user_id, 7)}) "
-            "RETURN m.user_id, m.team_id, properties(i)",
+            "RETURN m.user_id, m.org_id, properties(i)",
         ).result_set
         ghosts: list[tuple[str, str]] = []
-        for fake_uid, team_id, inv_props in rows:
+        for fake_uid, org_id, inv_props in rows:
             if inv_props is None:
-                ghosts.append((fake_uid, team_id))  # orphaned fake row
+                ghosts.append((fake_uid, org_id))  # orphaned fake row
                 continue
             node = dict(inv_props)
             consumed = node.get("accepted_at") is not None \
@@ -16679,14 +16679,14 @@ class TortoiseSDK:
             expired = node.get("expires_at") is not None \
                 and node["expires_at"] < now
             if consumed or expired:
-                ghosts.append((fake_uid, team_id))
+                ghosts.append((fake_uid, org_id))
         failed = 0
         if not dry_run:
-            for fake_uid, team_id in ghosts:
+            for fake_uid, org_id in ghosts:
                 try:
                     reg.query(
-                        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) DELETE m",
-                        params={"tid": team_id, "uid": fake_uid},
+                        "MATCH (m:Membership {org_id:$tid, user_id:$uid}) DELETE m",
+                        params={"tid": org_id, "uid": fake_uid},
                     )
                 except Exception as _e:
                     # best-effort, mirroring _delete_fake_invite_membership
@@ -16694,7 +16694,7 @@ class TortoiseSDK:
                     failed += 1
                     _logger.warning(
                         "invite ghost-cleanup failed for %s on %s (%s)",
-                        fake_uid, team_id, _e)
+                        fake_uid, org_id, _e)
         return {"found": len(rows), "ghosts": len(ghosts),
                 "deleted": 0 if dry_run else len(ghosts) - failed}
 
@@ -17022,7 +17022,7 @@ class TortoiseSDK:
         return self._get_entity(canonical_id)
 
     def _get_entity(self, id_val: str) -> dict:
-        # NOTE (issue #327): Session/APIKey/Team/Tag nodes are intentionally
+        # NOTE (issue #327): Session/APIKey/Org/Tag nodes are intentionally
         # excluded from entity resolution — only Point/Subject/Object/Document/
         # Event/Source resolve (index-backed union). On a cross-label id
         # collision the first _RESOLVE_BRANCHES match wins (Point priority) —
@@ -17060,7 +17060,7 @@ class TortoiseSDK:
                     "be set via props.")
         # NOTE (issue #327): like _get_entity, entity mutation covers only the
         # canonical labels (Point/Subject/Object/Document/Source/Event).
-        # Session/APIKey/Team/Tag nodes are intentionally NOT updated — legacy
+        # Session/APIKey/Org/Tag nodes are intentionally NOT updated — legacy
         # matched them via id/eventId but no caller relies on it.
         # Per-label indexed writes (id OR eventId — original predicate; no url).
         # UNION cannot carry SET, so run each branch sequentially (#327).
@@ -17075,7 +17075,7 @@ class TortoiseSDK:
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
         # NOTE (issue #327): deletion covers only canonical entity labels —
-        # Session/APIKey/Team/Tag nodes are intentionally NOT deleted (legacy
+        # Session/APIKey/Org/Tag nodes are intentionally NOT deleted (legacy
         # matched them by id/eventId; no caller relies on it).
         total = 0
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
@@ -20112,7 +20112,7 @@ class TortoiseSDK:
         proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
 
     def get_org_structure(self, subject_id: str) -> dict:
-        """Return organisational structure: members, roles, sub-teams."""
+        """Return organisational structure: members, roles, sub-orgs."""
         proj = self._get_proj()
         # Issue #327: labeled Subject start (id|name OR both indexed -> Index
         # Scan) then traverse outward; roles filters the source Subject p.
