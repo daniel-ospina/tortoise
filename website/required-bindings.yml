@@ -1,0 +1,83 @@
+# Required Cloudflare Pages bindings for the `premise-labs` project.
+#
+# WHY THIS FILE EXISTS (issue #3616)
+# ---------------------------------
+# #3501 shipped the BFF auth re-architecture without the `SESSIONS` D1 binding
+# that the code requires. The deploy succeeded, the workflow went green, and
+# production `/auth/start` returned `503 session_store_unavailable` for every
+# visitor — a total sign-in outage. The requirement had been written in a PR
+# body, which is not a gate.
+#
+# This file makes the requirement machine-readable so `deploy-pages.yml` can
+# verify it BEFORE deploying and fail loudly if it is unmet.
+#
+# Field meanings
+# --------------
+#   kind: required      the code cannot serve its purpose without this binding.
+#                       Preflight FAILS the deploy when it is absent.
+#         recommended   the code has a correct in-source default (or no caller
+#                       yet), so absence is not an outage — preflight WARNS.
+#   type: d1_databases | env_vars | kv_namespaces | r2_buckets
+#   envs: which deployment configs must carry it.
+#
+# Keep this list honest: adding a binding here without adding it to the project
+# will red the deploy, which is the intended direction of failure.
+
+project: premise-labs
+
+bindings:
+  # The session store. Without it every /auth/*, /welcome and /api/session
+  # request answers 503 — the #3616 outage.
+  - name: SESSIONS
+    kind: required
+    type: d1_databases
+    envs: [production, preview]
+    note: >-
+      Opaque session handles + auth_flows. Created 2026-09-16 as
+      tortoise-sessions (id c16d027e-8c66-4f3d-aeda-5772ea54e101).
+      Tables are created at runtime by ensureSchema / ensureFlowTable.
+
+  # Server-to-server Supabase calls (token exchange, refresh, profile lookup).
+  - name: SUPABASE_URL
+    kind: required
+    type: env_vars
+    envs: [production]
+    note: Supabase project URL, used by _shared/auth/supabase.ts.
+
+  - name: SUPABASE_ANON_KEY
+    kind: required
+    type: env_vars
+    envs: [production]
+    note: Public anon key — the BFF exchanges codes/passwords with Supabase.
+
+  # Has a correct in-code default (https://app.premiselabs.co), so absence is
+  # not an outage. Set it explicitly to decouple the redirect target from code.
+  - name: APP_ORIGIN
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: >-
+      Where /welcome redirects a signed-in visitor. Defaults to
+      https://app.premiselabs.co in functions/welcome.ts.
+
+  # Also defaulted in code: `${request origin}/auth/callback`. Setting it
+  # explicitly is required only if the callback ever moves off-origin.
+  - name: AUTH_CALLBACK_URL
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: >-
+      Supabase redirect_to. Defaults to <origin>/auth/callback, which is the
+      colocated-topology decision (ADR-001).
+
+  # Recommended, NOT required: /api/v1/* answers 503 proxy_not_configured
+  # without it, but that proxy has ZERO client callers today (it is scaffolding
+  # for the #3559 client-surface migration). It becomes `required` the moment a
+  # client calls it.
+  - name: API_ORIGIN
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: >-
+      Upstream for the /api/v1 Token Handler proxy. Must be set before #3559
+      lands; today nothing calls the proxy.

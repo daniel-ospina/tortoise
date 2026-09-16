@@ -90,6 +90,19 @@ jobs:
           mkdir -p ../../admin
           cp -r dist/* ../../admin/
           test -s ../../admin/index.html
+      # #3616: #3501 shipped a BFF auth layer requiring a `SESSIONS` D1 binding
+      # that did not exist. The deploy went green and production /auth/start
+      # answered `503 session_store_unavailable` for every visitor. The
+      # requirement lived in a PR body, which cannot fail — so it now lives in
+      # website/required-bindings.yml and this step reads it. Fails BEFORE the
+      # deploy, because the failure mode is "deploy succeeds, runtime 503s".
+      - name: Preflight — required Pages bindings exist
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 tools/check_pages_bindings.py --manifest website/required-bindings.yml
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           cd website
@@ -97,6 +110,47 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
+      # #3616: bindings, secrets and code can each be individually correct while
+      # the deployed site still cannot sign anyone in. /auth/start is the one
+      # request that exercises the whole chain at once — it needs SESSIONS (to
+      # persist the PKCE flow), the Supabase env vars, and a valid callback URL;
+      # a 302 to Supabase proves all three. Note `curl` without -f: a 5xx is the
+      # signal, so it must not abort the step.
+      - name: Post-deploy — sign-in is actually reachable
+        run: |
+          url=https://tortoise.premiselabs.co/auth/start
+          code=000
+          # Poll: Pages can briefly serve the previous deployment after upload.
+          for attempt in $(seq 1 10); do
+            # No -f: a 5xx IS the signal, so it must not abort the step.
+            code=$(curl -sS -o /tmp/start.body -D /tmp/start.hdr \
+                        -w '%{http_code}' -m 20 "$url" || echo 000)
+            [ "$code" = "302" ] && break
+            sleep 15
+          done
+          echo "$url -> $code"
+
+          if [ "$code" = "503" ]; then
+            echo "::error::/auth/start returned 503 — the session store is unavailable."
+            echo "::error::Almost always a missing SESSIONS D1 binding; see #3616."
+            cat /tmp/start.body
+            exit 1
+          fi
+          if [ "$code" != "302" ]; then
+            echo "::error::expected a 302 to Supabase, got $code"
+            cat /tmp/start.body
+            exit 1
+          fi
+
+          # A 302 alone is not enough: the redirect must carry a PKCE challenge,
+          # which proves the flow row was written to SESSIONS. A redirect without
+          # one would mean the store accepted a write it silently dropped.
+          if ! grep -qi 'code_challenge_method=s256' /tmp/start.hdr; then
+            echo "::error::302 did not include a PKCE code_challenge — the flow was not persisted"
+            cat /tmp/start.hdr
+            exit 1
+          fi
+          echo "✅ sign-in reachable, SESSIONS writable, PKCE challenge issued"
 
   # ── Dashboard (app.premiselabs.co → tortoise-dashboard Pages) ──────────
   # #1112: wire the dashboard into CI — closes #1086 + #1109 (two
