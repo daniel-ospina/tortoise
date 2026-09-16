@@ -133,7 +133,7 @@ if [ "$CAPTURE_ENABLED" != "1" ]; then
         > "$NOTICE_MARKER" 2>/dev/null || true
     fi
     printf '%s\n' \
-      "tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." >&2
+      "tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." >&2 || true
   fi
 fi
 

@@ -43,6 +43,14 @@ CAPTURE_OPT_IN_ENV = "TORTOISE_CAPTURE"
 
 _TRUTHY: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
+#: The whitespace trimmed before the truthy comparison. Deliberately the ASCII
+#: POSIX set (space/tab/CR/LF/VT/FF) and NOT `str.strip()`'s full `isspace()`
+#: set: Python's also trims C1 controls (U+001C-U+001F, U+0085, U+2028, ...)
+#: that bash's `[[:space:]]` leaves in place, which made the two predicates
+#: disagree on those inputs (security review P2). Narrowing Python to the ASCII
+#: set is the fail-closed direction and makes the parity claim exact.
+_ASCII_WS = " \t\r\n\v\f"
+
 #: Shown (stderr, non-blocking) when a capture is declined for lack of consent.
 CAPTURE_DECLINED_HINT = (
     "capture is off — session capture requires explicit consent; "
@@ -67,7 +75,7 @@ def capture_consent_enabled(env: Mapping[str, str] | None = None) -> bool:
     Default OFF: unset, empty, whitespace, or any unrecognised value is False.
     """
     source = os.environ if env is None else env
-    return str(source.get(CAPTURE_OPT_IN_ENV, "")).strip().lower() in _TRUTHY
+    return str(source.get(CAPTURE_OPT_IN_ENV, "")).strip(_ASCII_WS).lower() in _TRUTHY
 
 
 def capture_notice_path(home: Path | str | None = None) -> Path:
@@ -125,7 +133,12 @@ def pending_capture_notice(home: Path | str | None = None) -> str | None:
         if capture_notice_shown_path(home).exists():
             return None
         text = capture_notice_path(home).read_text(encoding="utf-8").strip()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, UnicodeDecodeError):
+        # UnicodeDecodeError is a ValueError, not an OSError: a partially
+        # written notice (the body contains a multi-byte em dash, and
+        # `write_text` truncates before writing) would otherwise escape this
+        # best-effort helper and crash EVERY command — this runs unconditionally
+        # from `main`. Same class `_resolve_config_path` guards for.
         return None
     return text or None
 

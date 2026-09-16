@@ -235,6 +235,9 @@ def test_session_end_local_sweep_runs_with_consent_too(tmp_path, transcript):
     (" 1 ", True), ("\ttrue\n", True),
     ("0", False), ("false", False), ("off", False), ("no", False),
     ("", False), ("2", False), ("y", False), ("enable", False),
+    # Security review P2: C1 controls. Python's str.strip() treats these as
+    # whitespace and AUTHORIZED; bash's [[:space:]] does not. Both refuse now.
+    ("1\x1c", False), ("\x1c1", False), ("\x1d1", False), ("1\x1f", False),
 ])
 def test_capture_opt_in_parity_bash_and_python(tmp_path, transcript, value, expected):
     """The bash gate in session-end.sh and capture_consent_enabled() implement

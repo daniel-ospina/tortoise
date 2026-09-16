@@ -102,8 +102,10 @@ let the Claude Code `session-end.sh` hook (or `tortoise session capture` /
 export TORTOISE_CAPTURE=1     # truthy: 1 / true / yes / on
 ```
 
-Without it the hook no-ops and prints a one-time notice; sessions stay on the
-machine. This is a deliberate behavior change: capture used to follow the
+Without it the hook no-ops and prints a notice; sessions stay on the machine.
+The visible line repeats on each session close while a legacy credential is
+present — only the durable copy is one-time. This is a deliberate behavior
+change: capture used to follow the
 credential. The requirement is **host-agnostic** — it applies to a self-hosted
 endpoint too (a self-hosted daemon is still data leaving the machine), so the
 same opt-in is needed for `docs/quickstart-selfhosted.md`'s replay steps.

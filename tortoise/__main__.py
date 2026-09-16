@@ -5823,33 +5823,43 @@ def _cmd_key_create(args) -> int:
     return 0
 
 
-#: Commands that run UNATTENDED (session close, index sweeps, MCP serve) or
-#: that are themselves the refusal path. They must stay quiet, and they must
-#: never consume the human-facing #3615 migration notice.
-_CAPTURE_NOTICE_SILENT = frozenset({
-    ("index", None),
-    ("serve", None),
-    ("session", "capture"),
-    ("session", "probe"),
-    ("sessions", "import"),
-})
+def _stderr_is_human_facing() -> bool:
+    """True only when stderr is a terminal — #3615's notice-delivery gate.
+
+    Anything that can silently swallow stderr (a harness hook's `2>/dev/null`,
+    a background sweep, an agent-run subprocess) must not be able to consume
+    the human's one sighting of the migration notice. Testing the surface
+    instead of enumerating commands is what makes the exemption class CLOSED:
+    every unattended consumer redirects stderr, so none of them can reach the
+    notice regardless of how the command list grows.
+    """
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, ValueError, OSError):
+        # `sys.stderr` can be None (pythonw) or a closed/replaced stream.
+        return False
 
 
-def _flush_pending_capture_notice(args) -> None:
+def _flush_pending_capture_notice() -> None:
     """Push the #3615 migration notice to stderr at most once per machine.
 
     `record_capture_declined` writes the notice whenever a capture is refused —
-    including from a STALE copied hook that swallows the CLI's stderr (`2>/dev/null`),
-    which is exactly the population a breaking change must not migrate silently.
-    A file nobody reads is evidence, not notification: the user's whole view of
-    this change would be "capture quietly stopped", with `tortoise doctor` —
-    which they have no reason to run — as the only consumer. So the next command
-    a human actually runs delivers it, once (stamped separately from the notice
-    file so a machine run cannot consume the human's one sighting).
+    including from a STALE copied hook that swallows the CLI's stderr
+    (`2>/dev/null`), which is exactly the population a breaking change must not
+    migrate silently. A file nobody reads is evidence, not notification: the
+    user's whole view of this change would be "capture quietly stopped", with
+    `tortoise doctor` — which they have no reason to run — as the only consumer.
+    So the next HUMAN-FACING command delivers it, once (stamped separately from
+    the notice file so an unattended run cannot consume the single sighting).
+
+    Security review P1: the first cut gated delivery on a five-entry command
+    denylist and missed `context` — the command the SessionStart hook runs as
+    `tortoise context 2>/dev/null`, so the notice was printed into /dev/null and
+    stamped "shown" on every session START, silently consuming it on exactly the
+    hosts the migration exists for (as did `volunteer`, whose hook relays only
+    prefixed lines). The TTY test above closes the whole class instead.
     """
-    sub = getattr(args, "session_cmd", None) or getattr(args, "sessions_cmd", None)
-    if (args.cmd, None) in _CAPTURE_NOTICE_SILENT \
-            or (args.cmd, sub) in _CAPTURE_NOTICE_SILENT:
+    if not _stderr_is_human_facing():
         return
     from tortoise.capture_consent import mark_capture_notice_shown, pending_capture_notice
     text = pending_capture_notice()
@@ -6233,7 +6243,7 @@ def main(argv: list[str] | None = None) -> int:
     # Idempotent; a no-op for commands that never open an embedded server.
     from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
     install_embedded_signal_cleanup()
-    _flush_pending_capture_notice(args)
+    _flush_pending_capture_notice()
     if args.cmd == "rebuild":
         _cmd_rebuild(args)
         return 0

@@ -85,6 +85,14 @@ def test_opt_in_falsy_values(value):
     assert capture_consent_enabled({CAPTURE_OPT_IN_ENV: value}) is False
 
 
+@pytest.mark.parametrize("value", ["1\x1c", "\x1c1", "\x1d1", "\x1f1", "1\x1f"])
+def test_c1_controls_are_not_whitespace(value):
+    """Security review P2: Python's str.strip() trims C1 controls that bash's
+    [[:space:]] leaves in place, so the old predicate AUTHORIZED on values the
+    shipped hook read as off. Trimming is ASCII-only now, so both refuse."""
+    assert capture_consent_enabled({CAPTURE_OPT_IN_ENV: value}) is False
+
+
 def test_opt_in_is_not_inferred_from_the_credential():
     """The whole point of #3615: a credential is not consent."""
     assert capture_consent_enabled({"TORTOISE_API_KEY": "tt_key"}) is False
@@ -181,12 +189,13 @@ def test_machine_facing_commands_never_consume_the_notice(tmp_path, transcript):
 
 
 def test_interactive_command_pushes_the_pending_notice_once(tmp_path, transcript,
-                                                            capsys):
+                                                            capsys, monkeypatch):
     """Solution-verify cycle 2 P1: the targeted population runs a STALE copied
     hook that swallows the refusal, and has no reason to ever run `doctor`, so a
-    file-only notice is evidence without notification. The next command a human
-    actually runs must deliver it — exactly once.
+    file-only notice is evidence without notification. The next HUMAN-FACING
+    command must deliver it — exactly once.
     """
+    monkeypatch.setattr("tortoise.__main__._stderr_is_human_facing", lambda: True)
     _seed_global(tmp_path)
     with mock.patch("urllib.request.urlopen"):
         main(["session", "capture", "--file", str(transcript)])
@@ -201,22 +210,34 @@ def test_interactive_command_pushes_the_pending_notice_once(tmp_path, transcript
     assert CAPTURE_OPT_IN_ENV not in capsys.readouterr().err, "shown twice"
 
 
-def test_unattended_commands_do_not_print_the_notice(tmp_path, transcript, capsys):
-    """The exemption list is what keeps an unattended sweep from consuming the
-    notice: `index`/`serve` run on a timer or a daemon, never in front of a human."""
-    from argparse import Namespace
+def test_non_terminal_run_never_consumes_the_notice(tmp_path, transcript, capsys):
+    """Security review P1 regression: the delivery gate is the SURFACE, not a
+    command list.
 
-    from tortoise.__main__ import _flush_pending_capture_notice
+    The first cut exempted five commands by name and missed `context` — the
+    command the SessionStart hook runs as `tortoise context 2>/dev/null`. On a
+    standard install (both hooks) the end-of-session refusal wrote the durable
+    notice, and the next session START printed it into /dev/null and stamped it
+    shown: the human's single sighting was consumed on exactly the hosts the
+    migration exists for. `volunteer` (whose hook relays only prefixed lines)
+    had the same hole. A non-terminal stderr is the one thing every unattended
+    consumer has in common, so gating on it closes the class rather than
+    extending the list.
+    """
+    from tortoise.__main__ import _flush_pending_capture_notice, _stderr_is_human_facing
+
     _seed_global(tmp_path)
     with mock.patch("urllib.request.urlopen"):
         main(["session", "capture", "--file", str(transcript)])
     capsys.readouterr()
-    for ns in (Namespace(cmd="index", index_cmd="directory"),
-               Namespace(cmd="serve"),
-               Namespace(cmd="session", session_cmd="capture")):
-        _flush_pending_capture_notice(ns)
-        assert "explicit consent" not in capsys.readouterr().err
-    assert pending_capture_notice(tmp_path) is not None
+
+    assert not _stderr_is_human_facing(), "capsys stderr is not a terminal"
+    # One gate covers every command, the hook-invoked ones included.
+    _flush_pending_capture_notice()
+    assert "explicit consent" not in capsys.readouterr().err
+    assert pending_capture_notice(tmp_path) is not None, (
+        "a non-terminal run consumed the human's single sighting")
+    assert not capture_notice_shown_path(tmp_path).exists()
 
 
 def test_doctor_reports_consent_without_a_false_warning(capsys):
