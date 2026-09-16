@@ -16,7 +16,11 @@ standard, key-rotation-safe path.
 #3284: the fetch is bounded by a HARD TOTAL (``_JWKS_FETCH_TOTAL_S``, applied
 outside the ``_fetch_jwks`` seam) rather than httpx's per-phase timeout, and
 ``prefetch_jwks()`` warms the cache at process start so the first request does
-not pay the fetch. Every 503 carries ``Retry-After``.
+NOT normally pay the fetch. The warm-up makes its bounded attempt with
+``arm_cooldown=False``: a boot-time blip therefore does not arm the
+request-path cooldown, and the first request still makes its own bounded
+attempt (the bound, not the warm-up, is the #3284 guarantee). Every 503
+carries ``Retry-After``.
 
 Issue #1460: the verifier previously only handled RS256 (`jwk["n"]` KeyError
 on the EC JWKS → unhandled 500 → no CORS headers → browser CORS-wall →
@@ -33,6 +37,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import os
 import secrets
 import time
@@ -92,8 +97,12 @@ def _resolve_fetch_total() -> float:
     IMPLEMENTED — as a TOTAL, not a per-phase timeout. A value below the phase
     sum would let the hard deadline win the race against the phases and strand
     the httpx worker in its socket read (CPython #87185 cannot cancel it), so
-    it is clamped up to the phase sum plus the margin and the clamp is logged
-    — the same clamp-and-warn convention as ``hosted_api._health_probe_interval``.
+    it is clamped UP to the phase sum plus the margin and the clamp is logged.
+    NOTE the convention differs from ``hosted_api._health_probe_interval``: that
+    function REJECTS a below-floor value and falls back to its default, whereas
+    this one clamps up. The direction is deliberate — the floor here IS the
+    safe value (a lower hard deadline strands a worker), so the operator's
+    requested value is preserved as far as is safe instead of being discarded.
     """
     floor = _JWKS_FETCH_PHASE_TOTAL_S + _JWKS_FETCH_MARGIN_S
     try:
@@ -119,11 +128,14 @@ def _resolve_fetch_total() -> float:
 
 #: The hard deadline one fetch can never outlive (request path included).
 _JWKS_FETCH_TOTAL_S = _resolve_fetch_total()
-#: Documented worst case for key resolution on ONE request: a TTL-refresh fetch
-#: plus a kid-miss refetch (R16). Both are hard-bounded, so the request path is
-#: bounded by construction rather than by upstream good behaviour. The default
-#: (4.0s per fetch → 8.0s) sits inside a 10s client connect budget (#3144
-#: records clients with 10–15s budgets and NO retry).
+#: Documented worst case for KEY RESOLUTION on ONE request: a TTL-refresh
+#: fetch plus a kid-miss refetch (R16). Both are hard-bounded, so key
+#: resolution is bounded by construction rather than by upstream good
+#: behaviour. This is NOT an end-to-end request bound: a ``/v1/*`` request
+#: adds Fly's proxy, TLS, middleware and the endpoint's own work (e.g. a
+#: FalkorDB round trip) on top. The default (4.0s per fetch → 8.0s) sits
+#: inside a 10s client connect budget (#3144 records clients with 10–15s
+#: budgets and NO retry).
 _JWKS_RESOLVE_WORST_CASE_S = 2 * _JWKS_FETCH_TOTAL_S
 
 _MAX_JWKS_BYTES = 65536  # post-buffer JWKS body cap (defense-in-depth; httpx buffers first)
@@ -162,12 +174,16 @@ class _JWKSCache:
         is indistinguishable from a hard outage). The miss path arms
         ``_last_failure_at`` in the FUTURE (jitter, SEC-001), so the arithmetic
         is intentionally signed-agnostic: it reports the real remaining window.
+        ``ceil``, matching the ``#1081`` rate-limit precedent: truncation
+        advertises a value that can still be inside the cooling window, inviting
+        a retry that is refused.
         """
         if self._last_failure_at is None:
-            return max(1, int(_COOLDOWN_S))
-        return max(1, int(_COOLDOWN_S - (time.monotonic() - self._last_failure_at)))
+            return max(1, math.ceil(_COOLDOWN_S))
+        return max(1, math.ceil(_COOLDOWN_S - (time.monotonic() - self._last_failure_at)))
 
-    async def get(self, force: bool = False, kid: str | None = None) -> dict[str, dict]:
+    async def get(self, force: bool = False, kid: str | None = None,
+                  arm_cooldown: bool = True) -> dict[str, dict]:
         """Return {kid: jwk}.
 
         - TTL-serve when fresh; kid-aware early return when the requested kid
@@ -178,15 +194,25 @@ class _JWKSCache:
         - Fetch failure / zero-usable-keys / miss (force + kid absent after a
           successful refetch) arm the cooldown (`_last_failure_at`).
         - `force` bypasses the TTL but NOT the cooldown.
+        - ``arm_cooldown=False`` is for the BOOT warm-up (#3284): it makes the
+          bounded attempt but does not arm the request-path cooldown, so a
+          boot-time blip cannot refuse every request for ``_COOLDOWN_S``
+          without trying. The first real request then makes its own (still
+          bounded) attempt — the #3284 guarantee is untouched.
         """
         now = time.monotonic()
-        if not force and self._keys is not None and now - self._fetched_at < _JWKS_TTL:
+        # The TTL fast path requires a USABLE key set, not just a non-None one:
+        # an empty parse leaves ``_fetched_at == 0.0`` with ``_keys == {}``, and
+        # on a host whose monotonic clock is below the TTL that reads as
+        # "fetched just now" — serving ``{}`` (a 401 "Unknown signing key") for
+        # up to a full TTL with the upstream healthy.
+        if not force and self._keys and now - self._fetched_at < _JWKS_TTL:
             return self._keys
         if kid is not None and self._keys is not None and kid in self._keys:
             return self._keys
         async with self._lock:
             now = time.monotonic()
-            if not force and self._keys is not None and now - self._fetched_at < _JWKS_TTL:
+            if not force and self._keys and now - self._fetched_at < _JWKS_TTL:
                 return self._keys
             if kid is not None and self._keys is not None and kid in self._keys:
                 return self._keys
@@ -209,14 +235,15 @@ class _JWKSCache:
                     # Zero usable keys = failure semantics: arm the cooldown,
                     # do NOT refresh the TTL (recovery via force path after the
                     # cooldown lapses, or TTL expiry), keep last-good on warm.
-                    self._last_failure_at = time.monotonic()
+                    if arm_cooldown:
+                        self._last_failure_at = time.monotonic()
                     if self._keys is None:
                         self._keys = {}
                     logger.warning("JWKS fetch returned zero usable keys — serving stale/empty")
                     return self._keys
                 self._keys = parsed
                 self._fetched_at = time.monotonic()
-                if kid is not None and kid not in parsed:
+                if kid is not None and kid not in parsed and arm_cooldown:
                     # Miss = failure semantics: a forged-kid flood against a
                     # healthy-but-kid-absent upstream must not refetch per
                     # request. Documented tradeoff: a flood can delay a
@@ -228,13 +255,16 @@ class _JWKSCache:
                     # below stays deterministic. CSPRNG draw (secrets) —
                     # re-review flagged MT19937 state-recovery as theoretical;
                     # secrets removes the argument at zero cost.
+                    # ``and arm_cooldown``: the boot warm-up must not arm the
+                    # request-path cooldown (#3284 review P1).
                     self._last_failure_at = time.monotonic() + (
                         secrets.randbelow(int(_COOLDOWN_S * 500)) / 1000
                     )
             except HTTPException:
                 raise
             except Exception as exc:  # network, json, shape, size, filter errors
-                self._last_failure_at = time.monotonic()
+                if arm_cooldown:
+                    self._last_failure_at = time.monotonic()
                 if self._keys is None:
                     logger.warning("JWKS unavailable (cold) — 503: %s", exc)
                     raise HTTPException(
@@ -318,38 +348,61 @@ async def prefetch_jwks() -> dict:
     ``force=True`` (the #3284 design round): the warm-up PAYS for a fresh key
     set rather than trusting an inherited, possibly stale in-process cache.
 
-    Deliberately NON-RAISING — the caller runs it as a background task behind
-    the listener, and a warm-up must never break boot. On failure the cache's
-    own semantics apply (cooldown armed), so the first request fails FAST with
-    a bounded ``503`` + ``Retry-After`` instead of paying the fetch itself.
-    That is the accepted trade: a failed warm-up converts a slow user-facing
-    call into an honest, retryable error, and recovery is the cooldown lapse.
+    ``arm_cooldown=False`` is the load-bearing half (#3284 review P1): a warm-up
+    runs milliseconds after boot, exactly when DNS/egress are least ready, so a
+    single boot-time blip must not spend the ONE attempt the request path is
+    allowed and then refuse every request for ``_COOLDOWN_S`` without trying.
+    The warm-up still makes its bounded attempt; it just does not arm the
+    request-path cooldown, so the first real request makes its own bounded
+    attempt (the #3284 bound is untouched) and recovers as soon as the upstream
+    does.
 
-    Returns a small boot-log report: ``{"ok", "keys", "elapsed_ms", "error"}``.
+    Deliberately NON-RAISING — the caller runs it as a background task behind
+    the listener, and a warm-up must never break boot. The report carries an
+    ``outcome`` so the boot log can be TRUTHFUL about which case it was:
+
+    * ``"ready"`` — keys cached; the first request pays nothing;
+    * ``"empty"`` — a 200 with ZERO usable keys (bad rotation / empty body).
+      This is NOT a transport outage: a zero-key body is cached as ``{}`` and
+      verifies as an unknown kid, so the request answers **401** "Unknown
+      signing key", never 503, and it re-attempts the fetch (the warm-up did
+      not arm the cooldown);
+    * ``"transport_error"`` — the bounded fetch failed (network/timeout/HTTP).
+      The first request makes its own bounded attempt and answers a bounded
+      ``503`` + ``Retry-After`` only if the upstream is STILL unreachable.
+
+    Returns a small boot-log report:
+    ``{"ok", "keys", "elapsed_ms", "error", "outcome"}``.
     """
     start = time.monotonic()
+
+    def _report(ok: bool, keys: int, error: str | None, outcome: str) -> dict:
+        return {
+            "ok": ok,
+            "keys": keys,
+            "elapsed_ms": round((time.monotonic() - start) * 1000, 1),
+            "error": error,
+            "outcome": outcome,
+        }
+
     try:
-        keys = await _jwks.get(force=True)
+        keys = await _jwks.get(force=True, arm_cooldown=False)
     except HTTPException as exc:
-        return {
-            "ok": False,
-            "keys": 0,
-            "elapsed_ms": round((time.monotonic() - start) * 1000, 1),
-            "error": f"HTTPException {exc.status_code}: {exc.detail}",
-        }
+        return _report(
+            False, 0, f"HTTPException {exc.status_code}: {exc.detail}",
+            "transport_error")
     except Exception as exc:  # a warm-up must never raise
-        return {
-            "ok": False,
-            "keys": 0,
-            "elapsed_ms": round((time.monotonic() - start) * 1000, 1),
-            "error": f"{type(exc).__name__}: {exc}"[:200],
-        }
-    return {
-        "ok": bool(keys),
-        "keys": len(keys),
-        "elapsed_ms": round((time.monotonic() - start) * 1000, 1),
-        "error": None,
-    }
+        return _report(False, 0, f"{type(exc).__name__}: {exc}"[:200],
+                       "transport_error")
+    if not keys:
+        # Every failure must state its reason (#2922), and an empty body is a
+        # DIFFERENT failure from a transport outage — say which one it is.
+        return _report(
+            False, 0,
+            "upstream JWKS answered 200 with 0 usable keys "
+            "(empty body / bad rotation)",
+            "empty")
+    return _report(True, len(keys), None, "ready")
 
 
 def _b64url_decode(part: str) -> bytes:

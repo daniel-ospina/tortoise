@@ -803,9 +803,11 @@ async def _first_contact_prewarm() -> None:
     ⛔ This MUST be a task, never awaited before ``yield``: uvicorn binds the
     listening socket only after ``lifespan.startup()`` returns, so awaiting a
     warm-up here means the machine accepts NOTHING until it finishes (#2953).
-    It is deliberately started BEFORE the embedding pre-warm thread so the
-    process's first network round trip is not competing with torch for the
-    box — the #545 cold-start failure mode this must not re-create.
+    It is CREATED before the embedding pre-warm thread — but creating a task
+    does not START it, and there is no ``await`` between the two, so this is
+    NOT a wall-clock ordering guarantee: the torch thread may begin first. The
+    property it does guarantee is the load-bearing one — the warm-up runs
+    behind the listener, off the request path.
 
     Both halves are gated on Supabase mode (the same predicate
     ``/health/ready`` uses for its control-plane probe): registry/self-host
@@ -831,17 +833,31 @@ async def _first_contact_prewarm() -> None:
         from tortoise.session_auth import prefetch_jwks
 
         report = await prefetch_jwks()
-        if report["ok"]:
+        outcome = report.get("outcome")
+        if outcome == "ready":
             _logger.info(
                 "auth: JWKS pre-warm ready in %.0fms (%d keys)",
                 report["elapsed_ms"],
                 report["keys"],
             )
+        elif outcome == "empty":
+            _logger.warning(
+                "auth: JWKS pre-warm got an EMPTY key set in %.0fms (%s) — "
+                "an upstream 200 with zero usable keys (bad rotation / empty "
+                "body), NOT a transport outage. The first session-"
+                "authenticated request will re-attempt the fetch and, if the "
+                "upstream is still empty, answer 401 'Unknown signing key' — "
+                "not a 503.",
+                report["elapsed_ms"],
+                report["error"],
+            )
         else:
             _logger.warning(
                 "auth: JWKS pre-warm failed in %.0fms (%s) — the first "
-                "session-authenticated request will answer a bounded 503 + "
-                "Retry-After instead of fetching inline",
+                "session-authenticated request will make its own bounded "
+                "fetch attempt (the warm-up does not arm the request-path "
+                "cooldown) and answer a bounded 503 + Retry-After if the "
+                "upstream is still unreachable",
                 report["elapsed_ms"],
                 report["error"],
             )
@@ -964,6 +980,7 @@ _LIVENESS_TASK_ATTRS = (
     "_health_probe_task",
     "_boot_sweep_task",
     "_event_retention_task",
+    "_first_contact_task",
 )
 
 
@@ -1081,10 +1098,12 @@ async def _lifespan(app):
         # ── #3284 Move A: pre-pay the first contacts, behind the listener.
         # Two bounded calls (JWKS + control plane) in one background task, so
         # the FIRST session-authenticated request after a (re)start does not
-        # pay for them. Scheduled BEFORE the embedding pre-warm thread below:
-        # the process's first TLS round trip should not compete with torch for
-        # the CPU (#545). Not awaited — uvicorn binds only after this half
-        # returns (#2953). Inert in registry mode (no Supabase session auth).
+        # pay for them. The task is created here, before the embedding pre-warm
+        # thread below — but creating a task does NOT start it and nothing
+        # awaits in between, so this is NOT a wall-clock ordering guarantee
+        # (torch may start first). Not awaited — uvicorn binds only after this
+        # half returns (#2953). Inert in registry mode (no Supabase session
+        # auth).
         try:
             app.state._first_contact_task = asyncio.get_event_loop().create_task(
                 _first_contact_prewarm()
@@ -1380,6 +1399,12 @@ app.add_middleware(
     allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    # ``Retry-After`` is NOT a CORS-safelisted response header, so without this
+    # the dashboard JS on app.premiselabs.co cannot read the value the
+    # session-auth 503 carries (#3284) — the "retryable, not an outage" signal
+    # would exist only for non-browser clients. Starlette emits
+    # ``Access-Control-Expose-Headers`` only for listed names.
+    expose_headers=["Retry-After"],
 )
 
 

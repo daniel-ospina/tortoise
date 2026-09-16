@@ -793,9 +793,16 @@ probe (`hosted_api.CONTROL_PLANE_PROBE_PHASES`).
   request is bounded by `2 ×` that value.
 - `_first_contact_prewarm` (lifespan startup half, **behind** the listener —
   never awaited before `yield`, per #2953) pre-pays the JWKS fetch and the
-  control-plane probe in Supabase mode. Registry/self-host does neither.
+  control-plane probe in Supabase mode. Registry/self-host does neither. A
+  failed warm-up deliberately does **not** arm the request-path cooldown (it
+  would otherwise refuse every request for `TORTOISE_JWKS_COOLDOWN` after a
+  single boot-time blip) — the first request makes its own bounded attempt.
+  An empty key set (`200 {"keys": []}`) is reported as its own outcome, not as
+  a transport failure: it answers 401, not 503.
 - Every session-auth **503 now carries `Retry-After`** (the remaining cooldown
-  window) and a JSON body. A failure is actionable instead of looking like an
+  window) and a JSON body. `Retry-After` is listed in
+  `Access-Control-Expose-Headers`, so the dashboard JS can read it (the header
+  is not CORS-safelisted). A failure is actionable instead of looking like an
   outage.
 
 **What is still not app-fixable.** A **zero-byte** 503 with `server: Fly/…` and
