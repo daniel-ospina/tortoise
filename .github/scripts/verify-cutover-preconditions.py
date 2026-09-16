@@ -134,7 +134,7 @@ def check_supabase_placeholders(cp) -> list[str]:
                 row.get("key_hash") != PLACEHOLDER_KEY_HASH:
             failures.append(
                 f"Supabase org_memberships[{i}] is NOT a reconcilable "
-                "placeholder (org_id={row.get('org_id')!r}, "
+                f"placeholder (org_id={row.get('org_id')!r}, "
                 f"key_hash={row.get('key_hash')!r}) — expected "
                 f"org_id={PLACEHOLDER_ORG_ID!r} / "
                 f"key_hash={PLACEHOLDER_KEY_HASH!r} (migration 0003 trigger).")

@@ -111,7 +111,18 @@ ALTER INDEX IF EXISTS public.uq_teams_name                     RENAME TO uq_orga
 --        `*_not_null` row exists at all depends on the server version — a
 --        hardcoded RENAME would abort the migration on servers that do not
 --        catalogue them. The guarded loop turns "absent" into "skip", which is
---        correct on every version and keeps the file idempotent under re-apply.
+--        correct on every version and makes THIS BLOCK idempotent under
+--        re-apply.
+--
+--    Scope of that idempotence claim: this block only. §1/§2 are one-shot by
+--    construction — `ALTER TABLE ... RENAME TO` and `RENAME COLUMN` have no
+--    IF EXISTS form, so re-applying the file aborts there. That is safe and
+--    intended: the runner is the Supabase CLI, which records applied versions
+--    in `supabase_migrations.schema_migrations` and skips them, and it
+--    applies a migration as one unit — a failure aborts, it does not leave a
+--    half-renamed catalog. Do NOT "fix" §1/§2 by wrapping them in DO blocks:
+--    that would add swallow-an-error failure modes to guard a case the runner
+--    already excludes.
 -- ============================================================================
 DO $$
 DECLARE

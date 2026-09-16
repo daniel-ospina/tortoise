@@ -7474,6 +7474,71 @@ class TestEmbeddedRegistryPathDivergence:
         assert records == [(None, "registry", None)], records
 
 
+class TestOrgGraphNameRoundTrip:
+    """#3543 code review (P1) — a stored graph name must round-trip to the
+    SAME graph.
+
+    `_org_namespace` returned a prefix-STRIPPED namespace for
+    `_make_sdk(namespace=...)` to re-prefix. When #3543 changed the SDK's
+    namespace rule from `team_{ns}` to `org_{ns}`, a stored `team_{x}` stripped
+    to `x` and was re-prefixed into `org_{x}` — a different, ABSENT graph, i.e.
+    an empty dump with HTTP 200, the exact #873 failure the stored-name rule
+    exists to prevent. And `_graph_has_org_namespace` returning True on a
+    `team_*` hit while its caller opened `org_*` minted a spurious empty graph
+    — the pin-4 read-path write. Both are pinned here.
+    """
+
+    def test_stored_name_is_returned_verbatim(self):
+        import tortoise.hosted_api as ha_mod
+
+        assert ha_mod._org_graph_name({"graph_name": "team_x"}, "o1") == "team_x"
+        assert ha_mod._org_graph_name({"graph_name": "org_x"}, "o1") == "org_x"
+        # custom sub-graph: the full `org_{tid}_{gid}` must survive too
+        assert ha_mod._org_graph_name(
+            {"graph_name": "org_t1_g9"}, "o1") == "org_t1_g9"
+        # fallback only when nothing is stored
+        assert ha_mod._org_graph_name({}, "o1") == "org_o1"
+        assert ha_mod._org_graph_name({"graph_name": None}, "o1") == "org_o1"
+
+    def test_open_org_graph_sdk_addresses_the_listed_name(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"org_o1", "team_o2"})
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda **kw: ("sdk", kw))
+        # canonical → the namespace form is preserved (embedded keepalive key
+        # and every downstream sdk._namespace consumer stay identical)
+        assert ha_mod._open_org_graph_sdk("o1") == ("sdk", {"namespace": "o1"})
+        # legacy → the FULL name, verbatim. Opening `namespace="o2"` here
+        # would resolve to `org_o2`: a different graph, minted on read.
+        assert ha_mod._open_org_graph_sdk("o2") == (
+            "sdk", {"graph_name": "team_o2"})
+        # neither listed → None (caller keeps its inline fallback)
+        assert ha_mod._open_org_graph_sdk("o3") is None
+        # probe failed → also None; the caller's `or _make_sdk(namespace=)`
+        # restores the fail-open read that ends in 'unavailable' markers
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs", lambda: None)
+        assert ha_mod._open_org_graph_sdk("o1") is None
+
+    def test_has_org_namespace_accepts_both_and_fails_open(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"team_o9"})
+        assert ha_mod._graph_has_org_namespace("o9") is True
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"org_o9"})
+        assert ha_mod._graph_has_org_namespace("o9") is True
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: set())
+        assert ha_mod._graph_has_org_namespace("o9") is False
+        # graph-up-unknown stays fail-open (never-raise contract, #2251)
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs", lambda: None)
+        assert ha_mod._graph_has_org_namespace("o9") is True
+
+
 class TestResolveEmbeddedDbPath:
     """_resolve_embedded_db_path corner tests (#2251 plan tests 5)."""
 

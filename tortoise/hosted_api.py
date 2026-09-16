@@ -10560,6 +10560,16 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str) -> str:
     from tortoise.onboarding import state as _os
     graph_name = f"org_{org_id}"
     proj = _make_sdk(namespace=org_id)._get_proj()
+    # ⚠️ Do NOT de-duplicate this literal against the SDK's namespace rule by
+    # reading `proj._graph_name` back. That attribute carries the PHYSICAL
+    # graph name, which the projection layer deliberately rewrites in test
+    # lanes (test_<stem>_<hash> isolation, projection/__init__.py) and which
+    # any future prefix-rule change would also move. `graph_name` here is the
+    # LOGICAL contract name — it is stored on the org row, passed to the
+    # provision RPC as `p_graph_name`, and echoed to the client as part of the
+    # create response — so it must stay exactly `org_{org_id}`. Deriving it
+    # from the resolved projection leaks test isolation into the wire contract
+    # (this test asserts the two are equal).
     graph = proj.db.select_graph(graph_name)
     _seen = graph.query("MATCH (m:TeamMeta) RETURN count(m)").result_set
     if _seen and _seen[0][0]:
@@ -14021,38 +14031,42 @@ def _org_members_sync(org_id: str) -> list[dict]:
     return [{"user_id": r[0], "role": r[1], "joined_at": r[2]} for r in rows]
 
 
-def _org_namespace(org_node: dict, org_id: str) -> str:
-    """Namespace for the org's data graph.
+def _org_graph_name(org_node: dict, org_id: str) -> str:
+    """FULL DB graph name for the org's data graph (export path).
 
-    Stored ``graph_name`` wins over the ``org_{org_id}`` fallback — the
-    stored name is canonical for export (code-review P1, PR #873). Since
+    Stored ``graph_name`` wins VERBATIM over the ``org_{org_id}`` fallback —
+    the stored name is canonical for export (code-review P1, PR #873). Since
     #1903 all provision paths (provision_tenant — selfhost-only, 503 in
     Supabase mode — register_user, agent_signup, and the Supabase-lane
     create_org + onboarding sub-org) mint ``org_{org_id}``; only the
     registry lane (sdk.org_create) still stores ``org_{name}`` (#2023).
     Exporting the wrong graph would silently return an empty dump.
+
+    Returns a FULL graph name — ``org_{x}``, a custom ``org_{tid}_{gid}``, or
+    the pre-rename ``team_{x}`` — NOT an SDK namespace: the caller must
+    address it with ``_make_sdk(graph_name=...)``.
+
+    It used to return a prefix-STRIPPED namespace for `_make_sdk(namespace=)`
+    to re-prefix, which broke silently when #3543 changed the SDK's rule from
+    `team_{ns}` to `org_{ns}`: a stored `team_{x}` stripped to `x` and was
+    re-prefixed into a different, absent graph — an empty dump with HTTP 200,
+    exactly the #873 failure the stored-name rule exists to prevent. Returning
+    the stored name verbatim removes the dependence on the prefix rule
+    entirely, for both conventions and for custom sub-graphs.
     """
     graph_name = org_node.get("graph_name")
     if graph_name:
-        # #3543: strip whichever tenant prefix the stored name carries. The
-        # pre-rename prefix was the 5-char `team_` and the S3 value rename
-        # ships no data migration, so a stored `team_{x}` must still resolve
-        # to `x` — returning `org_id` instead would export a different (empty)
-        # graph, the silent-empty-dump failure the stored-name rule exists to
-        # prevent (PR #873).
-        for prefix in ("org_", "team_"):
-            if str(graph_name).startswith(prefix) and len(str(graph_name)) > len(prefix):
-                return str(graph_name)[len(prefix):]
-    return org_id
+        return str(graph_name)
+    return f"org_{org_id}"
 
 
-def _export_graph_snapshot(namespace: str):
+def _export_graph_snapshot(graph_name: str):
     """Sync full-graph dump for export (run via asyncio.to_thread — heavy
     read that must not block the event loop, #310 webhook precedent).
 
     Returns (summary, points, entities, events, edges). Events are kept in
     seq order; the caller truncates to the newest window."""
-    sdk = _make_sdk(namespace=namespace)
+    sdk = _make_sdk(graph_name=graph_name)
     g = sdk._get_proj().g
     summary = {"nodes": 0, "points": 0, "entities": 0, "edges": 0, "events": 0}
     points: list[dict] = []
@@ -14131,7 +14145,7 @@ async def export_org(org_id: str, request: Request,
 
     try:
         summary, points, entities, events, edges = await asyncio.to_thread(
-            _export_graph_snapshot, _org_namespace(org_node, org_id)
+            _export_graph_snapshot, _org_graph_name(org_node, org_id)
         )
     except Exception:
         logging.getLogger("tortoise.api").exception("team export failed")
@@ -17964,36 +17978,26 @@ def _graph_has_org_namespace(org_id: str) -> bool:
     """Existence check WITHOUT constructing the ORG projection (constructing
     org_{tid} would materialize an absent org graph — a read-path write,
     banned by pin 4). Probes the server-wide graph list via the registry
-    seam's projection (list_graphs never mints org_{tid})."""
-    # #3543: probe both tenant prefixes — a graph minted before the rename is
-    # `team_{org_id}`, and no data migration rewrites it. Probing only `org_`
-    # reported "node absent" for every pre-rename org, which made the
-    # onboarding projection take the no-write FLOW-defaults path.
-    graph_names = (f"org_{org_id}", f"team_{org_id}")
-    try:
-        # #2251 (was #2179 follow-up): the old bare TortoiseSDK(namespace=
-        # "registry") resolved config.resolve_db_path() → ~/.tortoise/tortoise.db
-        # when TORTOISE_DB_PATH was unset while the anchored writers use
-        # /data-or-tempdir — the existence verdict probed the WRONG (likely
-        # empty) db. _make_sdk(namespace="registry") is byte-identical to the
-        # bare construction in URI mode (returns a fresh TortoiseSDK before
-        # any anchor logic — no keepalive, no _get_registry, so the deleted
-        # registry_control_plane is never auto-recreated in Supabase mode) and
-        # resolves the ANCHORED path in embedded mode (the db writers use).
-        # The fresh handle is closed explicitly below (its close only drops
-        # the connection — the keepalive anchor holds the daemon, #493/#1607).
-        # The construction sits INSIDE this try so a cross-process
-        # EmbeddedStoreBusyError keeps the never-raise fail-open contract.
-        sdk = _make_sdk(namespace="registry")
-        try:
-            graphs = sdk._get_proj().db.list_graphs() or []
-        finally:
-            sdk.close()
-        return any(name in graphs for name in graph_names)
-    except Exception:
+    seam's projection (list_graphs never mints org_{tid}).
+
+    A bare bool is NOT sufficient for a caller that then OPENS the graph:
+    this is True when either tenant prefix is listed, so True does not say
+    WHICH name is real. Such callers must open through `_open_org_graph_sdk`
+    — `_make_sdk(namespace=org_id)` re-derives `org_{org_id}` from the
+    namespace rule and would therefore open, and so MINT, a different, absent
+    graph for a legacy `team_{org_id}` org, defeating this function's purpose.
+    Callers that only need the verdict (accept-and-drop gates) keep using
+    this."""
+    # #3543: both tenant prefixes are probed — a graph minted before the
+    # rename is `team_{org_id}`, and no data migration rewrites it. Probing
+    # only `org_` reported "node absent" for every pre-rename org, which made
+    # the onboarding projection take the no-write FLOW-defaults path.
+    graphs = _registry_existing_graphs()
+    if graphs is None:
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
         return True
+    return any(name in graphs for name in (f"org_{org_id}", f"team_{org_id}"))
 
 
 def _registry_existing_graphs() -> set[str] | None:
@@ -18001,14 +18005,29 @@ def _registry_existing_graphs() -> set[str] | None:
 
     list_graphs() is a read that never mints a graph (pin-4) and never
     auto-recreates the deleted registry_control_plane in Supabase mode
-    (#669) — same safe shape _graph_has_org_namespace already uses on
-    the onboarding hot path. Used as a probe-before-purge gate by the
-    retention sweep (#2251 review P2): purging an ABSENT org_{tid} graph
-    (orphan registry row from a partial provision between the Org-node
-    create and the graph mint) would silently materialize an empty graph,
-    flipping the onboarding existence verdict for orgs whose graph never
-    existed. None = probe failed → caller skips the sweep this cycle
-    (best-effort; the per-org SDK lazy hook still purges per-org graphs).
+    (#669) — the single probe behind _graph_has_org_namespace (onboarding hot
+    path) and _open_org_graph_sdk (the graph-opening callers). Used as a
+    probe-before-purge gate by the retention sweep (#2251 review P2): purging
+    an ABSENT org_{tid} graph (orphan registry row from a partial provision
+    between the Org-node create and the graph mint) would silently
+    materialize an empty graph, flipping the onboarding existence verdict for
+    orgs whose graph never existed. None = probe failed → caller skips the
+    sweep this cycle (best-effort; the per-org SDK lazy hook still purges
+    per-org graphs).
+
+    #2251 (was #2179 follow-up): the old bare TortoiseSDK(namespace=
+    "registry") resolved config.resolve_db_path() → ~/.tortoise/tortoise.db
+    when TORTOISE_DB_PATH was unset while the anchored writers use
+    /data-or-tempdir — the existence verdict probed the WRONG (likely empty)
+    db. _make_sdk(namespace="registry") is byte-identical to the bare
+    construction in URI mode (returns a fresh TortoiseSDK before any anchor
+    logic — no keepalive, no _get_registry, so the deleted
+    registry_control_plane is never auto-recreated in Supabase mode) and
+    resolves the ANCHORED path in embedded mode (the db writers use). The
+    fresh handle is closed explicitly below (its close only drops the
+    connection — the keepalive anchor holds the daemon, #493/#1607). The
+    construction sits INSIDE the try so a cross-process
+    EmbeddedStoreBusyError keeps the never-raise contract.
     """
     try:
         sdk = _make_sdk(namespace="registry")
@@ -18019,6 +18038,33 @@ def _registry_existing_graphs() -> set[str] | None:
         return set(graphs)
     except Exception:
         return None
+
+
+def _open_org_graph_sdk(org_id: str) -> TortoiseSDK | None:
+    """SDK on the org's DEFAULT graph, or None when the server lists neither
+    the canonical nor the pre-rename name.
+
+    Addresses the LISTED name explicitly, mirroring _require_graph_scope's
+    custom-graph branch: `_make_sdk(namespace=org_id)` re-derives
+    `org_{org_id}` from the namespace rule, so for a legacy `team_{org_id}`
+    graph it would open — and so MINT — a different, absent graph (the
+    read-path write pin 4 bans) and read an empty one. When the canonical
+    name is listed the namespace form is used unchanged, so the embedded
+    keepalive key and every downstream `sdk._namespace` consumer stay
+    byte-identical to before this helper existed.
+
+    None means "not listed" — it does NOT mean the probe failed. Callers keep
+    their `_make_sdk(namespace=org_id)` fallback for the fail-open case
+    (graph-up-unknown), exactly as the inline construction did.
+    """
+    listed = _registry_existing_graphs()
+    if not listed:
+        return None
+    if f"org_{org_id}" in listed:
+        return _make_sdk(namespace=org_id)
+    if f"team_{org_id}" in listed:
+        return _make_sdk(graph_name=f"team_{org_id}")
+    return None
 
 
 def _graph_available(org_id: str) -> bool:
@@ -18054,7 +18100,15 @@ def _get_onboarding_projection(org_id: str) -> dict:
             None, bool(raw.get("onboarding_complete")), [])
         return state
     try:
-        proj = _make_sdk(namespace=org_id)._get_proj()
+        # Open the name the guard actually verified. `_make_sdk(namespace=)`
+        # re-derives `org_{org_id}`, so for a legacy `team_{org_id}` org it
+        # would MINT a different, absent graph (the read-path write pin 4
+        # bans) and read an empty one — the guard's True would then be about a
+        # name this line never opens. None comes back when the probe failed
+        # (fail-open) or neither name is listed: fall back to the inline
+        # construction so the read proceeds and raises → 'unavailable'.
+        proj = (_open_org_graph_sdk(org_id)
+                or _make_sdk(namespace=org_id))._get_proj()
         node = _os.read_onboarding_node(proj, org_id)
         steps = _os.completed_steps(proj, org_id) if node is not None else []
     except Exception:
@@ -18276,7 +18330,12 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
             # handle leaks a connection per PATCH otherwise — the writers'
             # _org_proj leak is pre-existing, but this block is on the hot
             # PATCH path and must not add to it).
-            _node_sdk = _make_sdk(namespace=org["org_id"])
+            # Open the name the guard verified — a legacy `team_{org_id}` org
+            # would otherwise be read on a minted, absent `org_{org_id}` (pin
+            # 4). None (probe failed / not listed) → the inline construction,
+            # unchanged. Closed in the finally below either way.
+            _node_sdk = (_open_org_graph_sdk(org["org_id"])
+                         or _make_sdk(namespace=org["org_id"]))
             try:
                 _node = _os.read_onboarding_node(
                     _node_sdk._get_proj(), org["org_id"])

@@ -1864,8 +1864,8 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
 
 def tortoise_list_graphs() -> list[str]:
     """List graph names. HTTP: only the calling org's own graphs (exact
-    org_{org_id} equality — no cross-tenant enumeration). Stdio: full list
-    (operator context).
+    `org_{org_id}` / legacy `team_{org_id}` equality — no cross-tenant
+    enumeration). Stdio: full list (operator context).
     Alias → overview(section='graphs') (epic #888 W3)."""
     graphs = _safe(_get_org_sdk().list_graphs)
     if not isinstance(graphs, list):
@@ -1873,8 +1873,13 @@ def tortoise_list_graphs() -> list[str]:
     if _transport_mode.get() == "http":
         from tortoise.mcp_auth import _current_org_id
         org_id = _current_org_id.get()
-        own = f"org_{org_id}" if org_id else None
-        return [g for g in graphs if own is not None and g == own]
+        # #3543: the tenant graph is `org_{org_id}` post-rename and
+        # `team_{org_id}` before it; no data migration rewrites the stored
+        # namespace, so both spellings are the calling org's own graph.
+        # Same dual probe as hosted_api._graph_has_org_namespace — the sites
+        # must agree or a legacy org's graphs become invisible here alone.
+        own = {f"org_{org_id}", f"team_{org_id}"} if org_id else set()
+        return [g for g in graphs if g in own]
     return graphs
 
 
