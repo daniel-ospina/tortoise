@@ -15838,8 +15838,8 @@ async def agent_signup(request: Request):
     except HTTPException as exc:
         if exc.status_code == 429:
             # P2-2 (phase-7): same fire-and-forget pattern as the success feed —
-            # the 429 response must NOT absorb ops email latency (up to ~15s
-            # Resend). Retained in _SIGNUP_FEED_TASKS (P2-1: create_task must
+            # the 429 response must NOT absorb ops-alert latency (up to ~15s).
+            # Retained in _SIGNUP_FEED_TASKS (P2-1: create_task must
             # hold a reference — asyncio GC).
             _retain_feed_task("block-" + (getattr(request.state, "client_ip", None)
                 or (request.client.host if request.client else None)),
@@ -15927,7 +15927,7 @@ async def agent_signup(request: Request):
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
-        # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops email
+        # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops-alert
         # latency never delays the cold-start mint (best-effort telemetry; #310)
         _retain_feed_task("signup-" + (getattr(request.state, "client_ip", None)
             or (request.client.host if request.client else None)),
@@ -15975,7 +15975,7 @@ async def agent_signup(request: Request):
         sdk._graph_create(org_id, "default", kind="default", namespace=graph_name)
 
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
-        # P3-D/P3-6: fire-and-forget success-path feed (ops email latency
+        # P3-D/P3-6: fire-and-forget success-path feed (ops-alert latency
         # must never delay the mint response)
         _retain_feed_task("signup-" + (getattr(request.state, "client_ip", None)
             or (request.client.host if request.client else None)),
