@@ -1305,7 +1305,7 @@ def _default_drill_key(client, mem_storage, org_id="team_x") -> str:
     assert r.json()["status"] == "backed_up", r.text
     keys = [k for k in mem_storage.list(f"backups/{org_id}/default/")
             if k.endswith("dump.enc")]
-    assert keys, f"no default archive for {team}"
+    assert keys, f"no default archive for {org_id}"
     return sorted(keys)[-1]  # newest (lexicographic ts == chronological)
 
 

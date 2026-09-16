@@ -809,9 +809,9 @@ def test_mcp_capture_path_reserves_admission(client, monkeypatch):
         _current_graph_id,
         _current_graph_namespace,
         _current_legacy_full_access,
-        _current_scopes,
         _current_org_id,
         _current_org_limits,
+        _current_scopes,
     )
     from tortoise.mcp_server import tortoise_session_capture
 

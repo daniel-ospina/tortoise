@@ -447,9 +447,9 @@ def _run_mcp_graph_capture(tmp_path, db):
         _current_graph_id,
         _current_graph_namespace,
         _current_legacy_full_access,
-        _current_scopes,
         _current_org_id,
         _current_org_limits,
+        _current_scopes,
     )
     from tortoise.mcp_server import tortoise_session_capture
     toks = [
@@ -537,9 +537,9 @@ def _run_with_mcp_ctx(tid, fn, *, scopes, legacy=False, graph=None,
         _current_graph_id,
         _current_graph_namespace,
         _current_legacy_full_access,
-        _current_scopes,
         _current_org_id,
         _current_org_limits,
+        _current_scopes,
     )
     toks = []
 
