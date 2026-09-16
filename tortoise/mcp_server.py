@@ -1933,7 +1933,7 @@ def tortoise_health() -> dict:
     # with its real graph_size instead of degraded/0.
     return _safe(lambda: monitoring.metrics(
         sdk=_get_org_sdk(),
-        probe_setup_timeout=monitoring.probe_setup_timeout(),
+        setup_timeout=monitoring.probe_setup_timeout(),
     ))
 
 

@@ -169,26 +169,28 @@ class TestProbeDb:
         assert calls["n"] == 2  # retried once, then still degraded
         assert "NXDOMAIN" in result["error"]
 
-    def test_retry_total_is_bounded_by_probe_db_total_timeout(self, monkeypatch):
-        """#2988: ``probe_db``'s real ceiling is TWO attempt bounds plus the
-        retry delay — ``PROBE_DB_TOTAL_TIMEOUT`` — not the bare per-attempt
-        ``PROBE_TIMEOUT``.
+    def test_retry_rides_the_single_combined_deadline(self, monkeypatch):
+        """#2988/#3143: the COMBINED (platform) shape's real ceiling is ONE
+        ``PROBE_TIMEOUT`` deadline — the #1565 retry rides the REMAINDER of it,
+        it does not take a second attempt bound. ``PROBE_DB_TOTAL_TIMEOUT``
+        (2 x ``PROBE_TIMEOUT`` + the retry delay) is retained only as the LOOSE
+        outer-alignment figure coordinators are sized above.
 
-        That total is the number a coordinator's outer bound is aligned above.
-        The previous version of this test slept ``0.98 * PROBE_TIMEOUT`` per
-        attempt and compared the wall clock against the 3.1s total with only
-        ~40-60ms of headroom; it genuinely failed once (3.1827s > 3.1s under a
-        cold daemon-thread start). A flaky guard in a registered CI surface is
-        worse than no guard.
+        This test used to assert the wall clock against that loose figure
+        (~0.95s at the patched sizes) — a bound the call cannot reach (~0.25s),
+        so it no longer guarded what it claimed. It now guards the REAL
+        structure: (a) a spy pins the retry's ``timeout`` at the REMAINDER —
+        strictly below the single bound — which is exactly what a "fresh
+        second bound" regression would break, and (b) the wall-clock backstop
+        is the single combined deadline. The SHIPPED ``PROBE_DB_TOTAL_TIMEOUT``
+        formula is pinned separately, as the alignment figure.
 
-        FIX — determinism over the knife-edge: the per-attempt bound and the
-        retry delay are MONKEYPATCHED DOWN so the measured total is small and
-        the margin is SECONDS, not milliseconds, and the SDK fails well INSIDE
-        the (small) attempt bound so nothing races the worker's own timeout.
-        The LOWER bound is safe because ``time.sleep`` can overshoot but never
-        undershoot; the UPPER bound carries a generous NAMED tolerance. The
-        SHIPPED ``PROBE_DB_TOTAL_TIMEOUT`` is pinned separately, because the
-        monkeypatched behavioural run cannot pin it.
+        Determinism over the knife-edge: the per-attempt bound and the retry
+        delay are MONKEYPATCHED DOWN so the measured total is small, and the
+        SDK fails well INSIDE the (small) attempt bound so nothing races the
+        worker's own timeout. ``time.sleep`` can overshoot but never undershoot,
+        so the LOWER bound is safe; the UPPER backstop carries a generous NAMED
+        tolerance.
         """
         import time
 
@@ -212,9 +214,22 @@ class TestProbeDb:
         per_attempt_work = 0.05
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", attempt_bound)
         monkeypatch.setattr(monitoring, "PROBE_RETRY_DELAY", retry_delay)
-        expected_total = 2 * attempt_bound + retry_delay
+        # The COMBINED shape's real ceiling: the retry rides the remainder of
+        # this ONE deadline — NOT `2 x attempt_bound + retry_delay`.
+        combined_deadline = attempt_bound
 
         calls = {"n": 0}
+        # Spy on the seam the retry budget crosses WITHOUT replacing the real
+        # implementation (the run stays behavioural).
+        seen: list[tuple] = []
+        real_probe_once = monitoring._probe_once
+
+        def spy_probe_once(sdk, timeout=None, setup_timeout=None):
+            seen.append((timeout, setup_timeout))
+            return real_probe_once(sdk, timeout=timeout,
+                                   setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(monitoring, "_probe_once", spy_probe_once)
 
         class SlowTransientSDK:
             def _get_proj(self):
@@ -231,6 +246,16 @@ class TestProbeDb:
 
         assert calls["n"] == 2, "the transient retry did not happen"
         assert result["ok"] is False
+        # STRUCTURAL guard: attempt 1 is the combined shape (no explicit
+        # allowance), and the retry is handed the REMAINDER — strictly less
+        # than the one deadline, because the first attempt and the delay were
+        # spent out of it. A regression that gave the retry a FRESH bound
+        # (``attempt_bound``) or the whole total would pin ``seen[1][0]`` at
+        # ``attempt_bound`` and fail here; the wall clock cannot see it, because
+        # each attempt fails in ~50ms.
+        assert seen[0] == (None, None), seen[0]
+        assert seen[1][1] is None, seen[1]  # the retry stays in COMBINED shape
+        assert 0 < seen[1][0] < combined_deadline, seen[1][0]
         # SAFE lower bound: both attempts' work plus the inter-attempt delay
         # really elapsed, so this run exercises the retry path.
         assert elapsed >= 2 * per_attempt_work + retry_delay, (
@@ -238,19 +263,19 @@ class TestProbeDb:
             f"({per_attempt_work}s each) plus the {retry_delay}s delay, so this "
             "measurement is not exercising the retry path"
         )
-        # UPPER bound with a GENEROUS NAMED TOLERANCE (seconds of headroom, not
-        # the ~40ms the old assertion had).
-        assert elapsed <= expected_total + RETRY_TOTAL_TIMING_TOLERANCE_S, (
-            f"probe_db took {elapsed:.3f}s — above two attempts plus one delay "
-            f"({expected_total}s) plus the {RETRY_TOTAL_TIMING_TOLERANCE_S}s "
-            "tolerance; probe_db's structure is no longer two bounded attempts "
-            "plus PROBE_RETRY_DELAY"
+        # UPPER backstop (generous NAMED tolerance): the call must stay inside
+        # its ONE combined deadline. The retry-budget structure is pinned by the
+        # structural assertions above, not by this clock.
+        assert elapsed <= combined_deadline + RETRY_TOTAL_TIMING_TOLERANCE_S, (
+            f"probe_db took {elapsed:.3f}s — above the single combined deadline "
+            f"({combined_deadline}s) plus the "
+            f"{RETRY_TOTAL_TIMING_TOLERANCE_S}s tolerance"
         )
-        # Drift guard, NOT a bound: the SHIPPED total must stay exactly two
-        # attempt bounds plus one retry delay.
+        # Drift guard, NOT a bound: the SHIPPED alignment figure must stay
+        # exactly two attempt bounds plus one retry delay.
         assert shipped_total == 2 * shipped_timeout + shipped_delay, (
-            "PROBE_DB_TOTAL_TIMEOUT drifted from the structure it describes "
-            "(2 x PROBE_TIMEOUT + PROBE_RETRY_DELAY)"
+            "PROBE_DB_TOTAL_TIMEOUT drifted from the alignment structure it "
+            "describes (2 x PROBE_TIMEOUT + PROBE_RETRY_DELAY)"
         )
 
     def test_never_raises_on_hung_connection(self, monkeypatch):
@@ -302,6 +327,42 @@ class TestProbeDb:
         result = monitoring.probe_db(ProjWithoutGraph())
         assert result["ok"] is False
         assert "attribute" in result["error"]
+
+    def test_setup_raising_a_bare_timeout_never_reports_an_empty_error(
+            self, monkeypatch):
+        """#3143 review P2: on py3.12 ``concurrent.futures.TimeoutError`` IS
+        ``builtins.TimeoutError``, so a callable that RAISES one (a bare
+        ``TimeoutError()`` / ``socket.timeout`` from inside ``_get_proj``) is
+        re-raised out of ``Future.result`` and caught by the same handler as a
+        genuine phase overrun. ``setup.done()`` is True for BOTH causes, and
+        ``str(bare_timeout)`` is EMPTY — so pre-fix the probe returned
+        ``error=''`` (rendered as a bare 'unreachable' by /health) instead of
+        the synthesized setup message.
+        """
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.5)
+
+        class BareTimeoutSDK:
+            def _get_proj(self):
+                raise TimeoutError()  # str() == ""
+
+        calls = {"n": 0}
+
+        class MessagedTimeoutSDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                raise TimeoutError("timed out")
+
+        # A bare timeout falls back to the synthesized setup message — never
+        # an empty string.
+        bare = monitoring.probe_db(BareTimeoutSDK())
+        assert bare["ok"] is False
+        assert bare["error"] == "probe setup timeout after 0.5s", bare
+        # A timeout WITH its own message keeps it (more informative).
+        messaged = monitoring.probe_db(MessagedTimeoutSDK())
+        assert messaged["ok"] is False
+        assert "timed out" in messaged["error"], messaged
+        # A TimeoutError is never retried (a hung DB stays hung).
+        assert calls["n"] == 1, calls
 
     def test_default_budget_is_shared_across_the_two_phases(self, monkeypatch):
         """#3143 review: with NO explicit setup allowance (the /health shape)
@@ -472,8 +533,8 @@ class TestProbeSetupTimeoutResolution:
         "nan",
         "inf",
         "0.1",    # below PROBE_TIMEOUT: can only false-degrade a reachable graph
-        "1e-9",   # …and this reads as "valid" without the low clamp
-        "300.001",  # above the clamp
+        "1e-9",   # …and this reads as "valid" without the lower BOUND
+        "300.001",  # just above the accepted maximum
         "1e12",
     ])
     def test_bad_env_falls_back_to_default_never_raises(self, monkeypatch, raw):
@@ -534,7 +595,7 @@ class TestProbeSetupTimeoutResolution:
         finally:
             _transport_mode.reset(token)
         assert result["status"] == "ok", result
-        assert captured["probe_setup_timeout"] == 7.0
+        assert captured["setup_timeout"] == 7.0
 
 
 class TestMetricsFunction:
@@ -766,14 +827,17 @@ class TestProbeSetupBudget:
 
         result = monitoring.probe_db(SetupHogSDK())
         assert result["ok"] is False
-        assert result["error"] == "probe timeout after 1.0s"
+        # The cold-start consumed the shared budget, so the QUERY never ran:
+        # it carries the SETUP spelling (one spelling per phase, #3143 review
+        # P2). "probe timeout" here would falsely claim the query was reached.
+        assert result["error"] == "probe setup timeout after 1.0s"
         assert submits["n"] == 1, "the query was submitted past the deadline"
 
     def test_serve_health_handler_forwards_no_allowance(self, monkeypatch):
         """#3143 review: the standalone ``serve_health`` server is the third
         platform liveness caller. Its handler calls ``metrics()`` with NO
         arguments — pin that end-to-end, because a handler-level
-        ``probe_setup_timeout=probe_setup_timeout()`` would otherwise give the
+        ``setup_timeout=probe_setup_timeout()`` would otherwise give the
         standalone liveness server a multi-second cold-start with the whole
         suite green."""
         import threading
@@ -837,7 +901,7 @@ class TestProbeSetupBudget:
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
         result = monitoring.metrics(
             sdk=SlowColdStartSDK(delay=0.2, graph_size=9019),
-            probe_setup_timeout=monitoring.PROBE_SETUP_TIMEOUT,
+            setup_timeout=monitoring.PROBE_SETUP_TIMEOUT,
         )
         assert result["status"] == "ok", result
         assert result["db"]["ok"] is True
@@ -866,6 +930,81 @@ class TestProbeSetupBudget:
             _transport_mode.reset(token)
         assert result["status"] == "ok", result
         assert result["db"]["ok"] is True
+        assert result["graph_size"] == 9019
+
+
+class TestProbeQueueIsolation:
+    """#3143 review P1: the shared #3062 probe slot must not charge its QUEUE
+    WAIT to the reachability budget.
+
+    The slot is deliberately ONE process-lifetime worker, so a probe can queue
+    behind another probe's cold-start. ``Future.result(timeout=…)`` starts its
+    clock at SUBMISSION, so before the fix a query queued behind a slow (or
+    already-abandoned) cold-start spent the 1.5s reachability budget queued,
+    timed out, and reported a REACHABLE graph ``degraded``/0 — the exact #3143
+    symptom this PR exists to remove, surviving under concurrency. The
+    unrebased head could not hit it (it used a per-call executor); the
+    hand-port onto the shared slot introduced it.
+    """
+
+    def test_query_queued_behind_a_slow_setup_is_not_reported_degraded(
+            self, monkeypatch):
+        import threading
+
+        # Tight reachability budget: a query whose queue wait is charged to it
+        # fails long before the competing cold-start finishes.
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        setup_running = threading.Event()
+        release_setup = threading.Event()
+
+        proj = MagicMock()
+        proj.g.query.return_value = MagicMock(result_set=[[1]])
+
+        class CoordinatedSDK:
+            """A reachable graph whose cold-start the test can hold open."""
+
+            def _get_proj(self):
+                setup_running.set()
+                assert release_setup.wait(5.0), "test never released setup"
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 9019}
+
+        holder: dict = {}
+
+        def _call():
+            holder["result"] = monitoring.metrics(
+                sdk=CoordinatedSDK(), setup_timeout=20.0)
+
+        caller = threading.Thread(target=_call, daemon=True)
+        caller.start()
+        try:
+            assert setup_running.wait(5.0), "the cold-start never started"
+
+            # While OUR cold-start holds the single slot, ANOTHER probe
+            # submits. Its cold-start is FIFO-queued AHEAD of our query, so
+            # when our setup returns the query has an occupied slot in front
+            # of it (the #3143 P1 interleave). The 0.5s dwell leaves a wide
+            # window for the caller thread to submit the query; the pre-fix
+            # failure below is evidence the interleave actually happened.
+            worker = monitoring._probe_worker()
+
+            def _competing_cold_start():
+                time.sleep(0.5)
+
+            worker.submit(_competing_cold_start)
+            release_setup.set()
+            caller.join(15.0)
+        finally:
+            release_setup.set()
+        assert not caller.is_alive(), "metrics() did not return"
+        result = holder["result"]
+        # The graph is reachable and `RETURN 1` is instant, so the ONLY way
+        # this reports degraded/0 is the queue wait being charged to the
+        # reachability budget.
+        assert result["status"] == "ok", result
+        assert result["db"]["ok"] is True, result
         assert result["graph_size"] == 9019
 
 
@@ -908,7 +1047,7 @@ class TestProbeSetupBudgetIntegration:
         assert "setup timeout" in tight["error"]
 
         result = monitoring.metrics(
-            sdk=sdk, probe_setup_timeout=monitoring.PROBE_SETUP_TIMEOUT)
+            sdk=sdk, setup_timeout=monitoring.PROBE_SETUP_TIMEOUT)
         assert result["status"] == "ok", result
         assert result["db"]["ok"] is True
         # The REAL taxonomy count, not a stub attribute — and this is the
