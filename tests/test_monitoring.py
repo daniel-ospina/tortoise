@@ -1075,6 +1075,83 @@ class TestProbeQueueIsolation:
             "a FREE-slot probe"
         )
 
+    def test_queued_never_started_query_is_attributed_to_setup(
+            self, monkeypatch):
+        """#3143 review P2: a query that is QUEUED and never RAN is attributed
+        to the SETUP phase — the query phase was never reached.
+
+        The read of ``query_started`` in the ``TimeoutError`` handler resolves
+        a genuine race: the single #3062 slot is occupied for the whole
+        reachability budget, so the submitted ``_run_query`` never starts and
+        ``Future.result`` times out with the event still CLEAR. The phase at
+        fault is the wait for the slot, so the error must carry the SETUP
+        spelling; "probe timeout after …" would falsely claim the query itself
+        was reached and overran.
+
+        Determinism — no wall-clock race:
+        * the probe clock is frozen and ``_get_proj`` advances it by EXACTLY
+          the cold-start allowance, so the slot-wait leftover is exactly
+          ``0.0`` and the truthiness guard above the ``try`` cannot fire (a
+          zero leftover must stay benign — the FREE-slot counterpart is
+          ``test_zero_leftover_with_a_free_slot_reports_the_reachable_graph``);
+        * the slot is occupied by a blocker QUEUED FROM INSIDE ``_get_proj``,
+          i.e. put on the single slot's FIFO queue BEFORE the caller submits
+          the query. FIFO order — not thread scheduling — guarantees the
+          blocker runs first, so the query stays pending for the whole budget.
+        """
+        import threading
+
+        query_budget = 0.05
+        ALLOWANCE = 3.0
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+
+        release_slot = threading.Event()
+        ran = {"query": 0}
+        proj = MagicMock()
+
+        def _q(*args, **kwargs):
+            ran["query"] += 1
+            return MagicMock(result_set=[[1]])
+
+        proj.g.query.side_effect = _q
+
+        worker = monitoring._probe_worker()
+
+        class OccupiedSlotSDK:
+            """A reachable graph whose cold-start QUEUES a blocker ahead of
+            the query, occupying the single probe slot for the budget."""
+
+            def _get_proj(self):
+                clock.t += ALLOWANCE  # leftover becomes exactly 0.0
+                # Queued from INSIDE the slot, so it precedes the caller's
+                # query submission in the single slot's FIFO order.
+                worker.submit(lambda: release_slot.wait(5.0))
+                return proj
+
+        try:
+            ok, error, transient = monitoring._probe_once(
+                OccupiedSlotSDK(), timeout=query_budget,
+                setup_timeout=ALLOWANCE)
+
+            assert ok is False, (ok, error)
+            # THE DISCRIMINATOR: the query never started, so the SETUP phase
+            # owns the error. The pre-fix fall-through spelled it
+            # "probe timeout after 0.05s" (a query that overran).
+            assert error == (
+                f"{monitoring._PROBE_SETUP_TIMEOUT_MSG}{ALLOWANCE}s"), error
+            assert error == "probe setup timeout after 3.0s", error
+            assert "probe timeout after" not in error, error
+            assert transient is False, transient
+            assert ran["query"] == 0, (
+                "the queued query RAN — the blocker did not hold the slot")
+        finally:
+            # Release the blocker, then flush the abandoned query submission so
+            # the process-lifetime worker is idle for the next test.
+            release_slot.set()
+        worker.submit(lambda: None).result(timeout=5.0)
+
 
 class TestProbeSetupBudgetIntegration:
     """#3143 at the REAL-projection layer — the issue's integration surface.
