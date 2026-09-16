@@ -126,6 +126,21 @@ if _OriginalFalkorDB is not None:
             if "host" not in kwargs and "port" not in kwargs:
                 from tortoise.embedded_lifecycle import register_embedded_client
                 register_embedded_client(self)
+                # #3599: record this process as a live OWNER of the server,
+                # so the reaper can decide orphanhood per-server ("no live
+                # owner") instead of via the global suite-marker gate that a
+                # fleet host keeps permanently True. Written in the server's
+                # own socket dir; removed by every close seam (_t_close,
+                # _atexit_close, close_embedded_clients). owner_socket_of
+                # resolves the INNER redislite client — the wrapper itself
+                # has no socket_file (redislite's FalkorDB keeps its server
+                # on self.client).
+                from tortoise.embedded_lifecycle import owner_socket_of, record_owner
+                # Capture the socket path NOW: redislite mutates the inner
+                # client during close(), so re-deriving it at release time
+                # can yield None and silently strand the record.
+                self._t_socket_file = owner_socket_of(self)
+                record_owner(self._t_socket_file)
             # #1371: route the atexit seam through the fast-close wrapper
             # (ephemeral test servers) so interpreter exit does not spend
             # 3-4s per leaked server on redislite's response-waiting close.
@@ -143,8 +158,45 @@ if _OriginalFalkorDB is not None:
             """
             if atexit_fast_close(getattr(self, "client", self)):
                 self._t_closed = True
+                # #3599: the fast path bypasses close()/_t_close — release
+                # the owner record here so a normal exit never leaves a
+                # live-looking record for a server that is already gone.
+                self._t_release_owner()
                 return
             self._t_close()
+
+        def _t_release_owner(self) -> None:
+            """#3599: release this client's owner record claim (idempotent).
+
+            Refcounted in embedded_lifecycle, so closing ONE of several
+            clients on a shared server keeps the record that protects the
+            others. The per-client flag makes the release idempotent across
+            the three teardown seams (explicit close, atexit, signal), which
+            would otherwise decrement twice and drop a record the process
+            still needs.
+            """
+            if getattr(self, "_t_owner_released", False):
+                return
+            self._t_owner_released = True
+            from tortoise.embedded_lifecycle import forget_owner, owner_socket_of
+            sock = getattr(self, "_t_socket_file", None) or owner_socket_of(self)
+            forget_owner(sock)
+
+        def close(self, *args, **kwargs):
+            """#3599: release the owner-record claim on the PUBLIC close seam.
+
+            The wrapper inherits redislite's ``close()`` (a redis-py pool
+            disconnect + ``_cleanup``), which has no hook for our owner
+            record. Without this override a direct ``db.close()`` bypasses
+            ``_t_close`` entirely and strands the record until interpreter
+            exit. Idempotent via ``_t_release_owner``'s per-client flag, so
+            the ``_t_close`` path (which calls ``close()`` and then
+            releases) stays correct.
+            """
+            try:
+                return super().close(*args, **kwargs)
+            finally:
+                self._t_release_owner()
 
         def _t_close(self) -> None:
             """Idempotent close; safe from atexit or __exit__."""
@@ -155,6 +207,10 @@ if _OriginalFalkorDB is not None:
                 self.close()
             except Exception:
                 pass  # teardown context: never raise
+            # #3599: release the owner record on EVERY close path, including
+            # the exception path above (a failed shutdown still means this
+            # process no longer owns the server).
+            self._t_release_owner()
 
         def __enter__(self):
             return self
