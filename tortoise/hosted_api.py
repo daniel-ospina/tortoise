@@ -10014,6 +10014,173 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     }
 
 
+# #B7: the activation scorecard — which sessions actually produced memory, and
+# whether anything read it. Read-only; derives from data other components
+# already record (no new write, no change to the capture path).
+#
+# Distinct from `first_api_call` (tortoise/analytics.py), whose docstring calls
+# it the "Activation event" while it fires on ANY POST /v1/* returning <400,
+# and distinct from the dashboard's captureStatus `active` state, which is
+# receipt-authoritative ("the transcript was stored").
+#
+# The definition, its evidence, and the stages that are NOT measurable live in
+# tortoise/activation_scorecard.py — read that module's docstring first.
+@app.get("/v1/activation/scorecard")
+async def activation_scorecard(
+    since: str | None = None,
+    until: str | None = None,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Activation funnel for the calling org over [since, until).
+
+    Stages: captured -> stored -> memory_produced (session-scoped, graph),
+    recall_attempted (org/time-scoped, analytics), value_confirmed (a
+    REFUSAL — see the module). Every stage carries state + reason; a 0 is only
+    ever emitted with state == "measured".
+
+    Defaults to the beta's own <= 24h criterion window. 422 on a malformed,
+    naive, non-positive, or over-90-day window (a client error, never a silent
+    empty result).
+
+    Guards: `graphs:read` scope, then `_reject_graph_bound_org_surface` — the
+    graph legs read the org DEFAULT graph while the analytics leg is ORG-WIDE
+    (analytics_events carries no graph_id), so a graph-bound key would mix two
+    scopes and leak cross-graph activity.
+
+    Fail-soft: an unreadable graph or analytics store yields `unavailable`,
+    never a 500 and never a fabricated 0.
+    """
+    from tortoise.activation_scorecard import (
+        FUNNEL_QUERY as _FUNNEL,
+    )
+    from tortoise.activation_scorecard import (
+        LIFETIME_MEMORY_QUERY,
+        analytics_write_path_configured,
+        assemble,
+        graph_unavailable_stages,
+        stage_counts,
+    )
+    from tortoise.activation_scorecard import (
+        MCP_TELEMETRY_EVENT as _EVENT,
+    )
+    from tortoise.activation_scorecard import (
+        RECALL_PAGE_CAP as _CAP,
+    )
+    from tortoise.activation_scorecard import (
+        WindowError as _WindowError,
+    )
+    from tortoise.activation_scorecard import (
+        normalize_window as _norm_window,
+    )
+
+    _require_scope(org, "graphs:read", "activation_scorecard")
+    _reject_graph_bound_org_surface(org, "the activation scorecard")
+    try:
+        since_iso, until_iso = _norm_window(since, until)
+    except _WindowError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    log = logging.getLogger("tortoise.api")
+
+    # ── Stages 1-3, and the lifetime baseline for stage 4 ──────────────────
+    graph_error: str | None = None
+    rows: list = []
+    lifetime: dict | None = None
+    try:
+        sdk = _data_sdk(org)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            _FUNNEL, params={"since": since_iso, "until": until_iso}
+        ).result_set
+        life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set
+        if life:
+            lifetime = {"first_memory_at": life[0][0],
+                        "sessions_with_memory": life[0][1]}
+    except Exception:
+        graph_error = "org_graph_unavailable"
+        log.warning("activation scorecard graph unavailable (fail-soft): %s",
+                    org["org_id"], exc_info=True)
+
+    if graph_error:
+        graph_stages = graph_unavailable_stages(graph_error)
+        graph_detail = {"captured_sessions": None, "stored_sessions": None,
+                        "memory_produced_sessions": None,
+                        "turn_points_total": None, "extracted_points_total": None}
+    else:
+        graph_stages, graph_detail = stage_counts(rows, since_iso, until_iso)
+
+    # ── Stage 4 ────────────────────────────────────────────────────────────
+    analytics_state = ("configured" if analytics_write_path_configured()
+                       else "unset")
+    recall_cell, recall_detail = _read_recall(
+        org, since_iso, until_iso, lifetime, graph_error, analytics_state, log,
+        _EVENT, _CAP)
+
+    payload = assemble(
+        org_id=org["org_id"], since=since_iso, until=until_iso,
+        graph_stages=graph_stages, graph_detail=graph_detail,
+        recall_cell=recall_cell, recall_detail=recall_detail,
+        lifetime=lifetime, analytics_state=analytics_state,
+    )
+    if graph_error:
+        payload["integrity"].append(graph_error)
+    if analytics_state == "unset":
+        # The writer cannot reach the store: every window is unmeasured, and a
+        # historical window can never be backfilled. Say so in the payload.
+        payload["notes"].append(
+            "analytics write path is not configured on this server — stage 4 "
+            "is unmeasured, not zero, and historical events are unrecoverable")
+    return payload
+
+
+def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
+                 graph_error: str | None, analytics_state: str, log,
+                 event: str, cap: int):
+    """Read the analytics rows for the window and fold them into stage 4.
+
+    Returns `(stage_cell, detail)`. Deliberately returns an `unavailable` cell
+    — NEVER a zero — for every case where the store cannot be trusted to be
+    complete: not configured, unreachable, a full page (no offset support on
+    the read helper, so a full page is a lower bound), or no memory has ever
+    been produced (nothing could have been answered from memory).
+    """
+    from tortoise.activation_scorecard import (
+        analytics_write_path_configured,
+    )
+    from tortoise.activation_scorecard import (
+        recall_stages as _recall_stages,
+    )
+    if not analytics_write_path_configured():
+        return _recall_stages(
+            None, None, reason="analytics_write_path_unconfigured")
+    if graph_error:
+        # first_memory_at is unknown, so stage 4 cannot be conditioned.
+        return _recall_stages(None, None, reason=graph_error)
+    try:
+        from tortoise.supabase_control import get_control_plane
+        analytics_rows = get_control_plane().query(
+            "analytics_events",
+            select=["event_name", "properties", "created_at"],
+            filters=[("org_id", "eq", org["org_id"]),
+                     ("event_name", "eq", event),
+                     ("created_at", "gt", since),
+                     ("created_at", "lt", until)],
+            order="created_at.desc",
+            limit=cap,
+        )
+    except Exception:
+        log.warning("activation scorecard analytics unreachable (fail-soft): %s",
+                    org["org_id"], exc_info=True)
+        return _recall_stages(
+            None, None, reason="analytics_store_unreachable")
+    truncated = isinstance(analytics_rows, list) and len(analytics_rows) >= cap
+    return _recall_stages(analytics_rows,
+                          (lifetime or {}).get("first_memory_at"),
+                          truncated=truncated,
+                          memory_sessions=(lifetime or {}).get(
+                              "sessions_with_memory"))
+
+
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
 # Captured-sessions view/delete home (DE2E-11). Removes the Session node +
 # its OWNED graph subgraph (CONTAINS turn/extracted Points, the
@@ -19250,9 +19417,18 @@ def _track_analytics_event(org_id: str, event_name: str,
                            properties: dict | None = None) -> None:
     """Record a funnel event. PII-free; graceful when Supabase is unconfigured.
 
-    Writes to Supabase analytics_events when SUPABASE_URL + SUPABASE_SERVICE_KEY
-    are set; otherwise appends to a local JSONL fallback. Never raises — the
+    Writes to Supabase analytics_events when SUPABASE_URL and a service key are
+    set; otherwise appends to a local JSONL fallback. Never raises — the
     onboarding flow must not break because analytics failed.
+
+    Key name (#B7): BOTH ``SUPABASE_SERVICE_ROLE_KEY`` (the canonical hosted
+    deployment name — ``deploy-hosted.yml``, ``supabase_control._SERVICE_KEY_ENV``)
+    and the legacy ``SUPABASE_SERVICE_KEY`` are accepted. Reading only the
+    legacy name made this writer a silent no-op on the hosted deployment: the
+    key was absent, so every event fell through to the JSONL fallback on an
+    EPHEMERAL container and was lost — the whole funnel surface (including
+    ``mcp_tool_call``) was dark. The four sibling Supabase call sites in this
+    module already read both names; this aligns the writer with them.
     """
     props = {k: v for k, v in (properties or {}).items()
              if k in _ALLOWED_ANALYTICS_PROPS}
@@ -19263,7 +19439,8 @@ def _track_analytics_event(org_id: str, event_name: str,
         "created_at": datetime.now(UTC).isoformat(),
     }
     url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+           or os.environ.get("SUPABASE_SERVICE_KEY"))
     if url and key:
         try:
             import httpx

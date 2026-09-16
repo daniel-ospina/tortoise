@@ -249,6 +249,21 @@ def test_unrelated_tools_change_still_tier1():
     assert set(r["test_files"]) == _tier1()
 
 
+def test_activation_cohort_change_does_not_drop_to_tier1():
+    # #B7 (#3674): tools/activation_cohort.py owns part of
+    # tests/test_activation_scorecard.py (its roll_up cohort-summing logic).
+    # Without the TOOL_CARVEOUTS entry the flat "tools/" prefix swallows it ->
+    # tier-1 smoke only, and the suite that pins the cohort number never runs.
+    r = _sel(["tools/activation_cohort.py"])
+    assert r["surfaces"], r
+    assert set(r["test_files"]) != _tier1(), r
+    # Today it lands in the fail-closed unknown-path branch (FULL matrix — the
+    # heaviest but safest gate for a file a reported metric depends on). If
+    # that ever becomes a mapped surface, the owning suite must still run.
+    if not r["full"]:
+        assert "test_activation_scorecard.py" in r["test_files"], r
+
+
 def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     # #2071: tools/ask_spotcheck*.py are carved out of NON_PYTHON_PREFIXES
     # and mapped to the sdk surface — a spot-check-only change selects the
