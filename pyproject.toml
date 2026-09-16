@@ -17,6 +17,13 @@ dependencies = [
     # hosted_api.py analytics + tortoise.billing StripeClient). requirements.txt
     # is generated from this file, so the floor must live HERE (#494).
     "httpx>=0.27",
+    # httpcore is imported DIRECTLY by tortoise/cimd.py, which needs its
+    # `network_backend` seam to pin the CIMD fetch socket to a vetted address
+    # (#2847). Promoted from transitive (httpx's own dependency, same rule as
+    # redis below) so a future httpx bump cannot drop it silently. The floor
+    # matches httpx 0.28's resolved httpcore line, whose NetworkBackend / sync
+    # ConnectionPool API the pin is written against.
+    "httpcore>=1.0.9",
     "uvicorn>=0.23.0",
     "numpy>=1.24",
     "scipy>=1.10",

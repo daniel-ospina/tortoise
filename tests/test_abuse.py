@@ -11,7 +11,7 @@ Covers (plan Task 2/4/9 + scoping deltas 8/9/11/13/14):
 - suspended-signal set semantics (invalidation signal, not an authority)
 - FakeControlPlane migration-0015 trigger emulation (bootstrap exclusion,
   ON CONFLICT DO NOTHING no-duplicate)
-- notify_abuse (recipient precedence, missing/NULL email fallback, no-raise)
+- notify_abuse (Telegram-only per #3639 — never touches Resend, no-raise)
 - CLI SUSPENDED detail parse; Turnstile siteverify fail-open/fail-closed
 """
 from __future__ import annotations
@@ -547,45 +547,67 @@ class TestFakeTrigger:
 # ── notify_abuse (Task 4) ───────────────────────────────────────────────────
 
 class TestNotifyAbuse:
-    def test_recipient_precedence_and_fallbacks(self, monkeypatch):
+    def test_telegram_only_never_calls_resend(self, monkeypatch):
+        """#3639: any Resend call from the abuse path is a regression.
+
+        The abuse path is uncounted by the Resend send budget, so an email leg
+        here can starve the transactional quota (401 abuse_flag emails in 3h
+        drove two consecutive days to a reported 200% of the daily cap).
+        """
         import tortoise.notify as notify
-        sent: list[tuple[str, str]] = []
+
+        resend_calls: list[tuple] = []
         monkeypatch.setattr(notify, "_send_resend",
-                            lambda key, to, subj, html: sent.append((key, to)))
+                            lambda *a, **k: resend_calls.append(a))
+        telegram_sent: list[str] = []
+        monkeypatch.setattr(notify, "telegram_send",
+                            lambda bot, chat, text, **k: telegram_sent.append(text))
         monkeypatch.setenv("RESEND_API_KEY", "re_test")
         monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@premiselabs.co")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
 
-        notify.notify_abuse("abuse_flag", {"org_id": "t1", "email": "owner@x.co"}, {})
-        assert sent[-1][1] == "owner@x.co"
+        # every org shape (email set / NULL / absent) must behave identically
+        for org in ({"org_id": "t1", "email": "owner@x.co"},
+                    {"org_id": "t1", "email": None},
+                    {"org_id": "t1"}):
+            notify.notify_abuse("abuse_flag", org,
+                                {"rule": "point_create", "count": 2826,
+                                 "threshold": 500, "window_s": 3600})
 
-        # NULL email → ops fallback
-        notify.notify_abuse("abuse_flag", {"org_id": "t1", "email": None}, {})
-        assert sent[-1][1] == "ops@premiselabs.co"
+        assert resend_calls == [], "abuse must never consume the Resend quota"
+        assert len(telegram_sent) == 3
+        assert all("abuse_flag" in t and "point_create" in t for t in telegram_sent)
 
-        # MISSING email key (registry dict shape) → ops fallback, no KeyError
-        notify.notify_abuse("abuse_flag", {"org_id": "t1"}, {})
-        assert sent[-1][1] == "ops@premiselabs.co"
-
-    def test_never_raises_on_channel_failure(self, monkeypatch):
+    def test_never_raises_on_telegram_failure(self, monkeypatch):
         import tortoise.notify as notify
 
         def boom(*a, **k):
-            raise RuntimeError("resend down")
+            raise RuntimeError("telegram down")
 
-        monkeypatch.setattr(notify, "_send_resend", boom)
-        monkeypatch.setenv("RESEND_API_KEY", "re_test")
-        monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@premiselabs.co")
-        # must not raise
+        monkeypatch.setattr(notify, "telegram_send", boom)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
+        # Telegram is the ONLY channel now, so its failure must still not
+        # propagate into the caller's request path.
         notify.notify_abuse("abuse_suspended", {"org_id": "t1"}, {"rule": "point_create"})
 
     def test_unknown_kind_ignored(self, monkeypatch):
         import tortoise.notify as notify
-        sent = []
-        monkeypatch.setattr(notify, "_send_resend", lambda *a: sent.append(a))
+        resend_calls: list[tuple] = []
+        telegram_calls: list[tuple] = []
+        monkeypatch.setattr(notify, "_send_resend", lambda *a: resend_calls.append(a))
+        monkeypatch.setattr(notify, "telegram_send", lambda *a, **k: telegram_calls.append(a))
         monkeypatch.setenv("RESEND_API_KEY", "re_test")
         monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@x.co")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
         notify.notify_abuse("not_a_kind", {"org_id": "t1"}, {})
-        assert sent == []
+        assert resend_calls == []
+        assert telegram_calls == []
 
 
 # ── CLI SUSPENDED parse (Task 9) ────────────────────────────────────────────

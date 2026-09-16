@@ -146,10 +146,10 @@ def test_unknown_kind_ignored(monkeypatch):
 
 
 def test_abuse_signup_velocity_kind_allowed_with_ip(monkeypatch):
-    """#1081: abuse_signup_velocity ∈ KINDS — notify_abuse must NOT hit the
-    unknown-kind early return, and the IP (the most actionable field of an
-    IP-scoped ops alert) renders in BOTH channels. Anon team (no email key)
-    → BILLING_NOTIFY_TO ops inbox fallback (notify.py:153)."""
+    """#1081 + #3639: abuse_signup_velocity ∈ KINDS — notify_abuse must NOT hit
+    the unknown-kind early return, and the IP (the most actionable field of an
+    IP-scoped ops alert) renders in the Telegram message. Telegram is the ONLY
+    channel for abuse since #3639, so a Resend call here is a regression."""
     calls = []
 
     def fake_post(url, **kwargs):
@@ -167,12 +167,10 @@ def test_abuse_signup_velocity_kind_allowed_with_ip(monkeypatch):
         sent.update(chat_id=chat_id, text=text)
 
     monkeypatch.setattr("tortoise.notify.telegram_send", fake_telegram_send)
+    notify._skip_logged.clear()
     notify.notify_abuse("abuse_signup_velocity", {"org_id": "team_123"},
                         {"ip": "203.0.113.7", "count": 3,
                          "threshold": 2, "window_s": 86400})
-    assert calls, "resend should be called for a known kind"
-    body = calls[0][1]["json"]
-    assert body["to"] == ["ops@premiselabs.co"]  # BILLING_NOTIFY_TO fallback
-    assert "abuse_signup_velocity" in body["subject"]
-    assert "203.0.113.7" in body["html"]  # IP renders in the email
+    assert calls == [], "abuse must not post to Resend (#3639)"
     assert sent and "203.0.113.7" in sent["text"]  # IP renders in Telegram
+    assert "abuse_signup_velocity" in sent["text"]

@@ -152,7 +152,10 @@ run it, connect your tools over MCP.
 - **License**: Business Source License 1.1 — free self-hosted production use
   under $5M annual revenue; MPL 2.0 conversion after 4 years; hosted =
   commercial with free tier. See `docs/license-notes.md` (clause → precedent).
-- **`.mcp.json`**: tortoise entry points at the daemon (`http://localhost:8000/mcp`).
+- **`.mcp.json`**: tortoise entry points at the hosted endpoint
+  (`https://api.premiselabs.co/mcp/`) with an env-indirect
+  `Bearer ${TORTOISE_API_KEY}` (#3601); a self-hoster points the entry's `url`
+  at their own daemon (`http://localhost:8000/mcp`).
 
 ### Fixed — EP NAND under-propagation (#855)
 

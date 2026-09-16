@@ -15838,8 +15838,8 @@ async def agent_signup(request: Request):
     except HTTPException as exc:
         if exc.status_code == 429:
             # P2-2 (phase-7): same fire-and-forget pattern as the success feed —
-            # the 429 response must NOT absorb ops email latency (up to ~15s
-            # Resend). Retained in _SIGNUP_FEED_TASKS (P2-1: create_task must
+            # the 429 response must NOT absorb ops-alert latency (up to ~15s).
+            # Retained in _SIGNUP_FEED_TASKS (P2-1: create_task must
             # hold a reference — asyncio GC).
             _retain_feed_task("block-" + (getattr(request.state, "client_ip", None)
                 or (request.client.host if request.client else None)),
@@ -15927,7 +15927,7 @@ async def agent_signup(request: Request):
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
-        # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops email
+        # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops-alert
         # latency never delays the cold-start mint (best-effort telemetry; #310)
         _retain_feed_task("signup-" + (getattr(request.state, "client_ip", None)
             or (request.client.host if request.client else None)),
@@ -15975,7 +15975,7 @@ async def agent_signup(request: Request):
         sdk._graph_create(org_id, "default", kind="default", namespace=graph_name)
 
         await _async_audit(request, org_id, "agent_signup", resource_type="team", resource_id=org_id)
-        # P3-D/P3-6: fire-and-forget success-path feed (ops email latency
+        # P3-D/P3-6: fire-and-forget success-path feed (ops-alert latency
         # must never delay the mint response)
         _retain_feed_task("signup-" + (getattr(request.state, "client_ip", None)
             or (request.client.host if request.client else None)),
@@ -23427,8 +23427,17 @@ async def oauth_authorize(request: Request):
         # `_redirect_uri_matches` also refuses parse-differential input: this is
         # the one place the raw request param is echoed into a Location header,
         # so relaxing the match without that guard would BE the open redirect.
-        from tortoise.oauth import _redirect_uri_matches, get_client
-        client = get_client(cp, params["client_id"]) if params["client_id"] else None
+        from tortoise.oauth import _redirect_uri_matches, resolve_client
+        client = None
+        if params["client_id"]:
+            try:
+                # #2847: the resolver, not `get_client`, so a CIMD client's
+                # in-document redirect_uri is honoured on this path too.
+                # Best-effort: a refused fetch must not turn an OAuth error
+                # response into a 5xx, so this stays non-fatal.
+                client = resolve_client(cp, params["client_id"])
+            except Exception:
+                client = None
         registered_uris = (client.get("redirect_uris") or []) if client else []
         if not isinstance(registered_uris, (list, tuple)):
             registered_uris = [registered_uris]
