@@ -3504,6 +3504,51 @@ async def get_current_org_gated(request: Request) -> dict:
 _SESSION_USER_ID_KEY = "session_user_id"
 
 
+def _credential_is_agent(org: dict) -> bool:
+    """True iff the caller authenticated with an AGENT credential.
+
+    Agent = a ``tt_``/``tk_`` API key or an MCP/OAuth (``oat_``) token — a
+    machine credential the user's agent runs with. NOT a human session JWT
+    (the dashboard / a browser).
+
+    The lane discriminator is ``session_user_id`` presence — the established
+    #2297/#2380 predicate (attached ONLY on the JWT branch of
+    get_current_org_session; key/OAuth org dicts never carry it, and the
+    dependency-override seam supplies it only when it emulates a session
+    face). ``auth_lane == 'session'`` is the explicit marker; the
+    session_user_id presence stays the predicate of record so the override
+    seam keeps gating identically.
+
+    Why it matters (#3670/#3671): "your agent connected" is literally true
+    only when an agent credential made the call. The dashboard is a browser
+    — it observes no agent — so a state write from that lane is an assertion,
+    never an observation."""
+    return not (org.get(_SESSION_USER_ID_KEY)
+                or org.get("auth_lane") == "session")
+
+
+def _observed_capture_harness(org: dict, claimed: str | None,
+                              stored: str | None = None) -> str | None:
+    """The harness the SERVER may name in capture bookkeeping (receipt key /
+    last-error key / the Session's own ``harness`` property).
+
+    - A session-JWT caller (dashboard / browser) observes no harness — the
+      per-harness claim is refused and the bare ``session_capture_receipt``
+      (server-observed: a capture happened, harness unproven) is used.
+    - An agent credential: the server's OWN stored Session harness wins over
+      a later claim (``stored or claimed``) — first-writer-wins, so a re-POST
+      of an existing session_id can never RELABEL the harness and light
+      another harness's receipt. Only a FRESH session falls back to the
+      caller's claim, which for an agent credential is the agent's own
+      declaration (the agent is present — the connection is observed).
+
+    ``body.harness`` is therefore never authoritative on its own: it can only
+    ever introduce a harness on a session the server has not yet stamped."""
+    if not _credential_is_agent(org):
+        return None
+    return stored or claimed
+
+
 async def get_current_org_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
     identity) OR an API key. Key-auth goes through get_current_org + the
@@ -4628,6 +4673,14 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     )
     # Metering (#681): best-effort write-op count for overage billing.
     _record_write_op(org)
+    # #3670: an AGENT-credentialed graph write is a server-observed agent
+    # connection — file the onboarding completion signal so a REST-first /
+    # build-fork org (whose only in-flow write is this REST route) reaches
+    # the connected screen. A session-JWT (dashboard/browser) write must NOT
+    # file it: it observes no agent, and filing generically would re-create
+    # the false claim lane B3 deleted. Fail-open (never fails the write).
+    if _credential_is_agent(org):
+        _maybe_file_harness_connected(org["org_id"])
     # #308 (R1, delta 8): one Point created → one point_create event.
     await _abuse_record_points(request, org, 1)
 
@@ -7786,7 +7839,8 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
                 and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             try:
                 _record_capture_last_error(
-                    org["org_id"], body.harness, e.detail)
+                    org["org_id"], _observed_capture_harness(org, body.harness),
+                    e.detail)
             except Exception:
                 logging.getLogger("tortoise.api").exception(
                     "capture last-error state write failed (non-fatal)")
@@ -7799,7 +7853,7 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
             "session capture failed (unexpected error)")
         try:
             _record_capture_last_error(
-                org["org_id"], body.harness,
+                org["org_id"], _observed_capture_harness(org, body.harness),
                 "internal capture error — see server logs")
         except Exception:
             logging.getLogger("tortoise.api").exception(
@@ -8048,10 +8102,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     session_row = proj.g.query(
         "OPTIONAL MATCH (s:Session {id:$sid}) "
         "RETURN count(s) AS n, s.capture_ok AS ok, "
-        "s.capture_extractor AS extractor",
+        "s.capture_extractor AS extractor, s.harness AS harness",
         params={"sid": session_id},
     ).result_set[0]
     session_existed = bool(session_row[0])
+    # #3681 (server-stamped harness): the capture's harness is resolved from
+    # the SERVER's own record — a session-JWT caller never names one (bare
+    # receipt), and an agent credential can never RELABEL an already-captured
+    # session (the stored harness wins; first-writer-wins). ``body.harness``
+    # only ever introduces a harness on a session the server has not stamped.
+    stored_harness = session_row[3]
+    capture_harness = _observed_capture_harness(org, body.harness,
+                                                stored_harness)
     # #2335 WI-2b (TRUE retry): capture_ok records whether the LAST attempt
     # SUCCEEDED. Replay (no-op) fires only when the prior capture SUCCEEDED
     # (capture_ok True). A prior FAILED capture (capture_ok False) is
@@ -8147,9 +8209,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                    "s.turn_count=$tc", "s.is_episodic=true"]
     _merge_params = {"sid": session_id, "now": now,
                      "tc": len(body.conversation)}
-    if body.harness:
+    if capture_harness:
         _merge_sets.append("s.harness=$harness")
-        _merge_params["harness"] = body.harness
+        _merge_params["harness"] = capture_harness
     # #2600: actor stamp — set only when a server-resolved human is present
     # (org dict carries it on REST; the MCP capture tool threads the
     # middleware ContextVar into its hand-built dict at mcp_server.py).
@@ -8451,7 +8513,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # carry a provenance field, so None normalizes to "unknown"
                 # (the Session-merge conditional can't apply: the stamp is
                 # one shared SET for all points).
-                source_harness = body.harness or "unknown"
+                source_harness = capture_harness or "unknown"
                 # W5 Phase D (#2104): the stamp gates over the MINTED ids —
                 # a dedup-folded entry (content_hash_hit/rephrase_linked)
                 # resolved to an existing node whose provenance belongs to
@@ -8715,13 +8777,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 params={"sid": session_id, "url": f"session:{session_id}"},
             )
 
-    receipt_key = _capture_receipt_key(body.harness)
+    receipt_key = _capture_receipt_key(capture_harness)
     if _session_alive():
         try:
             _update_onboarding_state(org["org_id"], **{
                 receipt_key: now,
             })
-            _record_capture_last_error(org["org_id"], body.harness, None)
+            _record_capture_last_error(org["org_id"], capture_harness, None)
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception(
@@ -8741,7 +8803,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # reconcile self-heals).
                 try:
                     bucket_empty = _session_count_by_harness(
-                        proj, body.harness) == 0
+                        proj, capture_harness) == 0
                 except Exception:
                     bucket_empty = False
                 if bucket_empty:
@@ -8772,7 +8834,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         extraction_warnings.append(
             "session deleted during capture — capture receipt not recorded")
         _sweep_orphaned_writes()
-        _record_capture_last_error(org["org_id"], body.harness, None)
+        _record_capture_last_error(org["org_id"], capture_harness, None)
 
     # #2002 (W6): FIRST-CAPTURE trigger (epic §2 WF-5, §4 DM-1, §8 timing pin)
     # — at the user's FIRST capture the capture-disclosed NODE CHECKPOINT is
@@ -17913,6 +17975,38 @@ def _maybe_apply_completion(org_id: str) -> bool:
         return False
 
 
+def _maybe_file_harness_connected(org_id: str) -> None:
+    """#3670: file ``harness-connected`` off a server-observed AGENT write.
+
+    The completion signal was MCP-tool-only (``mcp_server
+    ._maybe_onboarding_auto_complete``), so a REST-first / build-fork org —
+    whose only in-flow write is the wizard's ``POST /v1/points`` curl — could
+    never reach the connected screen (#3670). An AGENT-credentialed graph
+    write IS the observation the step claims: the agent's own credential was
+    used, so "your agent connected" is literally true.
+
+    Callers MUST gate on ``_credential_is_agent`` — a session-JWT
+    (dashboard/browser) write observes no agent and must never file this (the
+    #3670 design constraint: filing generically would re-create the exact
+    false claim lane B3 deleted, merely moved from the client into the
+    server). Step write is FWW/keyed-MERGE (replay is a no-op). Fail-open: a
+    graph/state hiccup must never fail the agent's committed write (the MCP
+    auto-complete precedent #2985)."""
+    try:
+        if not _graph_available(org_id):
+            return
+        legacy_mirror = bool(
+            _get_onboarding_state(org_id).get("onboarding_complete"))
+        _os.write_completed_step(
+            _org_proj(org_id), org_id, "harness-connected",
+            status_from_mirror=legacy_mirror)
+        _maybe_apply_completion(org_id)
+    except Exception:
+        _logger.exception(
+            "onboarding auto-file (harness-connected) failed (non-fatal, "
+            "org=%s)", org_id)
+
+
 def _update_onboarding_state(org_id: str, **fields) -> dict:
     """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
     legacy whole-dict merge — its non-atomicity caveat is pre-existing
@@ -18234,11 +18328,29 @@ class OnboardingStatePatchRequest(BaseModel):
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
 # where (per-step write-surface ownership, scope pin 7/8).
+#
+# #3681: the capture-surface evidence keys are SERVER-OWNED. A receipt
+# (``session_capture_receipt[_harness]``), a per-harness last-error, and an
+# install probe are all observations the server stamps — a client PATCH could
+# otherwise fabricate the receipt ``captureStatus.js`` reads to decide the
+# capture sentence's TENSE, producing the present-tense claim with nothing
+# filed (the same false-claim class as #3671, one key further down). Derived
+# from the canonical harness value set so a new harness cannot silently
+# re-open the surface; the bare (harness-less) receipt is the legacy member.
+_CAPTURE_SERVER_OWNED_KEYS = {
+    "session_capture_receipt",
+    *{f"session_capture_receipt_{h}" for h in _SESSION_HARNESS_VALUES},
+    *{f"session_capture_last_error_{h}" for h in _SESSION_HARNESS_VALUES},
+    # only the TWO registered install-probe keys exist on the PATCH model
+    # (Task 11 registration table) — never enumerate a harness with no probe
+    # surface.
+    "install_probe_claude", "install_probe_pi",
+}
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
     "completed_steps", "member_progress", "last_decide_attempt",
     "fork_unsure_at",
-}
+} | _CAPTURE_SERVER_OWNED_KEYS
 _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
     "capture_disclosed", "org_named",
@@ -18490,6 +18602,20 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
         raise HTTPException(
             status_code=403,
             detail={"message": "server_owned_key", "keys": ["status"]})
+    # #3671 (assertion ≠ observation): a STEP is a server-observed fact (an
+    # agent connected / filed / decided / was disclosed). A session JWT is
+    # the dashboard/browser lane — it observes no agent, so a step assertion
+    # from it is exactly the false claim lane B3 deleted, merely moved from
+    # the client into the server. Only an AGENT credential (tt_/tk_ key,
+    # MCP/OAuth) may write a step; a session write is REFUSED loudly (403)
+    # rather than silently accepted. Non-step FLOW ops (fork/compact/
+    # member_progress/fork_unsure_at) keep their existing lanes — the
+    # dashboard legitimately records the human's fork answer.
+    if body.step is not None and not _credential_is_agent(org):
+        raise HTTPException(
+            status_code=403,
+            detail={"message": "agent_credential_required",
+                    "step": body.step})
     if not _graph_available(org_id):
         raise HTTPException(status_code=503,
                             detail="Onboarding graph unavailable — retry later")
