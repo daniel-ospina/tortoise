@@ -91,6 +91,16 @@ STALE_SWEEP_BUDGET = 200
 # P1: discover pass 2 and the stale action must both skip these — they are
 # handled exclusively by _sweep_quarantine_dirs).
 STALE_QUARANTINE_SUFFIX = ".reaper-stale-"
+# #3599: owner records. tortoise.FalkorDB writes one file per owning process
+# into the server's OWN socket dir (`<socket_dir>/.tortoise-owners/<pid>-<start>`),
+# removed on every close seam. Consulted by _owner_records below so orphanhood
+# is decided PER SERVER ("does this server still have a live owner?") instead
+# of by the global suite-marker gate (#1642 FIX 4), which on a host running a
+# fleet of concurrent sessions is permanently True and therefore never
+# confirmed anything — the #3599 deadlock. The writer lives in
+# tortoise/embedded_lifecycle.py and imports this name lazily (no import
+# cycle: embedded_reaper deliberately stays dependency-free).
+OWNERS_DIRNAME = ".tortoise-owners"
 # #1383 security review (Issue 3): ownership marker written into a
 # quarantine at rename time — the sweep only rmtrees dirs carrying it, so a
 # same-suffix foreign dir (another tool's temp naming, a planted decoy) is
@@ -1479,6 +1489,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         if batch_size is not None and killed >= batch_size:
             continue
         if only_safe and not (record.get("dir_missing")
+                              or record.get("_orphan_confirmed")
                               or _is_detached(record.get("pid") or 0)):
             logger.info(
                 "concurrent-suite guard: skipping live ephemeral candidate %s",
@@ -2079,15 +2090,106 @@ def _zero_client_state_write(state: dict) -> None:
         logger.warning("could not persist zero-client state")
 
 
+def _owner_records(socket_path: str) -> tuple[int, int] | None:
+    """(live_owners, total_owners) recorded for the server at ``socket_path``.
+
+    #3599: the per-server orphan discriminator. None when no owner-record
+    dir exists (an uninstrumented spawn — the caller must fall back to the
+    global suite-marker gate, fail closed).
+
+    Only ever used to PROVE orphanhood, never to assume it: a record whose
+    (pid, start) identity cannot be verified (an unreadable start time, or
+    the 'unknown' stamp the writer emits when `ps` was unavailable) counts
+    as LIVE whenever its pid is alive — while a record whose pid is
+    provably DEAD is a stale record and does not count, even if its start
+    is unreadable (otherwise nothing would ever prune it). A file whose
+    name is not an integer pid prefix is a foreign file and is ignored
+    entirely; a bare `<pid>` with no start is treated as an unknown-start
+    record. A shared server is safe by construction — every constructor
+    writes its own record, so a co-tenant that attached after the creator
+    is its own live entry and the server is never confirmed (the #1557
+    kill-a-live-server hazard).
+    """
+    d = os.path.join(os.path.dirname(socket_path), OWNERS_DIRNAME)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return None
+    live = 0
+    total = 0
+    for n in names:
+        if n.startswith("."):
+            continue
+        pid_s, _, start_s = n.partition("-")
+        # Parse the pid ONCE, guarded: `str.isdigit()` is True for
+        # non-decimal Unicode digits (`²`, `①`) that `int()` rejects, so
+        # `isdigit()` alone is not a safe gate before an `int()` call.
+        # An unparsable name is a foreign file — ignore it entirely.
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        total += 1
+        if start_s == "unknown" or not start_s:
+            # #3599 review cycle 2: only the START is unverifiable here —
+            # the pid is known. Counting the record live WITHOUT a liveness
+            # check made it immortal: nothing prunes owner files
+            # (`forget_owner` only matches its own pid prefix), so a
+            # SIGKILLed owner whose `ps` timed out at construction pinned
+            # `owners[0] > 0` forever and the server could never be
+            # orphan-confirmed by the only_safe cron or the conftest
+            # end-sweep. That population IS #3599 (killed lanes on a loaded
+            # host). A dead pid is verifiable even when its identity is
+            # not:
+            #   pid dead   -> dead owner (the record is stale)
+            #   pid alive  -> LIVE (fail closed; a recycled pid included)
+            if _pid_alive(pid):
+                live += 1
+            continue
+        try:
+            start = float(start_s)
+        except ValueError:
+            live += 1  # malformed -> fail closed
+            continue
+        # #3599 review P0: _pid_identity_matches() is the WRONG primitive
+        # here — it returns False both for a recycled pid (provably dead)
+        # and for an alive pid whose start time could not be read (a `ps`
+        # timeout, exactly this host's loaded condition). Treating the
+        # second as dead would orphan-confirm a server with a LIVE owner
+        # and let the reaper kill it at its next 0-client moment
+        # (#1005/#1557). Decide the cases explicitly instead:
+        #   pid dead                 -> dead
+        #   start unreadable (None)  -> LIVE (fail closed)
+        #   start matches            -> LIVE
+        #   start differs (recycled) -> dead
+        if not _pid_alive(pid):
+            continue
+        current = _process_start_time(pid)
+        if current is None or abs(current - start) < 2.0:
+            live += 1
+    if total == 0:
+        return None  # empty dir is no evidence at all -> fail closed
+    return live, total
+
+
 def _mark_orphan_confirmation(records: list[dict]) -> None:
     """#1642 FIX 3: decide orphanhood for LIVE 0-client candidates.
 
     A live detached server with 0 clients is NOT yet provably an orphan — a
     concurrent suite's between-tests idle server looks identical (#1557:
-    all redislite servers daemonize to ppid=1). Orphanhood is confirmed
-    only when the 0-client state has persisted >= ZERO_CLIENT_CONFIRM_
-    MINUTES across sweeps AND no live suite markers exist (FIX 4). The
-    state is keyed by (pid, process_start_time) so a recycled pid restarts
+    all redislite servers daemonize to ppid=1). Orphanhood is confirmed by
+    the FIRST signal that proves it, per server:
+      1. #3599: no live owner. tortoise.FalkorDB records one owner file per
+         owning process inside the server's socket dir; all owners provably
+         dead (or the socket dir gone) => orphan, independent of what other
+         suites on the host are doing. This is the signal that breaks the
+         fleet deadlock: the global gate below is permanently True on a
+         host running many concurrent sessions, so nothing was ever
+         confirmed and the only_safe cron was a no-op (#3599).
+      2. #1642 FIX 3 fallback (uninstrumented spawns — no owner records):
+         the 0-client state must have persisted >= ZERO_CLIENT_CONFIRM_
+         MINUTES across sweeps AND no live suite markers may exist (FIX 4).
+    State is keyed by (pid, process_start_time) so a recycled pid restarts
     the window (FIX 5). Mutates records in place (`_orphan_confirmed`);
     reap() reads the flag. Never raises.
     """
@@ -2113,6 +2215,42 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
     suites_active = bool(active_suite_tokens())
     for rec in candidates:
         cc = rec.get("client_count")
+        if cc is not None and cc > 0:
+            # Clients are connected -> not an orphan, clear any window.
+            if rec["socket_path"] in state:
+                del state[rec["socket_path"]]
+                changed = True
+            continue
+        # #3599: PER-SERVER orphanhood, checked BEFORE the CLIENT LIST
+        # fail-closed branch and before the global suite-marker gate. A
+        # server with no live owner is an orphan no matter how many other
+        # suites are running, and no matter whether the server is too
+        # loaded (or its socket path too long) to answer a probe — keying
+        # this on either of those is what made the only_safe sweeps no-ops
+        # on a fleet host (527 orphans, host load 98/10 CPUs).
+        #   (a) at least one LIVE owner -> never an orphan (returns early),
+        #       including against the window fallback below.
+        #   (b) ALL owner records provably dead -> orphan. Restricted to
+        #       EPHEMERAL test-tree servers (`path_based` False) so the
+        #       blast radius is the disposable leak class this issue
+        #       measured; a user-data server keeps the conservative window
+        #       (its db outlives the test tree — #1642 FIX 3).
+        #   (c) socket DIR gone -> no client can connect -> orphan.
+        # NOTE: confirming here cannot itself kill a served server —
+        # reap() still requires a verified 0-client CLIENT LIST probe
+        # (before AND after) before any _kill.
+        owners = _owner_records(rec["socket_path"])
+        if owners is not None and owners[0] > 0:
+            if state.pop(rec["socket_path"], None) is not None:
+                changed = True
+            continue
+        no_live_owner = (owners is not None and owners[0] == 0
+                         and not rec.get("path_based"))
+        if no_live_owner or _socket_dir_missing(rec["socket_path"]):
+            rec["_orphan_confirmed"] = True
+            if state.pop(rec["socket_path"], None) is not None:
+                changed = True
+            continue
         if cc is None:
             # #1642 FIX 3: a SOCKET-LESS live server — socket dir GONE, so
             # no client can exist and CLIENT LIST probes cannot succeed — is
@@ -2120,13 +2258,7 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
             # + no-live-markers hold (the missing-dir signal substitutes for
             # the 0-client probe). A probe failure with the socket dir still
             # present is a transient (loaded server) -> fail closed.
-            if not _socket_dir_missing(rec["socket_path"]):
-                continue  # probe failed but dir exists -> fail closed
-        elif cc > 0:
-            if rec["socket_path"] in state:
-                del state[rec["socket_path"]]
-                changed = True
-            continue
+            continue  # probe failed but dir exists -> fail closed
         start = _process_start_time(rec["pid"])
         entry = state.get(rec["socket_path"])
         # #1642 FIX 5 (review P1): compare the process's CURRENT start against

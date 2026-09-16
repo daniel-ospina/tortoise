@@ -969,3 +969,92 @@ def test_selfhost_daemon_sigterm_closes_embedded_server(tmp_path):
         proc.wait()
         if redis_pid is not None and _pid_alive(redis_pid):
             _kill_quiet(redis_pid)
+
+
+# ── #3599: per-server owner records (the reaper's orphan discriminator) ───
+
+def _owner_entries(socket_file: str):
+    from tortoise.embedded_lifecycle import owner_record_dir
+    d = owner_record_dir(socket_file)
+    return sorted(os.listdir(d)) if os.path.isdir(d) else None
+
+
+def test_owner_socket_of_resolves_the_inner_client():
+    """owner_socket_of must accept BOTH shapes: the guarded tortoise
+    FalkorDB wrapper keeps its redislite server on the INNER client
+    (self.client), so reading `.socket_file` off the wrapper yields None —
+    the bug that made the first cut of the #3599 fix silently write no
+    owner record at all."""
+    from tortoise.embedded_lifecycle import owner_socket_of
+
+    class Inner:
+        socket_file = "/tmp/inner/redis.socket"
+
+    class Wrapper:
+        client = Inner()
+
+    assert owner_socket_of(Wrapper()) == "/tmp/inner/redis.socket"
+    assert owner_socket_of(Inner()) == "/tmp/inner/redis.socket"
+    # Host/port (server-mode) clients have no socket -> None (no child).
+    assert owner_socket_of(object()) is None
+    assert owner_socket_of(type("NoSocket", (), {"socket_file": None})()) is None
+
+
+def test_owner_record_written_on_construction_removed_on_close(tmp_path):
+    """A guarded construction records THIS process as the server's owner;
+    close() releases it. A SIGKILL cannot run close(), which is exactly why
+    the record is what lets the reaper see the orphan.
+
+    NB (#3599 review P2): asserting only on the record FILE would not test
+    the release seam — redislite's ``_cleanup`` rmtree's the whole socket
+    dir, so the file vanishes even if the release never runs. The refcount
+    and the release flag are asserted directly for that reason."""
+    from tortoise.embedded_lifecycle import OWNERS_DIRNAME, _owner_refcounts  # noqa: F401
+    db = FalkorDB(str(tmp_path / "own.db"))
+    sock = None
+    try:
+        sock = db.client.socket_file
+        # NB: a unix socket is not a regular file — os.path.isfile() is False.
+        assert os.path.exists(sock), "redislite server socket should exist"
+        entries = _owner_entries(sock)
+        assert entries, "construction must write an owner record"
+        assert all(e.startswith(f"{os.getpid()}-") for e in entries), entries
+        assert _owner_refcounts.get(sock) == 1, "one client, one claim"
+    finally:
+        # The PUBLIC close seam (not _t_close): a bare db.close() must
+        # release the owner claim too, or an SDK that closes that way
+        # strands the record.
+        db.close()
+    assert getattr(db, "_t_owner_released", False) is True, \
+        "close() must drive the owner-release seam (not just rmtree the dir)"
+    assert sock not in _owner_refcounts, \
+        "close() must drop this process's per-process owner claim"
+    assert _owner_entries(sock) in (None, []), \
+        "close() must release this process's owner record"
+
+
+def test_shared_server_keeps_co_tenant_owner_record(tmp_path):
+    """#3599 P0 guard, end-to-end: two clients in ONE process on ONE server
+    each own a record claim; closing the first must NOT drop the shared
+    record (the reaper would otherwise see zero live owners and kill a live
+    co-tenant's server).
+
+    The record is reference-counted per process, so it disappears only when
+    the last client releases it."""
+    from tortoise.projection import FalkorProjection
+    db_path = str(tmp_path / "owners_shared.db")
+    a = FalkorProjection(db_path, graph_name="test")
+    b = FalkorProjection(db_path, graph_name="test")
+    cli_a = getattr(a.db, "client", a.db)
+    cli_b = getattr(b.db, "client", b.db)
+    assert cli_a.socket_file == cli_b.socket_file, "must share one server"
+    assert cli_a is not cli_b, "distinct clients on the shared server"
+    sock = cli_a.socket_file
+    assert _owner_entries(sock), "a shared construction must be recorded"
+    a.close()
+    assert _owner_entries(sock), (
+        "the co-tenant's owner record must survive a.close() — losing it "
+        "would let the reaper kill a live shared server (#3599 P0)")
+    b.close()
+    assert _owner_entries(sock) in (None, []), \
+        "the last client's close must release the shared record"

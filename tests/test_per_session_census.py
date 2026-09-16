@@ -249,7 +249,7 @@ def test_replay_load_workers_write_pressure():
     """The load-injection workers write synthetic points into scratch
     namespaces while the replay runs — reproducing the degraded run's write
     pressure. Stop is idempotent and bounded."""
-    workers = _ReplayLoadWorkers(lambda: _fresh_sdk(), n=2)
+    workers = _ReplayLoadWorkers(lambda: (_fresh_sdk(), None), n=2)
     workers.start()
     import time
     time.sleep(0.3)

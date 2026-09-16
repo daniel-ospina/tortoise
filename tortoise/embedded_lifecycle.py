@@ -37,7 +37,7 @@ import os
 import socket
 import tempfile
 
-from tortoise.embedded_reaper import _is_ephemeral_dir
+from tortoise.embedded_reaper import OWNERS_DIRNAME, _is_ephemeral_dir
 
 
 def _is_ephemeral_test_server(client) -> bool:
@@ -268,15 +268,39 @@ def _gc_close(db_ref) -> None:
             client.connection_pool.disconnect()
         except Exception:
             pass
+        # #3599: release THIS client's owner-record claim. A shared server
+        # would otherwise keep the record (and the per-process refcount)
+        # until process exit, so a later construct/close on the same socket
+        # path could never drive the refcount to 0 and drop the record.
+        _release_owner_quietly(db)
         return
     try:
         if atexit_fast_close(client):
+            _release_owner_quietly(db)
             return
     except Exception:
         pass  # probe/gating failure -> fall through to the normal close
     try:  # noqa: SIM105
         client._cleanup()
     except Exception:
+        pass
+    _release_owner_quietly(db)
+
+
+def _release_owner_quietly(db) -> None:
+    """#3599: release a client's owner claim from GC/**non-raising** contexts.
+
+    Prefers the guarded wrapper's idempotent ``_t_release_owner``; a raw
+    redislite client has no such method and falls back to a direct
+    ``forget_owner`` on its own socket path.
+    """
+    try:
+        release = getattr(db, "_t_release_owner", None)
+        if release is not None:
+            release()
+            return
+        forget_owner(owner_socket_of(db))
+    except Exception:  # GC/teardown context: never raise
         pass
 
 
@@ -394,6 +418,7 @@ def close_embedded_clients() -> int:
         try:
             if atexit_fast_close(inner):
                 closed += 1
+                _release_owner(client, inner)
                 continue
         except Exception:
             pass  # probe/gating failure -> fall through to the normal close
@@ -403,6 +428,7 @@ def close_embedded_clients() -> int:
                 t_close()
             except Exception:
                 pass  # teardown context: never raise
+            _release_owner(client, inner)
             closed += 1
             continue
         cleanup = getattr(client, "_cleanup", None)
@@ -412,7 +438,26 @@ def close_embedded_clients() -> int:
             except Exception:
                 pass
             closed += 1
+        _release_owner(client, inner)
     return closed
+
+
+def _release_owner(client, inner) -> None:
+    """#3599: release a client's owner-record claim (never raises).
+
+    Prefers the guarded wrapper's idempotent ``_t_release_owner`` (which
+    also handles the refcount when one process holds several clients on a
+    shared server); a raw redislite client has no such method and falls
+    back to a direct ``forget_owner``.
+    """
+    try:
+        release = getattr(client, "_t_release_owner", None)
+        if release is not None:
+            release()
+            return
+        forget_owner(owner_socket_of(inner) if inner is not None else None)
+    except Exception:  # teardown context: never raise
+        pass
 
 
 def _embedded_term_handler(signum, _frame) -> None:
@@ -486,3 +531,138 @@ def install_embedded_signal_cleanup() -> bool:
         pass
     _signal_guard_installed = True
     return replaced
+
+
+# ── #3599: per-server owner records ────────────────────────────────────
+# The reaper's only_safe mode could not distinguish a SIGKILLed suite's
+# orphan from a live suite's between-tests idle server on pid/detachment
+# alone (#1557 — every redislite server daemonizes to ppid=1), so #1642
+# gated orphan confirmation on a GLOBAL condition (`not suites_active`).
+# On a host running a fleet of concurrent sessions that condition is never
+# true, so `_orphan_confirmed` was never set and the only_safe reaper
+# (launchd cron + the conftest end-sweep) was permanently a no-op — every
+# SIGKILLed lane left its servers behind (#3599: 527 orphans, load 98 on
+# 10 CPUs).
+#
+# Fix: record the OWNERS of each server — one file per owning process, in
+# the server's OWN socket dir — so orphanhood becomes a per-server
+# question ("does this server still have a live owner?") that needs no
+# reference to any other suite. A shared server is safe by construction:
+# every constructor writes its own record, so a co-tenant that attaches
+# after the creator has exited keeps its own live entry and the server is
+# never confirmed.
+#
+# The reaper owns the format and the constant (OWNERS_DIRNAME); this module
+# is the only writer. Identity is (pid, process start time) — the #1642
+# FIX 5 recycled-pid defence — so a record left behind by a SIGKILLed owner
+# reads as provably dead instead of aliasing a later process.
+
+
+def owner_record_dir(socket_file: str) -> str:
+    """Dir holding the owner records for the server at ``socket_file``."""
+    return os.path.join(os.path.dirname(os.path.abspath(socket_file)),
+                        OWNERS_DIRNAME)
+
+
+#: Per-process refcount of live clients per socket path (see record_owner/
+#: forget_owner — several clients in ONE process share a single record, so a
+#: record is only dropped when the last of them closes).
+_owner_refcounts: dict[str, int] = {}
+
+
+def owner_socket_of(client) -> str | None:
+    """Socket path of the redislite server a client owns, or None.
+
+    Accepts EITHER shape so record/forget stay symmetric: the guarded
+    ``tortoise.FalkorDB`` wrapper (whose redislite server lives on the INNER
+    client at ``.client``) and a raw redislite client (which owns
+    ``socket_file`` directly). Host/port (server-mode) constructions have no
+    ``socket_file`` and correctly yield None — there is no child to reap.
+    """
+    inner = getattr(client, "client", None) or client
+    sock = getattr(inner, "socket_file", None)
+    return sock if isinstance(sock, str) and sock else None
+
+
+def record_owner(socket_file: str | None) -> bool:
+    """Record THIS process as a live owner of the server at ``socket_file``.
+
+    Called from the guarded ``tortoise.FalkorDB`` constructor (the single
+    embedded choke-point). Reference-counted PER PROCESS: several clients
+    in one process share one record, so closing the first of two clients on
+    a shared server must not drop the record that still protects the
+    second (that would let the reaper kill a live co-tenant's server).
+    Returns True when a record was created. Never raises — an unwritable
+    socket dir simply leaves the server uninstrumented, and the reaper
+    falls back to its global gate (fail closed).
+    """
+    if not socket_file:
+        return False
+    key = os.path.abspath(socket_file)
+    if _owner_refcounts.get(key, 0) > 0:
+        _owner_refcounts[key] += 1  # this process already owns the record
+        return False
+    try:
+        os.makedirs(owner_record_dir(socket_file), exist_ok=True)
+    except OSError:
+        return False
+    # Import at call time: `_process_start_time` shells out to `ps`, and the
+    # reaper module is already a module-level import here — this keeps the
+    # acquisition localized and skippable.
+    from tortoise.embedded_reaper import _process_start_time
+    try:
+        start = _process_start_time(os.getpid())
+    except Exception:
+        start = None
+    # An undeterminable start time is stamped 'unknown'; _owner_records
+    # treats that as LIVE (fail closed) — never as a dead owner.
+    stamp = f"{os.getpid()}-{'unknown' if start is None else int(start)}"
+    try:
+        fd = os.open(os.path.join(owner_record_dir(socket_file), stamp),
+                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        pass  # already recorded by this process' first client
+    except OSError:
+        return False
+    _owner_refcounts[key] = _owner_refcounts.get(key, 0) + 1
+    return True
+
+
+def forget_owner(socket_file: str | None) -> bool:
+    """Release one client's claim on this process's owner record.
+
+    Idempotent per client at the CALLER (the guarded wrapper's
+    ``_t_release_owner``); here it decrements the per-process refcount and
+    removes the record only when the LAST client on that server releases
+    it. A shared server keeps the records of its other owner PROCESSES, so
+    forgetting one never orphans it.
+    """
+    if not socket_file:
+        return False
+    key = os.path.abspath(socket_file)
+    held = _owner_refcounts.get(key, 0)
+    if held > 1:
+        _owner_refcounts[key] = held - 1
+        return False  # another client in this process still owns it
+    _owner_refcounts.pop(key, None)
+    d = owner_record_dir(socket_file)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return False
+    prefix = f"{os.getpid()}-"
+    removed = False
+    for n in names:
+        if not n.startswith(prefix):
+            continue  # '123-' never matches '1234-...' — the dash is the guard
+        try:
+            os.unlink(os.path.join(d, n))
+            removed = True
+        except OSError:
+            pass
+    try:  # server-scoped dir: drop it once the last owner is gone
+        os.rmdir(d)
+    except OSError:
+        pass  # another owner's records remain
+    return removed
