@@ -14,9 +14,10 @@ the consent requirement does not depend on which endpoint the config names.
 
 Consumers:
   * `tortoise/__main__.py` — the transcript-upload primitives
-    (``session capture``, ``sessions import``) fail closed here, and every
-    interactive command pushes the pending migration notice to stderr once
-    (machine/hook-facing commands are exempt so they cannot consume it).
+    (``session capture``, ``sessions import``) fail closed here, and a command
+    whose stderr is a terminal pushes the pending migration notice once (the
+    surface gate: a redirected/piped stderr consumes nothing; a pty-allocating
+    non-human caller is a declared, notice-only residual).
   * `tortoise/claude-hooks/session-end.sh` — the ambient automatic path
     pre-checks the same variable in bash. The predicate is implemented twice on
     purpose (defense-in-depth: the hook gate stops the ambient path from even
@@ -124,10 +125,11 @@ def pending_capture_notice(home: Path | str | None = None) -> str | None:
     Delivery half of the migration. Writing the file is necessary but not
     sufficient: the population this change targets runs a STALE copied hook that
     swallows the CLI's stderr, and has no reason to ever run `tortoise doctor`,
-    so a file-only notice is evidence without notification. Interactive commands
-    call this and print the result once (see `mark_capture_notice_shown`);
-    machine/hook-facing commands must NOT, so an unattended run can never consume
-    the human's one sighting of it.
+    so a file-only notice is evidence without notification. Commands on a
+    terminal stderr call this and print the result once (see
+    `mark_capture_notice_shown`); a redirected or piped unattended run must NOT,
+    so it cannot consume the human's one sighting of it (a pty-allocating
+    non-human caller remains a declared residual).
     """
     try:
         if capture_notice_shown_path(home).exists():

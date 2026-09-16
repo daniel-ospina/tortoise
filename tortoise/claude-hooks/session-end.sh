@@ -21,8 +21,10 @@
 # TORTOISE_API_URL are the hosted credential/endpoint used to reach the API,
 # and exporting the key for the MCP `Authorization: Bearer` header must NEVER
 # opt the machine into shipping transcripts. With the opt-in absent the capture
-# step is skipped (one-time notice on stderr) and the hook still exits 0; the
-# LOCAL reindex sweep below still runs — it never leaves the machine.
+# step is skipped (a notice on stderr, repeated on each session close while a
+# legacy credential is present; only the durable file is one-time) and the hook
+# still exits 0; the LOCAL reindex sweep below still runs — it never leaves the
+# machine.
 # For a LOCAL-only graph, replace the capture step with:
 #   tortoise index --dir ~/.tortoise/docs/conversations/.
 #
@@ -100,10 +102,14 @@ PYEOF
 # (hooks are copied per-project and never update themselves).
 CAPTURE_ENABLED=0
 # Trim leading/trailing whitespace, then lowercase — mirrors Python's
-# str(...).strip().lower() so the two implementations agree exactly.
+# str(...).strip(" \t\r\n\v\f").lower() so the two implementations agree
+# EXACTLY. The explicit ASCII set is deliberate: `[[:space:]]` is locale- and
+# platform-dependent and also matches Unicode spaces (U+00A0, U+2028, U+2029,
+# U+3000, …) that Python no longer trims, which would reopen the parity-drift
+# class in the opposite direction (bash authorizes, Python refuses).
 CAPTURE_RAW="${TORTOISE_CAPTURE:-}"
-CAPTURE_RAW="${CAPTURE_RAW#"${CAPTURE_RAW%%[![:space:]]*}"}"
-CAPTURE_RAW="${CAPTURE_RAW%"${CAPTURE_RAW##*[![:space:]]}"}"
+CAPTURE_RAW="${CAPTURE_RAW#"${CAPTURE_RAW%%[!$' \t\r\n\v\f']*}"}"
+CAPTURE_RAW="${CAPTURE_RAW%"${CAPTURE_RAW##*[!$' \t\r\n\v\f']}"}"
 case "$(printf '%s' "$CAPTURE_RAW" | tr '[:upper:]' '[:lower:]')" in
   1|true|yes|on) CAPTURE_ENABLED=1 ;;
 esac

@@ -182,7 +182,7 @@ Delivery is therefore two channels with different lifetimes:
 |---|---|---|
 | `~/.tortoise/capture-consent-notice` (content = the re-enable line) | the hook (first refusal) and both CLI primitives | once per machine — durable, discoverable, never rewritten |
 | the visible stderr line | the hook on **every** session close while capture is off and a legacy credential is present | per invocation — cannot be suppressed by the marker |
-| the next interactive command | `__main__._flush_pending_capture_notice` (exempt: `index`, `serve`, `session capture`, `session probe`, `sessions import`) | once per human, stamped separately in `…-notice.shown` |
+| the next interactive command | `__main__._flush_pending_capture_notice`, gated on `sys.stderr.isatty()` (a redirected/piped stderr consumes nothing; a pty-allocating non-human caller is a declared, notice-only residual) | once per human, stamped separately in `…-notice.shown` |
 
 The third row is the one that actually reaches the stale-hook population: a
 machine/hook-facing command may not consume the human's single sighting, so the

@@ -238,6 +238,13 @@ def test_session_end_local_sweep_runs_with_consent_too(tmp_path, transcript):
     # Security review P2: C1 controls. Python's str.strip() treats these as
     # whitespace and AUTHORIZED; bash's [[:space:]] does not. Both refuse now.
     ("1\x1c", False), ("\x1c1", False), ("\x1d1", False), ("1\x1f", False),
+    # Security review cycle-2 P2: `[[:space:]]` is locale/platform-dependent and
+    # matches Unicode spaces in a UTF-8 locale (U+00A0/U+2028/U+2029/U+3000)
+    # while Python trims only the ASCII set — a naive bash twin AUTHORIZES on
+    # these and the CLI refuses, reopening the parity-drift class. Both must
+    # refuse; the hook now trims the explicit ASCII set.
+    ("\u00a01", False), ("1\u00a0", False), ("\u20281", False),
+    ("\u20291", False), ("\u30001", False), ("\u00851", False),
 ])
 def test_capture_opt_in_parity_bash_and_python(tmp_path, transcript, value, expected):
     """The bash gate in session-end.sh and capture_consent_enabled() implement

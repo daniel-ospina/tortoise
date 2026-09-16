@@ -5827,11 +5827,20 @@ def _stderr_is_human_facing() -> bool:
     """True only when stderr is a terminal — #3615's notice-delivery gate.
 
     Anything that can silently swallow stderr (a harness hook's `2>/dev/null`,
-    a background sweep, an agent-run subprocess) must not be able to consume
-    the human's one sighting of the migration notice. Testing the surface
-    instead of enumerating commands is what makes the exemption class CLOSED:
-    every unattended consumer redirects stderr, so none of them can reach the
-    notice regardless of how the command list grows.
+    a background sweep, an agent-run subprocess with a pipe or a file) must not
+    be able to consume the human's one sighting of the migration notice.
+    Testing the surface instead of enumerating commands closes the DEFAULT path
+    — the `tortoise context 2>/dev/null` SessionStart hook included — regardless
+    of how the command list grows.
+
+    DECLARED RESIDUAL (not closed by construction): a caller that allocates a
+    pty (`script`, `expect`, `unbuffer`, `docker run -t`, …) has a terminal
+    stderr by construction, so it will print and stamp the notice even with no
+    human watching. There is no reliable process-level test that separates a
+    human terminal from a pty, so this is accepted rather than chased with a
+    command denylist (the mechanism this gate replaced). The impact is capped
+    at notice delivery: the flush never authorizes capture —
+    `capture_consent_enabled()` is the sole authority and never consults stderr.
     """
     try:
         return bool(sys.stderr.isatty())
@@ -5857,7 +5866,8 @@ def _flush_pending_capture_notice() -> None:
     `tortoise context 2>/dev/null`, so the notice was printed into /dev/null and
     stamped "shown" on every session START, silently consuming it on exactly the
     hosts the migration exists for (as did `volunteer`, whose hook relays only
-    prefixed lines). The TTY test above closes the whole class instead.
+    prefixed lines). The TTY test above closes that default path; the
+    pty-allocating residual is declared on `_stderr_is_human_facing`.
     """
     if not _stderr_is_human_facing():
         return
