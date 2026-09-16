@@ -135,8 +135,7 @@ if _OriginalFalkorDB is not None:
                 # resolves the INNER redislite client — the wrapper itself
                 # has no socket_file (redislite's FalkorDB keeps its server
                 # on self.client).
-                from tortoise.embedded_lifecycle import (owner_socket_of,
-                                                         record_owner)
+                from tortoise.embedded_lifecycle import owner_socket_of, record_owner
                 # Capture the socket path NOW: redislite mutates the inner
                 # client during close(), so re-deriving it at release time
                 # can yield None and silently strand the record.
@@ -179,8 +178,7 @@ if _OriginalFalkorDB is not None:
             if getattr(self, "_t_owner_released", False):
                 return
             self._t_owner_released = True
-            from tortoise.embedded_lifecycle import (forget_owner,
-                                                     owner_socket_of)
+            from tortoise.embedded_lifecycle import forget_owner, owner_socket_of
             sock = getattr(self, "_t_socket_file", None) or owner_socket_of(self)
             forget_owner(sock)
 

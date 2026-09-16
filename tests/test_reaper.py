@@ -11,7 +11,7 @@ import os
 import shutil
 import socket
 import subprocess
-import sys  # noqa: F401
+import sys
 import tempfile
 import threading
 import time
@@ -2821,7 +2821,6 @@ def test_owner_records_parsing(tmp_path):
     _owner_dir(sock)
     assert _owner_records(sp) is None
 
-    from tortoise.embedded_reaper import _process_start_time
     mine = _own_start()
     _write_owner(_owner_dir(sock), os.getpid(), mine)
     assert _owner_records(sp) == (1, 1)
@@ -3166,8 +3165,7 @@ def test_owner_records_dead_owner_confirms_despite_live_suite_marker(
 def test_owner_records_live_owner_is_never_confirmed(monkeypatch, tmp_path):
     """The over-kill guard: a server with ANY live owner is not an orphan,
     even with no suite markers and after the whole confirmation window."""
-    from tortoise.embedded_reaper import (_mark_orphan_confirmation,
-                                          _process_start_time)
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _process_start_time
     _markerless_suite(monkeypatch, tmp_path)
     monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
                         0.0)

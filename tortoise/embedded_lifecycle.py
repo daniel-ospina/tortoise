@@ -33,6 +33,7 @@ Scope (deliberately narrow — the safety boundary):
 from __future__ import annotations  # noqa: I001
 
 import os
+import contextlib
 
 import socket
 import tempfile
@@ -594,10 +595,8 @@ def _adopt_owner_records_after_fork() -> None:
     inherited = list(_owner_refcounts)
     _owner_refcounts.clear()
     for sock in inherited:
-        try:
+        with contextlib.suppress(Exception):
             record_owner(sock)
-        except Exception:  # noqa: BLE001 - never break the child over this
-            pass
 
 
 if hasattr(os, "register_at_fork"):  # POSIX; absent on Windows
@@ -690,13 +689,11 @@ def forget_owner(socket_file: str | None) -> bool:
     for n in names:
         if not n.startswith(prefix):
             continue  # '123-' never matches '1234-...' — the dash is the guard
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(os.path.join(d, n))
             removed = True
-        except OSError:
-            pass
-    try:  # server-scoped dir: drop it once the last owner is gone
+    # server-scoped dir: drop it once the last owner is gone (another
+    # owner's records may remain, so a failure here is expected).
+    with contextlib.suppress(OSError):
         os.rmdir(d)
-    except OSError:
-        pass  # another owner's records remain
     return removed

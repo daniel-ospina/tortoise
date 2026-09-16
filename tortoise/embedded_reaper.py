@@ -2342,15 +2342,14 @@ def _mark_orphan_confirmation(records: list[dict]) -> None:
             if state.pop(rec["socket_path"], None) is not None:
                 changed = True
             continue
-        if cc is None:
+        if cc is None and not _socket_dir_missing(rec["socket_path"]):
             # #1642 FIX 3: a SOCKET-LESS live server — socket dir GONE, so
             # no client can exist and CLIENT LIST probes cannot succeed — is
             # an orphan once the confirmation window + (pid, start) identity
             # + no-live-markers hold (the missing-dir signal substitutes for
             # the 0-client probe). A probe failure with the socket dir still
             # present is a transient (loaded server) -> fail closed.
-            if not _socket_dir_missing(rec["socket_path"]):
-                continue  # probe failed but dir exists -> fail closed
+            continue  # probe failed but dir exists -> fail closed
         start = _process_start_time(rec["pid"])
         entry = state.get(rec["socket_path"])
         # #1642 FIX 5 (review P1): compare the process's CURRENT start against

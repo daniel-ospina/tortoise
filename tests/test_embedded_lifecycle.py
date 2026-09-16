@@ -1158,7 +1158,6 @@ def test_forked_child_reclaims_ownership_of_inherited_server(tmp_path):
     Runs the real `fork()`, reads the owners dir from the parent, and asserts
     a record naming the CHILD exists.
     """
-    import sys as _sys
     db_path = str(tmp_path / "fork.db")
     db = FalkorDB(db_path)
     try:
