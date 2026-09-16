@@ -29,8 +29,12 @@
 project: premise-labs
 
 bindings:
-  # The session store. Without it every /auth/*, /welcome and /api/session
-  # request answers 503 — the #3616 outage.
+  # The session store. Without it every /auth/* and /welcome request answers 503
+  # — the #3616 outage. NOTE: /api/session is NOT in that list, and deliberately
+  # so: its missing-cookie branch returns 401 `not_signed_in` BEFORE the
+  # missing-binding check, so an anonymous request looks healthy whether or not
+  # this binding exists. That ordering is exactly why the outage evaded
+  # detection, and why the deploy probe targets /auth/start instead.
   - name: SESSIONS
     kind: required
     type: d1_databases

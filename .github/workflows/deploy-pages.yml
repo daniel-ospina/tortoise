@@ -101,7 +101,7 @@ jobs:
       # deploy, because the failure mode is "deploy succeeds, runtime 503s".
       - name: Preflight — required Pages bindings exist
         run: |
-          python3 -m pip install --quiet 'pyyaml==6.0.2'
+          python3 -m pip install --quiet 'pyyaml==6.0.3'
           python3 tools/check_pages_bindings.py --manifest website/required-bindings.yml
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -123,30 +123,53 @@ jobs:
       # supabase.ts. Those are covered by the preflight above.
       # `curl` deliberately without -f: a 5xx IS the signal, so it must be
       # captured, not turned into an abort.
+      #
+      # KNOWN LIMITATION (unpinned): the poll stops at the first 302, which is
+      # what a still-propagating PREVIOUS deployment also returns. It therefore
+      # cannot distinguish the new deployment from the old one, so a regression
+      # in the new build can be masked if Pages is still serving the previous
+      # one. Detecting that needs the deployment id from the upload step, which
+      # `wrangler pages deploy` does not hand back in a form this step can read.
+      # The probe catches "the site cannot sign anyone in at all", not "this
+      # particular build broke sign-in".
       - name: Post-deploy — sign-in is actually reachable
         run: |
           url=https://tortoise.premiselabs.co/auth/start
           code=000
+          curl_rc=0
           # Poll: Pages can briefly serve the previous deployment after upload.
           for attempt in $(seq 1 10); do
-            # No -f: a 5xx IS the signal, so it must not abort the step. Also no
-            # `|| echo 000` — curl already writes 000 via -w on a connection
-            # failure, and the fallback would concatenate into "000000", which is
-            # the least useful diagnostic in the path that has to explain an
-            # outage. Capture the exit status separately instead.
+            # Two traps here, both verified by execution:
+            #
+            # 1. GitHub's default shell is `bash -e`. A bare
+            #    `code=$(curl ...)` whose substitution fails ABORTS the step
+            #    immediately, so a transient DNS/connect blip would red the
+            #    deploy on the first attempt and skip every retry below it.
+            #    The `|| curl_rc=$?` guard is what keeps the loop reachable.
+            # 2. `curl -w '%{http_code}'` already writes `000` on a connection
+            #    failure, so the old `|| echo 000` concatenated to `000000`.
+            #    Capture the status separately instead of appending to it.
+            # Both are pinned by tests/test_pages_bindings.py, which executes
+            # this block rather than string-matching it.
+            curl_rc=0
             code=$(curl -sS -o /tmp/start.body -D /tmp/start.hdr \
-                        -w '%{http_code}' -m 20 "$url" 2>/tmp/start.err)
-            curl_rc=$?
-            [ "$curl_rc" -ne 0 ] && code="curl-failed(rc=$curl_rc)"
+                        -w '%{http_code}' -m 20 "$url" 2>/tmp/start.err) \
+              || curl_rc=$?
+            if [ "$curl_rc" -ne 0 ]; then
+              code="curl-failed(rc=$curl_rc)"
+            fi
             [ "$code" = "302" ] && break
             sleep 15
           done
           echo "$url -> $code"
 
           if [ "$code" = "503" ]; then
-            echo "::error::/auth/start returned 503 — the session store is unavailable."
-            echo "::error::Expected `session_store_unavailable` (session.ts). Almost always"
-            echo "::error::a missing SESSIONS D1 binding — see issue #3616."
+            # NOTE: single quotes. Backticks here would be command substitution:
+            # bash would try to RUN `session_store_unavailable`, strip the token
+            # from the message, and print "command not found".
+            echo '::error::/auth/start returned 503 — the session store is unavailable.'
+            echo '::error::Expected `session_store_unavailable` (session.ts). Almost always'
+            echo '::error::a missing SESSIONS D1 binding — see issue #3616.'
             cat /tmp/start.body 2>/dev/null || true
             exit 1
           fi
@@ -161,7 +184,7 @@ jobs:
           # The challenge is generated in-process, so this proves the awaited
           # INSERT into auth_flows did not throw (not that the row is readable).
           if ! grep -qi 'code_challenge_method=s256' /tmp/start.hdr; then
-            echo "::error::302 did not include a PKCE code_challenge"
+            echo '::error::302 did not include a PKCE code_challenge'
             cat /tmp/start.hdr
             exit 1
           fi

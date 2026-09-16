@@ -77,8 +77,12 @@ def load_manifest(path: Path) -> dict:
         # to a warning and the deploy goes green — which is precisely the #3616
         # failure mode this gate exists to prevent. A misspelling must be a hard
         # error, not a fail-open.
+        #
+        # `isinstance(kind, str)` first: a non-string kind (a list, a mapping, a
+        # bool) is unhashable or surprising, and would raise TypeError from the
+        # set-membership test instead of the contractual ValueError.
         kind = spec.get("kind", "required")
-        if kind not in KIND_ENUM:
+        if not isinstance(kind, str) or kind not in KIND_ENUM:
             raise ValueError(
                 f"{path}: bindings[{i}] ({spec.get('name')}) has invalid kind "
                 f"{kind!r}; expected one of {sorted(KIND_ENUM)}"
@@ -155,7 +159,17 @@ def fetch_configs(account_id: str, project: str, api_token: str) -> dict:
 
     if not payload.get("success"):
         raise RuntimeError(f"Cloudflare API reported failure: {payload.get('errors')}")
-    return payload["result"].get("deployment_configs") or {}
+
+    # A `success: true` response with no `result` is a malformed payload, not a
+    # "binding is missing" verdict. Raise RuntimeError so main() exits 2
+    # (could-not-determine, fail closed) rather than letting a KeyError escape
+    # and land on the exit-1 path that means "a required binding is absent".
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            f"Cloudflare API returned success with a malformed payload: {str(payload)[:300]}"
+        )
+    return result.get("deployment_configs") or {}
 
 
 def main(argv: list[str] | None = None) -> int:

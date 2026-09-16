@@ -104,15 +104,15 @@ SOURCE_PATTERNS = {
                    # it. That is the #3616 pattern one level up: the thing that
                    # decides whether the gate works would not itself be gated.
                    "tools/check_pages_bindings.py",
-                   "website/required-bindings.yml",
-                   # #3616: the deploy workflow carries the preflight ordering
-                   # and the post-deploy probe target. tests/test_pages_bindings
-                   # .py asserts both, so a change to this file must select the
-                   # surface that runs it. (deploy-pages.yml currently reaches
-                   # onboarding only via the broad .github/workflows/ rule; this
-                   # entry makes the intent explicit and survives a narrowing
-                   # of that rule.)
-                   ".github/workflows/deploy-pages.yml"),
+                   "website/required-bindings.yml"),
+    # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
+    # A review pointed out that adding it would be a coverage DOWNGRADE: an
+    # unlisted path falls into the unknown-path branch -> FULL matrix (fail
+    # closed), whereas listing it selects only `onboarding`. Today the two tests
+    # that read that workflow both live in onboarding, so nothing is lost — but
+    # a future core-registered test reading it would silently stop running on
+    # the PR that edits it. Fail-closed is the right default for the file that
+    # owns the deploy.
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",

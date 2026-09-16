@@ -7,6 +7,8 @@ a checker that always returns [] would have let #3616 ship again.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -404,3 +406,267 @@ def test_a_manifest_with_no_required_binding_is_rejected(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="no binding is marked"):
         cpb.load_manifest(p)
+
+
+# ---------------------------------------------------------------------------
+# The probe is EXECUTED, not string-matched.
+#
+# Cycle-2 review found two bugs in this shell that a string assertion cannot see,
+# both confirmed by running bash:
+#   1. Under GitHub's `bash -e`, a bare `code=$(curl ...)` whose substitution
+#      fails ABORTS the step, so the retry loop and every diagnostic below it
+#      were unreachable on a transport blip — a transient DNS failure would red
+#      the deploy on the first attempt with an EMPTY log.
+#   2. `echo "... `session_store_unavailable` ..."` is command substitution:
+#      bash tried to RUN that token, stripped it from the message, and printed
+#      "command not found".
+# Both shipped green. The block is now extracted verbatim and run against a stub
+# `curl` with controlled exit codes.
+# ---------------------------------------------------------------------------
+
+STUB_CURL = r"""#!/bin/bash
+# Stub for curl. Honours STUB_MODE.
+out=; hdr=; fmt=; url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2;;
+    -D) hdr=$2; shift 2;;
+    -w) fmt=$2; shift 2;;
+    -m) shift 2;;
+    -sS|-s|-S) shift;;
+    *) url=$1; shift;;
+  esac
+done
+count_file="$STUB_DIR/calls"
+n=$(cat "$count_file" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$count_file"
+case "$STUB_MODE" in
+  rc7|rc7once)
+    if [ "$STUB_MODE" = rc7 ] || [ "$n" -lt 3 ]; then
+      echo "curl: (7) Failed to connect to host" >&2
+      [ -n "$out" ] && : > "$out"
+      [ -n "$hdr" ] && : > "$hdr"
+      printf '000'
+      exit 7
+    fi
+    ;;
+esac
+case "$STUB_MODE" in
+  ok|rc7once)
+    code=302
+    loc="https://x.supabase.co/auth/v1/authorize?provider=email&code_challenge=abc&code_challenge_method=s256"
+    body=''
+    ;;
+  503)
+    code=503
+    loc=''
+    body='{"error":"session_store_unavailable"}'
+    ;;
+  nochallenge)
+    code=302
+    loc="https://x.supabase.co/auth/v1/authorize?provider=email"
+    body=''
+    ;;
+  200)
+    code=200
+    loc=''
+    body='<html>landing page</html>'
+    ;;
+  *)
+    code=500
+    loc=''
+    body=''
+    ;;
+esac
+if [ -n "$hdr" ]; then
+  printf 'HTTP/1.1 %s\n' "$code" > "$hdr"
+  [ -n "$loc" ] && printf 'Location: %s\n' "$loc" >> "$hdr"
+fi
+[ -n "$out" ] && printf '%s' "$body" > "$out"
+case "$fmt" in *http_code*) printf '%s' "$code";; esac
+exit 0
+"""
+
+
+def _probe_script(tmp_path: Path) -> Path:
+    """Extract the real Post-deploy shell with ONLY these benign rewrites:
+      - /tmp/start.* -> a per-test tempdir (so tests cannot collide)
+      - 10 attempts -> 3, sleep 15 -> sleep 0 (so failing cases are fast)
+    The control flow under test — the `|| curl_rc=$?` guard, the 302 break, the
+    status branching and the PKCE grep — is untouched. The guard is asserted to
+    be present, so this test cannot pass against a version without it.
+    """
+    step = next(s for s in _deploy_steps() if s.get("name") == PROBE)
+    run = step["run"]
+    assert "|| curl_rc=$?" in run, (
+        "the `|| curl_rc=$?` guard is gone — under `bash -e` a failed curl "
+        "aborts the step and makes the retry loop unreachable"
+    )
+    rewritten = (
+        run.replace("/tmp/start.", str(tmp_path) + "/start.")
+        .replace("$(seq 1 10)", "$(seq 1 3)")
+        .replace("sleep 15", "sleep 0")
+    )
+    p = tmp_path / "probe.sh"
+    p.write_text(rewritten, encoding="utf-8")
+    return p
+
+
+def _run_probe(tmp_path: Path, mode: str) -> tuple[int, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "curl"
+    stub.write_text(STUB_CURL, encoding="utf-8")
+    stub.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_MODE": mode,
+        "STUB_DIR": str(tmp_path),
+    }
+    # `bash -e` mirrors GitHub Actions' default Linux shell — the exact condition
+    # under which the original bug reproduced.
+    r = subprocess.run(
+        ["bash", "-e", str(_probe_script(tmp_path))],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return r.returncode, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "want_rc"),
+    [
+        ("ok", 0),           # healthy production shape
+        ("503", 1),          # the #3616 outage shape
+        ("nochallenge", 1),  # silent write-drop
+        ("200", 1),          # a landing page is not a sign-in endpoint
+        ("rc7", 1),          # transport failure on every attempt
+        ("rc7once", 0),      # transient blip, then healthy -> retry must save it
+    ],
+)
+def test_the_probe_shell_behaves_correctly(tmp_path, mode: str, want_rc: int) -> None:
+    rc, out = _run_probe(tmp_path, mode)
+    assert rc == want_rc, f"mode={mode} rc={rc} want={want_rc}\n{out}"
+    assert "command not found" not in out, (
+        f"mode={mode}: the shell tried to EXECUTE a backticked token: {out}"
+    )
+
+
+def test_the_probe_reports_the_503_error_code_verbatim(tmp_path) -> None:
+    """The diagnostic must survive bash, not merely exist in the YAML source.
+
+    Backticks around `session_store_unavailable` were command substitution: bash
+    ran the token, stripped it from the message, and printed 'command not found'.
+    A source-level string assertion could not see that.
+    """
+    _rc, out = _run_probe(tmp_path, "503")
+    assert "session_store_unavailable" in out
+    assert "command not found" not in out
+
+
+def test_the_probe_retries_a_transient_transport_failure(tmp_path) -> None:
+    """Proves the retry loop is REACHABLE under `bash -e`.
+
+    Before the `|| curl_rc=$?` guard, the first failed substitution aborted the
+    step: `rc7once` (two failures then a healthy 302) exited non-zero and the
+    deploy went red on a blip, with an empty log. The stub counts its calls.
+    """
+    rc, out = _run_probe(tmp_path, "rc7once")
+    assert rc == 0, f"a transient failure must be retried, not fatal\n{out}"
+    calls = int((tmp_path / "calls").read_text())
+    assert calls == 3, f"expected 3 attempts (2 failures + 1 success), saw {calls}"
+
+
+def test_the_probe_does_not_treat_a_landing_page_as_sign_in(tmp_path) -> None:
+    """A 200 is not success."""
+    rc, out = _run_probe(tmp_path, "200")
+    assert rc == 1
+    assert "expected a 302" in out
+
+
+# ---------------------------------------------------------------------------
+# Manifest classification pins.
+#
+# Fixtures derive from the manifest (so they cannot drift), which also means a
+# change to a binding's `kind` silently re-derives every expectation. These pin
+# the specific decisions, each reasoned about, so none can change by accident.
+# ---------------------------------------------------------------------------
+
+EXPECTED_CLASSIFICATION = {
+    # name: (kind, envs)
+    "SESSIONS": ("required", ["production", "preview"]),
+    "SUPABASE_URL": ("required", ["production"]),
+    "SUPABASE_ANON_KEY": ("required", ["production"]),
+    "SUPABASE_SERVICE_ROLE_KEY": ("required", ["production"]),
+    "OPENROUTER_API_KEY": ("required", ["production"]),
+    # recommended: correct in-source default, or no caller yet
+    "APP_ORIGIN": ("recommended", ["production"]),
+    "AUTH_CALLBACK_URL": ("recommended", ["production"]),
+    "API_ORIGIN": ("recommended", ["production"]),
+    # recommended: cloudflare-purge.ts is best-effort and fail-open by design
+    "CF_API_TOKEN": ("recommended", ["production"]),
+    "CF_ZONE_ID": ("recommended", ["production"]),
+}
+
+
+def test_the_manifest_classification_matches_the_reviewed_table() -> None:
+    """Flipping OPENROUTER_API_KEY to `recommended`, or dropping `preview` from
+    SESSIONS, previously left the whole suite green — the fixtures derive from
+    whatever the manifest currently says."""
+    actual = {
+        spec["name"]: (spec.get("kind", "required"), spec.get("envs", ["production"]))
+        for spec in _manifest()["bindings"]
+    }
+    assert actual == EXPECTED_CLASSIFICATION
+
+
+def test_the_classification_table_covers_every_binding() -> None:
+    """Non-vacuity: the table above must not silently miss a new binding."""
+    names = {spec["name"] for spec in _manifest()["bindings"]}
+    assert names == set(EXPECTED_CLASSIFICATION), (
+        "a binding was added or removed without updating EXPECTED_CLASSIFICATION"
+    )
+
+
+def test_a_non_string_kind_is_a_ValueError_not_a_TypeError(tmp_path) -> None:
+    """`kind: [required]` must hit the documented ValueError contract.
+
+    An unhashable kind raised TypeError from the set-membership test, escaping
+    the documented contract (main() still failed closed, but on the wrong path).
+    """
+    p = tmp_path / "m.yml"
+    p.write_text(
+        _manifest_yaml(
+            "  - name: SESSIONS\n    kind: [required]\n    type: d1_databases\n"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid kind"):
+        cpb.load_manifest(p)
+
+
+def test_a_malformed_success_payload_exits_2_not_1(monkeypatch) -> None:
+    """`success: true` with no `result` is could-not-determine (2), not
+    binding-missing (1).
+
+    A KeyError escaping to exit 1 would misreport the reason and send an
+    operator hunting for a binding that is not the problem.
+    """
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"success": true}'
+
+    monkeypatch.setattr(cpb.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    with pytest.raises(RuntimeError, match="malformed payload"):
+        cpb.fetch_configs("acct", "proj", "token")
