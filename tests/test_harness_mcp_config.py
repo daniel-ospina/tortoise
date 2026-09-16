@@ -239,9 +239,12 @@ class TestCommittedRepoMcpJson:
     entry could not authenticate even when the daemon WAS up under the
     documented `tortoise serve --http --auth tenant`.
 
-    Reads the file on disk (the committed blob in any clean checkout / CI). A
-    machine-local uncommitted edit to `.mcp.json` is deliberately NOT covered --
-    that is exactly what the entry's `_comment` tells a self-hoster to make.
+    Covers all five fields of the entry: `url`, `type`, `headers`, the absence
+    of a stdio `env`/`command`/`args`, and no literal token anywhere in the
+    file. Reads the file on disk (the committed blob in any clean checkout /
+    CI). A machine-local uncommitted edit to `.mcp.json` is deliberately NOT
+    covered -- that is exactly what the entry's `_comment` tells a self-hoster
+    to make.
     """
 
     COMMITTED = REPO_ROOT / ".mcp.json"
@@ -281,13 +284,23 @@ class TestCommittedRepoMcpJson:
         )
 
     def test_tortoise_header_is_env_indirect(self):
-        headers = self._tortoise().get("headers") or {}
-        auth = headers.get("Authorization")
-        # Diagnosable failure on the exact #3601 shape (headers dropped/empty).
+        headers = self._tortoise().get("headers")
+        # Diagnosable failure on every malformed shape, not just the empty one
+        # (#3601 was `"headers": {}`): a bare AttributeError tells a maintainer
+        # nothing about what drifted.
+        assert headers is None or isinstance(headers, dict), (
+            f"committed .mcp.json tortoise headers must be an object -- got "
+            f"{type(headers).__name__}"
+        )
+        auth = (headers or {}).get("Authorization")
         assert auth, (
             f"committed .mcp.json must carry an Authorization header -- an "
             f"empty/absent headers block cannot authenticate even when the "
             f"daemon is up (#3601); got headers={headers!r}"
+        )
+        assert isinstance(auth, str), (
+            f"committed .mcp.json Authorization must be a string -- got "
+            f"{type(auth).__name__}"
         )
         # Env-indirect only: the wizard/CLI copy never writes a literal key.
         assert auth.startswith("Bearer ${") and auth.endswith("}"), (
@@ -295,23 +308,44 @@ class TestCommittedRepoMcpJson:
         )
         assert "TORTOISE_API_KEY" in auth, auth
 
+    def test_tortoise_entry_is_http_only(self):
+        # The entry must stay an HTTP entry. `_comment` and
+        # docs/infra-runbook.md section 4.5 both state that the committed entry
+        # carries no `env` (the DB target is resolved server-side by the hosted
+        # API), and the stdio command+args pattern was replaced in feat/338 --
+        # so re-adding any of these drifts the docs silently.
+        entry = self._tortoise()
+        for key in ("env", "command", "args"):
+            assert key not in entry, (
+                f"committed .mcp.json tortoise entry must not define {key!r} "
+                f"(it is an HTTP entry -- see its _comment); got {entry[key]!r}"
+            )
+
     def test_no_literal_api_key_in_committed_config(self):
         # This file ships to users -- a literal token leaks a credential.
-        # The scan covers the whole file on purpose: a token pasted into a
-        # `_comment` is the same leak. Prefixes come from the minting sources of
-        # truth (tenant API keys + OAuth access/refresh tokens) so a family
-        # minted there is covered without editing this test.
         text = self.COMMITTED.read_text(encoding="utf-8")
+        # (a) Prefix scan over the whole file: a token pasted into a `_comment`
+        # is the same leak. The prefixes are the MCP-bearer-accepted minting
+        # sources (tortoise/mcp_auth.py accepts API_KEY_PREFIXES or `oat_`), so
+        # a family minted there is covered without editing this test. Families
+        # that are not bearer-reachable (the client id/secret `ct_`/`cs_` minted
+        # inline in tortoise/oauth.py) are deliberately not listed.
         for marker in (*API_KEY_PREFIXES, ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX):
             assert marker not in text, (
                 f"literal {marker!r} key material in committed .mcp.json -- "
                 f"keys must stay env-indirect"
             )
-        # Structural backstop: the Authorization header is the only
-        # credential-bearing value in the file, so every `Bearer ` in it must
-        # introduce an env expression. Catches a token family this test -- and
-        # the prefix list above -- has never heard of.
-        assert text.count("Bearer ") == text.count("Bearer ${"), (
-            "committed .mcp.json has a literal Bearer token -- every `Bearer ` "
-            "in a user-shipped config must be followed by a ${VAR} expression"
-        )
+        # (b) Structural backstop over the PARSED HEADER VALUES, not the raw
+        # text: the Authorization header is where a credential would actually
+        # be presented, and prose in a `_comment` that merely says "Bearer "
+        # must not trip the guard. Catches any token family, including one this
+        # test has never heard of.
+        headers = self._tortoise().get("headers")
+        if isinstance(headers, dict):
+            for name, value in headers.items():
+                if isinstance(value, str) and "Bearer " in value:
+                    assert value.count("Bearer ") == value.count("Bearer ${"), (
+                        f"committed .mcp.json header {name!r} carries a literal "
+                        f"Bearer token -- every `Bearer ` in a user-shipped "
+                        f"config must be followed by a ${{VAR}} expression"
+                    )
