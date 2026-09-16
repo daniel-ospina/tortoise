@@ -117,9 +117,12 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # Faithful replay via apply() (preserves context; restore uses the same
     # path). Per-event guard: one bad event must not abort the whole recovery.
     applied = 0
-    for ev in events:
+    for pos, ev in enumerate(events):
         try:
-            projection.apply(ev)
+            # journal_pos (#3590 S0): the durable replay position, so a
+            # recorded non-fold names its journal line on this engine too
+            # (not rendered "live" — `recover_from_log` IS a replay).
+            projection.apply(ev, pos)
             applied += 1
         except Exception:
             torn += 1
