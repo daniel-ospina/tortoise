@@ -7,13 +7,13 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
-updated: 2026-09-12
+updated: 2026-09-16
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
 
 **Epic:** #7711 (legacy provisioning epic — provenance) · availability watchdog: #2850
-**Last updated:** 2026-09-12
+**Last updated:** 2026-09-16
 
 ## 1. Initial Provisioning
 
@@ -879,7 +879,25 @@ every 5 minutes.
 - **Logic + limits:** `.github/scripts/availability-watchdog.sh`
 - **Harness (runs in CI job `availability-watchdog`):** `bash .github/scripts/availability-watchdog.test.sh`
 
+**Two production targets (#3628).** The watchdog now drives TWO surfaces, as two
+steps of the same job: the Fly API probe (§7.1a) and the Cloudflare Pages auth
+surface probe (§7.1b). They alert **independently** (the auth step runs even if
+the API step failed) and each files its **own** incident, keyed by its own host
+label — the two never share an issue. Only the Fly API target is restartable;
+the auth target is **hard-disarmed** from the restart leg (§7.4).
+
+> **The production alert path has never fired.**
+> `gh issue list --state all --search '"[monitor] PROD DOWN" in:title'` returns
+> `[]` — every exercise of the alerting machinery so far has been a **drill**
+> (§7.7), which is the **only proven route**. That makes the drill path the one
+> to trust when changing this code, and it is why `is_prod` is a **set
+> membership** test rather than a boolean flag: an unrecognised URL must stay a
+> DRILL, so a misconfigured or newly-added target can never arm self-heal
+> against an unexpected host (fail closed).
+
 ### 7.1 What the probe checks
+
+#### 7.1a The Fly API target (default)
 
 `GET https://api.premiselabs.co/v1/organizations` with **no auth** — the real user
 path (an authenticated API route served by the app), not just an open socket.
@@ -901,6 +919,48 @@ suspension) answers `401` and therefore reads UP.
 A generous per-request timeout (25 s) plus 3 attempts ~10 s apart must all fail
 before the run declares DOWN, so a single transient blip cannot fire an alarm.
 
+#### 7.1b The Pages auth target (#3628)
+
+The second step probes `GET https://tortoise.premiselabs.co/auth/start`
+(Cloudflare Pages). It exists because of the **#3616 sign-in outage** (~35 min):
+only `/auth/start` revealed it. The other candidate routes stayed GREEN the
+whole time — this is the trap to remember when tempted to probe something
+cheaper:
+
+| Route | Status during #3616 | Reads as |
+|---|---|---|
+| `/auth/start` | **503** `session_store_unavailable` | **DOWN/DEGRADED — the only revealing route** |
+| `/welcome` | 302 | UP (a bare liveness probe is blind) |
+| `/api/session` (anon) | 401 `not_signed_in` | UP — its missing-cookie branch precedes the binding check (`functions/api/session.ts`) |
+| `/auth` | 200 | UP |
+
+The auth target's UP contract is **narrower and stronger** than the API's:
+
+| | Value | Why |
+|---|---|---|
+| `PROBE_EXPECT_STATUS` | `302` | A healthy `/auth/start` is a redirect, not a 200. The watchdog's built-in arms classify 3xx as UNEXPECTED, so **without this allow-list a healthy site would page** — the #1 way to get this wrong |
+| `PROBE_REQUIRE_HEADER` | `code_challenge_method=s256` | Proof the PKCE flow row was actually written to D1. A 302 **without** it is an *answered-but-wrong* (UNEXPECTED → `PROD DEGRADED`) verdict, not an outage — “the site is up but nobody can sign in”, the entire lesson of #3616 |
+| `PROBE_HOST_LABEL` | `tortoise.premiselabs.co` | The incident **title is the dedupe key**. Two production targets must not share one label or they would fight over a single issue |
+
+The allow-list replaces **only** the UP arms: `000`/`5xx` are checked **first**
+and stay **DOWN** even if listed, and any other status stays **UNEXPECTED**. A
+malformed allow-list therefore fails closed (a genuine outage still alerts,
+never a silent disarm).
+
+That 302 + `code_challenge_method=s256` contract is exactly what the deploy
+gate already asserts (`tests/e2e/auth/test_bff_flow.py` — “expected redirect from
+/auth/start” and “S256 only” in the `Location` header); the watchdog is the
+**scheduled twin of the deploy gate**, pointed at the same tuple so the same
+fault is caught after a deploy as well as during one (#3618 blocks deploying it,
+this blocks living with it).
+
+**Never restartable.** The auth surface has **no Fly machine** behind it; a `503`
+there means a missing/renamed binding (D1/KV) or a Pages routing change, which
+`flyctl machine restart` on the API app cannot repair and which would restart an
+**unrelated service**. The auth URL is in the production set but **not** in the
+restartable set, and the run log / incident body say `disarmed:no_machine`
+explicitly (§7.4).
+
 ### 7.2 How to read a failure
 
 1. **The workflow run goes RED** — that is the alert (enable GitHub Actions
@@ -908,6 +968,10 @@ before the run declares DOWN, so a single transient blip cannot fire an alarm.
 2. **One GitHub issue** appears (or an existing one gets a comment):
    `[monitor] PROD DOWN — api.premiselabs.co is not answering the availability
    probe` (or `PROD DEGRADED` for the UNEXPECTED class), labelled `auto-filed`.
+   The auth target files a **separate** incident with its own host in the title
+   (`[monitor] PROD DOWN — tortoise.premiselabs.co is not answering the
+   availability probe`). An external page (Telegram) also fires on the
+   transition when the paging secrets are set.
 3. The issue **body** is machine-managed and carries the verdict, the first
    observation time, the failing-run count, the raw probe evidence, and the
    self-healing state. Read it first; add human notes as **comments**.
@@ -963,9 +1027,14 @@ velocity and involve a human when the cap is hit).
 
 Override them in the `env:` block of `availability-watchdog.yml`. The watchdog
 restarts **only**: (a) on a DOWN verdict — never on UNEXPECTED, where a restart
-cannot help; (b) when `PROBE_URL` is the production endpoint — a drill
-automatically disarms the restart leg; (c) when the failure is one a restart
-cannot fix — `classify_failure()` maps curl's exit code to a class, and **DNS**
+cannot help; (b) when `PROBE_URL` is a **restartable member of the production
+set** — an unrecognised URL is a drill and a drill automatically disarms the
+restart leg, and a production URL that is **not** restartable (the Pages auth
+surface — no Fly machine behind it, so a restart of the API app cannot repair a
+missing binding and would restart an unrelated service) is hard disarmed
+(`disarmed:no_machine`) regardless of the failure class; (c) when the failure is
+one a restart cannot fix — `classify_failure()` maps curl's exit code to a
+class, and **DNS**
 (6) and **TLS/certificate** (35, 51, 58–60, 66, 77, 80, 82–83, 90–91) failures
 disarm the restart leg (`disarmed:unfixable`). The incident is still filed and
 its body names the class and why nothing was restarted: restarting a machine
@@ -1003,8 +1072,8 @@ Three further safeguards worth knowing:
 
 | Secret | Needed for | If missing |
 |---|---|---|
-| `FLY_API_TOKEN` | the automated restart | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | optional paging on transitions | Page skipped with a log line (reuses the DR driver's secrets) |
+| `FLY_API_TOKEN` | the automated restart of the **Fly API** target — **not** the Pages auth step, which is hard-disarmed regardless | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | optional paging on transitions | Page skipped with a log line (reuses the DR driver's secrets). Both probe steps get them at STEP level |
 
 `GITHUB_TOKEN` is supplied by Actions and needs `issues: write` (granted in the
 workflow). A missing `GH_TOKEN` fails the run before probing — a monitor that
@@ -1013,9 +1082,11 @@ cannot file is a deaf monitor.
 ### 7.6 When restarts do not help
 
 The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
-that as “this is not a wedged process”. Three disarm reasons also land here
+that as “this is not a wedged process”. Four disarm reasons also land here
 without the cap being reached, and all are named in the incident body and the
-run log: **`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
+run log: **`disarmed:no_machine`** (a production surface with no Fly machine —
+the Pages auth target: repair the binding/route, there is nothing to restart),
+**`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
 resolver or the certificate; a restart is not the fix), **`disarmed:no_ledger`**
 (the prior incident's restart ledger could not be read), and
 **`disarmed:corrupt_ledger`** (the ledger was read but not fully parseable —
@@ -1076,13 +1147,37 @@ To check the *paging* path, set the repo secrets (`gh secret set
 TELEGRAM_BOT_TOKEN`) — a dispatched workflow uses the repository secrets, not
 your shell environment. `gh workflow run` cannot pass them inline.
 
+**The production alert path has never fired** — `gh issue list --state all
+--search '"[monitor] PROD DOWN" in:title'` returns `[]`, so a drill is the
+**only proven route** for the alerting machinery (§7, §7.7). Two consequences:
+
+1. **Drill the drill before trusting a change.** A reverted/mis-wired
+   `is_prod` set would make every production run a silent drill (no PROD page),
+   and nothing in the live path would tell you — the drill is where you notice.
+2. **Widening the production set must not let a drill arm self-heal.** The set
+   (`PROD_PROBE_URLS`) and the restartable set (`RESTARTABLE_PROBE_URLS`) are
+   separate; only exact members of the production set are PROD, and only exact
+   members of the restartable set may restart. An unrecognised URL stays a
+   DRILL with self-heal disarmed — never add a flag, never loosen this to a
+   prefix/wildcard match, and never let a drill URL appear in either set.
+
+**Both targets are probed on every run**, drills included: the auth step always
+uses its production URL and is hard-disarmed from the restart leg. Note the auth
+probe is **not** side-effect-free — asserting the PKCE header means the GET must
+reach `/auth/start`, which **writes an `auth_flows` row** (one per run; expired
+rows are currently not garbage-collected — tracked in #3647). A drill therefore
+exercises the API drill path while still alerting on a genuinely-down auth
+surface.
+
 ### 7.8 Known limits
 
-- **Single-route, unauthenticated blindness.** The probe checks ONE route
-  (`/v1/organizations`) and only its no-auth branch. An outage that leaves that route
-  answering `401` while other routes fail reads as UP (green) — and so does an
-  auth-leg break that rejects every *real* token. The probe proves liveness and
-  route presence, not end-to-end authenticated traffic.
+- **Two probes, still narrow.** The API probe checks ONE route
+  (`/v1/organizations`) and only its no-auth branch; the auth probe checks ONE
+  route (`/auth/start`) and asserts 302 + the PKCE header. An outage that leaves
+  either route answering as expected while other routes fail reads as UP
+  (green) — and so does an auth-leg break that rejects every *real* token (the
+  probe sends none). Together they cover the two paths where a silent outage is
+  worst, not the whole surface.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
   `CONTROL_URL` check). Alerting still fires; no restart is issued. The
   escalation page is throttled (at most once per `CAP_RENOTIFY_MINUTES`) and the

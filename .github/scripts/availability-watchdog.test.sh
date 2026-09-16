@@ -132,12 +132,13 @@ cat > "$BIN/curl" <<'CURL_EOF'
 # Handles exactly the two shapes the watchdog uses:
 #   probe:    curl -sS -o FILE -w '<fmt>' --connect-timeout N --max-time N URL
 #   telegram: curl -sS --max-time 15 -o /dev/null URL --data-urlencode k=v ...
-out_file=""; write_fmt=""; url=""; data=""; fail_body=0
+out_file=""; write_fmt=""; url=""; data=""; fail_body=0; hdr_file=""
 args=("$@"); i=0
 while [ $i -lt ${#args[@]} ]; do
   a="${args[$i]}"
   case "$a" in
     -o) out_file="${args[$((i+1))]:-}"; i=$((i+2)) ;;
+    -D) hdr_file="${args[$((i+1))]:-}"; i=$((i+2)) ;;
     -w) write_fmt="${args[$((i+1))]:-}"; i=$((i+2)) ;;
     --data-urlencode) data="${data}${data:+&}${args[$((i+1))]:-}"; i=$((i+2)) ;;
     --connect-timeout|--max-time|-H) i=$((i+2)) ;;
@@ -202,6 +203,10 @@ idx=$((n - 1)); [ "$idx" -ge "${#codes[@]}" ] && idx=$(( ${#codes[@]} - 1 ))
 code="${codes[$idx]}"
 echo "CURL probe #${n} code=${code} url=${url}" >> "$STUB_TMP/calls.log"
 [ -n "$out_file" ] && printf '%s' "${STUB_PROBE_BODY:-}" > "$out_file"
+# `-D FILE` dumps RESPONSE HEADERS. STUB_PROBE_HEADERS reproduces the header
+# block a real curl writes (status line + headers), which is what the watchdog
+# reads for PROBE_REQUIRE_HEADER. Absent → an empty dump (no header found).
+[ -n "$hdr_file" ] && printf '%s' "${STUB_PROBE_HEADERS:-}" > "$hdr_file"
 # A real curl emits the -w output even when the transfer FAILED (http_code is
 # then 000) and exits non-zero with the reason on stderr. STUB_PROBE_RC /
 # STUB_PROBE_STDERR reproduce that so the harness can drive classify_failure().
@@ -376,13 +381,14 @@ reset_case() {
   unset STUB_PROBE_CODES STUB_PROBE_BODY STUB_PROBE_TIME STUB_SEARCH_JSON \
         STUB_SEARCH_FAIL STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
         STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_MARKER STUB_LEDGER_SEARCH_FAIL \
-        STUB_PROBE_RC STUB_PROBE_STDERR \
+        STUB_PROBE_RC STUB_PROBE_STDERR STUB_PROBE_HEADERS \
         STUB_FLY_MACHINES STUB_FLY_LIST_FAIL STUB_FLY_RESTART_FAIL STUB_FLY_LEAK \
         STUB_FLY_LEAK_SHAPE STUB_FLY_SPLIT STUB_ISSUE_CREATED_AT \
         STUB_TELEGRAM_FAIL STUB_TELEGRAM_HTTP STUB_TELEGRAM_DESC STUB_COMMENT_FAIL STUB_GET_BODY_FAIL \
         STUB_CONTROL_CODES \
         PROBE_URL FLY_API_TOKEN TELEGRAM_BOT_TOKEN \
         TELEGRAM_CHAT_ID PROBE_HOST_LABEL STUB_PATCH_FAIL \
+        PROBE_EXPECT_STATUS PROBE_REQUIRE_HEADER PROD_PROBE_URLS RESTARTABLE_PROBE_URLS \
         RECOVERY_CONFIRM_PROBES SUSTAINED_MIN_RUNS PROBE_ATTEMPTS \
         MAX_RESTARTS_PER_HOUR STALE_RESET_MINUTES CONTROL_URL 2>/dev/null || true
   export GH_TOKEN="test-token"
@@ -1703,6 +1709,193 @@ assert_contains "$(patched_body)" "velocity cap" "run 3: the recovered stamps tr
 assert_not_contains "$(patched_body)" "ledger_state=invalid" "run 3: the sentinel is CLEARED once the source parses"
 export WATCHDOG_NOW_EPOCH="$NOW"
 
+# ══ #3628: the Pages auth surface (a SECOND production target) ══════════════
+# Every case below FAILS on the pre-#3628 code:
+#   * the healthy-302 case is RED under the old hardcoded `2??` UP arm — which
+#     is exactly why a bare liveness probe of /auth/start would page on a
+#     HEALTHY site;
+#   * PROBE_EXPECT_STATUS / PROBE_REQUIRE_HEADER did not exist and `is_prod`
+#     was a single-literal comparison, so the auth URL classified as a DRILL
+#     ([DRILL]-titled incident, no PROD page).
+AUTH_URL="https://tortoise.premiselabs.co/auth/start"
+AUTH_TITLE_DOWN='[monitor] PROD DOWN — tortoise.premiselabs.co is not answering the availability probe'
+PKCE_HEADERS=$'HTTP/2 302\r\nlocation: https://github.com/login/oauth/authorize?client_id=x&code_challenge=abc&code_challenge_method=s256\r\n'
+
+# Unit-call the pure helpers straight from the script (the WATCHDOG_LIB_ONLY
+# seam). Prose-level integration cases below cover the same ground end-to-end.
+classify_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; classify_code "$1"' "$WATCHDOG" "$1"; }
+prod_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; if is_production_url "$1"; then printf PROD; else printf DRILL; fi' "$WATCHDOG" "$1"; }
+restartable_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; if is_restartable_url "$1"; then printf YES; else printf NO; fi' "$WATCHDOG" "$1"; }
+
+# ── 93: classify_code — the allow-list is ADDITIVE, not a replacement ──────
+reset_case
+assert_eq "$(classify_unit 200)" "UP" "classify DEFAULT: 200 → UP"
+assert_eq "$(classify_unit 401)" "UP" "classify DEFAULT: 401 → UP"
+assert_eq "$(classify_unit 503)" "DOWN" "classify DEFAULT: 503 → DOWN"
+assert_eq "$(classify_unit 302)" "UNEXPECTED" "classify DEFAULT: 302 → UNEXPECTED (THE TRAP a naive auth probe falls into)"
+export PROBE_EXPECT_STATUS="302"
+assert_eq "$(classify_unit 302)" "UP" "classify allow-list: 302 → UP"
+assert_eq "$(classify_unit 503)" "DOWN" "classify allow-list keeps 5xx DOWN (302 does NOT make an outage healthy)"
+assert_eq "$(classify_unit 404)" "UNEXPECTED" "classify allow-list keeps other codes UNEXPECTED"
+assert_eq "$(classify_unit 200)" "UNEXPECTED" "classify allow-list: a code OUTSIDE the list is not UP"
+# The DOWN arm is checked FIRST and cannot be widened by the list: a malformed
+# list that names a 5xx/000 must still alert (fail closed), not disarm the probe.
+export PROBE_EXPECT_STATUS="302 503 000"
+assert_eq "$(classify_unit 503)" "DOWN" "classify allow-list: a LISTED 5xx is STILL DOWN (the list cannot disarm the outage class)"
+assert_eq "$(classify_unit 000)" "DOWN" "classify allow-list: a LISTED 000 is STILL DOWN"
+assert_eq "$(classify_unit 302)" "UP" "classify allow-list: the good code in the same list is still UP"
+unset PROBE_EXPECT_STATUS
+
+# ── 94: prod/restartable classification is SET-based and fail-closed ───────
+assert_eq "$(prod_unit "$AUTH_URL")" "PROD" "prod set: the auth URL is PRODUCTION (files a PROD incident, pages)"
+assert_eq "$(prod_unit "https://api.premiselabs.co/v1/organizations")" "PROD" "prod set: the API URL stays PRODUCTION"
+assert_eq "$(prod_unit "https://staging.example.test/v1/organizations")" "DRILL" "prod set: an unrecognised URL is a DRILL (fail closed — no armed self-heal)"
+assert_eq "$(prod_unit "https://api.premiselabs.co/v1/organizations/")" "PROD" "prod set: a trailing slash is normalised away"
+assert_eq "$(restartable_unit "https://api.premiselabs.co/v1/organizations")" "YES" "restart set: the Fly API surface may restart"
+assert_eq "$(restartable_unit "$AUTH_URL")" "NO" "restart set: the Pages auth surface is NEVER restartable"
+assert_eq "$(restartable_unit "https://staging.example.test/v1/organizations")" "NO" "restart set: a drill is not restartable"
+
+# ── 86: a healthy 302 + the PKCE header on the auth target → UP ─────────────
+reset_case
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
+export STUB_PROBE_CODES="302"
+export STUB_PROBE_HEADERS="$PKCE_HEADERS"
+run_watchdog
+assert_eq "$RC" "0" "auth healthy: 302 + PKCE header → exit 0 (UP)"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "auth healthy: no incident filed"
+assert_eq "$(count_calls 'FLYCTL')" "0" "auth healthy: no flyctl call"
+assert_eq "$(cat "$STUB_TMP/probe.count")" "2" "auth healthy: one probe + one recovery-confirmation probe"
+
+# ── 87: the SAME 302 without the header is NOT UP (the #3616 class) ────────
+reset_case
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
+export STUB_PROBE_CODES="302"
+export STUB_PROBE_HEADERS=$'HTTP/2 302\r\nlocation: https://github.com/login/oauth/authorize?client_id=x\r\n'
+run_watchdog
+assert_eq "$RC" "1" "auth: 302 WITHOUT the PKCE header → exit 1 (up but not signing anyone in)"
+assert_contains "$(patched_body)" "required response header NOT found" "auth: the incident body names the missing required header"
+assert_contains "$(created_json)" "PROD DEGRADED" "auth: answered-but-wrong → PROD DEGRADED (an ANSWER, not an outage)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "auth: answered-but-wrong → no restart attempt"
+assert_eq "$(cat "$STUB_TMP/probe.count")" "1" "auth: the header check is deterministic → no retry budget burned"
+
+# ── 88: a 503 on the auth target → DOWN and flyctl is NEVER called ─────────
+reset_case
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
+export STUB_PROBE_CODES="503"
+export FLY_API_TOKEN="fly-token"     # present on purpose: the token must NOT be enough
+run_watchdog
+assert_eq "$RC" "1" "auth: 503 → exit 1"
+assert_contains "$(created_json)" "PROD DOWN" "auth: 503 → PROD DOWN title"
+assert_eq "$(count_calls 'FLYCTL')" "0" "auth: 503 → flyctl was NEVER called (no Fly machine; no restart)"
+assert_contains "$OUT" "restart decision: disarmed:no_machine" "auth: the run log names the no-machine disarm"
+assert_contains "$(patched_body)" "NO Fly machine" "auth: the incident body explains why nothing was restarted"
+
+# ── 89: sustained 60 min + a Fly token is STILL a hard no-restart ──────────
+# The strongest possible case for a restart and it must still not happen.
+reset_case
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export STUB_PROBE_CODES="503"
+export FLY_API_TOKEN="fly-token"
+jq -n --arg b "<!-- watchdog-state kind=down first_failure_ts=$((NOW - 3600)) down_runs=20 last_down_ts=$((NOW - 60)) last_comment_ts=0 cap_notified_ts=0 restarts= -->" '{body:$b}' > "$STUB_TMP/issue.json"
+STUB_SEARCH_JSON="$(search_json 77 "$AUTH_TITLE_DOWN")"
+export STUB_SEARCH_JSON
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL')" "0" "auth sustained: 60 min down + a Fly token → STILL zero flyctl calls (hard disarm)"
+assert_contains "$OUT" "restart decision: disarmed:no_machine" "auth sustained: the disarm is still no_machine"
+assert_contains "$(patched_body)" "down_runs=21" "auth sustained: the incident is still tracked and alerted (count increments)"
+assert_contains "$(comments_all)" "NO Fly machine" "auth sustained: a human sees why nothing restarted"
+
+# ── 90: the auth URL is PROD (not DRILL) → PROD title with its OWN label ───
+reset_case
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export STUB_PROBE_CODES="503"
+run_watchdog
+assert_contains "$(created_json)" "[monitor] PROD DOWN" "auth: the incident is PROD-titled (the URL is in the prod SET)"
+assert_not_contains "$(created_json)" "DRILL" "auth: the incident is NOT a drill"
+assert_contains "$(created_json)" "tortoise.premiselabs.co" "auth: the title carries the auth host — its OWN dedupe key"
+
+# ── 90b: the auth run never adopts (or mutates) the API incident ───────────
+reset_case
+seed_issue down "$((NOW - 600))" 3 0 ""   # seeds an OPEN API incident (#42)
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export STUB_PROBE_CODES="503"
+run_watchdog
+assert_eq "$(count_calls 'GH POST .*/issues$')" "1" "auth: the API incident is NOT adopted → the auth incident is filed fresh"
+assert_eq "$(count_calls 'GH PATCH repos/.*/issues/42$')" "0" "auth: the API incident (#42) is NEVER mutated (separate dedupe identity)"
+assert_contains "$(created_json)" "tortoise.premiselabs.co" "auth: the fresh incident carries the auth host"
+
+# ── 91: the required-header match is CASE-INSENSITIVE ──────────────────────
+reset_case
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
+export STUB_PROBE_CODES="302"
+export STUB_PROBE_HEADERS=$'HTTP/2 302\r\nLocation: https://x/authorize?Code_Challenge_Method=S256\r\n'
+run_watchdog
+assert_eq "$RC" "0" "auth: header name/value casing is irrelevant → still UP"
+
+# ── 92: a trailing slash still classifies as PROD ──────────────────────────
+reset_case
+export PROBE_URL="$AUTH_URL/"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export STUB_PROBE_CODES="503"
+run_watchdog
+assert_contains "$(created_json)" "[monitor] PROD DOWN" "auth: a trailing slash is normalised → still PROD, not a drill"
+
+# ── 95: the API target's contract is UNCHANGED with the knobs unset ────────
+# The end-to-end regression is the whole 1-33 block above (it runs with no
+# knobs); these two make the contrast explicit against the auth cases.
+reset_case
+export STUB_PROBE_CODES="302"
+run_watchdog
+assert_eq "$RC" "1" "api regression: a bare 302 with NO allow-list is still UNEXPECTED"
+assert_contains "$(created_json)" "PROD DEGRADED" "api regression: 302 → DEGRADED, not DOWN"
+reset_case
+export STUB_PROBE_CODES="503"
+run_watchdog
+assert_eq "$RC" "1" "api regression: 503 → DOWN"
+assert_eq "$(count_calls 'FLYCTL')" "0" "api regression: 503 with no token → no restart (unchanged)"
+
+# ── 97: a malformed allow-list cannot make a 5xx healthy (end to end) ──────
+reset_case
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302 503"    # 503 must NOT become healthy
+export STUB_PROBE_CODES="503"
+run_watchdog
+assert_eq "$RC" "1" "allow-list: a LISTED 5xx still fails the run (fail closed)"
+assert_contains "$(created_json)" "PROD DOWN" "allow-list: a listed 5xx still files a DOWN incident"
+assert_eq "$(count_calls 'FLYCTL')" "0" "allow-list: a listed 5xx on the auth target still never restarts"
+
+# ── 98: the no-Fly-machine prose keys on RESTARTABILITY, not the knob ──────
+# With an expectation knob set on the RESTARTABLE API target, the public incident
+# body must NOT tell an operator that nothing will restart (it could).
+reset_case
+export PROBE_URL="https://api.premiselabs.co/v1/organizations"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="503"
+run_watchdog
+assert_eq "$RC" "1" "prose: an expectation knob on the API target still alerts"
+assert_not_contains "$(patched_body)" "no Fly machine" "prose: a RESTARTABLE target's body never claims there is no Fly machine"
+
 # ── 85: workflow credential containment (round 4, P3-5/P3-6) ────────────────
 # These invariants live in the workflow, not the script, so the harness cannot
 # drive them — a STATIC check is the only automated guard. Both FAIL on the
@@ -1727,6 +1920,18 @@ assert_not_contains "$JOB_ENV" "TELEGRAM_BOT_TOKEN" "TELEGRAM_BOT_TOKEN is NOT j
 assert_not_contains "$JOB_ENV" "TELEGRAM_CHAT_ID" "TELEGRAM_CHAT_ID is NOT job-level (step env only, P3-6)"
 assert_not_contains "$JOB_ENV" "FLY_API_TOKEN" "FLY_API_TOKEN is NOT job-level (step env only)"
 assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env only)"
+
+# ── 96: the workflow drives the auth surface as its OWN step (#3628) ───────
+AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
+# Same comment-stripping rule as case 85: a comment must not satisfy the guard.
+AUTH_STEP="$(sed -n '/Probe the Pages auth surface/,/availability-watchdog.sh/p' "$AUTH_WORKFLOW" | grep -v '^[[:space:]]*#' || true)"
+assert_contains "$AUTH_STEP" "https://tortoise.premiselabs.co/auth/start" "the auth step targets /auth/start"
+assert_contains "$AUTH_STEP" "PROBE_EXPECT_STATUS: '302'" "the auth step expects a 302"
+assert_contains "$AUTH_STEP" "PROBE_REQUIRE_HEADER: 'code_challenge_method=s256'" "the auth step requires the PKCE header"
+assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: tortoise.premiselabs.co" "the auth step passes its OWN host label (its own dedupe key)"
+assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
+assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
+assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
 
 echo
 if [ "$FAIL" -eq 0 ]; then
