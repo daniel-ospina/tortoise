@@ -9,8 +9,11 @@ constant) — no graph, no network.
     label-free (rank is the only trigger); ``idx:N``/sentinel buckets
     dropped as phantom sessions.
   * EXPAND: one batched query per call, pool-membership filter IN the
-    query, ``pool_ids`` bound as a list, unconditional question id,
-    per-session + total caps applied in deterministic order, fail-open.
+    query, ``pool_ids`` bound as a list, scope anchored on the seeded
+    hit's Session (``Session-[:CONTAINS]->Point``; no ``lme_*`` predicate
+    and no ``p.session_id``), the ``WITH DISTINCT s`` plan barrier, a
+    deterministic ``ORDER BY``, per-session + total caps applied in that
+    order, fail-open.
   * MERGE: anchor = the session's LAST base rank in the pool; splices
     accumulate deterministically in seed order; already-present ids are
     dropped; a base chunk ranked beyond the seed window survives; the
@@ -113,11 +116,15 @@ def test_seed_defaults_are_the_documented_constants():
 
 
 def test_total_budget_is_below_the_structural_fan_out():
-    """The total cap must be strictly BELOW ``SEED_SESSIONS *
-    PER_SESSION`` or it is structurally inert (the per-session cap alone
-    guarantees no row ever trips it, so ``total_cap_hit`` could never be
-    True — the defect this PR fixes). Pin the invariant so a future bump of
-    either constant cannot silently re-inert the census key."""
+    """The reachability condition is ``TOTAL <= SEED_SESSIONS *
+    PER_SESSION``: above it the total is structurally inert (the
+    per-session cap alone bounds retained items), so ``total_cap_hit``
+    could never be True — the defect this PR fixes. The shipped value is
+    the conservative choice STRICTLY below that line. Pin the invariant so
+    a future bump of either constant cannot silently re-inert the census
+    key. (The binding of the key at the shipped defaults is pinned
+    separately, behaviourally — see
+    ``test_total_cap_binds_at_the_shipped_defaults``.)"""
     assert (DEFAULT_REINJECTION_TOTAL_ITEMS
             < DEFAULT_REINJECTION_SEED_SESSIONS
             * DEFAULT_REINJECTION_PER_SESSION)
@@ -164,6 +171,18 @@ def test_fetch_is_one_query_with_the_filter_in_the_query():
     assert "seed.id IN $seed_ids" in cypher
     assert "lme_question_id" not in cypher
     assert "p.session_id IN" not in cypher
+    # the plan barrier that keeps the driver on the seed list: without it
+    # FalkorDB scans the whole Point label and applies the seed filter last
+    # (verified with GRAPH.EXPLAIN). Result-neutral, plan-decisive.
+    assert "WITH DISTINCT s" in cypher
+    # the group key the merge's ``seed_order`` must agree with
+    assert "coalesce(p.session_id, s.id)" in cypher
+    # the deterministic budget order: which rows get charged a cap slot
+    # must not be left to the graph (normalise the query's line-continuation
+    # whitespace before matching)
+    assert ("ORDER BY coalesce(p.session_id, s.id), "
+            "coalesce(p.lme_chunk_index, -1), p.id") in " ".join(
+        cypher.split())
     # the default kind is the PRODUCT's verbatim material, not the eval's
     assert params["chunk_kind"] == TURN_POINT_KIND
     assert sorted(params["pool_ids"]) == ["p1", "p2"]  # coerced to a list
@@ -177,10 +196,11 @@ def test_fetch_is_one_query_with_the_filter_in_the_query():
 def test_fetch_constrains_event_kind_to_the_turn_shape():
     """``pointKind``'s vocabulary is open, so the turn kind alone does not
     prove a node is a turn: the hosted demo/dashboard seed writes
-    ``pointKind='event'`` with no ``is_episodic`` and no role tag. The
-    default (turn) kind must carry the shape predicate; the eval's chunk
-    A/B must NOT (chunks are role-prefixed windows whose shape is already
-    pinned by the kind)."""
+    ``pointKind='event'`` with NO ``is_episodic`` (its body IS
+    ``[role]``-tagged, so ``is_episodic`` is the conjunct that excludes
+    it). The default (turn) kind must carry the shape predicate; the eval's
+    chunk A/B must NOT (chunks are role-prefixed windows whose shape is
+    already pinned by the kind)."""
     proj = _FakeProj(rows=[])
     source_session_chunk_pass(proj, ["seed1"], pool_ids=[])
     turn_cypher, _ = proj.g.calls[0]
@@ -193,6 +213,26 @@ def test_fetch_constrains_event_kind_to_the_turn_shape():
     assert "is_episodic" not in chunk_cypher
     assert "STARTS WITH" not in chunk_cypher
     assert params["chunk_kind"] == SESSION_TRANSCRIPT_KIND
+
+
+def test_total_cap_binds_at_the_shipped_defaults():
+    """Behavioural pin of the retune: at the SHIPPED defaults the total
+    budget is the binding volume guard. Five sessions x 4 candidate rows
+    (all off-pool) = 20 candidates; ``per_session_cap`` is 3 and
+    ``total_cap`` is 10, so the total trips and ``dropped_by_cap`` counts
+    the excess. Without this the only coverage of the retune would be the
+    constant comparison above, which is a necessary condition, not the
+    claim (that ``total_cap_hit`` is a LIVE census key)."""
+    rows = [(f"s{s}i{i}", f"s{s}", i)
+            for s in range(5) for i in range(4)]
+    out = source_session_chunk_pass(_FakeProj(rows=rows), ["seed"] * 5,
+                                   pool_ids=[])
+    assert out["total"] == DEFAULT_REINJECTION_TOTAL_ITEMS
+    assert out["total_cap_hit"] is True
+    # 20 candidates - 10 admitted = 10 dropped (3 by the per-session cap on
+    # the first session, 7 by the total cap)
+    assert out["dropped_by_cap"] == 10
+    assert sum(len(v) for v in out["by_session"].values()) == 10
 
 
 def test_fetch_applies_per_session_and_total_caps_in_order():

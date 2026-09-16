@@ -22,11 +22,14 @@ ONE bounded graph pass:
    also carries the POOL HIT ID that seeded it — the fetch anchors on
    that hit (see EXPAND).
 2. **EXPAND** — :func:`source_session_chunk_pass`: ONE batched Cypher
-   fetch per FIRED question (never one per seed), bounded by a
-   per-session cap and a total-item cap. The pool-membership filter lives
-   IN the query (``NOT p.id IN $pool_ids``) so the budgets are spent on
-   genuinely-new items. Fail-open: any failure yields the empty result and
-   the caller keeps the ORIGINAL pool.
+   fetch per FIRED question (never one per seed), with the per-session and
+   total caps applied in Python to the returned rows (the query carries no
+   ``LIMIT``; ``WITH DISTINCT s`` anchors the traversal on the seeded
+   sessions so the driver scan is the seed list, not the whole ``Point``
+   label). The pool-membership filter lives IN the query
+   (``NOT p.id IN $pool_ids``) so the budgets are spent on genuinely-new
+   items. Fail-open: any failure yields the empty result and the caller
+   keeps the ORIGINAL pool.
 
    **What the fetch targets (product-real by construction).** The default
    ``chunk_kind`` is :data:`TURN_POINT_KIND` — the episodic TURN points the
@@ -43,19 +46,45 @@ ONE bounded graph pass:
    speaker/is_episodic and links ``Session-[:CONTAINS]->Point``), so any
    ``p.session_id IN $sids`` predicate is dead in the product; and the
    previous ``p.lme_question_id = $q`` guard was a benchmark-only property
-   no product writer emits. Anchoring on the seeded hit also preserves the
-   eval's question scope by construction: the seeded hit IS this question's
-   pool hit, so the Session it belongs to is this question's Session — no
-   ``lme_*`` predicate is needed, and the cross-question ``session_id``
-   collisions the eval corpus DOES contain (212 shared dataset session ids
-   across the 100-question tail cohort) cannot leak a sibling question's
-   turns into this question's pool.
+   no product writer emits.
+
+   Question scope comes from TWO independent things, and neither is the
+   removed guard: (1) the eval ingests each question into its OWN graph
+   namespace with a per-question wipe, so no graph ever holds two
+   questions' points — the corpus-level ``session_id`` collisions (212
+   shared dataset session ids across the 100-question tail cohort) never
+   co-exist in one graph; (2) the anchor itself — the seeded hit is THIS
+   question's pool hit, so the Session it belongs to is this question's
+   Session.
+
+   ⚠️ Residual, NOT a guarantee: a seed that is a CONTENT-ADDRESSED point
+   shared across sessions is linked into EVERY Session that folds it
+   (``ingest_v2._apply_noops`` for the eval; the product's dedup-by-
+   content-hash hit for ``capture_session``), so
+   ``(s:Session)-[:CONTAINS]->(seed)`` can resolve more than one Session
+   and the fetch expands all of them. ``WITH DISTINCT s`` dedups that
+   traversal; it does not constrain the fetch to one Session per seed.
+   Within the eval this stays question-scoped (one graph per question) and
+   within the product every containing Session is a legitimate source
+   session, but a seed shared across sessions widens the fetch.
+
+   ⚠️ SEED identity limitation (unchanged by this retarget). The fetch
+   TARGET is product-real; the SEED gate is not, for a turn hit. A product
+   turn Point carries no ``session_id``, so ``session_key_of`` returns the
+   synthetic ``idx:-1`` and :func:`seeded_sessions` drops it as a phantom
+   bucket. In the product the seed is therefore a NON-turn pool hit that
+   carries ``session_id`` (an extracted point — ``capture_session`` links
+   it ``Session-[:CONTAINS]->Point`` and stamps ``session_id``), and the
+   fetch then expands that session's verbatim turns. Letting a turn hit
+   seed itself needs a product-side session identity for turn points; that
+   is a SEED change, out of scope for the fetch retarget.
 
    **Turn-shape constraint.** ``pointKind``'s vocabulary is open
    (``create_point`` accepts any registered kind), so ``pointKind='event'``
    alone does not prove a TURN: the hosted demo/dashboard seed writes
-   ``pointKind='event'`` points with no ``is_episodic`` and no role-tagged
-   body (``hosted_api.py:~6243``), and any SDK/API caller can mint one.
+   ``pointKind='event'`` points with NO ``is_episodic`` — their body IS
+   ``[role]``-tagged, so the ``is_episodic`` conjunct is what excludes them
+   (``hosted_api.py:~6243``) — and any SDK/API caller can mint one.
    ``_TURN_SHAPE_FILTER`` therefore requires the shape EVERY product and
    eval turn writer emits and no non-turn ``event`` writer does:
    ``is_episodic=true`` plus a ``[...]``-prefixed body.
@@ -138,12 +167,16 @@ DEFAULT_REINJECTION_PER_SESSION = 3
 
 #: Injected items per fired question, across all seeds (the total budget).
 #:
-#: ⚠️ This budget MUST stay strictly BELOW ``SEED_SESSIONS *
-#: PER_SESSION`` (= 15), or it is structurally inert: the per-session cap
-#: alone bounds the fetch at 15 distinct items, so no 16th row ever exists
-#: and ``source_session_chunk_pass``'s ``total_cap_hit`` could never be
-#: True. At the shipped ``10`` the total IS reachable (the 11th genuinely-
-#: new item trips it), so ``total_cap_hit`` is a live census signal and
+#: ⚠️ Reachability condition: ``total_cap <= SEED_SESSIONS *
+#: PER_SESSION`` (= 15). Above 15 the total is structurally inert — the
+#: per-session cap alone bounds RETAINED items at 15, so no 16th item is
+#: ever admitted and ``source_session_chunk_pass``'s ``total_cap_hit``
+#: could never be True. (The budget is charged per DISTINCT admitted item,
+#: and the total check runs BEFORE the per-session check, so a 16th
+#: CANDIDATE row can still trip the key at ``total_cap == 15``; the shipped
+#: value is the conservative choice strictly below that line, not at it.)
+#: At the shipped ``10`` the total IS reachable (the 11th genuinely-new
+#: item trips it), so ``total_cap_hit`` is a live census signal and
 #: ``dropped_by_cap`` counts BOTH kinds of drop. The invariant is pinned by
 #: ``tests/test_session_reinjection_rules.py::
 #: test_total_budget_is_below_the_structural_fan_out`` so a future change
@@ -166,15 +199,16 @@ DEFAULT_REINJECTION_TOTAL_ITEMS = 10
 #:     AND a body of the deterministic form ``f"[{role}] {content}"`` — so
 #:     the body always STARTS WITH ``[``;
 #:   * the NON-turn ``pointKind='event'`` writer in the tree — the
-#:     hosted demo/dashboard seed (`hosted_api.py:~6243`) — writes neither
-#:     (no ``is_episodic``, no role tag);
+#:     hosted demo/dashboard seed (`hosted_api.py:~6243`) — writes no
+#:     ``is_episodic`` (its body IS ``[role]``-tagged, so the shape
+#:     predicate excludes it on the ``is_episodic`` conjunct alone);
 #:   * so this predicate excludes it and any caller-minted bare ``event``
 #:     Point, while holding for every legitimate turn.
 #:
 #: The check is deliberately NOT ``speaker IS NOT NULL``: the ``speaker``
 #: property arrived with delta 5 (#721) and set it alongside, so requiring
 #: it would silently exclude legacy turns for no additional exclusion power
-#: (both predicates the demo seed fails are already here).
+#: (the demo seed's exclusion is already carried by ``is_episodic``).
 _TURN_SHAPE_FILTER = ("coalesce(p.is_episodic, false) = true "
                       "AND coalesce(p.content, '') STARTS WITH '['")
 
@@ -195,9 +229,12 @@ class SeededSession:
 
 
 def _is_real_session_id(key: str) -> bool:
-    """A seed must be a REAL session identity. The synthetic ``idx:N``
-    bucket key (and the ``""`` sentinel) names no graph session, so seeding
-    one would spend the fetch budget on a phantom session."""
+    """A seed must be a REAL session identity, because the key it yields is
+    the merge's splice anchor: ``reinjection_merge_order`` splices an
+    injected group only for a key present in ``seed_order`` (the seeds'
+    own ``session_id``), so an ``idx:N`` bucket key — which names no graph
+    session and can never equal that anchor — would spend the fetch budget
+    on a group that could only land in the defensive tail."""
     return bool(key) and not key.startswith("idx:")
 
 
@@ -263,17 +300,23 @@ def source_session_chunk_pass(
         product writes — NOT by a ``p.session_id`` property, which a
         product TURN point does not have, and not by ``lme_question_id``,
         which no product writer emits.
-      * Question scope falls out of the anchor: the seeded hit is THIS
-        question's pool hit, so the Session it belongs to is this
-        question's Session. That matters in the eval corpus, where one
-        dataset ``session_id`` string is shared by several questions (212
-        shared session ids across the 100-question tail cohort) — a bare
-        ``p.session_id IN $sids`` predicate would inject a sibling
-        question's turns here.
+      * Question scope comes from the per-question graph namespace (the
+        eval ingests one question per graph, with its own wipe — no graph
+        holds two questions' points) AND from the anchor (the seeded hit is
+        THIS question's pool hit). The removed ``lme_question_id`` guard
+        was redundant under that isolation; it was never what made the
+        fetch question-safe.
+      * ⚠️ A seed point shared across sessions (content-addressed
+        extraction dedup folds one point id into several Sessions) expands
+        EVERY containing Session: ``WITH DISTINCT s`` dedups that
+        traversal, it does not constrain the fetch to one Session per seed.
       * The group key returned is ``coalesce(p.session_id, s.id)``: the
         eval's dataset session id when the point carries one (it always
         does), the ``:Session`` id in the product (a product turn carries
-        no ``session_id``).
+        no ``session_id``). A key absent from the caller's ``seed_order``
+        (reachable only via a Session reached through a shared seed) lands
+        in ``reinjection_merge_order``'s defensive tail rather than after
+        its own base rank.
 
     Default ``chunk_kind`` is :data:`~tortoise.retrieval.TURN_POINT_KIND`,
     the product's verbatim material; passing
@@ -314,6 +357,12 @@ def source_session_chunk_pass(
         rows = proj.g.query(
             "MATCH (seed:Point) WHERE seed.id IN $seed_ids "
             "MATCH (s:Session)-[:CONTAINS]->(seed) "
+            # ``WITH DISTINCT s`` is a PLAN barrier, not a result change: it
+            # dedups the session reached from a shared seed and forces the
+            # driver to be the seed list (GRAPH.EXPLAIN: seed scan → traverse
+            # → Distinct → traverse) instead of a full ``Point`` label scan
+            # with the seed filter applied last (#2517 review).
+            "WITH DISTINCT s "
             "MATCH (s)-[:CONTAINS]->(p:Point) "
             "WHERE coalesce(p.pointKind, '') = $chunk_kind "
             + kind_filter +

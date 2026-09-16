@@ -212,26 +212,52 @@ falsified two specifics of the issue text. They are **not** adopted:
    `DEFAULT_REINJECTION_SEED_WINDOW = 40` as the product fallback — so a non-default
    `TORTOISE_LME_CONTEXT_ITEMS` cannot silently desynchronise it. Pure; **label-free**
    (rank trigger). `DEFAULT_REINJECTION_SEED_SESSIONS = 5`.
-2. **EXPAND** — `source_session_chunk_pass(proj, session_ids, *, question_id,
-   pool_ids, per_session_cap, total_cap)`: **ONE batched Cypher fetch** per **fired
-   question**:
+2. **EXPAND** — `source_session_chunk_pass(proj, seed_point_ids, *, pool_ids,
+   chunk_kind, per_session_cap, total_cap)`: **ONE batched Cypher fetch** per
+   **fired question**. **AS BUILT (#2517 retarget — the fetch was re-pointed at the
+   product's own verbatim material; the pre-retarget form fetched
+   `session-transcript` by `p.session_id IN $sids AND p.lme_question_id = $q`, which
+   is unreachable in a product graph because no product writer emits that kind, that
+   property, or a `session_id` on a turn Point):**
    ```cypher
-   MATCH (p:Point)
-   WHERE p.session_id IN $sids
-     AND coalesce(p.pointKind, '') = $chunk_kind
-     AND p.lme_question_id = $q
+   MATCH (seed:Point) WHERE seed.id IN $seed_ids
+   MATCH (s:Session)-[:CONTAINS]->(seed)
+   WITH DISTINCT s                      -- plan barrier: seed scan, not Point label scan
+   MATCH (s)-[:CONTAINS]->(p:Point)
+   WHERE coalesce(p.pointKind, '') = $chunk_kind
+     AND coalesce(p.is_episodic, false) = true      -- turn shape, turn kind only
+     AND coalesce(p.content, '') STARTS WITH '['    -- turn shape, turn kind only
      AND NOT p.id IN $pool_ids
-   RETURN p.id, p.session_id, coalesce(p.lme_chunk_index, -1)
+   RETURN p.id, coalesce(p.session_id, s.id), coalesce(p.lme_chunk_index, -1)
+   ORDER BY coalesce(p.session_id, s.id), coalesce(p.lme_chunk_index, -1), p.id
    ```
-   The pool-membership filter is **in the query**, so the per-session/total budgets
-   are spent on genuinely-new chunks. **`pool_ids` is coerced with `list(pool_ids)`**
-   before binding (the call site holds a Python set, `retrieve.py:1530`; every repo
+   The default `chunk_kind` is `TURN_POINT_KIND` (`'event'` — the product's episodic
+   turn points written by `TortoiseSDK.capture_session` / hosted `POST /v1/sessions`);
+   `SESSION_TRANSCRIPT_KIND` (the eval ingest's raw chunk windows) remains available
+   as the non-default arm. The pool-membership filter is **in the query**, so the
+   per-session/total budgets are spent on genuinely-new items. **`pool_ids` is coerced
+   with `list(pool_ids)`** before binding (the call site holds a Python set; every repo
    precedent passes a list — `tortoise/sdk.py:17226`, `tortoise/hosted_api.py:5060`).
-   Deterministic `(session_id, lme_chunk_index, id)` order; budgets
-   `DEFAULT_REINJECTION_PER_SESSION = 3`, `DEFAULT_REINJECTION_TOTAL_ITEMS = 20`.
-   `lme_question_id` is unconditional (prevents cross-question `session_id`
-   collisions). Fail-open, and the `try/except` wraps **the whole block including
-   the merge stage**.
+   Deterministic `(session key, lme_chunk_index, id)` order; budgets
+   `DEFAULT_REINJECTION_PER_SESSION = 3`, `DEFAULT_REINJECTION_TOTAL_ITEMS = **10**`
+   (retuned from 20: at turn grain the per-session candidate list is the session's
+   whole turn list, and 20 was above the structural fan-out `5 × 3 = 15`, so
+   `total_cap_hit` could never be True). Fail-open, and the `try/except` wraps **the
+   whole block including the merge stage**.
+
+   **Scope (as built):** the Session is named by the `Session-[:CONTAINS]->Point`
+   edge the product writes, not by a point property. Question scope comes from the
+   per-question graph namespace (the eval ingests one question per graph, with its own
+   wipe) **and** from the anchor (the seeded hit is this question's pool hit). The
+   removed `lme_question_id` predicate was redundant under that isolation: it was
+   never what made the fetch question-safe, and the corpus-level `session_id`
+   collisions (212 shared dataset ids across the 100-question tail cohort) never
+   co-exist in one graph. **Residual:** a content-addressed seed point shared across
+   Sessions expands every containing Session (`WITH DISTINCT s` dedups, does not
+   constrain). **SEED limitation (unchanged):** a product turn Point carries no
+   `session_id`, so a turn HIT cannot seed (`session_key_of` → `idx:-1`); in the
+   product the seed is a non-turn point carrying `session_id` and the fetch expands
+   that session's turns.
 3. **MERGE** — `reinjection_merge_order(pool, added_by_session, *, ...)`:
    - **anchor** = the seeded session's **last base rank in the pool** (not merely in
      the seed window), guaranteeing the injected group lands **after every base hit
@@ -284,10 +310,13 @@ is the point of the gate.
 | retrieval latency | **+1 batched query per FIRED question** | the fetch is one batched Cypher per question that fires (0 when it does not), not one per seed. Reported per arm (P50/P95) with the injected-query count (expected 1 when fired, 0 otherwise). |
 
 **Known reach boundaries (readable, not hidden):** (a) a seeded session contributing
-**no new ids** skips the guard entirely (its chunk set is already pool-present);
-(b) a session at the **C5 chunk ceiling** cannot receive injected chunks (the
-re-cap drops them). Both are the expected null signal, readable in the census
-(`injected_total`, `injected_merged`, `guard: false`).
+**no new ids** skips the guard entirely (its material is already pool-present);
+(b) at the **chunk** grain a session at the **C5 chunk ceiling** cannot receive
+injected chunks (the re-cap drops them) — **at the shipped turn grain the C5 re-cap
+does not apply at all** (`dedup_pool` counts only `is_raw_chunk`), so the **total
+budget (10) is the volume guard** and the C5 boundary is a chunk-arm property only.
+Both nulls are readable in the census (`injected_total`, `injected_merged`,
+`guard: false`, `total_cap_hit`).
 
 **C5 posture (documented choice, #2517 indicator 3):** the plan **respects C5** and
 does **not** override it. The alternative (a separate injected-chunk budget beyond
@@ -479,7 +508,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
 | Surface | Test layer | Expected verification |
 |---|---|---|
 | seeded-session detection + bounds | unit (hermetic) | only pool-head **real** sessions seed; bounded by window+limit; label-free; `idx:N`/sentinels dropped |
-| batched `session_id` fetch | unit (fake proj) + integration (docker) | one query per fired question; pool-membership filter in-query; `pool_ids` bound as a list; per-session + total caps; unconditional qid predicate |
+| batched fetch anchored on the seeded hit | unit (fake proj) + integration (docker) | one query per fired question; pool-membership filter in-query; `pool_ids` bound as a list; scope = `Session-[:CONTAINS]->hit` (no `lme_*`, no `p.session_id`); `WITH DISTINCT s` plan barrier; per-session + total caps in `ORDER BY` order |
 | additive merge + placement | unit (hermetic) | anchor = last base rank in pool; accumulation deterministic; already-present dropped; a base chunk beyond the seed window survives |
 | `guard_and_recap_pool` (shared, `guard:` inside) | unit (hermetic) | ≤ per-session cap in the window; additive; no-op on a single-session pool; C5 re-cap via the pinned key; **`guard=False` still re-caps through the same function** |
 | `session_key_of` unify + import direction | unit | `session_key_of` == the historical `dedup_pool` bucket key; `coverage_loop._session_of` delegates; **no import cycle under either import order** |
@@ -576,7 +605,7 @@ update is owned by **Task 2**, where the projection entry lands — see Task 2.)
 | `tests/test_uri_env_mutations_declared.py` docker-lane URI probe | test registry | Task 3 | ✅ |
 | `tests/test_session_reinjection_rules.py` (create+register) / `tests/test_session_reinjection.py` (create+register) | tests | Task 1 / Task 2 | ✅ |
 | cohort builder + receipt + forensic census | evidence | Task 4 | ✅ |
-| Graph schema change | — | none (reads existing `Point.session_id` / `pointKind` / `lme_question_id`) | n/a |
+| Graph schema change | — | none (as built: reads `Point.pointKind` / `is_episodic` / `content` and the `Session-[:CONTAINS]->Point` edge; no `lme_*` or `Point.session_id` read on the turn path) | n/a |
 
 ---
 

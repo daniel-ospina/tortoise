@@ -301,10 +301,16 @@ SESSION_TRANSCRIPT_KIND = "session-transcript"
 #: :func:`_is_turn_point`). This is the product's real verbatim material:
 #: ``session-transcript`` is written ONLY by the eval ingest lane
 #: (``tools/longmem_eval/ingest.py`` / ``ingest_v2.py``), never by a
-#: product writer. The literal is a product constant here for the same
-#: reason ``SESSION_TRANSCRIPT_KIND`` is — one home, so the read side
-#: (``session_reinjection``'s default fetch kind, ``_is_turn_point``) and
-#: the eval's turn writers cannot drift.
+#: product writer. The literal is a product constant here so the READ side
+#: (``session_reinjection``'s default fetch kind, :func:`_is_turn_point`)
+#: has one home. Both ``SESSION_TRANSCRIPT_KIND`` and this constant are
+#: mirrored by writers that hardcode the literal (``sdk``'s capture turn
+#: loop, the hosted turn loop, the hosted demo seed, and the two eval
+#: ingest legs); only ``SESSION_TRANSCRIPT_KIND`` has a writer-parity test
+#: pinning that mirror (``tests/test_session_reinjection_rules.py::
+#: test_chunk_kind_is_single_sourced_across_all_four_consumers``). There is
+#: no equivalent parity pin for the turn kind, so a writer that changed its
+#: literal would empty the fetch while this constant stayed "correct".
 #:
 #: ``pointKind``'s vocabulary is OPEN (``create_point`` accepts any
 #: registered kind), so this constant alone never proves a node is a
@@ -1037,7 +1043,14 @@ def _is_turn_point(h: dict) -> bool:
     """Slice A: True for a verbatim source TURN point (kind ``event`` or a
     ``[role] …`` content — the shape the deterministic leg writes turns as).
     Distinguished from a distilled statement so own-source turns can collapse
-    INTO their distilled point instead of standing as a duplicate slot."""
+    INTO their distilled point instead of standing as a duplicate slot.
+
+    ⚠️ DELIBERATELY BROADER than ``session_reinjection._TURN_SHAPE_FILTER``,
+    which needs BOTH conjuncts. This OR classifies a non-turn ``event``
+    point (the hosted demo/dashboard seed, which writes no ``is_episodic``)
+    as a turn; that is harmless for the collapse/slot decision here but it
+    is NOT the predicate the C4 fetch may use — see the constant for why.
+    """
     return (h.get("point_kind") == TURN_POINT_KIND
             or bool(_ROLE_PREFIX_RE.match(str(h.get("content") or ""))))
 

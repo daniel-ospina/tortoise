@@ -7,24 +7,34 @@ C3-1 block and BEFORE the C2 boost.
 
 Hermetic contract proven here (docker lane, dense leg pinned out):
 
-  * (a) the END-TO-END flip: a seeded session's injected chunks trigger the
+  * (a) the END-TO-END flip: a seeded session's injected items trigger the
         shared guard, which admits a pool-present starved session into
         ``hits[:5]`` (``session_recall@5`` 0.5 → 1.0); with the guard
         ablated OFF the flip does NOT happen — the flip is attributable to
-        the guard, not the fetched chunks (falsifier 1),
+        the guard, not the fetched items (falsifier 1),
   * (b) default OFF == explicit OFF, byte-identical ranked ids,
   * (c) fail-open: a fetch failure, a zero-new-ids fetch, AND a forced
         merge-stage exception each return the base pool unchanged,
   * (d) caps: the C5 per-session raw-chunk cap holds on the re-injected
-        pool,
+        pool. ⚠️ The C5 re-cap counts only raw chunks, so this test pins
+        the arm at the NON-default chunk grain (``_pin_chunk_grain``); the
+        shipped turn grain is deliberately not re-capped (the total budget
+        is its volume guard),
   * (e) TR questions are excluded,
   * (f) the guard is a no-op on a single-session pool,
-  * (g) guard OFF still re-caps through the same shared contract,
+  * (g) guard OFF still re-caps through the same shared contract (also on
+        the pinned chunk grain),
   * (h) the census keys, the resolved-arm env gate, the CLI flags, and the
         both-arms-ON ABORT (message + exit). The fingerprint-refusal and
         arm-conflict gates are NOT here: they are hermetic run-level gates
         and live in ``tests/test_session_reinjection_rules.py``, because
-        this module skips as a whole on an unavailable FalkorDB probe.
+        this module skips as a whole on an unavailable FalkorDB probe,
+  * (i) the PRODUCT turn shape: a turn Point written the way
+        ``capture_session`` writes it (no ``session_id`` property, linked
+        ``Session-[:CONTAINS]->Point``) is injected and grouped under its
+        ``:Session`` id, and a non-turn ``pointKind='event'`` point (the
+        hosted demo seed's shape) is NOT — the fixture's ``CONTAINS``
+        membership is per session, so a cross-session leak is visible here.
 
 Requires the docker lane's FTS backend — skips when unavailable.
 """
@@ -154,9 +164,9 @@ def _question(question: str = QUESTION, *,
 def _seed_graph(sdk, *, n_a: int = 6, n_turns: int = 2,
                 n_chunks: int = 2) -> None:
     """A fresh dedicated graph in the PRODUCT's shape: ``:Session`` nodes
-    with ``CONTAINS`` edges (the membership the C4 fetch scopes on — a
-    product turn Point carries no ``session_id`` property), episodic turn
-    Points whose body is ``[role] …``, and raw chunks."""
+    with PER-SESSION ``CONTAINS`` edges (the membership the C4 fetch scopes
+    on — a product turn Point carries no ``session_id`` property), episodic
+    turn Points whose body is ``[role] …``, and raw chunks."""
     for sid in (SR_A, SR_B):
         sdk._get_proj().g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
@@ -178,17 +188,64 @@ def _seed_graph(sdk, *, n_a: int = 6, n_turns: int = 2,
         sdk.create_point("session-transcript", CHUNK_CONTENT,
                          id=f"srAc{i}", session_id=SR_A, status="draft")
     _link_sessions(sdk)
+    # POST-CONDITION: membership is PER SESSION (exactly one CONTAINS edge
+    # per seeded point). The fixture used to write the CARTESIAN product
+    # (``p.session_id IN $sids`` with no join), which linked every Session
+    # to every Point — so a leak of a DIFFERENT session's points was
+    # invisible to this lane, which is the failure the retarget prevents.
+    n_edges = sdk._get_proj().g.query(
+        "MATCH (:Session)-[c:CONTAINS]->(:Point) RETURN count(c)"
+    ).result_set[0][0]
+    expected = n_a + 1 + n_turns + n_chunks
+    assert n_edges == expected, (
+        f"per-session CONTAINS membership expected {expected}, "
+        f"got {n_edges} — the fixture is linking across sessions")
 
 
-def _link_sessions(sdk) -> None:
-    """Wire ``Session-[:CONTAINS]->Point`` for this fixture's session
-    points (the eval ingest and the product capture loop both write it;
-    the C4 fetch resolves the session through it)."""
-    sdk._get_proj().g.query(
+def _link_sessions(sdk, extra: dict[str, list[str]] | None = None) -> None:
+    """Wire ``Session-[:CONTAINS]->Point`` PER SESSION (the eval ingest
+    and the product capture loop both write it; the C4 fetch resolves the
+    session through it).
+
+    ``extra`` links points that carry NO ``session_id`` (the product turn
+    loop's property set) to their session EXPLICITLY — the branch the
+    fetch's ``coalesce(p.session_id, s.id)`` group key exists for.
+    """
+    proj = sdk._get_proj()
+    proj.g.query(
         "MATCH (s:Session), (p:Point) WHERE s.id IN $sids "
-        "  AND p.session_id IN $sids "
+        "  AND p.session_id = s.id "
         "MERGE (s)-[:CONTAINS]->(p)",
         params={"sids": [SR_A, SR_B]})
+    for sid, pids in (extra or {}).items():
+        for pid in pids:
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                "MERGE (s)-[:CONTAINS]->(p)",
+                params={"sid": sid, "pid": pid})
+
+
+def _create_product_turn(sdk, pid: str, content: str) -> None:
+    """Write a turn the way ``capture_session`` does: NO ``session_id``
+    property, ``pointKind='event'``, ``is_episodic=true``, role-prefixed
+    body. The fetch must still group it under its ``:Session`` id."""
+    sdk._get_proj().g.query(
+        "MERGE (t:Point {id:$id}) "
+        "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
+        "    t.speaker='user', t.is_episodic=true, t.status='draft'",
+        params={"id": pid, "c": content})
+
+
+def _create_demo_event(sdk, pid: str, content: str) -> None:
+    """The hosted demo/dashboard seed's shape: ``pointKind='event'`` with
+    NO ``is_episodic``. Its body IS role-tagged (``hosted_api.
+    _DEMO_EPISODIC_TURNS``), so ``is_episodic`` is the conjunct that
+    excludes it — not the ``[``-prefix test."""
+    sdk._get_proj().g.query(
+        "MERGE (t:Point {id:$id}) "
+        "SET t.content=$c, t.pointKind='event', t.is_operator=false, "
+        "    t.status='live'",
+        params={"id": pid, "c": content})
 
 
 @pytest.fixture
@@ -234,7 +291,7 @@ def test_reinjection_flips_a_starved_session_into_top5(seeded_sdk):
     st = on["session_reinjection_stats"]
     assert st["on"] is True
     # B is pool-present at rank 6, inside the reader-reachable seed
-    # window (40) — seeded too, but it owns no chunks to fetch
+    # window (40) — seeded too, but it owns no off-pool turns to fetch
     assert st["seed_sessions"] == [SR_A, SR_B]
     assert st["seeded"] == 2
     assert st["fetch_ok"] is True
@@ -247,12 +304,18 @@ def test_reinjection_flips_a_starved_session_into_top5(seeded_sdk):
     assert on["session_recall@k"]["5"] == 1.0
     # the seed is never displaced
     assert "srAp0" in on_ids[:5]
-    # the injected chunks carry the driver's OWN leg
+    # the injected ids are the session's off-pool TURNS — the product's
+    # default grain — NOT its raw chunks. This is the assertion that makes
+    # the flip test discriminate the grain: at ``session-transcript`` the
+    # injected set would be {srAc0, srAc1} and these two lines would fail.
+    assert {"srAq0", "srAq1"} <= set(on_ids)
+    assert not {"srAc0", "srAc1"} & set(on_ids)
+    # the injected items carry the driver's OWN leg
     assert any(h["match_source"] == "session" for h in on["hits"])
 
 
-def test_flip_is_attributable_to_the_guard_not_the_chunks(seeded_sdk):
-    """Falsifier 1: with the guard ablated OFF, the injected chunks still
+def test_flip_is_attributable_to_the_guard_not_the_fetch(seeded_sdk):
+    """Falsifier 1: with the guard ablated OFF, the injected items still
     merge but the starved session does NOT flip into the top-5 — so the
     flip above is the guard's, not the fetch's."""
     from tools.longmem_eval.retrieve import retrieve_for_question
@@ -418,6 +481,37 @@ def test_c5_per_session_chunk_cap_holds_on_the_reinjected_pool(
     assert st["injected_merged"] < st["injected_total"]
 
 
+# ── (i) the PRODUCT turn shape: no ``session_id`` on the point ───────────
+
+def test_product_shaped_turn_is_injected_via_its_session(seeded_sdk):
+    """A product turn Point carries NO ``session_id``
+    (``capture_session`` writes content/kind/speaker/is_episodic and links
+    ``Session-[:CONTAINS]->Point``). The fetch's group key must therefore
+    fall back to the ``:Session`` id — and the key must equal the seed's
+    ``session_id`` (or the group is orphaned into the merge's defensive
+    tail). The non-turn ``event`` (demo-seed shape) is NOT a turn."""
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    _create_product_turn(seeded_sdk, "srApv0",
+                         TURN_PREFIX + OFF_POOL_TURN_CONTENT)
+    _create_demo_event(seeded_sdk, "srAev0",
+                       "[user] let's set up our agent memory system")
+    _link_sessions(seeded_sdk, extra={SR_A: ["srApv0", "srAev0"]})
+    ret = retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                                pool_size=60, session_reinjection=True)
+    st = ret["session_reinjection_stats"]
+    ids = {h["id"] for h in ret["hits"]}
+    assert st["fetch_ok"] is True
+    # the ``session_id``-less turn is injected and grouped under SR_A (its
+    # Session id) — never under ``""`` and never orphaned: every injected
+    # item survives the merge.
+    assert st["injected_per_session"] == {SR_A: 3}
+    assert st["injected_merged"] == 3
+    assert {"srAq0", "srAq1", "srApv0"} <= ids
+    # the demo-seed ``event`` shares the KIND but fails the SHAPE
+    # (``is_episodic`` absent) — it must not be injected
+    assert "srAev0" not in ids
+
+
 # ── (e) TR exclusion ─────────────────────────────────────────────────────
 
 def test_tr_questions_are_excluded(seeded_sdk):
@@ -488,8 +582,8 @@ _CENSUS_KEYS = {
 def test_reader_item_and_token_caps_hold_on_the_reinjected_pool(seeded_sdk):
     """Task-3 acceptance (d): the reader item/token caps still bound the
     context AFTER injection — a re-injected pool must not smuggle items
-    past the reader window (the C4 chunks are pool entries, not a bypass
-    of the reader budget)."""
+    past the reader window (the C4 injected items are pool entries, not a
+    bypass of the reader budget)."""
     from tools.longmem_eval.retrieve import retrieve_for_question
     q = _question()
     cap_items, cap_tokens = 12, 900

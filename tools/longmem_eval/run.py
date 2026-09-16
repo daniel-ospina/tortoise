@@ -5521,7 +5521,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # code). The A/B switch for the reader-surface + pool-rank-cut lever;
     # the guard ablation (--no-session-reinjection-guard) still re-caps
     # through the shared contract but skips the session-diverse reorder, so
-    # a flip is attributable to the guard rather than the fetched chunks.
+    # a flip is attributable to the guard rather than the fetched items.
     # A both-arms-ON run (this + --coverage-loop) is REFUSED at arm
     # resolution (both own the pool order).
     sr = p.add_mutually_exclusive_group()
@@ -5529,9 +5529,11 @@ def _build_parser() -> argparse.ArgumentParser:
                     action="store_true", default=None,
                     help="enable the C4 source-session re-injection "
                          "(seed the reader-reachable pool head by rank, "
-                         "fetch each seeded session's remaining raw chunks "
-                         "in ONE batched query, splice them additively "
-                         "after the session's last base hit; default: env "
+                         "fetch each seeded session's remaining verbatim "
+                         "material — the product's episodic turns by "
+                         "default — in ONE batched query, splice them "
+                         "additively after the session's last base hit; "
+                         "default: env "
                          "TORTOISE_LME_SESSION_REINJECTION — OFF by default "
                          "in code, #2517)")
     sr.add_argument("--no-session-reinjection", dest="session_reinjection",
@@ -5550,7 +5552,9 @@ def _build_parser() -> argparse.ArgumentParser:
                      dest="session_reinjection_guard", action="store_false",
                      help="skip the C4 session-diverse reorder (the "
                           "injection-only ablation; the C5 re-cap still "
-                          "applies through the same shared contract)")
+                          "applies through the same shared contract — it "
+                          "binds injected CHUNKS, not the default turn "
+                          "grain)")
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state --aggregative-flag / --no-aggregative-flag (None
     # default so the TORTOISE_LME_AGGREGATIVE_FLAG env still applies; OFF

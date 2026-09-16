@@ -1108,9 +1108,14 @@ def retrieve_for_question(
     # ``TORTOISE_LME_SESSION_REINJECTION``; only 1/true/yes/on enables —
     # fail-safe OFF, the #1745 default decision). When ON, a seeded
     # (rank-triggered, label-free) pool head has each session's remaining
-    # raw ``session-transcript`` chunks fetched in ONE batched query and
-    # spliced back after that session's last base hit (additive), then the
-    # shared session-diverse guard re-caps. ``session_reinjection_guard``
+    # verbatim material fetched in ONE batched query and spliced back after
+    # that session's last base hit (additive), then the shared
+    # session-diverse guard re-caps. Since #2517 the fetched material is the
+    # PRODUCT's episodic TURN points (``pointKind='event'``, turn-shaped);
+    # the eval's raw ``session-transcript`` chunks are the non-default
+    # ``chunk_kind`` arm only. The C5 re-cap counts raw chunks alone, so at
+    # the shipped turn grain the total budget is the volume guard.
+    # ``session_reinjection_guard``
     # (None = True) is the guard ablation: False still re-caps through the
     # same ``retrieval.guard_and_recap_pool`` contract but skips the
     # reorder.
