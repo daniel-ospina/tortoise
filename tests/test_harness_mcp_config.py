@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions  # noqa: I001
+from tortoise.auth import API_KEY_PREFIXES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # #984 contract (merged to main): the hosted endpoint always carries the
@@ -236,24 +237,57 @@ class TestCommittedRepoMcpJson:
     whose local daemon was not running got an opaque `fetch failed` -- and the
     entry could not authenticate even when the daemon WAS up under the
     documented `tortoise serve --http --auth tenant`.
+
+    Reads the file on disk (the committed blob in any clean checkout / CI). A
+    machine-local uncommitted edit to `.mcp.json` is deliberately NOT covered --
+    that is exactly what the entry's `_comment` tells a self-hoster to make.
     """
 
     COMMITTED = REPO_ROOT / ".mcp.json"
 
     def _tortoise(self) -> dict:
+        assert self.COMMITTED.is_file(), f"committed {self.COMMITTED} is missing"
         cfg = json.loads(self.COMMITTED.read_text(encoding="utf-8"))
-        return cfg["mcpServers"]["tortoise"]
+        servers = cfg.get("mcpServers")
+        assert isinstance(servers, dict), (
+            f"committed .mcp.json has no mcpServers object (got {type(servers).__name__})"
+        )
+        server = servers.get("tortoise")
+        assert isinstance(server, dict), (
+            f"committed .mcp.json has no 'tortoise' entry (have {sorted(servers)}); "
+            f"the entry is how an agent reaches the graph at all (#3601)"
+        )
+        return server
 
     def test_tortoise_entry_targets_hosted_endpoint(self):
-        url = self._tortoise()["url"]
+        url = self._tortoise().get("url")
         assert url == ENDPOINT, (
             f"committed .mcp.json must target the hosted endpoint {ENDPOINT}; "
             f"a local-daemon url breaks every agent without a running daemon "
             f"(#3601) -- got {url!r}"
         )
 
+    def test_tortoise_entry_keeps_http_type(self):
+        # This root file also serves Claude Code, which SKIPS a url entry with
+        # no `type` (see module docstring); pi ignores `type` and picks the
+        # transport from url-vs-command. Pinned because the sibling doc
+        # docs/quickstart-cloud.md:47 names a DIFFERENT value (streamable-http)
+        # for the same object -- drifting this field silently disables the
+        # server for Claude Code with no other test failing.
+        assert self._tortoise().get("type") == "http", (
+            f"committed .mcp.json tortoise entry must keep type='http' -- got "
+            f"{self._tortoise().get('type')!r}"
+        )
+
     def test_tortoise_header_is_env_indirect(self):
-        auth = self._tortoise()["headers"]["Authorization"]
+        headers = self._tortoise().get("headers") or {}
+        auth = headers.get("Authorization")
+        # Diagnosable failure on the exact #3601 shape (headers dropped/empty).
+        assert auth, (
+            f"committed .mcp.json must carry an Authorization header -- an "
+            f"empty/absent headers block cannot authenticate even when the "
+            f"daemon is up (#3601); got headers={headers!r}"
+        )
         # Env-indirect only: the wizard/CLI copy never writes a literal key.
         assert auth.startswith("Bearer ${") and auth.endswith("}"), (
             f"committed .mcp.json Authorization must be env-indirect, got {auth!r}"
@@ -261,9 +295,12 @@ class TestCommittedRepoMcpJson:
         assert "TORTOISE_API_KEY" in auth, auth
 
     def test_no_literal_api_key_in_committed_config(self):
-        # This file ships to users -- a literal tt_/tk_ token leaks a credential.
+        # This file ships to users -- a literal token leaks a credential.
+        # Prefixes come from the minting source of truth so a NEW prefix cannot
+        # silently escape this guard. The scan is over the whole file on
+        # purpose: a key pasted into a `_comment` is the same leak.
         text = self.COMMITTED.read_text(encoding="utf-8")
-        for marker in ("tt_", "tk_"):
+        for marker in API_KEY_PREFIXES:
             assert marker not in text, (
                 f"literal {marker!r} key material in committed .mcp.json -- "
                 f"keys must stay env-indirect"

@@ -104,10 +104,20 @@ fly ssh console -a tortoise-api -C "python -c 'from tortoise.sdk import Tortoise
 point local tooling at the hosted (cloud) DB — a remote connection from a local
 install defeats the purpose of hosting locally.
 
+> **Exception — the committed repo-root `.mcp.json` defaults to the HOSTED
+> endpoint.** That file ships pointed at `https://api.premiselabs.co/mcp/` with
+> an env-indirect `Bearer ${TORTOISE_API_KEY}` (`tortoise/onboarding/SKILL.md`
+> §3b), so an agent launched inside this checkout talks to the hosted API, not
+> to a local daemon, unless you point the `tortoise` entry's `url` back at your
+> own daemon (`http://localhost:8000/mcp` — the self-host path in
+> `docs/quickstart-selfhosted.md`). The local rules below describe that
+> self-hosted/stdio configuration.
+
 - Local tooling (MCP server, SDK scripts, graph-scripts) resolves its DB target
   from `TORTOISE_DB_URI` — canonical local form
   `docker://:falkordb@localhost:6379/tortoise` (compose publishes 127.0.0.1:6379;
-  `.mcp.json`, `.env.example`). The legacy `FALKORDB_*` trio defaults to the
+  `.env.example` and the self-hosted/stdio `.mcp.json` — not the committed
+  repo-root one, see the exception above). The legacy `FALKORDB_*` trio defaults to the
   same port (`FALKORDB_PORT=6379` in `.env.example`; code defaults stay
   on the legacy port — env-overridable — for backward compat with older local containers).
 - The MCP server loads a repo-root `.env` if present and **fails loud** when the
