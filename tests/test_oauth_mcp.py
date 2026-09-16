@@ -52,6 +52,7 @@ from tortoise.oauth import (  # noqa: E402, RUF100
     _sha256,
     _valid_redirect_uri,
     mcp_resource_url,
+    resolve_oauth_access_token,
     team_resource_url,
 )
 
@@ -908,6 +909,161 @@ class TestRedirectUriParserDifferential:
             assert _valid_redirect_uri(uri) is True, uri
         assert _register_client(
             tc, redirect_uris=["http://localhost/callback"])["client_id"]
+
+
+class TestCursorPrivateUseRedirectScheme:
+    """#3579 — Cursor IDE's MCP OAuth DCR sends a private-use callback scheme
+    (RFC 8252 §7.1). Registration is all-or-nothing, so before this change a
+    single `cursor://` entry rejected the WHOLE request: Cursor got no
+    client_id, never reached /oauth/authorize, and a Cursor tester had no way
+    to sign in. Reproduced live against api.premiselabs.co before the fix.
+    """
+
+    CURSOR_CB = "cursor://anysphere.cursor-mcp/oauth/callback"
+
+    def test_cursor_custom_scheme_registers(self, api_client):
+        tc, _ = api_client
+        assert _valid_redirect_uri(self.CURSOR_CB) is True
+        body = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        assert body["client_id"].startswith("ct_")
+
+    def test_cursor_mixed_registration_is_accepted_whole(self, api_client):
+        """The real Cursor payload: the documented loopback + https pair AND
+        the legacy custom scheme. One invalid entry used to sink all three."""
+        tc, _ = api_client
+        uris = ["https://www.cursor.com/agents/mcp/oauth/callback",
+                "http://localhost:8787/callback",
+                self.CURSOR_CB]
+        body = _register_client(tc, redirect_uris=uris)
+        assert body["redirect_uris"] == uris
+
+    def test_cursor_documented_pair_unchanged(self, api_client):
+        """Additive: the Cursor path that already worked still works."""
+        tc, _ = api_client
+        for uri in ("https://www.cursor.com/agents/mcp/oauth/callback",
+                    "http://localhost:8787/callback"):
+            assert _valid_redirect_uri(uri) is True, uri
+        assert _register_client(
+            tc, redirect_uris=["http://localhost:8787/callback"])["client_id"]
+
+    def test_non_allowlisted_schemes_fail_closed(self):
+        """The allowlist fails closed on every scheme not explicitly reasoned
+        about — especially the browser-executed ones, which the consent page
+        would otherwise navigate to and execute in its own origin."""
+        for uri in ("javascript:alert(1)",
+                    "data:text/html,<script>x</script>",
+                    "vbscript:msgbox(1)",
+                    "file:///etc/passwd",
+                    "vscode://x/callback",
+                    "claude://x/callback",
+                    self.CURSOR_CB + "#frag",
+                    "cursor:",
+                    "http://evil.example\\@127.0.0.1/callback"):
+            assert _valid_redirect_uri(uri) is False, uri
+
+    def test_fragment_refused_for_https_and_loopback_too(self):
+        """RFC 6749 §3.1.2. The error message already promised this; the check
+        now matches it for every scheme (registration-time only, so no existing
+        registered client is affected).
+
+        The BARE trailing `#` is the case review caught: `parsed.fragment` is
+        empty for it, so a value testing only `parsed.fragment` was a false
+        PASS on this very check."""
+        assert _valid_redirect_uri("https://app.example.com/cb#frag") is False
+        assert _valid_redirect_uri("http://localhost:8787/cb#frag") is False
+        assert _valid_redirect_uri("https://app.example.com/cb#") is False
+        assert _valid_redirect_uri("http://localhost:8787/cb#") is False
+        assert _valid_redirect_uri("https://app.example.com/cb?#") is False
+        assert _valid_redirect_uri(self.CURSOR_CB + "#") is False
+        assert _valid_redirect_uri("https://app.example.com/cb") is True
+
+    def test_cursor_scheme_still_matches_exactly_at_authorize(self):
+        """The #2846 port relaxation keys on TWO loopback hosts, so a
+        private-use scheme keeps strict exact-string matching — one Cursor
+        client can never satisfy another's registration."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m(self.CURSOR_CB, self.CURSOR_CB)
+        assert not m(self.CURSOR_CB, "cursor://evil.example/oauth/callback")
+        assert not m(self.CURSOR_CB,
+                     "cursor://anysphere.cursor-mcp/oauth/other")
+        assert not m("http://localhost:8787/callback",
+                     "http://localhost:8787/callback#")
+        assert not m("http://localhost:8787/callback#frag",
+                     "http://localhost:8787/callback#other")
+        assert not m(self.CURSOR_CB,
+                     "cursor://anysphere.cursor-mcp/oauth/callback?x=1")
+
+    def test_non_allowlisted_scheme_rejected_on_the_endpoint(self, api_client):
+        tc, _ = api_client
+        r = tc.post("/register", json={
+            "client_name": "javascript-scheme",
+            "redirect_uris": ["javascript:alert(1)"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_client_metadata"
+
+    def test_cursor_scheme_drives_the_full_flow_to_a_team_scoped_token(
+            self, api_client, session_user):
+        """Drive the REAL flow, not just the boolean helper: register ->
+        GET /oauth/authorize -> POST /oauth/consent -> /oauth/token -> resolve
+        the minted access token. Cursor failed at REGISTRATION, so every later
+        leg was unreachable; asserting each one here pins the whole path, and
+        the final leg proves the token is bound to the consented team."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        assert reg["redirect_uris"] == [self.CURSOR_CB]
+        verifier, challenge = _pkce()
+
+        page = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": self.CURSOR_CB,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-cur",
+            "scope": "mcp", "resource": ""})
+        assert page.status_code == 200, page.text
+        assert "text/html" in page.headers["content-type"]
+
+        con = _consent(tc, client_id=reg["client_id"],
+                       redirect_uri=self.CURSOR_CB, challenge=challenge)
+        assert con.status_code == 200, con.text
+
+        tok = _exchange(tc, client_id=reg["client_id"],
+                        code=con.json()["code"], verifier=verifier,
+                        redirect_uri=self.CURSOR_CB,
+                        resource=mcp_resource_url(TEST_BASE))
+        assert tok.status_code == 200, tok.text
+        access = tok.json()["access_token"]
+        assert access.startswith(ACCESS_TOKEN_PREFIX)
+
+        # The token is team-scoped by construction: its row carries the team the
+        # consent chose, and the MCP boundary resolves it to THAT team only.
+        team = resolve_oauth_access_token(cp, access)
+        assert team is not None
+        assert team["team_id"] == "team-free-001"
+
+    def test_cursor_mismatch_is_refused_on_the_authorize_endpoint(
+            self, api_client, session_user):
+        """Registration accepting the scheme must NOT widen matching: a
+        different host, path or query is refused where it counts — the
+        authorize leg that would otherwise hand over a code."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.CURSOR_CB])
+        for bad in ("cursor://evil.example/oauth/callback",
+                    "cursor://anysphere.cursor-mcp/oauth/other",
+                    "https://anysphere.cursor-mcp/oauth/callback",
+                    self.CURSOR_CB + "?x=1",
+                    self.CURSOR_CB + "#frag",
+                    self.CURSOR_CB + "#"):
+            r = tc.get("/oauth/authorize", params={
+                "client_id": reg["client_id"], "redirect_uri": bad,
+                "response_type": "code", "code_challenge": "x" * 60,
+                "code_challenge_method": "S256", "state": "st",
+                "scope": "mcp", "resource": ""})
+            assert r.status_code == 400, (bad, r.status_code, r.text)
 
 
 class TestConsentPreview:
