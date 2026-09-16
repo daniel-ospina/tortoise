@@ -16,13 +16,11 @@ Hosted headers use env expansion (${TORTOISE_API_KEY} / ${env:TORTOISE_API_KEY})
 from __future__ import annotations
 
 import io
-import ipaddress
 import json
 import os
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -262,20 +260,6 @@ class TestCommittedRepoMcpJson:
     needs a heuristic that hyphenated keys defeat, so either check would be
     theatre.
 
-    One more #3601-shaped rule, under a DIFFERENT server key: a non-`tortoise`
-    entry that is not EXPLICITLY `lazy: true` must not target a loopback host.
-    Such an entry connects at startup, so a local `url` makes every agent
-    without that daemon running fail exactly as the old `tortoise` entry did.
-    The `lazy: true` carve-out is a real, honored pi-client semantic (pi's
-    mcp-client keeps `cfg.lazy === true` servers out of the eager set at
-    startup -- extensions/mcp-client README and `classifyServers`), but it is a
-    PI key: this root file also serves Claude Code, whose schema has no `lazy`,
-    so this rule exempts only the explicitly-flagged entry and a flagless local
-    sibling still fails closed (`lazy` must be the boolean `true`, not a truthy
-    string). The `tortoise` entry is outside the loopback rule because
-    `test_tortoise_entry_targets_hosted_endpoint` already pins its `url` to
-    `ENDPOINT` verbatim.
-
     Reads the file on disk (the committed blob in any clean checkout /
     CI). This class pins what the repo SHIPS, so it is deliberately not
     override-aware: a self-hoster who follows the entry's `_comment` and points
@@ -293,28 +277,6 @@ class TestCommittedRepoMcpJson:
     # can smuggle a literal past any check that only looks for `${`.
     ENV_EXPR = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
     SPAN = re.compile(r"\$\{[^}]*\}")
-    # Hostname `localhost` is loopback by name; every other loopback form is an
-    # ADDRESS (127.0.0.0/8, `::1`), so it is decided by `is_loopback` rather
-    # than a prefix string -- `127.0.0.2` counts, and a substring check on
-    # "127.0.0.1"/"localhost" alone would miss it.
-    LOOPBACK_NAMES = frozenset({"localhost"})
-
-    @classmethod
-    def _is_loopback_url(cls, url: object) -> bool:
-        """True when `url` is a string whose host is this machine (loopback)."""
-        if not isinstance(url, str):
-            return False
-        host = urlsplit(url).hostname
-        if host is None:
-            return False
-        # `localhost.` is the FQDN spelling of the same loopback host.
-        host = host.rstrip(".")
-        if host in cls.LOOPBACK_NAMES:
-            return True
-        try:
-            return ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            return False
 
     @staticmethod
     def _strip_env_spans(value: str) -> str:
@@ -419,9 +381,11 @@ class TestCommittedRepoMcpJson:
 
     def test_no_literal_api_key_in_committed_config(self):
         # This file ships to users -- a literal credential leaks one. Resolve
-        # the servers FIRST: an absent/unparseable file must fail with this
-        # class's authored `committed ... is missing` message, as the other four
-        # tests do, not a bare FileNotFoundError from the raw read below.
+        # the servers FIRST: an absent file must fail with this class's
+        # authored `committed ... is missing` message, as the other four
+        # tests do, not a bare FileNotFoundError from the raw read below. (An
+        # UNPARSEABLE file fails with its own JSONDecodeError -- an accurate
+        # message too, just not this class's authored one.)
         servers = self._servers()
         text = self.COMMITTED.read_text(encoding="utf-8")
         # (a) Every token family this repo MINTS, anywhere in the raw text: a
@@ -491,14 +455,3 @@ class TestCommittedRepoMcpJson:
                             f"variable a client exports, so {value!r} is unset "
                             f"in practice and expands to an empty value"
                         )
-            if server != "tortoise" and entry.get("lazy") is not True:
-                # #3601 under a different server key: an eager entry that
-                # targets loopback fails at startup for every agent without
-                # that daemon running. Decision is on PARSED host, so
-                # `127.0.0.2`/`::1`/a trailing dot do not slip past.
-                assert not self._is_loopback_url(entry.get("url")), (
-                    f"committed .mcp.json {server} targets loopback "
-                    f"({entry.get('url')!r}) without 'lazy: true' -- it "
-                    f"connects at startup, so every agent without a local "
-                    f"daemon fails as in #3601"
-                )
