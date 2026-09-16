@@ -23427,8 +23427,17 @@ async def oauth_authorize(request: Request):
         # `_redirect_uri_matches` also refuses parse-differential input: this is
         # the one place the raw request param is echoed into a Location header,
         # so relaxing the match without that guard would BE the open redirect.
-        from tortoise.oauth import _redirect_uri_matches, get_client
-        client = get_client(cp, params["client_id"]) if params["client_id"] else None
+        from tortoise.oauth import _redirect_uri_matches, resolve_client
+        client = None
+        if params["client_id"]:
+            try:
+                # #2847: the resolver, not `get_client`, so a CIMD client's
+                # in-document redirect_uri is honoured on this path too.
+                # Best-effort: a refused fetch must not turn an OAuth error
+                # response into a 5xx, so this stays non-fatal.
+                client = resolve_client(cp, params["client_id"])
+            except Exception:
+                client = None
         registered_uris = (client.get("redirect_uris") or []) if client else []
         if not isinstance(registered_uris, (list, tuple)):
             registered_uris = [registered_uris]
