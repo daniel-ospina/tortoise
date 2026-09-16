@@ -232,10 +232,21 @@ class _JWKSCache:
     ) -> tuple[dict[str, dict], str | None]:
         """``get()`` plus WHY the returned key set was served (#3284 boot log).
 
-        ``origin`` is ``None`` when THIS call obtained a fresh, usable key set
-        from the upstream, and a short reason otherwise: the fetch raised, the
-        upstream answered with zero usable keys, or an armed cooldown blocked
-        the attempt — in which case a previously-cached (STALE) set was served.
+        ``origin`` is ``None`` when this call has NO stale serve to report —
+        the returned set was fetched by this call (it may be EMPTY: the
+        ``empty`` outcome for an upstream 200 with zero usable keys), is still
+        inside the TTL fast path, or still contains the requested ``kid``.
+        Otherwise ``origin`` is a short reason: the fetch raised, the upstream
+        answered with zero usable keys while last-good keys were cached, or an
+        armed cooldown blocked the attempt — and a previously-cached (STALE)
+        set was served.
+
+        The kid-hit early return is TTL-AGNOSTIC: it serves a set that still
+        holds the requested ``kid`` WITHOUT fetching or checking freshness, so
+        it CAN serve an EXPIRED set and report ``origin is None``. Only the TTL
+        fast path and the cooldown-fresh guard in ``_resolve`` check
+        ``_JWKS_TTL``. ``origin is None`` therefore means "no stale serve to
+        report", never "this call fetched".
 
         The boot warm-up needs the distinction. With last-good keys cached, a
         failed fetch returns THEM (stale-serve), so keying ``ok`` off the
@@ -251,11 +262,13 @@ class _JWKSCache:
     ) -> tuple[dict[str, dict], str | None]:
         """Shared body of ``get``/``get_with_origin`` — ``(keys, stale_reason)``.
 
-        ``stale_reason is None`` ⇔ a FRESH, usable key set is being served —
-        either fetched by this call, or already within the TTL (the fast path
-        and the kid-hit early return both serve a fresh set without fetching).
-        Any non-None value means a previously-cached set is being served that
-        this call did NOT refresh, and says why.
+        ``stale_reason is None`` ⇔ there is no stale serve to report: the set
+        was fetched by this call (possibly EMPTY — the ``empty`` outcome), was
+        served by the TTL fast path, or was served by the TTL-AGNOSTIC kid-hit
+        early return — which returns a set that still contains the requested
+        ``kid`` without fetching or checking freshness, so it can serve an
+        EXPIRED set. Any non-None value means a previously-cached set is being
+        served that this call did NOT refresh, and says why.
         """
         now = time.monotonic()
         # The TTL fast path requires a USABLE key set, not just a non-None one:
@@ -459,13 +472,20 @@ async def prefetch_jwks() -> dict:
       but last-good keys WERE cached, so ``get()`` serves the old set. This is
       reported as a failure, with its reason (#2922), instead of as ``ready``
       while the cache logs "serving stale": the first request is served from
-      the stale set and a kid miss still triggers its own bounded refetch —
-      which, if it also fails, answers **401** from that set (never an
-      unbounded wait and never a 503, since last-good keys exist);
-    * ``"transport_error"`` — the bounded fetch failed with NO last-good keys
-      to fall back on (network/timeout/HTTP). The first request makes its own
-      bounded attempt and answers a bounded ``503`` + ``Retry-After`` only if
-      the upstream is STILL unreachable.
+      the stale set and a kid miss still triggers its own bounded refetch
+      UNLESS that cooldown is still armed (a cooldown an earlier lifespan
+      armed also blocks the request path) — which, if it also fails, answers
+      **401** from that set (never an unbounded wait and never a 503, since
+      last-good keys exist);
+    * ``"transport_error"`` — no usable key set could be reported and there
+      was NO last-good set to serve stale: either the bounded fetch raised
+      (network/timeout/HTTP) with a cold/empty cache, or an already-armed
+      failure/miss cooldown blocked the attempt outright (its text,
+      ``"refetch not attempted — within the …s failure/miss cooldown"``, is
+      carried verbatim in ``error``). The first request makes its own bounded
+      attempt UNLESS that cooldown is still armed; it answers a bounded
+      ``503`` + ``Retry-After`` when no key set has ever been cached, or
+      ``401`` "Unknown signing key" from an empty cached set.
 
     Returns a small boot-log report:
     ``{"ok", "keys", "elapsed_ms", "error", "outcome"}``.

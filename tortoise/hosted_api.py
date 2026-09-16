@@ -855,10 +855,12 @@ async def _first_contact_prewarm() -> None:
             _logger.warning(
                 "auth: JWKS pre-warm did NOT refresh in %.0fms (%s) — serving "
                 "%d last-good cached key(s). The first session-authenticated "
-                "request is served from that set; a kid miss still triggers "
-                "its own bounded refetch and, if that also fails, answers 401 "
-                "'Unknown signing key' from the stale set (never a 503 — "
-                "last-good keys exist — and never an unbounded wait).",
+                "request is served from that set; a kid miss triggers its "
+                "own bounded refetch UNLESS the failure/miss cooldown is "
+                "still armed (a cooldown an earlier lifespan armed also "
+                "blocks the request path) — either way the answer is 401 "
+                "'Unknown signing key' from the stale set, never a 503 "
+                "(last-good keys exist) and never an unbounded wait.",
                 report["elapsed_ms"],
                 report["error"],
                 report["keys"],
@@ -871,14 +873,24 @@ async def _first_contact_prewarm() -> None:
             # a keyless set is not a transport failure). The report does not
             # distinguish them, so naming only 503 here was the #2922 misreport
             # class for the empty case.
+            #
+            # A THIRD axis cuts across both: an already-armed failure/miss
+            # cooldown (``_last_failure_at`` is a module global that survives
+            # across lifespans, so a fresh boot can inherit one) short-circuits
+            # the request path at ZERO fetches, so the sentence must not
+            # promise a fetch attempt unconditionally. Every ``transport_error``
+            # report sets ``error`` — it is never ``None`` here.
             _logger.warning(
                 "auth: JWKS pre-warm failed in %.0fms (%s) — the first "
-                "session-authenticated request will make its own bounded "
-                "fetch attempt (the warm-up does not arm the request-path "
-                "cooldown) and, if the upstream is still unreachable, answer "
-                "a bounded 503 + Retry-After when no key set has ever been "
-                "cached, or 401 'Unknown signing key' from an empty cached "
-                "set",
+                "session-authenticated request makes its own bounded fetch "
+                "attempt UNLESS the request-path failure/miss cooldown is "
+                "already armed (the warm-up itself does not arm it, but it is "
+                "a module global that survives across lifespans), in which "
+                "case it is answered from the cooldown with NO fetch. If the "
+                "upstream is still unreachable (or still answering with zero "
+                "usable keys), that request answers a bounded 503 + "
+                "Retry-After when no key set has ever been cached, or 401 "
+                "'Unknown signing key' from an empty cached set",
                 report["elapsed_ms"],
                 report["error"],
             )

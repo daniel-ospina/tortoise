@@ -8960,6 +8960,82 @@ class TestFirstContactPrewarm:
         assert "401 'Unknown signing key' from an empty cached set" in text, text
         assert cache._last_failure_at is None
 
+    @pytest.mark.parametrize(
+        "cached_keys", [None, {}], ids=["cold-cache", "empty-cache"])
+    def test_cooldown_blocked_prewarm_log_does_not_promise_a_fetch_attempt(
+            self, monkeypatch, caplog, cached_keys):
+        """#3284 P2: with a cooldown ALREADY armed, "the first request will
+        make its own bounded fetch attempt" is FALSE — the request path is
+        answered from the cooldown with ZERO fetches.
+
+        ``_jwks._last_failure_at`` is a module global that survives across
+        lifespans, so a boot warm-up can meet a cooldown armed by an EARLIER
+        lifespan (the warm-up's own ``arm_cooldown=False`` stops it ARMING the
+        cooldown, it does not stop it READING one). The boot log asserted a
+        request-path fetch that the cooldown short-circuits. The report's
+        ``error`` already carries the real reason verbatim; only the sentence
+        overpromised.
+        """
+        import logging as _logging
+        import time as _time
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        fetches = {"n": 0}
+
+        async def _boom() -> bytes:
+            fetches["n"] += 1
+            raise OSError("network down")
+
+        cache = sa._JWKSCache()
+        cache._keys = cached_keys
+        # Armed by an EARLIER lifespan, before this boot warm-up runs.
+        cache._last_failure_at = _time.monotonic()
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "JWKS pre-warm failed" in text, text
+        assert "cooldown" in text, (
+            "the sentence must state the cooldown that blocks the attempt: "
+            + text)
+        # ``error`` is never ``None`` on the ``else`` (transport_error) branch:
+        # the cold case reports the bounded-503 HTTPException, the empty case
+        # the cooldown reason. Check the real reason is present, not a bare
+        # ``(None)``.
+        expected_reason = (
+            "HTTPException 503" if cached_keys is None
+            else "refetch not attempted")
+        assert expected_reason in text, text
+        assert "(None)" not in text, text
+        assert "will make its own bounded fetch attempt" not in text, (
+            "an armed cooldown short-circuits the request-path fetch, so this "
+            "claim is false: " + text)
+        assert fetches["n"] == 0, "the boot warm-up was blocked by the cooldown"
+
+        # Prove the claim was false ON THE FIRST REQUEST: the request path
+        # (kid miss -> the force path ``verify_session_jwt`` takes) is answered
+        # from the cooldown with no fetch at all. Cold cache -> bounded 503;
+        # empty cache -> the keyless 401 path.
+        from fastapi import HTTPException
+        if cached_keys is None:
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(cache.get(force=True, kid="kid-1"))
+            assert ei.value.status_code == 503, ei.value
+        else:
+            assert asyncio.run(cache.get(force=True, kid="kid-1")) == {}, (
+                "an empty cached set is served as-is")
+        assert fetches["n"] == 0, (
+            "the first request DID fetch — the cooldown short-circuit the log "
+            "omitted would not have happened")
+
     def test_slow_dead_jwks_still_yields_a_bounded_503_with_retry_after(
             self, unauth_client, monkeypatch):
         """The #3284 regression on the REAL HTTP surface.
