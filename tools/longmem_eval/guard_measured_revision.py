@@ -40,13 +40,16 @@ CONTRACT (declared surface — what is and is not covered):
   non-allowlisted untracked file exists under the surface.
 * **Reports but does not refuse** files *added* after ``<rev>``. They did not
   exist during the run, so they cannot be what the run executed. This is what
-  lets the guard itself live on the measured surface.
+  lets the guard itself live on the measured surface. It does NOT extend to a
+  declared surface that matched NOTHING at ``<rev>``: that refuses, because
+  there is no revision side to compare against at all.
 * **Ignores** paths outside ``--paths``.
 
 Untracked scanning deliberately does **not** honour ``.gitignore``: an ignore
-rule is a way to hide a file from the check. The only files excused are those in
-``NOISE_DIRS`` / ``NOISE_SUFFIXES``, reported in the output rather than silently
-accepted. Those are editor/VCS droppings **plus byte-caches** — and a ``.pyc``
+rule is a way to hide a file from the check. The only files excused are those
+whose name ends in ``NOISE_SUFFIXES`` — excused by SUFFIX, never by directory, so
+a stray ``__pycache__/evil.py`` refuses. Excused files are reported in the output
+rather than silently accepted. Those are editor/VCS droppings **plus byte-caches** — and a ``.pyc``
 IS executable code that CPython will run in preference to the ``.py`` beside it,
 so this check does NOT cover it. That is a deliberate, stated limit: a
 byte-code-free measured run (``python -B`` or ``PYTHONDONTWRITEBYTECODE=1``) is
@@ -84,11 +87,11 @@ from typing import NamedTuple
 
 DEFAULT_PATHS = ("tortoise/", "tools/")
 
-#: Byte-cache directories. NOTE: their contents ARE executed code — excused
-#: here only because a normal working tree is full of them; see --strict-bytecode.
-NOISE_DIRS = ("__pycache__/",)
-#: Basenames / suffixes excused from the untracked refusal (editor/VCS
-#: droppings, and byte-caches — see NOISE_DIRS).
+#: Suffixes excused from the untracked refusal: editor/VCS droppings, and
+#: byte-caches. NOTE: byte-caches ARE executed code — excused here only because a
+#: normal working tree is full of them; see ``--strict-bytecode``. Nothing else
+#: is excused, not even inside ``__pycache__/`` (a stray ``.py`` or ``.so``
+#: there used to ride the directory match).
 NOISE_SUFFIXES = (
     ".pyc",
     ".pyo",
@@ -155,16 +158,19 @@ def _ast_without_docstrings(source: str) -> str:
 
 
 def _is_noise(rel: str) -> bool:
-    if any(part in rel for part in NOISE_DIRS):
-        return True
+    """Excused from the untracked refusal ONLY by suffix — never by directory."""
     return rel.endswith(NOISE_SUFFIXES)
 
 
 def _modes_at_rev(worktree: Path, rev: str, paths: tuple[str, ...]) -> dict[str, str]:
     """``{path: git mode}`` for every file at ``rev`` under the surface."""
     modes: dict[str, str] = {}
-    for line in _git(worktree, "ls-tree", "-r", rev, "--", *paths).splitlines():
-        meta, _, path = line.partition("\t")
+    # ``-z``: NUL-separated rows, so a path containing a tab or newline cannot
+    # be mis-keyed by the parser (a dropped row would read as "not tracked").
+    for entry in _git(worktree, "ls-tree", "-r", "-z", rev, "--", *paths).split("\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition("\t")
         if path:
             modes[path] = meta.split()[0]
     return modes
@@ -186,6 +192,11 @@ def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
             f"guard: {rel} exists at {rev} but cannot be read in the working "
             f"tree ({exc}) — re-measure rather than re-label"
         ) from None
+    if rev_mode == "160000":
+        raise GuardRefused(
+            f"guard: {rel} is a gitlink/submodule at {rev} — its contents are "
+            "not in this repository, so they cannot be compared"
+        )
     rev_is_link = rev_mode == "120000"
     if stat.S_ISLNK(st.st_mode) != rev_is_link:
         raise GuardRefused(
@@ -213,8 +224,14 @@ def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
             "a data/config file can change behaviour, and it cannot be "
             "compared structurally"
         )
-    before = _ast_without_docstrings(at_rev_bytes.decode())
-    after = _ast_without_docstrings(on_disk_bytes.decode())
+    try:
+        before = _ast_without_docstrings(at_rev_bytes.decode())
+        after = _ast_without_docstrings(on_disk_bytes.decode())
+    except SyntaxError as exc:
+        raise GuardRefused(
+            f"guard: {rel} does not parse as Python ({exc}) — it cannot be "
+            "compared structurally, so it is refused rather than passed"
+        ) from None
     if before != after:
         raise GuardRefused(
             f"guard: code under test changed since {rev}: {rel} — "
@@ -250,11 +267,16 @@ def guard(
     modes_at_rev = _modes_at_rev(worktree, rev, paths)
     at_rev = list(modes_at_rev)
     tracked = _git(worktree, "ls-files", "--", *paths).split()
-    if not at_rev and not tracked:
+    if not at_rev:
         raise GuardRefused(
-            f"guard: --paths {' '.join(paths)} matches no file at {rev} and "
-            "nothing in the index — refusing rather than reporting an empty "
-            "surface as clean"
+            f"guard: nothing under --paths {' '.join(paths)} existed at {rev} "
+            "— there is no revision side to compare against, so an empty "
+            "comparison must not read as a clean one"
+        )
+    if not tracked:
+        raise GuardRefused(
+            f"guard: nothing under --paths {' '.join(paths)} is tracked — "
+            "refusing rather than reporting an empty surface as clean"
         )
     # NO --exclude-standard: an ignore rule must not hide a file from the check.
     untracked = _git(worktree, "ls-files", "--others", "--", *paths).split()

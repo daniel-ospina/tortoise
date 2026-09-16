@@ -278,7 +278,7 @@ def test_non_repository_worktree_refuses(tmp_path: Path) -> None:
 
 def test_empty_declared_surface_refuses(repo: Repo) -> None:
     """A typo'd pathspec must not read as a pass."""
-    with pytest.raises(GuardRefused, match="matches no file"):
+    with pytest.raises(GuardRefused, match="existed at"):
         _scan(repo, "typo_path/")
 
 
@@ -315,8 +315,46 @@ def test_bytecode_is_excused_by_default_and_refused_under_strict(repo: Repo) -> 
         guard(repo.root, repo.rev, SURFACE, allow_bytecode=False)
 
 
-def test_default_surface_is_the_declared_one() -> None:
+def test_default_surface_is_the_declared_one(repo: Repo) -> None:
+    """The optional paths argument must DEFAULT to the declared constant.
+
+    Pinned because the earlier suite asserted only the literal value, so
+    mutating the signature/CLI default (leaving the constant intact) stayed
+    green.
+    """
+    from tools.longmem_eval import guard_measured_revision as mod
+
     assert DEFAULT_PATHS == ("tortoise/", "tools/")
+    assert guard(repo.root, repo.rev).checked == SURFACE_FILES
+    assert mod.guard.__defaults__ == (DEFAULT_PATHS,)
+
+
+def test_surface_empty_at_rev_refuses_even_with_index_entries(repo: Repo) -> None:
+    """A surface that exists only AFTER the measured revision has no revision
+    side to compare against — it must not print OK with `checked == 0`."""
+    (repo.path("tools/later.py")).write_text("x = 1\n")
+    later = repo.path("tools/later.py")
+    repo.commit("added after the measured revision")
+    # the file is now tracked, but it did not exist at the measured revision
+    assert later.exists()
+    with pytest.raises(GuardRefused, match="existed at"):
+        guard(repo.root, repo.rev, ("tools/later.py",))
+
+
+def test_non_bytecode_file_inside_pycache_is_refused(repo: Repo) -> None:
+    """Excused by SUFFIX, never by directory: a stray .py in __pycache__ is
+    executable-shaped and used to ride the directory match."""
+    cache = repo.path("tortoise/__pycache__")
+    cache.mkdir()
+    (cache / "evil.py").write_text("x = 1\n")
+    with pytest.raises(GuardRefused, match="untracked file"):
+        _scan(repo)
+
+
+def test_unparseable_surface_file_refuses_with_a_reason(repo: Repo) -> None:
+    repo.path("tortoise/a.py").write_text("def f(:\n")
+    with pytest.raises(GuardRefused, match="does not parse"):
+        _scan(repo)
 
 
 # ── declared-but-untested residuals (recorded, not chased) ────────────────

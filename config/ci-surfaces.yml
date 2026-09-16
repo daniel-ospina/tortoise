@@ -661,7 +661,7 @@ surfaces:
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
   - test_build_cohorts_2517.py  # #2517 (hermetic cohort-builder leg, mirrors test_retrieval.py)
-  - test_guard_measured_revision.py  # #2517 (hermetic guard leg: the surface audit + the receipt's machine check)
+  - test_guard_measured_revision.py  # #2517 (hermetic guard leg: the declared bypass surface on synthetic fixtures, mirrors the eval lane)
   - test_session_reinjection.py  # #2517 (docker-lane leg, mirrors test_retrieval.py)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
