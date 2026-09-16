@@ -81,9 +81,11 @@ bindings:
     envs: [production]
     note: >-
       server-side blog/admin writes. The explicit ``503 not_configured`` sites
-      are functions/blog/api/posts/[[path]].ts (2), blog/api/purge.ts,
-      generate-cover.ts and generate-seo.ts; functions/admin/[[path]].ts reports
-      `unavailable`. functions/blog/_shared/admin-auth.ts also reads it (`?? ""`).
+      are website/functions/blog/api/posts/[[path]].ts (2),
+      website/functions/blog/api/purge.ts, .../generate-cover.ts and
+      .../generate-seo.ts; website/functions/admin/[[path]].ts reports
+      `unavailable`. website/functions/blog/_shared/admin-auth.ts reads it too
+      (`?? ""`).
 
   # Cover and SEO generation. Absent -> ``503 not_configured``.
   - name: OPENROUTER_API_KEY

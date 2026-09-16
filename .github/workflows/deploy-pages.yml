@@ -117,7 +117,7 @@ jobs:
             [ "$attempt" -lt 3 ] && sleep 10
           done
           if [ "$rc" = "1" ]; then
-            echo '::error::A REQUIRED binding is absent. Retrying cannot help —' 
+            echo '::error::A REQUIRED binding is absent. Retrying cannot help —'
             echo '::error::bind it on the premise-labs Pages project. See #3616.'
           fi
           exit $rc

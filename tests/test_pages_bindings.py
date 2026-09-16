@@ -608,6 +608,10 @@ def _probe_script(tmp_path: Path) -> Path:
     rewritten = (
         run.replace("/tmp/start.", '"$PROBE_TMP"/start.')
         .replace("$(seq 1 10)", "$(seq 1 3)")
+        # The sleep guard's BOUND must be rewritten too, or it stays `-lt 10` and
+        # is unreachable with 3 attempts — so the guard would only ever be pinned
+        # by a source string, not exercised. (Final-cycle review, P3.)
+        .replace('-lt 10 ] && sleep 15', '-lt 3 ] && sleep 0')
         .replace("sleep 15", "sleep 0")
     )
     p = tmp_path / "probe.sh"
@@ -791,6 +795,45 @@ def test_json_output_still_reports_missing_required_and_exits_1(monkeypatch, cap
     payload = json.loads(captured.out)
     assert payload["missing_required"], "a missing binding must appear in the JSON"
     assert rc == 1
+
+
+def test_json_output_on_the_exit_2_path_is_still_a_parseable_document(tmp_path, capsys) -> None:
+    """`--json` must emit ONE document for every exit code, including 2.
+
+    Without this, the exit-2 paths printed nothing, so an unconditional
+    `json.loads(stdout)` crashed with JSONDecodeError instead of reading an
+    error document. (Final-cycle review, P3.)
+    """
+    rc = cpb.main(
+        ["--manifest", str(tmp_path / "nope.yml"), "--account-id", "a",
+         "--api-token", "t", "--json"]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)  # must not raise
+    assert payload["error"], "the error path must carry a reason"
+    assert payload["project"] is None
+    assert rc == 2
+
+
+def test_the_probe_harness_exercises_the_sleep_GUARD_not_just_the_string() -> None:
+    """The harness must rewrite the guard's BOUND too.
+
+    `_probe_script` reduces 10 attempts to 3; if it did not also reduce `-lt 10`
+    to `-lt 3`, the guard would be unreachable and pinned only by a source
+    string — the same weakness this PR has already been caught on twice.
+    """
+    step = next(s for s in _deploy_steps() if s.get("name") == PROBE)
+    run = step["run"]
+    assert "[ \"$attempt\" -lt 10 ] && sleep 15" in run, (
+        "the shipped guard changed shape — update _probe_script and this test"
+    )
+    import inspect
+
+    src = inspect.getsource(_probe_script)
+    assert "-lt 10 ] && sleep 15" in src and "-lt 3 ] && sleep 0" in src, (
+        "_probe_script does not rewrite the sleep guard's bound, so the guard "
+        "is never exercised by the harness"
+    )
 
 
 def test_a_malformed_success_payload_exits_2_not_1(monkeypatch) -> None:

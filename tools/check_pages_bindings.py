@@ -201,27 +201,48 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
 
+    def _fail(reason: str) -> int:
+        """Exit 2 (could-not-determine), emitting the SAME document shape as the
+
+        other paths when --json is set. Without this, `--json` printed nothing on
+
+        this path, so an unconditional `json.loads(stdout)` crashed with
+
+        JSONDecodeError instead of reading an error document.
+
+        """
+        print(f"::error::{reason}", file=sys.stderr)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "project": None,
+                        "missing_required": [],
+                        "missing_recommended": [],
+                        "error": reason,
+                    },
+                    indent=2,
+                )
+            )
+        return 2
+
     try:
         manifest = load_manifest(Path(args.manifest))
     except Exception as e:
-        print(f"::error::cannot read {args.manifest}: {e}", file=sys.stderr)
-        return 2
+        return _fail(f"cannot read {args.manifest}: {e}")
 
     project = manifest.get("project")
     if not project or not args.account_id or not args.api_token:
-        print(
-            "::error::project, --account-id and --api-token (or "
-            "CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN) are required",
-            file=sys.stderr,
+        return _fail(
+            "project, --account-id and --api-token (or CLOUDFLARE_ACCOUNT_ID / "
+            "CLOUDFLARE_API_TOKEN) are required"
         )
-        return 2
 
     try:
         configs = fetch_configs(args.account_id, project, args.api_token)
     except RuntimeError as e:
         # Fail CLOSED: not knowing is not the same as knowing it is fine.
-        print(f"::error::{e}", file=sys.stderr)
-        return 2
+        return _fail(str(e))
 
     missing_required, missing_recommended = evaluate(manifest, configs)
 
