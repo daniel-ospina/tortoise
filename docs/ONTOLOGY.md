@@ -18,19 +18,31 @@ doc_status: live
 > - §4.7: rewritten as the canonical statement of the temporal model — two
 >   orthogonal axes (valid time `validFrom`/`validTo`; transaction time
 >   `createdAt`/`expiredAt`), supersession as a **third, separate fact**
->   (`supersededAt` on Object; `outdated` + `CORRECTS` on Point), one canonical
+>   (`supersededAt` on Object; `status='superseded'` on Point), one canonical
 >   name per slot, Event's `startedAt`/`endedAt` declared a named alias of the
 >   valid-time pair, and a per-type presence matrix. **Fixes the contradiction
 >   with §4.5:** the old map's `createdAt` row mapped Event's record-creation to
 >   `startedAt`; Event's transaction-time start is `capturedAt`.
+> - §4.7 (correction): Point supersession is `status='superseded'` — the
+>   `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do
+>   not distinguish the two. §4.7's `validFrom` start is ⚠️ (populated only by
+>   date-carrying write paths; **absent ⇒ open start**), and `when` documented
+>   as the occurrence-date input that fills `validFrom` on the commit path, not
+>   a second slot.
+> - §4.7 (correction): the Document column carries explicit per-cell markers,
+>   not "inherits Object" — Document inheritance of the Object column is
+>   **conceptual** (`objectKind: document`); Documents carry `:Document` and not
+>   `:Object`, so the Object-labelled supersession fold never reaches them and
+>   supersession is unreachable for a Document.
 > - §4.1: `expiredAt` description split — transaction-time expiry (the record
 >   stopped being current) is not "when a supersession/withdrawal terminated the
->   record"; supersession is a separate fact (`outdated` flag + `CORRECTS`) and
->   both can apply.
+>   record"; supersession is a separate fact (`status='superseded'`) and both
+>   can apply. Point `validFrom` split from `validTo` with `prov:generatedAtTime`
+>   / `prov:invalidatedAtTime` and ⚠️ partial-coverage marking.
 > - §4.2/§4.3/§4.6: `validFrom`/`validTo` + `expiredAt` declared (❌ — the model
 >   is declared, not built; implementation tracked separately).
-> - §4.4: Document declared to inherit the Object temporal fields (no duplicate
->   rows).
+> - §4.4: Document declared to inherit the Object temporal fields conceptually
+>   (no duplicate rows; no `:Object` label — see §4.7 †).
 > - §4.5: `capturedAt` moved from planned(❌) to the declared transaction-time
 >   start (⚠️ — written by the hosted capture/commit + session-index paths, not
 >   yet on every Event write path); cross-references §4.7.
@@ -404,8 +416,9 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
-| `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window — the valid-time axis (§4.7) |
-| `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as the `outdated` flag + the `CORRECTS` edge (Point has no `supersededAt`), so a superseded Point is both `outdated` and `expiredAt`-stamped. See §4.7. |
+| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated only by write paths that supply a date (the hosted commit path sets it from the payload `when`); **absent ⇒ open/unbounded start** (`restore_point_at`), not a clock-stamped one. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
+| `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` (contiguous window); `invalidate_point` stamps `now` (no successor ⇒ no contiguity). §4.7 |
+| `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as `status='superseded'` (Point has no `supersededAt`); the `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do **not** distinguish the two. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
 | `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Indexed via the plain `:Point(lastDreamedAt)` index, created idempotently at init on ALL engines — `is_operator` is never indexed (#522 embedded stale bool type table; #3154 docker/server `GRAPH.COPY` drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it, and leaving the copy destination unable to rebuild it) |
 | `embedding` | vector | — | — | ✅ | Semantic embedding (FTS + vector search) |
@@ -451,7 +464,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 
 ### §4.4 Document (subclass of Object)
 
-> **Document is an Object** (`objectKind: document`) — a core subclass (§6). Inherits all Object fields — **including the Object temporal fields `validFrom`/`validTo`/`expiredAt` (§4.7)**; additions below. Graph label is `:Document` (matching `_upsert_document`'s `MERGE (d:Document {id:$id})`); the subclass relationship to Object is expressed via `objectKind: document`, not via a second graph label. Do not create a separate `:Object` label for Documents. `documentKind` is the subclass-of-Document vocabulary (BIBO-aligned).
+> **Document is an Object** (`objectKind: document`) — a core subclass (§6). Inherits all Object fields; the Object temporal fields `validFrom`/`validTo`/`expiredAt` are **conceptual** inheritance only — no Object-labelled write path reaches a `:Document` node (§4.7 †); additions below. Graph label is `:Document` (matching `_upsert_document`'s `MERGE (d:Document {id:$id})`); the subclass relationship to Object is expressed via `objectKind: document`, not via a second graph label. Do not create a separate `:Object` label for Documents. `documentKind` is the subclass-of-Document vocabulary (BIBO-aligned).
 
 | Field | Type | Required | ISO/PROV/DC | Impl | Meaning |
 |-------|------|----------|-------------|------|---------|
@@ -519,8 +532,15 @@ window, independent of when Tortoise learned it. Canonical pair:
 
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
-| start | `validFrom` | `prov:generatedAtTime` | Stamped on Point create; falls back to the graph-write clock when the fact is undated |
-| end | `validTo` | `prov:invalidatedAtTime` | On supersession set to the successor's `validFrom` — **contiguous Graphiti (Zep) windows: the old fact stops being true exactly when the new one starts being true** (`supersede_point`, E6 #1538) |
+| start | `validFrom` | `prov:generatedAtTime` | Populated only by write paths that supply a date (the hosted commit path sets it from the payload `when`; §4.1). `create_point`'s CREATE map writes only `createdAt`/`updatedAt`, so an **absent** `validFrom` means an **open/unbounded start** — not a clock-stamped one (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
+| end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` — **contiguous Graphiti (Zep) windows: the old fact stops being true exactly when the new one starts being true** (`supersede_point`, E6 #1538). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity) |
+
+> **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
+> **occurrence-date input** — the payload-level anchor the hosted commit path
+> copies verbatim into `validFrom` on the same node
+> (`point_props["validFrom"] = point_props["when"]`, hosted_api.py:9461-9484).
+> It is the same value under the §4.1 spelling, not a second slot — the
+> pre-v3.12 map grouped them (`validFrom/To + when`) for this reason.
 
 **Axis 2 — Transaction time: "when did our record of it exist?"** The
 graph-write clock. Canonical pair: `createdAt` / `expiredAt`.
@@ -541,22 +561,44 @@ transaction-time end.
 successor) is **not** the expiry axis. `supersededAt` (Object) is its own
 concept and **coexists with `expiredAt`** — an Object can be superseded at T1
 and expire at T2, so both apply and neither implies the other. Points record
-the same fact differently: the `outdated` flag + the `CORRECTS` edge, **not**
-`supersededAt` (§4.1, §3.1).
+the same fact differently: `status='superseded'` (set by `supersede_point`,
+never by `invalidate_point`), **not** `supersededAt`. The `outdated` flag and
+the `CORRECTS` edge are shared with `invalidate_point` — they do **not**
+identify a supersession on their own, and a reader following them alone
+classifies every invalidated Point as superseded (§4.1, §3.1, §5).
 
 **Per-type presence (canonical matrix)** — ✅ implemented · ⚠️ partial · ❌
 declared, not built (implementation is tracked separately):
 
 | Slot | Point | Subject | Object | Document | Event | Source |
 |------|-------|---------|--------|----------|-------|--------|
-| valid start | `validFrom` ✅ | `validFrom` ❌ | `validFrom` ❌ | **inherits Object** | `startedAt` ✅ (alias) | `validFrom` ❌ |
-| valid end | `validTo` ✅ | `validTo` ❌ | `validTo` ❌ | **inherits Object** | `endedAt` ✅ (alias) | `validTo` ❌ |
-| txn start | `createdAt` ✅ | `createdAt` ✅ | `createdAt` ✅ | **inherits Object** | `capturedAt` ⚠️ | `ingestedAt` ✅ |
-| txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | **inherits Object** | — | `expiredAt` ❌ |
-| supersession | `outdated` + `CORRECTS` ✅ | — | `supersededAt` ✅ | **inherits Object** | — | — |
+| valid start | `validFrom` ⚠️ | `validFrom` ❌ | `validFrom` ❌ | `validFrom` ❌ † | `startedAt` ✅ (alias) | `validFrom` ❌ |
+| valid end | `validTo` ✅ | `validTo` ❌ | `validTo` ❌ | `validTo` ❌ † | `endedAt` ✅ (alias) | `validTo` ❌ |
+| txn start | `createdAt` ✅ | `createdAt` ✅ | `createdAt` ✅ | `createdAt` ⚠️ † | `capturedAt` ⚠️ | `ingestedAt` ✅ |
+| txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | `expiredAt` ❌ † | — | `expiredAt` ❌ |
+| supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — † | — | — |
 
-> **Document** is an Object (`objectKind: document`, `:Document` label, §4.4) and
-declares no temporal rows of its own — it inherits the Object column.
+> **Point valid start is ⚠️, not ✅** — populated only by date-carrying write
+> paths; an absent `validFrom` is an **open start**, and `validFrom` → `createdAt`
+> is a *render* fallback (`_render_date`), not a stamp. This matches the ⚠️
+> convention `capturedAt` follows; §4.1 marks `validFrom` and `validTo` separately.
+
+> † **Document's inheritance of the Object column is CONCEPTUAL only**
+> (`objectKind: document`, §4.4) — Documents carry the `:Document` label and
+> **not** `:Object`, so Object-labelled write paths never reach them. The
+> supersession fold (`_fold_object_superseded` / `apply_supersessions`)
+> `MATCH`es `(o:Object {id|name})` and can **never** stamp a Document: Document
+> supersession is **unreachable**, not merely unimplemented (`—`).
+> `_upsert_document` writes no `validFrom`/`validTo`/`expiredAt`, and no
+> `createdAt` either — a Document gets `createdAt` only when its event carries
+> one through `_persist_extra_props` (the SDK index path does not) — hence ⚠️.
+
+> ‡ **Point supersession discriminator.** `supersede_point` and
+> `invalidate_point` write the **same** four markers — `outdated=true`,
+> `validTo`, `expiredAt`, and a `CORRECTS` edge. Only `status='superseded'`
+> separates them (`supersede_point` sets it; `invalidate_point` never does) —
+> §5's status vocabulary and §3.1 encode the same split. The `outdated` +
+> `CORRECTS` pair alone classifies every invalidated Point as superseded.
 
 **Cross-Entity Field Map** (non-temporal fields; the matrix above is
 authoritative for the temporal slots. The pre-v3.12 map's `createdAt` row mapped
@@ -575,7 +617,7 @@ here: Event's transaction-time start is `capturedAt`.)
 | management | — | — | edge (§3.5) | — | — | — |
 | format | — | — | — | format | format | — |
 | aboutEdges | ✅ | — | ✅ | ✅ | ✅ | — |
-| occurrence date | `when` | — | — | — | — | — |
+| occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — | — |
 | is_episodic | ✅ | — | ❌ | — | ✅ | ✅ |
 | passes_frequency_gate | — | — | ❌ | ❌ (inherits Object) | — | — |
 
@@ -996,5 +1038,5 @@ the bottom of the recursion (leaf confidence = mean EP of attached points).
 | **Schema.org** | Event with startTime/endTime. Action pattern: `performs`=schema:agent inverse (the "direct performer or driver of the action"), `produces`=schema:result, `uses`=schema:instrument (mechanisms) / schema:input. |
 | **BIBO** | Document subclasses — `documentKind` vocabulary. |
 | **OWL-Time** | Event is the temporal entity (`startedAt`/`endedAt` = the valid-time alias, §4.7). Non-event validity windows (`validFrom`/`validTo`) are intervals on the same axis. Transaction time is the record clock, not an OWL-Time interval. |
-| **Bi-temporal (Graphiti/Zep)** | Two orthogonal axes — **valid time** (`validFrom`/`validTo`) and **transaction time** (`createdAt`/`expiredAt`) — plus supersession as a third, separate fact (`supersededAt` on Object; `outdated` + `CORRECTS` on Point). Contiguous windows: `validTo` = the successor's `validFrom` (§4.7). |
+| **Bi-temporal (Graphiti/Zep)** | Two orthogonal axes — **valid time** (`validFrom`/`validTo`) and **transaction time** (`createdAt`/`expiredAt`) — plus supersession as a third, separate fact (`supersededAt` on Object; `status='superseded'` on Point — the `outdated` flag + `CORRECTS` edge are shared with invalidation and do not distinguish the two). Contiguous windows on **supersession**: `validTo` = the successor's `validFrom`; `invalidate_point` instead stamps `validTo=now` (no successor ⇒ no contiguity) (§4.7). |
 | **RDF-star** | Operators are reified edges with metadata (label + confidence) — RDF-star-like reification for epistemic edges. |
