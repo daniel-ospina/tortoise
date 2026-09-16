@@ -346,7 +346,7 @@ class TestHealthTruthMCP:
         monkeypatch.setattr(builtins, "__import__", _blocked_import)
         token = _current_org_id.set(SELFHOST_ORG_ID)
         try:
-            assert _ms._team_onboarding_complete() is False
+            assert _ms._org_onboarding_complete() is False
         finally:
             _current_org_id.reset(token)
 

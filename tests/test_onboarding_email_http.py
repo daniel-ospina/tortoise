@@ -47,7 +47,7 @@ def _seed_team(fake: FakeControlPlane, *, org_id: str = ORG_ID,
         row["email"] = email
     if marker is not None:
         row["onboarding_email_sent_at"] = marker
-    fake.seed("teams", [row])
+    fake.seed("organizations", [row])
 
 
 @pytest.fixture
@@ -95,7 +95,7 @@ class TestSendOnboardingEmail:
         assert body["status"] == "sent"
         assert body["message_id"] == "msg_1"
         assert sent == [(EMAIL, "Daniel Ospina", "Acme", ORG_ID)]
-        team = fake.tables["teams"][0]
+        team = fake.tables["organizations"][0]
         assert team["onboarding_email_sent_at"] is not None
 
     def test_personalization_defaults_when_display_name_absent(
@@ -228,11 +228,11 @@ class TestSendOnboardingEmail:
                      json={"org_id": ORG_ID}, headers=_INTERNAL_HEADERS)
         assert r1.status_code == 200, r1.text
         assert r1.json()["status"] == "failed"
-        assert fake.tables["teams"][0].get("onboarding_email_sent_at") is None
+        assert fake.tables["organizations"][0].get("onboarding_email_sent_at") is None
         r2 = tc.post("/internal/onboarding-email",
                      json={"org_id": ORG_ID}, headers=_INTERNAL_HEADERS)
         assert r2.json()["status"] == "sent"
-        assert fake.tables["teams"][0]["onboarding_email_sent_at"] is not None
+        assert fake.tables["organizations"][0]["onboarding_email_sent_at"] is not None
 
     def test_sender_exception_fail_soft_never_5xx(self, client_and_fake,
                                                   monkeypatch):
@@ -249,7 +249,7 @@ class TestSendOnboardingEmail:
                     json={"org_id": ORG_ID}, headers=_INTERNAL_HEADERS)
         assert r.status_code == 200
         assert r.json()["status"] == "failed"
-        assert fake.tables["teams"][0].get("onboarding_email_sent_at") is None
+        assert fake.tables["organizations"][0].get("onboarding_email_sent_at") is None
 
     def test_control_plane_failure_fail_soft(self, client_and_fake,
                                              monkeypatch):

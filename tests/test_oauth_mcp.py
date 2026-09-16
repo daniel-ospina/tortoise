@@ -176,7 +176,7 @@ def _exchange(tc, *, client_id: str, code: str, verifier: str,
 def supabase_cp(monkeypatch) -> FakeControlPlane:
     """Supabase mode on + fake control plane seeded with two teams."""
     cp = FakeControlPlane({
-        "teams": [dict(TEAM_FREE), dict(TEAM_TEAM)],
+        "organizations": [dict(TEAM_FREE), dict(TEAM_TEAM)],
         "org_memberships": [_member(_U1, "team-free-001")],
         "api_keys": [],
     })
@@ -450,10 +450,10 @@ class TestAuthorizePage:
 
     def test_consent_html_team_picker_wiring(self, api_client):
         html = self._consent_html(api_client)
-        assert 'id="team-select"' in html
+        assert 'id="org-select"' in html
         # the Authorize POST carries the PICKER selection first, then the
         # client-declared resource (single-team flow unchanged)
-        assert "resource: teamResource || PARAMS.resource || null" in html
+        assert "resource: orgResource || PARAMS.resource || null" in html
         # options carry each membership's team-scoped resource as the value
         assert "opt.value = m.resource" in html
         assert "memberships.forEach" in html
@@ -462,10 +462,10 @@ class TestAuthorizePage:
         html = self._consent_html(api_client)
         # select present-but-hidden in the shared markup; only unhidden for
         # memberships.length > 1
-        assert 'id="team-select" style="display:none' in html
+        assert 'id="org-select" style="display:none' in html
         assert "memberships && memberships.length > 1" in html
-        assert 'id="team-line"' in html
-        assert html.count('id="team-select"') == 1
+        assert 'id="org-line"' in html
+        assert html.count('id="org-select"') == 1
 
     def test_consent_html_authorize_disabled_in_markup(self, api_client):
         html = self._consent_html(api_client)
@@ -480,11 +480,11 @@ class TestAuthorizePage:
         html = self._consent_html(api_client)
         # no silent auto-bind: a leading disabled placeholder forces an explicit
         # change event, and teamResource is set ONLY in the change handler
-        assert "Choose a team…" in html
+        assert "Choose an org…" in html
         assert "placeholder.disabled = true" in html
-        assert 'teamResource = teamSelectEl.value' in html
-        assert "teamResource = null" in html  # reset at every run entry
-        assert "if (teamResource) enableAuthorize(); else disableAuthorize();" in html
+        assert 'orgResource = orgSelectEl.value' in html
+        assert "orgResource = null" in html  # reset at every run entry
+        assert "if (orgResource) enableAuthorize(); else disableAuthorize();" in html
 
     def test_consent_html_401_recovery_refresh_first_no_signout(self, api_client):
         html = self._consent_html(api_client)
@@ -511,7 +511,7 @@ class TestAuthorizePage:
         # scratch (no duplicate rows on sequential re-runs)
         assert "let previewInFlight = false" in html
         assert "if (previewInFlight) return;" in html
-        assert "while (teamSelect.firstChild) teamSelect.removeChild" in html
+        assert "while (orgSelect.firstChild) orgSelect.removeChild" in html
         assert "onAuthStateChange" in html
         assert 'event === "INITIAL_SESSION"' in html
 
@@ -1003,7 +1003,7 @@ class TestConsentPreview:
         tc, cp = api_client
         session_user(_U1)
         _join_second_team(api_client)
-        cp.tables["teams"].append({
+        cp.tables["organizations"].append({
             "id": "team-suspended-001", "name": "Suspended Team",
             "tier": "free", "suspended_at": "2026-08-15T00:00:00Z"})
         cp.tables["org_memberships"].append(
@@ -1021,7 +1021,7 @@ class TestConsentPreview:
         tc, cp = api_client
         session_user(_U1)
         _join_second_team(api_client)
-        cp.tables["teams"][1]["suspended_at"] = "2026-08-15T00:00:00Z"  # team-team-001
+        cp.tables["organizations"][1]["suspended_at"] = "2026-08-15T00:00:00Z"  # team-team-001
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
@@ -1032,7 +1032,7 @@ class TestConsentPreview:
     def test_preview_all_teams_suspended_403(self, api_client, session_user):
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
@@ -1043,7 +1043,7 @@ class TestConsentPreview:
         preview — never a code that dies at a later exchange."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.get("/oauth/consent/preview",
                    params={"resource": org_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
@@ -1491,7 +1491,7 @@ class TestSuspensionRevocation:
         session_user(_U1)
         tokens = self._granted(tc, cp)
         # suspend the team (durable suspended_at — the #308 authority)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "refresh_token": tokens["refresh_token"],
@@ -1514,7 +1514,7 @@ class TestSuspensionRevocation:
         cleanly instead of minting a code that dies at the later exchange."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -1533,7 +1533,7 @@ class TestSuspensionRevocation:
         tc, cp = api_client
         session_user(_U1)
         flow = _auth_code_flow(tc, cp)  # minted while active
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
         assert r.status_code == 403
@@ -1611,7 +1611,7 @@ class TestMcpBoundary:
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         mcp_tc = self._mcp(cp)
         mcp_tc.headers.update(_mcp_headers(r.json()["access_token"]))
         with mcp_tc:

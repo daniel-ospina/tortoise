@@ -312,7 +312,7 @@ class TestEffectiveTier:
 class TestApplyLimitsAndReconcile:
     def test_apply_limits_writes_tier_and_limits_atomically(self, monkeypatch, billing_sdk):
         sdk = billing_sdk
-        team = sdk.team_create("limits-team")
+        team = sdk.org_create("limits-team")
         queries: list[str] = []
         orig_query = sdk._get_registry().query
 
@@ -323,7 +323,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(sdk._get_registry(), "query", counting_query)
         apply_limits(sdk, team["id"], "pro")
         assert len(queries) == 1  # single atomic Cypher SET
-        t = sdk.team_get(team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000   # == max_graph_nodes (GAP-B mapping)
         assert t["max_api_keys"] == 10
@@ -333,7 +333,7 @@ class TestApplyLimitsAndReconcile:
 
     def test_reconcile_subscription_repairs_mirror(self, monkeypatch, stripe_env, billing_sdk):
         sdk = billing_sdk
-        team = sdk.team_create("recon-team")
+        team = sdk.org_create("recon-team")
         # Drift: registry says free; Stripe says the team pays for pro.
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_123'",
@@ -342,7 +342,7 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: dict(FIXTURE_SUB))
         reconcile_org(sdk, team["id"])
-        t = sdk.team_get(team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000
         assert t["subscription_status"] == "active"
@@ -352,7 +352,7 @@ class TestApplyLimitsAndReconcile:
         """A team with only stripe_customer_id (missed checkout event) is
         repaired via list_subscriptions — first active sub wins."""
         sdk = billing_sdk
-        team = sdk.team_create("customer-only")
+        team = sdk.org_create("customer-only")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_1'",
             params={"id": team["id"]},
@@ -365,21 +365,21 @@ class TestApplyLimitsAndReconcile:
         monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
                             lambda self, cid: [inactive, active])
         reconcile_org(sdk, team["id"])
-        t = sdk.team_get(team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "team"
         assert t["subscription_status"] == "active"
 
     def test_reconcile_noop_without_identifiers(self, stripe_env, billing_sdk):
         sdk = billing_sdk
-        team = sdk.team_create("noop-team")
+        team = sdk.org_create("noop-team")
         reconcile_org(sdk, team["id"])  # no subscription_id / customer_id → no-op
-        t = sdk.team_get(team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "free"
 
     def test_reconcile_unknown_price_keeps_tier(self, monkeypatch, stripe_env, billing_sdk):
         """Unparseable price → error surfaces to caller; stored tier untouched."""
         sdk = billing_sdk
-        team = sdk.team_create("unknown-price")
+        team = sdk.org_create("unknown-price")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_1', t.tier='pro', "
             "t.subscription_status='active'",
@@ -391,7 +391,7 @@ class TestApplyLimitsAndReconcile:
                             lambda self, sid: sub)
         with pytest.raises(BillingError, match="unknown price"):
             reconcile_org(sdk, team["id"])
-        t = sdk.team_get(team["id"])
+        t = sdk.org_get(team["id"])
         assert t["tier"] == "pro"  # preserved — never downgraded on unparseable price
         assert t["subscription_status"] == "active"
 
@@ -468,7 +468,7 @@ class TestCheckoutPortal:
         assert r.status_code == 200, r.text
         assert r.json()["checkout_url"] == "https://checkout.stripe.com/pay/session1"
         # Customer binding persisted on the Team node before the redirect.
-        t = billing_client["sdk"].team_get(billing_client["org_id"])
+        t = billing_client["sdk"].org_get(billing_client["org_id"])
         assert t["stripe_customer_id"] == "cus_checkout1"
         assert t["customer_email"] == "billing-owner@example.com"
 
@@ -929,7 +929,7 @@ class TestBootReconcile:
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_1', "
             "t.stripe_customer_id='cus_1'", params={"id": org_id})
-        monkeypatch.setattr(ha, "_iter_registered_teams",
+        monkeypatch.setattr(ha, '_iter_registered_orgs',
                             lambda: [{"org_id": org_id, "name": "x"}])
 
         started = time.monotonic()

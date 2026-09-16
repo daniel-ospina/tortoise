@@ -342,10 +342,10 @@ class TestEmailSignupClaim:
             json={"api_key": api_key},
         )
         assert r.status_code == 200, r.text
-        team_row = next(t for t in fake.tables["teams"] if t["id"] == org_id)
-        assert team_row.get("email") == "reg-a@example.com", (
+        org_row = next(t for t in fake.tables["organizations"] if t["id"] == org_id)
+        assert org_row.get("email") == "reg-a@example.com", (
             f"claim must NOT write teams.email — mint contact survives, "
-            f"got {team_row.get('email')}")
+            f"got {org_row.get('email')}")
         mem = next(m for m in fake.tables["org_memberships"]
                    if m["org_id"] == org_id)
         assert mem["user_id"] == _U_REG_CLAIM

@@ -14022,8 +14022,9 @@ def _org_namespace(org_node: dict, org_id: str) -> str:
     Exporting the wrong graph would silently return an empty dump.
     """
     graph_name = org_node.get("graph_name")
-    if graph_name and str(graph_name).startswith("org_") and len(str(graph_name)) > 5:
-        return str(graph_name)[5:]
+    if (graph_name and str(graph_name).startswith("org_")
+            and len(str(graph_name)) > len("org_")):
+        return str(graph_name)[len("org_"):]
     return org_id
 
 
@@ -19384,11 +19385,14 @@ async def github_connect(body: GitHubConnectRequest | None = None,
     # ``or org["org_id"]`` fallback stored a hex UUID as github_org, which
     # made every org-scoped repo lookup 404 (empty selector). body.org (an
     # explicit client org) is still honored when provided.
-    org = (body.org if body else None)
+    # NOTE (rename #3543): this local was `org` in the pre-rename codebase where
+    # the auth dependency was named `team`. Renaming the dependency to `org`
+    # collided with it — the local is now `gh_org` and `org` stays the dict.
+    gh_org = (body.org if body else None)
     state = secrets.token_urlsafe(24)
     _GITHUB_STATES[state] = {
         "org_id": org["org_id"],
-        "org": org,
+        "org": gh_org,
         "created_at": time.time(),
     }
     callback = os.environ.get("GITHUB_CALLBACK_URL",
@@ -19612,7 +19616,8 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
     # graph-bound keys rejected (MCP twin tortoise_onboarding_github_status
     # parity). A per-graph key must never observe the org's GitHub org.
     _reject_graph_bound_org_surface(org, "github status")
-    encrypted, org = _github_credentials(org["org_id"])
+    _org_id = org["org_id"]
+    encrypted, gh_org = _github_credentials(_org_id)
     if not encrypted:
         return {"connected": False, "org": None, "repos_count": None}
     from tortoise.crypto import decrypt_token
@@ -19620,9 +19625,9 @@ async def github_status(org: dict = Depends(get_current_org_session_ungated)):  
         token = decrypt_token(encrypted)
     except ValueError:
         return {"connected": False, "org": None, "repos_count": None}
-    org = await _heal_github_org(org["org_id"], encrypted, org)
+    gh_org = await _heal_github_org(_org_id, encrypted, gh_org)
     repos_count = _github_repos_count(token)
-    return {"connected": True, "org": org, "repos_count": repos_count}
+    return {"connected": True, "org": gh_org, "repos_count": repos_count}
 
 
 @app.get("/v1/onboarding/github/repos")
@@ -19651,7 +19656,8 @@ async def github_repos(org: dict = Depends(get_current_org_session_ungated)):  #
     # state) — graph-bound keys rejected (MCP/onboarding-github parity). A
     # per-graph key must never enumerate the org's GitHub org repos.
     _reject_graph_bound_org_surface(org, "github repos")
-    encrypted, org = _github_credentials(org["org_id"])
+    _org_id = org["org_id"]
+    encrypted, gh_org = _github_credentials(_org_id)
     if not encrypted:
         return {"connected": False, "org": None, "repos": []}
     from tortoise.crypto import decrypt_token
@@ -19662,12 +19668,12 @@ async def github_repos(org: dict = Depends(get_current_org_session_ungated)):  #
         # failure, not evidence of an empty org (the dashboard gates
         # hydration on this flag exactly like a resolve exception).
         return {"connected": False, "org": None, "repos": [], "resolve_error": True}
-    org = await _heal_github_org(org["org_id"], encrypted, org)
+    gh_org = await _heal_github_org(_org_id, encrypted, gh_org)
     from tortoise.indexer.github_indexer import GitHubIndexer
     indexer = GitHubIndexer(token)
     resolve_error = False
     try:
-        resolved = await indexer.resolve_repos(org)
+        resolved = await indexer.resolve_repos(gh_org)
     except Exception:
         # resolve failure → empty list (selector still renders "All repos"),
         # but FLAG it: the dashboard must not treat a failed resolve as a
@@ -19679,7 +19685,7 @@ async def github_repos(org: dict = Depends(get_current_org_session_ungated)):  #
         await indexer._close()
     # short names (owner prefix stripped) — see the endpoint docstring.
     repos = [r.split("/", 1)[1] if "/" in r else r for r in resolved]
-    payload = {"connected": True, "org": org, "repos": repos}
+    payload = {"connected": True, "org": gh_org, "repos": repos}
     if resolve_error:
         payload["resolve_error"] = True
     return payload
@@ -19705,7 +19711,8 @@ async def github_branches(repo: str,
     # family parity — a per-graph key must never enumerate the org's
     # GitHub branches).
     _reject_graph_bound_org_surface(org, "github branches")
-    encrypted, org = _github_credentials(org["org_id"])
+    _org_id = org["org_id"]
+    encrypted, gh_org = _github_credentials(_org_id)
     if not encrypted:
         return {"connected": False, "org": None, "repo": repo,
                 "branches": [], "default_branch": None}
@@ -19715,8 +19722,8 @@ async def github_branches(repo: str,
     except ValueError:
         return {"connected": False, "org": None, "repo": repo,
                 "branches": [], "default_branch": None}
-    org = await _heal_github_org(org["org_id"], encrypted, org)
-    if not org:
+    gh_org = await _heal_github_org(_org_id, encrypted, gh_org)
+    if not gh_org:
         return {"connected": True, "org": None, "repo": repo,
                 "branches": [], "default_branch": None}
     # #1845 (review P1 parity): repo is a client-supplied value that reaches
@@ -19730,16 +19737,16 @@ async def github_branches(repo: str,
     branches = []
     default_branch = None
     try:
-        branches = await indexer.list_branches(f"{org}/{repo}")
+        branches = await indexer.list_branches(f"{gh_org}/{repo}")
     except Exception:
         branches = []  # review P2-4: list failure degrades to empty
     try:
-        default_branch = await indexer.default_branch(f"{org}/{repo}")
+        default_branch = await indexer.default_branch(f"{gh_org}/{repo}")
     except Exception:
         default_branch = None  # review P2-4: default unknown is non-fatal
     finally:
         await indexer._close()
-    return {"connected": True, "org": org, "repo": repo,
+    return {"connected": True, "org": gh_org, "repo": repo,
             "branches": branches, "default_branch": default_branch}
 
 
@@ -20181,8 +20188,8 @@ async def index_github(body: GitHubIndexRequest, org: dict = Depends(get_current
     # keys rejected (cross-graph write prevention).
     _require_scope(org, "graphs:write", "github index")
     _reject_graph_bound_org_surface(org, "github index")
-    org = (body.org or "").strip()
-    if not org:
+    gh_org = (body.org or "").strip()
+    if not gh_org:
         raise HTTPException(status_code=400, detail="org is required")
     # Verify GitHub connected first (seam-aware read — Supabase orgs in
     # Supabase mode, registry for selfhost)
@@ -20193,7 +20200,7 @@ async def index_github(body: GitHubIndexRequest, org: dict = Depends(get_current
     if is_new:
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
-            _run_indexing(job_id, org["org_id"], org,
+            _run_indexing(job_id, org["org_id"], gh_org,
                           _validate_repo_scope([body.repo] if body.repo else None)))
     return {"job_id": job_id, "status": "started"}
 
@@ -20220,11 +20227,12 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
     # scope + graph-bound rejection (see index_github).
     _require_scope(org, "graphs:write", "github reindex")
     _reject_graph_bound_org_surface(org, "github reindex")
-    encrypted, org = _github_credentials(org["org_id"])
+    _org_id = org["org_id"]
+    encrypted, gh_org = _github_credentials(_org_id)
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
-    org = await _heal_github_org(org["org_id"], encrypted, org)
-    if not org:
+    gh_org = await _heal_github_org(_org_id, encrypted, gh_org)
+    if not gh_org:
         raise HTTPException(status_code=400, detail="GitHub org unknown. Re-connect.")
     # #1845 (review P1): repo(s) are the ONE client-supplied value that
     # reaches the GitHub URL path. org is read server-side from the stored
@@ -20242,11 +20250,11 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
         repos = _validate_repo_scope([legacy]) if legacy else None
     else:
         repos = None
-    job_id, is_new = _start_index_job(org["org_id"])
+    job_id, is_new = _start_index_job(_org_id)
     if is_new:
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
-            _run_indexing(job_id, org["org_id"], org, repos))
+            _run_indexing(job_id, _org_id, gh_org, repos))
     return {"job_id": job_id, "status": "started"}
 
 
@@ -20564,8 +20572,9 @@ async def index_docs(body: DocsIndexRequest | None = None,
     encrypted, stored_org = _github_credentials(org["org_id"])
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
-    org = await _heal_github_org(org["org_id"], encrypted, stored_org)
-    if not org:
+    _org_id = org["org_id"]
+    gh_org = await _heal_github_org(_org_id, encrypted, stored_org)
+    if not gh_org:
         raise HTTPException(status_code=400, detail="GitHub org unknown. Re-connect.")
     # #1845 (review P1 parity): every repo short name is the ONE
     # client-supplied value that reaches the GitHub URL path — allowlist
@@ -20603,11 +20612,11 @@ async def index_docs(body: DocsIndexRequest | None = None,
         elif not _is_safe_branch(branch):
             raise HTTPException(status_code=400, detail="Invalid branch")
         scopes = [{"repo": repo, "branch": branch}]
-    job_id, is_new = _start_index_job(org["org_id"], kind="docs")
+    job_id, is_new = _start_index_job(_org_id, kind="docs")
     if is_new:
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
-            _run_docs_indexing(job_id, org["org_id"], org, scopes))
+            _run_docs_indexing(job_id, _org_id, gh_org, scopes))
     return {"job_id": job_id, "status": "started"}
 
 

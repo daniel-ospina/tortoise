@@ -36,7 +36,7 @@ def client(tmp_path, monkeypatch):
     from tortoise.hosted_api import _make_sdk
     sdk = _make_sdk(namespace="registry")
     try:
-        team = sdk.team_create("e2e-team")
+        team = sdk.org_create("e2e-team")
     except Exception:
         # Already exists — look it up
         rows = sdk._get_registry().query(

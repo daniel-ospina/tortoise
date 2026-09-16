@@ -483,7 +483,7 @@ def test_supabase_set_graph_recording_custom_and_default():
     from tests.fake_control_plane import FakeControlPlane
     from tortoise.supabase_control import graph_metadata, set_graph_recording
     cp = FakeControlPlane()
-    cp.seed("teams", [{"id": "t1", "graph_name": "team_t1"}])
+    cp.seed("organizations", [{"id": "t1", "graph_name": "team_t1"}])
     cp.seed("graphs", [{
         "id": "g1", "org_id": "t1", "name": "acme", "kind": "custom",
         "namespace": "team_t1_g1", "status": "active", "recording": None,
@@ -878,7 +878,7 @@ def test_supabase_set_graph_name_custom_and_default():
         set_graph_recording,
     )
     cp = FakeControlPlane()
-    cp.seed("teams", [{"id": "t1", "graph_name": "team_t1"}])
+    cp.seed("organizations", [{"id": "t1", "graph_name": "team_t1"}])
     cp.seed("graphs", [{
         "id": "g1", "org_id": "t1", "name": "acme", "kind": "custom",
         "namespace": "team_t1_g1", "status": "active", "recording": None,
@@ -923,7 +923,7 @@ def test_supabase_set_graph_name_custom_and_default():
     assert len(drow) == 1 and drow[0]["name"] == "Renamed Again"
     # No display row yet → graph_metadata falls back to the literal 'default'
     cp2 = FakeControlPlane()
-    cp2.seed("teams", [{"id": "t2", "graph_name": "team_t2"}])
+    cp2.seed("organizations", [{"id": "t2", "graph_name": "team_t2"}])
     meta = graph_metadata(cp2, "t2")
     default = next(m for m in meta if m["kind"] == "default")
     assert default["name"] == "default"
@@ -942,7 +942,7 @@ _SB_OWNER = "9f2c1a40-0000-4a00-8000-000000000270"
 
 
 def _sb_seed(fake):
-    fake.seed("teams", [{
+    fake.seed("organizations", [{
         "id": _SB_TEAM, "graph_name": f"org_{_SB_TEAM}", "tier": "pro",
         "max_graphs": 5, "name": "Org", "status": "active",
     }])
@@ -965,7 +965,7 @@ def _sb_env(monkeypatch, fake_cls=None):
     from tests.fake_control_plane import FakeControlPlane
     from tests.test_export_delete import _enable_supabase
     fake = (fake_cls or FakeControlPlane)(
-        {"teams": [], "api_keys": [], "org_memberships": [],
+        {"organizations": [], "api_keys": [], "org_memberships": [],
          "invitations": [], "graphs": []})
     _sb_seed(fake)
     _enable_supabase(monkeypatch, fake)

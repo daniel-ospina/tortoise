@@ -82,7 +82,7 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB."""
     fake = FakeControlPlane(
-        {"teams": [], "api_keys": [], "org_memberships": [], "invitations": []}
+        {"organizations": [], "api_keys": [], "org_memberships": [], "invitations": []}
     )
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -108,7 +108,7 @@ def _seed_team(fake, *, suspended: bool = False, role: str = "owner", org_id: st
     team["id"] = org_id
     if suspended:
         team["suspended_at"] = "2026-08-01T00:00:00Z"
-    fake.seed("teams", [team])
+    fake.seed("organizations", [team])
     fake.seed("org_memberships", [_membership_row(role=role, org_id=org_id)])
 
 
@@ -206,10 +206,10 @@ class TestSuspendedTeamLockdown:
         _seed_team(fake, suspended=True)
         as_user()
         import tortoise.hosted_api as ha_mod
-        team_dict = {"org_id": ORG_ID, "tier": "free", "key_id": None,
+        org_dict = {"org_id": ORG_ID, "tier": "free", "key_id": None,
                      "session_user_id": OWNER}
         app.dependency_overrides[ha_mod.get_current_org_session] = \
-            lambda: dict(team_dict)
+            lambda: dict(org_dict)
         try:
             r = tc.delete(f"/v1/graphs/g_doesnotexist?org_id={ORG_ID}")
             _assert_suspended(r)
@@ -343,10 +343,10 @@ class TestSuspendedTeamLockdown:
         _seed_team(fake, suspended=False, org_id=_TEAM2)
         # a graph_name would make graph_list return 1 graph — the skip must
         # still yield graph_count 0 / default_graph_id None for the row.
-        fake.tables["teams"][0]["graph_name"] = "default"
+        fake.tables["organizations"][0]["graph_name"] = "default"
         # mirror: the HEALTHY row in the same mixed response must still
         # resolve its default graph.
-        fake.tables["teams"][1]["graph_name"] = "default"
+        fake.tables["organizations"][1]["graph_name"] = "default"
         as_user()
         r = tc.get("/v1/organizations")
         assert r.status_code == 200, r.text
@@ -428,8 +428,8 @@ class TestHealthyTeamControl:
         in play and the success path is what's asserted."""
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=False)
-        fake.tables["teams"][0]["tier"] = "pro"
-        fake.tables["teams"][0]["max_graphs"] = None
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
         as_user()
         r = tc.post("/v1/graphs", json={"org_id": ORG_ID, "name": "g1"})
         assert r.status_code == 201, r.text
@@ -443,8 +443,8 @@ class TestHealthyTeamControl:
         session_user_id, which the endpoint reads for the role check."""
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=False)
-        fake.tables["teams"][0]["tier"] = "pro"
-        fake.tables["teams"][0]["max_graphs"] = None
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
         as_user()
         r = tc.post("/v1/graphs", json={"org_id": ORG_ID, "name": "g1"})
         assert r.status_code == 201, r.text
@@ -453,10 +453,10 @@ class TestHealthyTeamControl:
         # established dual-auth session pattern — the dep dict carries
         # session_user_id, set by the real dependency's JWT lane).
         import tortoise.hosted_api as ha_mod
-        team_dict = {"org_id": ORG_ID, "tier": "pro", "key_id": None,
+        org_dict = {"org_id": ORG_ID, "tier": "pro", "key_id": None,
                      "session_user_id": OWNER}
         app.dependency_overrides[ha_mod.get_current_org_session] = \
-            lambda: dict(team_dict)
+            lambda: dict(org_dict)
         try:
             r = tc.delete(f"/v1/graphs/{gid}?org_id={ORG_ID}")
             assert r.status_code == 204, r.text
@@ -472,8 +472,8 @@ class TestHealthyTeamControl:
         admin only — parity with the key face's graphs:delete requirement)."""
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=False, role="member")
-        fake.tables["teams"][0]["tier"] = "pro"
-        fake.tables["teams"][0]["max_graphs"] = None
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
         as_user()
         r = tc.post("/v1/graphs", json={"org_id": ORG_ID, "name": "g1"})
         # A member CAN create (pre-existing E5 gates on membership only,
@@ -481,10 +481,10 @@ class TestHealthyTeamControl:
         assert r.status_code == 201, r.text
         gid = r.json()["graph"]["id"]
         import tortoise.hosted_api as ha_mod
-        team_dict = {"org_id": ORG_ID, "tier": "pro", "key_id": None,
+        org_dict = {"org_id": ORG_ID, "tier": "pro", "key_id": None,
                      "session_user_id": OWNER}
         app.dependency_overrides[ha_mod.get_current_org_session] = \
-            lambda: dict(team_dict)
+            lambda: dict(org_dict)
         try:
             r = tc.delete(f"/v1/graphs/{gid}?org_id={ORG_ID}")
             assert r.status_code == 403, r.text

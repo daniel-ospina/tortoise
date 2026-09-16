@@ -152,7 +152,7 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
         # both lanes; the endpoint resolves graph_name from teams.graph_name
         'f"org_{tid}"': "endpoint-constrained",  # Supabase-lane sweep seed write
-        '"team_team_x"': "read-only",                  # post-drill count assert
+        '"org_team_x"': "read-only",                  # post-drill count assert
         # #2313 custom-graph drill seeds (per-graph sweep/restore E2E); the
         # server-lane _clean_team_graphs fixture drops team_* graphs per test
         '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
@@ -175,7 +175,7 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     "test_mcp_server_auth_modes.py": {
         # #2657 TestAskConnectedAssemblyExposure finally-cleanup — deletes the
         # team_selfhost graph seeded by the auth_mode="none" ask fixture.
-        '"team_selfhost"': "endpoint-constrained",  # fixture's own seeded graph delete
+        '"org_selfhost"': "endpoint-constrained",  # fixture's own seeded graph delete
     },
     "test_onboarding_state_split.py": {
         'f"org_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
@@ -264,7 +264,7 @@ def _select_graph_literals():
             if end < 0 or end > 80:
                 continue  # malformed/opaque — not a static literal
             literal = body[:end]
-            if literal.startswith(("team_", "registry_")):
+            if literal.startswith(("org_", "registry_")):
                 line = src.count("\n", 0, m.start()) + 1
                 rendered = f"{quote}{literal}{quote}"
                 if is_f:

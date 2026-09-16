@@ -20,7 +20,7 @@ ALTER TABLE public.metering_records
     ADD COLUMN IF NOT EXISTS ask_cost_usd    double precision NOT NULL DEFAULT 0;
 
 CREATE OR REPLACE FUNCTION public.metering_increment_ask(
-    p_team_id    text,
+    p_org_id     text,
     p_period     text,
     p_calls      integer DEFAULT 1,
     p_tokens_in  integer DEFAULT 0,
@@ -35,7 +35,7 @@ AS $$
 BEGIN
     INSERT INTO public.metering_records
         (team_id, period, ask_calls, ask_tokens_in, ask_tokens_out, ask_cost_usd)
-    VALUES (p_team_id, p_period, p_calls, p_tokens_in, p_tokens_out, p_cost_usd)
+    VALUES (p_org_id, p_period, p_calls, p_tokens_in, p_tokens_out, p_cost_usd)
     ON CONFLICT (team_id, period)
     DO UPDATE SET
         ask_calls      = public.metering_records.ask_calls + p_calls,

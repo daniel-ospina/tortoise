@@ -239,7 +239,7 @@ def sb_client(monkeypatch):
     pin + close-at-restore still apply (anchors created mid-test via
     _export_graph_snapshot are reused, not evicted).
     """
-    fake = FakeControlPlane({"teams": [], "api_keys": [],
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -368,7 +368,7 @@ def _seed_supabase_team(fake, *, role: str = "owner", deleted_at: str | None = N
     team = dict(FREE_TEAM)
     if deleted_at:
         team["deleted_at"] = deleted_at
-    fake.seed("teams", [team])
+    fake.seed("organizations", [team])
     fake.seed("org_memberships", [_membership_row(role=role)])
     if with_key:
         fake.seed("api_keys", [_key_row()])
@@ -622,7 +622,7 @@ class TestDeleteSupabase:
         assert body["deleted_at"]
         assert body["hard_delete_after"] > body["deleted_at"]
 
-        by_id = {row["id"]: row for row in fake.tables["teams"]}
+        by_id = {row["id"]: row for row in fake.tables["organizations"]}
         assert by_id[ORG_ID]["deleted_at"] == body["deleted_at"]
         assert by_id[ORG_ID]["grace_hours"] == 24  # persisted promise
         assert fake.tables["api_keys"][0]["revoked_at"] == body["deleted_at"]
@@ -722,16 +722,16 @@ class TestDashboardCreatedTeamRoundTrip:
         org_id = r.json()["org_id"]
         assert r.json()["graph_name"] == f"org_{org_id}"
         dropped = []
-        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict",
+        monkeypatch.setattr(ha_mod, '_drop_org_graph_strict',
                             lambda tid, gn=None: dropped.append((tid, gn)))
         r = tc.delete(f"/v1/organizations/{org_id}")
         assert r.status_code == 202, r.text
         assert r.json()["grace_hours"] == 0  # env->stored promise pinned
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
         # exactly one drop, exactly the org_{org_id} target (suite precedent:
         # TestPurge asserts strict equality on the captured drop list)
         assert dropped == [(org_id, f"org_{org_id}")]  # Indicator 3
-        assert not any(t["id"] == org_id for t in fake.tables["teams"])
+        assert not any(t["id"] == org_id for t in fake.tables["organizations"])
         ops = [e["operation"] for e in capture_audit]
         assert "team_delete_purged" in ops
 
@@ -774,7 +774,7 @@ class TestExportDeleteRegistry:
         reg = sdk._get_registry()
         reg.query(
             "CREATE (t:Team {id:'reg-named', name:'Acme', tier:'free', "
-            "graph_name:'team_Acme'})"
+            "graph_name:'org_Acme'})"
         )
         reg.query(
             "CREATE (m:Membership {id:'m-2', user_id:'9f2c1a40-0000-4a00-8000-000000000002', "
@@ -875,10 +875,10 @@ class TestPurge:
                        deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         # wiring check: the graph drop is invoked for the purged team only
         dropped: list[str] = []
-        monkeypatch.setattr(ha_mod, "_drop_team_graph",
+        monkeypatch.setattr(ha_mod, '_drop_org_graph',
                             lambda org_id, graph_name=None: dropped.append(org_id))
 
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
 
         assert _registry_count(db_path, "Team", "reg-old") == 0
         assert _registry_count(db_path, "Membership", "reg-old") == 0
@@ -906,7 +906,7 @@ class TestPurge:
         _seed_registry(db_path, org_id="reg-env-old",
                        deleted_at=ten_hours)  # no stored grace → env 1h
 
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
 
         assert _registry_count(db_path, "Team", "reg-promised") == 1  # kept
         assert _registry_count(db_path, "Team", "reg-env-old") == 0  # purged
@@ -916,7 +916,7 @@ class TestPurge:
         tc, fake, _ = sb_client  # noqa: RUF059
         past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
         recent = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        fake.seed("teams", [
+        fake.seed("organizations", [
             dict(FREE_TEAM, deleted_at=past),
             dict(FREE_TEAM, id="team-recent", deleted_at=recent),
         ])
@@ -933,16 +933,16 @@ class TestPurge:
             "role": "member", "status": "pending", "expires_at": None,
         }])
 
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
 
         # team-free-001 control-plane rows hard-deleted (all tables)
-        assert all(r["id"] != ORG_ID for r in fake.tables["teams"])
+        assert all(r["id"] != ORG_ID for r in fake.tables["organizations"])
         assert all(r["org_id"] != ORG_ID for r in fake.tables["api_keys"])
         assert all(r["org_id"] != ORG_ID
                    for r in fake.tables["org_memberships"])
         assert fake.tables["invitations"] == []
         # within-grace team survives
-        assert any(r["id"] == "team-recent" for r in fake.tables["teams"])
+        assert any(r["id"] == "team-recent" for r in fake.tables["organizations"])
         ops = [e["operation"] for e in capture_audit]
         assert "team_delete_purged" in ops
 
@@ -955,7 +955,7 @@ class TestPurge:
         next sweep retries the drop to completion."""
         tc, fake, _ = sb_client  # noqa: RUF059
         past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
-        fake.seed("teams", [dict(FREE_TEAM, deleted_at=past),
+        fake.seed("organizations", [dict(FREE_TEAM, deleted_at=past),
                              dict(FREE_TEAM, id="team-other",
                                   deleted_at=past)])
         fake.seed("org_memberships", [_membership_row(),
@@ -968,17 +968,17 @@ class TestPurge:
                 raise RuntimeError("graph drop failed (fault injection, #926)")
             return None
 
-        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict", _flaky)
+        monkeypatch.setattr(ha_mod, '_drop_org_graph_strict', _flaky)
 
-        ha_mod._purge_deleted_teams()
+        ha_mod._purge_deleted_orgs()
 
         # retry anchor survives: teams row + child rows NOT purged
-        assert any(r["id"] == ORG_ID for r in fake.tables["teams"])
+        assert any(r["id"] == ORG_ID for r in fake.tables["organizations"])
         assert any(r["org_id"] == ORG_ID for r in fake.tables["api_keys"])
         assert any(r["org_id"] == ORG_ID
                    for r in fake.tables["org_memberships"])
         # ...and a failed drop never blocks OTHER past-grace teams
-        assert all(r["id"] != "team-other" for r in fake.tables["teams"])
+        assert all(r["id"] != "team-other" for r in fake.tables["organizations"])
         assert all(r["org_id"] != "team-other"
                    for r in fake.tables["api_keys"])
         ops = [e["operation"] for e in capture_audit]
@@ -986,10 +986,10 @@ class TestPurge:
         assert capture_audit[-1]["org_id"] == "team-other"
 
         # next sweep (drop healed, real strict impl) → row purged
-        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict",
-                            ha_mod._drop_team_graph_impl)
-        ha_mod._purge_deleted_teams()
-        assert all(r["id"] != ORG_ID for r in fake.tables["teams"])
+        monkeypatch.setattr(ha_mod, '_drop_org_graph_strict',
+                            ha_mod._drop_org_graph_impl)
+        ha_mod._purge_deleted_orgs()
+        assert all(r["id"] != ORG_ID for r in fake.tables["organizations"])
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 2
 
@@ -1024,15 +1024,15 @@ class TestDropTeamGraphImplCloudShape:
         monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
 
         # graph_name wins; the default org_{org_id} fallback also drops
-        ha_mod._drop_team_graph_impl("team-abc", "team_abc000000000000000000000")
-        ha_mod._drop_team_graph_impl("team-xyz")
+        ha_mod._drop_org_graph_impl("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_org_graph_impl("team-xyz")
 
         # the pre-#2163 code called NOTHING on this client (hasattr probe
         # false) — the regression pin is that both drops actually fired
         assert not hasattr(db, "delete_graph"), \
             "fixture must mirror the pip falkordb client (no delete_graph)"
         assert dropped == [
-            "team_abc000000000000000000000", "team_team-xyz"]
+            "team_abc000000000000000000000", "org_team-xyz"]
 
     def test_strict_drop_raises_when_graph_delete_fails(self, monkeypatch):
         """#926 retry-anchor contract: _drop_team_graph_strict propagates a
@@ -1048,9 +1048,9 @@ class TestDropTeamGraphImplCloudShape:
         monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
 
         with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
-            ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
+            ha_mod._drop_org_graph_strict("team-abc", "team_abc000000000000000000000")
         # best-effort variant swallows the same failure
-        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_org_graph("team-abc", "team_abc000000000000000000000")
 
     def test_strict_drop_converges_on_absent_graph(self, monkeypatch):
         """#2163 re-review P0: GRAPH.DELETE on an already-dropped graph
@@ -1074,8 +1074,8 @@ class TestDropTeamGraphImplCloudShape:
         monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
 
         # strict drop must NOT raise on the absent-graph family
-        ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
-        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_org_graph_strict("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_org_graph("team-abc", "team_abc000000000000000000000")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

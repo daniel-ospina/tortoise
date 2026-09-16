@@ -110,7 +110,7 @@ class TestTenantModeDefault:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create("tk-mcp-team")
+        team = reg.org_create("tk-mcp-team")
         # Mint a tk_ key via the C2 prefix kwarg (the provisioning lane's
         # credential class).
         key = reg.apikey_create(team["id"], "t", prefix="tk_")["api_key"]
@@ -142,7 +142,7 @@ class TestTenantModeDefault:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create("tk-mcp-deleg-team")
+        team = reg.org_create("tk-mcp-deleg-team")
         # deleg=0 minted per-graph key (the provisioning lane's credential
         # class — C2 _mint_graph_key stamps delegation_depth 0).
         key = reg.apikey_create(team["id"], "t", prefix="tk_",
@@ -453,7 +453,7 @@ class TestAskConnectedAssemblyExposure:
             return _json.loads(data_line)
         finally:
             with contextlib.suppress(Exception):
-                s._get_proj().db.select_graph("team_selfhost").delete()
+                s._get_proj().db.select_graph("org_selfhost").delete()
             with contextlib.suppress(Exception):
                 s.close()
             # the hermetic FakeReader was cached under ask:selfhost (the

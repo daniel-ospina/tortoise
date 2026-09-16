@@ -267,8 +267,8 @@ def test_serve_http_main_dispatch_tenant(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("auth_args,namespace", [
     (["--auth", "tenant"], "org_{id}"),
-    (["--auth", "static", "--api-key", "tt_x"], "team_selfhost"),
-    (["--auth", "none"], "team_selfhost"),
+    (["--auth", "static", "--api-key", "tt_x"], "org_selfhost"),
+    (["--auth", "none"], "org_selfhost"),
 ])
 def test_serve_http_namespace_note_all_modes_tilde_expansion(monkeypatch, capsys, auth_args, namespace):
     """#719 P2: the fresh-namespace isolation note must fire for EVERY HTTP auth
@@ -735,8 +735,8 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         body = _parse_sse_json(r)
         assert not body["result"]["isError"], body
 
-        team_sdk = TortoiseSDK(namespace=org_id)
-        pts = team_sdk._get_proj().g.query("MATCH (p:Point) RETURN count(p)").result_set
+        org_sdk = TortoiseSDK(namespace=org_id)
+        pts = org_sdk._get_proj().g.query("MATCH (p:Point) RETURN count(p)").result_set
         assert pts and pts[0][0] >= 1, "write must land in the team graph"
 
         # isolation: default 'tortoise' graph must NOT hold it

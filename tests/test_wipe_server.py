@@ -474,7 +474,7 @@ def test_team_registry_isolation_across_sequential_tests(server_proj, monkeypatc
     monkeypatch.setattr("tests._embedded._JOURNAL_FILE",
                         str(tmp_path / "isolation.graphs.jsonl"))
     import tortoise.backup_sweep as bs
-    fake_org_names = iter(["test_team_0_tortoise", "test_team_1_tortoise"])
+    fake_org_names = iter(["test_org_0_tortoise", "test_org_1_tortoise"])
     monkeypatch.setattr(
         bs, "org_graph_name", lambda registry, org_id: next(fake_org_names))
     for i in range(2):
@@ -1024,65 +1024,81 @@ def test_session_end_sweep_drops_journaled_team_graph(uri_env, monkeypatch, tmp_
 
 
 def test_leftover_team_strays_dropped_when_opted_in(uri_env, monkeypatch):
-    """#1686 closure (review P1-1 fix): the journal-blind team_* residual
-    class is closed by _sweep_team_strays, but ONLY when allowed — an
-    explicit TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in (never inferred from
-    the URI path since #1884; a pathless shared/dev docker never triggers
-    it). The helper is exercised DIRECTLY (no mid-suite global wipe — the
-    last-suite-standing gate is conftest's, not this helper's; review
-    P1-2)."""
+    """#1686 closure (review P1-1 fix): the journal-blind product-namespace
+    residual class is closed by _sweep_team_strays, but ONLY when allowed —
+    an explicit TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in (never inferred
+    from the URI path since #1884; a pathless shared/dev docker never
+    triggers it). The helper is exercised DIRECTLY (no mid-suite global
+    wipe — the last-suite-standing gate is conftest's, not this helper's;
+    review P1-2).
+
+    Both mint-namespace generations are reclaimed: `org_` (current, #3543)
+    and `team_` (graphs minted before the rename). A sweep that matches
+    only the legacy prefix is a silent no-op and lets strays re-accumulate
+    — the #2850-class DB-full disease."""
     from tests._embedded import _sweep_team_strays
     from tortoise.projection import FalkorProjection
 
     monkeypatch.setenv("TORTOISE_TEST_SWEEP_TEAM_STRAYS", "1")
-    stray = "team_ws_stray_8f3a"
+    stray = "org_ws_stray_8f3a"
+    legacy_stray = "team_ws_stray_8f3a"
     proj = FalkorProjection.from_uri(
         "docker://:falkordb@localhost:6379", graph_name="test_ws_leftover_probe")
     try:
-        proj.db.select_graph(stray).query("CREATE (:TeamMeta {name:'stray'})")
+        for name in (stray, legacy_stray):
+            proj.db.select_graph(name).query("CREATE (:TeamMeta {name:'stray'})")
         dropped = _sweep_team_strays(proj, os.environ["TORTOISE_DB_URI"])
         assert stray in dropped, f"expected {stray} dropped, got {dropped!r}"
+        assert legacy_stray in dropped, \
+            f"expected pre-rename {legacy_stray} reclaimed too, got {dropped!r}"
         remaining = proj.db.list_graphs() or []
         assert stray not in remaining
+        assert legacy_stray not in remaining
     finally:
         proj.close()
 
 
 def test_leftover_team_strays_refused_on_shared_docker(uri_env, monkeypatch):
     """#1686 default-fail-safe (review P1-1): a pathless shared/dev URI does
-    NOT trigger the team_* pass without the explicit opt-in — team_<name> is
-    the product's mint namespace and real tenant graphs must survive on a
-    shared docker. The stray is cleaned up directly by the test itself."""
+    NOT trigger the product-namespace pass without the explicit opt-in —
+    the current mint namespace (`org_<name>`, #3543) holds REAL tenant
+    graphs and must survive on a shared docker. The stray is cleaned up
+    directly by the test itself."""
     from tests._embedded import _sweep_team_strays
     from tortoise.projection import FalkorProjection
 
     monkeypatch.delenv("TORTOISE_TEST_SWEEP_TEAM_STRAYS", raising=False)
-    stray = "team_ws_stray_keep"
+    stray = "org_ws_stray_keep"
+    legacy_stray = "team_ws_stray_keep"
     proj = FalkorProjection.from_uri(
         "docker://:falkordb@localhost:6379", graph_name="test_ws_leftover_probe")
     try:
-        proj.db.select_graph(stray).query("CREATE (:TeamMeta {name:'keep'})")
+        for name in (stray, legacy_stray):
+            proj.db.select_graph(name).query("CREATE (:TeamMeta {name:'keep'})")
         dropped = _sweep_team_strays(proj, "docker://:falkordb@localhost:6379")
         assert dropped == [], f"shared-docker sweep must refuse, got {dropped!r}"
         remaining = proj.db.list_graphs() or []
         assert stray in remaining, "product-named graph must survive"
+        assert legacy_stray in remaining, "pre-rename product graph must survive"
     finally:
-        proj.db.select_graph(stray).query("MATCH (n) DETACH DELETE n")
-        proj.db.select_graph(stray).delete()
+        for name in (stray, legacy_stray):
+            proj.db.select_graph(name).query("MATCH (n) DETACH DELETE n")
+            proj.db.select_graph(name).delete()
         proj.close()
 
 
 def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
     """#1884 regression: the LONGMEM_EVAL URI (docker://.../tortoise_test_
     matrix — the shared dev container's test-named graph) does NOT trigger
-    the journal-blind team_* pass without the explicit opt-in. The
-    re-validation ran per-question graphs named team_default__default__{qid}
-    against this exact URI; a concurrent docker-lane pytest session ending
-    last-suite-standing inferred "dedicated test DB" from the "test" path
-    substring and DETACH-DELETEd + GRAPH.DELETEd the eval's LIVE graphs
-    mid-ingest (silent write loss: pool_size 8 vs 374 ingested points). The
-    opt-in-only gate makes the eval's graphs survive any concurrent test
-    session's sweep on the shared container."""
+    the journal-blind product-namespace pass without the explicit opt-in.
+    The re-validation ran per-question graphs (named team_default__default__
+    {qid} then; minted org_* today) against this exact URI; a concurrent
+    docker-lane pytest session ending last-suite-standing inferred
+    "dedicated test DB" from the "test" path substring and DETACH-DELETEd +
+    GRAPH.DELETEd the eval's LIVE graphs mid-ingest (silent write loss:
+    pool_size 8 vs 374 ingested points). The opt-in-only gate makes the
+    eval's graphs survive any concurrent test session's sweep on the shared
+    container."""
     from tests._embedded import _sweep_team_strays, _team_sweep_allowed
     from tortoise.projection import FalkorProjection
 
@@ -1093,7 +1109,7 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
     # the retracted inference: the URI path says "test" but the gate refuses
     assert _team_sweep_allowed(eval_uri) is False, \
         "URI-path 'test' inference must be retracted (#1884)"
-    stray = f"team_ws_eval_stray_{uuid.uuid4().hex[:8]}"
+    stray = f"org_ws_eval_stray_{uuid.uuid4().hex[:8]}"
     proj = FalkorProjection.from_uri(
         "docker://:falkordb@localhost:6379", graph_name="test_ws_evalsweep_probe")
     try:
@@ -1103,7 +1119,8 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
             f"eval-URI sweep must refuse without opt-in, got {dropped!r}"
         remaining = proj.db.list_graphs() or []
         assert stray in remaining, \
-            "eval question graphs (team_*) must survive a concurrent session's sweep"
+            "eval question graphs (product-namespace) must survive a " \
+            "concurrent session's sweep"
     finally:
         proj.db.select_graph(stray).query("MATCH (n) DETACH DELETE n")
         proj.db.select_graph(stray).delete()

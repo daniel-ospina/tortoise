@@ -267,7 +267,7 @@ def test_sweep_noop_run_preserves_previous_rollup(shared_proj):
         # no eligible Pro teams -> no-op run (no_teams branch)
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store, config=_config(
-                team_sweep_enabled=False),
+                org_sweep_enabled=False),
         )
         assert res["status"] == "no_teams"
         state = read_ops_state(store)
@@ -339,9 +339,9 @@ def test_sweep_backs_up_team_and_writes_state(shared_proj):
         )
         assert res["status"] == "backed_up"
         assert res["teams_backed_up"] == 1
-        team_res = res["results"]["team_x"]
-        assert team_res["status"] == "backed_up"
-        assert team_res["node_count"] == 1
+        org_res = res["results"]["team_x"]
+        assert org_res["status"] == "backed_up"
+        assert org_res["node_count"] == 1
         # P0-guard: manifest names the right graph with data.
         keys = [k for k in store.list("backups/team_x/") if k.endswith("manifest.json")]
         assert len(keys) == 1
@@ -364,8 +364,8 @@ def test_sweep_size_guard_aborts_before_dump(shared_proj):
             db=proj.db, registry=reg, storage=store,
             config=_config(size_guard_max_nodes=0),
         )
-        team_res = res["results"]["team_x"]
-        assert team_res["status"] == "aborted_size_guard"
+        org_res = res["results"]["team_x"]
+        assert org_res["status"] == "aborted_size_guard"
         assert any(i["kind"] == "SIZE_GUARD_ABORT" for i in res["incidents"])
         assert not [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")]
 
@@ -386,8 +386,8 @@ def test_sweep_data_loss_candidate_on_transition(shared_proj):
         # Wipe the graph → second sweep: transition fires, NO state write.
         proj.db.select_graph(_team_graph("team_x")).query("MATCH (n) DETACH DELETE n")
         res2 = run_backup_sweep(db=proj.db, registry=reg, storage=store, config=_config())
-        team_res = res2["results"]["team_x"]
-        assert team_res["status"] == "data_loss_candidate"
+        org_res = res2["results"]["team_x"]
+        assert org_res["status"] == "data_loss_candidate"
         assert any(i["kind"] == "DATA_LOSS_CANDIDATE" for i in res2["incidents"])
         # state.json NOT updated on fire (guard ordering).
         assert read_org_state(store, "team_x")["node_count"] == 1
@@ -405,9 +405,9 @@ def test_sweep_steady_zero_never_fires(shared_proj):
         proj.db.select_graph(_team_graph("team_e"))  # exists, empty
         store = MemoryStorage()
         res = run_backup_sweep(db=proj.db, registry=reg, storage=store, config=_config())
-        team_res = res["results"]["team_e"]
+        org_res = res["results"]["team_e"]
         # Steady-0 is skipped (empty archives never stand) — no incident.
-        assert team_res["status"] == "empty_skipped"
+        assert org_res["status"] == "empty_skipped"
         assert not any(i["kind"] == "DATA_LOSS_CANDIDATE" for i in res["incidents"])
 
 
@@ -437,8 +437,8 @@ def test_sweep_p0_guard_deletes_wrong_graph_upload(shared_proj):
             res = run_backup_sweep(db=proj.db, registry=reg, storage=store, config=_config())
         finally:
             bs.create_backup = real
-        team_res = res["results"]["team_x"]
-        assert team_res["status"] == "p0_guard_failed"
+        org_res = res["results"]["team_x"]
+        assert org_res["status"] == "p0_guard_failed"
         assert any(i["kind"] == "P0_GUARD_FAIL" for i in res["incidents"])
         assert not [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")]
 
@@ -519,7 +519,7 @@ def test_team_sweep_backs_up_pro_team_and_prunes(shared_proj):
 
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store,
-            config=_config(team_sweep_enabled=True),
+            config=_config(org_sweep_enabled=True),
         )
         assert res["status"] == "backed_up"
         assert res["teams_backed_up"] == 1
@@ -560,7 +560,7 @@ def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
 
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store,
-            config=_config(team_sweep_enabled=True),
+            config=_config(org_sweep_enabled=True),
         )
         assert res["status"] == "no_eligible_teams"
         assert res["teams_backed_up"] == 0
@@ -578,7 +578,7 @@ def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
         # Re-run: incident is returned again (dedup is the alert store's job).
         res2 = run_backup_sweep(
             db=proj.db, registry=reg, storage=store,
-            config=_config(team_sweep_enabled=True),
+            config=_config(org_sweep_enabled=True),
         )
         assert any(
             i["kind"] == "NO_ELIGIBLE_TEAMS" for i in res2["incidents"]
@@ -607,7 +607,7 @@ def test_team_sweep_flag_off_backs_up_all_teams(shared_proj):
 
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store,
-            config=_config(team_sweep_enabled=False),
+            config=_config(org_sweep_enabled=False),
         )
         # Both free teams backed up (legacy behavior preserved).
         assert res["status"] == "backed_up"
@@ -636,7 +636,7 @@ def test_team_sweep_enum_failure_when_enabled(shared_proj):
         store = MemoryStorage()
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store,
-            config=_config(team_sweep_enabled=True),
+            config=_config(org_sweep_enabled=True),
         )
         assert res["status"] == "enum_failed"
         assert "eligible-team enumeration failed" in res["error"]
@@ -696,9 +696,9 @@ def test_sweep_missing_registry_stream_key_fail_closed(shared_proj):
             db=proj.db, registry=reg, storage=store,
             config=_config(registry_stream_key=b"", backup_key=b"k" * 32),
         )
-        team_res = res["results"]["team_x"]
-        assert team_res["status"] == "error"
-        assert "REGISTRY_STREAM_KEY" in team_res["error"]
+        org_res = res["results"]["team_x"]
+        assert org_res["status"] == "error"
+        assert "REGISTRY_STREAM_KEY" in org_res["error"]
         # No backup objects were uploaded.
         assert not [
             k for k in store.list("backups/team_x/") if k.endswith("dump.enc")
@@ -756,11 +756,11 @@ def test_sweep_per_label_drift_catches_small_label_wipe(shared_proj):
             db=proj.db, registry=reg, storage=store,
             config=_config(),
         )
-        team_res = res2["results"]["team_x"]
+        org_res = res2["results"]["team_x"]
 
         # The per-label guard fires: 5→3 Invitation nodes (40% drop, 5 < floor=10
         # → absolute floor — any drop fires).
-        assert team_res["status"] == "data_loss_candidate"
+        assert org_res["status"] == "data_loss_candidate"
         assert any(i["kind"] == "DATA_LOSS_CANDIDATE" for i in res2["incidents"])
 
         # The incident detail must name the breached label.
@@ -883,7 +883,7 @@ from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane  # noqa
 
 
 def _fake_teams() -> FakeControlPlane:
-    return FakeControlPlane().seed("teams", [
+    return FakeControlPlane().seed("organizations", [
         {"id": "team_a", "graph_name": "team_alpha", "tier": "free", "backup_enabled": False},
         {"id": "team_b", "graph_name": _BETA_GRAPH, "tier": "pro", "backup_enabled": True},
         {"id": "team_c", "graph_name": _GAMMA_GRAPH, "tier": "enterprise", "backup_enabled": True},
@@ -986,7 +986,7 @@ def test_sweep_reports_resolved_source_in_ops_state(shared_proj):
     # A REAL run's two provenance fields agree by definition.
     assert first["last_run_source"] == "registry"
     # The lane flips; the next run enumerates 0 teams FROM THE SUPABASE LANE.
-    empty_cp = FakeControlPlane().seed("teams", [])
+    empty_cp = FakeControlPlane().seed("organizations", [])
     assert source_dialect(empty_cp) == "supabase"
     res2 = run_backup_sweep(
         db=proj.db, registry=empty_cp, storage=store, config=_config(),
@@ -1036,7 +1036,7 @@ def test_enumerate_teams_empty_supabase_read_is_confirmed_empty(monkeypatch):
     on the >0 → 0 transition (#2821), not a refusal here."""
     monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                         lambda: True)
-    empty = FakeControlPlane().seed("teams", [])
+    empty = FakeControlPlane().seed("organizations", [])
     assert enumerate_orgs(empty) == []
     assert enumerate_eligible_orgs(empty) == []
 
@@ -1076,7 +1076,7 @@ def test_team_graph_name_reads_from_teams(shared_proj):
             return
         wipe(proj)
         reg = proj.db.select_graph(_REGISTRY_GRAPH)
-        assert org_graph_name(reg, "team_x") == "team_team_x"
+        assert org_graph_name(reg, "team_x") == "org_team_x"
         pass  # shared session projection — fixture owns close
 
 
@@ -1085,7 +1085,7 @@ def test_team_graph_name_supabase_fail_closed():
     with pytest.raises(RuntimeError, match="vanished from the control plane"):
         org_graph_name(_fake_teams(), "team_ghost")
     with pytest.raises(RuntimeError, match="no graph_name"):
-        cp = FakeControlPlane().seed("teams", [{"id": "team_b", "graph_name": None}])
+        cp = FakeControlPlane().seed("organizations", [{"id": "team_b", "graph_name": None}])
         org_graph_name(cp, "team_b")
     with pytest.raises(RuntimeError, match="graph-name lookup failed"):
         org_graph_name(ErrorControlPlane(), "team_b")
@@ -1104,7 +1104,7 @@ def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
         g = proj.db.select_graph(_MYAPP_GRAPH)
         g.query("CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
         g.query("CREATE (p:Point {id:'pt-1', content:'c2', pointKind:'claim'})")
-        cp = FakeControlPlane().seed("teams", [
+        cp = FakeControlPlane().seed("organizations", [
             {"id": "team_x", "graph_name": _MYAPP_GRAPH, "tier": "pro",
              "backup_enabled": True},
             # A team whose graph does not exist — the size-guard COUNT fails
@@ -1117,15 +1117,15 @@ def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
             db=proj.db, registry=cp, storage=store, config=_config(),
         )
         assert res["status"] == "backed_up"
-        team_res = res["results"]["team_x"]
-        assert team_res["status"] == "backed_up"
-        assert team_res["node_count"] == 2
+        org_res = res["results"]["team_x"]
+        assert org_res["status"] == "backed_up"
+        assert org_res["node_count"] == 2
         keys = [k for k in store.list("backups/team_x/") if k.endswith("manifest.json")]
         assert len(keys) == 1
         manifest = json.loads(store.download(keys[0]))
         assert manifest["graph_name"] == _MYAPP_GRAPH  # from teams, not org_{id}
         # Stamps land on the team's Supabase row (PATCH via the fake).
-        row = cp.query("teams", select=["backup_latest_at"],
+        row = cp.query("organizations", select=["backup_latest_at"],
                        filters=[("id", "eq", "team_x")])
         assert row[0]["backup_latest_at"]
         # team_ghost: its graph is empty in the data plane → skipped as a
@@ -1153,7 +1153,7 @@ def test_team_sweep_supabase_eligible_only(shared_proj):
         store = MemoryStorage()
         res = run_backup_sweep(
             db=proj.db, registry=cp, storage=store,
-            config=_config(team_sweep_enabled=True),
+            config=_config(org_sweep_enabled=True),
         )
         assert res["status"] == "backed_up"
         assert res["results"]["team_b"]["status"] == "backed_up"
@@ -1199,7 +1199,7 @@ def test_sweep_supabase_resolution_flap_fires_incident(shared_proj):
                     raise RuntimeError("Supabase blip (simulated)")
                 return super().query(table, *args, **kwargs)
 
-        cp = ResolutionFlap().seed("teams", [
+        cp = ResolutionFlap().seed("organizations", [
             {"id": "team_x", "graph_name": _MYAPP_GRAPH, "tier": "pro",
              "backup_enabled": True},
             {"id": "team_y", "graph_name": "team_yourapp", "tier": "pro",
@@ -1234,14 +1234,14 @@ def test_sweep_supabase_partial_resolution_failure_is_isolated(shared_proj):
 
         class ResolutionFlap(FakeControlPlane):
             def query(self, table, *args, **kwargs):
-                if kwargs.get("select") == ["graph_name"] and table == "teams":
-                    rows = [r for r in self.tables.get("teams", [])
+                if kwargs.get("select") == ["graph_name"] and table == "organizations":
+                    rows = [r for r in self.tables.get("organizations", [])
                             if r["id"] == kwargs["filters"][0][2]]
                     if rows and rows[0]["id"] == "team_bad":
                         raise RuntimeError("Supabase blip (simulated)")
                 return super().query(table, *args, **kwargs)
 
-        cp = ResolutionFlap().seed("teams", [
+        cp = ResolutionFlap().seed("organizations", [
             {"id": "team_good", "graph_name": _MYAPP_GRAPH, "tier": "pro",
              "backup_enabled": True},
             {"id": "team_bad", "graph_name": "team_yourapp", "tier": "pro",
@@ -1280,7 +1280,7 @@ def test_sweep_supabase_stamp_blip_is_best_effort(shared_proj):
                     raise RuntimeError("Supabase blip (simulated)")
                 return super().query(table, *args, **kwargs)
 
-        cp = StampBlip().seed("teams", [
+        cp = StampBlip().seed("organizations", [
             {"id": "team_x", "graph_name": _MYAPP_GRAPH, "tier": "pro",
              "backup_enabled": True},
         ])
@@ -1293,7 +1293,7 @@ def test_sweep_supabase_stamp_blip_is_best_effort(shared_proj):
         assert any(k.endswith("dump.enc") for k in store.list("backups/team_x/"))
         assert res["incidents"] == []
         # No stamp landed (the PATCH failed) — but the backup is durable.
-        row = cp.query("teams", select=["backup_latest_at"],
+        row = cp.query("organizations", select=["backup_latest_at"],
                        filters=[("id", "eq", "team_x")])
         assert row[0]["backup_latest_at"] is None
         pass  # shared session projection — fixture owns close
@@ -1335,12 +1335,12 @@ def test_sweep_backs_up_default_plus_custom_graphs(shared_proj):
         res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                                config=_config())
         assert res["status"] == "backed_up"
-        team_res = res["results"]["team_mg"]
-        assert team_res["status"] == "backed_up"
-        assert set(team_res["graphs"].keys()) == {"default", "g_aaa", "g_bbb"}
-        assert team_res["graphs"]["g_aaa"]["status"] == "backed_up"
-        assert team_res["graphs"]["g_aaa"]["node_count"] == 1
-        assert team_res["graphs"]["g_bbb"]["node_count"] == 2
+        org_res = res["results"]["team_mg"]
+        assert org_res["status"] == "backed_up"
+        assert set(org_res["graphs"].keys()) == {"default", "g_aaa", "g_bbb"}
+        assert org_res["graphs"]["g_aaa"]["status"] == "backed_up"
+        assert org_res["graphs"]["g_aaa"]["node_count"] == 1
+        assert org_res["graphs"]["g_bbb"]["node_count"] == 2
         # Per-graph artifacts are graph-keyed; the default is the literal
         # segment "default" (Q4 owner decision).
         for gid, n in (("default", 1), ("g_aaa", 1), ("g_bbb", 2)):
@@ -1386,11 +1386,11 @@ def test_sweep_skips_deleted_custom_tombstone(shared_proj):
         store = MemoryStorage()
         res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                                config=_config())
-        team_res = res["results"]["team_tomb"]
-        assert team_res["status"] == "backed_up"
-        assert set(team_res["graphs"].keys()) == {"default"}
+        org_res = res["results"]["team_tomb"]
+        assert org_res["status"] == "backed_up"
+        assert set(org_res["graphs"].keys()) == {"default"}
         assert store.list("backups/team_tomb/g_dead/") == []
-        assert "default" not in team_res["graphs"].get("g_dead", {})
+        assert "default" not in org_res["graphs"].get("g_dead", {})
 
 
 @pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
@@ -1419,9 +1419,9 @@ def test_sweep_custom_size_guard_is_per_graph(shared_proj):
         store = MemoryStorage()
         res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                                config=_config(size_guard_max_nodes=10))
-        team_res = res["results"]["team_sz"]
-        assert team_res["graphs"]["default"]["status"] == "backed_up"
-        assert team_res["graphs"]["g_big"]["status"] == "aborted_size_guard"
+        org_res = res["results"]["team_sz"]
+        assert org_res["graphs"]["default"]["status"] == "backed_up"
+        assert org_res["graphs"]["g_big"]["status"] == "aborted_size_guard"
         assert store.list("backups/team_sz/g_big/") == []
         aborts = [i for i in res["incidents"]
                   if i["kind"] == "SIZE_GUARD_ABORT"]
@@ -1458,8 +1458,8 @@ def test_sweep_drains_legacy_flat_pool_leaves_nested(shared_proj):
         }).encode())
         res = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                                config=_config(retention_weekly=0))
-        team_res = res["results"]["team_drain"]
-        assert team_res["graphs"]["default"]["status"] == "backed_up"
+        org_res = res["results"]["team_drain"]
+        assert org_res["graphs"]["default"]["status"] == "backed_up"
         # legacy flat object drained (its manifest is gone)
         assert not [k for k in store.list("backups/team_drain/")
                     if k.endswith("manifest.json") and
@@ -1705,9 +1705,9 @@ def test_sweep_writes_flat_index_and_prunes_custom_flats_on_default_failure(shar
         monkeypatch.setattr(bs_mod, "_backup_graph", _default_fails)
         r2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
                               config=_config())
-        team_res = r2["results"]["team_fi"]
-        assert team_res["graphs"]["default"]["status"] == "error"
-        assert team_res["graphs"]["g_c1"]["status"] == "backed_up"
+        org_res = r2["results"]["team_fi"]
+        assert org_res["graphs"]["default"]["status"] == "error"
+        assert org_res["graphs"]["g_c1"]["status"] == "backed_up"
         # custom-era flat gone; default flat retained (recovery source)
         assert store.list(f"backups/{default_bid}/"), "default flat drained while failing"
         assert store.list(f"backups/{custom_bid}/") == []
@@ -2046,7 +2046,7 @@ def test_purge_skips_team_whose_lock_is_stuck(shared_proj, monkeypatch):
         deleted_at=(datetime.now(UTC) - timedelta(days=30)).isoformat())
     import tortoise.backup_sweep as bs_mod
 
-    monkeypatch.setattr(bs_mod, "_TEAM_LOCK_TIMEOUT_S", 1)
+    monkeypatch.setattr(bs_mod, "_ORG_LOCK_TIMEOUT_S", 1)
     import threading as _threading
 
     held = _threading.Lock()
@@ -2084,7 +2084,7 @@ def test_purge_drops_erased_graphs_from_ops_state_rollup(shared_proj):
         "CREATE (g:Graph {id:$gid, org_id:'team_x', name:$gid, "
         "kind:'custom', namespace:$ns, status:'deleted', "
         "deleted_at:$da, purged_at:null})",
-        params={"gid": ghost, "ns": f"team_team_x_{ghost}",
+        params={"gid": ghost, "ns": f"org_team_x_{ghost}",
                 "da": (datetime.now(UTC) - timedelta(days=30)).isoformat()})
     store.upload(
         OPS_STATE_KEY,

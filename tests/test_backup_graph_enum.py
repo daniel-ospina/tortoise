@@ -17,7 +17,7 @@ class _FakeGraphsTable:
     (teams row + graphs rows)."""
 
     def __init__(self, teams_row: dict, graphs_rows: list[dict]):
-        self._teams = teams_row
+        self._orgs = teams_row
         self._graphs = graphs_rows
 
     def query(self, table: str, *, select=None, filters=None, order=None):
@@ -25,8 +25,8 @@ class _FakeGraphsTable:
         #   teams: select id,graph_name filters [("id","eq",org_id)]
         #   graphs: select recording filters [("org_id","eq",..),("kind","eq","default")]
         #   graphs: select [...] filters team/custom/active order created_at
-        if table == "teams":
-            return [self._teams]
+        if table == "organizations":
+            return [self._orgs]
         fl = {k: v for (k, op, v) in (filters or [])}
         if fl.get("kind") == "default":
             rows = [r for r in self._graphs if r["kind"] == "default"]

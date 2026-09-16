@@ -114,7 +114,7 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 @pytest.fixture
 def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB."""
-    fake = FakeControlPlane({"teams": [], "api_keys": [],
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -170,7 +170,7 @@ def _seed_team(fake, *, role: str = "owner", deleted_at: str | None = None,
         team["max_points"] = max_points
     if deleted_at:
         team["deleted_at"] = deleted_at
-    fake.seed("teams", [team])
+    fake.seed("organizations", [team])
     fake.seed("org_memberships", [_membership_row(role=role)])
     fake.seed("api_keys", [_key_row()])
 
@@ -552,7 +552,7 @@ class TestImportValidationFailClosed:
         key = os.urandom(32)
         artifact = _build_artifact(_build_payload(), key, tamper_blob=True)
         assert _post_import(tc, artifact, key).status_code == 422
-        rows = fake.tables["teams"]
+        rows = fake.tables["organizations"]
         assert rows and rows[0].get("last_import_quarantined_sha256")
 
 
@@ -590,7 +590,7 @@ class TestImportForeignKindsGuard:
         assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
         # ledger NOT stamped → re-import of the same artifact re-validates
         # (quarantine stamps a separate key; last_import_sha256 is untouched)
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
 
     def test_import_v1_1_empty_packs_foreign_kind_422(self, sb_client, as_user,
                                                       capture_audit):
@@ -697,7 +697,7 @@ class TestImportPackConfigShape422:
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
         # ledger NOT stamped; quarantine prop IS stamped
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert not row.get("last_import_sha256")
         assert row.get("last_import_quarantined_sha256")
 
@@ -720,7 +720,7 @@ class TestImportPackConfigShape422:
         assert "pack_config" in r.json()["detail"]
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == []
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
 
     def test_dual_fault_shape_fires_before_foreign_kind_guard(
             self, sb_client, as_user, capture_audit):
@@ -746,7 +746,7 @@ class TestImportPackConfigShape422:
         assert "predates pack-config" not in r.json()["detail"]
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == []
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -792,7 +792,7 @@ class TestImportPackConfigApplyFailures:
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         # swap LANDED (pack failure is post-swap) but ledger NOT stamped
         assert _counts(db_path)["ids"] == ["pt-0"]
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert not row.get("last_import_sha256")  # cleared / never stamped
         expected = hashlib.sha256(_canonical(payload)).hexdigest()
         assert row.get("last_import_quarantined_sha256") == expected
@@ -816,7 +816,7 @@ class TestImportPackConfigApplyFailures:
         assert r.status_code == 422, r.text
         assert "unknown starter pack" in r.json()["detail"]
         assert _counts(db_path)["ids"] == ["pt-0"]
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
         r2 = _post_import(tc, artifact, key)
         assert r2.status_code == 422, r2.text
         assert "unknown starter pack" in r2.json()["detail"]
@@ -835,7 +835,7 @@ class TestImportPackConfigApplyFailures:
         r = _post_import(tc, artifact, key)
         assert r.status_code == 422, r.text
         assert "nesting too deep" in r.json()["detail"]
-        assert not fake.tables["teams"][0].get("last_import_sha256")
+        assert not fake.tables["organizations"][0].get("last_import_sha256")
 
     def test_rollback_prior_artifact_after_pack_failure(self, sb_client,
                                                         as_user):
@@ -853,7 +853,7 @@ class TestImportPackConfigApplyFailures:
         assert r_a.status_code == 200, r_a.text
         assert r_a.json()["imported"] is True
         sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
         # B: broken pack config (invalid manifest) — same key, new sha
         payload_b = self._payload("namespace: [broken", n_points=2)
         artifact_b = _build_artifact(payload_b, key)
@@ -862,14 +862,14 @@ class TestImportPackConfigApplyFailures:
         assert "invalid YAML" in r_b.json()["detail"]
         # ledger CLEARED (distinguishes clear-from-reorder-only: B's sha is
         # NOT what sits in last_import_sha256 — it must be falsy)
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert not row.get("last_import_sha256")  # cleared, not A and not B
         # re-import A → RE-SWAP (imported true), not already
         r_a2 = _post_import(tc, artifact_a, key)
         assert r_a2.status_code == 200, r_a2.text
         assert r_a2.json()["imported"] is True
         assert r_a2.json()["already"] is False
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
 
     def test_clear_path_stamp_failure_still_422(self, sb_client, as_user,
                                                 monkeypatch, caplog):
@@ -929,12 +929,12 @@ class TestImportPackConfigApplyFailures:
         r1 = _post_import(tc, artifact, key)
         assert r1.status_code == 422, r1.text
         assert "transient pack env failure" in r1.json()["detail"]
-        assert fake.tables["teams"][0].get("last_import_quarantined_sha256") == sha
+        assert fake.tables["organizations"][0].get("last_import_quarantined_sha256") == sha
         # 2: same sha, env fixed → 200 imported; quarantine cleared
         r2 = _post_import(tc, artifact, key)
         assert r2.status_code == 200, r2.text
         assert r2.json()["imported"] is True
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha
         assert not row.get("last_import_quarantined_sha256")
         # 3: same sha → already (quarantine consultation passes)
@@ -985,13 +985,13 @@ class TestImportPackConfigApplyFailures:
         # 1: transient apply failure → 422, quarantine stamped (Q=sha)
         r1 = _post_import(tc, artifact, key)
         assert r1.status_code == 422, r1.text
-        assert fake.tables["teams"][0].get("last_import_quarantined_sha256") == sha
+        assert fake.tables["organizations"][0].get("last_import_quarantined_sha256") == sha
         # 2: same sha, env fixed → 200 imported; L=sha, Q-clear FAILS → Q stays sha;
         # the pack-failure marker still clears (independent best-effort writes)
         r2 = _post_import(tc, artifact, key)
         assert r2.status_code == 200, r2.text
         assert r2.json()["imported"] is True
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha
         assert row.get("last_import_quarantined_sha256") == sha  # Q clear failed
         assert not row.get("last_import_pack_failed_sha256")  # marker cleared
@@ -1018,7 +1018,7 @@ class TestImportPackConfigApplyFailures:
         sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
         r_a = _post_import(tc, artifact_a, key)
         assert r_a.status_code == 200, r_a.text
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
         # B: pre-restore rejection (foreign kind, no pack_config) — Q=B stamped,
         # graph untouched, NO pack-failure marker
         payload_b = _build_payload(n_points=1, n_edges=0)
@@ -1026,7 +1026,7 @@ class TestImportPackConfigApplyFailures:
         artifact_b = _build_artifact(payload_b, key)
         r_b = _post_import(tc, artifact_b, key)
         assert r_b.status_code == 422, r_b.text
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_quarantined_sha256") != sha_a
         assert not row.get("last_import_pack_failed_sha256")
         assert row.get("last_import_sha256") == sha_a  # A untouched
@@ -1078,21 +1078,21 @@ class TestImportPackConfigApplyFailures:
         sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
         r_a = _post_import(tc, artifact_a, key)
         assert r_a.status_code == 200, r_a.text
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
         # B: broken manifest → 422 post-swap; L-clear blips → L stays A (stale),
         # marker=B
         payload_b = self._payload("namespace: [broken", n_points=2)
         artifact_b = _build_artifact(payload_b, key)
         r_b = _post_import(tc, artifact_b, key)
         assert r_b.status_code == 422, r_b.text
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha_a  # stale (clear blipped)
         assert row.get("last_import_pack_failed_sha256") != sha_a
         # re-import A: swap lands, pack apply FAILS (2nd call) → 422; marker=A
         r_a2 = _post_import(tc, artifact_a, key)
         assert r_a2.status_code == 422, r_a2.text
         assert "pack env failure on A re-import" in r_a2.json()["detail"]
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_pack_failed_sha256") == sha_a  # marker=A
         # re-import A again → NOT already (marker==sha_a blocks the lie) → re-swap
         a_calls["n"] = 0  # reset so the third import applies cleanly
@@ -1127,14 +1127,14 @@ class TestImportPackConfigApplyFailures:
         sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
         r_a = _post_import(tc, artifact_a, key)
         assert r_a.status_code == 200, r_a.text
-        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        assert fake.tables["organizations"][0].get("last_import_sha256") == sha_a
         # B: broken manifest → 422 post-swap; ledger-clear FAILS → L stays A
         payload_b = self._payload("namespace: [broken", n_points=2)
         artifact_b = _build_artifact(payload_b, key)
         r_b = _post_import(tc, artifact_b, key)
         assert r_b.status_code == 422, r_b.text
         assert "invalid YAML" in r_b.json()["detail"]
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha_a  # STALE (clear failed)
         assert row.get("last_import_quarantined_sha256") != sha_a
         # re-import A → RE-SWAP (200 imported), NOT already (Q != A non-empty)
@@ -1180,7 +1180,7 @@ class TestImportPackConfigApplyFailures:
         r = _post_import(tc, artifact, key)
         assert r.status_code == 200, r.text
         assert r.json()["imported"] is True
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("last_import_sha256") == sha
         assert not row.get("last_import_quarantined_sha256")
         r2 = _post_import(tc, artifact, key)
@@ -1217,7 +1217,7 @@ class TestImportHappyPath:
         assert counts["edges"] == 2
         assert counts["ids"] == ["pt-0", "pt-1", "pt-2"]
         # audit event recorded (team_import, actor, sha256)
-        events = [e for e in capture_audit if e["operation"] == "team_import"]
+        events = [e for e in capture_audit if e["operation"] == "org_import"]
         assert len(events) == 1
         assert events[0]["actor_user_id"] == OWNER
         assert events[0]["detail"]["sha256"] == body["id"]
@@ -1323,7 +1323,7 @@ class TestImportIdempotencyAndSwapSafety:
         # no double-swap: the graph still has the imported nodes exactly once
         assert _counts(db_path)["nodes"] == 3
         assert _counts(db_path)["ids"] == ["pt-0", "pt-1", "pt-2"]
-        events = [e for e in capture_audit if e["operation"] == "team_import"]
+        events = [e for e in capture_audit if e["operation"] == "org_import"]
         assert len(events) == 2
         assert events[1]["detail"].get("already") is True
 
@@ -1337,7 +1337,7 @@ class TestImportIdempotencyAndSwapSafety:
         artifact = _build_artifact(payload, key)
         assert _post_import(tc, artifact, key).status_code == 200
         expected = hashlib.sha256(_canonical(payload)).hexdigest()
-        assert fake.tables["teams"][0].get("last_import_sha256") == expected
+        assert fake.tables["organizations"][0].get("last_import_sha256") == expected
 
     @_import_deep
     def test_import_swap_failure_503_quarantined_live_untouched(

@@ -180,7 +180,7 @@ def provision_test_user():
         if _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
             _ns = f"test_e2e_{os.urandom(4).hex()}"
         sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace=_ns)
-        team = sdk.team_create(f"e2e-{os.urandom(4).hex()}")
+        team = sdk.org_create(f"e2e-{os.urandom(4).hex()}")
         lim = tier_limits(tier)
         # #310 (review fix 16b): mirror production CREATE semantics — write
         # max_points (= max_graph_nodes, GAP-B mapping) + max_sessions too.

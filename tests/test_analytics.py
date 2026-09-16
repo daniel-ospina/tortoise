@@ -88,11 +88,11 @@ class TestCapture:
     def test_api_key_created_wrapper(self):
         calls = []
         _enable(lambda **kw: calls.append(kw))
-        analytics.api_key_created("user-uuid", "t1", "t1key_01", "k1", "team_keys")
+        analytics.api_key_created("user-uuid", "t1", "t1key_01", "k1", "org_keys")
         assert calls[0]["event"] == "api_key_created"
         assert calls[0]["properties"] == {
             "org_id": "t1", "key_prefix": "t1key_01", "key_id": "k1",
-            "source": "team_keys",
+            "source": "org_keys",
         }
 
 

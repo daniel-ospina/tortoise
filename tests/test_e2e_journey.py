@@ -28,7 +28,7 @@ class TestE2E1SignupProvision:
 
     def test_provisioned_team_exists(self, provision_test_user):
         u = provision_test_user(tier="free")
-        team = u["sdk"].team_get(u["org_id"])
+        team = u["sdk"].org_get(u["org_id"])
         assert team is not None
         assert team["tier"] == "free"
         # No max_teams field (user-level capability)
@@ -52,10 +52,10 @@ class TestE2E1SignupProvision:
         # SDK team_create stores the key hash on the Team node (api_key prop);
         # the hosted provision path creates APIKey nodes. Verify the hash is
         # stored in salt:digest format (auth-compatible).
-        team_row = u["sdk"]._get_registry().query(
+        org_row = u["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) RETURN t.api_key", params={"id": u["org_id"]},
         ).result_set
-        assert team_row and ":" in team_row[0][0]
+        assert org_row and ":" in org_row[0][0]
 
 
 class TestE2E3KeyRecovery:
@@ -111,8 +111,8 @@ class TestE2E10Decoupling:
         import tempfile, os as _os  # noqa: E401, F811, I001
         tmpdir = tempfile.mkdtemp()
         sdk = TortoiseSDK(_os.path.join(tmpdir, "e2e.db"), namespace=f"test_e2e_decouple_{os.urandom(4).hex()}")
-        team_a = sdk.team_create("team-a")
-        team_b = sdk.team_create("team-b")
+        team_a = sdk.org_create("team-a")
+        team_b = sdk.org_create("team-b")
         user_id = "shared-user-1"
         sdk.membership_create(team_a["id"], user_id, "owner")
         sdk.membership_create(team_b["id"], user_id, "admin")  # SDK roles: owner|admin

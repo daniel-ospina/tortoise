@@ -145,7 +145,7 @@ def fake() -> FakeControlPlane:
     return FakeControlPlane({
         "api_keys": [],
         "org_memberships": [],
-        "teams": [dict(FREE_TEAM),
+        "organizations": [dict(FREE_TEAM),
                    {"id": "team-1", "name": "Invite Team", "tier": "free",
                     "max_users": 100, "graph_name": "team_team-1"}],
     })
@@ -156,10 +156,10 @@ def test_fake_filter_column_drift_raises():
     decomposition's sweep/health tests): PostgREST 400s on a FILTER of an
     absent column just as on a select — the #302 sweeps filter deleted_at."""
     fake = FakeControlPlane(
-        {"teams": [dict(FREE_TEAM)]},
-        missing_columns={"teams": {"deleted_at"}})
+        {"organizations": [dict(FREE_TEAM)]},
+        missing_columns={"organizations": {"deleted_at"}})
     with pytest.raises(RuntimeError):
-        fake.query("teams", select=["id"],
+        fake.query("organizations", select=["id"],
                    filters=[("deleted_at", "is", None)])
 
 
@@ -221,7 +221,7 @@ class TestResolveApiKey:
     def test_c1_legacy_key_resolves_default_graph(self, fake):
         """E2E-5: a pre-C1 key (no graph_id/scopes/delegation columns in the
         row) resolves as the legacy full-access class → default graph."""
-        fake.tables["teams"] = [{
+        fake.tables["organizations"] = [{
             "id": "team-free-001", "name": "Free Team", "tier": "free",
             "max_users": 1, "max_graphs": 1, "graph_size_cap": 10000,
             "ops_allowance": 1000, "graph_name": "team_team-free-001",
@@ -239,7 +239,7 @@ class TestResolveApiKey:
     def test_c1_minted_key_reports_scopes_and_no_legacy(self, fake):
         """E2E-9: a C1-minted key (graph_id set, scopes, deleg=0) reports its
         allowlist and is NOT legacy full-access."""
-        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.tables["organizations"] = [dict(FREE_TEAM)]
         fake.seed("api_keys", [_key_row(
             graph_id="g_abc123def4567890",
             scopes=["graphs:read", "graphs:write"],
@@ -256,7 +256,7 @@ class TestResolveApiKey:
     def test_c1_membership_path_is_legacy_full_access(self, fake):
         """A long-lived key with no api_keys row (membership path) has no
         scopes/delegation → legacy full access (matches today)."""
-        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.tables["organizations"] = [dict(FREE_TEAM)]
         fake.seed("org_memberships", [_membership_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team["graph_id"] is None
@@ -267,7 +267,7 @@ class TestResolveApiKey:
 
     def test_c1_graph_bound_namespace_resolved_from_graphs_table(self, fake):
         """A graph-bound key resolves its namespace from the graphs row."""
-        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.tables["organizations"] = [dict(FREE_TEAM)]
         fake.seed("api_keys", [_key_row(
             graph_id="g_abc123def4567890",
             scopes=["graphs:read"],
@@ -289,7 +289,7 @@ class TestResolveApiKey:
         drift (ladder drops the C1 tier first, never `enabled`; history
         review P1: #1705 round-1 rejected dropping an older gate)."""
         fake = FakeControlPlane(
-            {"teams": [dict(FREE_TEAM)]},
+            {"organizations": [dict(FREE_TEAM)]},
             missing_columns={"api_keys": {
                 "graph_id", "scopes", "delegation_depth", "created_by_key_id"}})
         fake.seed("api_keys", [_key_row()])
@@ -305,7 +305,7 @@ class TestResolveApiKey:
         still REJECT a disabled key — the ladder drops the C1 tier first,
         never the #1148 enabled gate."""
         fake = FakeControlPlane(
-            {"teams": [dict(FREE_TEAM)]},
+            {"organizations": [dict(FREE_TEAM)]},
             missing_columns={"api_keys": {
                 "graph_id", "scopes", "delegation_depth", "created_by_key_id"}})
         fake.seed("api_keys", [_key_row(enabled=False)])
@@ -316,7 +316,7 @@ class TestResolveApiKey:
         (drift race / soft-deleted graph) resolves graph_namespace None —
         NEVER the team default graph (a scoped key must not widen onto the
         default graph boundary)."""
-        fake = FakeControlPlane({"teams": [{
+        fake = FakeControlPlane({"organizations": [{
             "id": "team-free-001", "name": "Free Team", "tier": "free",
             "max_users": 1, "max_graphs": 1, "graph_size_cap": 10000,
             "ops_allowance": 1000, "graph_name": "team_team-free-001",
@@ -336,7 +336,7 @@ class TestResolveApiKey:
 
     def test_missing_team_fails_closed(self, fake):
         """A key whose team row vanished → None (401), never authenticate."""
-        fake.tables["teams"] = []
+        fake.tables["organizations"] = []
         fake.seed("api_keys", [_key_row()])
         assert resolve_api_key(fake, TOKEN) is None
 
@@ -348,7 +348,7 @@ class TestResolveApiKey:
 
     def test_tier_and_quota_from_teams_row(self, fake):
         """Tier/quota come from the teams row (plan Task 3)."""
-        fake.tables["teams"] = [dict(TEAM_TIER_TEAM)]
+        fake.tables["organizations"] = [dict(TEAM_TIER_TEAM)]
         fake.seed("api_keys", [_key_row(org_id="team-team-001")])
         team = resolve_api_key(fake, TOKEN)
         assert team["tier"] == "team"
@@ -375,12 +375,12 @@ class TestResolveApiKey:
         """#1859 P3-2: a teams.max_points override (migration
         20260817000001) wins over graph_size_cap at resolve_api_key; a NULL
         override falls back to graph_size_cap (GAP-B), then pricing."""
-        fake.tables["teams"] = [dict(FREE_TEAM, max_points=12345)]
+        fake.tables["organizations"] = [dict(FREE_TEAM, max_points=12345)]
         fake.seed("api_keys", [_key_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team["max_points"] == 12345
         # NULL override → graph_size_cap fallback
-        fake.tables["teams"] = [dict(FREE_TEAM, max_points=None)]
+        fake.tables["organizations"] = [dict(FREE_TEAM, max_points=None)]
         team = resolve_api_key(fake, TOKEN)
         assert team["max_points"] == FREE_TEAM["graph_size_cap"]
 
@@ -402,8 +402,8 @@ class TestResolveApiKeyFailSoft:
         to safe values (un-suspended/un-flagged; key login allowed); the
         base read still carries real values (email, 0006) and the degrade
         is logged (drift stays diagnosable)."""
-        fake.tables["teams"][0]["email"] = "owner@example.com"
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.tables["organizations"][0]["email"] = "owner@example.com"
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         fake.seed("api_keys", [_key_row()])
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             team = resolve_api_key(fake, TOKEN)
@@ -427,7 +427,7 @@ class TestResolveApiKeyFailSoft:
         """#1096: the 20260813000005 additive class alone (dashboard_key_login
         missing while 0015 present) fails soft the same way — key login
         degrades to the safe default True."""
-        fake.missing_columns = {"teams": {"dashboard_key_login"}}
+        fake.missing_columns = {"organizations": {"dashboard_key_login"}}
         fake.seed("api_keys", [_key_row()])
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             team = resolve_api_key(fake, TOKEN)
@@ -440,9 +440,9 @@ class TestResolveApiKeyFailSoft:
         discard real 0015 suspension state — the tiered retry reads
         suspended_at/flagged_at on the second attempt (discarding it would
         bypass enforcement with REAL data present)."""
-        fake.tables["teams"][0]["suspended_at"] = \
+        fake.tables["organizations"][0]["suspended_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        fake.missing_columns = {"teams": {"dashboard_key_login"}}
+        fake.missing_columns = {"organizations": {"dashboard_key_login"}}
         fake.seed("api_keys", [_key_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team is not None
@@ -487,9 +487,9 @@ class TestResolveApiKeyFailSoft:
         (dropped first) prevents a single missing column from dropping the
         whole import tier (which would break the idempotency read)."""
         from tortoise.supabase_control import org_by_id
-        fake.tables["teams"][0]["last_import_sha256"] = "sha-a"
-        fake.tables["teams"][0]["max_points"] = 999
-        fake.missing_columns = {"teams": {"last_import_pack_failed_sha256"}}
+        fake.tables["organizations"][0]["last_import_sha256"] = "sha-a"
+        fake.tables["organizations"][0]["max_points"] = 999
+        fake.missing_columns = {"organizations": {"last_import_pack_failed_sha256"}}
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             team = org_by_id(fake, "team-free-001")
         assert team is not None
@@ -526,10 +526,10 @@ class TestResolveApiKeyFailSoft:
                 "org_id": "team-free-001", "role": "owner",
                 "status": "active", "org_name": "free-team",
             }])
-            fake.tables["teams"][0]["suspended_at"] = \
+            fake.tables["organizations"][0]["suspended_at"] = \
                 datetime.now(timezone.utc).isoformat()  # noqa: UP017
-            fake.tables["teams"][0]["max_points"] = 999
-            fake.missing_columns = {"teams": {"last_import_pack_failed_sha256"}}
+            fake.tables["organizations"][0]["max_points"] = 999
+            fake.missing_columns = {"organizations": {"last_import_pack_failed_sha256"}}
             request = Request({
                 "type": "http", "method": "GET", "path": "/v1/team",
                 "query_string": b"",
@@ -581,17 +581,17 @@ class TestResolveApiKeyFailSoft:
             user = {"user_id": "9f2c1a40-0000-4a00-8000-000000000001"}
             # stored False → the session team dict carries False (#2475 fix;
             # pre-fix this was the hardcoded True that broke the reload).
-            fake.tables["teams"][0]["dashboard_key_login"] = False
+            fake.tables["organizations"][0]["dashboard_key_login"] = False
             team = asyncio.run(_session_user_org(request, user))
             assert team["dashboard_key_login"] is False
             # stored True rides as True (the common case)
-            fake.tables["teams"][0]["dashboard_key_login"] = True
+            fake.tables["organizations"][0]["dashboard_key_login"] = True
             team = asyncio.run(_session_user_org(request, user))
             assert team["dashboard_key_login"] is True
             # drift: additive DKL column missing → safe default True (the
             # #1148 gate must not 403 key-auth management during drift; the
             # UI switch renders "on" for teams that never disabled it).
-            fake.missing_columns = {"teams": {"dashboard_key_login"}}
+            fake.missing_columns = {"organizations": {"dashboard_key_login"}}
             team = asyncio.run(_session_user_org(request, user))
             assert team["dashboard_key_login"] is True
         finally:
@@ -611,8 +611,8 @@ class TestResolveApiKeyFailSoft:
         try:
             import tortoise.supabase_control as sc
             monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
-            fake.tables["teams"][0]["max_points"] = 999
-            fake.missing_columns = {"teams": {"last_import_pack_failed_sha256"}}
+            fake.tables["organizations"][0]["max_points"] = 999
+            fake.missing_columns = {"organizations": {"last_import_pack_failed_sha256"}}
             limits = resolve_org_limits("team-free-001")
             assert limits["max_points"] == 999  # override survives drift
         finally:
@@ -638,8 +638,8 @@ class TestResolveApiKeyFailSoft:
         retry, so the gate degrades to the pre-20260813000005 default True
         (fail-open, same class as the suspension degrade). Pins the actual
         behavior so a future change cannot silently flip it closed."""
-        fake.tables["teams"][0]["dashboard_key_login"] = False
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.tables["organizations"][0]["dashboard_key_login"] = False
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         fake.seed("api_keys", [_key_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team is not None
@@ -657,8 +657,8 @@ class TestResolveApiKeyFailSoft:
         stays fail-soft, deletion fails-closed)."""
         fake = FakeControlPlane(
             {"api_keys": [_key_row()], "org_memberships": [],
-             "teams": [dict(FREE_TEAM)]},
-            missing_columns={"teams": {"deleted_at", "grace_hours"}})
+             "organizations": [dict(FREE_TEAM)]},
+            missing_columns={"organizations": {"deleted_at", "grace_hours"}})
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
             with pytest.raises(RuntimeError):
                 resolve_api_key(fake, TOKEN)
@@ -669,8 +669,8 @@ class TestResolveApiKeyFailSoft:
         _QUOTA_SELECT) — the app-layer deleted-team check in
         _agent_recover_flow reads REAL state (previously a dead .get() on an
         unselected column)."""
-        fake.tables["teams"][0]["deleted_at"] = "2026-01-01T00:00:00Z"
-        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.tables["organizations"][0]["deleted_at"] = "2026-01-01T00:00:00Z"
+        fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         from tortoise.supabase_control import _QUOTA_SELECT, _orgs_row_fail_soft
 
         row = _orgs_row_fail_soft(fake, "team-free-001", select=_QUOTA_SELECT,
@@ -679,7 +679,7 @@ class TestResolveApiKeyFailSoft:
         assert row["deleted_at"] == "2026-01-01T00:00:00Z"
         assert row["graph_name"] == "team_team-free-001"
         # not-drifted: deleted_at is carried as-is (None when unset)
-        fake.tables["teams"][0]["deleted_at"] = None
+        fake.tables["organizations"][0]["deleted_at"] = None
         row = _orgs_row_fail_soft(fake, "team-free-001", select=_QUOTA_SELECT,
                                    additive_tiers=[])
         assert row["deleted_at"] is None
@@ -689,7 +689,7 @@ class TestResolveApiKeyFailSoft:
         resolves (enforcement is unchanged — REST 403 / MCP -32006 consume
         this field)."""
         fake.seed("api_keys", [_key_row()])
-        fake.tables["teams"][0]["suspended_at"] = \
+        fake.tables["organizations"][0]["suspended_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
         team = resolve_api_key(fake, TOKEN)
         assert team is not None
@@ -700,9 +700,9 @@ class TestResolveApiKeyFailSoft:
         additive columns become readable again, enforcement resumes (a
         future latch/cache in the degrade path must not stick)."""
         fake.seed("api_keys", [_key_row()])
-        fake.tables["teams"][0]["suspended_at"] = \
+        fake.tables["organizations"][0]["suspended_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         assert resolve_api_key(fake, TOKEN)["suspended_at"] is None  # degraded
         fake.missing_columns = None
         assert resolve_api_key(fake, TOKEN)["suspended_at"] is not None  # recovered
@@ -710,7 +710,7 @@ class TestResolveApiKeyFailSoft:
     def test_resolve_api_key_missing_team_under_drift_returns_none(self, fake):
         """#1096: drift + absent team — the base retry returns [] → None
         (401), never a raise (fail-closed on not-found, fail-soft on drift)."""
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         fake.seed("api_keys", [_key_row(org_id="team-gone")])
         assert resolve_api_key(fake, TOKEN) is None
 
@@ -718,7 +718,7 @@ class TestResolveApiKeyFailSoft:
         """#1096: the org_memberships (long-lived key) branch drifts the
         same way — the shared _orgs_row_fail_soft teams read degrades
         identically; the membership query itself is drift-scoped."""
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         fake.seed("org_memberships", [_membership_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team is not None
@@ -731,7 +731,7 @@ class TestResolveApiKeyFailSoft:
         """#1096: a drifted BASE column (0006) fails the auth hot path
         CLOSED — combined read raises → base retry also raises (ops_allowance
         stays in the base set) → RuntimeError + the fatal-path WARNING."""
-        fake.missing_columns = {"teams": {"ops_allowance"}}
+        fake.missing_columns = {"organizations": {"ops_allowance"}}
         fake.seed("api_keys", [_key_row()])
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
             with pytest.raises(RuntimeError):
@@ -747,7 +747,7 @@ class TestTeamByID:
         safe None defaults, no raise; the caplog WARNING discriminates the
         degrade actually firing (a None assert alone would pass without
         drift, since FREE_TEAM lacks the columns)."""
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at",
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at",
                                            "dashboard_key_login"}}
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             team = org_by_id(fake, "team-free-001")
@@ -762,15 +762,15 @@ class TestTeamByID:
     def test_team_by_id_missing_team_under_drift_returns_none(self, fake):
         """#1096: org_by_id drift + absent team — the base retry returns
         [] → None, never a raise (fail-closed on not-found)."""
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         assert org_by_id(fake, "missing") is None
 
     def test_team_by_id_dkl_only_drift_keeps_suspension(self, fake):
         """#1096 (code-review fix): org_by_id's tiered retry — a
         20260813000005-ONLY drift keeps real 0015 suspension state."""
-        fake.tables["teams"][0]["suspended_at"] = \
+        fake.tables["organizations"][0]["suspended_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        fake.missing_columns = {"teams": {"dashboard_key_login"}}
+        fake.missing_columns = {"organizations": {"dashboard_key_login"}}
         team = org_by_id(fake, "team-free-001")
         assert team is not None
         assert team["suspended_at"] is not None  # real 0015 data kept
@@ -781,9 +781,9 @@ class TestTeamByID:
         deleted_at (soft-deleted team) is carried by the base retry, so
         invitation_accept/export_team 410 guards keep firing. The caplog
         WARNING proves the retry (not just the select) fired."""
-        fake.tables["teams"][0]["deleted_at"] = \
+        fake.tables["organizations"][0]["deleted_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             team = org_by_id(fake, "team-free-001")
         assert team is not None
@@ -797,8 +797,8 @@ class TestTeamByID:
         fatal-path WARNING (the drift-diagnosability tripwire) fires and
         names the retry select."""
         fake = FakeControlPlane(
-            {"api_keys": [], "org_memberships": [], "teams": [dict(FREE_TEAM)]},
-            missing_columns={"teams": {"deleted_at", "grace_hours"}})
+            {"api_keys": [], "org_memberships": [], "organizations": [dict(FREE_TEAM)]},
+            missing_columns={"organizations": {"deleted_at", "grace_hours"}})
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
             with pytest.raises(RuntimeError):
                 org_by_id(fake, "team-free-001")
@@ -817,9 +817,9 @@ class TestTeamByID:
         contract the Architecture section claims)."""
         inv = invitation_mint(fake, "team-free-001", "bob@example.com",
                               "member", "owner-1")
-        fake.tables["teams"][0]["deleted_at"] = \
+        fake.tables["organizations"][0]["deleted_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         with pytest.raises(InvitationError) as ei:
             invitation_accept(fake, inv["token"], _U2)
         assert ei.value.status == 410
@@ -1005,8 +1005,8 @@ class TestInvitationSeam:
         }])
         # Accept's quota/tier gate (PR #864 review P2) reads the teams row —
         # seed it with a generous member cap unless a test overrides.
-        if not any(t.get("id") == org_id for t in fake.tables.get("teams", [])):
-            fake.seed("teams", [{
+        if not any(t.get("id") == org_id for t in fake.tables.get("organizations", [])):
+            fake.seed("organizations", [{
                 "id": org_id, "name": "Invite Team", "tier": "free",
                 "max_users": 100, "graph_name": f"org_{org_id}",
             }])
@@ -1168,7 +1168,7 @@ class TestInvitationSeam:
         """Quota/tier gate parity with the registry accept path (code-review
         P2, PR #864): a free-tier team at its 1-user cap rejects with 402."""
         # free tier: max_users=1; the owner already occupies the slot
-        for t in fake.tables["teams"]:
+        for t in fake.tables["organizations"]:
             if t["id"] == "team-1":
                 t.update({"tier": "free", "max_users": 1})
         self._owner(fake)
@@ -1186,7 +1186,7 @@ class TestInvitationSeam:
         so the invitee can retry."""
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        fake.seed("teams", [{"id": "team-1", "name": "T", "tier": "free",
+        fake.seed("organizations", [{"id": "team-1", "name": "T", "tier": "free",
                               "max_users": 10, "graph_name": "team_team-1"}])
         # Fail the membership POST only (first failing call after accept)
         class _FlakyAfterAccept(FakeControlPlane):
@@ -1212,7 +1212,7 @@ class TestInvitationSeam:
         """Race fix (code-review P2, PR #864): a rescind racing a concurrent
         accept must not flip a consumed invite to revoked — 409 instead."""
         self._owner(fake)
-        fake.seed("teams", [{"id": "team-1", "name": "T", "tier": "free",
+        fake.seed("organizations", [{"id": "team-1", "name": "T", "tier": "free",
                               "max_users": 10, "graph_name": "team_team-1"}])
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
@@ -1341,7 +1341,7 @@ class TestOnboardingState:
     """teams.onboarding_state (jsonb) read-patch via the seam (E2E-5)."""
 
     def _set_state(self, fake, state):
-        fake.tables["teams"][0]["onboarding_state"] = state
+        fake.tables["organizations"][0]["onboarding_state"] = state
 
     def test_read_returns_merged_defaults_for_empty_state(self, fake):
         """A team row with empty onboarding_state reads as the full hosted
@@ -1361,7 +1361,7 @@ class TestOnboardingState:
         self._set_state(fake, {"demo_created": True})
         state = org_onboarding_state(fake, "team-free-001")
         assert state["demo_created"] is True
-        assert state["team_created"] is False  # default preserved
+        assert state["org_created"] is False  # default preserved
 
     def test_read_preserves_unknown_keys(self, fake):
         """Unknown stored keys are PRESERVED on the merge — registry parity
@@ -1380,7 +1380,7 @@ class TestOnboardingState:
         the registry path's JSON-string wrapping."""
         self._set_state(fake, {})
         update_onboarding_state(fake, "team-free-001", {"demo_created": True})
-        stored = fake.tables["teams"][0]["onboarding_state"]
+        stored = fake.tables["organizations"][0]["onboarding_state"]
         assert isinstance(stored, dict)  # jsonb object, NOT a string
         assert stored == {"demo_created": True}
         # and the read back merges over defaults
@@ -1388,7 +1388,7 @@ class TestOnboardingState:
     def test_email_read_patch_round_trip(self, fake):
         """E2E-5: team email read-patch from teams (wired via the onboarding
         endpoints — #764 review P2: the email seam must not be dead code)."""
-        fake.tables["teams"][0]["email"] = None  # fixture has none set
+        fake.tables["organizations"][0]["email"] = None  # fixture has none set
         assert org_email(fake, "team-free-001") is None
         update_org_email(fake, "team-free-001", "owner@premise-labs.dev")
         assert org_email(fake, "team-free-001") == "owner@premise-labs.dev"
@@ -1406,7 +1406,7 @@ class TestTeamEmail:
     """teams.email read-patch via the seam (E2E-5)."""
 
     def test_read_and_patch_round_trip(self, fake):
-        fake.tables["teams"][0]["email"] = None
+        fake.tables["organizations"][0]["email"] = None
         assert org_email(fake, "team-free-001") is None
         update_org_email(fake, "team-free-001", "owner@example.com")
         assert org_email(fake, "team-free-001") == "owner@example.com"
@@ -1428,7 +1428,7 @@ class TestGithubCredentials:
     seam is the ONLY read/write path in Supabase mode."""
 
     def test_store_then_read_round_trip(self, fake):
-        fake.tables["teams"][0].update(
+        fake.tables["organizations"][0].update(
             {"github_token_enc": None, "github_org": None})
         store_github_credentials(
             fake, "team-free-001", token_enc="enc-blob", org="acme")
@@ -1438,7 +1438,7 @@ class TestGithubCredentials:
     def test_rotation_overwrites_in_place(self, fake):
         """Re-connecting PATCHes a fresh encrypted token over the old one —
         rotation is the reconnect itself (plan Task 6 'rotation documented')."""
-        fake.tables["teams"][0].update(
+        fake.tables["organizations"][0].update(
             {"github_token_enc": "old", "github_org": "acme"})
         store_github_credentials(
             fake, "team-free-001", token_enc="new", org="acme")
@@ -1522,7 +1522,7 @@ class TestTask8Helpers:
             "p_ops_allowance": 10000, "p_graph_size_cap": 10000,
         })
         assert fake.rpc_calls[0][0] == "provision_team"
-        assert any(t["id"] == "team-new-1" for t in fake.tables["teams"])
+        assert any(t["id"] == "team-new-1" for t in fake.tables["organizations"])
         mem = [m for m in fake.tables["org_memberships"]
                if m["org_id"] == "team-new-1"]
         assert len(mem) == 1
@@ -1556,7 +1556,7 @@ class TestTask8Helpers:
         params["p_lookup_hash"] = lookup_hash(key2)
         params["p_key_hash"] = "salt2:hash"
         provision_org(fake, **params)
-        assert len([t for t in fake.tables["teams"]
+        assert len([t for t in fake.tables["organizations"]
                     if t["id"] == "team-new-2"]) == 1
         assert len([m for m in fake.tables["org_memberships"]
                     if m["org_id"] == "team-new-2"]) == 1
@@ -1570,7 +1570,7 @@ class TestTask8Helpers:
             provision_org(ErrorControlPlane(), p_org_id="t")
 
     def test_team_by_email_and_name(self, fake):
-        fake.seed("teams", [{"id": "t1", "name": "acme",
+        fake.seed("organizations", [{"id": "t1", "name": "acme",
                               "email": "a@example.com"}])
         assert org_by_email(fake, "a@example.com") == {"id": "t1"}
         assert org_by_email(fake, "nope@example.com") is None
@@ -1703,7 +1703,7 @@ class TestTask8Helpers:
         """C1 (#2110): the seam emits the registry-shaped row
         {graph_id, org_id, name, kind, namespace, status} — default derived
         from teams.graph_name (no row needed), status active."""
-        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         assert graph_metadata(fake, "team-free-001") == [{
             "graph_id": "default", "org_id": "team-free-001",
             "name": "default", "kind": "default",
@@ -1723,7 +1723,7 @@ class TestTask8Helpers:
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
         monkeypatch.setattr(
             "tortoise.supabase_control.get_control_plane", lambda: fake)
-        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         # default only → 1
         assert sdk.graph_count("team-free-001") == 1
         # default + 1 active custom; deleted excluded → 2
@@ -1740,8 +1740,8 @@ class TestTask8Helpers:
         }])
         assert sdk.graph_count("team-free-001") == 2
         # drift: missing graphs table → default-only (count 1), no raise
-        fake2 = FakeControlPlane({"teams": [dict(FREE_TEAM)]})
-        fake2.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake2 = FakeControlPlane({"organizations": [dict(FREE_TEAM)]})
+        fake2.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         monkeypatch.setattr(
             "tortoise.supabase_control.get_control_plane", lambda: fake2)
         assert sdk.graph_count("team-free-001") == 1
@@ -1750,7 +1750,7 @@ class TestTask8Helpers:
         """C1 (#2110): custom graphs table rows (active) ride the seam after
         the default — deleted rows excluded, missing table degrades to
         default-only (D3 drift-safe)."""
-        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         fake.seed("graphs", [{
             "id": "g_abc123def4567890", "org_id": "team-free-001",
             "name": "prod", "kind": "custom",
@@ -1767,13 +1767,13 @@ class TestTask8Helpers:
             "default", "g_abc123def4567890"]
         assert got[1]["status"] == "active"
         # drift: missing graphs table (pre-C1 schema) → default-only, no raise
-        fake2 = FakeControlPlane({"teams": [dict(FREE_TEAM)]})
-        fake2.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake2 = FakeControlPlane({"organizations": [dict(FREE_TEAM)]})
+        fake2.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         assert graph_metadata(fake2, "team-free-001")[0]["graph_id"] == "default"
 
     def test_graph_metadata_foreign_team_sees_own_rows_only(self, fake):
         """C1 (#2110): another team's graphs don't leak into the list."""
-        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         fake.seed("graphs", [{
             "id": "g_otherteam0001", "org_id": "team-other-000",
             "name": "theirs", "kind": "custom",
@@ -1856,8 +1856,8 @@ class TestClientConstruction:
             )
             # resolve_api_key makes 2-3 queries per auth — the second one
             # must not fail on a persistent client.
-            r1 = cp.query("teams", select=["id"], filters=[("id", "eq", "team-1")])
-            r2 = cp.query("teams", select=["id"], filters=[("id", "eq", "team-1")])
+            r1 = cp.query("organizations", select=["id"], filters=[("id", "eq", "team-1")])
+            r2 = cp.query("organizations", select=["id"], filters=[("id", "eq", "team-1")])
             assert r1 == [{"id": "team-1"}] and r2 == [{"id": "team-1"}]
             assert calls["n"] == 2
         finally:
@@ -1963,7 +1963,7 @@ class TestPerRequestTimeout:
 
         plane, calls = self._plane()
         composed = httpx.Timeout(connect=1.0, read=2.0, write=3.0, pool=4.0)
-        plane.query("teams", select=["id"], timeout=composed)
+        plane.query("organizations", select=["id"], timeout=composed)
         assert calls and calls[-1]["kwargs"].get("timeout") is composed, (
             "the per-request timeout was not forwarded — the client silently "
             "kept its per-phase default (the regression this seam prevents)"
@@ -1975,7 +1975,7 @@ class TestPerRequestTimeout:
         plane, calls = self._plane()
         composed = httpx.Timeout(1.0)
         for method in ("GET", "PATCH", "POST", "DELETE"):
-            plane.query("teams", method=method, json_body={}, timeout=composed)
+            plane.query("organizations", method=method, json_body={}, timeout=composed)
         assert len(calls) == 4
         assert all(c["kwargs"].get("timeout") is composed for c in calls), (
             f"not every method forwarded the timeout: {calls}"
@@ -1986,9 +1986,9 @@ class TestPerRequestTimeout:
         default (and an explicit ``None``) must OMIT the kwarg entirely — the
         code comment says that is deliberate; this pins it."""
         plane, calls = self._plane()
-        plane.query("teams", select=["id"])
+        plane.query("organizations", select=["id"])
         assert "timeout" not in calls[-1]["kwargs"]
-        plane.query("teams", select=["id"], timeout=None)
+        plane.query("organizations", select=["id"], timeout=None)
         assert "timeout" not in calls[-1]["kwargs"]
 
 
@@ -2137,7 +2137,7 @@ class TestResolveTeamLimitsSupabase:
         monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
         import tortoise.supabase_control as sc
-        fake = FakeControlPlane({"teams": [{"id": "team-1", "tier": "free",
+        fake = FakeControlPlane({"organizations": [{"id": "team-1", "tier": "free",
                                              "max_users": 1, "max_graphs": 1,
                                              "graph_size_cap": 10000,
                                              "ops_allowance": 1000}]})
@@ -2163,7 +2163,7 @@ class TestResolveTeamLimitsSupabase:
         monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
         import tortoise.supabase_control as sc
-        fake = FakeControlPlane({"teams": [{"id": "team-1", "tier": "team",
+        fake = FakeControlPlane({"organizations": [{"id": "team-1", "tier": "team",
                                              "max_users": None,
                                              "max_graphs": None,
                                              "graph_size_cap": 500000}]})
@@ -2213,7 +2213,7 @@ class TestClaimSeam:
         assert owner["identity"] is None
         assert owner["role"] == "owner"
         assert owner["status"] == "active"
-        team = next(t for t in fake.tables["teams"]
+        team = next(t for t in fake.tables["organizations"]
                     if t["id"] == "team-claim-1")
         assert team.get("email") is None  # demotion: claim never writes teams.email
         # created_by migration: anon- key attributed to the claimer
@@ -2338,7 +2338,7 @@ class TestClaimSeam:
         row = next(r for r in fake.tables["org_memberships"]
                    if r["org_id"] == "team-e2")
         assert row["user_id"] == _U8  # linked — no collision
-        team2 = next(t for t in fake.tables["teams"] if t["id"] == "team-e2")
+        team2 = next(t for t in fake.tables["organizations"] if t["id"] == "team-e2")
         assert team2.get("email") is None  # claim never writes it
 
     def test_claim_drops_leftover_placeholder(self, fake):
@@ -2468,7 +2468,7 @@ class TestGraphLifecycleSeam:
     soft-delete graph rows + graph-key counting + delete cascade source."""
 
     def _seed_team(self, fake):
-        fake.seed("teams", [{
+        fake.seed("organizations", [{
             "id": "team-c2-001", "name": "C2 Team", "tier": "solo",
             "max_graphs": 2, "graph_name": "team_team-c2-001",
         }])
@@ -2670,7 +2670,7 @@ class TestC3KeyLifecycleSeam:
     count."""
 
     def _seed_team(self, fake):
-        fake.seed("teams", [{
+        fake.seed("organizations", [{
             "id": "team-c3-001", "name": "C3 Team", "tier": "pro",
             "max_api_keys": 5, "graph_name": "team_team-c3-001",
         }])
@@ -2767,8 +2767,8 @@ class TestInviteFusionV2Seam:
             "user_id": user_id, "org_id": org_id,
             "role": "owner", "status": "active",
         }])
-        if not any(t.get("id") == org_id for t in fake.tables.get("teams", [])):
-            fake.seed("teams", [{
+        if not any(t.get("id") == org_id for t in fake.tables.get("organizations", [])):
+            fake.seed("organizations", [{
                 "id": org_id, "name": "Invite Team", "tier": "team",
                 "max_users": 100, "graph_name": f"org_{org_id}",
             }])
@@ -2952,7 +2952,7 @@ class TestInviteFusionV2Seam:
         the SAME code once a seat frees)."""
         inv = self._pending_invite(fake)
         self._otp_for(fake, inv["id"], "123456")
-        for t in fake.tables["teams"]:          # cap at current members
+        for t in fake.tables["organizations"]:          # cap at current members
             if t.get("id") == "team-1":
                 t["max_users"] = 1
         with pytest.raises(InvitationError) as ei:
@@ -2964,7 +2964,7 @@ class TestInviteFusionV2Seam:
         assert row.get("accepted_at") is None  # invite NOT consumed
         assert row["otp_hash"] is not None     # code NOT burned
         # free the seat → the SAME code accepts
-        for t in fake.tables["teams"]:
+        for t in fake.tables["organizations"]:
             if t.get("id") == "team-1":
                 t["max_users"] = 100
         res = invitation_accept(fake, inv["token"], _U2,
@@ -3143,7 +3143,7 @@ class TestConcurrentAcceptSingleUseSupabase:
             "user_id": _U3, "org_id": "team-race-sb",
             "role": "owner", "status": "active",
         }])
-        fake.seed("teams", [{
+        fake.seed("organizations", [{
             "id": "team-race-sb", "name": "Race Team",
             "tier": "team", "max_users": 100,
             "graph_name": "team_team-race-sb",
@@ -3173,7 +3173,7 @@ class TestConcurrentAcceptSingleUseSupabase:
         status='accepted' and minted a SECOND membership — assert she did
         NOT."""
         base = FakeControlPlane({"api_keys": [], "org_memberships": [],
-                                 "invitations": [], "teams": []})
+                                 "invitations": [], "organizations": []})
         fake = _InterleaveLoserFake(base.tables, winner_uid=_U2,
                                     winner_email="alice@example.com")
         inv = self._seed(fake)
@@ -3220,7 +3220,7 @@ class TestConcurrentAcceptSingleUseSupabase:
         membership write (pre-fix the follow-up GET saw the winner's
         status='accepted' and minted a second membership)."""
         base = FakeControlPlane({"api_keys": [], "org_memberships": [],
-                                 "invitations": [], "teams": []})
+                                 "invitations": [], "organizations": []})
         fake = _InterleaveLoserFake(base.tables, winner_uid=_U2,
                                     winner_email="alice@example.com")
         inv = self._seed(fake)
@@ -3245,8 +3245,8 @@ class TestConcurrentAcceptSingleUseSupabase:
     def _pending_invite_team1(self, fake):
         # reuse the TestInvitationSeam team-1 owner seed (free tier, cap 100)
         if not any(t.get("id") == "team-1"
-                   for t in fake.tables.get("teams", [])):
-            fake.seed("teams", [{
+                   for t in fake.tables.get("organizations", [])):
+            fake.seed("organizations", [{
                 "id": "team-1", "name": "Invite Team", "tier": "free",
                 "max_users": 100, "graph_name": "team_team-1",
             }])
@@ -3264,7 +3264,7 @@ class TestConcurrentAcceptSingleUseSupabase:
         email link). Pre-fix the rotate PATCH ignored its matched-row count
         → phantom token."""
         base = FakeControlPlane({"api_keys": [], "org_memberships": [],
-                                 "invitations": [], "teams": []})
+                                 "invitations": [], "organizations": []})
         fake = _ResendRaceFake(base.tables, winner_uid=_U2)
         inv = self._seed(fake)
         with pytest.raises(InvitationError) as ei:
@@ -3287,16 +3287,16 @@ class TestOnboardingEmailMarker:
         assert org_onboarding_email_sent(fake, "team-free-001") is False
         assert set_org_onboarding_email_sent(fake, "team-free-001") is True
         assert org_onboarding_email_sent(fake, "team-free-001") is True
-        first = fake.tables["teams"][0]["onboarding_email_sent_at"]
+        first = fake.tables["organizations"][0]["onboarding_email_sent_at"]
         assert set_org_onboarding_email_sent(fake, "team-free-001") is False
-        assert fake.tables["teams"][0]["onboarding_email_sent_at"] == first
+        assert fake.tables["organizations"][0]["onboarding_email_sent_at"] == first
 
     def test_marker_helpers_unknown_team(self, fake):
         assert org_onboarding_email_sent(fake, "no-such-team") is None
         assert set_org_onboarding_email_sent(fake, "no-such-team") is False
 
     def test_team_by_id_reads_marker_column(self, fake):
-        fake.tables["teams"][0]["onboarding_email_sent_at"] = \
+        fake.tables["organizations"][0]["onboarding_email_sent_at"] = \
             "2026-09-06T10:00:00+00:00"
         team = org_by_id(fake, "team-free-001")
         assert team is not None
@@ -3308,10 +3308,10 @@ class TestOnboardingEmailMarker:
         ordering drift) fails soft — the marker's OWN tier is dropped first by
         the #1096 ladder (marker reads unset → one best-effort send attempt,
         logged) while real billing/import/suspension state stays readable."""
-        fake.tables["teams"][0]["subscription_status"] = "active"
-        fake.tables["teams"][0]["suspended_at"] = \
+        fake.tables["organizations"][0]["subscription_status"] = "active"
+        fake.tables["organizations"][0]["suspended_at"] = \
             "2026-09-01T00:00:00+00:00"
-        fake.missing_columns = {"teams": {"onboarding_email_sent_at"}}
+        fake.missing_columns = {"organizations": {"onboarding_email_sent_at"}}
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             team = org_by_id(fake, "team-free-001")
         assert team is not None

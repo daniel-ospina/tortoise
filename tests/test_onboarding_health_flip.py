@@ -58,7 +58,7 @@ def supabase_client(monkeypatch):
     fake = FakeControlPlane({
         "api_keys": [],
         "org_memberships": [],
-        "teams": [dict(FREE_TEAM, email="owner@example.com",
+        "organizations": [dict(FREE_TEAM, email="owner@example.com",
                        onboarding_state={}, github_token_enc=None,
                        github_org=None)],
     })
@@ -130,7 +130,7 @@ class TestOnboardingStateFlip:
         body = r.json()["onboarding"]
         assert body["demo_created"] is True and body["prompt_pasted"] is True
         # stored as a real JSON object on the teams row (jsonb — no string)
-        stored = fake.tables["teams"][0]["onboarding_state"]
+        stored = fake.tables["organizations"][0]["onboarding_state"]
         assert isinstance(stored, dict)
         assert stored["demo_created"] is True
         # read-back through the endpoint reflects the patch
@@ -155,7 +155,7 @@ class TestOnboardingStateFlip:
         r = tc.patch("/v1/onboarding/state", json={"email": "owner@premise-labs.dev"})
         assert r.status_code == 200, r.text
         assert r.json()["email"] == "owner@premise-labs.dev"
-        assert fake.tables["teams"][0]["email"] == "owner@premise-labs.dev"
+        assert fake.tables["organizations"][0]["email"] == "owner@premise-labs.dev"
         # read-back reflects it
         r = tc.get("/v1/onboarding/state")
         assert r.json()["email"] == "owner@premise-labs.dev"
@@ -165,7 +165,7 @@ class TestOnboardingStateFlip:
         r = tc.post("/v1/onboarding/session-recording", json={"enabled": True})
         assert r.status_code == 200, r.text
         assert r.json()["onboarding"]["session_recording"] is True
-        assert fake.tables["teams"][0]["onboarding_state"]["session_recording"] is True
+        assert fake.tables["organizations"][0]["onboarding_state"]["session_recording"] is True
 
 
 # ── GitHub connect (E2E-5: token_enc + org via the seam) ────────────────────
@@ -202,7 +202,7 @@ class TestGithubConnectFlip:
         assert r.status_code == 302, r.text
         assert "github=connected" in r.headers["location"]
 
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         # encrypted blob stored — never the raw token
         assert row["github_token_enc"] is not None
         assert row["github_token_enc"] != "gho_raw_access_token_123"
@@ -217,7 +217,7 @@ class TestGithubConnectFlip:
         import tortoise.hosted_api as ha
         from tortoise.crypto import encrypt_token
         tc, fake = supabase_client
-        fake.tables["teams"][0].update({
+        fake.tables["organizations"][0].update({
             "github_token_enc": encrypt_token("gho_token_for_status"),
             "github_org": "acme",
         })

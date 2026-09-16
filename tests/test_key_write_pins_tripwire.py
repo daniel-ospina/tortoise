@@ -17,7 +17,7 @@ Two layers:
      the server-contract dashboard-login entry the client boundary excludes)
      must still resolve ?org_id= through
      a recognized seam (the get_current_org_session DI, or the shared
-     _session_pinned_team / _ensure_key_in_pinned_team helpers), and every
+     _session_pinned_org / _ensure_key_in_pinned_org helpers), and every
      such route must be enumerated in KEY_WRITE_HANDLERS. NOT a whole-file
      scan: a FUTURE session key-write endpoint on a NEW prefix must
      deliberately extend KEY_WRITE_HANDLERS + the route-coverage matrix + the
@@ -86,10 +86,10 @@ KEY_WRITE_HANDLERS: dict[str, tuple[str, ...]] = {
     # the pin and resolves the team from it.
     "create_api_key": ("get_current_org_session",),
     # Inline seam — the shared helpers (membership gate + fail-closed).
-    "toggle_api_key_enabled": ("_session_pinned_team", "_ensure_key_in_pinned_team"),
-    "toggle_dashboard_login": ("_session_pinned_team", "_require_owner_admin"),
+    "toggle_api_key_enabled": ("_session_pinned_org", "_ensure_key_in_pinned_org"),
+    "toggle_dashboard_login": ("_session_pinned_org", "_require_owner_admin"),
     # DI seam + the shared fail-closed helper on the key lookup.
-    "revoke_api_key": ("get_current_org_session", "_ensure_key_in_pinned_team"),
+    "revoke_api_key": ("get_current_org_session", "_ensure_key_in_pinned_org"),
 }
 # Route decorator paths that carry key-write semantics (GET list is a read and
 # is deliberately excluded — same boundary as the client tripwire's scan of
@@ -394,10 +394,10 @@ class TestKeyWritePinsTripwireBehavior:
         )
         assert r.status_code == 200, r.text
         assert r.json()["org_id"] == teamB
-        flagA = fake.query("teams", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
+        flagA = fake.query("organizations", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
             0
         ]
-        flagB = fake.query("teams", select=["dashboard_key_login"], filters=[("id", "eq", teamB)])[
+        flagB = fake.query("organizations", select=["dashboard_key_login"], filters=[("id", "eq", teamB)])[
             0
         ]
         assert flagA["dashboard_key_login"] is True, (
@@ -410,7 +410,7 @@ class TestKeyWritePinsTripwireBehavior:
         never a memberships[0] fallback write on the caller's own team. The
         detail assert discriminates the membership gate from the role gate's
         independent 403 ("Requires owner or admin role in team"): dropping or
-        reordering _session_pinned_team past _require_owner_admin must fail
+        reordering _session_pinned_org past _require_owner_admin must fail
         this test, not silently pass via the role gate."""
         _keyA, teamA = _provision_anon(client, fake)
         _keyC, teamC = _provision_anon(client, fake)
@@ -424,7 +424,7 @@ class TestKeyWritePinsTripwireBehavior:
         )
         assert r.status_code == 403, r.text
         assert "No membership in team" in str(r.json())
-        flagA = fake.query("teams", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
+        flagA = fake.query("organizations", select=["dashboard_key_login"], filters=[("id", "eq", teamA)])[
             0
         ]
         assert flagA["dashboard_key_login"] is True  # A untouched

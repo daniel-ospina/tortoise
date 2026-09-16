@@ -422,9 +422,9 @@ class TestClaimE2E:
         assert len(mems) == 1, mems
         assert mems[0]["user_id"] == _U_CLAIM_A
         assert mems[0]["identity"] is None
-        team_row = next(t for t in cp.tables["teams"] if t["id"] == org_id)
+        org_row = next(t for t in cp.tables["organizations"] if t["id"] == org_id)
         # #1765 demotion: claim never writes teams.email (mint contact only)
-        assert team_row.get("email") is None
+        assert org_row.get("email") is None
 
     def test_claim_requires_session_jwt_and_key(self, claim_server):
         base = claim_server["base_url"]

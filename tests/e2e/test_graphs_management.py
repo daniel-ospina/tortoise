@@ -122,7 +122,7 @@ def _team_row(tier: str, max_graphs: int | None) -> dict:
     }
 
 
-def _wire_graphs_harness(page: Page, team_row: dict,
+def _wire_graphs_harness(page: Page, org_row: dict,
                          graphs: list[dict],
                          graph_keys: dict[str, list[dict]],
                          mint_bodies: list | None = None,
@@ -177,7 +177,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 return
             if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([team_row]))
+                              body=json.dumps([org_row]))
                 return
             if path.endswith("/v1/team/keys") and route.request.method == "GET":
                 # The API-Keys tab's mount read (no graph_id) returns the
@@ -267,7 +267,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps(team_row))
+                              body=json.dumps(org_row))
                 return
             route.fulfill(status=401, content_type="application/json",
                           body=json.dumps({"detail": "unauthorized"}))
@@ -295,12 +295,12 @@ def _team_key_rows(graph_keys: dict[str, list[dict]]) -> list[dict]:
     return out
 
 
-def _open_graphs_tab(page: Page, team_row: dict,
+def _open_graphs_tab(page: Page, org_row: dict,
                      graphs: list[dict] | None = None,
                      graph_keys: dict[str, list[dict]] | None = None,
                      **kw) -> None:
     _wire_graphs_harness(
-        page, team_row,
+        page, org_row,
         graphs if graphs is not None else [DEFAULT_ROW, CUSTOM_A],
         graph_keys if graph_keys is not None else {"g_prod": [_GRAPH_KEY]},
         **kw,

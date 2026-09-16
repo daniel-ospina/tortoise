@@ -125,7 +125,7 @@ class FakeControlPlane:
             # Mirrors the SQL: set suspended_at only when NULL; flagged_at is
             # NOT touched (the engine's flag-episode state is event-derived).
             tid = (body or {}).get("p_org_id")
-            for t in self.tables.get("teams", []):
+            for t in self.tables.get("organizations", []):
                 if t.get("id") == tid and t.get("suspended_at") is None:
                     from datetime import datetime, timezone
                     t["suspended_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -136,7 +136,7 @@ class FakeControlPlane:
             return None
         if fn == "abuse_unsuspend":
             tid = (body or {}).get("p_org_id")
-            for t in self.tables.get("teams", []):
+            for t in self.tables.get("organizations", []):
                 if t.get("id") == tid:
                     t["suspended_at"] = None
                     t["flagged_at"] = None
@@ -371,7 +371,7 @@ class FakeControlPlane:
                     raise RuntimeError(
                         "recover_team_key: token not found or revoked")
                 if any(t.get("id") == tid and t.get("deleted_at")
-                       for t in self.tables.get("teams", [])):
+                       for t in self.tables.get("organizations", [])):
                     raise RuntimeError("recover_team_key: team deleted")
                 cap = int(p.get("p_max_api_keys") or 2)
                 key_rows = self.tables.setdefault("api_keys", [])
@@ -479,7 +479,7 @@ class FakeControlPlane:
                 "provision_team: exactly one of p_user_id / p_identity is required")
 
         # teams upsert on id (exactly one row)
-        team_rows = self.tables.setdefault("teams", [])
+        team_rows = self.tables.setdefault("organizations", [])
         team = next((t for t in team_rows if t.get("id") == org_id), None)
         # #2789: unique-name parity (migration 0011 `uq_teams_name`). The real
         # RPC upserts ON CONFLICT (id) ONLY, so a name held by a DIFFERENT team

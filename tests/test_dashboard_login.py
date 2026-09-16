@@ -480,7 +480,7 @@ class TestDashboardLoginGate:
         from tortoise.auth import lookup_hash
         sc.claim_membership(fake, lookup_hash=lookup_hash(key),
                             user_id=user_id, email="owner@example.com")
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             r = client.post("/v1/team/keys",
                             headers={"Authorization": "Bearer eyJ.sess"},
@@ -506,7 +506,7 @@ class TestDashboardLoginGate:
         from tortoise.auth import lookup_hash
         sc.claim_membership(fake, lookup_hash=lookup_hash(key),
                             user_id=user_id, email="owner@example.com")
-        fake.missing_columns = {"teams": {
+        fake.missing_columns = {"organizations": {
             "last_import_sha256", "last_import_quarantined_sha256",
             "max_points"}}
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):

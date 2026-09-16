@@ -106,10 +106,10 @@ class TestPreconditions:
 
     def test_supabase_real_team_fails(self):
         from tests.fake_control_plane import FakeControlPlane
-        cp = FakeControlPlane({"teams": [{"id": "team-free-001"}]})
+        cp = FakeControlPlane({"organizations": [{"id": "team-free-001"}]})
         failures = preconditions.check_supabase_placeholders(cp)
         assert len(failures) == 1
-        assert "teams" in failures[0]
+        assert "organizations" in failures[0]
 
     def test_supabase_real_api_key_fails(self):
         from tests.fake_control_plane import FakeControlPlane
@@ -140,7 +140,7 @@ class TestPreconditions:
         assert preconditions.main(["--db-path", db_path]) == 1
 
     def test_main_supabase_violation_exits_nonzero(self, tmp_path):
-        seed = json.dumps({"teams": [{"id": "team-free-001"}]})
+        seed = json.dumps({"organizations": [{"id": "team-free-001"}]})
         assert preconditions.main([
             "--db-path", _fresh_db_path(str(tmp_path)),
             "--fake-cp-seed-json", seed]) == 1
@@ -281,7 +281,7 @@ class TestWebhookSupabaseBranch:
         )
         from tests.fake_control_plane import FakeControlPlane
 
-        fake = FakeControlPlane({"teams": [
+        fake = FakeControlPlane({"organizations": [
             {"id": "team-1", "stripe_customer_id": "cus_123"},
             {"id": "team-2", "stripe_customer_id": None},
         ]})
@@ -289,11 +289,11 @@ class TestWebhookSupabaseBranch:
         assert org_id_for_stripe_customer(fake, "cus_nope") is None
 
     def test_update_team_billing_writes_known_columns_only(self):
-        from tortoise.supabase_control import update_team_billing  # noqa: I001
+        from tortoise.supabase_control import update_org_billing  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
-        fake = FakeControlPlane({"teams": [{"id": "team-1"}]})
-        update_team_billing(fake, "team-1", {
+        fake = FakeControlPlane({"organizations": [{"id": "team-1"}]})
+        update_org_billing(fake, "team-1", {
             "tier": "team",
             "subscription_id": "sub_1",
             "subscription_status": "active",
@@ -304,7 +304,7 @@ class TestWebhookSupabaseBranch:
             # unknown column must be dropped, not written
             "not_a_column": 42,
         })
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row["tier"] == "team"
         assert row["subscription_id"] == "sub_1"
         assert row["subscription_status"] == "active"
@@ -326,7 +326,7 @@ class TestWebhookSupabaseBranch:
         monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
         import tortoise.supabase_control as sc
-        fake = FakeControlPlane({"teams": [{"id": "team-1",
+        fake = FakeControlPlane({"organizations": [{"id": "team-1",
                                              "stripe_customer_id": "cus_123"}]})
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
@@ -374,7 +374,7 @@ class TestWebhookSupabaseBranch:
 
         assert r.status_code == 200, r.text
         # The teams row got the cancel (tier → free) via the seam.
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row.get("tier") == "free"
         assert row.get("subscription_status") == "canceled"
         # ZERO registry writes (re-review P1, PR #878): the webhook must not
@@ -404,7 +404,7 @@ class TestWebhookSupabaseBranch:
             "team": {"monthly": "price_team", "annual": "price_team_yr"},
         }))
         import tortoise.supabase_control as sc
-        fake = FakeControlPlane({"teams": [{"id": "team-1",
+        fake = FakeControlPlane({"organizations": [{"id": "team-1",
                                              "stripe_customer_id": "cus_123"}]})
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         from fastapi.testclient import TestClient
@@ -435,7 +435,7 @@ class TestWebhookSupabaseBranch:
                            headers=headers2).status_code == 200
         # replay: still one marker row (dedup), teams row still canceled
         assert len(fake.tables["webhook_events"]) == 1
-        assert fake.tables["teams"][0].get("tier") == "free"
+        assert fake.tables["organizations"][0].get("tier") == "free"
 
     def test_apply_limits_supabase_writes_quota_columns(self, monkeypatch):
         """Re-review P1 (PR #878): apply_limits' Supabase branch must raise
@@ -447,7 +447,7 @@ class TestWebhookSupabaseBranch:
 
         monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_key")
-        fake = FakeControlPlane({"teams": [{"id": "team-1", "tier": "free",
+        fake = FakeControlPlane({"organizations": [{"id": "team-1", "tier": "free",
                                              "max_users": 1, "max_graphs": 1,
                                              "ops_allowance": 10000,
                                              "graph_size_cap": 10000}]})
@@ -458,7 +458,7 @@ class TestWebhookSupabaseBranch:
                 raise AssertionError("registry touched in Supabase mode")
 
         apply_limits(_Boom(), "team-1", "team")
-        row = fake.tables["teams"][0]
+        row = fake.tables["organizations"][0]
         assert row["tier"] == "team"
         # team tier: max_users/max_graphs are None (unlimited — matches the
         # registry SET twin); ops_allowance + graph_size_cap are raised

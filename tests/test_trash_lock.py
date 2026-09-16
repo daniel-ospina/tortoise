@@ -27,7 +27,7 @@ _OWNER = "9f2c1a40-0000-4a00-8000-000000000001"
 def _seed(fake):
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "solo", "max_graphs": 2})
-    fake.seed("teams", [team])
+    fake.seed("organizations", [team])
     fake.seed("org_memberships", [{
         "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
@@ -42,7 +42,7 @@ def _seed(fake):
 
 @pytest.fixture
 def sb_client(monkeypatch):
-    fake = FakeControlPlane({"teams": [], "api_keys": [],
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -71,7 +71,7 @@ def test_restore_503_when_team_lock_held(sb_client, as_owner, monkeypatch):
     _seed(fake)
     as_owner()
     monkeypatch.setattr(ha_mod, "_TRASH_RESTORE_LOCK_TIMEOUT_S", 1)
-    lock = ha_mod._sweep_team_lock(_TEAM)
+    lock = ha_mod._sweep_org_lock(_TEAM)
     acquired = lock.acquire(blocking=False)
     assert acquired
     try:

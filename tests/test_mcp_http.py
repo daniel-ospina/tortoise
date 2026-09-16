@@ -53,7 +53,7 @@ def seeded_registry_sdk(tmp_path):
     """
     db_path = str(tmp_path / "reg.db")
     sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-    team = sdk.team_create("test-team")
+    team = sdk.org_create("test-team")
     key_info = sdk.apikey_create(team["id"], "test-fixture")
     return sdk, key_info["api_key"]  # (registry SDK, plaintext tt_ key)
 
@@ -132,7 +132,7 @@ class TestContextVarsAndSdk:
 
     def test_http_allowed_populated_default_deny(self):
         from tortoise.mcp_auth import HTTP_ALLOWED
-        assert "tortoise_team_create" not in HTTP_ALLOWED
+        assert "tortoise_org_create" not in HTTP_ALLOWED
         assert "tortoise_backfill_v25" not in HTTP_ALLOWED
         assert "tortoise_ingest_corpus" not in HTTP_ALLOWED
         assert "tortoise_create_point" in HTTP_ALLOWED
@@ -195,15 +195,15 @@ class TestAuthPreLeak:
             def apikey_verify(self, token):
                 raise ConnectionError("Connection refused")
 
-        orig_init = ma.TeamResolutionMiddleware._get_registry_sdk
-        ma.TeamResolutionMiddleware._get_registry_sdk = lambda self: _DownSDK()
+        orig_init = ma.OrgResolutionMiddleware._get_registry_sdk
+        ma.OrgResolutionMiddleware._get_registry_sdk = lambda self: _DownSDK()
         try:
             r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
             assert r.status_code == 503
             body = _parse_sse_json(r)
             assert body is not None and "error" in body
         finally:
-            ma.TeamResolutionMiddleware._get_registry_sdk = orig_init
+            ma.OrgResolutionMiddleware._get_registry_sdk = orig_init
 
     def test_revoked_key_fails_after_cache_expiry(self, tmp_path):
         """Revoked key works ≤60s (cache hit), fails after cache expiry (fresh cache → 401)."""
@@ -212,7 +212,7 @@ class TestAuthPreLeak:
 
         db_path = str(tmp_path / "rev.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.team_create("rev-team")
+        team = reg_sdk.org_create("rev-team")
         key_info = reg_sdk.apikey_create(team["id"], "t")
         key = key_info["api_key"]
         headers = {"Authorization": f"Bearer {key}",
@@ -281,7 +281,7 @@ class TestTortoiseHealthTruth:
         db = str(tmp_path / "health.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("health-truth-team")
+        team = reg.org_create("health-truth-team")
         key = reg.apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
@@ -320,8 +320,8 @@ class TestTortoiseHealthTruth:
         db = str(tmp_path / "health.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("health-truth-team")
-        reg.team_update(team["id"], max_points=1000)
+        team = reg.org_create("health-truth-team")
+        reg.org_update(team["id"], max_points=1000)
         key = reg.apikey_create(team["id"], "h")["api_key"]
 
         app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
@@ -391,9 +391,9 @@ class TestTeamIsolation:
 
         db_path = str(tmp_path / "iso.db")
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_a = sdk.team_create("tenant-a")
+        team_a = sdk.org_create("tenant-a")
         ka = sdk.apikey_create(team_a["id"], "t")["api_key"]
-        team_b = sdk.team_create("tenant-b")
+        team_b = sdk.org_create("tenant-b")
         kb = sdk.apikey_create(team_b["id"], "t")["api_key"]
 
         app = create_http_app(allowed_origins=[], _registry_sdk=sdk)
@@ -543,7 +543,7 @@ class TestRateLimit:
         # Fresh registry + app with rate limiting enabled
         db_path = str(tmp_path / "rl.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg_sdk.team_create("rl-team")
+        team = reg_sdk.org_create("rl-team")
         key = reg_sdk.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg_sdk)
         tc = _mounted_test_client(app)
@@ -567,14 +567,14 @@ class TestExcludedTools:
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
         assert r.status_code == 200
         names = [t["name"] for t in _parse_sse_json(r)["result"]["tools"]]
-        assert "tortoise_team_create" not in names
+        assert "tortoise_org_create" not in names
         assert "tortoise_backfill_v25" not in names
         assert "tortoise_ingest_corpus" not in names
 
     def test_excluded_call_errors(self, mcp_client):
         tc, _ = mcp_client
         r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call", "id": 1,
-                                  "params": {"name": "tortoise_team_create",
+                                  "params": {"name": "tortoise_org_create",
                                              "arguments": {"name": "x"}}})
         assert r.status_code == 200  # JSON-RPC error inside result, not HTTP error
         body = _parse_sse_json(r)
@@ -620,7 +620,7 @@ class TestOnboardingToolGating:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create(org_name)
+        team = reg.org_create(org_name)
         key = reg.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         return _mounted_test_client(app), key, team["id"]
@@ -635,7 +635,7 @@ class TestOnboardingToolGating:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create("seedteam")
+        team = reg.org_create("seedteam")
         key = reg.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
@@ -693,9 +693,9 @@ class TestOnboardingToolGating:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_a = reg.team_create("team-a")
+        team_a = reg.org_create("team-a")
         key_a = reg.apikey_create(team_a["id"], "t")["api_key"]
-        team_b = reg.team_create("team-b")
+        team_b = reg.org_create("team-b")
         key_b = reg.apikey_create(team_b["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         tc = _mounted_test_client(app)
@@ -738,8 +738,8 @@ class TestOnboardingToolGating:
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("cache-team")
         try:
-            assert mcp_server._team_onboarding_complete() is True
-            assert mcp_server._team_onboarding_complete() is True  # cached
+            assert mcp_server._org_onboarding_complete() is True
+            assert mcp_server._org_onboarding_complete() is True  # cached
             assert calls["n"] == 1, f"re-fetched within TTL: {calls['n']} reads"
         finally:
             mcp_auth._current_org_id.reset(tok)
@@ -759,8 +759,8 @@ class TestOnboardingToolGating:
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("ttl-team")
         try:
-            assert mcp_server._team_onboarding_complete() is True
-            assert mcp_server._team_onboarding_complete() is True
+            assert mcp_server._org_onboarding_complete() is True
+            assert mcp_server._org_onboarding_complete() is True
             assert calls["n"] == 2, f"TTL=0 must refetch: {calls['n']} reads"
         finally:
             mcp_auth._current_org_id.reset(tok)
@@ -782,11 +782,11 @@ class TestOnboardingToolGating:
         mcp_server._onboarding_state_cache.clear()
         tok = mcp_auth._current_org_id.set("retry-team")
         try:
-            assert mcp_server._team_onboarding_complete() is False  # fail-open
-            assert mcp_server._team_onboarding_complete() is False  # retried read
+            assert mcp_server._org_onboarding_complete() is False  # fail-open
+            assert mcp_server._org_onboarding_complete() is False  # retried read
             assert calls["n"] == 2, "failed read must not be cached"
             # and the successful False WAS cached now
-            assert mcp_server._team_onboarding_complete() is False
+            assert mcp_server._org_onboarding_complete() is False
             assert calls["n"] == 2, "successful read should now be cached"
         finally:
             mcp_auth._current_org_id.reset(tok)
@@ -839,7 +839,7 @@ class TestGraphBoundKeyTeamSurfaceReject:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.team_create(name)
+        team = reg.org_create(name)
         reg._graph_create(team["id"], "default", kind="default")
         g = reg._graph_create(team["id"], "bound-g", kind="custom")
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
@@ -1110,7 +1110,7 @@ class TestQuotaEnforcement:
         monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "quota.db"))
         db = str(tmp_path / "quota.db")
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("quota-team")
+        team = reg.org_create("quota-team")
         key_info = reg.apikey_create(team["id"], "quota-fixture")
         yield reg, key_info["api_key"], team["id"], db
         reg.close()
@@ -1131,7 +1131,7 @@ class TestQuotaEnforcement:
             yield tc, reg, key, tid
 
     def _set_max_points(self, reg_sdk, org_id, value):
-        reg_sdk.team_update(org_id, max_points=value)
+        reg_sdk.org_update(org_id, max_points=value)
 
     def test_create_point_blocked_at_cap(self, quota_client):
         """A team at its points cap gets ERR_QUOTA on create_point (HTTP)."""
@@ -1179,7 +1179,7 @@ class TestQuotaEnforcement:
     def test_cross_team_isolation(self, quota_client):
         """Team A at cap → blocked; team B below cap → succeeds (same DB)."""
         tc, reg_sdk, key, tid = quota_client  # noqa: RUF059
-        team_b = reg_sdk.team_create("quota-team-b")
+        team_b = reg_sdk.org_create("quota-team-b")
         key_b = reg_sdk.apikey_create(team_b["id"], "quota-fixture-b")["api_key"]
         self._set_max_points(reg_sdk, tid, 0)  # team A at cap
 
@@ -1311,7 +1311,7 @@ class TestQuotaEnforcement:
             graphs = _j.loads(text)
         except Exception:
             graphs = []
-        assert all(g.startswith("team_") for g in graphs), f"foreign graphs leaked: {graphs}"
+        assert all(g.startswith("org_") for g in graphs), f"foreign graphs leaked: {graphs}"
         assert "registry" not in graphs
 
 
@@ -1381,7 +1381,7 @@ class TestIntrospectiveQuotaCompleteness:
         names = {t.get("name") for t in body.get("result", {}).get("tools", [])}
         for excluded in ("tortoise_ingest_corpus", "tortoise_index_sessions",
                          "tortoise_index_files", "tortoise_backfill_v25",
-                         "tortoise_team_create"):
+                         "tortoise_org_create"):
             assert excluded not in names, f"{excluded} must stay HTTP-excluded"
 
 
@@ -1487,7 +1487,7 @@ class TestGraphSetRecordingHTTP:
         db = str(tmp_path / "rec.db")
         monkeypatch.setenv("TORTOISE_DB_PATH", db)
         reg = TortoiseSDK(db_path=db, namespace="registry")
-        team = reg.team_create("rec-http-team")
+        team = reg.org_create("rec-http-team")
         reg._graph_create(team["id"], "default", kind="default")
         key = reg.apikey_create(team["id"], "r")["api_key"]
 

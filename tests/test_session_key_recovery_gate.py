@@ -113,13 +113,13 @@ def _sb_membership(fake, org_id: str, user_id: str, role: str):
 
 def _sb_team(fake, org_id: str, **overrides) -> dict:
     """Seed (or fetch) a teams row shaped like FREE_TEAM with a new id."""
-    for t in fake.tables.setdefault("teams", []):
+    for t in fake.tables.setdefault("organizations", []):
         if t.get("id") == org_id:
             t.update(overrides)
             return t
     team = dict(FREE_TEAM, id=org_id)
     team.update(overrides)
-    fake.tables["teams"].append(team)
+    fake.tables["organizations"].append(team)
     return team
 
 
@@ -145,7 +145,7 @@ def sb(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://recovery-gate.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_recovery_gate")
     fake = FakeControlPlane({
-        "api_keys": [], "org_memberships": [], "teams": [dict(FREE_TEAM)],
+        "api_keys": [], "org_memberships": [], "organizations": [dict(FREE_TEAM)],
         "invitations": [], "abuse_events": [],
     })
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)

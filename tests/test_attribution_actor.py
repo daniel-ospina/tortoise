@@ -109,7 +109,7 @@ class TestOauthResolverRawActor:
 
         user_uuid = str(_uuid.uuid4())
         cp = FakeControlPlane({
-            "teams": [{"id": "team-oat", "name": "oat-team", "tier": "free"}],
+            "organizations": [{"id": "team-oat", "name": "oat-team", "tier": "free"}],
             "oauth_access_tokens": [{
                 "token_hash": "x" * 64,
                 "client_id": "client-1",
@@ -141,7 +141,7 @@ class TestOauthResolverRawActor:
         from tortoise.oauth import _sha256, resolve_oauth_access_token
 
         cp = FakeControlPlane({
-            "teams": [{"id": "team-oat", "name": "oat-team", "tier": "free"}],
+            "organizations": [{"id": "team-oat", "name": "oat-team", "tier": "free"}],
             "oauth_access_tokens": [{
                 "token_hash": _sha256("oat_revokedtoken"),
                 "client_id": "client-1",
@@ -169,7 +169,7 @@ class TestRegistryApikeyVerifyRawCreatedBy:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = sdk.team_create("attribution-team")
+        team = sdk.org_create("attribution-team")
         creator = str(_uuid.uuid4())
         mint = sdk.apikey_create(team["id"], created_by=creator)
         key = mint["api_key"]
@@ -190,7 +190,7 @@ class TestRegistryApikeyVerifyRawCreatedBy:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = sdk.team_create("attribution-team-legacy")
+        team = sdk.org_create("attribution-team-legacy")
         # created_via="provisioned", no creator uuid rides the node when the
         # caller does not pass created_by (the "api" class).
         key = sdk.apikey_create(team["id"], "api")["api_key"]

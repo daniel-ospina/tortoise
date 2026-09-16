@@ -452,10 +452,10 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
             "MATCH (d:Document) RETURN count(d)").result_set
         return int(rows[0][0])
 
-    team_root = GitHubDocsIndexer.team_root(TEAM_A)
-    assert str(team_root) == os.path.join(base, TEAM_A)
+    org_root = GitHubDocsIndexer.org_root(TEAM_A)
+    assert str(org_root) == os.path.join(base, TEAM_A)
     first = sdk.index_directory(
-        str(team_root), file_type="doc", extract_metadata=False,
+        str(org_root), file_type="doc", extract_metadata=False,
         corpus_name="acme-docs")
     assert first["indexed"] == 2
     assert _docs_count() == 2
@@ -472,7 +472,7 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
     stats2 = _run(idx2.walk_repo(TEAM_A, "acme/repo1"))
     assert stats2["blobs_fetched"] == 0
     second = sdk.index_directory(
-        str(team_root), file_type="doc", extract_metadata=False,
+        str(org_root), file_type="doc", extract_metadata=False,
         corpus_name="acme-docs")
     assert second["indexed"] == 0
     assert second["skipped"] == 2

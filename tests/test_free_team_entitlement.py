@@ -56,7 +56,7 @@ def _count_free(user_id: str) -> int:
 @pytest.fixture
 def fake() -> FakeControlPlane:
     cp = FakeControlPlane()
-    cp.seed("teams", [dict(FREE_TEAM)])
+    cp.seed("organizations", [dict(FREE_TEAM)])
     return cp
 
 
@@ -126,7 +126,7 @@ def user_client(client):
 
 def _seed_team(fake, org_id: str, tier: str = "free",
                subscription_status=None) -> None:
-    fake.seed("teams", [dict(FREE_TEAM, id=org_id, name=org_id, tier=tier,
+    fake.seed("organizations", [dict(FREE_TEAM, id=org_id, name=org_id, tier=tier,
                              subscription_status=subscription_status)])
 
 
@@ -352,7 +352,7 @@ class TestCreateTeamEntitlement:
         tc, fake = user_client
         _seed_team(fake, "team-free-a")
         _seed_membership(fake, "team-free-a")
-        fake.seed("teams", [dict(FREE_TEAM, id="t-dup", name="acme")])
+        fake.seed("organizations", [dict(FREE_TEAM, id="t-dup", name="acme")])
         r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 409
         assert "already exists" in r.json()["detail"]
@@ -381,7 +381,7 @@ class TestCreateTeamEntitlement:
         r1 = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r1.status_code == 200, r1.text
         # attempt the client reset via the PATCH surface
-        rp = tc.patch("/v1/onboarding/state", json={"team_created": False})
+        rp = tc.patch("/v1/onboarding/state", json={"org_created": False})
         assert rp.status_code == 200, rp.text
         r2 = tc.post("/v1/onboarding/team", json={"name": "subteam2"})
         assert r2.status_code == 409, "the guard must survive a PATCH reset attempt"
@@ -451,7 +451,7 @@ class TestCreateTeamEntitlement:
         # arm the marker directly (as the lane does post-mint) — the parent
         # row must exist for the onboarding_state write to land.
         _seed_team(fake, "team-parent-001")
-        _update_onboarding_state("team-parent-001", team_created=True)
+        _update_onboarding_state("team-parent-001", org_created=True)
         app.dependency_overrides[get_current_org_session] = lambda: dict(dep)
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 409
@@ -698,9 +698,9 @@ def _clear_locks():
     asyncio.run loops, so clear them between tests to avoid cross-loop
     RuntimeError."""
     import tortoise.hosted_api as _ha
-    _ha._TEAM_CREATE_LOCKS.clear()
+    _ha._ORG_CREATE_LOCKS.clear()
     yield
-    _ha._TEAM_CREATE_LOCKS.clear()
+    _ha._ORG_CREATE_LOCKS.clear()
 
 
 class TestConcurrentTeamCreationTOCTOU:
@@ -743,7 +743,7 @@ class TestConcurrentTeamCreationTOCTOU:
         _assert_capped(denied.json()["detail"])
         # exactly one team minted + exactly one owner membership (the gate
         # is primed — a third sequential create would 402 too)
-        teams = fake.query("teams")
+        teams = fake.query("organizations")
         minted = [t for t in teams if t.get("name") in ("alpha", "beta")]
         assert len(minted) == 1, f"expected exactly one minted team: {minted}"
         mems = fake.query("org_memberships",
@@ -825,7 +825,7 @@ class TestConcurrentTeamCreationTOCTOU:
         denied = r1 if r1.status_code == 409 else r2
         assert "already created" in denied.json()["detail"]
         # exactly one sub-team minted (main team-free-001 + one sub-team row)
-        teams = fake.query("teams")
+        teams = fake.query("organizations")
         minted = [t for t in teams
                   if t.get("name") in ("subalpha", "subbeta")]
         assert len(minted) == 1, f"expected exactly one sub-team: {minted}"

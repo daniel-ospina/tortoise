@@ -365,10 +365,10 @@ class TestAgentSignupClaim:
             json={"api_key": api_key},
         )
         assert r.status_code == 200, r.text
-        team_row = next(t for t in fake.tables["teams"] if t["id"] == org_id)
-        assert team_row.get("email") == "stale-reg@example.com", (
+        org_row = next(t for t in fake.tables["organizations"] if t["id"] == org_id)
+        assert org_row.get("email") == "stale-reg@example.com", (
             f"claim must NOT write teams.email — mint contact survives, "
-            f"got {team_row.get('email')}")
+            f"got {org_row.get('email')}")
 class TestIpv6Normalization:
     """#1081 review P4: IPv4-mapped IPv6 must share ONE bucket with the
     dotted-quad form — a dual-stack client cannot double its 2/24h budget

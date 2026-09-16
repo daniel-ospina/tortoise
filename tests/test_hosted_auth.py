@@ -136,46 +136,46 @@ class TestOrgNameSanitization:
 
     def test_valid_org_name_accepted(self, sdk):
         """Valid alphanumeric team names with hyphens/underscores pass."""
-        result = sdk.team_create("my-team_123")
+        result = sdk.org_create("my-team_123")
         assert result["name"] == "my-team_123"
         assert result["api_key"].startswith("tt_")
 
     def test_org_name_with_spaces_allowed(self, sdk):
         """Spaces are now allowed in team names."""
-        result = sdk.team_create("my team")
+        result = sdk.org_create("my team")
         assert result["name"] == "my team"
         assert result["api_key"].startswith("tt_")
 
     def test_org_name_with_special_chars_rejected(self, sdk):
         """Special characters are rejected."""
         with pytest.raises(ValueError, match="alphanumeric"):
-            sdk.team_create("team@name!")
+            sdk.org_create("team@name!")
 
     def test_org_name_empty_rejected(self, sdk):
         """Empty team name raises ValueError."""
         with pytest.raises(ValueError):
-            sdk.team_create("")
+            sdk.org_create("")
 
     def test_org_name_whitespace_only_rejected(self, sdk):
         """Whitespace-only name raises ValueError."""
         with pytest.raises(ValueError):
-            sdk.team_create("   ")
+            sdk.org_create("   ")
 
     def test_org_name_too_long_rejected(self, sdk):
         """Names > 64 characters are rejected."""
         with pytest.raises(ValueError):
-            sdk.team_create("a" * 65)
+            sdk.org_create("a" * 65)
 
     def test_org_name_max_length_accepted(self, sdk):
         """Exactly 64 characters is fine."""
         name = "a" * 64
-        result = sdk.team_create(name)
+        result = sdk.org_create(name)
         assert result["name"] == name
 
     def test_org_name_starts_with_hyphen_rejected(self, sdk):
         """Leading hyphen is not allowed."""
         with pytest.raises(ValueError, match="alphanumeric"):
-            sdk.team_create("-myteam")
+            sdk.org_create("-myteam")
 
 
 # ── Team Creation Tests ─────────────────────────────────────────────────────
@@ -185,17 +185,17 @@ class TestTeamCreation:
 
     def test_team_create_returns_expected_fields(self, sdk):
         """team_create returns name, graph_name, api_key, id."""
-        result = sdk.team_create("test-team")
+        result = sdk.org_create("test-team")
         assert "name" in result
         assert "graph_name" in result
         assert "api_key" in result
         assert "id" in result
         assert result["name"] == "test-team"
-        assert result["graph_name"] == "team_test-team"
+        assert result["graph_name"] == "org_test-team"
 
     def test_team_create_api_key_format(self, sdk):
         """API key starts with tt_ and is hex-encoded."""
-        result = sdk.team_create("apikey-test")
+        result = sdk.org_create("apikey-test")
         key = result["api_key"]
         assert key.startswith("tt_")
         # After tt_, should be hex (UUID4)
@@ -204,39 +204,39 @@ class TestTeamCreation:
 
     def test_team_create_duplicate_rejected(self, sdk):
         """Creating the same team name twice raises ValueError."""
-        sdk.team_create("unique-team")
+        sdk.org_create("unique-team")
         with pytest.raises(ValueError, match="already exists"):
-            sdk.team_create("unique-team")
+            sdk.org_create("unique-team")
 
     def test_team_create_different_namespaces_independent(self, sdk):
         """Same team name in different namespaces is allowed."""
         # Create in one namespace
-        sdk.team_create("cross-ns-team")
+        sdk.org_create("cross-ns-team")
 
         # Create with different namespace should be independent
         sdk2 = TortoiseSDK(sdk._db_path, namespace="test-hosted-2")
-        result = sdk2.team_create("cross-ns-team")
+        result = sdk2.org_create("cross-ns-team")
         assert result["name"] == "cross-ns-team"
 
     def test_team_create_generates_unique_keys(self, sdk):
         """Each team gets a unique API key."""
-        r1 = sdk.team_create("team-a")
-        r2 = sdk.team_create("team-b")
+        r1 = sdk.org_create("team-a")
+        r2 = sdk.org_create("team-b")
         assert r1["api_key"] != r2["api_key"]
 
     def test_team_create_graph_name_format(self, sdk):
         """Graph name follows org_{name} pattern."""
-        result = sdk.team_create("mygraph")
-        assert result["graph_name"] == "team_mygraph"
+        result = sdk.org_create("mygraph")
+        assert result["graph_name"] == "org_mygraph"
 
     def test_team_create_rollback_on_graph_failure(self, sdk):
         """If graph creation fails, registry entry is rolled back."""
         # Create first team normally
-        sdk.team_create("rollback-test")
+        sdk.org_create("rollback-test")
 
         # Try creating with same name — should fail
         with pytest.raises(ValueError, match="already exists"):
-            sdk.team_create("rollback-test")
+            sdk.org_create("rollback-test")
 
 
 # ── Dev Mode Tests ──────────────────────────────────────────────────────────
@@ -287,7 +287,7 @@ class TestSecurityBaseline:
 
     def test_api_keys_are_not_stored_in_plaintext(self, sdk):
         """After team_create, verify the graph doesn't store the plaintext key."""
-        result = sdk.team_create("security-test")
+        result = sdk.org_create("security-test")
         api_key = result["api_key"]
 
         # The returned API key is plaintext (for one-time display)
@@ -302,7 +302,7 @@ class TestSecurityBaseline:
 
     def test_api_key_verification_works_end_to_end(self, sdk):
         """Create a team, get the key, verify it validates against its hash."""
-        result = sdk.team_create("verify-test")
+        result = sdk.org_create("verify-test")
         api_key = result["api_key"]
         stored_hash = auth_mod.hash_api_key(api_key)
 

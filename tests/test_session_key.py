@@ -34,7 +34,7 @@ def sdk():
 
 class TestE1SessionKey:
     def test_recovery_key_persistent_and_counts_against_cap(self, sdk):
-        team = sdk.team_create("recovery-team")
+        team = sdk.org_create("recovery-team")
         # (E1 endpoint itself is FastAPI-level; here we verify the APIKey node
         # schema supports expires_at/created_via that E1 writes, and that the
         # tier cap is readable so E1 can enforce it)
@@ -51,7 +51,7 @@ class TestE1SessionKey:
         assert rows[0][1] == "recovery"
 
     def test_bootstrap_key_carries_expiry(self, sdk):
-        team = sdk.team_create("boot-team")
+        team = sdk.org_create("boot-team")
         sdk._get_registry().query(
             "CREATE (k:APIKey {id:'boot1', org_id:$tid, key_hash:'h', key_prefix:'tt_', "
             "created_by:'u', created_at:'2026-08-07', revoked_at:null, "

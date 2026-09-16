@@ -65,7 +65,7 @@ def _seed_graph(fake, *, deleted_at: str | None, purged_at: str | None = None):
     # must not block the grace-path 200 case. Free (cap 1) is always at cap.
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "solo", "max_graphs": 2})
-    fake.seed("teams", [team])
+    fake.seed("organizations", [team])
     fake.seed("org_memberships", [{
         "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
@@ -82,7 +82,7 @@ def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB
     (mirror of test_export_delete's fixture — kept local so this file is
     self-contained; #2127 shared helper for the SDK patch)."""
-    fake = FakeControlPlane({"teams": [], "api_keys": [],
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:

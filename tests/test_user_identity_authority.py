@@ -510,7 +510,7 @@ def test_oauth_quota_fields_no_nameerror():
     import tortoise.oauth as oa
     from tests.fake_control_plane import FakeControlPlane
     cp = FakeControlPlane()
-    cp.seed("teams", [{"id": "t-1", "email": "owner@x.com", "tier": "free"}])
+    cp.seed("organizations", [{"id": "t-1", "email": "owner@x.com", "tier": "free"}])
     row = {"id": "t-1", "tier": "free", "email": "owner@x.com"}
     out = oa._quota_fields(cp, row)
     assert out["email"] == "owner@x.com"  # or None via fallback — never NameError

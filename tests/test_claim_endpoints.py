@@ -249,9 +249,9 @@ class TestClaimEndpoint:
         assert post.status_code == 200, post.text
         assert post.json()["org_id"] == org_id
         # #1765 demotion: claim never writes teams.email
-        rows = fake.tables["teams"]
-        team_row = next(t for t in rows if t["id"] == org_id)
-        assert team_row.get("email") is None
+        rows = fake.tables["organizations"]
+        org_row = next(t for t in rows if t["id"] == org_id)
+        assert org_row.get("email") is None
         # owner membership linked + identity cleared
         mem = next(m for m in fake.tables["org_memberships"]
                    if m["org_id"] == org_id)
@@ -429,14 +429,14 @@ class TestClaimEndpoint:
         # Drift phase: suspended anon team claims successfully (fail-open).
         key, org_id = _provision_anon(client, fake)
         fake.rpc("abuse_suspend", {"p_org_id": org_id})
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         r = client.post("/v1/claim", json={"api_key": key})
         assert r.status_code == 200
         # The DURABLE write actually landed (the accepted-risk property):
         # owner membership linked + identity cleared. #1765: teams.email
         # is NEVER written by claim.
-        team_row = next(t for t in fake.tables["teams"] if t["id"] == org_id)
-        assert team_row.get("email") is None
+        org_row = next(t for t in fake.tables["organizations"] if t["id"] == org_id)
+        assert org_row.get("email") is None
         mem = next(m for m in fake.tables["org_memberships"]
                    if m["org_id"] == org_id)
         assert mem["user_id"] == _U_1
@@ -643,13 +643,13 @@ class TestAnonCeiling:
         r = client.post("/v1/claim", json={"api_key": key})
         assert r.status_code == 200, r.text
         # stored caps (free values) read-time override → 12345 wins
-        fake.tables["teams"][0]["max_points"] = 12345
+        fake.tables["organizations"][0]["max_points"] = 12345
         lim = resolve_org_limits(org_id)
         assert lim["max_points"] == 12345, lim
         # NULL override → graph_size_cap fallback (GAP-B)
-        fake.tables["teams"][0]["max_points"] = None
+        fake.tables["organizations"][0]["max_points"] = None
         lim = resolve_org_limits(org_id)
-        assert lim["max_points"] == fake.tables["teams"][0]["graph_size_cap"], lim
+        assert lim["max_points"] == fake.tables["organizations"][0]["graph_size_cap"], lim
 
     def test_parity_claim_rpc_resolve_limits(self, client, fake, monkeypatch):
         """Parity: the claim RPC's is_anon_org predicate, resolve_api_key,

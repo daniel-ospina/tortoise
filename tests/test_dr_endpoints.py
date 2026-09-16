@@ -89,7 +89,7 @@ def _clean_team_graphs(monkeypatch):
             _sdk = _ha._make_sdk(namespace="registry")
             _db = _sdk._get_proj().db
             for _g in list(_db.list_graphs() or []):
-                if _g.startswith("team_") and not _g.startswith("team_test_"):
+                if _g.startswith("org_") and not _g.startswith("org_test_"):
                     try:  # noqa: SIM105
                         _db.select_graph(_g).delete()
                     except Exception:
@@ -366,7 +366,7 @@ class TestDrSweep:
         manifests = [k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")]
         assert len(manifests) == 1
         manifest = json.loads(mem_storage.download(manifests[0]))
-        assert manifest["graph_name"] == "team_team_x"
+        assert manifest["graph_name"] == "org_team_x"
         assert manifest["node_count"] == 2
 
     def test_sweep_reports_resolved_control_plane(self, client, dr_env, mem_storage):
@@ -392,10 +392,10 @@ class TestDrSweep:
         """
         from tests.fake_control_plane import FakeControlPlane
 
-        cp = FakeControlPlane().seed("teams", [
-            {"id": "team_s1", "graph_name": "team_team_s1",
+        cp = FakeControlPlane().seed("organizations", [
+            {"id": "team_s1", "graph_name": "org_team_s1",
              "tier": "pro", "backup_enabled": True},
-            {"id": "team_s2", "graph_name": "team_team_s2",
+            {"id": "team_s2", "graph_name": "org_team_s2",
              "tier": "pro", "backup_enabled": True},
         ])
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
@@ -456,7 +456,7 @@ class TestDrSweep:
         `no_teams` — NOT `enum_failed` — and still reports its dialect."""
         from tests.fake_control_plane import FakeControlPlane
 
-        cp = FakeControlPlane().seed("teams", [])
+        cp = FakeControlPlane().seed("organizations", [])
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                             lambda: True)
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
@@ -499,7 +499,7 @@ class TestSupabaseLaneSeam:
     satisfy.
     """
 
-    TEAM: ClassVar[dict] = {"id": "team_s1", "graph_name": "team_team_s1",
+    TEAM: ClassVar[dict] = {"id": "team_s1", "graph_name": "org_team_s1",
                           "tier": "pro", "backup_enabled": True}
 
     @staticmethod
@@ -516,7 +516,7 @@ class TestSupabaseLaneSeam:
         import tortoise.hosted_api as ha
         from tests.fake_control_plane import FakeControlPlane
 
-        cp = FakeControlPlane().seed("teams", [dict(TestSupabaseLaneSeam.TEAM)])
+        cp = FakeControlPlane().seed("organizations", [dict(TestSupabaseLaneSeam.TEAM)])
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                             lambda: True)
         monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
@@ -572,7 +572,7 @@ class TestSupabaseLaneSeam:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "reconciled"
-        assert body["teams"] == 1, body
+        assert body["organizations"] == 1, body
         assert body["results"]["team_s1"]["status"] == "reconciled"
         assert cp.query_count > 0
 
@@ -590,7 +590,7 @@ class TestSupabaseLaneSeam:
         cp.seed("graphs", [{
             "id": "g_old", "org_id": "team_s1", "name": "g_old",
             "kind": "custom", "status": "deleted",
-            "namespace": "team_team_s1_g_old", "deleted_at": expired,
+            "namespace": "org_team_s1_g_old", "deleted_at": expired,
             "purged_at": None,
         }])
         r = client.post("/v1/internal/backups/purge", headers=INTERNAL_HEADERS,
@@ -627,7 +627,7 @@ class TestSupabaseLaneSeam:
         short-circuits before the seam and proves nothing."""
         cp = self._fortify_supabase_lane(monkeypatch)
         self._seed_data_plane()
-        key = _default_drill_key(client, mem_storage, team="team_s1")
+        key = _default_drill_key(client, mem_storage, org_id="team_s1")
         ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
                         json={"org_id": "team_s1", "backup_key": key})
@@ -767,7 +767,7 @@ class TestSupabaseLaneSeam:
         # The provider the lifespan WIRED IN must enumerate the Supabase teams
         # (BackupWatcher stores it as `_teams`) — a partial revert that calls the
         # seam but hands the watcher the raw registry handle fails here.
-        assert watcher.watcher._teams() == ["team_s1"]
+        assert watcher.watcher._orgs() == ["team_s1"]
 
 class TestDrRebaseline:
     def test_rebaseline_requires_team(self, client, dr_env, mem_storage):
@@ -833,7 +833,7 @@ class TestDrDrill:
         assert body["target_graph"].startswith("_drill_")
         # Live graph untouched, scratch cleaned.
         sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
-        live = sdk._get_proj().db.select_graph("team_team_x")
+        live = sdk._get_proj().db.select_graph("org_team_x")
         assert live.query("MATCH (n) RETURN count(n)").result_set[0][0] == 2
         graphs = sdk._get_proj().db.list_graphs()
         assert body["target_graph"] not in graphs
@@ -1254,9 +1254,9 @@ class TestDrAclReconcile:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "reconciled"
-        team_res = body["results"]["team_x"]
-        assert team_res["custom_graphs_ok"] == 1
-        assert team_res["default_skipped"] == 1
+        org_res = body["results"]["team_x"]
+        assert org_res["custom_graphs_ok"] == 1
+        assert org_res["default_skipped"] == 1
         # the ACTIVE custom graph is rebuilt; the tombstone is never touched
         assert ("g_a", "team_x") in calls
         assert ("g_dead", "team_x") not in calls
@@ -1298,7 +1298,7 @@ def _backdate_archive(store, backup_key: str, created_at: str) -> None:
     store.upload(mkey, json.dumps(manifest).encode())
 
 
-def _default_drill_key(client, mem_storage, team="team_x") -> str:
+def _default_drill_key(client, mem_storage, org_id="team_x") -> str:
     """Sweep the team once and return the NEWEST default-graph archive key
     (a sweep always adds one archive; retention keeps older ones)."""
     r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)

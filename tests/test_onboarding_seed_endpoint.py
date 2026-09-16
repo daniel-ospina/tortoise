@@ -105,10 +105,10 @@ class TestSeedEndpoint:
             # rename the team so teams.name ≠ email slug? teams.name IS the
             # email slug post-register — assert the seed USES it when no
             # org_name is given.
-            team_node = _make_sdk(namespace="registry")._get_registry().query(
+            org_node = _make_sdk(namespace="registry")._get_registry().query(
                 "MATCH (t:Team {id: $id}) SET t.name = $name RETURN t.name",
                 params={"id": org_id, "name": org_name}).result_set
-            assert team_node[0][0] == org_name
+            assert org_node[0][0] == org_name
             res = _seed(tc, person_name="Alex Johnson")
             assert res["status"] == "seeded", res
             assert res["org_name"] == org_name

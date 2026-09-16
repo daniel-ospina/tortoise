@@ -809,11 +809,11 @@ def test_legacy_unqualified_corpus_cleaned(provisioned, mock_github,
     the first new-layout walk — it would otherwise be ingested under the new
     branch-qualified tree, duplicating every doc (same content, two ids)."""
     from tortoise.indexer.github_docs import GitHubDocsIndexer
-    team_root = GitHubDocsIndexer.team_root(provisioned.org_id)
-    legacy_docs = team_root / "acme" / "repo1" / "docs"
+    org_root = GitHubDocsIndexer.org_root(provisioned.org_id)
+    legacy_docs = org_root / "acme" / "repo1" / "docs"
     legacy_docs.mkdir(parents=True, exist_ok=True)
     (legacy_docs / "README.md").write_text("# legacy\n")
-    legacy_manifest = team_root / ".manifest" / "acme" / "repo1.json"
+    legacy_manifest = org_root / ".manifest" / "acme" / "repo1.json"
     legacy_manifest.parent.mkdir(parents=True, exist_ok=True)
     legacy_manifest.write_text('{"tree_sha":"legacy","branch":"main"}')
 

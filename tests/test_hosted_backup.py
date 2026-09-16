@@ -1247,14 +1247,14 @@ def test_registry_stamp_lands_in_canonical_registry(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         db_path = os.path.join(tmp, "t.db")
         reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_sdk = TortoiseSDK(db_path=db_path, namespace="team_x")
+        org_sdk = TortoiseSDK(db_path=db_path, namespace="team_x")
         # seed a Team node in the canonical registry (as provision does)
         reg_sdk._get_registry().query("CREATE (t:Team {id:'team_x', tier:'pro'})")
-        _seed(team_sdk._get_proj().g)
+        _seed(org_sdk._get_proj().g)
         store = MemoryStorage()
 
         manifest = create_backup(
-            team_sdk._get_proj(), reg_sdk._get_registry(), store,
+            org_sdk._get_proj(), reg_sdk._get_registry(), store,
             org_id="team_x", graph_name="team_team_x",
         )
         assert manifest["node_count"] == 6
@@ -1263,7 +1263,7 @@ def test_registry_stamp_lands_in_canonical_registry(monkeypatch):
             "MATCH (t:Team {id:'team_x'}) RETURN t.backup_latest_at"
         ).result_set
         assert row and row[0][0]
-        team_sdk.close()
+        org_sdk.close()
         reg_sdk.close()
 
 
@@ -1917,7 +1917,7 @@ def test_backup_seam_dialect_detection():
         registry = proj.db.select_graph("registry_tortoise")
         assert not _is_supabase_source(registry)  # falkordb Graph → Cypher
         assert _is_supabase_source(FakeControlPlane())
-        assert _is_supabase_source(FakeControlPlane().seed("teams", []))
+        assert _is_supabase_source(FakeControlPlane().seed("organizations", []))
 
         class _VarArgsStub:  # *args stub → treated as the registry dialect
             def query(self, *a, **k):
@@ -1946,7 +1946,7 @@ def test_create_backup_stamps_supabase_teams_row(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
         _seed(proj.g)
-        cp = FakeControlPlane().seed("teams", [
+        cp = FakeControlPlane().seed("organizations", [
             {"id": "team_x", "graph_name": "tortoise", "tier": "pro",
              "backup_enabled": True},
             {"id": "team_y", "graph_name": "tortoise", "tier": "pro",
@@ -1955,10 +1955,10 @@ def test_create_backup_stamps_supabase_teams_row(monkeypatch):
         store = MemoryStorage()
         manifest = create_backup(proj, cp, store, org_id="team_x", graph_name="tortoise")
         assert manifest["node_count"] == 6
-        row = cp.query("teams", select=["backup_latest_at"],
+        row = cp.query("organizations", select=["backup_latest_at"],
                        filters=[("id", "eq", "team_x")])
         assert row[0]["backup_latest_at"]  # stamped on the target team
-        other = cp.query("teams", select=["backup_latest_at"],
+        other = cp.query("organizations", select=["backup_latest_at"],
                          filters=[("id", "eq", "team_y")])
         assert other[0]["backup_latest_at"] is None  # untouched
         proj.close()
@@ -1981,7 +1981,7 @@ def test_create_backup_supabase_stamp_blip_best_effort(monkeypatch):
 
         store = MemoryStorage()
         manifest = create_backup(
-            proj, StampBlip().seed("teams", [{"id": "team_x"}]), store,
+            proj, StampBlip().seed("organizations", [{"id": "team_x"}]), store,
             org_id="team_x", graph_name="tortoise",
         )
         assert manifest["node_count"] == 6
@@ -1996,7 +1996,7 @@ def test_restore_backup_stamps_supabase_teams_row(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
         _seed(proj.g)
-        cp = FakeControlPlane().seed("teams", [
+        cp = FakeControlPlane().seed("organizations", [
             {"id": "team_x", "graph_name": "tortoise", "tier": "pro",
              "backup_enabled": True},
         ])
@@ -2007,7 +2007,7 @@ def test_restore_backup_stamps_supabase_teams_row(monkeypatch):
             proj.db, cp, store, dump_key, org_id="team_x", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 6, "edges": 5}
-        row = cp.query("teams", select=["backup_restored_at"],
+        row = cp.query("organizations", select=["backup_restored_at"],
                        filters=[("id", "eq", "team_x")])
         assert row[0]["backup_restored_at"]
         proj.close()
@@ -2030,12 +2030,12 @@ def test_restore_supabase_stamp_blip_best_effort(monkeypatch):
 
         store = MemoryStorage()
         manifest = create_backup(  # noqa: F841
-            proj, StampBlip().seed("teams", [{"id": "team_x"}]), store,
+            proj, StampBlip().seed("organizations", [{"id": "team_x"}]), store,
             org_id="team_x", graph_name="tortoise",
         )
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
-            proj.db, StampBlip().seed("teams", [{"id": "team_x"}]), store, dump_key,
+            proj.db, StampBlip().seed("organizations", [{"id": "team_x"}]), store, dump_key,
             org_id="team_x", graph_name="tortoise",
         )
         assert result["restored"] == {"nodes": 6, "edges": 5}

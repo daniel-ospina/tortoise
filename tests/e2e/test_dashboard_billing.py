@@ -68,7 +68,7 @@ BILLING_ROW = {
 
 def _open_billing(page: Page) -> None:
     _wire_prod_domains(page, exchange_body=_session_json(),
-                       team_row=BILLING_ROW, billing_routes=True)
+                       org_row=BILLING_ROW, billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
     expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
@@ -114,7 +114,7 @@ def test_active_subscriber_manage_subscription_posts_portal(page: Page) -> None:
     /v1/billing/portal (plan changes route through the Stripe portal — the
     checkout endpoint 409s on active subscriptions by design)."""
     _wire_prod_domains(page, exchange_body=_session_json(),
-                       team_row={**BILLING_ROW, "subscription_status": "active",
+                       org_row={**BILLING_ROW, "subscription_status": "active",
                                  "tier": "pro"},
                        billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")

@@ -40,7 +40,7 @@ def reg_sdk(monkeypatch, tmp_path):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     sdk = TortoiseSDK(db, namespace="registry")
-    sdk.team_create(name="quota-team")
+    sdk.org_create(name="quota-team")
     yield sdk
     sdk.close()
 

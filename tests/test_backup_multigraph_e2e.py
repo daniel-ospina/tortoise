@@ -157,11 +157,11 @@ def test_multigraph_sweep_and_per_graph_restore_e2e(monkeypatch):
                 db=proj.db, registry=reg, storage=store, config=cfg,
             )
             assert res["status"] == "backed_up"
-            team_res = res["results"][org_id]
-            assert team_res["status"] == "backed_up"
-            assert set(team_res["graphs"].keys()) == {"default", "g_a", "g_b"}
+            org_res = res["results"][org_id]
+            assert org_res["status"] == "backed_up"
+            assert set(org_res["graphs"].keys()) == {"default", "g_a", "g_b"}
             # tombstoned graph absent from the enumeration + sweep results
-            assert "g_del" not in team_res["graphs"]
+            assert "g_del" not in org_res["graphs"]
             assert list_backups(store, org_id, graph_id="g_del") == []
 
             # per-graph artifacts + state
@@ -175,8 +175,8 @@ def test_multigraph_sweep_and_per_graph_restore_e2e(monkeypatch):
             # every archive is graph-keyed — NO legacy team-level (4-segment)
             # manifests remain after this sweep (pre-#2313 flat objects are
             # the drain target; a fresh sweep produces none)
-            team_keys = store.list(f"backups/{org_id}/")
-            assert not [k for k in team_keys if len(k.split("/")) == 4
+            org_keys = store.list(f"backups/{org_id}/")
+            assert not [k for k in org_keys if len(k.split("/")) == 4
                         and k.endswith("manifest.json")]
 
             # ── per-graph restore: mutate g_a LIVE, restore from ITS archive ──

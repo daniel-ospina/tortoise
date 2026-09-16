@@ -45,7 +45,7 @@ _WEBHOOK_SECRET = "whsec_test"
 @pytest.fixture
 def fake() -> FakeControlPlane:
     return FakeControlPlane({
-        "teams": [dict(FREE_TEAM)],
+        "organizations": [dict(FREE_TEAM)],
         "org_memberships": [],
         "api_keys": [],
         "webhook_events": [],
@@ -112,7 +112,7 @@ def user_client(client):
 
 def _seed_team(fake, org_id: str, tier: str = "free",
                subscription_status=None) -> None:
-    fake.seed("teams", [dict(FREE_TEAM, id=org_id, name=org_id, tier=tier,
+    fake.seed("organizations", [dict(FREE_TEAM, id=org_id, name=org_id, tier=tier,
                              subscription_status=subscription_status)])
 
 
@@ -187,7 +187,7 @@ class TestNewOrgCheckout:
         assert seen["tier"] == "pro"
         assert seen["email"] == "owner@example.com"
         # NOTHING is written server-side (design 2): no team, no membership.
-        assert not [t for t in fake.query("teams") if t.get("id") == tid]
+        assert not [t for t in fake.query("organizations") if t.get("id") == tid]
         assert not [m for m in fake.query("org_memberships")
                     if m.get("org_id") == tid]
 
@@ -218,7 +218,7 @@ class TestNewOrgCheckout:
         """teams.name is globally unique (0011) — a collision must fail BEFORE
         money moves (a webhook-time collision would strand a paying customer)."""
         tc, fake = user_client
-        fake.seed("teams", [dict(FREE_TEAM, id="t-taken", name="Acme")])
+        fake.seed("organizations", [dict(FREE_TEAM, id="t-taken", name="Acme")])
         calls: list = []
         import tortoise.billing as billing
         monkeypatch.setattr(
@@ -285,7 +285,7 @@ class TestNewOrgCheckout:
 
 
 def _team_rows(fake, org_id):
-    return [t for t in fake.query("teams") if t.get("id") == org_id]
+    return [t for t in fake.query("organizations") if t.get("id") == org_id]
 
 
 def _membership_rows(fake, org_id):
@@ -510,7 +510,7 @@ class TestWebhookProvisioning:
                 raise RuntimeError("control plane down")
             return real(cp, **kwargs)
 
-        monkeypatch.setattr(sc, "provision_team", _flaky)
+        monkeypatch.setattr(sc, "provision_org", _flaky)
         statements = _recording_sdk(monkeypatch)
         tid = _tid("f")
         event = _checkout_event(tid, event_id="evt_flaky_1")
@@ -548,7 +548,7 @@ class TestWebhookProvisioning:
         import tortoise.billing as billing
         monkeypatch.setattr(billing.StripeClient, "get_subscription",
                             lambda self, sid: FIXTURE_SUB)
-        fake.seed("teams", [dict(FREE_TEAM, id="t-taken", name="Contested")])
+        fake.seed("organizations", [dict(FREE_TEAM, id="t-taken", name="Contested")])
         tid = _tid("c")
         assert _post_signed(
             tc, _checkout_event(tid, org_name="Contested")).status_code == 200
@@ -571,13 +571,13 @@ class TestWebhookProvisioning:
         monkeypatch.setattr(
             billing.StripeClient, "create_checkout_session_for_new_org",
             lambda self, **kw: ("cs_abandoned", "https://checkout.stripe.com/ab"))
-        before_teams = len(fake.query("teams"))
+        before_teams = len(fake.query("organizations"))
         r = tc.post("/v1/billing/checkout/new-org",
                     json={"name": "Never Bought", "price_id": _PRO_PRICE})
         assert r.status_code == 200, r.text
         tid = r.json()["org_id"]
         # no webhook arrived → nothing exists
-        assert len(fake.query("teams")) == before_teams
+        assert len(fake.query("organizations")) == before_teams
         assert _team_rows(fake, tid) == []
         assert _membership_rows(fake, tid) == []
         assert not [k for k in fake.query("api_keys") if k.get("org_id") == tid]
@@ -872,7 +872,7 @@ class TestRegistryLaneWebhookProvisioning:
                             lambda self, sid: FIXTURE_SUB)
         # someone else took the name in the meantime
         _make = __import__("tortoise.hosted_api", fromlist=["_make_sdk"])
-        _make._make_sdk(namespace="registry").team_create("Second Org")
+        _make._make_sdk(namespace="registry").org_create("Second Org")
         pre = "c" * 26
         r = _post_signed(registry_client,
                          _checkout_event(pre, org_name="Second Org",

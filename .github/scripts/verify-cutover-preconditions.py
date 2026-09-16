@@ -9,7 +9,7 @@ the two preconditions that must hold BEFORE the single-deploy flip:
      count == 0. Every registry writer was migrated to Supabase or disabled
      (plan Task 8, #765); zero nodes is the runnable proof.
   2. Supabase precondition — the Supabase control plane contains ONLY
-     reconcilable placeholders: no ``teams`` rows, no ``api_keys`` rows,
+     reconcilable placeholders: no ``organizations`` rows, no ``api_keys`` rows,
      and every ``org_memberships`` row is the auth-trigger placeholder
      (``org_id=''`` AND ``key_hash='pending'``, migrations 0003/0010 —
      provisioned at signup by the tenant-provision RPC). Anything else
@@ -62,7 +62,7 @@ PLACEHOLDER_ORG_ID = ""
 PLACEHOLDER_KEY_HASH = "pending"
 
 # Tables that must contain no real rows before the flip.
-_ZERO_ROW_TABLES = ("teams", "api_keys")
+_ZERO_ROW_TABLES = ("organizations", "api_keys")
 
 
 def check_registry_empty(db_path: str | None = None, db_uri: str | None = None) -> list[str]:
@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
                     "TORTOISE_DB_URI env).")
     ap.add_argument("--fake-cp-seed-json",
                     help="JSON seed for the fake control plane, e.g. "
-                         '{"teams": [{"id": "t"}]} (test/forensic use).')
+                         '{"organizations": [{"id": "t"}]} (test/forensic use).')
     args = ap.parse_args(argv)
 
     db_path = args.db_path or os.environ.get("TORTOISE_DB_PATH") or None
@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"verify-cutover: FAIL — {f}", file=sys.stderr)
         else:
             print(f"verify-cutover: OK — Supabase precondition holds "
-                  f"({cp_mode}: no real teams/api_keys rows, "
+                  f"({cp_mode}: no real organizations/api_keys rows, "
                   "memberships placeholder-only).")
     except Exception as e:
         cannot_run = True  # never a pass

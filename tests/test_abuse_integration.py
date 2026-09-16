@@ -58,7 +58,7 @@ _U_STRANGER = "9f2c1a40-0000-4a00-8000-00000000000a"
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 def _seed_team(fake: FakeControlPlane, *, suspended=None, flagged=None):
-    fake.seed("teams", [{
+    fake.seed("organizations", [{
         "id": TEAM, "name": "abuse-team", "tier": "free",
         "email": "owner@abuse.test", "graph_name": f"org_{TEAM}",
         "max_users": 1, "max_graphs": 1, "ops_allowance": 10000,
@@ -154,12 +154,12 @@ class TestRestSuspension:
         fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         abuse.mark_suspended(TEAM)
         assert abuse.is_suspended_signal(TEAM)
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         with TestClient(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
         assert r.status_code == 200  # degraded (accepted-by-scope)
         assert not abuse.is_suspended_signal(TEAM)  # self-heal tore it down
-        assert fake.tables["teams"][0]["suspended_at"] is not None  # durable stays
+        assert fake.tables["organizations"][0]["suspended_at"] is not None  # durable stays
 
     def test_unsuspend_restores_next_request(self, env):
         fake = env["fake"]
@@ -200,13 +200,13 @@ class TestPointBurst:
         with TestClient(env["app"]) as tc:
             for i in range(6):
                 self._post_point(tc, i)
-            team_row = fake.tables["teams"][0]
-            assert team_row["flagged_at"] is not None      # stage 1
-            assert team_row["suspended_at"] is None        # never stage 2
+            org_row = fake.tables["organizations"][0]
+            assert org_row["flagged_at"] is not None      # stage 1
+            assert org_row["suspended_at"] is None        # never stage 2
             assert not abuse.is_suspended_signal(TEAM)
             for i in range(3):  # continued in-window writes: still no suspend
                 self._post_point(tc, i)
-            assert fake.tables["teams"][0]["suspended_at"] is None
+            assert fake.tables["organizations"][0]["suspended_at"] is None
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
             # quiet → burst AFTER the window: a new episode re-flags, never
             # suspends on its first evaluation (stale-flag protection)
@@ -217,7 +217,7 @@ class TestPointBurst:
             self._post_point(tc, 50)
             for i in range(5):
                 self._post_point(tc, 51 + i)
-            assert fake.tables["teams"][0]["suspended_at"] is None
+            assert fake.tables["organizations"][0]["suspended_at"] is None
         assert [c[0] for c in env["notified"]].count("abuse_flag") >= 2
 
     def test_boundary_crossing_suspends_and_403(self, env):
@@ -228,7 +228,7 @@ class TestPointBurst:
         with TestClient(env["app"]) as tc:
             for i in range(6):
                 self._post_point(tc, i)
-            assert fake.tables["teams"][0]["flagged_at"] is not None
+            assert fake.tables["organizations"][0]["flagged_at"] is not None
             # Age the flag EPISODE anchor (the flag event row — staging is
             # event-derived) a full window into the past, and move ONE point
             # event into the continuity band (flag, now-window] so the breach
@@ -243,7 +243,7 @@ class TestPointBurst:
                           if e["event_type"] == "point_create"]
             point_rows[0]["created_at"] = band  # continuity evidence
             self._post_point(tc, 99)  # evaluation now crosses the boundary
-            assert fake.tables["teams"][0]["suspended_at"] is not None
+            assert fake.tables["organizations"][0]["suspended_at"] is not None
             # next authed request 403s with the SUSPENDED contract
             r = tc.get("/v1/team/keys", headers=_auth())
             assert r.status_code == 403
@@ -271,7 +271,7 @@ class TestPointBurst:
         events = [e for e in fake.tables.get("abuse_events", [])
                   if e["event_type"] == "point_create"]
         assert events == []  # revokes never record point_create
-        assert env["fake"].tables["teams"][0]["flagged_at"] is None
+        assert env["fake"].tables["organizations"][0]["flagged_at"] is None
 
 
 # ── R2: key-create velocity ─────────────────────────────────────────────────
@@ -300,7 +300,7 @@ class TestKeyVelocity:
                         json={"content": "next hooked request",
                               "kind": "statement"})
             assert r.status_code == 200
-        assert fake.tables["teams"][0]["flagged_at"] is not None
+        assert fake.tables["organizations"][0]["flagged_at"] is not None
         flag_notifies = [c for c in env["notified"] if c[0] == "abuse_flag"]
         assert flag_notifies and flag_notifies[0][2]["rule"] == "key_create"
 
@@ -319,7 +319,7 @@ class TestKeyVelocity:
             r = tc.post("/v1/points", headers=_auth(),
                         json={"content": "hooked", "kind": "statement"})
             assert r.status_code == 200
-        assert fake.tables["teams"][0]["flagged_at"] is None
+        assert fake.tables["organizations"][0]["flagged_at"] is None
 
 
 # ── R3: exfiltration detection ──────────────────────────────────────────────
@@ -434,7 +434,7 @@ class TestSessionLane:
         geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
         assert len(geo) == 1 and geo[0][2]["country"] == "MX"
         # R3: the session GET counted toward team read velocity
-        assert len(abuse.READ_TRACKER._by_team[TEAM]) == 1
+        assert len(abuse.READ_TRACKER._by_org[TEAM]) == 1
 
     def test_key_lane_unchanged(self, env):
         """Regression: the key lane still records auth_ip (R4) + R3 reads
@@ -446,7 +446,7 @@ class TestSessionLane:
             assert r.status_code == 200
         assert {e["country"] for e in self._ip_events(fake)} == {"CL"}
         assert [c[0] for c in env["notified"]] == ["abuse_new_ip"]
-        assert len(abuse.READ_TRACKER._by_team[TEAM]) == 1
+        assert len(abuse.READ_TRACKER._by_org[TEAM]) == 1
 
 
 class TestMcp:
@@ -456,14 +456,14 @@ class TestMcp:
         from starlette.applications import Starlette  # noqa: I001
         from starlette.responses import JSONResponse
         from starlette.routing import Route
-        from tortoise.mcp_auth import TeamResolutionMiddleware
+        from tortoise.mcp_auth import OrgResolutionMiddleware
 
         async def echo(request):
             await request.body()
             return JSONResponse({"ok": True})
 
         app = Starlette(routes=[Route("/", echo, methods=["POST"])])
-        app.add_middleware(TeamResolutionMiddleware)
+        app.add_middleware(OrgResolutionMiddleware)
         return TestClient(app)
 
     def test_suspended_team_jsonrpc_error(self, env):
@@ -548,7 +548,7 @@ class TestMintGateAndAlerts:
         # (precedent: test_auth_flip test_mint_resolves_then_revoked_rejected).
         fake.tables["api_keys"] = []
         fake.rpc("abuse_suspend", {"p_org_id": TEAM})
-        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.missing_columns = {"organizations": {"suspended_at", "flagged_at"}}
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
         try:
@@ -574,7 +574,7 @@ class TestMintGateAndAlerts:
             "user_id": _U1, "org_id": TEAM, "role": "owner",
             "status": "active", "org_name": "abuse-team"}])
         store = SupabaseAbuseStore(fake)
-        store.flag_team(TEAM, "point_create", {"count": 6})
+        store.flag_org(TEAM, "point_create", {"count": 6})
         store.record_event(TEAM, "auth_ip", country="US")
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
@@ -595,7 +595,7 @@ class TestMintGateAndAlerts:
         fake.seed("org_memberships", [{
             "user_id": _U1, "org_id": TEAM, "role": "owner",
             "status": "active", "org_name": "abuse-team"}])
-        SupabaseAbuseStore(fake).flag_team(TEAM, "point_create", {"count": 6})
+        SupabaseAbuseStore(fake).flag_org(TEAM, "point_create", {"count": 6})
         fake.rpc("abuse_suspend", {"p_org_id": TEAM})
         env["app"].dependency_overrides[get_current_user] = \
             lambda: {"user_id": _U1}
@@ -620,7 +620,7 @@ class TestMintGateAndAlerts:
     def test_team_info_status_flagged(self, env):
         """status ∈ {active, flagged} over HTTP — suspension 403s earlier."""
         fake = env["fake"]
-        fake.tables["teams"][0]["flagged_at"] = \
+        fake.tables["organizations"][0]["flagged_at"] = \
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
         with TestClient(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())

@@ -319,10 +319,10 @@ def test_429_rate_limit_retry_after_backoff_safe(monkeypatch):
                         path_limits={"/v1/context": 1})
     # Reuse the real handler (real pipeline + real auth dependency overridden
     # to the no-key lane) — the limiter sees no Bearer → per-IP bucket.
-    async def _team():
+    async def _org():
         return {"org_id": TEST_ORG_ID, "tier": "free", "key_id": None}
 
-    mini.dependency_overrides[get_current_org_gated] = _team
+    mini.dependency_overrides[get_current_org_gated] = _org
     mini.add_api_route("/v1/context", ha_mod.volunteer_context,
                        methods=["POST"])
     with TestClient(mini) as tc:

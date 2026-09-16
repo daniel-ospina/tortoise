@@ -47,7 +47,7 @@ def client(tmp_path, monkeypatch):
         return dict(hosted_api.DEFAULT_ONBOARDING_STATE)
 
     monkeypatch.setattr(hosted_api, "_update_onboarding_state", fake_update)
-    monkeypatch.setattr(hosted_api, "_team_email", lambda org_id: None)
+    monkeypatch.setattr(hosted_api, '_org_email', lambda org_id: None)
     app.dependency_overrides[get_current_org] = lambda: TEAM
     with TestClient(app) as c:
         c._captured_kwargs = captured_kwargs

@@ -861,7 +861,7 @@ class TestBootOrder:
             release.wait(60)
 
         monkeypatch.setattr(ha_mod, "_sweep_events", _blocking_sweep)
-        monkeypatch.setattr(ha_mod, "_purge_deleted_teams", lambda: None)
+        monkeypatch.setattr(ha_mod, '_purge_deleted_orgs', lambda: None)
         monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "0")
         monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", str(_free_tcp_port()))
 
@@ -1198,7 +1198,7 @@ class TestLastUsedAtTracking:
                 )
                 request.headers = {"Authorization": f"Bearer {pt_token}"}
                 result4 = asyncio.run(get_current_org(request))
-                assert result4["graph_namespace"] == "team_pt-team"  # derived
+                assert result4["graph_namespace"] == "org_pt-team"  # derived
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 
@@ -1384,7 +1384,7 @@ class TestTeamInfo:
         assert body["max_graphs"] == 1
         # max_teams removed (D1): multi-team is a user capability, not a tier
         # field — the response omits it (None) rather than a pre-existing 500.
-        assert body["max_teams"] is None
+        assert body["max_orgs"] is None
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
 
@@ -2009,7 +2009,7 @@ class TestListApiKeysSupabase:
             "revoked_at": None, "enabled": False,
             "created_via": "provisioned", "expires_at": None,
         }])
-        fake.seed("teams", [{"id": "team-001", "name": "T", "tier": "free"}])
+        fake.seed("organizations", [{"id": "team-001", "name": "T", "tier": "free"}])
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 401, r.text
 
@@ -2027,7 +2027,7 @@ class TestListApiKeysSupabase:
             "created_via": "bootstrap",
             "expires_at": "2026-08-02T00:00:00Z",  # in the past
         }])
-        fake.seed("teams", [{"id": "team-001", "name": "T", "tier": "free"}])
+        fake.seed("organizations", [{"id": "team-001", "name": "T", "tier": "free"}])
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 401, r.text
 
@@ -3151,7 +3151,7 @@ def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     gn = body["graph_name"]
-    assert gn.startswith("team_")
+    assert gn.startswith("org_")
     assert gn in _read_journal_file(str(journal)), \
         "register_user mint must be journaled (#1686)"
 
@@ -3193,7 +3193,7 @@ class TestInternalProvision:
                                  headers=self.INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         gn = r.json()["graph_name"]
-        assert gn.startswith("team_")
+        assert gn.startswith("org_")
         assert gn in _read_journal_file(str(journal)), \
             "tenant_provision mint must be journaled (#1686)"
 
@@ -5620,8 +5620,8 @@ class TestSearchOffloadConcurrency:
                     from tortoise.hosted_api import search
                     t0 = time.monotonic()
                     await asyncio.wait_for(asyncio.gather(
-                        search("falkordb traversal", limit=10, team=TEST_TEAM),
-                        search("graph performance", limit=10, team=TEST_TEAM),
+                        search("falkordb traversal", limit=10, org=TEST_TEAM),
+                        search("graph performance", limit=10, org=TEST_TEAM),
                     ), timeout=15)
                     return time.monotonic() - t0
 
@@ -5651,7 +5651,7 @@ class TestSearchOffloadConcurrency:
 
                 from tortoise.hosted_api import search
                 result = asyncio.run(search("anything", limit=10,
-                                            team=TEST_TEAM))
+                                            org=TEST_TEAM))
                 # Empty temp DB -> FTS finds nothing; the meaningful assert is
                 # 200-shaped (no HTTPException) + count == 0.
                 assert result == {"results": [], "count": 0}
@@ -5674,7 +5674,7 @@ class TestSearchOffloadConcurrency:
                 from tortoise.hosted_api import topic_summary
                 result = asyncio.run(topic_summary(
                     "some topic", max_seeds=50, max_hops=1,
-                    include_relationships=True, team=TEST_TEAM))
+                    include_relationships=True, org=TEST_TEAM))
                 # Empty DB -> empty-but-shaped summary (no 500).
                 assert isinstance(result, dict)
                 assert result.get("topic") == "some topic"
@@ -6158,7 +6158,7 @@ class TestProvisioningService:
         os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
         os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
         fake = FakeControlPlane({
-            "teams": [], "api_keys": [], "org_memberships": [],
+            "organizations": [], "api_keys": [], "org_memberships": [],
             "invitations": [],
         })
         # #2670: dashboard_key_login now DEFAULTS to false for human-created
@@ -6166,7 +6166,7 @@ class TestProvisioningService:
         # and the minted-key guard below is the guard actually under test.
         # (Without this, the exchange 403s dashboard_login_disabled first and
         # the P1-2 minted-key property is never exercised.)
-        fake.seed("teams", [dict(FREE_TEAM, dashboard_key_login=True)])
+        fake.seed("organizations", [dict(FREE_TEAM, dashboard_key_login=True)])
         fake.seed("org_memberships",
                   [_membership_row(user_id=_U1, org_id="team-free-001")])
         token = "tk_" + uuid.uuid4().hex
@@ -6583,10 +6583,10 @@ class TestC3KeyLifecycle:
         """Session-face mint: the client fixture override supplies the team
         dict with key_id REMOVED (a session JWT face — key_id None →
         owner-class session mint; TEST_TEAM carries a key_id by default)."""
-        team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
-        team_dict.pop("key_id", None)
-        team_dict.pop("delegation_depth", None)
-        app.dependency_overrides[get_current_org] = lambda: team_dict
+        org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+        org_dict.pop("key_id", None)
+        org_dict.pop("delegation_depth", None)
+        app.dependency_overrides[get_current_org] = lambda: org_dict
         import tortoise.hosted_api as ha_mod
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
@@ -6877,9 +6877,9 @@ class TestC3KeyCapAndEscalationBackstop:
         try:
             # One key already exists (fills the cap of 1).
             sdk.apikey_create(tid, "owner-test")
-            team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
-            team_dict.pop("key_id", None)
-            app.dependency_overrides[get_current_org] = lambda: team_dict
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+            org_dict.pop("key_id", None)
+            app.dependency_overrides[get_current_org] = lambda: org_dict
             # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
             # owner Membership (pre-#2297 the mint had no role check, so this
             # override never needed it; same pattern as _session_mint).
@@ -7017,9 +7017,9 @@ class TestC3KeyCapAndEscalationBackstop:
             scoped = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read", "graphs:write"])
             # shrink to [] via session face (owner admin).
-            team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_org] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: org_dict
             app.dependency_overrides[get_current_user] = lambda: {
                 "user_id": _U1, "email": "owner@example.com"}
             sdk._get_registry().query(
@@ -7047,9 +7047,9 @@ class TestC3KeyCapAndEscalationBackstop:
         sdk, tid, tc = next(gen)
         try:
             sdk.apikey_create(tid, "owner-test")  # fill cap
-            team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_org] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: org_dict
             # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
             # owner Membership (pre-#2297 the mint had no role check, so this
             # override never needed it; same pattern as _session_mint).
@@ -7125,9 +7125,9 @@ class TestC3ReviewGatePins:
             scoped = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])
             # session face owner
-            team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_org] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: org_dict
             app.dependency_overrides[get_current_user] = lambda: {
                 "user_id": _U1, "email": "owner@example.com"}
             sdk._get_registry().query(
@@ -7166,9 +7166,9 @@ class TestC3ReviewGatePins:
 
     def _session_mint_owner(self, tc, tid, body):
         import tortoise.hosted_api as ha_mod
-        team_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
-        team_dict.pop("key_id", None)
-        app.dependency_overrides[get_current_org] = lambda: team_dict
+        org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+        org_dict.pop("key_id", None)
+        app.dependency_overrides[get_current_org] = lambda: org_dict
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
             "MERGE (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
@@ -7251,7 +7251,7 @@ class TestEmbeddedRegistryPathDivergence:
                 "CREATE (t:Team {id:$id, name:$name, deleted_at:null})",
                 params={"id": "", "name": "Falsy"},
             )
-            teams = ha_mod._iter_registered_teams()
+            teams = ha_mod._iter_registered_orgs()
             writer.close()
         finally:
             _close_keepalive_anchors(ha_mod)
@@ -7285,11 +7285,11 @@ class TestEmbeddedRegistryPathDivergence:
             assert records, "writer seam constructed nothing"
             writer_records = list(records)
             records.clear()
-            ha_mod._iter_registered_teams()
+            ha_mod._iter_registered_orgs()
             sweep_records = list(records)
             assert sweep_records, "_iter_registered_teams constructed nothing"
             records.clear()
-            ha_mod._graph_has_team_namespace("team-2251-x")
+            ha_mod._graph_has_org_namespace("team-2251-x")
             probe_records = list(records)
             assert probe_records, "_graph_has_team_namespace constructed nothing"
         finally:
@@ -7331,7 +7331,7 @@ class TestEmbeddedRegistryPathDivergence:
             raise RuntimeError("embedded store busy")
 
         monkeypatch.setattr(ha_mod, "_make_sdk", _busy)
-        assert ha_mod._iter_registered_teams() == []
+        assert ha_mod._iter_registered_orgs() == []
 
     def test_graph_has_team_namespace_real_verdict(self, monkeypatch, tmp_path):
         """Consumer-visible verdict on a REAL embedded store: a minted
@@ -7367,8 +7367,8 @@ class TestEmbeddedRegistryPathDivergence:
             # Post-fix: both sites resolve the SAME anchored store → True for
             # a present graph, False for an absent one. Pre-fix this probed
             # the (empty) default store → False for the present graph.
-            assert ha_mod._graph_has_team_namespace(tid) is True
-            assert ha_mod._graph_has_team_namespace("team-absent-999") is False
+            assert ha_mod._graph_has_org_namespace(tid) is True
+            assert ha_mod._graph_has_org_namespace("team-absent-999") is False
         finally:
             # Close every anchor minted (registry + the team graph) — the
             # #1950 close-then-drop pattern.
@@ -7391,7 +7391,7 @@ class TestEmbeddedRegistryPathDivergence:
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
         ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
-            teams = ha_mod._iter_registered_teams()
+            teams = ha_mod._iter_registered_orgs()
         finally:
             ha_mod._FALLBACK_KEEPALIVE.clear()
         # URI-branch _make_sdk returns a fresh TortoiseSDK(namespace="registry")
@@ -7412,13 +7412,13 @@ class TestEmbeddedRegistryPathDivergence:
         monkeypatch.setenv("SUPABASE_URL", "https://2251.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-2251")
         fake = FakeControlPlane()
-        fake.seed("teams", [{"id": "supa-team-1", "name": "Supa T",
+        fake.seed("organizations", [{"id": "supa-team-1", "name": "Supa T",
                              "deleted_at": None}])
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
         ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
-            teams = ha_mod._iter_registered_teams()
+            teams = ha_mod._iter_registered_orgs()
         finally:
             ha_mod._FALLBACK_KEEPALIVE.clear()
         assert teams == [{"org_id": "supa-team-1", "name": "Supa T"}], teams
@@ -7444,7 +7444,7 @@ class TestEmbeddedRegistryPathDivergence:
         monkeypatch.setattr(fake, "query", _query_boom)
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
-        assert ha_mod._iter_registered_teams() == []
+        assert ha_mod._iter_registered_orgs() == []
         assert records == [], "registry SDK must never be built in Supabase mode"
 
     def test_graph_has_team_namespace_uri_mode_parity(
@@ -7461,7 +7461,7 @@ class TestEmbeddedRegistryPathDivergence:
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
         ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
-            ha_mod._graph_has_team_namespace("team-2251-uri")
+            ha_mod._graph_has_org_namespace("team-2251-uri")
             # The no-anchor URI contract the docstring claims: URI mode must
             # never populate the keepalive dict.
             assert ha_mod._FALLBACK_KEEPALIVE.get("registry") is None
@@ -7677,7 +7677,7 @@ class TestGraphHasTeamNamespaceExceptionPath:
         monkeypatch.setattr(
             ha_mod, "_make_sdk",
             lambda namespace=None, graph_name=None: _Sdk())
-        assert ha_mod._graph_has_team_namespace("team-leak") is True
+        assert ha_mod._graph_has_org_namespace("team-leak") is True
         assert closed == [True], "close() must run on the exception path"
 
     def test_construction_raise_keeps_fail_open(self, monkeypatch, tmp_path):
@@ -7691,7 +7691,7 @@ class TestGraphHasTeamNamespaceExceptionPath:
             raise RuntimeError("embedded store busy")
 
         monkeypatch.setattr(ha_mod, "_make_sdk", _boom)
-        assert ha_mod._graph_has_team_namespace("team-busy") is True
+        assert ha_mod._graph_has_org_namespace("team-busy") is True
 
 
 class TestSupabaseLaneV2AcceptErrorShape:
@@ -8330,10 +8330,10 @@ class TestRestAttributionE2E2600:
         monkeypatch.setenv("SUPABASE_URL", "https://e24b1.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-e24b1")
         fake = FakeControlPlane({
-            "teams": [], "api_keys": [], "org_memberships": [],
+            "organizations": [], "api_keys": [], "org_memberships": [],
             "invitations": [],
         })
-        fake.seed("teams", [dict(FREE_TEAM)])
+        fake.seed("organizations", [dict(FREE_TEAM)])
         fake.seed("org_memberships",
                   [_membership_row(user_id=_2600_UUID_A,
                                    org_id="team-free-001")])
@@ -8551,10 +8551,10 @@ class TestE2E10ReadPathDisplaySupabase2600:
         monkeypatch.setenv("SUPABASE_URL", "https://e10.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-e10")
         fake = FakeControlPlane({
-            "teams": [], "api_keys": [], "org_memberships": [],
+            "organizations": [], "api_keys": [], "org_memberships": [],
             "invitations": [],
         })
-        fake.seed("teams", [{"id": org_id, "name": "E10", "tier": "pro",
+        fake.seed("organizations", [{"id": org_id, "name": "E10", "tier": "pro",
                              "deleted_at": None}])
         fake.seed("org_memberships", members)
         token = "tt_" + _uuid.uuid4().hex

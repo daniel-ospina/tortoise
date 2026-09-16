@@ -329,10 +329,10 @@ class TestPackInstallLockSerialization:
     def test_ensure_keys_lock_on_resolved_graph(self, tmp_path, monkeypatch):
         """conf 75 (PR #1312): ensure_tenant_packs keys the lock on the
         RESOLVED graph name, not the passed string. ``graph_name=None``
-        (hosted provision) and ``graph_name='team_team-k'`` (backfill read
+        (hosted provision) and ``graph_name='org_team-k'`` (backfill read
         target) hit the SAME physical graph and MUST use the same lock.
         Pre-fix keying (``graph_name or 'default'``) produced 'default' vs
-        'team_team-k' — a split lock on one graph (and one shared 'default'
+        'org_team-k' — a split lock on one graph (and one shared 'default'
         lock across all None callers)."""
         import tortoise.pack_state as ps
         sdk = TortoiseSDK(db_path=str(tmp_path / "k.db"), namespace="team-k")
@@ -345,7 +345,7 @@ class TestPackInstallLockSerialization:
 
         monkeypatch.setattr(ps, "_pack_install_lock", _spy)
         ensure_tenant_packs(sdk, graph_name=None, starter=["dev"])
-        ensure_tenant_packs(sdk, graph_name="team_team-k", starter=["dev"])
+        ensure_tenant_packs(sdk, graph_name="org_team-k", starter=["dev"])
         assert seen, "lock must be consulted for every activation"
         assert seen[0] == seen[1], (
             f"lock keyed on different graphs: {seen}")
@@ -358,7 +358,7 @@ class TestPackInstallLockSerialization:
             assert seen[0].startswith("test_"), (
                 f"docker lane must lock the derived graph, got {seen[0]}")
         else:
-            assert seen == ["team_team-k", "team_team-k"], (
+            assert seen == ["org_team-k", "org_team-k"], (
                 f"lock keyed on passed string, not resolved graph: {seen}")
 
     def test_race_seam_reproduces_duplicates_without_serialization(
@@ -442,7 +442,7 @@ def supabase_client(monkeypatch):
     fake = FakeControlPlane({
         "api_keys": [],
         "org_memberships": [],
-        "teams": [dict(FREE_TEAM)],
+        "organizations": [dict(FREE_TEAM)],
         "invitations": [],
     })
     monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
@@ -646,10 +646,10 @@ class TestMcpPacksList:
         # registry SDK (auth resolution) + team SDK share one embedded DB
         db = str(tmp_path / "mcp-http.db")
         reg_sdk = TortoiseSDK(db_path=db, namespace=f"test_pack_registry_{os.urandom(4).hex()}")
-        team = reg_sdk.team_create("test-team")
+        team = reg_sdk.org_create("test-team")
         key_info = reg_sdk.apikey_create(team["id"], "test-fixture")
-        sdk_team = TortoiseSDK(db_path=db, namespace=team["id"])
-        ensure_tenant_packs(sdk_team, starter=["dev", "marketing"])
+        sdk_org = TortoiseSDK(db_path=db, namespace=team["id"])
+        ensure_tenant_packs(sdk_org, starter=["dev", "marketing"])
 
         # the tool handler resolves _get_org_sdk from mcp_server's module
         # namespace — patch that name (not mcp_auth's) so the team SDK
@@ -788,9 +788,9 @@ class TestBackfillScript:
             # _iter_teams enumeration (TortoiseSDK() → control_plane) — a
             # namespace="registry" SDK would write to registry_control_plane
             # and the backfill would never see the team.
-            created = TortoiseSDK(db_path=db_path).team_create("LegacyCo")
+            created = TortoiseSDK(db_path=db_path).org_create("LegacyCo")
             org_id, legacy_graph = created["id"], created["graph_name"]
-            assert legacy_graph == "team_LegacyCo"
+            assert legacy_graph == "org_LegacyCo"
             sdk_legacy = TortoiseSDK(db_path=db_path, namespace=org_id)
             assert _read_installs(sdk_legacy) == []  # legacy: no installs
 

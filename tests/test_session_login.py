@@ -60,13 +60,13 @@ def _seed_team(fake, *, org_id="t1", created_by=_OWNER,
                user_ids=None, status="active", email="owner@example.com",
                team_extra=None):
     """Seed a claimed team + an api_keys row created by `created_by`."""
-    team_row = {"id": org_id, "name": "Team", "tier": "free",
+    org_row = {"id": org_id, "name": "Team", "tier": "free",
                 "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
                 "ops_allowance": 1000, "email": email,
                 "dashboard_key_login": True}
     if team_extra:
-        team_row.update(team_extra)
-    fake.seed("teams", [team_row])
+        org_row.update(team_extra)
+    fake.seed("organizations", [org_row])
     mems = [{"org_id": org_id, "user_id": uid, "role": "owner" if uid == _OWNER else "member",
              "status": status}
             for uid in (user_ids or [_OWNER, _MEMBER])]
@@ -193,7 +193,7 @@ class TestSessionLogin:
         # Force the flag off on the resolved team (resolve_api_key reads
         # dashboard_key_login from the teams row — seed it off).
         monkeypatch.setattr(sc, "get_control_plane", lambda: FakeControlPlane(
-            tables={"teams": [{"id": "t1", "name": "T", "tier": "free", "max_users": 5,
+            tables={"organizations": [{"id": "t1", "name": "T", "tier": "free", "max_users": 5,
                                "max_graphs": 5, "graph_size_cap": 10000, "ops_allowance": 1000,
                                "email": "x@y.com", "dashboard_key_login": False}],
                     "org_memberships": [{"org_id": "t1", "user_id": _OWNER,
@@ -220,7 +220,7 @@ class TestSessionLogin:
         assert r.json()["detail"]["error_code"] == "KEY_NOT_USER_MINTED"
 
     def test_identity_key_on_anon_team_403_anon_team_no_owner(self, client, fake):
-        fake.seed("teams", [{"id": "t-anon", "name": "T", "tier": "free",
+        fake.seed("organizations", [{"id": "t-anon", "name": "T", "tier": "free",
                              "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
                              "ops_allowance": 1000, "email": None}])
         fake.seed("org_memberships", [{"org_id": "t-anon", "identity": "anon-abc",
@@ -243,7 +243,7 @@ class TestSessionLogin:
         creators ONLY — a UUID creator who is no longer an active member (a
         team that lost its claimed owner) is KEY_NOT_USER_MINTED, never
         ANON_TEAM_NO_OWNER."""
-        fake.seed("teams", [{"id": "t-anon2", "name": "T", "tier": "free",
+        fake.seed("organizations", [{"id": "t-anon2", "name": "T", "tier": "free",
                              "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
                              "ops_allowance": 1000, "email": None}])
         fake.seed("org_memberships", [{"org_id": "t-anon2", "identity": "anon-xyz",

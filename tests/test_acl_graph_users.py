@@ -447,6 +447,6 @@ def test_team_purge_drops_custom_graph_users(acl_env):
     acl.create_acl_user(g2["graph_id"], tid)
     assert acl.acl_user_exists(gid)
     assert acl.acl_user_exists(g2["graph_id"])
-    ha._drop_team_acl_users(tid)
+    ha._drop_org_acl_users(tid)
     assert not acl.acl_user_exists(gid)
     assert not acl.acl_user_exists(g2["graph_id"])

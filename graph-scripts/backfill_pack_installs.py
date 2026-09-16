@@ -51,7 +51,7 @@ def _iter_teams() -> list[dict]:
         from tortoise.supabase_control import get_control_plane, is_supabase_enabled
         if is_supabase_enabled():
             rows = get_control_plane().query(
-                "teams", select=["id", "graph_name"],
+                "organizations", select=["id", "graph_name"],
                 filters=[("deleted_at", "is", None)],
             )
             return [{"org_id": r["id"], "graph_name": r.get("graph_name")}

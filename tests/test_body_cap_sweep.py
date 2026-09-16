@@ -81,7 +81,7 @@ def supabase_client(monkeypatch, tmp_path):
     monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
     monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
-    cp = FakeControlPlane({"teams": [], "api_keys": [],
+    cp = FakeControlPlane({"organizations": [], "api_keys": [],
                            "org_memberships": [], "invitations": []})
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
     db_path = os.path.join(tmp_path, "oauth_sweep.db")

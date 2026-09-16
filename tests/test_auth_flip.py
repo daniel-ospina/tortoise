@@ -62,7 +62,7 @@ def supabase_fake() -> FakeControlPlane:
     return FakeControlPlane({
         "api_keys": [],
         "org_memberships": [],
-        "teams": [dict(FREE_TEAM)],
+        "organizations": [dict(FREE_TEAM)],
     })
 
 
@@ -496,19 +496,19 @@ class TestInvitesEndpointFlip:
         app.dependency_overrides.pop(get_current_user, None)
 
     @pytest.fixture
-    def team_tier(self, rest_client):
+    def org_tier(self, rest_client):
         """Team-tier team with user-1 as owner (invites enabled)."""
         tc, fake = rest_client
-        fake.tables["teams"] = [dict(TEAM_TIER_TEAM)]
+        fake.tables["organizations"] = [dict(TEAM_TIER_TEAM)]
         fake.seed("org_memberships", [{
             "user_id": _USER1, "org_id": "team-team-001",
             "role": "owner", "status": "active"}])
         return tc, fake
 
-    def test_mint_accept_round_trip_role_preserved(self, team_tier, as_user):
+    def test_mint_accept_round_trip_role_preserved(self, org_tier, as_user):
         """E2E-3 happy path: mint → lookup_hash row → accept → membership
         with the INVITED role; consumed invite cannot be re-accepted."""
-        tc, fake = team_tier
+        tc, fake = org_tier
         as_user(_USER1)
 
         r = tc.post("/v1/invites", json={
@@ -547,8 +547,8 @@ class TestInvitesEndpointFlip:
         assert r.status_code == 400
         assert "accepted" in r.json()["detail"]
 
-    def test_mint_dedup_409(self, team_tier, as_user):
-        tc, fake = team_tier
+    def test_mint_dedup_409(self, org_tier, as_user):
+        tc, fake = org_tier
         as_user(_USER1)
         payload = {"org_id": "team-team-001", "email": "bob@example.com",
                    "role": "member"}
@@ -569,8 +569,8 @@ class TestInvitesEndpointFlip:
             "role": "member"})
         assert r.status_code == 402
 
-    def test_mint_requires_owner_admin(self, team_tier, as_user):
-        tc, fake = team_tier
+    def test_mint_requires_owner_admin(self, org_tier, as_user):
+        tc, fake = org_tier
         fake.seed("org_memberships", [{
             "user_id": _USER9, "org_id": "team-team-001",
             "role": "member", "status": "active"}])
@@ -580,8 +580,8 @@ class TestInvitesEndpointFlip:
             "role": "member"})
         assert r.status_code == 403
 
-    def test_expired_invite_rejected(self, team_tier, as_user):
-        tc, fake = team_tier
+    def test_expired_invite_rejected(self, org_tier, as_user):
+        tc, fake = org_tier
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "org_id": "team-team-001", "email": "bob@example.com",
@@ -595,9 +595,9 @@ class TestInvitesEndpointFlip:
         assert r.status_code == 400
         assert "expired" in r.json()["detail"]
 
-    def test_revoked_invite_rejected_after_rescind(self, team_tier, as_user):
+    def test_revoked_invite_rejected_after_rescind(self, org_tier, as_user):
         """E2E-3: rescind → revoked; a revoked invite cannot be accepted."""
-        tc, fake = team_tier
+        tc, fake = org_tier
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "org_id": "team-team-001", "email": "bob@example.com",
@@ -618,8 +618,8 @@ class TestInvitesEndpointFlip:
         assert all(m["user_id"] != _USER2
                    for m in fake.tables["org_memberships"])
 
-    def test_rescind_requires_owner_admin(self, team_tier, as_user):
-        tc, fake = team_tier
+    def test_rescind_requires_owner_admin(self, org_tier, as_user):
+        tc, fake = org_tier
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "org_id": "team-team-001", "email": "bob@example.com",
@@ -633,8 +633,8 @@ class TestInvitesEndpointFlip:
         assert r.status_code == 403
         assert fake.tables["invitations"][0]["status"] == "pending"
 
-    def test_list_pending_invites(self, team_tier, as_user):
-        tc, fake = team_tier
+    def test_list_pending_invites(self, org_tier, as_user):
+        tc, fake = org_tier
         as_user(_USER1)
         tokens = {}
         for email in ("bob@example.com", "carol@example.com", "dave@example.com"):
@@ -658,7 +658,7 @@ class TestInvitesEndpointFlip:
         assert rows[0]["status"] == "pending"
 
     def test_invites_fail_closed_on_control_plane_error(self, monkeypatch,
-                                                        team_tier, as_user):
+                                                        org_tier, as_user):
         """#2380 (P2): the seam's own membership read (inside
         _require_owner_admin) is now wrapped — a control-plane outage is a
         503 control_plane_unavailable (#1719 class, mirroring the #2401
@@ -672,7 +672,7 @@ class TestInvitesEndpointFlip:
         """
         import tortoise.supabase_control as sc
         monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
-        tc, _ = team_tier
+        tc, _ = org_tier
         as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "org_id": "team-team-001", "email": "bob@example.com",
@@ -778,13 +778,13 @@ class TestMcpAuthFlip:
         _enable_supabase(monkeypatch, supabase_fake)
         called = []
 
-        orig = ma.TeamResolutionMiddleware._get_registry_sdk
+        orig = ma.OrgResolutionMiddleware._get_registry_sdk
 
         def _boom(self):
             called.append(True)
             raise AssertionError("registry SDK must not be used in Supabase mode")
 
-        ma.TeamResolutionMiddleware._get_registry_sdk = _boom
+        ma.OrgResolutionMiddleware._get_registry_sdk = _boom
         try:
             mcp_app = create_http_app(allowed_origins=[])
             tc = _mounted_test_client(mcp_app)
@@ -794,7 +794,7 @@ class TestMcpAuthFlip:
                 assert r.status_code == 200, r.text
             assert called == []
         finally:
-            ma.TeamResolutionMiddleware._get_registry_sdk = orig
+            ma.OrgResolutionMiddleware._get_registry_sdk = orig
 
 
 # ── #1855: per-team mint lock (cap integrity under concurrency) ─────────────

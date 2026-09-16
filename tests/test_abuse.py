@@ -74,14 +74,14 @@ class TestStaging:
         eng = AbuseEngine(store)
         # exactly 500 (threshold) must NOT flag — breach is strictly >
         assert eng.record_point_create("t1", 500, now=T0) is None
-        assert store.team_flagged_at("t1") is None
+        assert store.org_flagged_at("t1") is None
         assert notified == []
 
     def test_above_threshold_flags(self, notified):
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         assert eng.record_point_create("t1", 501, now=T0) == "flag"
-        assert store.team_flagged_at("t1") is not None
+        assert store.org_flagged_at("t1") is not None
         assert [c[0] for c in notified] == ["abuse_flag"]
         assert notified[0][2]["rule"] == "point_create"
 
@@ -95,7 +95,7 @@ class TestStaging:
         for i in range(5):
             r = eng.record_point_create("t1", 100, now=T0 + timedelta(minutes=10 * (i + 1)))
             assert r == "breach"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
         assert not is_suspended_signal("t1")
 
     def test_boundary_crossing_suspends(self, notified):
@@ -113,7 +113,7 @@ class TestStaging:
         # (T0+1800, T0+5400] still breaches via the fresh 501.
         r = eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=90))
         assert r == "suspend"
-        assert store.team_suspended("t1") is True
+        assert store.org_suspended("t1") is True
         assert is_suspended_signal("t1") is True
         assert "abuse_suspended" in [c[0] for c in notified]
         assert notified[-1][2]["appeal_url"]
@@ -123,7 +123,7 @@ class TestStaging:
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)
         # no further evaluations (team went quiet) — even far past the window
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_new_burst_after_quiet_is_new_episode(self, notified):
         """Code-review P1 fix: a stale flag must not auto-suspend a fresh
@@ -136,10 +136,10 @@ class TestStaging:
         # quiet for 2 full windows, then a new single-window burst
         burst = T0 + timedelta(seconds=7200)
         assert eng.record_point_create("t1", 501, now=burst) == "flag"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
         assert eng.record_point_create("t1", 100,
                                        now=burst + timedelta(minutes=10)) == "breach"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
         # the re-flagged episode stages normally from its own anchor
         # (sustained breach throughout — no clean evaluation)
         assert eng.record_point_create(
@@ -160,7 +160,7 @@ class TestStaging:
                                created_at=later)
         r = eng.evaluate_key_creates("t1", now=later)
         assert r == "flag"  # stage 1 for R2, NOT suspension
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_weighted_rows_sum(self, notified):
         """One weighted row (bulk ingest) counts by weight, not rows."""
@@ -169,7 +169,7 @@ class TestStaging:
         eng.record_point_create("t1", 250, now=T0)
         assert store.window_sum("t1", "point_create", 3600, now=T0) == 250
         eng.record_point_create("t1", 251, now=T0)
-        assert store.team_flagged_at("t1") is not None  # 501 via 2 rows
+        assert store.org_flagged_at("t1") is not None  # 501 via 2 rows
 
 
 class TestKeyRule:
@@ -206,7 +206,7 @@ class TestKeyRule:
         assert eng.evaluate_key_creates("t1", now=T0) == "flag"
         self._seed_keys(store, "t1", 11, T0 + timedelta(hours=25))
         assert eng.evaluate_key_creates("t1", now=T0 + timedelta(hours=25)) == "flag"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_piggyback_on_point_create(self, notified):
         """Trigger-recorded key events (signup RPC path) evaluate on the
@@ -235,14 +235,14 @@ class TestEpisodeLifecycle:
         # Pass the simulated clock: the default now=wall-clock would stamp
         # the flag_clear rows AFTER the (simulated) future burst, so
         # latest_flag_at would see the new burst as already cleared.
-        store.unsuspend_team("t1", now=T0 + timedelta(minutes=90))
+        store.unsuspend_org("t1", now=T0 + timedelta(minutes=90))
         assert store.latest_flag_at("t1", "point_create") is None
         # fresh burst long after recovery: stage 1 again, never stage 2
         burst = T0 + timedelta(days=30)
         assert eng.record_point_create("t1", 501, now=burst) == "flag"
         assert eng.record_point_create(
             "t1", 100, now=burst + timedelta(minutes=10)) == "breach"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_clean_evaluation_ends_episode(self, notified):
         """Confirmation-review P2: a window back under threshold ends the
@@ -262,7 +262,7 @@ class TestEpisodeLifecycle:
         # much later burst: re-flag, never a stale-flag suspend
         burst = T0 + timedelta(days=10)
         assert eng.record_point_create("t1", 501, now=burst) == "flag"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_unsuspend_clears_all_rules(self, notified):
         store = MemoryAbuseStore()
@@ -275,7 +275,7 @@ class TestEpisodeLifecycle:
         eng.evaluate_key_creates("t1", now=later)              # R2 flag
         assert store.latest_flag_at("t1", "point_create") is not None
         assert store.latest_flag_at("t1", "key_create") is not None
-        store.unsuspend_team("t1")
+        store.unsuspend_org("t1")
         assert store.latest_flag_at("t1", "point_create") is None
         assert store.latest_flag_at("t1", "key_create") is None
 
@@ -292,7 +292,7 @@ class TestEpisodeLifecycle:
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=90))
         assert any(w[1] == "suspended_at" and w[2] is not None for w in writes)
-        store.unsuspend_team("t1")
+        store.unsuspend_org("t1")
         assert ("t1", "suspended_at", None) in writes
         assert ("t1", "flagged_at", None) in writes
         # every write names exactly one field (no combined prop clobber)
@@ -519,27 +519,27 @@ class TestFakeTrigger:
         assert len(events) == 1
 
     def test_suspend_rpc_toggles_state(self):
-        fake = FakeControlPlane().seed("teams", [{"id": "t1", "tier": "free"}])
+        fake = FakeControlPlane().seed("organizations", [{"id": "t1", "tier": "free"}])
         fake.rpc("abuse_suspend", {"p_org_id": "t1"})
-        assert fake.tables["teams"][0]["suspended_at"] is not None
+        assert fake.tables["organizations"][0]["suspended_at"] is not None
         fake.rpc("abuse_unsuspend", {"p_org_id": "t1"})
-        assert fake.tables["teams"][0]["suspended_at"] is None
-        assert fake.tables["teams"][0].get("flagged_at") is None
+        assert fake.tables["organizations"][0]["suspended_at"] is None
+        assert fake.tables["organizations"][0].get("flagged_at") is None
 
     def test_supabase_store_over_fake(self):
         """SupabaseAbuseStore window_sum/flag/suspend over the fake plane."""
         from tortoise.abuse import SupabaseAbuseStore
-        fake = FakeControlPlane().seed("teams", [{"id": "t1", "tier": "free"}])
+        fake = FakeControlPlane().seed("organizations", [{"id": "t1", "tier": "free"}])
         store = SupabaseAbuseStore(fake)
         store.record_event("t1", "point_create", weight=300)
         store.record_event("t1", "point_create", weight=201)
         assert store.window_sum("t1", "point_create", 3600) == 501
-        store.flag_team("t1", "point_create", {"count": 501})
-        assert store.team_flagged_at("t1") is not None
-        store.suspend_team("t1")
-        assert store.team_suspended("t1")
-        store.unsuspend_team("t1")
-        assert not store.team_suspended("t1")
+        store.flag_org("t1", "point_create", {"count": 501})
+        assert store.org_flagged_at("t1") is not None
+        store.suspend_org("t1")
+        assert store.org_suspended("t1")
+        store.unsuspend_org("t1")
+        assert not store.org_suspended("t1")
         alerts = store.recent_alerts("t1")
         assert alerts and alerts[0]["type"] in ("suspend", "flag")
 

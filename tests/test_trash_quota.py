@@ -28,7 +28,7 @@ _OWNER = "9f2c1a40-0000-4a00-8000-000000000001"
 def _seed_team(fake, *, max_graphs, active_customs: int = 0):
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "solo", "max_graphs": max_graphs})
-    fake.seed("teams", [team])
+    fake.seed("organizations", [team])
     fake.seed("org_memberships", [{
         "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",
@@ -51,7 +51,7 @@ def _seed_team(fake, *, max_graphs, active_customs: int = 0):
 
 @pytest.fixture
 def sb_client(monkeypatch):
-    fake = FakeControlPlane({"teams": [], "api_keys": [],
+    fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -99,7 +99,7 @@ def test_restore_unlimited_tier_no_gate(sb_client, as_owner):
     tc, fake, _ = sb_client
     team = dict(FREE_TEAM)
     team.update({"id": _TEAM, "tier": "team", "max_graphs": None})
-    fake.seed("teams", [team])
+    fake.seed("organizations", [team])
     fake.seed("org_memberships", [{
         "id": "m-1", "org_id": _TEAM, "user_id": _OWNER, "role": "owner",
         "status": "active",

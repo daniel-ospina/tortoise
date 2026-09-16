@@ -103,7 +103,7 @@ def _seed_github_creds(fake, org_id: str):
     pass the connect check. The blob is deliberately NOT fernet — the
     background job fails fast at decrypt (no network), exactly the
     established pattern in test_index_docs_api."""
-    for t in fake.tables.get("teams", []):
+    for t in fake.tables.get("organizations", []):
         if t.get("id") == org_id:
             t["github_token_enc"] = "garbage-not-fernet"
             t["github_org"] = "acme"
@@ -144,7 +144,7 @@ def _drain_job(client, job_id: str, timeout_s: float = 3.0, *, docs: bool = Fals
 
 def _set_dashboard_key_login(fake, org_id: str, enabled: bool):
     """Flip teams.dashboard_key_login (the #1148 flag)."""
-    for t in fake.tables.get("teams", []):
+    for t in fake.tables.get("organizations", []):
         if t.get("id") == org_id:
             t["dashboard_key_login"] = enabled
             return
@@ -204,7 +204,7 @@ class TestCreateEndpointsDualAuth:
         """The points gate still runs on the session lane: cap the team at 0
         points → session-authed write 402s (fail-closed), proving the quota
         path reads the session dict's max_points, not a key field."""
-        for t in session_user.fake.tables.get("teams", []):
+        for t in session_user.fake.tables.get("organizations", []):
             if t.get("id") == session_user.org_id:
                 t["graph_size_cap"] = 0
         r = session_user.client.post("/v1/points", headers={"Authorization": "Bearer eyJ.sess"},

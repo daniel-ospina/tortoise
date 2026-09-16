@@ -82,7 +82,7 @@ class TestNodeInit:
         import uuid
         name = f"w5sdk{uuid.uuid4().hex[:8]}"
         sdk = TortoiseSDK(namespace="registry")
-        team = sdk.team_create(name)
+        team = sdk.org_create(name)
         try:
             node = onboarding_state.read_onboarding_node(
                 sdk._get_proj().db.select_graph(f"org_{name}"), team["id"])
@@ -100,10 +100,10 @@ class TestNodeInit:
         import uuid
         sdk = TortoiseSDK(namespace="registry")
         try:
-            first = sdk.team_create(f"w5a{uuid.uuid4().hex[:8]}")
+            first = sdk.org_create(f"w5a{uuid.uuid4().hex[:8]}")
             user_id = f"user-{uuid.uuid4().hex[:8]}"
             sdk.membership_create(first["id"], user_id, "owner")
-            second = sdk.team_create(f"w5b{uuid.uuid4().hex[:8]}",
+            second = sdk.org_create(f"w5b{uuid.uuid4().hex[:8]}",
                                      owner_user_id=user_id)
             node = onboarding_state.read_onboarding_node(
                 sdk._get_proj().db.select_graph(second["graph_name"]),
@@ -119,14 +119,14 @@ class TestNodeInit:
         import uuid
         sdk = TortoiseSDK(namespace="registry")
         try:
-            first = sdk.team_create(f"w5c{uuid.uuid4().hex[:8]}")
+            first = sdk.org_create(f"w5c{uuid.uuid4().hex[:8]}")
             user_id = f"user-{uuid.uuid4().hex[:8]}"
             sdk.membership_create(first["id"], user_id, "owner")
             # creator answers the fork card on the FIRST org → 'build'
             onboarding_state.write_fork(
                 sdk._get_proj().db.select_graph(first["graph_name"]),
                 first["id"], "build")
-            second = sdk.team_create(f"w5d{uuid.uuid4().hex[:8]}",
+            second = sdk.org_create(f"w5d{uuid.uuid4().hex[:8]}",
                                      owner_user_id=user_id)
             node = onboarding_state.read_onboarding_node(
                 sdk._get_proj().db.select_graph(second["graph_name"]),
@@ -865,7 +865,7 @@ class TestPatchRouting:
                             {"harness_connected": True},
                             {"first_points_filed": True},
                             {"capture_disclosed": True},
-                            {"team_named": True}):
+                            {"org_named": True}):
                 r = tc.patch("/v1/onboarding/state", json=payload)
                 assert r.status_code == 422, payload
         finally:
@@ -909,9 +909,9 @@ class TestPatchRouting:
     def test_team_created_stripped(self):
         tc, _org_id = _registered_client()
         try:
-            r = tc.patch("/v1/onboarding/state", json={"team_created": True})
+            r = tc.patch("/v1/onboarding/state", json={"org_created": True})
             assert r.status_code == 200
-            assert r.json()["onboarding"]["team_created"] is False  # server-authoritative
+            assert r.json()["onboarding"]["org_created"] is False  # server-authoritative
         finally:
             tc.__exit__(None, None, None)
 
@@ -1325,13 +1325,13 @@ class TestJourneyLeg:
             proj = _make_sdk(namespace=org_id)._get_proj()
             # W3-style seed write (the org Subject + onboards edge) — W5
             # asserts the read surface accepts it
-            org_id = f"org-{uuid.uuid4().hex[:8]}"
+            subject_oid = f"org-{uuid.uuid4().hex[:8]}"
             proj.query(
                 "MATCH (n:OnboardingState {org_id: $oid}) "
                 "MERGE (s:Subject {subjectKind: 'organization', org_id: $oid, "
                 "name: $name}) "
                 "MERGE (n)-[:onboards]->(s)",
-                oid=org_id, name=org_id)
+                oid=org_id, name=subject_oid)
             res = proj.query(
                 "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->"
                 "(s:Subject {subjectKind: 'organization'}) RETURN s.org_id",
@@ -1421,7 +1421,7 @@ class TestPostProvisionHook:
         from tortoise.supabase_control import _ensure_onboarding_node_after_provision
         org_id = f"hook{uuid.uuid4().hex[:10]}"
         user_id = str(uuid.uuid4())
-        fake = FakeControlPlane({"teams": [], "org_memberships": [], "api_keys": []})
+        fake = FakeControlPlane({"organizations": [], "org_memberships": [], "api_keys": []})
         fake.seed("org_memberships", [
             {"id": "m1", "org_id": f"prior{uuid.uuid4().hex[:10]}",
              "user_id": user_id, "role": "owner", "status": "active",
@@ -1446,7 +1446,7 @@ class TestPostProvisionHook:
         from tortoise.supabase_control import _ensure_onboarding_node_after_provision
         org_id = f"hook2{uuid.uuid4().hex[:10]}"
         user_id = str(uuid.uuid4())
-        fake = FakeControlPlane({"teams": [], "org_memberships": [], "api_keys": []})
+        fake = FakeControlPlane({"organizations": [], "org_memberships": [], "api_keys": []})
         fake.seed("org_memberships", [{"id": "m1", "org_id": org_id,
                                         "user_id": user_id, "role": "owner",
                                         "status": "active",

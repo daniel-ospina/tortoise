@@ -494,7 +494,7 @@ class TestSupabaseLane:
         assert "recover_team_key" in fns
         assert fns.count("provision_team_with_token") == 1
         # exactly one team row
-        teams = [t for t in self.fake.tables["teams"] if t["id"] == org_id]
+        teams = [t for t in self.fake.tables["organizations"] if t["id"] == org_id]
         assert len(teams) == 1
         # the recovered key resolves via api_keys.lookup_hash
         r2 = client.get("/v1/team", headers={"Authorization": f"Bearer {second['key']}"})
@@ -530,7 +530,7 @@ class TestSupabaseLane:
 
         # deleted team → uniform 422
         data2 = _mint(client)
-        team = next(t for t in self.fake.tables["teams"]
+        team = next(t for t in self.fake.tables["organizations"]
                     if t["id"] == data2["org_id"])
         team["deleted_at"] = "2026-01-01T00:00:00Z"
         r = client.post("/v1/agent/signup",
@@ -540,7 +540,7 @@ class TestSupabaseLane:
 
     def test_suspended_team_403(self, client):
         data = _mint(client)
-        team = next(t for t in self.fake.tables["teams"]
+        team = next(t for t in self.fake.tables["organizations"]
                     if t["id"] == data["org_id"])
         team["suspended_at"] = "2026-01-01T00:00:00Z"
         r = client.post("/v1/agent/signup",
@@ -620,7 +620,7 @@ class TestSupabaseLane:
         lookup = "lu1709transport0000"
         fake.seed("agent_signup_tokens",
                   [self._token_row(th, "team-1709-t1")])
-        fake.seed("teams", [{"id": "team-1709-t1", "name": "T1"}])
+        fake.seed("organizations", [{"id": "team-1709-t1", "name": "T1"}])
         # the RPC committed server-side (mint landed) but echoed nothing
         fake.seed("api_keys", [{
             "id": "key_team-1709-t1_lu1709transp", "org_id": "team-1709-t1",
@@ -628,7 +628,7 @@ class TestSupabaseLane:
             "created_via": "recovery", "created_by": "st_" + th[:12],
             "created_at": None, "expires_at": None, "revoked_at": None}])
         fake.rpc = lambda fn, body=None: None  # type: ignore[method-assign]
-        out = sc.recover_team_key(fake, token_hash=th, org_id="team-1709-t1",
+        out = sc.recover_org_key(fake, token_hash=th, org_id="team-1709-t1",
                                   lookup_hash=lookup, key_prefix="tt_1709",
                                   max_api_keys=2)
         assert out == "team-1709-t1"
@@ -643,7 +643,7 @@ class TestSupabaseLane:
         fake = FakeControlPlane()
         fake.rpc = lambda fn, body=None: None  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="no org_id"):
-            sc.recover_team_key(fake, token_hash="th", org_id="team-1709-t1",
+            sc.recover_org_key(fake, token_hash="th", org_id="team-1709-t1",
                                 lookup_hash="lu-absent", key_prefix="tt_",
                                 max_api_keys=2)
 
@@ -666,7 +666,7 @@ class TestSupabaseLane:
 
         fake.rpc = _prod_rpc  # type: ignore[method-assign]
         with pytest.raises(sc.SignupTokenRecoveryError) as ei:
-            sc.recover_team_key(fake, token_hash="th", org_id="team-1",
+            sc.recover_org_key(fake, token_hash="th", org_id="team-1",
                                 lookup_hash="lu", key_prefix="tt_",
                                 max_api_keys=2)
         assert ei.value.status == 422
@@ -678,6 +678,6 @@ class TestSupabaseLane:
 
         fake.rpc = _prod_5xx  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="HTTP 500"):
-            sc.recover_team_key(fake, token_hash="th", org_id="team-1",
+            sc.recover_org_key(fake, token_hash="th", org_id="team-1",
                                 lookup_hash="lu", key_prefix="tt_",
                                 max_api_keys=2)

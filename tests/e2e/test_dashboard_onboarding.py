@@ -138,9 +138,9 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
     seed_objects = seed_objects or [{"id": "obj-1", "name": "Onboarding Test", "objectKind": "project", "status": "in_progress"}]
     rows = key_rows if key_rows is not None else []
 
-    team_row = {"org_id": "team_o", "name": "Onboarding Test"}
+    org_row = {"org_id": "team_o", "name": "Onboarding Test"}
     if role is not None:
-        team_row["role"] = role
+        org_row["role"] = role
 
     def handle(route):
         url = route.request.url
@@ -151,7 +151,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
         if "api.premiselabs.co" in url:
             if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([team_row]))
+                              body=json.dumps([org_row]))
                 return
             if path.endswith("/v1/team/keys") and method == "POST":
                 # #2710: the wizard's mint CTA rides this endpoint. The body is
@@ -179,7 +179,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({**team_row, "tier": "free", "graph_ready": True,
+                              body=json.dumps({**org_row, "tier": "free", "graph_ready": True,
                                                "point_count": 0,
                                                "subscription_status": "active",
                                                "checkout_price_ids": {"solo": "price_solo", "pro": "price_pro", "team": "price_team"},

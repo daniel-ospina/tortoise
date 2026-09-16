@@ -121,7 +121,7 @@ def _seed_base_tables(cp) -> None:
         "id": _CLIENT_ID, "client_name": "test", "redirect_uris": [_REDIRECT],
         "scope": "mcp", "token_endpoint_auth_method": "none",
         "created_at": "2026-01-01T00:00:00+00:00"})
-    cp.tables.setdefault("teams", []).append({
+    cp.tables.setdefault("organizations", []).append({
         "id": "t1", "tier": "Team", "suspended_at": None, "flagged_at": None,
         "email": "t@example.com"})
     cp.tables.setdefault("org_memberships", []).append({
@@ -540,7 +540,7 @@ def test_post_consume_team_read_failure_restores_the_code_and_retry_succeeds(fau
     """matrix row 3 — TODAY: 500, used_at stays set, retry → 400."""
     tc, cp = fault_client
     v = _seed_code(cp, "c5", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="teams", method="GET", times=1)
+    cp.fail_query(table="organizations", method="GET", times=1)
     r1 = _post_code(tc, cp, "c5", v)
     assert r1.status_code == 503 and r1.json()["error"] == "temporarily_unavailable"
     assert cp.tables["oauth_codes"][0]["used_at"] is None
@@ -605,7 +605,7 @@ def test_bad_pkce_never_re_arms_the_code(fault_client):
 @pytest.mark.parametrize("table,select", [
     ("oauth_clients", None),        # FIRST read on the path — the :726 leak
     ("oauth_refresh_tokens", None),  # the refresh-token SELECT
-    ("teams", None),                # _assert_team_usable
+    ("organizations", None),                # _assert_team_usable
     ("org_memberships", None),     # membership_for_user_org — S4 call site #4
     ("oauth_access_tokens", ["id"]),  # prev_access
 ])
@@ -634,7 +634,7 @@ def test_refresh_membership_revoke_failure_still_returns_403_invalid_grant(fault
 def test_refresh_suspension_family_revoke_failure_still_returns_403(fault_client):
     tc, cp = fault_client
     _rid, rt = _seed_refresh_token(cp, "rt-susp")
-    cp.tables["teams"][0]["suspended_at"] = "2026-01-01T00:00:00+00:00"
+    cp.tables["organizations"][0]["suspended_at"] = "2026-01-01T00:00:00+00:00"
     cp.fail_query(table="oauth_refresh_tokens", method="PATCH", times=1)  # _revoke_team_family
     assert _post_refresh(tc, cp, rt).status_code == 403
 
@@ -700,7 +700,7 @@ def test_row7_prev_access_revoke_failure_delivers_a_USABLE_pair(fault_client, ca
     assert "prev-access revoke failed" in caplog.text
 
 
-@pytest.mark.parametrize("table", ["oauth_clients", "teams"])
+@pytest.mark.parametrize("table", ["oauth_clients", "organizations"])
 @pytest.mark.parametrize("grant", ["code", "refresh"])
 def test_exactly_one_capture_per_conversion_path(monkeypatch, fault_client, table, grant):
     calls = []
@@ -774,7 +774,7 @@ def test_capture_exception_raising_does_not_break_the_typed_error(monkeypatch, f
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sentry down")))
     tc, cp = fault_client
     v = _seed_code(cp, "sentry", client_id=_CLIENT_ID, redirect_uri=_REDIRECT)
-    cp.fail_query(table="teams", method="GET", times=1)
+    cp.fail_query(table="organizations", method="GET", times=1)
     r = _post_code(tc, cp, "sentry", v)
     assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
 

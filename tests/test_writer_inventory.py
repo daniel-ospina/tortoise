@@ -106,7 +106,7 @@ def fake() -> FakeControlPlane:
     return FakeControlPlane({
         "api_keys": [],
         "org_memberships": [],
-        "teams": [dict(FREE_TEAM)],
+        "organizations": [dict(FREE_TEAM)],
         "invitations": [],
     })
 
@@ -487,7 +487,7 @@ class TestAgentSignup:
         assert p["p_signup_token_hash"] == lookup_hash(tok)
 
         # rows landed (fake simulates the RPC)
-        assert any(t["id"] == org_id for t in fake.tables["teams"])
+        assert any(t["id"] == org_id for t in fake.tables["organizations"])
         mem = [m for m in fake.tables["org_memberships"]
                if m["org_id"] == org_id]
         assert len(mem) == 1
@@ -569,7 +569,7 @@ class TestRegister:
         assert p["p_identity"].startswith("reg-")  # deterministic per-email
         assert p["p_email"] == "founder@example.com"
         assert p["p_lookup_hash"] == lookup_hash(body["api_key"])
-        team = next(t for t in fake.tables["teams"]
+        team = next(t for t in fake.tables["organizations"]
                     if t["id"] == body["org_id"])
         assert team["email"] == "founder@example.com"
 
@@ -579,7 +579,7 @@ class TestRegister:
 
     def test_duplicate_email_409(self, client):
         tc, fake, _ = client
-        fake.seed("teams", [{"id": "t-dup", "name": "dup",
+        fake.seed("organizations", [{"id": "t-dup", "name": "dup",
                              "email": "dup@example.com"}])
         r = tc.post("/v1/register", json={
             "email": "dup@example.com", "password": "hunter2secret"})
@@ -618,7 +618,7 @@ class TestCreateTeam:
         assert fn == "provision_team"
         assert p["p_graph_name"] == f"org_{body['org_id']}"
         # persisted teams.graph_name pinned (the round-trip consumers read it)
-        assert next(t for t in fake.tables["teams"]
+        assert next(t for t in fake.tables["organizations"]
                     if t["id"] == body["org_id"])["graph_name"] == \
             f"org_{body['org_id']}"
         assert p["p_user_id"] == _USER1
@@ -656,7 +656,7 @@ class TestCreateTeam:
 
     def test_duplicate_name_409(self, user_client):
         tc, fake, _ = user_client
-        fake.seed("teams", [{"id": "t-acme", "name": "acme"}])
+        fake.seed("organizations", [{"id": "t-acme", "name": "acme"}])
         r = tc.post("/v1/organizations", json={"name": "acme"})
         assert r.status_code == 409
 
@@ -948,7 +948,7 @@ class TestGraphSurface:
     def _seed_default_graph(self, fake):
         """Real teams rows always carry graph_name (provision_team requires
         it) — the shared FREE_TEAM fixture predates the column."""
-        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
 
     def test_create_graph_writes_row_supabase_mode(self, user_client):
         """C2: the session alias writes the graphs row via the seam in
@@ -956,8 +956,8 @@ class TestGraphSurface:
         table is the SOR). Uses a PRO team (free 402s per E2E-3)."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.tables["teams"][0]["tier"] = "pro"
-        fake.tables["teams"][0]["max_graphs"] = None
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
         fake.seed("org_memberships", [_owner_membership()])
         r = tc.post("/v1/graphs", json={
             "org_id": "team-free-001", "name": "research"})
@@ -965,7 +965,7 @@ class TestGraphSurface:
         body = r.json()
         # The nested 201 envelope (additive for the dashboard caller)
         assert body["graph"]["kind"] == "custom"
-        assert body["graph"]["namespace"].startswith("team_team-free-001_g_")
+        assert body["graph"]["namespace"].startswith("org_team-free-001_g_")
         assert body["graph"]["id"].startswith("g_")
         assert body["key_plaintext"].startswith("tk_")
         assert body["revealed_once"] is True
@@ -1059,8 +1059,8 @@ class TestGraphSurface:
         default → count 0 (the count comes from Supabase, never registry)."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.tables["teams"][0]["tier"] = "solo"
-        fake.tables["teams"][0]["max_graphs"] = 2
+        fake.tables["organizations"][0]["tier"] = "solo"
+        fake.tables["organizations"][0]["max_graphs"] = 2
         fake.seed("org_memberships", [_owner_membership()])
         # 1st custom: 2 of 2 reached → 201
         r1 = tc.post("/v1/graphs", json={
@@ -1077,8 +1077,8 @@ class TestGraphSurface:
         (fake control plane), never the registry graph."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
-        fake.tables["teams"][0]["tier"] = "pro"
-        fake.tables["teams"][0]["max_graphs"] = None
+        fake.tables["organizations"][0]["tier"] = "pro"
+        fake.tables["organizations"][0]["max_graphs"] = None
         fake.seed("org_memberships", [_owner_membership()])
         assert tc.post("/v1/graphs", json={
             "org_id": "team-free-001",
@@ -1125,7 +1125,7 @@ class TestOnboardingTeam:
         assert fn == "provision_team"
         assert p["p_graph_name"] == f"org_{body['org_id']}"
         # persisted teams.graph_name pinned (the round-trip consumers read it)
-        assert next(t for t in fake.tables["teams"]
+        assert next(t for t in fake.tables["organizations"]
                     if t["id"] == body["org_id"])["graph_name"] == \
             f"org_{body['org_id']}"
         # #1748: USER path — the session user is the owner member (no
@@ -1155,9 +1155,9 @@ class TestOnboardingTeam:
         assert mem[0]["role"] == "owner"
         assert mem[0]["status"] == "active"
         # onboarding state write went to the seam too (teams row)
-        state = next(t for t in fake.tables["teams"]
+        state = next(t for t in fake.tables["organizations"]
                      if t["id"] == TEST_TEAM["org_id"])["onboarding_state"]
-        assert state["team_created"] is True
+        assert state["org_created"] is True
 
     def test_subteam_requires_session_user(self, team_client):
         """#1748: no session user on the team context (session_user_id or
@@ -1168,7 +1168,7 @@ class TestOnboardingTeam:
         r = tc.post("/v1/onboarding/team", json={"name": "orphan"})
         assert r.status_code == 403, r.text
         assert fake.rpc_calls == []  # no provision attempted
-        assert all(t["id"] != "orphan" for t in fake.tables["teams"])
+        assert all(t["id"] != "orphan" for t in fake.tables["organizations"])
 
     def test_key_auth_owner_from_key_creator(self, client):
         """#1748 key-auth branch: a real Bearer tt_ key (no session JWT —
@@ -1353,7 +1353,7 @@ class TestBackupEndpointsSupabaseGraphName:
         # SDK-created team: the graph is named per teams.graph_name — NOT
         # org_{id} (#768). team_myapp != team_team-pro-924, so a org_{id}
         # hardcode is provably wrong here.
-        fake.seed("teams", [{
+        fake.seed("organizations", [{
             "id": "team-pro-924", "name": "myapp",
             "graph_name": "team_myapp", "tier": "pro", "backup_enabled": True,
         }])
