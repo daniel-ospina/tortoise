@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise import coverage_loop, retrieval
 from tortoise.retrieval import (
     SESSION_TRANSCRIPT_KIND,
+    TURN_POINT_KIND,
     dedup_pool,
     guard_and_recap_pool,
     is_raw_chunk,
@@ -61,7 +62,7 @@ def _chunk(pid: str, sid: str, *, idx: int = 0) -> dict:
 
 
 def _point(pid: str, sid: str) -> dict:
-    return {"id": pid, "session_id": sid, "point_kind": "event"}
+    return {"id": pid, "session_id": sid, "point_kind": TURN_POINT_KIND}
 
 
 # ── SEED ────────────────────────────────────────────────────────────────
@@ -69,8 +70,9 @@ def test_seed_is_rank_ordered_bounded_and_label_free():
     pool = [_point("a1", "s1"), _point("b1", "s2"),
             _point("a2", "s1"), _point("c1", "s3"), _point("d1", "s4")]
     seeds = seeded_sessions(pool, window=10, limit=3)
-    assert seeds == [SeededSession("s1", 0), SeededSession("s2", 1),
-                     SeededSession("s3", 3)]
+    assert seeds == [SeededSession("s1", 0, "a1"),
+                     SeededSession("s2", 1, "b1"),
+                     SeededSession("s3", 3, "c1")]
     # no mark/answer signal is read at all: the same pool with gold marks
     # injected yields the identical seeds
     marked = [dict(h, has_answer=True) for h in pool]
@@ -79,7 +81,7 @@ def test_seed_is_rank_ordered_bounded_and_label_free():
 
 def test_seed_window_bounds_the_head():
     pool = [_point("a1", "s1"), _point("b1", "s2")]
-    assert seeded_sessions(pool, window=1) == [SeededSession("s1", 0)]
+    assert seeded_sessions(pool, window=1) == [SeededSession("s1", 0, "a1")]
     assert seeded_sessions(pool, window=0) == []
     assert seeded_sessions(pool, limit=0) == []
     assert seeded_sessions([]) == []
@@ -91,14 +93,34 @@ def test_seed_drops_synthetic_and_sentinel_buckets():
             {"id": "x4", "session_id": ""},
             _point("y1", "real")]
     seeds = seeded_sessions(pool, window=10)
-    assert seeds == [SeededSession("real", 4)]
+    assert seeds == [SeededSession("real", 4, "y1")]
+
+
+def test_seed_requires_the_pool_hit_id_it_anchors_on():
+    """The fetch resolves the session through ``Session-[:CONTAINS]->hit``,
+    so a hit with no ``id`` names no session to expand and must not seed."""
+    pool = [_point("a1", "s1"), {"session_id": "s2"},
+            _point("c1", "s3")]
+    assert seeded_sessions(pool, window=10) == [SeededSession("s1", 0, "a1"),
+                                                SeededSession("s3", 2, "c1")]
 
 
 def test_seed_defaults_are_the_documented_constants():
     assert DEFAULT_REINJECTION_SEED_WINDOW == 40
     assert DEFAULT_REINJECTION_SEED_SESSIONS == 5
     assert DEFAULT_REINJECTION_PER_SESSION == 3
-    assert DEFAULT_REINJECTION_TOTAL_ITEMS == 20
+    assert DEFAULT_REINJECTION_TOTAL_ITEMS == 10
+
+
+def test_total_budget_is_below_the_structural_fan_out():
+    """The total cap must be strictly BELOW ``SEED_SESSIONS *
+    PER_SESSION`` or it is structurally inert (the per-session cap alone
+    guarantees no row ever trips it, so ``total_cap_hit`` could never be
+    True — the defect this PR fixes). Pin the invariant so a future bump of
+    either constant cannot silently re-inert the census key."""
+    assert (DEFAULT_REINJECTION_TOTAL_ITEMS
+            < DEFAULT_REINJECTION_SEED_SESSIONS
+            * DEFAULT_REINJECTION_PER_SESSION)
 
 
 # ── EXPAND ──────────────────────────────────────────────────────────────
@@ -128,20 +150,49 @@ class _FakeProj:
 def test_fetch_is_one_query_with_the_filter_in_the_query():
     proj = _FakeProj(rows=[("c1", "s1", 1)])
     out = source_session_chunk_pass(
-        proj, ["s1", "s2"], question_id="q1", pool_ids={"p1", "p2"})
+        proj, ["seed1", "seed2"], pool_ids={"p1", "p2"})
     assert len(proj.g.calls) == 1
     cypher, params = proj.g.calls[0]
     assert "NOT p.id IN $pool_ids" in cypher          # filter in-query
-    assert "p.lme_question_id = $q" in cypher         # unconditional qid
     assert "coalesce(p.pointKind, '') = $chunk_kind" in cypher
-    assert params["q"] == "q1"
+    # #2517: the scope is the Session the seeded hit BELONGS to (product-
+    # real), never a benchmark-only field and never ``p.session_id`` (a
+    # product turn Point carries no such property — that predicate was dead
+    # in every product graph).
+    assert "MATCH (s:Session)-[:CONTAINS]->(seed)" in cypher
+    assert "MATCH (s)-[:CONTAINS]->(p:Point)" in cypher
+    assert "seed.id IN $seed_ids" in cypher
+    assert "lme_question_id" not in cypher
+    assert "p.session_id IN" not in cypher
+    # the default kind is the PRODUCT's verbatim material, not the eval's
+    assert params["chunk_kind"] == TURN_POINT_KIND
     assert sorted(params["pool_ids"]) == ["p1", "p2"]  # coerced to a list
-    assert params["sids"] == ["s1", "s2"]
-    assert params["chunk_kind"] == SESSION_TRANSCRIPT_KIND
+    assert params["seed_ids"] == ["seed1", "seed2"]
     assert out["ok"] is True
     assert out["total"] == 1
     assert out["by_session"] == {"s1": [{"id": "c1", "session_id": "s1",
                                          "lme_chunk_index": 1}]}
+
+
+def test_fetch_constrains_event_kind_to_the_turn_shape():
+    """``pointKind``'s vocabulary is open, so the turn kind alone does not
+    prove a node is a turn: the hosted demo/dashboard seed writes
+    ``pointKind='event'`` with no ``is_episodic`` and no role tag. The
+    default (turn) kind must carry the shape predicate; the eval's chunk
+    A/B must NOT (chunks are role-prefixed windows whose shape is already
+    pinned by the kind)."""
+    proj = _FakeProj(rows=[])
+    source_session_chunk_pass(proj, ["seed1"], pool_ids=[])
+    turn_cypher, _ = proj.g.calls[0]
+    assert "coalesce(p.is_episodic, false) = true" in turn_cypher
+    assert "coalesce(p.content, '') STARTS WITH '['" in turn_cypher
+    proj2 = _FakeProj(rows=[])
+    source_session_chunk_pass(
+        proj2, ["seed1"], pool_ids=[], chunk_kind=SESSION_TRANSCRIPT_KIND)
+    chunk_cypher, params = proj2.g.calls[0]
+    assert "is_episodic" not in chunk_cypher
+    assert "STARTS WITH" not in chunk_cypher
+    assert params["chunk_kind"] == SESSION_TRANSCRIPT_KIND
 
 
 def test_fetch_applies_per_session_and_total_caps_in_order():
@@ -150,7 +201,7 @@ def test_fetch_applies_per_session_and_total_caps_in_order():
             ("c1", "s3", 0)]
     proj = _FakeProj(rows=rows)
     out = source_session_chunk_pass(
-        proj, ["s1", "s2", "s3"], question_id="q1", pool_ids=[],
+        proj, ["seed1", "seed2", "seed3"], pool_ids=[],
         per_session_cap=2, total_cap=4)
     assert out["total"] == 4
     assert [r["id"] for r in out["by_session"]["s1"]] == ["a1", "a2"]
@@ -163,7 +214,7 @@ def test_fetch_applies_per_session_and_total_caps_in_order():
 def test_fetch_total_cap_hit_flag_is_false_when_only_per_session_binds():
     proj = _FakeProj(rows=[("a1", "s1", 0), ("a2", "s1", 1)])
     out = source_session_chunk_pass(
-        proj, ["s1"], question_id="q1", pool_ids=[], per_session_cap=1,
+        proj, ["seed1"], pool_ids=[], per_session_cap=1,
         total_cap=10)
     assert out["dropped_by_cap"] == 1
     assert out["total_cap_hit"] is False
@@ -172,7 +223,7 @@ def test_fetch_total_cap_hit_flag_is_false_when_only_per_session_binds():
 def test_fetch_is_fail_open():
     proj = _FakeProj(error=RuntimeError("boom"))
     out = source_session_chunk_pass(
-        proj, ["s1"], question_id="q1", pool_ids=[])
+        proj, ["seed1"], pool_ids=[])
     assert out == {"ok": False, "by_session": {}, "total": 0,
                    "dropped_by_cap": 0, "total_cap_hit": False}
 
@@ -185,7 +236,7 @@ def test_fetch_budgets_count_distinct_ids_not_duplicate_nodes():
             ("a2", "s1", 1), ("a3", "s1", 2)]
     proj = _FakeProj(rows=rows)
     out = source_session_chunk_pass(
-        proj, ["s1"], question_id="q1", pool_ids=[], per_session_cap=2,
+        proj, ["seed1"], pool_ids=[], per_session_cap=2,
         total_cap=10)
     assert out["ok"] is True
     assert [r["id"] for r in out["by_session"]["s1"]] == ["a1", "a2"]
@@ -196,7 +247,7 @@ def test_fetch_budgets_count_distinct_ids_not_duplicate_nodes():
 
 def test_fetch_no_seeds_is_a_clean_noop():
     proj = _FakeProj(rows=[("a1", "s1", 0)])
-    out = source_session_chunk_pass(proj, [], question_id="q1", pool_ids=[])
+    out = source_session_chunk_pass(proj, [], pool_ids=[])
     assert out["ok"] is True and out["total"] == 0
     assert proj.g.calls == []
 
@@ -210,7 +261,7 @@ def test_fetch_zero_budgets_short_circuit_before_the_query():
                           ("total_cap", {"total_cap": 0})):
         proj = _FakeProj(rows=rows)
         out = source_session_chunk_pass(
-            proj, ["s1"], question_id="q1", pool_ids=[],
+            proj, ["seed1"], pool_ids=[],
             per_session_cap=kwargs.get("per_session_cap", 2),
             total_cap=kwargs.get("total_cap", 10))
         assert out == {"ok": True, "by_session": {}, "total": 0,

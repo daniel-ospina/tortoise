@@ -1644,9 +1644,13 @@ def retrieve_for_question(
     # product does not have; the window is conservative, not the reader's
     # admitted set — see session_reinjection.DEFAULT_REINJECTION_SEED_WINDOW),
     # fetch the
-    # rest of each seeded session's raw chunks in ONE batched query and
+    # rest of each seeded session's verbatim material — the PRODUCT's
+    # episodic TURN points (pointKind 'event', shape-constrained) by
+    # default, reached through the Session-[:CONTAINS]->Point edge the
+    # product writes; the raw ``session-transcript`` chunk kind stays
+    # addressable for the eval A/B — in ONE batched query and
     # splice them back immediately after that session's LAST base hit —
-    # additive, so an injected chunk can never evict a base chunk; the
+    # additive, so an injected item can never evict a base item; the
     # shared guard then re-caps through the same contract C3-1 uses.
     # Product rules live in tortoise/session_reinjection.py. INSERTION
     # POINT IS PINNED: after the C3-1 block, before the C2 boost — the
@@ -1699,7 +1703,7 @@ def retrieve_for_question(
             sr_seeded = len(sr_seeds)
             if _seeds:
                 _fetch = _sr.source_session_chunk_pass(
-                    sdk._get_proj(), sr_seeds, question_id=qid,
+                    sdk._get_proj(), [s.point_id for s in _seeds],
                     pool_ids={h["id"] for h in pool},
                     per_session_cap=DEFAULT_REINJECTION_PER_SESSION,
                     total_cap=DEFAULT_REINJECTION_TOTAL_ITEMS)
@@ -1717,10 +1721,11 @@ def retrieve_for_question(
                     for sid, _rows in (_fetch.get("by_session") or {}).items()}
                 sr_injected_total = sum(sr_injected_per_session.values())
                 # ``dropped_by_cap``/``total_cap_hit`` are FETCH-stage facts
-                # recorded with no later clearing point — under the shipped
-                # defaults ``total_cap_hit`` is structurally False (see
-                # DEFAULT_REINJECTION_TOTAL_ITEMS) and ``dropped_by_cap``
-                # counts per-session drops only.
+                # recorded with no later clearing point. Since #2517 they are
+                # BOTH live at the shipped defaults: the total budget (10) is
+                # below the structural fan-out (seed_sessions * per_session =
+                # 15), so ``total_cap_hit`` is reachable, and
+                # ``dropped_by_cap`` counts per-session AND total drops.
                 _added_by_session: dict[str, list[dict]] = {}
                 if sr_fetch_ok:
                     # ONE annotation pass over ALL fetched ids (the C3-1

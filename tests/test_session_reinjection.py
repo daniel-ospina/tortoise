@@ -42,6 +42,7 @@ import pytest
 # import the eval ingest first so its register_kind("event") /
 # register_kind("session-transcript") apply.
 import tools.longmem_eval.ingest  # noqa: F401
+from tortoise.retrieval import SESSION_TRANSCRIPT_KIND
 from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).resolve().parent / "fixtures" / "longmemeval_mini.json"
@@ -92,10 +93,20 @@ QID = "q2517test"
 SR_A = "sessA2517"        # the seeded, monopolising session
 SR_B = "sessB2517"        # the pool-present starved session
 MATCH_CONTENT = "the road bike repairs cost me 120 dollars in total"
+#: #2517: fabricated turns carry the PRODUCT turn shape — every product turn
+#: writer stores ``f"[{role}] {content}"`` with ``is_episodic=true``
+#: (``sdk.capture_session``, hosted ``POST /v1/sessions``), and the C4 fetch
+#: constrains ``pointKind='event'`` to exactly that shape (the kind
+#: vocabulary is open, so the kind alone does not prove a turn).
+TURN_PREFIX = "[user] "
 #: the chunks carry NO query token, so plain FTS never puts them in the
 #: pool — they are genuinely-new material for the C4 fetch.
 CHUNK_CONTENT = ("in the afternoon we watched a documentary about "
                  "volcanoes and then went to bed early")
+#: the session's OTHER turns (also off-pool) — the raw material the fetch
+#: injects at the product's default TURN grain.
+OFF_POOL_TURN_CONTENT = ("we also talked about the weather and about "
+                         "which documentary to watch next week")
 
 
 def _fresh_uri() -> str:
@@ -140,30 +151,44 @@ def _question(question: str = QUESTION, *,
     }
 
 
-def _seed_graph(sdk, *, n_a: int = 6, n_chunks: int = 2) -> None:
+def _seed_graph(sdk, *, n_a: int = 6, n_turns: int = 2,
+                n_chunks: int = 2) -> None:
+    """A fresh dedicated graph in the PRODUCT's shape: ``:Session`` nodes
+    with ``CONTAINS`` edges (the membership the C4 fetch scopes on — a
+    product turn Point carries no ``session_id`` property), episodic turn
+    Points whose body is ``[role] …``, and raw chunks."""
+    for sid in (SR_A, SR_B):
+        sdk._get_proj().g.query(
+            "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+            params={"sid": sid})
     for i in range(n_a):
-        sdk.create_point("event", MATCH_CONTENT, id=f"srAp{i}",
-                         session_id=SR_A, status="draft")
-    sdk.create_point("event", MATCH_CONTENT, id="srBp0",
-                     session_id=SR_B, status="draft")
+        sdk.create_point("event", TURN_PREFIX + MATCH_CONTENT,
+                         id=f"srAp{i}", session_id=SR_A, speaker="user",
+                         is_episodic=True, status="draft")
+    sdk.create_point("event", TURN_PREFIX + MATCH_CONTENT, id="srBp0",
+                     session_id=SR_B, speaker="user",
+                     is_episodic=True, status="draft")
+    # the session's OWN other turns — off-pool, so the fetch has
+    # genuinely-new TURN material to inject at the product's default grain
+    for i in range(n_turns):
+        sdk.create_point("event", TURN_PREFIX + OFF_POOL_TURN_CONTENT,
+                         id=f"srAq{i}", session_id=SR_A, speaker="user",
+                         is_episodic=True, status="draft")
     for i in range(n_chunks):
         sdk.create_point("session-transcript", CHUNK_CONTENT,
                          id=f"srAc{i}", session_id=SR_A, status="draft")
-    # the C4 fetch is question-scoped (`p.lme_question_id = $q`) — the eval
-    # ingest writes it; direct create_point does not.
-    _stamp_chunk_props(sdk)
+    _link_sessions(sdk)
 
 
-def _stamp_chunk_props(sdk) -> None:
-    """Stamp the eval's question-scoped props on the fixture's points
-    (``lme_question_id``; ``lme_chunk_index`` for the raw chunks)."""
+def _link_sessions(sdk) -> None:
+    """Wire ``Session-[:CONTAINS]->Point`` for this fixture's session
+    points (the eval ingest and the product capture loop both write it;
+    the C4 fetch resolves the session through it)."""
     sdk._get_proj().g.query(
-        "MATCH (p:Point) WHERE p.session_id IN $sids "
-        "SET p.lme_question_id = $q, "
-        "    p.lme_chunk_index = CASE WHEN p.pointKind = $kind "
-        "        THEN toInteger(replace(p.id, 'srAc', '')) ELSE -1 END",
-        params={"sids": [SR_A, SR_B], "q": QID,
-                "kind": "session-transcript"})
+        "MATCH (s:Session), (p:Point) WHERE s.id IN $sids "
+        "  AND p.session_id IN $sids "
+        "MERGE (s)-[:CONTAINS]->(p)",
+        params={"sids": [SR_A, SR_B]})
 
 
 @pytest.fixture
@@ -337,25 +362,49 @@ def test_one_batched_fetch_per_fired_question(seeded_sdk, monkeypatch):
     calls: list[list[str]] = []
     real = _sr.source_session_chunk_pass
 
-    def _counting(proj, session_ids, **kw):
-        calls.append(list(session_ids))
-        return real(proj, session_ids, **kw)
+    def _counting(proj, seed_point_ids, **kw):
+        calls.append(list(seed_point_ids))
+        return real(proj, seed_point_ids, **kw)
 
     monkeypatch.setattr(_sr, "source_session_chunk_pass", _counting)
     retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
                           pool_size=60, session_reinjection=True)
-    assert calls == [[SR_A, SR_B]]    # ONE batched query, all seeds at once
+    # ONE batched query, ALL seeds at once — anchored on the seeded POOL
+    # HIT ids (not the session strings), which is what resolves the session
+    assert len(calls) == 1
+    assert sorted(calls[0]) == ["srAp0", "srBp0"]
+
+
+def _pin_chunk_grain(monkeypatch) -> None:
+    """Pin the C4 arm at the CHUNK kind for a test.
+
+    The arm's default is now the product's TURN grain, and the C5 re-cap
+    (``dedup_pool``) counts only ``is_raw_chunk`` hits — turn points are
+    never chunk-capped (D3 #1540). The chunk-kind integration is therefore
+    the only place the re-cap is exercisable end-to-end, and it is the same
+    A/B ``source_session_chunk_pass``'s ``chunk_kind`` parameter exists for.
+    """
+    from tortoise import session_reinjection as _sr
+    real = _sr.source_session_chunk_pass
+
+    def _chunk_kind(proj, seed_point_ids, **kw):
+        kw.setdefault("chunk_kind", SESSION_TRANSCRIPT_KIND)
+        return real(proj, seed_point_ids, **kw)
+
+    monkeypatch.setattr(_sr, "source_session_chunk_pass", _chunk_kind)
 
 
 # ── (d) caps ─────────────────────────────────────────────────────────────
 
-def test_c5_per_session_chunk_cap_holds_on_the_reinjected_pool(seeded_sdk):
+def test_c5_per_session_chunk_cap_holds_on_the_reinjected_pool(
+        seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
+    _pin_chunk_grain(monkeypatch)
     for i in range(2, 6):
         seeded_sdk.create_point("session-transcript", CHUNK_CONTENT,
                                 id=f"srAc{i}", session_id=SR_A,
                                 status="draft")
-    _stamp_chunk_props(seeded_sdk)
+    _link_sessions(seeded_sdk)
     ret = retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
                                 pool_size=60, session_reinjection=True,
                                 max_chunks_per_session=2)
@@ -407,13 +456,14 @@ def test_guard_is_a_noop_on_a_single_session_pool(monkeypatch):
 
 # ── (g) guard OFF still re-caps through the shared contract ──────────────
 
-def test_guard_off_still_recaps(seeded_sdk):
+def test_guard_off_still_recaps(seeded_sdk, monkeypatch):
     from tools.longmem_eval.retrieve import retrieve_for_question
+    _pin_chunk_grain(monkeypatch)
     for i in range(2, 8):
         seeded_sdk.create_point("session-transcript", CHUNK_CONTENT,
                                 id=f"srAc{i}", session_id=SR_A,
                                 status="draft")
-    _stamp_chunk_props(seeded_sdk)
+    _link_sessions(seeded_sdk)
     # max_chunks_per_session=2 is TIGHTER than the fetch budget (3), so the
     # retained count can only be 2 if the re-cap actually ran.
     ret = retrieve_for_question(

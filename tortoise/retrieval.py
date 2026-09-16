@@ -294,6 +294,24 @@ def resolve_pool_size(
 #: ``CHUNK_KIND_FILTER`` equality twin) derive from it.
 SESSION_TRANSCRIPT_KIND = "session-transcript"
 
+#: #2517 / C4: the PRODUCT's verbatim source-turn pointKind — the episodic
+#: turn Points written by ``TortoiseSDK.capture_session`` and the hosted
+#: ``POST /v1/sessions`` turn loop (both SET ``pointKind='event'``,
+#: ``is_episodic=true`` and a ``[{role}] {content}`` body; see
+#: :func:`_is_turn_point`). This is the product's real verbatim material:
+#: ``session-transcript`` is written ONLY by the eval ingest lane
+#: (``tools/longmem_eval/ingest.py`` / ``ingest_v2.py``), never by a
+#: product writer. The literal is a product constant here for the same
+#: reason ``SESSION_TRANSCRIPT_KIND`` is — one home, so the read side
+#: (``session_reinjection``'s default fetch kind, ``_is_turn_point``) and
+#: the eval's turn writers cannot drift.
+#:
+#: ``pointKind``'s vocabulary is OPEN (``create_point`` accepts any
+#: registered kind), so this constant alone never proves a node is a
+#: TURN — see ``session_reinjection._TURN_SHAPE_FILTER`` for the shape
+#: predicate the fetch applies on top of it.
+TURN_POINT_KIND = "event"
+
 
 def session_key_of(hit: dict) -> str:
     """A hit's pool session identity — the AUTHORITY for the retrieval
@@ -1020,7 +1038,7 @@ def _is_turn_point(h: dict) -> bool:
     ``[role] …`` content — the shape the deterministic leg writes turns as).
     Distinguished from a distilled statement so own-source turns can collapse
     INTO their distilled point instead of standing as a duplicate slot."""
-    return (h.get("point_kind") == "event"
+    return (h.get("point_kind") == TURN_POINT_KIND
             or bool(_ROLE_PREFIX_RE.match(str(h.get("content") or ""))))
 
 
