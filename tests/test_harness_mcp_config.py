@@ -244,12 +244,12 @@ class TestCommittedRepoMcpJson:
     of a stdio `env`/`command`/`args`, and no literal credential in the file.
     "No literal credential" is scoped deliberately: every `env` and `headers`
     value of EVERY server must be structurally env-indirect (those are the
-    values a client actually sends), and every token family this repo mints is
-    forbidden anywhere in the file -- including prose, since a key pasted into
-    a `_comment` is the same leak. A third-party secret pasted into PROSE (a
-    `_comment`) is out of scope: distinguishing a secret from ordinary prose
-    needs a heuristic that hyphenated keys defeat, so that check would be
-    theatre.
+    credential-carrying fields a client sends), and every token family this
+    repo mints is forbidden anywhere in the file -- including prose and argv,
+    since a key pasted there is the same leak. A THIRD-PARTY secret in PROSE or
+    in `args`/`command` is out of scope: argv legitimately holds package names
+    and flags, and telling a secret from ordinary text needs a heuristic that
+    hyphenated keys defeat, so either check would be theatre.
     Reads the file on disk (the committed blob in any clean checkout /
     CI). This class pins what the repo SHIPS, so it is deliberately not
     override-aware: a self-hoster who follows the entry's `_comment` and points
@@ -262,6 +262,11 @@ class TestCommittedRepoMcpJson:
     COMMITTED = REPO_ROOT / ".mcp.json"
     # Scheme words that may precede a ${...} expression in a header value.
     GLUE = ("", "Bearer ", "Token ", "Basic ", "ApiKey ")
+    # A `${VAR}` expression must name a bare variable: content inside the
+    # braces -- a shell default (`${VAR:-literal}`) or a nested expression --
+    # can smuggle a literal past any check that only looks for `${`.
+    ENV_EXPR = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+    SPAN = re.compile(r"\$\{[^}]*\}")
 
     @staticmethod
     def _strip_env_spans(value: str) -> str:
@@ -402,9 +407,14 @@ class TestCommittedRepoMcpJson:
                     if not isinstance(value, str) or not value:
                         continue
                     if section == "env":
-                        direct = re.fullmatch(r"\$\{[^}]+\}", value) is not None
+                        direct = self.ENV_EXPR.fullmatch(value) is not None
                     else:
-                        direct = self._strip_env_spans(value) in self.GLUE
+                        spans = self.SPAN.findall(value)
+                        direct = (
+                            bool(spans)
+                            and all(self.ENV_EXPR.fullmatch(s) for s in spans)
+                            and self._strip_env_spans(value) in self.GLUE
+                        )
                     assert direct, (
                         f"committed .mcp.json {server}.{section}.{key} is not "
                         f"env-indirect ({value!r}) -- a user-shipped value must "
