@@ -111,6 +111,13 @@ PROBE_STALE_AFTER = 30.0
 PROBE_MAX_SUPERSEDES = 4
 PROBE_POLL_INTERVAL = 0.02
 
+#: Name of the single bounded daemon thread a ``HealthProbe`` starts for its
+#: probe (``_start_locked``). Defined once so callers/tests that must tell the
+#: background refresher's own worker apart from a request-path invocation can
+#: compare a symbol instead of re-typing the literal — if the literal drifts,
+#: such a check silently misclassifies the refresher.
+HEALTH_PROBE_THREAD_NAME = "tortoise-health-probe"
+
 # #1565: ONE bounded retry on a TRANSIENT connect failure only (an embedded
 # redislite server momentarily starting / momentarily unreachable under
 # parallel-suite load). The 100ms delay covers a server mid-startup; a REAL
@@ -601,7 +608,7 @@ class HealthProbe:
         self._started_at = time.monotonic()
         self._worker = threading.Thread(
             target=self._run, args=(seq,),
-            name="tortoise-health-probe", daemon=True,
+            name=HEALTH_PROBE_THREAD_NAME, daemon=True,
         )
         self._worker.start()
 

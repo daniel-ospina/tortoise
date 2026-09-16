@@ -27,8 +27,16 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return json({ error: "not_configured" }, 503);
   }
-  const userId = await requireAdmin(env, request);
-  if (!userId) return json({ error: "unauthorized", message: "Session expired or not an admin — refresh and log in again" }, 401);
+  const admin = await requireAdmin(env, request);
+  if (!admin.ok) {
+    // A store/database fault is NOT "you are signed out". Answering 401 here
+    // would sign an admin out because a lookup blipped — the #3485 class.
+    if (admin.reason === "unavailable") {
+      return json({ error: "unavailable", message: "Session store or admin lookup unavailable — try again shortly" }, 503);
+    }
+    return json({ error: "unauthorized", message: "Session expired or not an admin — refresh and log in again" }, 401);
+  }
+  const userId = admin.userId;
 
   let input: { slug?: unknown };
   try {

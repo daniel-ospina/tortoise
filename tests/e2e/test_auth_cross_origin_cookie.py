@@ -1,0 +1,169 @@
+"""
+Proof for the cross-origin session-cookie constraint (W6 blocker).
+
+Question: can the browser's `__Host-session` cookie authenticate the dashboard's
+calls to `api.premiselabs.co`?
+
+`__Host-` requires: Secure, Path=/, and NO Domain attribute — so the cookie is
+HOST-ONLY. The claim to test is that a host-only cookie is therefore NOT sent to
+a sibling origin (`api.premiselabs.co` from `app.premiselabs.co`), which would
+mean the BFF session cannot authenticate the dashboard's own API calls.
+
+This is asserted by OBSERVATION here, not by argument: the mock echoes the exact
+Cookie header the browser sent to a different port (a different origin).
+
+The sibling port stands in for api.premiselabs.co: what matters is the cookie
+scope rule, which is host-based, not the specific hostname.
+"""
+from __future__ import annotations
+
+import contextlib
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WEBSITE_DIR = REPO_ROOT / "website"
+MOCK = REPO_ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
+
+APP_PORT = int(os.environ.get("AUTH_CX_APP_PORT", "8993"))
+API_PORT = int(os.environ.get("AUTH_CX_API_PORT", "9101"))
+APP = f"http://localhost:{APP_PORT}"
+# MUST be a different HOSTNAME, not just a different port. Cookies are
+# host-scoped and ignore the port (RFC 6265 §5.1.3), so two ports on the same
+# host share cookies and would produce a false "the cookie WAS sent" result —
+# which is exactly what the first version of this test did.
+API = f"http://127.0.0.1:{API_PORT}"
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("AUTH_CLICKTHROUGH") != "1",
+    reason="opt-in: set AUTH_CLICKTHROUGH=1",
+)
+
+
+def _stop(proc) -> None:
+    """Terminate a process group and REAP it.
+
+    Without the wait, a subsequent module's readiness probe can succeed against
+    this dying server and adopt it — green, testing stale code.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except Exception:
+        return
+    try:
+        proc.wait(timeout=15)
+    except Exception:
+        # Escalate to SIGKILL; the process may already be gone, which is fine.
+        with contextlib.suppress(Exception):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+
+def _wait(port: int, timeout: float = 90.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.4)
+    return False
+
+
+@pytest.fixture(scope="module")
+def two_origins():
+    for binary in ("node", "wrangler"):
+        if not shutil.which(binary):
+            if os.environ.get("AUTH_ALLOW_NO_TOOLCHAIN") == "1":
+                pytest.skip(f"{binary} unavailable (AUTH_ALLOW_NO_TOOLCHAIN=1)")
+            pytest.fail(
+                f"{binary} not available — this suite is the ONLY place the browser-level\n"
+                "session properties are asserted; it must not silently skip. Install it or\n"
+                "set AUTH_ALLOW_NO_TOOLCHAIN=1 to opt out explicitly."
+            )
+
+    mock_env = os.environ.copy()
+    mock_env["MOCK_PORT"] = str(API_PORT)
+    # The app's Supabase calls also go to the "api" origin here.
+    api = subprocess.Popen(
+        [shutil.which("node"), str(MOCK)], cwd=str(MOCK.parent), env=mock_env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    assert _wait(API_PORT), "mock api failed to start"
+
+    app = subprocess.Popen(
+        [
+            shutil.which("wrangler"), "pages", "dev", ".",
+            "--port", str(APP_PORT), "--ip", "127.0.0.1",
+            "--d1", "SESSIONS",
+            "-b", f"SUPABASE_URL={API}",
+            "-b", "SUPABASE_ANON_KEY=mock-anon-key",
+            "-b", f"AUTH_CALLBACK_URL={APP}/auth/callback",
+        # Topology as configuration. Without this, /welcome redirects a
+        # signed-in visitor to the real app origin and the test client follows
+        # that redirect off-box (403). Binding it locally also exercises the
+        # config-not-literal change from SCOPE.md 6.
+        "-b", f"APP_ORIGIN={APP}",
+        ],
+        cwd=str(WEBSITE_DIR),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    if not _wait(APP_PORT):
+        os.killpg(os.getpgid(app.pid), signal.SIGTERM)
+        os.killpg(os.getpgid(api.pid), signal.SIGTERM)
+        pytest.fail("wrangler pages dev failed to start")
+    time.sleep(2.5)
+
+    yield {"app": APP, "api": API}
+
+    for p in (app, api):
+        _stop(p)
+
+
+def test_host_only_session_cookie_is_not_sent_to_a_sibling_origin(two_origins, request):
+    """The W6 blocker, demonstrated.
+
+    If this FAILS (cookie IS sent), the BFF session can authenticate the
+    dashboard's API calls directly and no proxy is needed. A failure here is
+    therefore informative in either direction — which is the point of testing it
+    rather than reasoning about it.
+    """
+    import playwright.sync_api as playwright_sync  # hard dep: see the note above
+    with playwright_sync.sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        ctx = browser.new_context()
+        page = ctx.new_page()
+
+        # Sign in through the real flow so a genuine __Host-session exists.
+        page.goto(f"{APP}/auth/start", wait_until="load", timeout=45_000)
+        cookies = {c["name"]: c for c in ctx.cookies()}
+        assert "__Host-session" in cookies, (
+            f"setup failed: not signed in; url={page.url} cookies={list(cookies)}"
+        )
+
+        # Now ask a DIFFERENT origin what Cookie header it receives.
+        echoed = page.evaluate(
+            f"""async () => {{
+                const r = await fetch("{API}/__mock/echo-cookie", {{
+                    credentials: 'include',
+                }});
+                return await r.json();
+            }}"""
+        )
+        sent = echoed.get("cookie") or ""
+
+        # Record the observation so the result is visible either way.
+        request.node.user_properties.append(("cookie_sent_to_sibling", sent))
+
+        assert "__Host-session" not in sent, (
+            "UNEXPECTED: the host-only session cookie WAS sent to a sibling "
+            f"origin ({sent!r}). If this is reproducible, the BFF session can "
+            "authenticate cross-origin API calls and W6 is unnecessary."
+        )
+
+        browser.close()

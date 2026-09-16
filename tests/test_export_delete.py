@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import warnings
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +30,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import tortoise.hosted_api as ha_mod  # noqa: I001
 from tortoise.hosted_api import app, get_current_user
+from tortoise.projection import FalkorProjection
 from tortoise.sdk import TortoiseSDK
 
 from tests._http_fixtures import patched_tortoise_sdk
@@ -42,10 +44,11 @@ ORG_ID = "team-free-001"
 # ═══════════════════════════════════════════════════════════════════════
 # #2090 — keepalive-anchor churn instrumentation (Task 1, RED).
 # The fixture patches TortoiseSDK.__init__ to a per-test temp DB but never
-# pins TORTOISE_DB_PATH, so _anchor_usable (hosted_api.py:96) path-drifts on
-# every _make_sdk/_registry_anchor() call → the #1607 keepalive anchor is
-# evicted+closed per call (0-other-client windows) → a dropped seed SDK's
-# GC-NOSAVE (embedded_lifecycle.py:204-282, TORTOISE_FAST_ATEXIT=1) can kill
+# pins TORTOISE_DB_PATH, so `_anchor_usable` (tortoise/hosted_api.py)
+# path-drifts on every _make_sdk/_registry_anchor() call → the #1607 keepalive
+# anchor is evicted+closed per call (0-other-client windows) → a dropped seed
+# SDK's GC-NOSAVE (`register_gc_close`/`_gc_close` in embedded_lifecycle.py,
+# TORTOISE_FAST_ATEXIT=1) can kill
 # the redislite daemon → empty respawn → 403 "Requires owner role in team".
 # The counter asserts ZERO mid-test drift evictions post-fix (Task 2); pre-fix
 # it deterministically reads ≥1 — the churn-enabler demonstration (G1).
@@ -62,10 +65,11 @@ _SEED_SDKS: list[TortoiseSDK] = []
 def _close_seed_sdks() -> None:
     """Close held seed SDKs (per-test; runs in the fixture finally).
 
-    # mirrors tests/test_dr_endpoints.py:34-39 — keep in sync.
+    # mirrors tests/test_dr_endpoints.py's session-scoped
+    # `_close_seed_sdks` — keep in sync.
     """
     while _SEED_SDKS:
-        try:  # noqa: SIM105  (mirrors test_dr_endpoints.py:37)
+        try:  # noqa: SIM105  (mirrors that fixture's pop/close drain)
             _SEED_SDKS.pop().close()
         except Exception:
             pass
@@ -74,7 +78,8 @@ def _close_seed_sdks() -> None:
 def _computed_db_path() -> str:
     """Replicate _make_sdk's env-path computation.
 
-    Mirrors tortoise/hosted_api.py:141-149 — keep in sync.
+    Mirrors `_resolve_embedded_db_path` (tortoise/hosted_api.py) — keep in
+    sync.
     """
     db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
     try:
@@ -85,7 +90,7 @@ def _computed_db_path() -> str:
 
 
 def _paths_same(path_a: object, path_b: str) -> bool:
-    """Mirror _anchor_usable's path comparison (hosted_api.py:114-125)."""
+    """Mirror `_anchor_usable`'s path comparison (tortoise/hosted_api.py)."""
     return (str(path_a) == str(path_b)) or (
         str(path_a) != ":memory:"
         and os.path.abspath(str(path_a)) == os.path.abspath(path_b)
@@ -229,9 +234,165 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 # docs/scoping/2026-09-02-2127-b-waves-scoping.md.
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# #3472/#3505 — background work armed by `TestClient(app)`, for BOTH fixtures.
+# One shared mechanism, deliberately fixture-INDEPENDENT (never copy-pasted):
+# `_lifespan` arms this work for EVERY `TestClient(app)` entry, so it is a
+# property of opening the app, not of the control-plane mode.
+# ═══════════════════════════════════════════════════════════════════════
+
+# #3505: one embedded server per db_path — serialize construction.
+#
+# redislite starts a NEW redis-server daemon whenever `<db>.settings` is
+# absent (or its pid is dead). Two constructions that interleave BEFORE
+# either has written `.settings` therefore BOTH take the fresh-start branch,
+# each spawning its own daemon in its own tempdir, and the later
+# `_save_setting_registry()` silently owns the registry — the loser's writes
+# are then invisible to every later opener. Mirror of the proven Group B fix
+# in tests/test_import_endpoint.py (`_EMBEDDED_CONSTRUCTION_LOCK`) — that
+# copy carries the full "Scope of the guarantee" / "Blast radius" note; the
+# two caveats that matter to THIS file are repeated here.
+#
+# LANE SCOPE — this lock is a NO-OP on the docker lane. With a supported
+# `TORTOISE_DB_URI` set, every construction from this module REDIRECTS to
+# that server (`tortoise/projection/__init__.py`, the #1647 D-1=A test
+# redirect: `path` is nulled, so `_is_embedded` is False), no redislite
+# daemon is started, and no double-start can occur. `test_export_delete` is
+# NOT in `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects
+# that branch. What protects THIS file on the docker lane is the BOOT-SWEEP
+# quiesce (`_quiesce_testclient_background_work`), not this lock. The
+# serialization is live on the embedded tier-2 / carve-out lane only. See
+# the LANE SCOPE note in `_quiesce_testclient_background_work`.
+#
+# Serializing the construction makes the first starter the single owner, so
+# later openers (seeder, `_registry_count`, health probe, request handler)
+# normally resolve through `.settings` to that one server. This is NOT a
+# global single-writer guarantee: the lock serializes only IN-PROCESS
+# `FalkorProjection.__init__` calls, and two paths stay outside it, each able
+# to add or remove a registry entry anyway — (1) a construction that raises
+# inside redislite's `_start_redis()` after its daemon spawned but before
+# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
+# redislite's `_cleanup()` last-client branch removing `<db>.settings` from
+# `__del__`/atexit on any thread.
+#
+# The critical section also spans redislite's BLOCKING server start, so a
+# wedged embedded start stalls every other constructor in the module, where
+# it previously stalled only its own thread. That wait is bounded by
+# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
+# `redis-server` binary — accepted deliberately: a hung start is a louder
+# failure than a silent second daemon.
+_EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
+
+
+async def _quiet_boot_sweeps() -> None:
+    """#3472: no-op stand-in for the lifespan's one-shot `_run_boot_sweeps`.
+
+    Must be `async def`: `_lifespan` arms it with
+    `create_task(_run_boot_sweeps())`, so a sync stub would hand
+    `create_task` a `None` and raise inside the startup half — turning a
+    test-isolation fix into a second, unrelated failure.
+    """
+
+
+def _quiesce_testclient_background_work(monkeypatch) -> None:
+    """#3472/#3505: make `TestClient(app)` entry safe for this file's tests.
+
+    `_lifespan` arms background work for EVERY `TestClient(app)` entry,
+    regardless of control-plane mode, and all of it touches the same store
+    the test body is driving:
+
+    1. `_run_boot_sweeps()` (armed by `_lifespan` as
+       `app.state._boot_sweep_task`, one-shot) and `_event_retention_loop()`
+       (the `_lifespan` closure armed as `app.state._event_retention_task`,
+       re-armed every `event_retention_interval()`) BOTH call
+       `_purge_deleted_teams`. A
+       background purge landing between a test's seeding and its own
+       `ha_mod._purge_deleted_teams()` call makes both read the row before
+       either deletes it: two `_drop_team_graph` calls and two
+       `team_delete_purged` audit rows — `assert ['reg-old', 'reg-old'] ==
+       ['reg-old']` on the registry fixture. Worse on Supabase mode, where
+       the test injects its `_drop_team_graph_strict` fault ONLY AFTER
+       seeding: a boot sweep in that window runs the REAL strict drop for
+       the past-grace teams and deletes the retry-anchor row the test
+       asserts must survive.
+
+       The product behaviour is benign (dropping an already-dropped graph
+       is idempotent) — the defect is test isolation: the assertions assume
+       exclusive ownership of a sweep production also runs. Both callers are
+       therefore quiesced here.
+
+       The CALLEE is deliberately not stubbed: this file's tests call
+       `ha_mod._purge_deleted_teams()` directly and resolve it off the
+       module at call time, so a callee stub would silence the very call
+       under test. `_run_boot_sweeps` is stubbed with an `async def` because
+       `_lifespan` arms it with `create_task(...)` (see
+       `_quiet_boot_sweeps`). The retention interval is pinned beyond any
+       test's lifetime: `_event_retention_loop` invokes BOTH `_sweep_events`
+       and `_purge_deleted_teams` on the same target, so pinning the
+       interval quiesces the loop while leaving the directly-called
+       `_purge_deleted_teams` under test.
+
+    2. The app's `_health_probe_loop` (armed by `_lifespan` as
+       `app.state._health_probe_task`) is NOT stubbed:
+       it runs `_probe_db -> _probe_sdk -> _make_sdk(namespace=None)` and so
+       constructs a projection on the SAME pinned db file, concurrently with
+       the test body's own constructions (the seeder's and
+       `_registry_count`'s SDKs). Quiescing the boot sweeps does NOT remove
+       that constructor, so the embedded double-start race would stay live.
+       Rather than quiesce a third background caller one caller at a time
+       (whack-a-mole — `_lifespan` already grew the probe loop after
+       #2850), the CONSTRUCTION is serialized instead: the invariant
+       redislite actually needs is that the first construction on a given
+       db_path writes `<db>.settings` before any other opener evaluates the
+       fresh-start branch, and serializing holds it for EVERY in-process
+       construction in this file — no matter which background caller
+       `_lifespan` arms next.
+
+       LANE SCOPE — the serialization is INERT on the lane CI runs this file
+       on. Under a supported `TORTOISE_DB_URI` (the docker lane, this file's
+       default) every construction from this module redirects to that server
+       (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect:
+       `path` is nulled, so `_is_embedded` is False), so no redislite daemon
+       exists and no double-start is possible. `test_export_delete` is NOT in
+       `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that
+       branch. On that lane the protection this file actually gets is item 1
+       — the BOOT-SWEEP quiesce, which removes the second caller of
+       `_purge_deleted_teams` — and NOT this serialization. The lock is live
+       only on the embedded tier-2 / carve-out lane (no URI), where
+       constructions stay local-file and real daemons are spawned; it is
+       kept for correctness there, not because the docker lane depends on
+       it.
+    """
+    # (1) quiesce both background callers of the purge sweep (the caller, not
+    # the callee — `_purge_deleted_teams` itself stays under test).
+    monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _quiet_boot_sweeps)
+    monkeypatch.setattr(ha_mod, "event_retention_interval",
+                        lambda *args, **kwargs: 86400.0)
+    # (2) serialize embedded projection construction on the pinned db file.
+    # NO-OP on a URI lane (docker): every construction redirects to the
+    # server, `_is_embedded` is False, no daemon is started — see the LANE
+    # SCOPE note in this fixture's docstring. Live on the embedded lane.
+    _orig_proj_init = FalkorProjection.__init__
+
+    def _serialized_proj_init(self, *args, **kwargs):
+        # `return` forwarded deliberately: `__init__` must return None, so it
+        # is inert today, but it stays correct if this wrapper is ever reused
+        # for a factory or `__new__` (where dropping the result is a bug).
+        with _EMBEDDED_CONSTRUCTION_LOCK:
+            return _orig_proj_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(FalkorProjection, "__init__", _serialized_proj_init)
+
+
 @pytest.fixture
 def sb_client(monkeypatch):
     """Supabase-mode TestClient with a fake control plane + temp DB.
+
+    #3472/#3505: `_quiesce_testclient_background_work` is applied BEFORE the
+    app is entered — the same lifespan-armed purge callers and health-probe
+    constructor run for this fixture too (the arming is mode-independent),
+    and on Supabase mode a boot sweep in the seeding window would run the
+    REAL strict drop behind the test's late-installed fault injection.
 
     #2090: no drift counter here (reg_client only) — supabase-mode authz is
     control-plane-only (no SDK/anchor op before the authz short-circuit in
@@ -239,6 +400,7 @@ def sb_client(monkeypatch):
     pin + close-at-restore still apply (anchors created mid-test via
     _export_graph_snapshot are reused, not evicted).
     """
+    _quiesce_testclient_background_work(monkeypatch)
     fake = FakeControlPlane({"organizations": [], "api_keys": [],
                              "org_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
@@ -263,7 +425,19 @@ def sb_client(monkeypatch):
 
 @pytest.fixture
 def reg_client(monkeypatch):
-    """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB."""
+    """Registry-mode TestClient (TORTOISE_CONTROL_PLANE=registry) + temp DB.
+
+    #3472/#3505: `_quiesce_testclient_background_work` is applied BEFORE the
+    tempdir opens — it neutralizes the lifespan-armed background work that
+    would otherwise race this fixture's own seeding: a background
+    `_purge_deleted_teams` landing between the seed and the test's direct
+    call (two `_drop_team_graph` calls, two `team_delete_purged` rows,
+    surfacing as `assert ['reg-old', 'reg-old'] == ['reg-old']`), plus the
+    health probe's projection construction on the same db file. Neither is
+    registry-specific — see the helper — but this is the fixture whose
+    exact-count assertions make the race an outright failure.
+    """
+    _quiesce_testclient_background_work(monkeypatch)
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
@@ -309,8 +483,9 @@ def reg_client(monkeypatch):
                     # RESTORED real dict, which is empty — every in-test
                     # anchor lives in the counter). The fixture owns the
                     # deterministic close: drain + close counter-held anchors
-                    # (uncounted), verbatim mirror of TestDriftCounterWiring
-                    # :164-170. The (d) guard sits in an inner try so a RED
+                    # (uncounted), verbatim mirror of the `finally` drain in
+                    # TestDriftCounterWiring.test_drift_counter_classifies_real_eviction.
+                    # The (d) guard sits in an inner try so a RED
                     # still restores the real dict + closes seeds (code-
                     # review P2-2: an (a)/(d) assert RED must leave clean
                     # module state).

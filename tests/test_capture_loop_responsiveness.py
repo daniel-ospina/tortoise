@@ -25,10 +25,12 @@ app, not the proxy or the network.
 
 The tests below assert the INVARIANT (other requests keep being served while
 a capture is stalled) — a future refactor that reintroduces a blocking call on
-the loop fails here regardless of shape. (Two deliberate exceptions pin the
+the loop fails here regardless of shape. (One deliberate exception pins the
 implementation the invariant depends on: the capture pool's thread-name prefix
-in the mechanism test, and the `/health` probe actually running in the liveness
-test — both are noted where they appear.)
+in the mechanism test. The second exception this file used to carry — the
+`/health` probe actually running in the liveness test — was REMOVED by #2850,
+which made the handler collect NO request-path I/O; asserting the probe ran
+would now pin the superseded design rather than the guarantee. See that test.)
 """
 from __future__ import annotations
 
@@ -154,8 +156,9 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
         f"(#3060)")
     assert str(seen["thread"]).startswith("capture-extract"), (
         f"[{mode}] the extraction ran on {seen['thread']!r}, not the dedicated "
-        f"capture pool — long stalls there can starve /health's probe and the "
-        f"auth middleware out of the shared default executor (#3060)")
+        f"capture pool — long stalls there would occupy the SHARED default "
+        f"executor's workers and starve every other ``to_thread`` caller out "
+        f"of it (the auth middleware's abuse hooks among them) (#3060)")
 
 
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
@@ -273,43 +276,205 @@ def test_health_answers_while_the_default_executor_is_saturated(
     """#3060 review finding: liveness must not queue behind the shared pool.
 
     The first revision moved the extraction to `asyncio.to_thread`, which uses
-    the loop's SHARED default executor — the same one /health's DB probe (and
-    the auth middleware's abuse hooks) use. Six-plus concurrent stalls (prod
-    runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave the probe
-    queued for minutes, miss Fly's 15s check timeout, and drop the machine
-    exactly as in the original outage — one level down, with nothing blocking
-    the loop at all.
+    the loop's SHARED default executor — at the time, also the pool /health's DB
+    probe (and the auth middleware's abuse hooks) rode. Six-plus concurrent
+    stalls (prod runs 2 vCPU → `min(32, cpu+4)` workers) would therefore leave
+    that probe queued for minutes, miss Fly's 15s check timeout, and drop the
+    machine exactly as in the original outage — one level down, with nothing
+    blocking the loop at all.
 
     This test occupies EVERY default-executor worker with a blocking task and
     then requires /health to answer within a short budget. `wait_for` (rather
-    than a bare await) is the assertion: if the probe queues, the request does
-    not answer at all and this fails, instead of the suite hanging.
+    than a bare await) is the assertion: if the response is blocked on the
+    saturated pool it never arrives, so this fails instead of the suite hanging.
+
+    #2850 (P0) then removed the last request-path I/O: the handler now reads an
+    in-memory `_HEALTH_PROBE.snapshot()` and returns, so "does the handler probe
+    on the request path?" is the WRONG question — the design answer is "never".
+    This test previously asserted the opposite (`assert probed`: the request must
+    have run the probe), which pinned the pre-#2850 design and now fails by
+    construction. The contract that survives, and is asserted below, is the one
+    that actually matters: liveness answers within budget while every shared
+    executor worker is saturated. The snapshot's own self-heal probe runs on a
+    single bounded daemon thread and is pinned off for this window (see the
+    quiesce note below), so it cannot mask or counterfeit a regression here.
+
+    The contract asserted is not "the probe runs on the request path" (the
+    pre-#2850 assertion) but "the request path takes no DB I/O and no executor
+    hand-off that reaches either witnessed seam, inside the request window".
+    Three assertions guard that contract; none covers every shape:
+
+    * BUDGET (``elapsed < HEALTH_BUDGET_S``, via ``wait_for``). Catches a probe
+      that runs SYNCHRONOUSLY on the loop and an UNBOUNDED
+      ``await asyncio.to_thread(_probe_db)``: both keep the handler from
+      returning, so the request times out before either witness below is ever
+      consulted.
+    * INVOCATION WITNESS (``probe_calls``). ``_HEALTH_PROBE``'s probe function
+      resolves ``ha_mod._probe_db`` at CALL time, so replacing that symbol means
+      any probe that reaches this seam is recorded, then blocks far past the
+      budget and raises. Catches hand-offs that START A WORKER THREAD — the
+      module's own ``_HEALTH_PROBE.wait()``/``begin()`` (a raw
+      ``HEALTH_PROBE_THREAD_NAME`` thread), a thread that spoofs that name, or a
+      direct ``executor.submit(_probe_db)`` on a dedicated executor — because
+      the record is taken before the sleep and no thread name is filtered. It is
+      NOT timing-independent: a bounded hand-off that times out before its
+      worker ever starts leaves no record (see the submission witness, which
+      covers that case). The record is only sound because the background
+      refresher is QUIESCED for the window (below), so an invocation can only
+      come from the request path.
+    * SUBMISSION WITNESS (``submissions``). Records every
+      ``asyncio.BaseEventLoop.run_in_executor`` submission for the request
+      window, whichever executor it targets (the SHARED default pool or a
+      DEDICATED one). This is the one that catches the documented pre-#2850
+      shape re-introduced with a cached fallback:
+      ``await asyncio.wait_for(asyncio.to_thread(_probe_db), timeout=...)``
+      (and its ``loop.run_in_executor(None, _probe_db)`` twin) submits to the
+      SHARED, fully saturated pool, so the worker NEVER STARTS, the invocation
+      witness never fires, the timeout falls back to the cached snapshot, and
+      the request still answers inside budget. A dedicated-executor hand-off is
+      caught here too, at submit time, before any worker scheduling. The
+      submission is recorded at the submit call itself, so it does not depend
+      on the worker ever running — which is what makes it independent of how
+      promptly that worker would have been scheduled.
+
+    OUT OF SCOPE (not "gaps" in the guard, just its edge): I/O or a hand-off
+    that reaches neither seam and does not block the handler — a direct
+    ``_get_proj().g.query(...)``, a callable doing its own DB I/O handed to a
+    raw thread or a separate executor, or any submission made after the request
+    window (the patch is uninstalled). The budget catches those only if the
+    handler blocks. The deferred ``loop.call_later(0.5, ...)`` shape escapes
+    because its timer does not fire before the loop closes; a post-window
+    submit that DOES fire is caught by the INVOCATION witness once the pooled
+    hogs are released — an accident of test lifetime, not a guarantee. The
+    submission witness records by ENTRY POINT, not callable identity, so a NEW
+    callable routed through ``to_thread``/``run_in_executor`` IS caught.
+
+    Recording every caller (rather than
+    filtering out the refresher's thread NAME) is deliberate: the one name a
+    filter excludes is exactly the worker the module's own ``wait()``/``run()``
+    start, so a ``_HEALTH_PROBE.wait()`` in the handler — or a hand-off that
+    simply names its thread ``HEALTH_PROBE_THREAD_NAME`` — walked straight
+    through the previous revision.
+
+    Finally the response is tied to the PRIMED snapshot by a distinctive
+    sentinel (below): a handler returning a hardcoded healthy payload passes
+    neither the sentinel nor ``db.ok``.
     """
     import tortoise.hosted_api as ha_mod
-    from tortoise.hosted_api import app
+    from tortoise.hosted_api import _HEALTH_PROBE, app
 
-    # Spy on the probe: latency + `db.ok` alone are satisfied by a /health that
-    # never probes at all (review finding — proven by stubbing the submission
-    # path), so assert the probe RAN before judging how fast the answer was.
+    # Prime the process-global `_HEALTH_PROBE` with a SENTINEL result BEFORE
+    # saturating the pool. The sentinel does two jobs:
+    #
+    # 1. It makes the response provably the snapshot. `_view_locked` returns a
+    #    COPY (`dict(self._result)`) of whatever the probe produced, so a
+    #    marker key on that result survives the read and appears verbatim under
+    #    `db` in the response. Without it, a handler returning a hardcoded
+    #    `{"status":"ok","db":{"ok":True,...},"probe":{...,
+    #    "result_age_s":0.0,...}}` satisfies every other assertion while never
+    #    touching the probe at all (review finding).
+    # 2. It makes the run deterministic rather than order-dependent.
+    #    `snapshot()` deliberately NEVER waits (that is its whole point,
+    #    #2850), so without a completed result `db.ok` and
+    #    `probe.result_age_s` would depend on whether some earlier test in the
+    #    file happened to warm the shared probe. Observed directly: a full-file
+    #    run answered `{"status":"degraded","db":{"ok":false,
+    #    "error":"probe in flight (0.4s)"}}` while the identical test passed in
+    #    isolation. `wait()` is the module's own blocking entry point,
+    #    documented "for non-async probes/tests".
+    #
+    # `reset()` first, so a probe the lifespan refresher started with the REAL
+    # `_probe_db` cannot be the result `wait()` joins (it would lack the
+    # sentinel). `reset()` abandons any such worker as a daemon thread and
+    # invalidates its write by sequence, so the `wait()` below is the probe
+    # that produces the completed result.
+    _PRIMED_SENTINEL = "primed-snapshot-sentinel-3458"
 
-    probed: list[int] = []
-    _real_probe = ha_mod._probe_db
+    def _sentinel_probe() -> dict:
+        return {"ok": True, "latency_ms": 0.0, "error": None,
+                "primed_sentinel": _PRIMED_SENTINEL}
 
-    def _spy_probe():
-        probed.append(1)
-        return _real_probe()
-
-    monkeypatch.setattr(ha_mod, "_probe_db", _spy_probe)
+    monkeypatch.setattr(ha_mod, "_probe_db", _sentinel_probe)
+    _HEALTH_PROBE.reset()
+    primed = _HEALTH_PROBE.wait()
+    assert primed.get("ok") is True, primed
+    assert primed.get("primed_sentinel") == _PRIMED_SENTINEL, primed
 
     HOG_WAIT_S = 30.0
-    # Derived from the probe's OWN documented worst case (1.5s timeout + 0.1s
-    # retry delay + 1.5s retry, monitoring.py:24/31) plus 1s slack, so a
-    # slow-but-healthy probe can never red the suite and the bound stays
-    # honest if those constants change (review finding: a hardcoded 4.0 sat
-    # 0.9s above the design's own worst case). Below the production probe
-    # budget (5s), so the verdict comes from design, not timer ordering.
-    from tortoise.monitoring import PROBE_RETRY_DELAY, PROBE_TIMEOUT
+    # Derived from the probe's OWN documented worst case — ``PROBE_TIMEOUT``
+    # bounds ONE attempt and a transient connect failure retries once after
+    # ``PROBE_RETRY_DELAY``, i.e. ``2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY`` —
+    # plus 1s slack, so a slow-but-healthy probe can never red the suite and
+    # the bound stays honest if those symbols change (review finding: a
+    # hardcoded 4.0 sat 0.9s above the design's own worst case). Below the
+    # production probe budget (5.6s), so the verdict comes from design, not
+    # timer ordering.
+    from tortoise.monitoring import (
+        PROBE_RETRY_DELAY,
+        PROBE_TIMEOUT,
+    )
     HEALTH_BUDGET_S = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY + 1.0
+
+    # #2850's contract is stronger than "answers fast here": the request path
+    # must perform NO I/O and NO thread hand-off at all. Two records guard the
+    # seams this test can actually see — an INVOCATION record on the
+    # coordinator's `_probe_db` seam, and a SUBMISSION record on the event
+    # loop's executor entry point — because neither alone covers every shape
+    # (the catch split is stated in the docstring).
+    #
+    # The invocation record comes from replacing `ha_mod._probe_db`: the
+    # coordinator's lambda resolves that symbol at CALL time, so any probe that
+    # reaches THIS seam is recorded (every invocation, no thread-name filter),
+    # then blocks far past the budget and raises. It does NOT cover DB I/O on
+    # the request path that reaches the database by another route (see the
+    # docstring's OUT OF SCOPE paragraph).
+    #
+    # QUIESCE THE REFRESHER — verified, not assumed. This test enters the
+    # `client` fixture, and that fixture wraps the app in `TestClient(app)`,
+    # which RUNS the lifespan: `_lifespan` arms `_health_probe_loop` as
+    # `app.state._health_probe_task`. Instrumented on this very test, that task
+    # is live and pending (`<Task pending ... coro=<_health_probe_loop()>>`)
+    # throughout the body — so the background refresher IS armed, and its
+    # `run()` calls `begin()` UNCONDITIONALLY (`snapshot()`'s read path is the
+    # gated one). Neutralise that entry point and pin the refresh budget, so no
+    # legitimate non-request caller can start a probe in the window at ANY
+    # configured interval. The request path uses `snapshot()` and the prime used
+    # `wait()` — never `run()` — so neither is affected. With the refresher
+    # quiesced and `primed` above just completing a probe, nothing but the
+    # request path can reach the seam, so an empty record is a real guarantee.
+    #
+    # The stub returns `{}` DELIBERATELY: `_health_probe_loop` discards `run()`'s
+    # return value, so `{}` is a sentinel meaning "neutralised", not a probe
+    # result. A mutant that surfaces `run()`'s return into the response would
+    # serve that `{}` — no `ok`, no sentinel — and is caught by the
+    # `db.get("ok")` / sentinel assertions below, which use `.get` so it fails
+    # on a described assertion rather than an incidental `KeyError: 'ok'`.
+    probe_calls: list[str] = []
+
+    async def _no_refresher_probe(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(ha_mod._HEALTH_PROBE, "run", _no_refresher_probe)
+    # Pin the refresh budget far above this window: `snapshot()`'s
+    # `begin(if_stale=True)` self-heal must not start a probe either, which at
+    # a small operator period it otherwise legitimately could.
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
+
+    def _blocking_probe(*args, **kwargs):
+        # INVOCATION WITNESS — record EVERY invocation BEFORE the sleep. A
+        # bounded hand-off that the handler times out of leaves its
+        # AssertionError stranded on an unretrieved Future, so the raise alone
+        # cannot prove the request path was clean; this record can. No
+        # thread-name filter (the refresher is quiesced above), so a hand-off
+        # that names its thread `HEALTH_PROBE_THREAD_NAME` is still recorded.
+        probe_calls.append(threading.current_thread().name)
+        # Any request-path probe that reaches this seam now blocks far past the
+        # budget.
+        time.sleep(HEALTH_BUDGET_S * 2)
+        raise AssertionError(
+            "the /health REQUEST PATH invoked the DB probe "
+            "(#2850: it must not)")
+    monkeypatch.setattr(ha_mod, "_probe_db", _blocking_probe)
 
     async def _run():
         release = threading.Event()
@@ -321,40 +486,86 @@ def test_health_answers_while_the_default_executor_is_saturated(
         # More hogs than the pool has workers, so every worker is taken.
         workers = max(4, (os.cpu_count() or 1) + 4)
         hogs = [loop.run_in_executor(None, _hog) for _ in range(workers + 4)]
+
+        # SUBMISSION WITNESS — record every executor submission made during the
+        # REQUEST window (the hogs above go through this same entry point and
+        # must not be recorded, so the patch goes on AFTER they are submitted,
+        # and is restored in a `finally` so it can never leak to another test).
+        submissions: list[str] = []
+        _orig_run_in_executor = asyncio.BaseEventLoop.run_in_executor
+
+        def _record_submission(_self, _ex, _fn, *a, **k):
+            submissions.append(getattr(_fn, "__name__", repr(_fn)))
+            return _orig_run_in_executor(_self, _ex, _fn, *a, **k)
+
         try:
             await asyncio.sleep(0.3)  # let the hogs claim every worker
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport,
                                          base_url="http://test") as ac:
-                started = time.perf_counter()
+                asyncio.BaseEventLoop.run_in_executor = _record_submission
                 try:
-                    r = await asyncio.wait_for(ac.get("/health"),
-                                               timeout=HEALTH_BUDGET_S)
-                except TimeoutError:
-                    raise AssertionError(
-                        f"/health did not answer within {HEALTH_BUDGET_S}s "
-                        f"while every default-executor worker was busy — the "
-                        f"liveness probe is sharing a pool with long/stallable "
-                        f"work, so a few stalled captures would starve it and "
-                        f"Fly would drop the machine exactly as in #3060"
-                    ) from None
-                return r, time.perf_counter() - started
+                    started = time.perf_counter()
+                    try:
+                        r = await asyncio.wait_for(ac.get("/health"),
+                                                   timeout=HEALTH_BUDGET_S)
+                    except TimeoutError:
+                        waited = time.perf_counter() - started
+                        raise AssertionError(
+                            f"/health did not answer within {HEALTH_BUDGET_S}s "
+                            f"(still waiting after {waited:.2f}s) while every "
+                            f"default-executor worker was busy — /health must "
+                            f"serve from the in-memory `_HEALTH_PROBE.snapshot()` "
+                            f"and take NO thread hand-off (#2850), so a saturated "
+                            f"shared pool must not delay it; a delay here means "
+                            f"liveness has been put back on the shared executor, "
+                            f"the shape that dropped the machine in #3060"
+                        ) from None
+                    return r, time.perf_counter() - started, submissions
+                finally:
+                    asyncio.BaseEventLoop.run_in_executor = _orig_run_in_executor
         finally:
             release.set()
             await asyncio.gather(*hogs, return_exceptions=True)
 
-    r, elapsed = asyncio.run(_run())
+    r, elapsed, submissions = asyncio.run(_run())
 
     assert r.status_code == 200, r.text
-    assert probed, (
-        "the /health DB probe never ran — a short-circuiting liveness handler "
-        "would otherwise pass this test")
-    assert r.json()["db"]["ok"] is True, r.text
+    # Served from the `_HEALTH_PROBE` snapshot rather than a trivial stub: the
+    # probe was primed above, so the response must carry its observability
+    # metadata WITH A REAL AGE (`HealthProbe.info()`) AND the sentinel that
+    # snapshot's probe result carried.
+    #
+    # Deliberately stronger than key presence. `info()` emits a `probe` dict
+    # whose `result_age_s` stays None until a probe completes, so this cannot be
+    # satisfied by a `{"status": "ok", "db": {"ok": True}}` stub with no
+    # `probe` key, by the pre-#2850 response shape (which carried no `probe` key
+    # at all), or by a `probe` dict that is present but never completed
+    # (`result_age_s is None`). A bare `"probe" in r.json()` check would pass
+    # the last of those. The SENTINEL is the additional, stronger tie: only a
+    # response that echoes `_HEALTH_PROBE`'s completed result can carry
+    # `primed_sentinel`, so a handler with a hardcoded healthy payload fails
+    # here even with a fabricated `probe` block. `.get` is used so a miss fails
+    # on this described assertion, not an incidental `KeyError`.
+    assert r.json()["probe"].get("result_age_s") is not None, r.text
+    assert r.json()["db"].get("primed_sentinel") == _PRIMED_SENTINEL, r.text
+    assert r.json()["db"].get("ok") is True, r.text
+    assert not probe_calls, (
+        f"/health invoked the DB probe on the request path: {probe_calls} "
+        f"(#2850: the request path must take no I/O and no thread hand-off)")
+    assert not submissions, (
+        f"the /health request path submitted work to an executor: {submissions} "
+        f"— the pre-#2850 shape (asyncio.to_thread(_probe_db) or "
+        f"run_in_executor(None, _probe_db) with a bounded timeout and a "
+        f"cached-snapshot fallback) queues on the SHARED pool, so its worker "
+        f"never starts and the invocation witness cannot see it (#3060)")
     assert elapsed < HEALTH_BUDGET_S, (
-        f"/health took {elapsed:.2f}s while every default-executor worker was "
-        f"busy — the liveness probe is sharing a pool with long/stallable "
-        f"work, so a few stalled captures would starve it and Fly would drop "
-        f"the machine exactly as in #3060")
+        f"/health took {elapsed:.2f}s (budget {HEALTH_BUDGET_S}s) while every "
+        f"default-executor worker was busy — /health must serve from the "
+        f"in-memory `_HEALTH_PROBE.snapshot()` and take NO thread hand-off "
+        f"(#2850), so a saturated shared pool must not delay it; a delay here "
+        f"means liveness has been put back on the shared executor, the shape "
+        f"that dropped the machine in #3060")
 
 
 def test_capture_capacity_limit_fails_fast_instead_of_queueing(
