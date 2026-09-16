@@ -144,7 +144,19 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
 def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
     """Existing Subject node props with the given ``name`` (None when
     absent). Subject-only: an Object/Statement with the same name is a
-    different label and can never collide with an anchor (B1)."""
+    different label and can never collide with an anchor (B1).
+
+    #3590 S1: still name-keyed — this helper is NOT in Slice 1's Files list
+    (the plan's blast-radius §B routes it, but assigns no slice), and its
+    ``handle`` is duck-typed across three lanes (``.query(cypher, **params)``
+    for the SDK/projection surface vs ``.query(cypher, params=...)`` for a raw
+    graph), which ``entities._resolve_name`` (raw-graph convention only) does
+    not handle. S2 owns the conversion, together with the same fake-SDK unit
+    test that mirrors the projection's keying
+    (``tests/test_onboarding_seed.py::_FakeSDK``). At S1 the name is still
+    single-valued (one derived id per name), so the read is correct; under
+    S2's same-name coexistence it would become a coin flip.
+    """
     res = _run(handle, "MATCH (s:Subject {name: $name}) RETURN properties(s) "
                        "LIMIT 1", {"name": name})
     if not res.result_set:

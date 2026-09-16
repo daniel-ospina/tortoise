@@ -79,6 +79,10 @@ from tortoise.projection import (
     _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
+from tortoise.projection.entities import (  # #3590 S1: the ONE entity key + name→id resolver
+    _entity_key,
+    _resolve_name,
+)
 from tortoise.quota import (
     DEFAULT_MAX_SESSIONS,  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
 )
@@ -9397,12 +9401,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
             # event wiring — a MATCH-only Object lookup silently dropped the
             # edge for NEW entities. MERGE creates the :Object on demand
-            # (consistent with step 6's MERGE-by-name semantics).
+            # (consistent with step 6's semantics). #3590 S1: the on-demand
+            # node is keyed on the ONE entity key (name→id resolve first), so
+            # this stub IS the node step 6's create_entity lands on — an
+            # id-keyed MERGE, not a name-keyed one.
+            _oid = _resolve_name(proj.g, "Object", name) \
+                or _entity_key("Object", name)
             proj.g.query(
-                "MATCH (e:Event {eventId:$eid}) "
-                "MERGE (o:Object {name:$name}) "
+                "MERGE (o:Object {id:$oid}) "
+                "ON CREATE SET o.name=$name, o.objectKind='other'",
+                params={"oid": _oid, "name": name},
+            )
+            proj.g.query(
+                "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
                 "MERGE (e)-[:aboutObject]->(o)",
-                params={"eid": ev.id, "name": name},
+                params={"eid": ev.id, "oid": _oid},
             )
 
     # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
@@ -9566,10 +9579,15 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
         for name in pr.point.about_entities:
+            # #3590 S1: resolve the name to the single live Object id — a
+            # name-keyed anchor is the #3573 bug class with no write.
+            _oid = _resolve_name(proj.g, "Object", name)
+            if not _oid:
+                continue
             proj.g.query(
-                "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
+                "MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
                 "MERGE (p)-[:aboutObject]->(o)",
-                params={"pid": pid, "name": name},
+                params={"pid": pid, "oid": _oid},
             )
 
     # ── 7. Operators — shared commit semantics via apply_payload_operators

@@ -179,6 +179,9 @@ class TestOnlyOnCreate:
 # ── Tests 3 + 3v (RED): stub adoption ──────────────────────────────────────
 
 class TestStubAdoption:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="adoption lands in S2 — owner #3590/P1-D")
     def test_stub_adoption_journals_canonicalization(self, tmp_path):
         """#1918/#2295 heal: a name-stub under a random ulid (raw CREATE,
         connector produces-edge shape — the ``_event_plain_merge`` Subject
@@ -240,7 +243,13 @@ class TestStubAdoption:
         the live node. RED at base for delta 1 ALONE: the line exists but
         ``_upsert_subject`` ON MATCH has no createdAt clause → live node
         stays createdAt-less. Post-fix pins the EventAPI-mention parity
-        clause in delta 1's edit comment."""
+        clause in delta 1's edit comment.
+
+        #3590 S1 re-derivation: the EventAPI mention now resolves the name
+        to the stub's id (a mention must not mint a second carrier), so the
+        journaled ``id`` IS the stub id — asserted here rather than left
+        implicit.
+        """
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t3v.db"))
@@ -257,11 +266,19 @@ class TestStubAdoption:
             assert len(sas) == 1, sas
             line = sas[0]
             assert line.get("createdAt"), line
+            assert line["id"] == stub_id, (
+                "#3590 S1: the mention must resolve to the existing live "
+                f"stub id, not mint a second carrier: {line}")
             rows = _subject_row(proj, "mention-person", "createdAt")
             assert rows and rows[0][0] == line["createdAt"], (
                 "live stub adopted by an EventAPI mention must carry the "
                 "journaled createdAt (delta 1 ON MATCH adoption — EventAPI "
                 f"parity): live={rows!r} line_ts={line['createdAt']!r}")
+            # exactly one node for that name — no second carrier (#3389)
+            count = proj.g.query(
+                "MATCH (s:Subject {name:$n}) RETURN count(s)",
+                params={"n": "mention-person"}).result_set[0][0]
+            assert count == 1, f"mention minted a second carrier: {count}"
         finally:
             sdk.close()
 
@@ -591,18 +608,23 @@ class TestFalsyName:
 # ── Test 10 (RED): EventAPI random-ulid coexistence (by-design pin) ────────
 
 class TestEventAPICoexistence:
-    def test_random_ulid_mention_between_sdk_creates_is_by_design(
-            self, tmp_path):
-        """By-design double-registration pin (delta 4): EventAPI add_subject
-        mints a random ulid with NO canonical override → a mention between
-        two SDK creates re-ids the live node (#1918 accepted), so the second
-        SDK create probe-misses and journals a second canonical line.
+    def test_eventapi_mention_resolves_and_journals_once(self, tmp_path):
+        """#3590 S1 re-derivation of the pre-S1
+        ``test_random_ulid_mention_between_sdk_creates_is_by_design``.
 
-        Layout pin: rebuild_all replays *.jsonl SORTED — B must NOT be
-        replayed (replayed FIRST it first-wins B's createdAt ≠ live; replayed
-        LAST it re-ids the node to the ulid). Rebuild the SDK log ONLY (A + C
-        reproduce live — C already re-converged B's transient re-id live).
-        Cross-file replay reorder is an accepted divergence (#330 class)."""
+        That test pinned the OLD name-as-identity behaviour: an EventAPI
+        mention minted a random ulid, re-id'ing the live node, so the second
+        SDK create probe-missed and journaled a SECOND canonical
+        SubjectAdded ("by design"). Under S1 the projection keys on ``id``,
+        so a random-ulid mention would instead land a SECOND live same-name
+        node — the #3389 "second carrier" class. The EventAPI default-id path
+        therefore resolves the name (``EventAPI._mention_id``) and the
+        mention lands on the canonical id: the SDK log holds exactly ONE
+        SubjectAdded, and the API log's line carries that same id.
+
+        Layout pin retained: the SDK log is rebuilt on its own so the
+        cross-file sort order cannot confound this assertion.
+        """
         sdk_events = tmp_path / "sdk_events"
         api_events = tmp_path / "api_events"
         sdk_events.mkdir()
@@ -613,35 +635,39 @@ class TestEventAPICoexistence:
             proj = sdk._get_proj()
             api = _api_log(proj, api_events / "api.jsonl")
             name = "shared-person"
+            canonical = _entity_name_id("Subject", name)
             # A: SDK first canonical registration
             sdk.create_entity("subject", name,
                               subjectKind="core:org", is_episodic=False)
-            # B: EventAPI random-ulid mention — re-ids the live node (#1918)
+            # B: EventAPI mention — RESOLVES to the canonical id (no re-id)
             api.add_subject(name)
-            # C: SDK re-mention — probe misses (live id is B's ulid) → line C
+            # C: SDK re-mention — the probe finds the canonical id+name row,
+            # so NO second registration line is journaled.
             sdk.create_entity("subject", name,
                               subjectKind="core:org", is_episodic=False)
             journal = _journaled(sdk, sdk_events)
             sas = _name_sas(journal, name)
-            assert len(sas) == 2, (
-                "SDK log must hold exactly two canonical SubjectAdded lines "
-                f"(A + C; B lives on the API's own log): {sas}")
-            assert sas[0]["id"] == sas[1]["id"] == _entity_name_id(
-                "Subject", name), sas
+            assert len(sas) == 1, (
+                "#3590 S1: the mention resolves to the canonical id, so the "
+                f"SDK log holds exactly ONE SubjectAdded line: {sas}")
+            assert sas[0]["id"] == canonical, sas
             api_journal = EventLog(str(api_events / "api.jsonl")).read_all()
-            assert len(_name_sas(api_journal, name)) == 1, api_journal
-            # live: re-canonicalized by C, createdAt first-won A's value
+            api_sas = _name_sas(api_journal, name)
+            assert len(api_sas) == 1, api_journal
+            assert api_sas[0]["id"] == canonical, (
+                f"the mention must journal the canonical id: {api_sas}")
+            # live: one node, the canonical id, and no second carrier
             live_rows = _subject_row(proj, name, "id", "createdAt")
-            assert live_rows and live_rows[0][0] == _entity_name_id(
-                "Subject", name), live_rows
+            assert len(live_rows) == 1, live_rows
+            assert live_rows[0][0] == canonical, live_rows
             assert live_rows[0][1] == sas[0]["createdAt"], (
                 "live createdAt must be A's (first registration)")
             # rebuild against the SDK log ONLY
             proj.rebuild_all(str(sdk_events))
             rows = _subject_row(proj, name, "id", "createdAt")
-            assert rows and rows[0][0] == _entity_name_id(
-                "Subject", name), (
-                "rebuilt node must be canonical (B's ulid must not stick)")
+            assert len(rows) == 1, rows
+            assert rows[0][0] == canonical, (
+                "rebuilt node must be canonical")
             assert rows[0][1] == sas[0]["createdAt"], (
                 "rebuilt createdAt must equal the SDK A-line value (== live)")
         finally:

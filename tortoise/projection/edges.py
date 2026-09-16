@@ -4,6 +4,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime, timezone
 
+# #3590 S1: the ONE Object/Subject key + the name→id resolver. Imported at
+# module scope — `entities` is a leaf w.r.t. this module (`projection/__init__`
+# imports entities BEFORE edges), and it imports `tortoise.sdk` only inside
+# `_entity_key`, so no cycle can close here.
+from tortoise.projection.entities import _resolve_name, _resolve_or_key
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -71,15 +77,26 @@ def stub_key(rel: str, target: dict):
     return (label, key)
 
 
-def _mint_subject_stub(g, name: str) -> None:
+def _mint_subject_stub(g, name: str) -> str:
     """MERGE the Subject stub live wiring's auto-detect fallback creates
     (edges.py _create_about_edges) — single create path for live + replay so a
-    replayed descriptor mints a byte-identical stub to live wiring."""
+    replayed descriptor mints a byte-identical stub to live wiring.
+
+    #3590 S1: the name resolves to its live holder first, then keys on the
+    canonical entity key (`_entity_key`). The stub is therefore deterministic
+    across live and replay, identical to the node a later
+    `create_subject(name)` lands on, and it ADOPTS a canonical Subject that
+    already holds the name instead of shadowing it — the pre-S1
+    MERGE-by-name + `s.id=$name` third id convention (id == name) is retired.
+    Returns the id so callers can key their paired reads on it without
+    re-deriving it."""
+    subj_key = _resolve_or_key(g, "Subject", name)
     g.query(
-        "MERGE (s:Subject {name:$name}) "
-        "ON CREATE SET s.id=$name, s.subjectKind='other'",
-        params={"name": name},
+        "MERGE (s:Subject {id:$id}) "
+        "ON CREATE SET s.name=$name, s.subjectKind='other'",
+        params={"name": name, "id": subj_key},
     )
+    return subj_key
 
 
 def _mint_source_stub(g, url: str, source_kind: str | None = None) -> None:
@@ -135,10 +152,10 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
             f"resolve_structural_target: unsafe label {label!r} "
             "(contract: STRUCTURAL_REL_LABELS values only)")
     if label == "Subject":
-        _mint_subject_stub(g, key)
+        subj_key = _mint_subject_stub(g, key)
         rows = g.query(
-            "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 1",
-            params={"name": key}).result_set
+            "MATCH (s:Subject {id:$id}) RETURN ID(s), s.id LIMIT 1",
+            params={"id": subj_key}).result_set
         if not rows:
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
@@ -152,14 +169,24 @@ def resolve_structural_target(g, label: str, key: str, rel: str):
         return {"internal": rows[0][0], "logical": rows[0][1]}
     # Non-stubbable labels — resolve-only (never mint). Document matches
     # name OR title (#211 — Documents store their display name in title);
-    # Event nodes match by name (set by create_event).
+    # Event nodes match by name (set by create_event). #3590 S1: Object is
+    # id-keyed, so the name resolves through the ONE name→id helper and the
+    # read is then id-keyed — never a same-name coin flip.
     if label == "Document":
         q = ("MATCH (d:Document) WHERE d.title = $key OR d.name = $key "
              "RETURN ID(d), d.id LIMIT 1")
+        rows = g.query(q, params={"key": key}).result_set
+    elif label == "Object":
+        obj_id = _resolve_name(g, "Object", key)
+        if obj_id is None:
+            return None
+        rows = g.query(
+            "MATCH (x:Object {id:$id}) RETURN ID(x), x.id LIMIT 1",
+            params={"id": obj_id}).result_set
     else:
         q = (f"MATCH (x:{label} {{name:$key}}) "
              f"RETURN ID(x), x.id LIMIT 1")
-    rows = g.query(q, params={"key": key}).result_set
+        rows = g.query(q, params={"key": key}).result_set
     if not rows:
         return None
     return {"internal": rows[0][0], "logical": rows[0][1]}
@@ -294,14 +321,15 @@ class _EdgeHandlers:
         # Neither exists — default to Subject stub (label-agnostic source).
         # #2489: stub mint routed through the SHARED resolver helper
         # (_mint_subject_stub) so live wiring and rebuild replay mint
-        # byte-identical stubs (one create path).
-        _mint_subject_stub(self.g, entity_name)
+        # byte-identical stubs (one create path). #3590 S1: the paired edge
+        # read keys on the same returned id.
+        stub_id = _mint_subject_stub(self.g, entity_name)
         srcs = self._resolve_entity(source_id, by_id=True)
         for n in srcs:
             self.g.query(
-                f"MATCH (n:{n['label']} {{{n['key']}:$pid}}), (s:Subject {{name:$name}}) "
+                f"MATCH (n:{n['label']} {{{n['key']}:$pid}}), (s:Subject {{id:$sid}}) "
                 f"MERGE (n)-[:aboutSubject]->(s)",
-                params={"pid": n["value"], "name": entity_name},
+                params={"pid": n["value"], "sid": stub_id},
             )
 
     def _try_about_edge(self, source_id: str, target_name: str, 
@@ -310,9 +338,21 @@ class _EdgeHandlers:
 
         For Document nodes, matches against both ``name`` and ``title`` properties
         (Documents store their display name in ``title`` per _upsert_document).
+
+        #3590 S1: Object/Subject are identified by ``id``; their name resolves
+        through the ONE name→id helper first, so the edge anchors on exactly
+        one live carrier (zero/ambiguous => no edge, never a guess) and the
+        read carries no name-keyed `MATCH … {name:}` coordinate.
         """
-        # Documents use 'title' as their display name (#211)
-        if label == 'Document':
+        if label in ("Object", "Subject"):
+            target_id = _resolve_name(self.g, label, target_name)
+            if target_id is None:
+                return False
+            r = self.g.query(
+                f"MATCH (e:{label} {{id:$id}}) RETURN e.id LIMIT 1",
+                params={"id": target_id},
+            ).result_set
+        elif label == 'Document':
             r = self.g.query(
                 f"MATCH (e:{label}) WHERE e.name = $name OR e.title = $name "
                 "RETURN coalesce(e.title, e.name, $name) LIMIT 1",
@@ -325,7 +365,13 @@ class _EdgeHandlers:
             ).result_set
         if r:
             for n in self._resolve_entity(source_id, by_id=True):
-                if label == 'Document':
+                if label in ("Object", "Subject"):
+                    self.g.query(
+                        f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (e:{label} {{id:$tid}}) "
+                        f"MERGE (n)-[:{edge_type}]->(e)",
+                        params={"sid": n["value"], "tid": target_id},
+                    )
+                elif label == 'Document':
                     self.g.query(
                         f"MATCH (n:{n['label']} {{{n['key']}:$sid}}), (e:{label}) "
                         f"WHERE e.name = $name OR e.title = $name "

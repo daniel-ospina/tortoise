@@ -159,25 +159,31 @@ def _retrieve_topic_neighborhood(
     # Stage 1a: Topic -> Subjects/Objects -> about* -> Points
     for entity_label in ("Subject", "Object"):
         try:
-            # Match entities by name (case-insensitive substring)
+            # Match entities by name (case-insensitive substring). #3590 S1:
+            # carry the id too — the follow-up about* anchor must key on the
+            # id, not the name (a name-keyed Object/Subject anchor is the
+            # same #3573 bug class with no write, and under same-name
+            # coexistence it would sweep every carrier).
             entity_rows = graph.query(
                 f"MATCH (e:{entity_label}) "
                 "WHERE toLower(coalesce(e.name, '')) CONTAINS toLower($topic) "
-                "RETURN e.name LIMIT $max_seeds",
+                "RETURN e.name, e.id LIMIT $max_seeds",
                 params={"topic": topic, "max_seeds": max_seeds},
             ).result_set
 
             for row in entity_rows:
-                entity_name = row[0]
+                entity_id = row[1]
+                if not entity_id:
+                    continue
                 # Follow incoming about* edges from Points
                 edge_type = "aboutSubject" if entity_label == "Subject" else "aboutObject"
                 point_rows = graph.query(
-                    f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{name: $name}}) "
+                    f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{id: $id}}) "
                     "WHERE p.is_operator = false "
                     "  AND (p.status IS NULL OR p.status <> 'retracted') "
                     "RETURN p.id, p.content, p.pointKind "
                     "LIMIT $max_seeds",
-                    params={"name": entity_name, "max_seeds": max_seeds},
+                    params={"id": entity_id, "max_seeds": max_seeds},
                 ).result_set
                 for pr in point_rows:
                     if pr[0] not in seed_ids:

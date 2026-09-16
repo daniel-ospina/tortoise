@@ -31,6 +31,7 @@ from .extractor import (
     _canonical_name,
 )
 from .ids import ulid, now_iso, content_hash  # noqa: F401
+from .projection.entities import _entity_key, _resolve_or_key
 
 logger = logging.getLogger(__name__)
 
@@ -528,12 +529,15 @@ class ConversationMiner:
 
     @staticmethod
     def _object_id(name: str) -> str:
-        """Deterministic canonical Object id (plan §4.1/§4.4): ``obj_`` +
-        sha256 of the domain-separated canonical name, truncated to 16 hex
-        chars (64 bits — collision-resistant vs the old 48-bit [:12], which
-        collided once punctuation-stripping canonicalization was added,
-        "Foo.Bar" == "FooBar") — via the existing ids.content_hash helper
-        (no third sha256)."""
+        """DEPRECATED at #3590 S1 — kept only until S2 deletes it.
+
+        Historically: ``obj_`` + sha256 of the domain-separated canonical
+        name, truncated to 16 hex chars (64 bits). S1 moved every reification
+        write onto the ONE entity key (``entities._entity_key``) so mining's
+        channel lands on the same node ``create_object(name)`` does (key
+        parity, P1-B); the name-derived ``obj_<hash16>`` id is no longer any
+        node's identity, and S2 deletes this derivation outright.
+        """
         return "obj_" + content_hash(f"obj:{_canonical_name(name)}")[:16]
 
     def _reify_entities(
@@ -573,7 +577,12 @@ class ConversationMiner:
                 name = ent["name"]
                 if not self._reifiable_name(name, transcript):
                     continue
-                api.add_object(name, ent["objectKind"], id=self._object_id(name),
+                # #3590 S1: no projection to resolve against — the
+                # deterministic entity key is the only id available, and it
+                # is what the projection will MERGE on when the log is
+                # replayed.
+                api.add_object(name, ent["objectKind"],
+                               id=_entity_key("Object", name),
                                canonical_name=_canonical_name(name), title=name)
                 wired += 1
             return wired
@@ -585,14 +594,15 @@ class ConversationMiner:
             if not self._reifiable_name(name, transcript):
                 continue
             canonical = _canonical_name(name)
-            api.add_object(name, ent["objectKind"], id=self._object_id(name),
+            # #3590 S1 (P1-B): resolve the name to its live holder, else key
+            # through the ONE entity key — so this channel, the SDK's
+            # create_object, and a connector-registered Object all land on ONE
+            # node. The old ``_object_id`` derivation (obj_<hash16>) is
+            # retired here; the re-fetch-by-name that followed is gone with
+            # it, because the resolver now runs BEFORE the write.
+            oid = _resolve_or_key(proj.g, "Object", name)
+            api.add_object(name, ent["objectKind"], id=oid,
                            canonical_name=canonical, title=name)
-            # MERGE-by-name: re-fetch the canonical node id (a prior run's id
-            # wins — no duplicate Objects, DE2E-8 idempotency)
-            r = proj.g.query("MATCH (o:Object {name:$name}) RETURN o.id",
-                             params={"name": name})
-            oid = r.result_set[0][0] if r.result_set and r.result_set[0] \
-                else self._object_id(name)
             # Point side: deterministic mention-based wiring
             for p in points:
                 content = p.get("content", "")

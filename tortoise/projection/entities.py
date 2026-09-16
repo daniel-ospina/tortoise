@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+from tortoise.live import _terminal_excluded, decay_clause  # #2490 / #3590 S1
 
 
 def _now_iso() -> str:
@@ -50,6 +50,81 @@ def _build_search_text(title, summary=None, topics=None) -> str:
     """
     parts = [title, summary] + list(topics or [])  # noqa: RUF005
     return " ".join(filter(None, parts))
+
+
+# ── #3590 Slice 1: one key for Object/Subject ─────────────────────────────
+# The slice's whole point: exactly ONE definition of the Object/Subject key,
+# so no two writers can derive/assign different ids for one entity (the #3389
+# "second carrier" class). At S1 the mint is still `_entity_name_id`'s
+# name-derived value; S2 replaces this body with a name→id resolve-or-refuse
+# lookup and deletes the derivation.
+
+def _entity_key(label: str, name: str) -> str:
+    """The Object/Subject MERGE key.
+
+    Slice 1: still name-derived — a function-level import of the SDK's
+    ``_entity_name_id`` so the projection keeps its independence from
+    ``tortoise.sdk`` at module scope (``sdk`` imports this package; a
+    module-level import here would close the cycle). S2 replaces the body
+    with a resolve-or-refuse lookup — the SDK write layer, never the
+    projection, is the only minter.
+    """
+    from tortoise.sdk import _entity_name_id  # function-level: no import cycle
+    return _entity_name_id(label, name)
+
+
+def _LIVE_HOLDER(alias: str = "n") -> str:
+    """The ONE live-holder predicate.
+
+    DELEGATES to ``live._terminal_excluded`` so the resolver, the rename
+    refusal and the delete arm cannot drift from the read surfaces. Do NOT
+    hand-roll the literal ``status IS NULL OR NOT (status IN $terminal OR
+    outdated = true)``: that shape treats ``status IS NULL AND outdated=true``
+    as LIVE (canonical: DEAD) and, via Cypher three-valued logic, excludes
+    ``status='live', outdated=NULL`` (``NOT(false OR NULL)`` = NULL) — the
+    exact defect the identity decision's D2 exists to prevent.
+    """
+    return _terminal_excluded(f"{alias}.status")
+
+
+def _resolve_name(g, label: str, name: str) -> str | None:
+    """Natural-key read: the single LIVE id holding *name*, else ``None``.
+
+    Zero or >=2 live holders -> ``None`` here; S2 turns the >=2 case into the
+    ambiguity refusal (it never picks one — R8's "never guess"). Non-live
+    holders (superseded/deprecated/archived/retracted/outdated) never resolve.
+
+    ``label`` is interpolated into the query STRUCTURE — fail loudly on
+    anything outside the two identity labels (parity with
+    ``resolve_structural_target``'s runtime defense).
+    """
+    if label not in ("Object", "Subject"):
+        raise RuntimeError(
+            f"_resolve_name: unsafe label {label!r} (Object/Subject only)")
+    rows = g.query(
+        f"MATCH (n:{label} {{name:$name}}) "
+        f"WHERE {_LIVE_HOLDER()} RETURN n.id",
+        params={"name": name}).result_set
+    return rows[0][0] if len(rows) == 1 else None
+
+
+def _resolve_or_key(g, label: str, name: str) -> str:
+    """The id a NAME-ONLY writer must key on (#3590 S1).
+
+    ``_resolve_name`` first — so a mention lands on the node that already
+    carries the name, whatever id its creator chose (a connector id, a
+    `_server_id`, a canonical `create_object`) — then ``_entity_key`` only
+    when no live holder exists. Resolving first is what makes the slice's
+    claim true: *"a projection stub and the canonical registration can no
+    longer land on two nodes"*. Keying on ``_entity_key`` alone would mint a
+    second live carrier for every name whose canonical node has a
+    non-derived id (`github_map`'s `github-issue-{repo}-{n}`, `_server_id`),
+    which is the same #3389 class S1 exists to close — and the pre-S1
+    name-keyed `MERGE` landed on that canonical node, so a bare key would be
+    a regression, not a migration. S2 renames this to ``_resolve_or_mint``
+    and swaps the ``_entity_key`` fallback for the ULID mint.
+    """
+    return _resolve_name(g, label, name) or _entity_key(label, name)
 
 
 class _EntityHandlers:
@@ -434,7 +509,16 @@ class _EntityHandlers:
     # ── Entity nodes ───────────────────────────────────────────────
 
     def _upsert_subject(self, ev: dict) -> None:
-        """MERGE Subject by name (content-hash dedup)."""
+        """MERGE Subject by ``id`` (#3590 S1: the name is a natural key only).
+
+        S1 keeps every ``ON CREATE``/``ON MATCH`` clause except the id write:
+        with the pattern ``{id:$id}`` a matched node already carries
+        ``s.id == $id``, so ``ON MATCH s.id=coalesce($id, s.id)`` is a
+        provable no-op — dead code whose stub-adoption *purpose* is now served
+        by the name→id resolver (#3590 S1 step 6). ``ON MATCH`` deliberately
+        does NOT write ``name``: a re-mention must never be able to rename a
+        node (that is what a journaled ``Renamed`` event is for, S3).
+        """
         sid = ev.get("id")
         name = ev.get("name", "")
         if not sid or not name:
@@ -446,26 +530,14 @@ class _EntityHandlers:
             embedding = compute_embedding(name)
         except Exception:
             pass
-        # #1918: canonical id must win on MATCH too — parity with the #1155
-        # Object fix (_upsert_object ON MATCH o.id=coalesce($id, o.id)). The
-        # webhook name-stub path (_event_plain_merge) can mint a Subject stub
-        # with a RANDOM ulid id before this entity path's SubjectAdded lands;
-        # without the ON MATCH id write, the MERGE below adopts the stub by
-        # NAME and the canonical id never lands on any node — MATCH
-        # (s:Subject {id:$sid}) wiring (participatesIn, aboutSubject) silently
-        # matches nothing. coalesce($id, s.id) makes the incoming id win on
-        # MATCH; this function early-returns when the caller sends no id, so
-        # entities without ids never fire the clause. Accepted trade-off
-        # (same as #1155 for Objects): a LATE random-ulid SubjectAdded from a
-        # producer without a deterministic id (api.add_subject, which unlike
-        # add_object has no id= override) can re-id a canonical node — blast
-        # radius is id-based wiring only (about* edges match by name).
+        # #3590 S1: id-keyed MERGE. The name becomes a natural key carried on
+        # the node (and indexed at projection/__init__.py:_ensure_indexes), so
+        # `_resolve_name` can hand a mention the canonical id.
         self.g.query(
-            "MERGE (s:Subject {name:$name}) "
-            "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
+            "MERGE (s:Subject {id:$id}) "
+            "ON CREATE SET s.name=$name, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
             "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END "
-            "ON MATCH SET s.id=coalesce($id, s.id), "
-            "            s.subjectKind=coalesce($sk, s.subjectKind), "
+            "ON MATCH SET s.subjectKind=coalesce($sk, s.subjectKind), "
             # #2295: ON MATCH createdAt ADOPTS only when absent
             # (coalesce(s.createdAt, $ca) — existing value wins): mirrors the
             # #2194 Object clause (_upsert_object) for the Subject stub-
@@ -483,14 +555,16 @@ class _EntityHandlers:
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "embedding": embedding},
         )
-        # #228: persist arbitrary caller-supplied props
+        # #228: persist arbitrary caller-supplied props (#3590 S1: re-targeted
+        # from {name:$name} to {id:$id} — the name-keyed MATCH would silently
+        # no-op now that the node is identified by id).
         self._persist_extra_props(
-            "MATCH (n:Subject {name: $name})", {"name": name},
+            "MATCH (n:Subject {id: $id})", {"id": sid},
             ev, self._SUBJECT_HANDLED,
         )
 
     def _upsert_object(self, ev: dict) -> None:
-        """MERGE Object by name (content-hash dedup).
+        """MERGE Object by ``id`` (#3590 S1: the name is a natural key only).
 
         Objects are encoded via the Source→references→Object chain —
         embedding from name provides direct vector search capability
@@ -509,23 +583,21 @@ class _EntityHandlers:
             embedding = compute_embedding(name)
         except Exception:
             pass
-        # #1155-P1: canonical id must win on MATCH too. The produces-edge
-        # wiring in _event_plain_merge can mint a name-stub Object (random
-        # ulid) when a poll/webhook event lands BEFORE this entity path's
-        # first ObjectRegistered. Without the ON MATCH id write, the MERGE
-        # below adopts the stub by NAME and the canonical id never lands on
-        # any node — aboutSubject wiring (MATCH by o.id) silently matches
-        # nothing. `coalesce($id, o.id)` is idempotent: $id is always the
-        # same deterministic id for a given name across producers (this
-        # function early-returns when the caller sends no id, so entities
-        # without ids never fire the clause).
+        # #3590 S1: id-keyed MERGE. The #1155-P1 ``ON MATCH
+        # o.id=coalesce($id, o.id)`` clause is DROPPED: with the pattern
+        # `{id:$id}` a matched node already carries `o.id == $id`, so the term
+        # can only write the value it matched on — a provable no-op. Its old
+        # purpose (adopting a name-stub under a random ulid) is now served by
+        # the name→id resolver, and the #3389 late-random-ulid re-id class
+        # dies with it. ``ON MATCH`` deliberately does NOT write ``name``: a
+        # re-mention must never be able to rename a node (S3's journaled
+        # ``Renamed`` is the only rename path).
         self.g.query(
-            "MERGE (o:Object {name:$name}) "
-            "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
+            "MERGE (o:Object {id:$id}) "
+            "ON CREATE SET o.name=$name, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
             "            o.status=coalesce($st, 'live'), "
             "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END "
-            "ON MATCH SET o.id=coalesce($id, o.id), "
-            "            o.objectKind=coalesce($ok, o.objectKind), "
+            "ON MATCH SET o.objectKind=coalesce($ok, o.objectKind), "
             "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "
             "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END",
@@ -550,9 +622,12 @@ class _EntityHandlers:
                     "title": title,
                     "embedding": embedding},
         )
-        # #228: persist arbitrary caller-supplied props
+        # #228: persist arbitrary caller-supplied props (#3590 S1: re-targeted
+        # from {name:$name} to {id:$id} — the name-keyed MATCH would silently
+        # no-op now that the node is identified by id, and it is exactly the
+        # edit the S0 invariant's totality note calls out).
         self._persist_extra_props(
-            "MATCH (n:Object {name: $name})", {"name": name},
+            "MATCH (n:Object {id: $id})", {"id": oid},
             ev, self._OBJECT_HANDLED,
         )
 
@@ -862,17 +937,22 @@ class _EntityHandlers:
         # Subject -[:performs]-> Event
         subj = inner.get("subject", "")
         if subj:
-            from tortoise.ids import ulid
-            stub_id = ulid()
+            # #3590 S1: the stub resolves the name to its live holder
+            # first, then keys on the canonical entity KEY — so live wiring
+            # and replay land on the SAME node (the old random ulid made
+            # replay mint a different id — the #3589/D9 divergence) AND the
+            # stub adopts an existing canonical node with a non-derived id
+            # instead of shadowing it with a second carrier.
+            subj_key = _resolve_or_key(self.g, "Subject", subj)
             self.g.query(
-                "MERGE (s:Subject {name:$name}) "
-                "ON CREATE SET s.id=$id, s.subjectKind='other'",
-                params={"name": subj, "id": stub_id},
+                "MERGE (s:Subject {id:$id}) "
+                "ON CREATE SET s.name=$name, s.subjectKind='other'",
+                params={"name": subj, "id": subj_key},
             )
             self.g.query(
-                "MATCH (s:Subject {name:$name}), (e:Event {eventId:$eid}) "
+                "MATCH (s:Subject {id:$id}), (e:Event {eventId:$eid}) "
                 "MERGE (s)-[:performs]->(e)",
-                params={"name": subj, "eid": eid},
+                params={"id": subj_key, "eid": eid},
             )
         # Event -[:produces]-> Object (or Document when objectType='document', #125)
         obj = inner.get("object", "")
@@ -895,24 +975,24 @@ class _EntityHandlers:
                     params={"id": obj, "eid": eid},
                 )
             else:
-                from tortoise.ids import ulid
-                stub_id = ulid()
-                # #1155-P1: id is written ON CREATE ONLY — the stub id is a
-                # RANDOM ulid, and a poll/webhook event may arrive before the
-                # entity path's ObjectRegistered. If this MERGE also wrote id
-                # on MATCH, a late stub would CLOBBER the canonical id
-                # (github-issue-{repo}-{n}) that _upsert_object set. The
-                # canonical id wins via _upsert_object's ON MATCH
-                # `o.id=coalesce($id, o.id)` — do not add an id write here.
+                # #3590 S1: the stub id is the RESOLVED live holder, else
+                # the canonical entity KEY (deterministic) — NOT a random
+                # ulid: live and replay mint the same node (closing the
+                # replay-nondeterminism class) and a stub never shadows the
+                # canonical Object the connector/`github_map` registered.
+                # The #1155-P1 warning against an `id` write on MATCH is now
+                # moot (one key), but the id stays ON CREATE-only: a
+                # re-mention must never re-identify a node.
+                obj_key = _resolve_or_key(self.g, "Object", obj)
                 self.g.query(
-                    "MERGE (o:Object {name:$name}) "
-                    "ON CREATE SET o.id=$id, o.objectKind='other'",
-                    params={"name": obj, "id": stub_id},
+                    "MERGE (o:Object {id:$id}) "
+                    "ON CREATE SET o.name=$name, o.objectKind='other'",
+                    params={"name": obj, "id": obj_key},
                 )
                 self.g.query(
-                    "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
+                    "MATCH (o:Object {id:$id}), (e:Event {eventId:$eid}) "
                     "MERGE (e)-[:produces]->(o)",
-                    params={"name": obj, "eid": eid},
+                    params={"id": obj_key, "eid": eid},
                 )
         # #1350: work-item status fold — GitHub/Linear lifecycle events derive
         # the Object's status (decision 2a: in_progress/completed, completed
@@ -932,17 +1012,26 @@ class _EntityHandlers:
         # still fold normally.
         if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
                                  "github.issue.reopened"):
-            self.g.query(
-                "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
-                "SET o.status='in_progress'",
-                params={"n": _obj_name})
+            # #3590 S1 step 6: route the fold through the ONE name→id
+            # resolver. A name-keyed MATCH here is the same #3573 bug class
+            # with no write to show for it — and under same-name coexistence
+            # it would fold EVERY carrier. Zero/ambiguous live holders => no
+            # fold (S2 records the non-fold).
+            _oid = _resolve_name(self.g, "Object", _obj_name)
+            if _oid:
+                self.g.query(
+                    "MATCH (o:Object {id:$id}) "
+                    "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                    "SET o.status='in_progress'",
+                    params={"id": _oid})
         elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
-            self.g.query(
-                "MATCH (o:Object {name:$n}) "
-                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
-                "SET o.status='completed'",
-                params={"n": _obj_name})
+            _oid = _resolve_name(self.g, "Object", _obj_name)
+            if _oid:
+                self.g.query(
+                    "MATCH (o:Object {id:$id}) "
+                    "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                    "SET o.status='completed'",
+                    params={"id": _oid})
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:
@@ -960,18 +1049,17 @@ class _EntityHandlers:
                     use_name = str(use_item)
                     use_kind = "other"
                 if use_name:
-                    from tortoise.ids import ulid
-                    stub_id = ulid()
+                    use_key = _resolve_or_key(self.g, "Object", use_name)
                     self.g.query(
-                        "MERGE (o:Object {name:$name}) "
-                        "ON CREATE SET o.id=$id, o.objectKind=$kind "
+                        "MERGE (o:Object {id:$id}) "
+                        "ON CREATE SET o.name=$name, o.objectKind=$kind "
                         "ON MATCH SET o.objectKind=$kind",
-                        params={"name": use_name, "kind": use_kind, "id": stub_id},
+                        params={"name": use_name, "kind": use_kind, "id": use_key},
                     )
                     self.g.query(
-                        "MATCH (o:Object {name:$name}), (e:Event {eventId:$eid}) "
+                        "MATCH (o:Object {id:$id}), (e:Event {eventId:$eid}) "
                         "MERGE (e)-[:uses]->(o)",
-                        params={"name": use_name, "eid": eid},
+                        params={"id": use_key, "eid": eid},
                     )
         # ── Auto-create participatesIn edges (#212) ──
         # (Subject)-[:participatesIn]->(Event) for each participant id,
@@ -987,12 +1075,15 @@ class _EntityHandlers:
                     params={"sid": pid, "eid": eid},
                 )
         elif subj:
-            # Fallback: performer is an implicit participant
-            self.g.query(
-                "MATCH (s:Subject {name: $name}), (e:Event {eventId: $eid}) "
-                "MERGE (s)-[:participatesIn]->(e)",
-                params={"name": subj, "eid": eid},
-            )
+            # Fallback: performer is an implicit participant. #3590 S1: resolve
+            # the name to the single live id rather than keying on the name.
+            _sid = _resolve_name(self.g, "Subject", subj)
+            if _sid:
+                self.g.query(
+                    "MATCH (s:Subject {id: $sid}), (e:Event {eventId: $eid}) "
+                    "MERGE (s)-[:participatesIn]->(e)",
+                    params={"sid": _sid, "eid": eid},
+                )
 
         # #228: persist arbitrary caller-supplied props (iterate inner dict
         # so nested {event:{...}} and flat formats both work)
@@ -1030,8 +1121,9 @@ class _EntityHandlers:
         carries an explicit ``sourceObjectId`` (set exclusively by the github
         entity path). ``event.object`` is NEVER used as an Object key — on
         poll/webhook paths it is the entity TITLE string and
-        ``_event_plain_merge`` already stubs ``Object {name: title}`` with a
-        random ulid; using it would wire references to the wrong stub.
+        ``_event_plain_merge`` already stubs the Object under its canonical
+        entity key (#3590 S1: previously `{name: title}` + a random ulid);
+        using it would wire references to the wrong stub.
         """
         sk = inner.get("sourceKind")
         source_url = inner.get("sourceUrl")

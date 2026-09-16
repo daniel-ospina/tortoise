@@ -235,6 +235,9 @@ class TestOnlyOnCreate:
 # ── Test 5 (RED): stub adoption ────────────────────────────────────────────
 
 class TestStubAdoption:
+    @pytest.mark.xfail(
+        strict=True,
+        reason="adoption lands in S2 — owner #3590/P1-D")
     def test_stub_adoption_journals_canonicalization(self, tmp_path):
         """#1155/#2164 ISSUE-B heal: a name-stub under a random ulid (raw
         CREATE, connector produces-edge shape) adopted by an SDK create must

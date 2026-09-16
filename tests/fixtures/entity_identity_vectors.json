@@ -73,12 +73,12 @@
     },
     {
       "id": "connector_bare_name_object",
-      "description": "A bare-name EventRecorded reference must be replay-deterministic (D9). TODAY the projection mints a random-ULID stub live and a DIFFERENT random ULID on replay.",
+      "description": "A bare-name EventRecorded reference must be replay-deterministic (D9). S0 pinned this xfail because the projection minted a random-ULID stub live and a DIFFERENT random ULID on replay; #3590 S1 keys the stub on the canonical entity key (_entity_key), so live and replay mint the SAME ids and the vector PASSES. S2 owns the other half of D9 (producers must register what they reference, and a projection-side reference to an unregistered name must refuse) and must re-derive this shape when it lands — the refusal becomes a non-folded entry and this all-green vector no longer describes it.",
       "steps": ["create_event('BareEvent', 'meeting', subject='BareSubject', object='BareObject')"],
-      "expect_live": "Event + stubbed Subject/Object with the live-minted ids",
-      "expect_replay": "the SAME ids — today they are re-minted differently",
-      "verdict": "xfail",
-      "owner": "#3589/D9",
+      "expect_live": "Event + stubbed Subject/Object under their canonical entity keys",
+      "expect_replay": "the SAME ids (deterministic key, not a random ulid)",
+      "verdict": "pass",
+      "owner": null,
       "harness": true
     },
     {

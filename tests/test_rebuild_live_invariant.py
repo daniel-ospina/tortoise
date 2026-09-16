@@ -141,8 +141,13 @@ def _drive_rename_then_rebuild(sdk):
 
 
 def _drive_connector_bare_name_object(sdk):
-    # A bare-name reference with no registration: the projection mints a stub
-    # live; replay mints a DIFFERENT stub (the D9 non-determinism).
+    # A bare-name reference with no registration. S0 pinned this xfail: the
+    # projection minted a random-ULID stub live and a DIFFERENT one on replay
+    # (the D9 non-determinism). #3590 S1 keys the stub on the canonical entity
+    # key, so both sides mint the SAME node and the shape is green. S2 owns
+    # the other half of D9 (producers register; a reference to an unregistered
+    # name refuses and records a non-folded entry) and must re-derive this
+    # vector when it lands.
     sdk.create_event("BareEvent", "meeting",
                      subject="BareSubject", object="BareObject")
 
@@ -235,10 +240,10 @@ def test_rename_then_rebuild(tmp_path):
     _run_shape(tmp_path, _drive_rename_then_rebuild)
 
 
-@pytest.mark.xfail(strict=True,
-                   reason="projection-side bare-name stub is minted "
-                          "non-deterministically (D9) — owner #3589/D9")
 def test_connector_bare_name_object(tmp_path):
+    """#3590 S1 un-xfailed this: id-keying the projection's bare-name stub on
+    the canonical entity key makes live and replay mint the SAME node (S0
+    pinned the xfail while the stub was a random ulid)."""
     _run_shape(tmp_path, _drive_connector_bare_name_object)
 
 

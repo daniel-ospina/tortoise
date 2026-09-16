@@ -336,6 +336,7 @@ surfaces:
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
   - test_embeddings_filters.py
+  - test_entity_identity.py          # #3590 S1: id-keyed Object/Subject writes + the name-keyed-coordinate source sweep
   - test_entity_stage.py
   - test_enumeration_surfaces.py
   - test_epic903_fixtures.py
@@ -463,6 +464,7 @@ surfaces:
   - test_query_suggestions.py
   - test_reaper.py
   - test_reaper_orphan.py
+  - test_rebuild_live_invariant.py  # #3590 S0: rebuild == live materialised-state harness (docker lane)
   - test_redirect_seam.py
   - test_references_edge.py
   - test_relationships_bounded.py

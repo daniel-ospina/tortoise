@@ -1610,13 +1610,21 @@ def test_upsert_event_legacy_string_uses_still_works(live_proj):
     assert rows[0][1] == "other", rows
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="adoption lands in S2 — owner #3590/P1-D")
 def test_falkor_subject_stub_resolves_canonical_id():
-    """#1918: a Subject stub minted with a random-ulid id (webhook
-    name-stub) must adopt the canonical id when SubjectAdded lands — parity
-    with the #1155 Object fix (_upsert_object ON MATCH
-    o.id=coalesce($id, o.id)). Pre-fix: _upsert_subject ON MATCH only set
-    subjectKind/embedding, so MATCH (s:Subject {id:$sid}) wiring silently
-    matched nothing."""
+    """#1918: a Subject stub minted under a DIFFERENT id (the pre-S1 webhook
+    name-stub's random ulid) must adopt the canonical id when SubjectAdded
+    lands — parity with the #1155 Object fix.
+
+    #3590 S1 P1-D carve-out: S1 makes the projection key on ``id``, so a stub
+    carrying some other id is NOT adopted — a second same-name node appears.
+    Adoption (through the name→id resolver) is S2's, so this test is
+    ``xfail(strict=True)`` here and re-derived when ``_resolve_or_mint``
+    lands. The scenario is kept intact on purpose: it is the exact shape S2
+    must make pass.
+    """
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()  # wipes all graphs on every call
