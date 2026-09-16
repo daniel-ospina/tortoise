@@ -1523,6 +1523,17 @@ function claimIntentInFlight() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, welcomeMode, authed, serverHarnessConnected])
+  // #3428/#2937 (lane B3, review cycle 8 item 5): the stall flag was reset ONLY
+  // inside the poll effect's setup, which early-returns when `wizardStep !== 3`.
+  // Leaving step 3 after a stall therefore kept the flag set, and re-entering
+  // committed ONE paint frame with the live region already containing the
+  // message (not announced — the a11y reason the region is mounted up front)
+  // and the body rendering the softened clause the poll was about to retract.
+  // Clear it where the step is LEFT, so re-entry starts from the not-stalled
+  // state and the frame cannot render a withdrawn promise.
+  React.useEffect(() => {
+    if (wizardStep !== 3) setWizardConnectPollStalled(false)
+  }, [wizardStep])
   // #2361 review-r3 (P2-2): wizardPaused must not out-live a real connection —
   // connect → Back → Skip must still show 'connected', not 'paused'.
   // #3428/#2937: the declared-before-use ordering #2621's TDZ fix required is
@@ -2632,6 +2643,14 @@ function claimIntentInFlight() {
     // sequence number — captured before the await so a response can be told
     // apart from one issued LATER (see the apply guard below).
     const _seq = ++onboardingRefreshSeqRef.current
+    // #3428/#2937 (lane B3, review cycle 8 item 1): `_superseded` is
+    // FUNCTION-scoped, declared before the try. Declared inside the try (cycle 7
+    // item 3) it was in the TDZ at the early no-session exit and completely
+    // UNBOUND in the `catch` (a try-scoped `const` is not in scope there), so
+    // EVERY error path threw `ReferenceError` instead of returning the
+    // discriminated outcome. It is assigned after each await, immediately before
+    // each use, so it always reflects the latest issued sequence.
+    let _superseded = false
     try {
       if (!sessionTokenRef.current) {
         // Mount race (#1838): the onboarding-state GET rides the session JWT —
@@ -2647,6 +2666,7 @@ function claimIntentInFlight() {
           const { data } = await supabaseClient.auth.getSession()
           session = (data && data.session) || null
         }
+        _superseded = _seq < onboardingRefreshSeqRef.current
         // P2 (review): strict validity check — a non-expired JWT is required,
         // otherwise fall through to the loading-off return below.
         if (session && session.access_token && session.expires_at && session.expires_at * 1000 > Date.now()) {
@@ -2686,7 +2706,7 @@ function claimIntentInFlight() {
       // flight, this one is stale by definition and is dropped; `_superseded`
       // is returned as a success below so the poll does not count it as a
       // failed check.
-      const _superseded = _seq < onboardingRefreshSeqRef.current
+      _superseded = _seq < onboardingRefreshSeqRef.current
       if (st && st.onboarding && _teamAtCall && orgIdRef.current === _teamAtCall && !_superseded) {
         // code-review P1: this response is for the CURRENT team (the team
         // did not move while the GET was in flight) — clear the switch-stale
@@ -2735,6 +2755,10 @@ function claimIntentInFlight() {
       // state leaves the panel in its initial state;
       // finishWelcomeLoads() re-fires this after org-create + provisioning
       // and is the authoritative load.
+      // review cycle 8 item 1: re-read the sequence AFTER the rejection (the
+      // awaited call never resolved, so no post-await assignment ran) — reading
+      // an unbound identifier here was the ReferenceError the P0 fixes.
+      _superseded = _seq < onboardingRefreshSeqRef.current
       if (e && e.status === 403 && !e.suspended && !orgIdRef.current) return { applied: false, superseded: _superseded }
       // #3428/#2937 (lane B3, review cycle 7 item 3): a superseded REJECTION is
       // superseded-aware too — the newer in-flight refresh owns the loading
@@ -6362,13 +6386,30 @@ function claimIntentInFlight() {
   const doneHarnessForRemedy = harnessPickEstablished ? wizardHarness : null
   const doneKeylessLeaf = doneHarnessForRemedy !== null && HARNESS_OAUTH.includes(doneHarnessForRemedy)
   const doneCanMintFresh = isOwnerAdmin && !capNotice && !wizardDurableCapped
+  // review cycle 9 (UX F1 + code F4): the Setup guide renders "Resume setup →"
+  // ONLY while it can render the active checklist — the card returns a skeleton
+  // while loading, an error card when the projection never landed, an
+  // "Unavailable" card when the server reports FLOW unavailable, and a
+  // collapsed card once complete; the button sits inside the active branch
+  // (SetupGuideCard: `onResume && g.status === 'active'`). Naming a control
+  // that is not on screen is the same defect class as naming a harness the
+  // branch never offered — and it is REACHABLE: a failed onboarding GET leaves
+  // `onboarding === null`, so this remedy's minting arm would point at a card
+  // that is concurrently rendering "Couldn't load setup status — refresh to
+  // retry." Derive the clause from the SAME predicate the card uses. The mint
+  // clause is true only when reopening would mint: a key already resolved
+  // (minted this session, or matching a durable row) is reused, not re-minted.
+  const guideCanResume = !!onboarding && !onboardingLoading && setupGuide(onboarding).status === 'active'
+  const doneReopenClause = guideCanResume
+    ? 'reopen it from Settings → Setup guide (Resume setup)'
+    : 'the steps are in Settings → Setup guide'
   const doneSetupRemedy = (!harnessPickEstablished || doneKeylessLeaf)
     ? 'the steps are in Settings → Setup guide'
     : (!isOwnerAdmin
         ? 'ask an owner or admin for an API key'
-        : (doneCanMintFresh
-            ? 'the command is in Settings → Setup guide (running it creates a fresh key)'
-            : 'the command is in Settings → Setup guide'))
+        : (doneCanMintFresh && !harnessKey
+            ? `${doneReopenClause} — the connect step mints a fresh key`
+            : doneReopenClause))
 
   // #2710: the wizard's paste escape (shared verbatim with the member/capped
   // branch below — same markup, same validation, no copy or IA change). The
@@ -7268,10 +7309,9 @@ function claimIntentInFlight() {
                             // the body must not keep asserting the very promise the
                             // stall notice below withdraws.
                             <p className="dim" style={{ lineHeight: 1.6 }}>
-                              We haven't seen your agent's first write yet — so we can't
+                              We haven't seen your agent's first write through its Tortoise tools yet — so we can't
                               tell it's connected. If you haven't finished the setup, {doneSetupRemedy}. If you have,
-                              head back to {doneHarnessName} and ask it to file
-                              its first memory; {wizardConnectPollStalled
+                              head back to {doneHarnessName} and ask it to file a memory; {wizardConnectPollStalled
                                 ? "we'll show it as soon as we can check"
                                 : 'it shows up here the moment it does'}.
                             </p>

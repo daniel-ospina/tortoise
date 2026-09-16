@@ -18,7 +18,7 @@
 // raw key beside the connector header literal).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -474,34 +474,151 @@ test('#3428: the connect-step advance no longer writes the harness-connected che
     'it still advances — the user is never trapped on the connect step')
 })
 
+// ── review cycle 8 (items 3 + 4): the SOURCE pin is cross-file + normalized ──
+// Cycle 7's pin read main.jsx only, on raw text. A writer therefore evaded it by
+// splitting the URL into a folded concatenation (M3), by carrying the step as a
+// value (M3/M10), and by living in a sibling module (M10) — all green. The
+// replacement scans EVERY non-test source module under src/, collapses literal
+// string concatenation first, and judges the serialized body by its VALUE (not
+// by deep-equality against the duplicated pair), so a whitespace reformat or a
+// behaviour-identical DRY dedupe of the two `catalog-presented` bodies stays
+// green while a split URL or a parameterized step does not.
+function sourceModules() {
+  const files = []
+  const walk = (dir) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, ent.name)
+      if (ent.isDirectory()) walk(p)
+      else if (/\.jsx?$/.test(ent.name) && !/\.test\.jsx?$/.test(ent.name)) files.push(p)
+    }
+  }
+  walk(here)
+  assert.ok(files.length >= 3, `the src walk found ${files.length} non-test modules`)
+  return files.map((p) => ({ file: p, src: collapseStringConcat(stripBlockAndWholeLineComments(readFileSync(p, 'utf8'))) }))
+}
+
+// Collapse adjacent string-literal concatenation ('a' + "b" → 'ab') so a split
+// URL or a split step cannot evade a literal scan. Purely lexical: the guard is
+// about a literal appearing in shipped source.
+function collapseStringConcat(source) {
+  let out = source
+  let prev
+  do {
+    prev = out
+    out = out.replace(/(['"])([^'"\n]*)\1\s*\+\s*(['"])([^'"\n]*)\3/g,
+      (m, q1, a, q3, b) => q1 + a + b + q1)
+  } while (out !== prev)
+  return out
+}
+
+// Quote/whitespace-insensitive form for comparing a body VALUE.
+function normalizeBodyValue(v) {
+  return v.replace(/['"`\s]/g, '')
+}
+
 test('#3428/#2937: exactly the three known checkpoint call sites may exist, each with an allowlisted body', () => {
   // review cycle 7 (item 1-ii): the dist-level probe audits ONE serialized
   // literal, so a writer can be reinstated by moving the POST into a small
   // helper — the body becomes `{step:r}`, the exact probe never appears, and a
   // reviewer BUILT that mutation: 33/33 tripwire + 4/4 distBundle green with the
-  // click-writer fully reinstated. This is the SOURCE-side backstop: the URL
-  // lives at exactly three call sites — the two `catalog-presented` marks and
-  // the fork write — and each body is allowlisted, so a 4th site fails AND a
-  // helper cannot move the POST out of the asserted body.
-  const src = stripBlockAndWholeLineComments(mainJsx)
-  const sites = [...src.matchAll(/\/v1\/onboarding\/state\/checkpoint/g)]
+  // click-writer fully reinstated. This is the SOURCE-side backstop, hardened in
+  // review cycle 8 (items 3 + 4): cross-file, concatenation-collapsed, and
+  // VALUE-based. MUTATIONS that fail here: a 4th site; a split URL
+  // ('/v1/onboarding/' + 'state/checkpoint'); a step carried as a value
+  // (['harness','connected'].join('-') or a `{ step: param }` object); a writer in
+  // a sibling module; `JSON.stringify(checkpointBody(step))` (uninspectable).
+  const modules = sourceModules()
+  const sites = []
+  for (const mod of modules) {
+    for (const m of mod.src.matchAll(/\/v1\/onboarding\/state\/checkpoint/g)) {
+      sites.push({ file: mod.file, index: m.index, window: mod.src.slice(m.index, m.index + 400) })
+    }
+  }
   assert.equal(sites.length, 3,
-    'exactly THREE /v1/onboarding/state/checkpoint call sites may exist ' +
-    '(2 catalog-presented marks + the fork write) — a 4th means a checkpoint writer was re-introduced')
-  const bodies = sites.map((m) => {
-    const window = src.slice(m.index, m.index + 400)
-    const body = window.match(/body: JSON\.stringify\((\{[^}]*\}|body)\)/)
-    assert.ok(body, `the checkpoint call at offset ${m.index} must carry an allowlisted body`)
-    return body[1]
-  })
-  assert.deepEqual(bodies,
-    ["{ step: 'catalog-presented' }", 'body', "{ step: 'catalog-presented' }"],
-    'the checkpoint bodies are exactly the two catalog-presented marks and the fork `body` — ' +
-    'nothing may serialize a harness-connected step, and a parameterized helper changes this list')
+    `exactly THREE /v1/onboarding/state/checkpoint call sites may exist across src/ — found ` +
+    `${sites.length} (${[...new Set(sites.map((s) => s.file.replace(`${here}/`, '')))].join(', ') || 'none'}). ` +
+    // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
+    // even when the count was LOWER than three, describing the wrong failure.
+    (sites.length > 3
+      ? 'A 4th means a checkpoint writer was re-introduced'
+      : 'Fewer than three means a legitimate checkpoint site is missing (or the src walk lost a module)'))
+  for (const site of sites) {
+    const rel = site.file.replace(`${here}/`, '')
+    assert.doesNotMatch(site.window, /harness-connected/,
+      `${rel}:${site.index} serializes a harness-connected step — a client writer cannot (#3428/#2937)`)
+    const body = site.window.match(/body:\s*JSON\.stringify\(\s*(\{[^}]{0,160}\}|[A-Za-z_$][\w$]*)\s*\)/)
+    assert.ok(body,
+      `${rel}:${site.index} must carry an inspectable JSON.stringify body — a parameterized helper ` +
+      'cannot move the POST out of the asserted body')
+    let value = body[1]
+    if (!value.startsWith('{')) {
+      // A bare identifier: resolve it to its declaration ANYWHERE in src/ (so a
+      // DRY'd shared body constant stays green), preferring a declaration whose
+      // value is a step/fork body — an unrelated `const body = …` elsewhere in
+      // the tree must not satisfy the guard — and fail when none resolves to a
+      // literal.
+      const decls = modules.flatMap((mod) =>
+        [...mod.src.matchAll(new RegExp(`(?:const|let|var)\\s+${value}\\s*=\\s*([^\\n;]+)`, 'g'))])
+      const candidates = decls.map((d) => collapseStringConcat(d[1]))
+      value = candidates.find((v) => {
+        const n = normalizeBodyValue(v)
+        return n.includes('step:') || /fork/.test(n)
+      })
+      assert.ok(value,
+        `${rel}:${site.index} body identifier \`${body[1]}\` has no literal step/fork declaration — a ` +
+        'checkpoint body must be a literal or a DRY constant, never a parameter')
+    }
+    value = collapseStringConcat(value)
+    const norm = normalizeBodyValue(value)
+    const step = norm.match(/step:([^,}]+)/)
+    if (step) {
+      assert.equal(step[1], 'catalog-presented',
+        `${rel}:${site.index} serializes a step other than catalog-presented (${norm}) — ` +
+        'the click-writer is back (#3428/#2937)')
+    } else {
+      assert.match(norm, /fork/,
+        `${rel}:${site.index} checkpoint body is neither a catalog-presented step nor the fork write`)
+      assert.doesNotMatch(norm, /harness-connected/,
+        `${rel}:${site.index} checkpoint body serializes harness-connected`)
+    }
+  }
   // the fork site's `body` derivation, so re-pointing the variable at a
   // harness-connected step cannot hide behind the allowlisted `body` name
+  const src = sourceModules().map((m) => m.src).join('\n')
   assert.match(src, /const body = forkId === 'unsure' \? \{ fork_unsure_at: true \} : \{ fork: forkId \}/,
     'the fork checkpoint body is the fork write, never a harness-connected step')
+})
+
+test('#3428/#2937 (cycle 8 item 4, M4): completed_steps is never written client-side', () => {
+  // M4 is the deepest mutation: a local `setOnboarding(o => ({ ...o,
+  // completed_steps: [...o.completed_steps, 'harness-connected'] }))` in the
+  // connect handler forges the claim with NO request at all, so no amount of
+  // checkpoint-watching can catch it. The state contract is the observable:
+  // `completed_steps` is a SERVER-owned projection and the client never writes
+  // it. Two pins: (a) the ONLY `setOnboarding(...)` call is the projected
+  // server response, and (b) no object literal anywhere in src/ writes a
+  // `completed_steps` array. MUTATIONS that fail: M4 above; a second
+  // `setOnboarding(...)` whose argument is not `st.onboarding`.
+  const modules = sourceModules()
+  const src = modules.map((m) => m.src).join('\n')
+  const calls = src.match(/setOnboarding\(/g) || []
+  assert.equal(calls.length, 1,
+    'exactly ONE setOnboarding call site may exist — the single projected server assignment; ' +
+    'a second call is a client-side write to the server-owned projection')
+  assert.match(src, /setOnboarding\(st\.onboarding\)/,
+    'setOnboarding takes the server projection (`st.onboarding`) — nothing else may be written')
+  // review cycle 9 (code F1): the old shape required a literal `[` immediately
+  // after the colon, so the identical write built with `.concat()` —
+  // `completed_steps: (o.completed_steps || []).concat('harness-connected')` —
+  // evaded it (MUT-S4 shipped green). The property is the VALUE, never the
+  // array literal. The `(?:[{,]\s*)` prefix is what distinguishes an
+  // object-property write from a ternary's `? x : y` colon (the minified bundle
+  // is one line, so a read's `:[]` window reaches the later `harness-connected`
+  // with no separator). Still only a backstop: the executing test in
+  // onboardingContinueExec.test.js owns the behaviour.
+  assert.doesNotMatch(src, /(?:[{,]\s*)completed_steps\s*:\s*[^;\n]{0,300}?harness-connected/,
+    'completed_steps must never be written client-side with a harness-connected value ' +
+    '(array literal, `.concat()`, or any other expression)')
 })
 
 test('#3428: the done screen is gated on the SERVER-observed connection, not a click', () => {
@@ -608,9 +725,25 @@ test('#3428/#2937: the not-connected remedy is derived per role, leaf and cap st
   assert.match(block, /!isOwnerAdmin\n\s*\? 'ask an owner or admin for an API key'/,
     'a member is told the action they can actually take')
   assert.match(block, /const doneCanMintFresh = isOwnerAdmin && !capNotice && !wizardDurableCapped/,
-    'a fresh key may only be promised to a minting owner/admin below the cap')
-  assert.match(block, /the command is in Settings \u2192 Setup guide \(running it creates a fresh key\)/,
-    'the fresh-key clause exists, and only in the minting arm')
+    'the mint precondition is owner/admin and uncapped (Keys tab + wizard mint)')
+  // review cycle 9 (UX F1 + code F4): "(Resume setup)" renders ONLY under the
+  // Setup guide card's active branch — naming it unconditionally pointed at a
+  // control that is absent when the onboarding GET failed (the card then shows
+  // "Couldn't load setup status"). The clause is derived from the card's OWN
+  // predicate, and the mint clause may claim a FRESH key only when no key is
+  // already resolved (a minted/pasted key is reused on reopen, not re-minted).
+  assert.match(block,
+    /const guideCanResume\s*=\s*!!onboarding\s*&&\s*!onboardingLoading\s*&&\s*setupGuide\(onboarding\)\.status\s*===\s*'active'/,
+    "the Resume-setup clause is derived from the Setup guide card's own render predicate " +
+    '(projection present, not a loading transient, active branch) — never assumed')
+  assert.match(block,
+    /const doneReopenClause = guideCanResume\s*\?\s*'reopen it from Settings \u2192 Setup guide \(Resume setup\)'\s*:\s*'the steps are in Settings \u2192 Setup guide'/,
+    'the reopen clause names the button only when the card renders it, else names the surface')
+  assert.match(block,
+    /doneCanMintFresh\s*&&\s*!harnessKey\s*\?\s*`\$\{doneReopenClause\} \u2014 the connect step mints a fresh key`\s*:\s*doneReopenClause/,
+    'the fresh-key clause sits only on the no-key minting arm; every other arm names the same derived reopen clause')
+  assert.doesNotMatch(block, /the command is in Settings/,
+    'the Setup guide renders no command — the remedy must not send the user to one')
   // P2-10: ONE canonical surface name. "Settings \u2192 Setup Guide" must not return.
   assert.doesNotMatch(block, /Setup Guide/,
     'the canonical spelling is "Setup guide" everywhere')
@@ -880,8 +1013,42 @@ test('#3428/#2937: a superseded onboarding refresh is never applied', () => {
   const src = stripBlockAndWholeLineComments(mainJsx)
   assert.match(src, /const _seq = \+\+onboardingRefreshSeqRef\.current/,
     'each refresh takes a monotonic sequence number at call time')
-  assert.match(src, /const _superseded = _seq < onboardingRefreshSeqRef\.current/,
-    'a response older than the latest issued request is superseded')
+  // review cycle 8 item 2: the previous pin LOCATED the TDZ-forming declaration
+  // (`const _superseded = …` after the awaits) and counted the out-of-scope
+  // catch references, so it passed on broken code whose every error path threw
+  // ReferenceError. Scope is the thing to pin, and the only observable it has is
+  // ORDER: the declaration must sit at FUNCTION scope (before the `try`, so the
+  // early exit is not in its TDZ and the `catch` can see it) and must PRECEDE
+  // its first use. MUTATIONS that fail here: moving the declaration back inside
+  // the `try` (unbound in the catch), putting it after the awaits (TDZ at the
+  // early exit), or `const`-ing it (the later assignments throw).
+  const fnStart = src.indexOf('async function refreshOnboarding()')
+  assert.ok(fnStart > -1, 'refreshOnboarding exists')
+  const fnBody = src.slice(fnStart, src.indexOf('React.useEffect(() => { refreshOnboarding() }', fnStart))
+  // review cycle 9 (test F4): this pin false-redded in BOTH directions.
+  //   (a) `try` was located by exact indentation (`'\n    try {'`) — reindenting
+  //       the block 4→2 spaces REDed it ("the try block was located") while the
+  //       code was correct. Locate it by TOKEN.
+  //   (b) the exact-RHS assertion (`_superseded = _seq < onboardingRefreshSeqRef.current`)
+  //       REDed a behaviour-identical DRY dedupe that hoists the predicate into
+  //       `const isSuperseded = () => _seq < …` and assigns `_superseded =
+  //       isSuperseded()`. The RHS spelling is not the property, and the
+  //       executing test (refreshOnboardingExec.test.js) now owns the behaviour
+  //       (that a superseded result is never applied and is side-effect-free).
+  // What is left is what this pin can actually see: the flag is a
+  // function-scoped `let`, declared before the `try` and before any use.
+  const declMatch = fnBody.match(/\blet\s+_superseded\s*=\s*false\b/)
+  const decl = declMatch ? declMatch.index : -1
+  const tryIdx = fnBody.search(/(^|\n)\s*try\s*\{/)
+  // first occurrence of the identifier AFTER its own declaration token
+  const firstUse = declMatch ? fnBody.indexOf('_superseded', decl + declMatch[0].length) : -1
+  assert.ok(decl > -1, 'the flag is declared with `let` at function scope (never a try-scoped const)')
+  assert.ok(tryIdx > -1, 'the try block was located')
+  assert.ok(decl < tryIdx,
+    'the declaration must be OUTSIDE the try — declared inside it, the no-session exit is a TDZ ' +
+    'read and the catch references an unbound identifier (every error path throws ReferenceError)')
+  assert.ok(firstUse > decl,
+    'the declaration must PRECEDE its first use (the no-session exit)')
   assert.match(src, /orgIdRef\.current === _teamAtCall && !_superseded\) \{/,
     'a superseded response is not applied')
   assert.match(src, /return \{ applied, superseded: _superseded \}/,
@@ -897,8 +1064,16 @@ test('#3428/#2937: the not-connected body states only the observed fact and the 
   // item 6 — no graph fact the projection cannot establish.
   assert.doesNotMatch(src, /hasn't filed anything to this Organization's graph yet/,
     'the body must not assert a graph fact a captured session can falsify')
-  assert.match(src, /We haven't seen your agent's first write yet/,
+  assert.match(src, /We haven't seen your agent's first write through its Tortoise tools yet/,
     'it states the missing OBSERVATION instead')
+  // review cycle 8 item 6: the observation is about the AGENT-TOOLS write path.
+  // A captured session writes Session nodes + extracted points WITHOUT the
+  // harness-connected checkpoint, so for that user the server HAS seen writes and
+  // the Overview shows them — the unqualified "first write" named an event this
+  // screen does not test. The qualifier mirrors the build arm's "through its
+  // agent tools".
+  assert.doesNotMatch(src, /We haven't seen your agent's first write yet/,
+    'the unqualified observation returns for a user whose captured session already wrote points')
   // item 7 — the dynamically-inserted notice must be a live region, and the
   // body's promise must be keyed on the stall flag.
   // review cycle 7 (items 5 + 6): the notice is now MOUNTED unconditionally
@@ -915,6 +1090,54 @@ test('#3428/#2937: the not-connected body states only the observed fact and the 
     'the stall notice is a live region MOUNTED at step-3 entry, and the stall message is keyed on the flag inside it')
   assert.match(src, /wizardConnectPollStalled\n\s*\? "we'll show it as soon as we can check"/,
     'the live-update promise softens while stalled')
+})
+
+test('#3428/#2937 (cycle 8 item 9): the not-connected bodies pin their substantive clauses', () => {
+  // review cycle 8 item 9: the build body's disambiguation ("marks a project
+  // connected when a write arrives through its agent tools, not through the
+  // /v1/points REST call") and the self body's clauses were covered only by an
+  // e2e file that is NOT wired into CI, so nothing CI-running pinned the text
+  // that carries the claim. These are the substantive clauses — the ones whose
+  // removal would change the meaning, not the wording.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const i = src.indexOf('{wizardStep === 3 && (')
+  assert.ok(i > -1, 'the done step renders')
+  const end = src.indexOf('Go to dashboard', i)
+  assert.notEqual(end, -1,
+    'the done-step slice end marker (Go to dashboard) must exist — refusing a slice to EOF')
+  const done = src.slice(i, end)
+  const buildStart = done.indexOf("Your project's graph is set up")
+  assert.ok(buildStart > -1, 'the build not-connected body is located')
+  const buildBody = done.slice(buildStart, done.indexOf('</p>', buildStart))
+  assert.match(buildBody,
+    /marks a project connected when a write arrives through its agent tools, not\s+through the <code>\/v1\/points<\/code> REST call/,
+    'the build body names the observable that actually marks a project connected')
+  assert.match(done,
+    /We haven't seen your agent's first write through its Tortoise tools yet — so we can't\s+tell it's connected/,
+    'the self body states the missing observation, qualified to the agent-tools write path')
+  assert.match(done, /If you haven't finished the setup, \{doneSetupRemedy\}/,
+    'the self body offers the DERIVED remedy')
+  // review cycle 9 (UX F2): "file its first memory" presupposed NOTHING was
+  // filed — false for a captured-session user (Session nodes + extracted points
+  // already written) and for a keyed agent that wrote without the checkpoint.
+  // The clause names the action without the ordinal.
+  assert.match(done, /head back to \{doneHarnessName\} and ask it to file\s+a memory/,
+    'the self body names the real next action without presupposing an empty graph')
+  assert.doesNotMatch(done, /file\s+its first memory/,
+    'the trailing clause must not presuppose nothing has been filed')
+})
+
+test('#3428/#2937 (cycle 8 item 5): the stall flag is cleared when step 3 is LEFT, not only on re-entry', () => {
+  // The flag was reset only inside the poll effect's setup, which early-returns
+  // when `wizardStep !== 3` — so leaving step 3 after a stall kept it set and
+  // re-entering committed one paint frame with the live region already holding
+  // the message (not announced) and the body rendering the softened clause the
+  // poll was about to retract. MUTATION: dropping this effect (leaving only the
+  // in-effect reset) fails here.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src,
+    /React\.useEffect\(\(\) => \{\s*if \(wizardStep !== 3\) setWizardConnectPollStalled\(false\)\s*\}, \[wizardStep\]\)/,
+    'leaving step 3 clears the stall flag so re-entry cannot paint a withdrawn promise')
 })
 
 test('#2912: the build-fork blocks own their rhythm (no inline margins stacking on the gap)', () => {

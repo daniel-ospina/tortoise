@@ -45,10 +45,18 @@ function shippedBundle() {
 }
 
 // Every script the committed dist actually SERVES, as dist-relative names:
-//   (i)  every `.js` under `dist/assets/`, recursively — a code-split chunk is
-//        shipped by the entry's dynamic import and NEVER appears in index.html;
-//   (ii) every script `index.html` references, including ones outside /assets
-//        (public/vendor/*.js is copied to dist/vendor).
+//   (i)   EVERY `.js` under the WHOLE `dist/` tree, recursively — not just
+//         `dist/assets/**` (review cycle 8 item 3: a writer copied by `public/`
+//         to `dist/<anything>.js` was shipped and executed and never scanned);
+//   (ii)  the `index.html` INLINE script bodies — the document's own text, not
+//         only its `<script src>` refs (mutation M5b put the exact probe
+//         literal in an inline script with the whole guard set green);
+//   (iii) every script `index.html` references, including ones outside /assets
+//         (public/vendor/*.js is copied to dist/vendor);
+//   (iv)  the literal paths a shipped script reaches at runtime that appear in
+//         neither `index.html` nor a `.js` walk on its own: `import("…")` and
+//         `new Worker("…")` (mutations M6/M9 shipped a writer in a copied
+//         public/ file reached only through those).
 // A missing reference is a hard fail (a stale/half-committed bundle), never a
 // silently skipped file — that is the whole point of this guard.
 function shippedScripts() {
@@ -57,28 +65,44 @@ function shippedScripts() {
   const html = readFileSync(htmlPath, 'utf8')
   const out = []
   const seen = new Set()
-  const add = (name, path) => {
+  const add = (name, path, text) => {
     if (seen.has(name)) return
     seen.add(name)
-    assert.ok(existsSync(path),
-      `dist/${name} is referenced by the shipped bundle but is NOT committed — the bundle is stale`)
-    out.push({ name, path, js: readFileSync(path, 'utf8') })
+    if (text === undefined) {
+      assert.ok(existsSync(path),
+        `dist/${name} is referenced by the shipped bundle but is NOT committed — the bundle is stale`)
+      text = readFileSync(path, 'utf8')
+    }
+    out.push({ name, path, js: text })
   }
   const walk = (dir, rel) => {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? `${rel}/${ent.name}` : ent.name
       if (ent.isDirectory()) walk(join(dir, ent.name), r)
-      else if (ent.name.endsWith('.js')) add(`assets/${r}`, join(dir, ent.name))
+      else if (ent.name.endsWith('.js')) add(r, join(dir, ent.name))
     }
   }
-  const assetsDir = join(dist, 'assets')
-  assert.ok(existsSync(assetsDir), 'dist/assets must be committed (it is a tracked artifact)')
-  walk(assetsDir, '')
+  walk(dist, '')
+  assert.ok(seen.size >= 1, 'the dist walk must find at least the entry chunk')
+  let inline = 0
+  for (const m of html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+    add(`index.html#inline-${++inline}`, null, m[1])
+  }
   for (const m of html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)) {
     const ref = m[1]
     if (/^(?:https?:)?\/\//.test(ref) || ref.startsWith('data:')) continue
     const rel = ref.replace(/^\//, '')
     add(rel, join(dist, rel))
+  }
+  // (iv) runtime-reachable literal roots — including ones found in the scripts
+  // already added (index-based loop so a newly added script is scanned too).
+  for (let i = 0; i < out.length; i++) {
+    for (const m of out[i].js.matchAll(/(?:import\(|new Worker\()\s*["'`]([^"'`]+)["'`]/g)) {
+      const ref = m[1]
+      if (/^(?:https?:)?\/\//.test(ref) || ref.startsWith('data:') || ref.startsWith('blob:')) continue
+      const rel = ref.replace(/^\//, '')
+      add(rel, join(dist, rel))
+    }
   }
   return out
 }
@@ -136,14 +160,19 @@ test('#3428/#2937: the shipped bundle does not carry the deleted click-writer', 
   // the PR note: wiring it into `dashboard-e2e` is the real close). So audit what
   // is actually SERVED, EVERY script, not just the entry chunk.
   //
-  // The probe is the serialized checkpoint body the writer POSTed:
-  // `step:"harness-connected"`. It is absent (0) from every shipped script in the
-  // current bundle and PRESENT (1) in a bundle that reinstates the writer
-  // (rebuilt during review cycle 7); that two-outcome run is the recorded
-  // mutation proof that this assertion discriminates (a string that is in no
-  // script would be a vacuous pin).
+  // The probe is the serialized checkpoint body the writer POSTed. It is absent
+  // (0) from every shipped script in the current bundle and PRESENT in a bundle
+  // that reinstates the writer; that two-outcome run is the recorded mutation
+  // proof that this assertion discriminates (a string that is in no script would
+  // be a vacuous pin).
+  //
+  // Review cycle 8 item 3: the probe was the DOUBLE-QUOTED esbuild form only,
+  // so a writer in a COPIED `public/` file — never minified, free to use single
+  // quotes — evaded it even once the scan roots covered that file (mutation M6).
+  // Match any quote style; the value is what matters.
+  const PROBE = /step:\s*["'`]harness-connected["'`]/
   const scripts = shippedScripts()
-  const hits = scripts.filter((s) => s.js.includes('step:"harness-connected"'))
+  const hits = scripts.filter((s) => PROBE.test(s.js))
   assert.deepEqual(hits.map((s) => s.name), [],
     `${hits.map((s) => s.name).join(', ') || 'a shipped script'} carries the deleted click-writer's ` +
     'checkpoint body — the wizard could manufacture `harness-connected` from a click again (#3428/#2937). ' +
@@ -158,28 +187,116 @@ test('#3428/#2937: the shipped-script scan covers every asset chunk AND every in
   const names = new Set(scripts.map((s) => s.name))
   const { html, entryName } = shippedBundle()
   assert.ok(names.has(`assets/${entryName}`), 'the entry chunk must be scanned')
-  // (i) every `.js` under dist/assets, recursively (an independent walk)
+  // (i) every `.js` under the WHOLE dist tree (an independent walk)
   const onDisk = []
   const walk = (dir, rel) => {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
       const r = rel ? `${rel}/${ent.name}` : ent.name
       if (ent.isDirectory()) walk(join(dir, ent.name), r)
-      else if (ent.name.endsWith('.js')) onDisk.push(`assets/${r}`)
+      else if (ent.name.endsWith('.js')) onDisk.push(r)
     }
   }
-  walk(join(dist, 'assets'), '')
-  assert.ok(onDisk.length > 1, 'dist/assets ships more than the entry (supabase-session.js)')
+  walk(dist, '')
+  // review cycle 8 item 4: this used to be `onDisk.length > 1` (i.e. "the vendored
+  // supabase UMD is still here") and hard-failed with a GUARD-COVERAGE message
+  // when that fixture was legitimately removed. The coverage claim is the loop
+  // below — every on-disk script must be in the scan — so assert that instead of
+  // asserting the fixture.
+  assert.ok(onDisk.length >= 1, `the dist walk found ${onDisk.length} scripts`)
   for (const name of onDisk) {
-    assert.ok(names.has(name), `the scan must cover dist/${name} — a split chunk is still shipped`)
+    assert.ok(names.has(name), `the scan must cover dist/${name} — every shipped script is scanable`)
   }
   // (ii) every script index.html references, including ones outside /assets
   const refs = [...html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)]
     .map((m) => m[1])
     .filter((r) => !/^(?:https?:)?\/\//.test(r) && !r.startsWith('data:'))
     .map((r) => r.replace(/^\//, ''))
-  assert.ok(refs.some((r) => r.startsWith('vendor/')),
-    'a script outside /assets (the vendored supabase) is referenced — clause (ii) must be exercised')
+  assert.ok(refs.length > 0, 'dist/index.html must reference at least one local script')
   for (const ref of refs) {
     assert.ok(names.has(ref), `the scan must cover the index.html script ${ref}`)
   }
+  // review cycle 8 item 4: the old `refs.some(r => r.startsWith('vendor/'))`
+  // hard-failed when the vendored supabase UMD was legitimately removed, again
+  // with a coverage message for a fixture change. The ref loop above covers
+  // clause (ii) wherever the referenced script lives (including vendor/), so the
+  // vendor-specific assertion is gone rather than made advisory.
+  // (iii) the inline script bodies are scanned too (mutation M5b lived there)
+  let inline = 0
+  for (const m of html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+    inline += 1
+    assert.ok(names.has(`index.html#inline-${inline}`),
+      'each inline <script> body must be its own scanned root')
+    assert.ok(m[1].length > 0, 'the inline body is non-empty')
+  }
+})
+
+test('#3428/#2937 (cycle 8 item 1): the artifact is authoritative — three checkpoint sites across EVERY shipped script', () => {
+  // The source pin can be split ('/v1/onboarding/' + 'state/checkpoint') and a
+  // sibling/public module can move the URL out of main.jsx entirely (M3/M10/
+  // M6/M9). A *src* literal cannot be split past the bundler: esbuild folds an
+  // adjacent-literal concatenation, so the request the built bundle fires
+  // carries the literal path. That claim holds for src/ modules — it does NOT
+  // hold for a `public/`-copied file, which is never bundler-processed and is
+  // exactly the root the widening added (review cycle 9 code F2: mutation
+  // MUT-D split the path inside a copied public/ file and this probe stayed
+  // green). Count the literal across everything served and reject a site whose
+  // serialized body is not a literal `catalog-presented` step, so a
+  // parameterized step (`['harness','connected'].join('-')`) reds even when the
+  // count happens to match. The behaviour is owned by the executing test
+  // (onboardingContinueExec.test.js); this is the shipped-artifact backstop.
+  const scripts = shippedScripts()
+  const sites = []
+  for (const s of scripts) {
+    for (const m of s.js.matchAll(/\/v1\/onboarding\/state\/checkpoint/g)) {
+      sites.push({ name: s.name, index: m.index, js: s.js })
+    }
+  }
+  assert.equal(sites.length, 3,
+    `exactly THREE checkpoint call sites may exist across every shipped script — found ${sites.length} ` +
+    `(${[...new Set(sites.map((s) => s.name))].join(', ') || 'none'}). ` +
+    // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
+    // even when the count was LOWER than three, which describes the wrong failure.
+    (sites.length > 3
+      ? 'A 4th means a checkpoint writer was re-introduced (M3/M6/M9/M10 all shipped one and passed the old entry-only scan)'
+      : 'Fewer than three means a legitimate checkpoint site is missing from the shipped bundle — check the build'))
+  for (const site of sites) {
+    const window = site.js.slice(site.index, site.index + 400)
+    assert.doesNotMatch(window, /harness-connected/,
+      `dist/${site.name} checkpoint at ${site.index} sits next to a harness-connected literal — ` +
+      'a client writer cannot serialize that step (#3428/#2937)')
+    const body = window.match(/body:\s*JSON\.stringify\(\s*(\{[^}]{0,160}\}|[A-Za-z_$][\w$]*)\s*\)/)
+    assert.ok(body,
+      `dist/${site.name} checkpoint at ${site.index} must serialize an inspectable ` +
+      'JSON.stringify body (a wrapper that hides the body is itself the defect)')
+    const arg = body[1]
+    if (arg.startsWith('{')) {
+      const step = arg.match(/step:\s*([^,}]+)/)
+      if (step) {
+        assert.equal(step[1].trim().replace(/^["'`]|["'`]$/g, ''), 'catalog-presented',
+          `dist/${site.name} checkpoint at ${site.index} serializes a step that is not ` +
+          `catalog-presented (${step[1].trim()}) — the writer is back (#3428/#2937)`)
+      }
+    }
+  }
+})
+
+test('#3428/#2937 (cycle 8 item 2): no shipped script writes completed_steps client-side', () => {
+  // Mutation M4 forges the claim with NO request at all — `setOnboarding(o =>
+  // ({ ...o, completed_steps: [...o.completed_steps, 'harness-connected'] }))` —
+  // so no amount of checkpoint-watching can see it. The state contract is the
+  // only observable: `completed_steps` is a SERVER-owned projection and is never
+  // written by the client. The source pin (wizardConnectTripwire.test.js) reads
+  // it literally; this probe reads what is SERVED, so a writer hidden in a
+  // vendor/copied file is covered too.
+  // review cycle 9 (code F1): the old shape required a literal `[` immediately
+  // after the colon, so the identical `.concat()` write evaded it (MUT-S4).
+  // Drop the `\[` requirement and judge the VALUE. The `(?:[{,]\s*)` prefix
+  // keeps a ternary's `? x : y` colon from matching (the whole minified bundle
+  // is one line, so a read's `:[]` window reaches the later `harness-connected`).
+  const WRITE = /(?:[{,]\s*)completed_steps\s*:\s*[^;\n]{0,300}?harness-connected/
+  const hits = shippedScripts().filter((s) => WRITE.test(s.js))
+  assert.deepEqual(hits.map((s) => s.name), [],
+    `${hits.map((s) => s.name).join(', ') || 'a shipped script'} writes completed_steps with a ` +
+    'harness-connected value — the wizard could manufacture the connection claim with no request ' +
+    'at all (#3428/#2937). Rebuild dist/ and remove the client-side write if this fires')
 })

@@ -93,7 +93,7 @@ test('DE2E-2 copy sweep: new Overview/Settings copy says Organization, never wor
   // review cycle 5 (item 6): the not-connected body states only the MISSING
   // OBSERVATION (a captured session can already have written points to the
   // graph while `harness-connected` is absent), never the graph fact.
-  assert.ok(src.includes("We haven't seen your agent's first write yet"), 'wizard done copy (not-connected screen)')
+  assert.ok(src.includes("We haven't seen your agent's first write through its Tortoise tools yet"), 'wizard done copy (not-connected screen)')
   assert.ok(src.includes('Settings → Setup guide'), 'wizard done copy points at Settings')
   assert.ok(src.includes('Your Organization is live — connect your agent below'), 'overview graph-missing copy')
   // no workspace in the SettingsTab component or the populated-Overview

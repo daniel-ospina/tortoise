@@ -423,7 +423,7 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # #3428 (lane B3, review cycle 2 P0-1): scope to `div.done` — the wizard
     # progress crumbs render `<span class="wizard-step done">` per completed
     # step, so the bare `.done` selector is ambiguous (strict-mode violation).
-    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write yet", timeout=10_000)
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write through its Tortoise tools yet", timeout=10_000)
     # the done step's exit (wizardComplete) — scoped: the header carries its own
     # exit ("Open my dashboard →"). No longer a same-named twin — review cycle 1
     # (P2-6): the done button was renamed to "Go to dashboard".
@@ -522,7 +522,7 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     # `.done` body reverted to the deleted "Your agent is connected — it files
     # your decisions and findings…" claim.
     expect(page.locator(".welcome-title")).to_have_text("No connection observed yet", timeout=10_000)
-    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write yet")
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write through its Tortoise tools yet")
     assert "Your agent is connected" not in page.locator("div.done").inner_text(), \
         "#3428: the final screen rendered the connection claim with nothing connected"
     assert not any(c.get("step") == "harness-connected" for c in cap["checkpoint"]), \
@@ -905,7 +905,7 @@ def test_member_without_key_reaches_keyless_claude_connectors(
     # announcement, so a body-wide assertion cannot falsify a `.done`-body
     # regression. (cycle 6 item 2: the label is now "No connection observed yet".)
     expect(page.locator(".welcome-title")).to_have_text("No connection observed yet", timeout=10_000)
-    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write yet")
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write through its Tortoise tools yet")
     assert not any(c.get("step") == "harness-connected" for c in cap["checkpoint"]), \
         f"#2937/#3428: a key-less advance must NOT write the checkpoint: {cap['checkpoint']}"
     expect(page.locator(".wizard-actions").get_by_role(
@@ -1262,7 +1262,7 @@ def test_unsure_fork_done_step_names_no_harness(page: Page) -> None:
     text = page.locator("div.done").inner_text()
     # review cycle 6 (item 9): assert the REDIRECT clause, not the substring
     # "your agent" — the static body already contains "your agent's first write
-    # yet", so the old assertion could not fail. MUTATION: if `doneHarnessName`
+    # through its Tortoise tools yet", so the old assertion could not fail. MUTATION: if `doneHarnessName`
     # leaked a real harness on the no-picker fork (e.g. 'Cursor'), this clause
     # disappears while the adjacent 'Claude' check would still pass.
     assert "head back to your agent" in text, \
