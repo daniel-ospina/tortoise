@@ -181,11 +181,14 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
       probe is fired only after the fake signals ENTRY (a shared event, not a
       fixed sleep, asserted at the point it matters — so a run whose probe
       would precede the stall fails instead of proving nothing), and the
-      answer is read against the fake's EXIT event. No ordering between the
-      two ``perf_counter`` readings — sampled in different threads — is
-      required (#3581); the probe must still complete inside the stall, whose
-      ``STALL_S`` budget is orders of magnitude above the in-memory /health
-      path, and a probe that merely queues behind a blocking capture fails.
+      answer is read against the fake's EXIT event. This signal needs no
+      cross-thread clock ordering (#3581) — unlike the tick filters above,
+      which compare the worker's ``state`` timestamps with loop-sampled ticks
+      and are sound because ``time.perf_counter()`` is a process-wide
+      monotonic clock read only after the worker completed. The probe must
+      still complete inside the stall, whose ``STALL_S`` budget is orders of
+      magnitude above the in-memory /health path; a probe that merely queues
+      behind a blocking capture fails.
 
     Mutation check (must stay true): calling the extraction inline
     (`return fn(*args, **kwargs)` instead of dispatching to the pool) makes the
@@ -250,8 +253,15 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             # pass vacuously on the exit-event read (#3581 review) — the
             # unconditional run-validity guard the old ordering assert carried.
             assert entered_evt.is_set(), (
-                "the capture never reached the extraction within 30s — the "
-                "stall window never opened, so this run proves nothing (#3060)")
+                "the capture never reached the extraction within the 30s wait "
+                "(600 x 0.05s) — the stall window never opened, so this run "
+                "proves nothing (#3060)"
+                + (
+                    " — the capture finished without entering the extraction: "
+                    f"{capture.exception() or capture.result()!r}"
+                    if capture.done()
+                    else " — the capture is still pending after 30s"
+                ))
             health = await ac.get("/health")
             # The invariant, read the moment the response is in hand: the stall
             # must still be OPEN. No clocks compared.
@@ -293,8 +303,10 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             f"at all for EVERY request (#3060)")
 
     assert health_served_in_stall, (
-        "no /health response was served while the capture was stalled — the "
-        "API was mute for the whole stall (#3060)")
+        f"the /health request did not return inside the {STALL_S:.1f}s stall "
+        f"even though the event loop kept ticking ({len(in_stall)} ticks) — "
+        "the liveness handler's own request path is blocking or queued behind "
+        "the capture, not the event loop (#3060)")
 
     assert cap.status_code == 200, cap.text
 
