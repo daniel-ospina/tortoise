@@ -18,12 +18,15 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions  # noqa: I001
+from tortoise.auth import API_KEY_PREFIXES
+from tortoise.oauth import ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # #984 contract (merged to main): the hosted endpoint always carries the
@@ -224,3 +227,139 @@ class TestPrintHarnessInstructions:
                     end = i
                     break
             json.loads("\n".join(lines[start : end + 1]))
+
+
+class TestCommittedRepoMcpJson:
+    """#3601 regression: the COMMITTED root `.mcp.json` must reach the hosted
+    endpoint with an env-indirect key.
+
+    The classes above pin the EMITTED onboarding configs (`_harness_mcp_config`
+    / `init`); this pins the file the repo actually ships. It previously
+    declared `http://localhost:8000/mcp` with `"headers": {}`, so every agent
+    whose local daemon was not running got an opaque `fetch failed` -- and the
+    entry could not authenticate even when the daemon WAS up under the
+    documented `tortoise serve --http --auth tenant`.
+
+    Covers all five fields of the entry: `url`, `type`, `headers`, the absence
+    of a stdio `env`/`command`/`args`, and no literal token anywhere in the
+    file. Reads the file on disk (the committed blob in any clean checkout /
+    CI). A machine-local uncommitted edit to `.mcp.json` is deliberately NOT
+    covered -- that is exactly what the entry's `_comment` tells a self-hoster
+    to make.
+    """
+
+    COMMITTED = REPO_ROOT / ".mcp.json"
+
+    def _tortoise(self) -> dict:
+        assert self.COMMITTED.is_file(), f"committed {self.COMMITTED} is missing"
+        cfg = json.loads(self.COMMITTED.read_text(encoding="utf-8"))
+        servers = cfg.get("mcpServers")
+        assert isinstance(servers, dict), (
+            f"committed .mcp.json has no mcpServers object (got {type(servers).__name__})"
+        )
+        server = servers.get("tortoise")
+        assert isinstance(server, dict), (
+            f"committed .mcp.json has no 'tortoise' entry (have {sorted(servers)}); "
+            f"the entry is how an agent reaches the graph at all (#3601)"
+        )
+        return server
+
+    def test_tortoise_entry_targets_hosted_endpoint(self):
+        url = self._tortoise().get("url")
+        assert url == ENDPOINT, (
+            f"committed .mcp.json must target the hosted endpoint {ENDPOINT}; "
+            f"a local-daemon url breaks every agent without a running daemon "
+            f"(#3601) -- got {url!r}"
+        )
+
+    def test_tortoise_entry_keeps_http_type(self):
+        # This root file also serves Claude Code, which SKIPS a url entry with
+        # no `type` (see module docstring); pi ignores `type` and picks the
+        # transport from url-vs-command. Pinned because the sibling doc
+        # docs/quickstart-cloud.md:47 names a DIFFERENT value (streamable-http)
+        # for the same object -- drifting this field silently disables the
+        # server for Claude Code with no other test failing.
+        assert self._tortoise().get("type") == "http", (
+            f"committed .mcp.json tortoise entry must keep type='http' -- got "
+            f"{self._tortoise().get('type')!r}"
+        )
+
+    def test_tortoise_header_is_env_indirect(self):
+        headers = self._tortoise().get("headers")
+        # Diagnosable failure on every malformed shape, not just the empty one
+        # (#3601 was `"headers": {}`): a bare AttributeError tells a maintainer
+        # nothing about what drifted.
+        assert headers is None or isinstance(headers, dict), (
+            f"committed .mcp.json tortoise headers must be an object -- got "
+            f"{type(headers).__name__}"
+        )
+        auth = (headers or {}).get("Authorization")
+        assert auth, (
+            f"committed .mcp.json must carry an Authorization header -- an "
+            f"empty/absent headers block cannot authenticate even when the "
+            f"daemon is up (#3601); got headers={headers!r}"
+        )
+        assert isinstance(auth, str), (
+            f"committed .mcp.json Authorization must be a string -- got "
+            f"{type(auth).__name__}"
+        )
+        # Exact value, not a substring: a lookalike env var
+        # (`${TORTOISE_API_KEY_ALT}`) is unset in practice and expands to
+        # `Bearer ` -- a silent 401 that a substring check would pass. Matches
+        # what the emitted-config classes pin for the same header.
+        assert auth == "Bearer ${TORTOISE_API_KEY}", (
+            f"committed .mcp.json Authorization must be exactly "
+            f"'Bearer ${{TORTOISE_API_KEY}}' (env-indirect, no literal key) -- "
+            f"got {auth!r}"
+        )
+
+    def test_tortoise_entry_is_http_only(self):
+        # The entry must stay an HTTP entry. `_comment` and
+        # docs/infra-runbook.md section 4.5 both state that the committed entry
+        # carries no `env` (the DB target is resolved server-side by the hosted
+        # API), and the stdio command+args pattern was replaced in feat/338 --
+        # so re-adding any of these drifts the docs silently.
+        entry = self._tortoise()
+        for key in ("env", "command", "args"):
+            assert key not in entry, (
+                f"committed .mcp.json tortoise entry must not define {key!r} "
+                f"(it is an HTTP entry -- see its _comment); got {entry[key]!r}"
+            )
+
+    def test_no_literal_api_key_in_committed_config(self):
+        # This file ships to users -- a literal token leaks a credential.
+        text = self.COMMITTED.read_text(encoding="utf-8")
+        # (a) Prefix scan over the whole file: a token pasted into a `_comment`
+        # is the same leak. The prefixes are the MCP-bearer-accepted minting
+        # sources (tortoise/mcp_auth.py accepts API_KEY_PREFIXES or `oat_`), so
+        # a family minted there is covered without editing this test. Families
+        # that are not bearer-reachable (the client id/secret `ct_`/`cs_` minted
+        # inline in tortoise/oauth.py) are deliberately not listed.
+        #
+        # Anchored to a token START -- which is how every consumer checks these
+        # prefixes (str.startswith, never a substring search) -- so ordinary
+        # prose cannot red the guard: "support_ticket" and "float_value"
+        # contain "ort_"/"oat_" mid-word and are not tokens.
+        prefixes = "|".join(
+            re.escape(p)
+            for p in (*API_KEY_PREFIXES, ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX)
+        )
+        leak = re.search(rf"(?<![A-Za-z0-9_])(?:{prefixes})", text)
+        assert leak is None, (
+            f"literal key material in committed .mcp.json (found "
+            f"{leak.group(0)!r}) -- keys must stay env-indirect"
+        )
+        # (b) Structural backstop over the PARSED HEADER VALUES, not the raw
+        # text: the Authorization header is where a credential would actually
+        # be presented, and prose in a `_comment` that merely says "Bearer "
+        # must not trip the guard. Catches any token family, including one this
+        # test has never heard of.
+        headers = self._tortoise().get("headers")
+        if isinstance(headers, dict):
+            for name, value in headers.items():
+                if isinstance(value, str) and "Bearer " in value:
+                    assert value.count("Bearer ") == value.count("Bearer ${"), (
+                        f"committed .mcp.json header {name!r} carries a literal "
+                        f"Bearer token -- every `Bearer ` in a user-shipped "
+                        f"config must be followed by a ${{VAR}} expression"
+                    )
