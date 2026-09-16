@@ -303,14 +303,18 @@ SESSION_TRANSCRIPT_KIND = "session-transcript"
 #: (``tools/longmem_eval/ingest.py`` / ``ingest_v2.py``), never by a
 #: product writer. The literal is a product constant here so the READ side
 #: (``session_reinjection``'s default fetch kind, :func:`_is_turn_point`)
-#: has one home. Both ``SESSION_TRANSCRIPT_KIND`` and this constant are
-#: mirrored by writers that hardcode the literal (``sdk``'s capture turn
-#: loop, the hosted turn loop, the hosted demo seed, and the two eval
-#: ingest legs); only ``SESSION_TRANSCRIPT_KIND`` has a writer-parity test
-#: pinning that mirror (``tests/test_session_reinjection_rules.py::
-#: test_chunk_kind_is_single_sourced_across_all_four_consumers``). There is
-#: no equivalent parity pin for the turn kind, so a writer that changed its
-#: literal would empty the fetch while this constant stayed "correct".
+#: has one home. The TURN literal is the one that is HARDCODED: ``sdk``'s
+#: capture turn loop, the hosted turn loop, the hosted demo seed, and both
+#: eval ingest legs all write ``"event"`` literally, so this constant is a
+#: read-side home, not a single source. ``SESSION_TRANSCRIPT_KIND`` is
+#: imported by the two eval ingest legs and has a derivation pin
+#: (``tests/test_session_reinjection_rules.py::
+#: test_chunk_kind_is_single_sourced_across_all_four_consumers``) — that pin
+#: covers ``is_raw_chunk`` / ``CHUNK_KIND_FILTER`` / ``D5_POINTKIND_FILTER``
+#: and a re-export equality, so it would not catch a hardcoded chunk literal
+#: either. There is no writer-parity pin for the turn kind: a writer that
+#: changed its literal would empty the fetch while this constant stayed
+#: "correct".
 #:
 #: ``pointKind``'s vocabulary is OPEN (``create_point`` accepts any
 #: registered kind), so this constant alone never proves a node is a

@@ -229,8 +229,12 @@ def test_total_cap_binds_at_the_shipped_defaults():
                                    pool_ids=[])
     assert out["total"] == DEFAULT_REINJECTION_TOTAL_ITEMS
     assert out["total_cap_hit"] is True
-    # 20 candidates - 10 admitted = 10 dropped (3 by the per-session cap on
-    # the first session, 7 by the total cap)
+    # 20 candidates - 10 admitted = 10 dropped: 3 by the per-session cap
+    # (one each on sessions s0/s1/s2) and 7 by the total cap (s3i1..i3,
+    # s4i0..i3). The fake returns rows already in the query's ORDER BY
+    # order, so this test pins the budget LOOP; the ordering itself is
+    # pinned by the ``ORDER BY`` assertion in
+    # test_fetch_is_one_query_with_the_filter_in_the_query.
     assert out["dropped_by_cap"] == 10
     assert sum(len(v) for v in out["by_session"].values()) == 10
 

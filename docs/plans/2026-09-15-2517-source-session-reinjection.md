@@ -299,15 +299,20 @@ is the point of the gate.
 
 ### 2.1 Metrics — what each mechanism can and cannot move
 
+> ⚠️ **Written for the pre-retarget CHUNK grain.** The shipped default is the
+> product's TURN grain (§2 as built), at which `dedup_pool` does not re-cap turns
+> and injected turns are NOT raw chunks — so the three rows marked ⌁ below read
+> differently at the shipped grain.
+
 | Metric | Effect | Why |
 |---|---|---|
 | official `recall_all@5` | **↑ or flat** | only the guard can admit a pool-present starved session into `hits[:5]`; the guard runs only when injection produced new ids, so a delta is attributable to the arm. Flat = legitimate null. |
-| `chunk_evidence_recall@5` | **↑ where reachable** | injected marked chunks enter the pool's top-k. **Reach-bounded:** a session already at the C5 ceiling (3 base chunks in the pool) drops injected chunks at the re-cap. |
-| `reader_surface@k` | **↑ or flat; may regress at the item/token cap** | injected chunks enter the **full** reader context; a marked tail item can be evicted at the 40-item cap. |
-| `reader_evidence@5` | **bounded / indirect** | its numerator **excludes raw chunks** (`retrieve.py:1802-1803`), so injected chunks cannot raise it; only the guard's reorder can move it, and the guard can also lower it. |
+| `chunk_evidence_recall@5` | **↑ where reachable** | injected marked chunks enter the pool's top-k. **Reach-bounded:** a session already at the C5 ceiling (3 base chunks in the pool) drops injected chunks at the re-cap. ⌁ At the shipped turn grain this metric is a raw-chunk surface and the injected material is turns, so it is NOT the arm's own surface (and is `null` under `--retrieval-only --mock`). |
+| `reader_surface@k` | **↑ or flat; may regress at the item/token cap** | injected items enter the **full** reader context; a marked tail item can be evicted at the 40-item cap. ⌁ Measured at the shipped grain, this did NOT rise: 1.0 → 0.975 → 0.95 pooled (receipt falsifier 2). |
+| `reader_evidence@5` | **bounded / indirect** | its numerator **excludes raw chunks** (`retrieve.py:1802-1803`), so injected chunks cannot raise it; only the guard's reorder can move it, and the guard can also lower it. ⌁ At the shipped turn grain the injected items are turns, which the numerator does NOT exclude — so injected turns CAN raise it. |
 | `evidence_recall@5` | **guardrail — may regress structurally** | the guard caps a session at 2 inside the window, so a top-5 holding ≥3 marked points from one session loses marked points **by construction**. Reported; a regression with no `recall_all@5` gain falsifies. |
-| `context_tokens` (head cohort) | **no regression** | injected items are bounded by the C5 + item caps. |
-| retrieval latency | **+1 batched query per FIRED question** | the fetch is one batched Cypher per question that fires (0 when it does not), not one per seed. Reported per arm (P50/P95) with the injected-query count (expected 1 when fired, 0 otherwise). |
+| `context_tokens` (head cohort) | **no regression** | injected items are bounded by the total budget + item caps (at the turn grain the C5 re-cap does not apply). |
+| retrieval latency | **+1 batched query per FIRED question** | the fetch is one batched Cypher per question that fires (0 when it does not), not one per seed. Reported per arm; at turn grain the ISOLATED C4 block cost is 6.4–9.0 ms mean, worst question 26.0 ms (receipt falsifier 3 — process-level latency was load-dominated and is not a cost proxy). |
 
 **Known reach boundaries (readable, not hidden):** (a) a seeded session contributing
 **no new ids** skips the guard entirely (its material is already pool-present);
