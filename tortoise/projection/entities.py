@@ -268,6 +268,88 @@ class _EntityHandlers:
         if p.get("operator"):
             self._create_edges(p)
 
+    # #3664: the `EntityLinked` record's validated vocabulary. The record is
+    # replayed from a journal FILE, so its label / relationship-type strings
+    # must never be interpolated into Cypher unvalidated. Mirrors
+    # ``session_link.ENTITY_LINKED_*`` (kept local so the projection stays
+    # self-contained and import-free).
+    _ENTITY_LINKED_RELS: frozenset = frozenset({
+        "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
+        "aboutDocument",
+    })
+    _ENTITY_LINKED_LABELS: frozenset = frozenset({
+        "Session", "Point", "Document", "Event", "Object", "Subject",
+    })
+
+    def _fold_entity_linked(self, ev: dict) -> int:
+        """#3664: fold an ``EntityLinked`` record into its live edge.
+
+        The capture entity-linking pass (``session_link.link_entity``) writes
+        ``(Session)-[:aboutObject]->(Object)`` / ``(Point)-[:aboutObject]->
+        (Object)`` edges LIVE and journals the flat logical identities. This
+        fold is the replay consumer: an idempotent MERGE keyed on the two
+        logical ids, so a JSONL wipe+rebuild reproduces the attachment
+        (live == rebuild). Returns 1 when the edge exists after the fold, 0
+        when the record is malformed or an endpoint is absent (honest — the
+        target was not re-created by any journaled event).
+        """
+        if not isinstance(ev, dict):
+            return 0
+        rel = ev.get("edge_type", "aboutObject")
+        if rel not in self._ENTITY_LINKED_RELS:
+            return 0
+        src_label = ev.get("source_label")
+        if src_label not in self._ENTITY_LINKED_LABELS:
+            return 0
+        tgt_label = ev.get("target_label", "Object")
+        if tgt_label not in self._ENTITY_LINKED_LABELS:
+            return 0
+        sid = ev.get("source_id") or ev.get("id")
+        tid = ev.get("target_id")
+        if not isinstance(sid, str) or not isinstance(tid, str):
+            return 0
+        r = self.g.query(
+            f"MATCH (s:{src_label} {{id:$sid}}), (t:{tgt_label} {{id:$tid}}) "
+            f"MERGE (s)-[:{rel}]->(t) RETURN count(s)",
+            params={"sid": sid, "tid": tid},
+        )
+        return int(r.result_set[0][0]) if r.result_set else 0
+
+    def _fold_session_recorded(self, ev: dict) -> int:
+        """#3664: fold a ``SessionRecorded`` record into the :Session node.
+
+        The capture path MERGEs the Session with a raw graph write; this
+        record is its journal carrier, so the node (and any ``EntityLinked``
+        edge from it) replays. Idempotent MERGE keyed on ``id``; ``created_at``
+        and ``actor_user_id`` are coalesce-preserved (first writer wins,
+        mirroring the live merge), ``turn_count`` tracks the latest journaled
+        capture. Returns 1 when the node exists after the fold, 0 on a
+        malformed record.
+        """
+        if not isinstance(ev, dict):
+            return 0
+        sid = ev.get("id")
+        if not isinstance(sid, str) or not sid:
+            return 0
+        sets = ["s.created_at=coalesce(s.created_at, $created_at)"]
+        params: dict = {"sid": sid, "created_at": ev.get("created_at")}
+        if ev.get("turn_count") is not None:
+            sets.append("s.turn_count=$turn_count")
+            params["turn_count"] = ev["turn_count"]
+        sets.append("s.is_episodic=true")
+        if ev.get("harness") is not None:
+            sets.append("s.harness=$harness")
+            params["harness"] = ev["harness"]
+        if ev.get("actor_user_id") is not None:
+            sets.append("s.actor_user_id=coalesce(s.actor_user_id, $uid)")
+            params["uid"] = ev["actor_user_id"]
+        r = self.g.query(
+            f"MERGE (s:Session {{id:$sid}}) SET {', '.join(sets)} "
+            "RETURN count(s)",
+            params=params,
+        )
+        return int(r.result_set[0][0]) if r.result_set else 0
+
     def _upsert(self, p: dict) -> None:
         """Upsert a Point: node properties via _upsert_point_props, then edges."""
         self._upsert_point_props(p)
