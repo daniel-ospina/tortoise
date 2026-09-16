@@ -45,6 +45,7 @@ surfaces:
   - test_billing.py
   - test_body_cap_sweep.py
   - test_bridge_mcp.py
+  - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
   - test_user_identity_inventory.py
