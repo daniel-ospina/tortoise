@@ -228,10 +228,9 @@ async function run(fnText, env) {
 // own delay, so a debounce of ANY length is covered. No deadline is silently
 // truncated: an earlier version threw past a 1000 ms budget, which false-redded a
 // legitimate long request timeout (a guard that false-reds is as unusable as one
-// that cannot red). `setInterval` callbacks run at most ONCE per drain — the
-// property under test is whether a deferred write can land AT ALL, not
-// steady-state interval cadence. MAX_DRAIN_CALLBACKS bounds a self-rescheduling
-// callback loudly instead of hanging. `setInterval` callbacks run up to
+// that cannot red). Borrowed timers are run to a BOUNDED look-ahead, never
+// claimed as complete coverage: MAX_DRAIN_CALLBACKS bounds a self-rescheduling
+// callback loudly instead of hanging, and `setInterval` callbacks run up to
 // INTERVAL_LOOKAHEAD_TICKS times, so a forge keyed to an early tick is still
 // observed — the claim is a BOUNDED look-ahead, never "any tick".
 const MAX_DRAIN_CALLBACKS = 10_000
@@ -275,7 +274,7 @@ function installVirtualTimers() {
   // `typeof requestAnimationFrame === 'function'` would be silently skipped and
   // the harness would not observe it. Provide the browser's surface so the
   // deferral is drained like any other.
-  globalThis.requestAnimationFrame = (cb) => schedule(cb, 16, [now], 'timeout')
+  globalThis.requestAnimationFrame = (cb) => schedule(cb, 16, [], 'raf')
   globalThis.clearTimeout = clear
   globalThis.clearInterval = clear
   globalThis.cancelAnimationFrame = clear
@@ -322,7 +321,10 @@ function installVirtualTimers() {
             'self-rescheduling callback is not bounded')
         }
         now = Math.max(now, firedAt)
-        t.cb(...t.args)
+        // rAF receives the FRAME timestamp at INVOCATION (a browser passes a
+        // positive DOMHighResTimeStamp), never the schedule-time value.
+        if (t.kind === 'raf') t.cb(now)
+        else t.cb(...t.args)
       }
     },
   }
