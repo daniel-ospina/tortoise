@@ -1021,9 +1021,12 @@ class TestProbeSetupBudgetIntegration:
     This class also PINS the deliberate divergence the fix creates on a
     reachable-but-slow graph: `/health` (tight shared budget) says degraded for
     the #1384 fast-degrade contract, while the on-demand `tortoise_health`
-    tool says ok. That is the intended new contract, not an accident — the
-    issue's "health and /health agree" indicator is satisfied on the *verdict
-    about the graph* (reachable, real graph_size), not on the latency policy.
+    tool says ok. That is the intended new contract, not an accident. NOTE it
+    does NOT satisfy #3143's Indicator 2 ("`tortoise_health` and `/health`
+    agree on the same instance within one probe cycle") — the two surfaces
+    deliberately DIVERGE here, and that indicator is descoped to #3243. What
+    this pins is narrower: the tool's verdict about the graph (reachable, with
+    its real graph_size) is no longer a false degraded/0.
     """
 
     def test_real_projection_slow_cold_start_ok_with_real_graph_size(

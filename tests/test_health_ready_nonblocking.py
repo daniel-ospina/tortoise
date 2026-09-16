@@ -364,16 +364,23 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     import tortoise.supabase_control as sc
     from tortoise.monitoring import PROBE_DB_TOTAL_TIMEOUT, PROBE_TIMEOUT
 
-    # Data plane: ``probe_db`` retries one TRANSIENT connect failure, so its
-    # real ceiling is PROBE_DB_TOTAL_TIMEOUT (2 x PROBE_TIMEOUT + the retry
-    # delay), NOT the bare PROBE_TIMEOUT. Bounding against the per-attempt
-    # figure looked correct (2.0 > 1.5) while actually sitting BELOW the true
-    # 3.1s inner bound — the exact inversion this test exists to prevent.
+    # Data plane: since #3143 probe_db's PLATFORM shape (no explicit
+    # allowance) has ONE caller deadline of PROBE_TIMEOUT — the #1565 retry
+    # rides the REMAINDER instead of taking a second bound — so its real total
+    # is ~PROBE_TIMEOUT. PROBE_DB_TOTAL_TIMEOUT (2 x PROBE_TIMEOUT + the retry
+    # delay) is now deliberately a LOOSE OVER-ESTIMATE kept as the
+    # outer-alignment figure a coordinator is sized ABOVE, NOT the exact inner
+    # total. The assertion still targets that loose figure on purpose: it is
+    # the STRICTER check (the readiness bound must clear the over-estimate
+    # too), so it cannot pass while the real ~1.5s total is unguarded. Bounding
+    # against the bare per-attempt figure instead is what produced the
+    # historical inversion (2.0 > 1.5 while the then-real total was ~3.1s,
+    # before #3143 made the retry ride the remainder).
     assert mod._READY_PROBE._timeout > PROBE_DB_TOTAL_TIMEOUT, (
         f"the FalkorDB readiness bound ({mod._READY_PROBE._timeout}s) must exceed "
-        f"probe_db's TOTAL bound ({PROBE_DB_TOTAL_TIMEOUT}s = 2 x {PROBE_TIMEOUT}s "
-        "+ the retry delay) or the outer bound wins the race and strands a worker "
-        "thread per timeout (#2988)"
+        f"probe_db's loose outer-alignment bound ({PROBE_DB_TOTAL_TIMEOUT}s = 2 x "
+        f"{PROBE_TIMEOUT}s + the retry delay) or the outer bound wins the race and "
+        "strands a worker thread per timeout (#2988)"
     )
 
     # Control plane: the probe request carries its OWN composed per-request

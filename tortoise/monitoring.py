@@ -189,8 +189,11 @@ PROBE_STALE_AFTER = 30.0
 # bounded by the redis READ timeout (10s default, clampable to 60s) with
 # redis-py's default 10 retries (a reviewer measured ~26.8s for one such
 # query). The LAYERED TIMEOUT — keep a coordinator's ``timeout`` ABOVE the
-# probe function's own statically-known TOTAL bound (see
-# ``PROBE_DB_TOTAL_TIMEOUT``) — is therefore a BEST-EFFORT ALIGNMENT that
+# probe function's own statically-known total for THAT caller's shape (the
+# platform liveness shape's real total is ~``PROBE_TIMEOUT``; the #3143
+# explicit-allowance shape's is ``setup_timeout + PROBE_TIMEOUT``;
+# ``PROBE_DB_TOTAL_TIMEOUT`` is only a loose OVER-ESTIMATE of the former, see
+# its definition) — is therefore a BEST-EFFORT ALIGNMENT that
 # reduces how often a worker is stranded. It is NOT, and cannot be, a
 # guarantee. Do not add another constant or another margin trying to make it
 # one. Abandoning a probe does not stop its thread (CPython #87185).
@@ -213,9 +216,16 @@ PROBE_RETRY_DELAY = 0.1
 
 #: Prefix of ``_probe_once``'s synthesized SETUP-phase timeout. ``probe_db``
 #: matches it to tell a retry that never reached the reachability query (its
-#: remaining slice of the deadline could not redo the cold-start) from a
-#: genuine verdict: the former carries no verdict about the DB, so it must not
-#: replace the FIRST attempt's real error (#3143 review).
+#: remaining slice of the deadline could not redo the cold-start) from one
+#: that reached (and failed at) the query: only the latter's error may replace
+#: the FIRST attempt's real error (#3143 review).
+#:
+#: ⚠️ This is a distinct error STRING, NOT a distinct status. A setup timeout
+#: still returns ``ok=False`` from ``probe_db``, and ``metrics()`` maps
+#: ``db["ok"] is False`` to ``status="degraded"`` + ``graph_size=0`` — #3143's
+#: symptom SHAPE, with only the ``error`` text changed. Do not read the
+#: separate spelling as "no verdict reported": to a caller the report is
+#: indistinguishable from a real unreachability except for that string.
 _PROBE_SETUP_TIMEOUT_MSG = "probe setup timeout after "
 
 #: A LOOSE outer-alignment bound for :func:`probe_db`'s PLATFORM liveness
@@ -275,13 +285,17 @@ PROBE_SDK_ACQUISITION_BUDGET = 2.0
 PROBE_DB_BOUND_MARGIN_S = 0.5
 
 #: The ``HealthProbe`` constructor DEFAULT — a safety net for any future
-#: ``HealthProbe(fn)`` that omits ``timeout``. It is DERIVED from the DB
-#: probes' statically-known inner total: ``PROBE_DB_TOTAL_TIMEOUT`` PLUS the
-#: acquisition budget PLUS a strict-above margin — NOT the bare
-#: ``PROBE_TIMEOUT`` (1.5s). The pre-#2988 literal was 2.0s: it LOOKED safely
-#: above a "1.5s" inner bound while actually sitting below the 3.1s total,
-#: so any ``HealthProbe(lambda: _probe_db())`` built without an explicit
-#: timeout was stranded a worker thread on every timeout (CPython #87185 —
+#: ``HealthProbe(fn)`` that omits ``timeout``. It is DERIVED from
+#: ``PROBE_DB_TOTAL_TIMEOUT`` — the loose outer-alignment figure for the
+#: PLATFORM liveness shape, deliberately an OVER-ESTIMATE of that shape's real
+#: ~``PROBE_TIMEOUT`` total (see its definition), NOT the probes' exact inner
+#: total — PLUS the acquisition budget PLUS a strict-above margin, and NOT the
+#: bare ``PROBE_TIMEOUT`` (1.5s). The pre-#2988 literal was 2.0s: it LOOKED
+#: safely above a "1.5s" inner bound while actually sitting below the
+#: THEN-REAL ~3.1s total (the #1565 retry still took a second ``PROBE_TIMEOUT``
+#: before #3143 made it ride the remainder), so any
+#: ``HealthProbe(lambda: _probe_db())`` built without an explicit timeout was
+#: stranded a worker thread on every timeout (CPython #87185 —
 #: ``asyncio.wait_for`` cancels the awaitable, not the thread).
 #:
 #: What this does and does not buy: it lifts the default above the part of
@@ -639,9 +653,12 @@ def _probe_once(sdk, timeout=None,
     if (slot_wait_budget and not query.done()
             and not query_started.wait(slot_wait_budget)):
         # The worker never BEGAN the query inside the leftover allowance, so the
-        # query never ran: not a reachability verdict. Same setup spelling as a
-        # cold-start overrun (one spelling per phase). The abandoned submission
-        # holds no extra thread (#2850).
+        # query never ran. That is a distinct error STRING, NOT a distinct
+        # status: ``ok=False`` still flows out to ``metrics()`` as
+        # ``status="degraded"`` + ``graph_size=0`` — #3143's shape with only
+        # the text changed (see ``_PROBE_SETUP_TIMEOUT_MSG``). Same setup
+        # spelling as a cold-start overrun (one spelling per phase). The
+        # abandoned submission holds no extra thread (#2850).
         return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
     try:
         query.result(timeout=query_budget)
