@@ -211,65 +211,90 @@ async function run(fnText, env) {
   return { result, error }
 }
 
-// ── draining the debounce window, not one tick ──────────────────────────────
-// A single 0 ms macrotask does NOT drain a debounce. Any `setTimeout(fn, 1+)` or
-// an ordinary 50-300 ms React debounce lands AFTER the assertion window, so a
-// DEFERRED write — the aliased-write forge, scheduled instead of immediate —
-// reads GREEN. The previous one-macrotask drain here had the same hole the
-// measured forge in refreshOnboardingExec.test.js demonstrated (7/7 green on a
-// 50 ms-deferred `completed_steps` write).
+// ── draining deferred work to quiescence, not one tick ──────────────────────
+// A single 0 ms macrotask does NOT drain a debounce. A `setTimeout(fn, 1+)`, an
+// ordinary 50-300 ms React debounce, a `setInterval`, or a pending microtask
+// chain lands AFTER the assertion window, so a DEFERRED write — the aliased-write
+// forge, scheduled instead of immediate — reads GREEN. Measured on the previous
+// one-macrotask drain: a 50 ms-deferred aliased write passed the three executing
+// tests; a `setInterval`-deferred aliased write then passed 7/7 on the FIRST
+// version of this mock-timer drain, which is why the interval is virtualized
+// here too (fresh-context review, 2026-09-16).
 //
-// So drain VIRTUAL time instead of racing the wall clock: install a queue-backed
-// `setTimeout` for the duration of the run and run its callbacks to quiescence (a
-// callback that schedules another extends the drain). A timer scheduled beyond
-// DEBOUNCE_BUDGET_MS of virtual time FAILS the test loudly — truncating the drain
-// silently is exactly the false PASS being removed.
-const DEBOUNCE_BUDGET_MS = 1000
+// So drain VIRTUAL time instead of racing the wall clock. `setTimeout` and
+// `setInterval` (and their clear* partners) are backed by one queue for the
+// duration of the run; the drain runs that queue to quiescence — a callback that
+// schedules more work extends the drain — advancing virtual time to each timer's
+// own delay, so a debounce of ANY length is covered. No deadline is silently
+// truncated: an earlier version threw past a 1000 ms budget, which false-redded a
+// legitimate long request timeout (a guard that false-reds is as unusable as one
+// that cannot red). `setInterval` callbacks run at most ONCE per drain — the
+// property under test is whether a deferred write can land AT ALL, not
+// steady-state interval cadence. MAX_DRAIN_CALLBACKS bounds a self-rescheduling
+// callback loudly instead of hanging.
 const MAX_DRAIN_CALLBACKS = 10_000
+// Quiescence is declared only after this many consecutive real `setImmediate`
+// turns find the virtual queue empty, so a chain of real immediates (which the
+// virtual queue cannot see) is still observed. Bounded by design: `setImmediate`
+// is not a browser API — the shipped app code cannot call it (the only occurrence
+// in the bundle is React's scheduler guard) — so this is a look-ahead window, not
+// a surface claim. A chain deeper than this is NOT drained.
+const QUIET_IMMEDIATE_TURNS = 64
 
 function installVirtualTimers() {
   const realSetTimeout = globalThis.setTimeout
   const realClearTimeout = globalThis.clearTimeout
-  const setImmediateFn = globalThis.setImmediate
+  const realSetInterval = globalThis.setInterval
+  const realClearInterval = globalThis.clearInterval
+  const realImmediate = globalThis.setImmediate
   const queue = []
   let now = 0
   let handle = 0
-  globalThis.setTimeout = (cb, delay = 0, ...args) => {
+  const schedule = (cb, delay, args) => {
     queue.push({ handle: ++handle, at: now + Math.max(0, Number(delay) || 0), cb, args })
     return handle
   }
-  globalThis.clearTimeout = (h) => {
+  globalThis.setTimeout = (cb, delay = 0, ...args) => schedule(cb, delay, args)
+  globalThis.setInterval = (cb, delay = 0, ...args) => schedule(cb, delay, args)
+  const clear = (h) => {
     const i = queue.findIndex((t) => t.handle === h)
     if (i >= 0) queue.splice(i, 1)
   }
+  globalThis.clearTimeout = clear
+  globalThis.clearInterval = clear
   return {
     restore() {
       globalThis.setTimeout = realSetTimeout
       globalThis.clearTimeout = realClearTimeout
+      globalThis.setInterval = realSetInterval
+      globalThis.clearInterval = realClearInterval
     },
     async drain() {
-      for (let ran = 0; ; ran++) {
-        // `setImmediate` is deliberately NOT stubbed: it drains the whole
+      let quiet = 0
+      for (let ran = 0; ; ) {
+        // The real `setImmediate` is deliberately NOT stubbed: it drains the whole
         // microtask queue, so an await continuation that schedules a timer is
-        // visible to the next pass.
-        await new Promise((r) => setImmediateFn(r))
-        if (queue.length === 0) return
+        // visible to the next pass. A few quiet turns are required before
+        // quiescence is declared, so a promise/microtask chain is not truncated.
+        await new Promise((r) => realImmediate(r))
+        if (queue.length === 0) {
+          if (++quiet >= QUIET_IMMEDIATE_TURNS) return
+          continue
+        }
+        quiet = 0
         let next = 0
         for (let i = 1; i < queue.length; i++) {
           if (queue[i].at < queue[next].at ||
               (queue[i].at === queue[next].at && queue[i].handle < queue[next].handle)) next = i
         }
         const t = queue[next]
-        if (t.at > DEBOUNCE_BUDGET_MS) {
+        queue.splice(next, 1)  // `setInterval` runs at most once per drain (see above)
+        if (++ran > MAX_DRAIN_CALLBACKS) {
           throw new Error(
-            `a timer scheduled at ${t.at} ms is beyond the ${DEBOUNCE_BUDGET_MS} ms drain budget — ` +
-            'the debounce window is not covered, so a deferred forge would read green')
+            `the drain ran ${MAX_DRAIN_CALLBACKS} callbacks without quiescing — a ` +
+            'self-rescheduling callback is not bounded')
         }
-        if (ran >= MAX_DRAIN_CALLBACKS) {
-          throw new Error(`the drain ran ${MAX_DRAIN_CALLBACKS} callbacks without quiescing`)
-        }
-        queue.splice(next, 1)
-        now = t.at
+        now = Math.max(now, t.at)
         t.cb(...t.args)
       }
     },
