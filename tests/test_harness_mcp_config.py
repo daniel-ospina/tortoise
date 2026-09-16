@@ -224,3 +224,47 @@ class TestPrintHarnessInstructions:
                     end = i
                     break
             json.loads("\n".join(lines[start : end + 1]))
+
+
+class TestCommittedRepoMcpJson:
+    """#3601 regression: the COMMITTED root `.mcp.json` must reach the hosted
+    endpoint with an env-indirect key.
+
+    The classes above pin the EMITTED onboarding configs (`_harness_mcp_config`
+    / `init`); this pins the file the repo actually ships. It previously
+    declared `http://localhost:8000/mcp` with `"headers": {}`, so every agent
+    whose local daemon was not running got an opaque `fetch failed` -- and the
+    entry could not authenticate even when the daemon WAS up under the
+    documented `tortoise serve --http --auth tenant`.
+    """
+
+    COMMITTED = REPO_ROOT / ".mcp.json"
+
+    def _tortoise(self) -> dict:
+        cfg = json.loads(self.COMMITTED.read_text(encoding="utf-8"))
+        return cfg["mcpServers"]["tortoise"]
+
+    def test_tortoise_entry_targets_hosted_endpoint(self):
+        url = self._tortoise()["url"]
+        assert url == ENDPOINT, (
+            f"committed .mcp.json must target the hosted endpoint {ENDPOINT}; "
+            f"a local-daemon url breaks every agent without a running daemon "
+            f"(#3601) -- got {url!r}"
+        )
+
+    def test_tortoise_header_is_env_indirect(self):
+        auth = self._tortoise()["headers"]["Authorization"]
+        # Env-indirect only: the wizard/CLI copy never writes a literal key.
+        assert auth.startswith("Bearer ${") and auth.endswith("}"), (
+            f"committed .mcp.json Authorization must be env-indirect, got {auth!r}"
+        )
+        assert "TORTOISE_API_KEY" in auth, auth
+
+    def test_no_literal_api_key_in_committed_config(self):
+        # This file ships to users -- a literal tt_/tk_ token leaks a credential.
+        text = self.COMMITTED.read_text(encoding="utf-8")
+        for marker in ("tt_", "tk_"):
+            assert marker not in text, (
+                f"literal {marker!r} key material in committed .mcp.json -- "
+                f"keys must stay env-indirect"
+            )
