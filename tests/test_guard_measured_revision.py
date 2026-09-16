@@ -315,7 +315,7 @@ def test_bytecode_is_excused_by_default_and_refused_under_strict(repo: Repo) -> 
         guard(repo.root, repo.rev, SURFACE, allow_bytecode=False)
 
 
-def test_default_surface_is_the_declared_one(repo: Repo) -> None:
+def test_default_surface_is_the_declared_one(repo: Repo, capsys) -> None:
     """The optional paths argument must DEFAULT to the declared constant.
 
     Pinned because the earlier suite asserted only the literal value, so
@@ -327,6 +327,9 @@ def test_default_surface_is_the_declared_one(repo: Repo) -> None:
     assert DEFAULT_PATHS == ("tortoise/", "tools/")
     assert guard(repo.root, repo.rev).checked == SURFACE_FILES
     assert mod.guard.__defaults__ == (DEFAULT_PATHS,)
+    # and the CLI/argparse default, which is a second, independent default
+    assert mod.main(["--rev", repo.rev, "--worktree", str(repo.root)]) == 0
+    assert f"compared {SURFACE_FILES} file(s)" in capsys.readouterr().out
 
 
 def test_surface_empty_at_rev_refuses_even_with_index_entries(repo: Repo) -> None:
@@ -339,6 +342,48 @@ def test_surface_empty_at_rev_refuses_even_with_index_entries(repo: Repo) -> Non
     assert later.exists()
     with pytest.raises(GuardRefused, match="existed at"):
         guard(repo.root, repo.rev, ("tools/later.py",))
+
+
+def test_surface_with_only_untracked_content_refuses(repo: Repo) -> None:
+    """`not tracked` is its own refusal: the revision side is non-empty, but the
+    index holds nothing to compare."""
+    (repo.path("tortoise/a.py")).unlink()
+    _git(repo.root, "rm", "-q", "--cached", "tortoise/a.py")
+    _git(repo.root, "rm", "-q", "--cached", "tortoise/b.py")
+    _git(repo.root, "rm", "-q", "--cached", "tortoise/routing.yaml")
+    _git(repo.root, "rm", "-q", "--cached", "tools/hook.sh")
+    with pytest.raises(GuardRefused, match="is tracked"):
+        guard(repo.root, repo.rev, ("tortoise/b.py",))
+
+
+def test_gitlink_under_the_surface_is_refused(repo: Repo) -> None:
+    """A submodule's contents are not in this repository, so there is nothing to
+    compare — refuse rather than report the exec-bit branch."""
+    head = _git(repo.root, "rev-parse", "HEAD")
+    _git(repo.root, "update-index", "--add", "--cacheinfo", "160000", head, "tools/vendor")
+    _git(repo.root, "commit", "-q", "-m", "register a gitlink")
+    # the gitlink must exist AT the measured revision for the mode to be read
+    at_rev = _git(repo.root, "rev-parse", "HEAD")
+    with pytest.raises(GuardRefused, match="gitlink"):
+        guard(repo.root, at_rev, SURFACE)
+
+
+def test_path_with_a_space_passes_when_clean_and_drifts_when_edited(repo: Repo) -> None:
+    """`ls-files` output is whitespace-split unless `-z` is used, so a surface
+    path containing a space used to be mis-keyed into a false block."""
+    spaced = repo.path("tortoise/my module.py")
+    spaced.write_text("def h():\n    return 3\n")
+    rev = repo.commit("measured with a spaced path")
+    assert guard(repo.root, rev, SURFACE).comment_only == []
+    spaced.write_text("def h():\n    return 4\n")
+    with pytest.raises(GuardRefused, match="code under test changed"):
+        guard(repo.root, rev, SURFACE)
+
+
+def test_non_utf8_surface_file_refuses_with_a_reason(repo: Repo) -> None:
+    (repo.path("tortoise/a.py")).write_bytes(b"def f():\n    return '\xff\xfe'\n")
+    with pytest.raises(GuardRefused, match="does not parse"):
+        _scan(repo)
 
 
 def test_non_bytecode_file_inside_pycache_is_refused(repo: Repo) -> None:

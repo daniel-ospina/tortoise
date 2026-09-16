@@ -184,6 +184,11 @@ def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
     it is byte-identical. Content comes from git (``cat-file``/``show``), never
     from ``git diff`` — see the module docstring on index flags and renames.
     """
+    if rev_mode == "160000":
+        raise GuardRefused(
+            f"guard: {rel} is a gitlink/submodule at {rev} — its contents are "
+            "not in this repository, so they cannot be compared"
+        )
     on_disk = worktree / rel
     try:
         st = os.lstat(on_disk)
@@ -192,11 +197,6 @@ def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
             f"guard: {rel} exists at {rev} but cannot be read in the working "
             f"tree ({exc}) — re-measure rather than re-label"
         ) from None
-    if rev_mode == "160000":
-        raise GuardRefused(
-            f"guard: {rel} is a gitlink/submodule at {rev} — its contents are "
-            "not in this repository, so they cannot be compared"
-        )
     rev_is_link = rev_mode == "120000"
     if stat.S_ISLNK(st.st_mode) != rev_is_link:
         raise GuardRefused(
@@ -227,7 +227,7 @@ def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
     try:
         before = _ast_without_docstrings(at_rev_bytes.decode())
         after = _ast_without_docstrings(on_disk_bytes.decode())
-    except SyntaxError as exc:
+    except (SyntaxError, UnicodeDecodeError) as exc:
         raise GuardRefused(
             f"guard: {rel} does not parse as Python ({exc}) — it cannot be "
             "compared structurally, so it is refused rather than passed"
@@ -266,7 +266,7 @@ def guard(
 
     modes_at_rev = _modes_at_rev(worktree, rev, paths)
     at_rev = list(modes_at_rev)
-    tracked = _git(worktree, "ls-files", "--", *paths).split()
+    tracked = [f for f in _git(worktree, "ls-files", "-z", "--", *paths).split("\0") if f]
     if not at_rev:
         raise GuardRefused(
             f"guard: nothing under --paths {' '.join(paths)} existed at {rev} "
@@ -279,7 +279,13 @@ def guard(
             "refusing rather than reporting an empty surface as clean"
         )
     # NO --exclude-standard: an ignore rule must not hide a file from the check.
-    untracked = _git(worktree, "ls-files", "--others", "--", *paths).split()
+    untracked = [
+        f
+        for f in _git(worktree, "ls-files", "-z", "--others", "--", *paths).split(
+            "\0"
+        )
+        if f
+    ]
 
     noise = [f for f in untracked if _is_noise(f)]
     if not allow_bytecode:
