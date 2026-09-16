@@ -1575,6 +1575,24 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                         record["socket_path"])
             continue
 
+        # #3599 adversarial review (fail-open): the per-server owner signal is
+        # what AUTHORISES this kill, but it was read once, back in
+        # `_mark_orphan_confirmation`. A co-tenant that attached since then
+        # would not block: `_active_client_count` ignores connections younger
+        # than its age floor, and on the socketless path both probes are
+        # skipped entirely. So re-read the owner records immediately before
+        # the kill and refuse if any owner is now live. Cheap (one listdir +
+        # kill(0) per record) and it makes the decision self-consistent:
+        # if we confirm on "no live owner", we must not kill on "a live
+        # owner appeared". An uninstrumented server has no records (None ->
+        # unchanged) and a socketless one cannot host a new record's dir.
+        owners_now = _owner_records(record["socket_path"])
+        if owners_now is not None and owners_now[0] > 0:
+            logger.info(
+                "owner attached since confirmation (%d live), skipping: %s",
+                owners_now[0], record["socket_path"])
+            continue
+
         if dry_run:
             logger.warning("[DRY-RUN] would kill PID %s (%s)",
                            record["pid"], record["socket_path"])

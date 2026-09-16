@@ -3045,6 +3045,84 @@ def test_embedded_orphans_inconclusive_is_not_clean(monkeypatch, capsys):
     assert "INCONCLUSIVE" in capsys.readouterr().err
 
 
+def test_embedded_orphans_never_uses_the_swallowing_enumerator(monkeypatch):
+    """#3599 adversarial review (fail-open): the census must not probe with
+    one pgrep and enumerate with another. `_pgrep_redis_servers` swallows a
+    timeout/OSError as `[]`, so a guard probe that ANSWERS followed by a real
+    call that TIMES OUT would report `live_servers: 0`, `orphans: 0` and exit
+    0. The census now enumerates with its own strict call and must never
+    consult the swallowing one."""
+    mod = _load_embedded_orphans()
+    import tortoise.embedded_reaper as _R
+
+    def _boom():
+        raise AssertionError(
+            "census must enumerate STRICTLY, never via "
+            "_pgrep_redis_servers (which swallows a timeout as an empty "
+            "list — the fail-open this guards)")
+
+    monkeypatch.setattr(_R, "_pgrep_redis_servers", _boom)
+    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/usr/bin/pgrep")
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Ok())
+    res = mod.census()  # must not reach _pgrep_redis_servers at all
+    assert res["live_servers"] == 0
+
+
+def test_reap_refuses_when_an_owner_attached_after_confirmation(
+        monkeypatch, tmp_path):
+    """#3599 adversarial review (fail-open): `_orphan_confirmed` is set during
+    the sweep, but a co-tenant can attach before the kill. `reap()` must
+    re-read the owner records at kill time — `_active_client_count` ignores
+    connections younger than its age floor, and the socketless path skips
+    both probes, so the CLIENT LIST double-check alone cannot see it."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    monkeypatch.setattr("tortoise.embedded_reaper._is_detached",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    # A LIVE owner that appeared after the sweep confirmed an orphan.
+    _write_owner(_owner_dir(sock), os.getpid(), _own_start())
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": str(sock / "redis.socket"), "pid": os.getpid(),
+           "path_based": False, "client_count": 0,
+           "_orphan_confirmed": True}
+    acted = reap([rec], dry_run=False, only_safe=True)
+    assert killed == [], (
+        "a live owner record present at kill time must block the kill")
+    assert not acted
+
+
+def test_reap_still_kills_when_owners_are_all_dead(monkeypatch, tmp_path):
+    """The other half: re-reading the owner records must not stop the reap
+    the per-server signal authorises."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    monkeypatch.setattr("tortoise.embedded_reaper._is_detached",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), _dead_pid(), 1234567890)
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": str(sock / "redis.socket"), "pid": os.getpid(),
+           "path_based": False, "client_count": 0,
+           "_orphan_confirmed": True}
+    acted = reap([rec], dry_run=False, only_safe=True)
+    assert killed == [os.getpid()]
+    assert acted
+
+
 def test_owner_records_recycled_pid_is_dead(monkeypatch, tmp_path):
     """#3599: the fail-closed start check must still let a RECYCLED pid
     (a different process now using the dead owner's pid) be counted dead —

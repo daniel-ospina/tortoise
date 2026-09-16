@@ -1144,6 +1144,61 @@ def test_owner_record_written_on_construction_removed_on_close(tmp_path):
         "close() must release this process's owner record"
 
 
+@pytest.mark.skipif(not hasattr(os, "register_at_fork"),
+                    reason="no os.register_at_fork on this platform")
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")  # fork in pytest
+def test_forked_child_reclaims_ownership_of_inherited_server(tmp_path):
+    """#3599 adversarial review (fail-open): `_owner_refcounts` is inherited
+    across `fork()`, so without an at-fork hook the child's `record_owner`
+    would early-return on the parent's count and write NO record naming the
+    child. When the parent was then SIGKILLed (no `forget_owner`), the child
+    — a live owner holding the inherited connection — would be invisible and
+    the reaper would kill the server out from under it.
+
+    Runs the real `fork()`, reads the owners dir from the parent, and asserts
+    a record naming the CHILD exists.
+    """
+    import sys as _sys
+    db_path = str(tmp_path / "fork.db")
+    db = FalkorDB(db_path)
+    try:
+        sock = db.client.socket_file
+        assert _owner_entries(sock), "parent should own the record"
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # child
+            rc = 1
+            try:
+                os.close(r)
+                # A second client on the SAME server in the forked child.
+                child_db = FalkorDB(db_path)
+                _ = child_db.client.socket_file
+                rc = 0
+            except BaseException:
+                rc = 1
+            finally:
+                with contextlib.suppress(OSError):
+                    os.write(w, str(rc).encode())
+                    os.close(w)
+                os._exit(rc if rc else 0)
+        os.close(w)
+        try:
+            child_rc = os.read(r, 8).decode()
+        finally:
+            os.close(r)
+        os.waitpid(pid, 0)
+        assert child_rc == "0", "child failed to construct its own client"
+        entries = _owner_entries(sock)
+        assert entries, "the parent's record must survive"
+        assert any(e.startswith(f"{pid}-") for e in entries), (
+            f"the forked child must be recorded as an owner of the inherited "
+            f"server (owners={entries}, child pid={pid}) — otherwise a "
+            f"parent SIGKILL makes a live child's server reapable")
+    finally:
+        with contextlib.suppress(Exception):
+            db.close()
+
+
 def test_shared_server_keeps_co_tenant_owner_record(tmp_path):
     """#3599 P0 guard, end-to-end: two clients in ONE process on ONE server
     each own a record claim; closing the first must NOT drop the shared

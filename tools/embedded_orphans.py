@@ -42,17 +42,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 DEFAULT_MAX_ORPHANS = 5
 
 
-def _require_enumerable_pgrep() -> None:
-    """Raise when server enumeration cannot be trusted (#3599 review).
+def _enumerate_servers_strict() -> list[int]:
+    """Live embedded-server PIDs, or raise when enumeration is unreliable.
 
-    `tortoise.embedded_reaper._pgrep_redis_servers` swallows a missing OR
-    TIMING-OUT `pgrep` and returns `[]`, which is indistinguishable from "no
-    servers". A census on a host where pgrep times out — precisely the load
-    level #3599 documents — would then print `orphans: 0` and exit 0 while
-    orphans accumulate, i.e. the observability check would fail open.
+    #3599 review: `tortoise.embedded_reaper._pgrep_redis_servers` swallows a
+    missing OR TIMING-OUT `pgrep` and returns `[]`, which is
+    indistinguishable from "no servers". A census on a host where pgrep
+    times out — precisely the load level #3599 documents — would then print
+    `orphans: 0` and exit 0 while orphans accumulate, i.e. the observability
+    check would fail open. So this runs the SAME command strictly and
+    RETURNS the pid list, which the census then uses directly: probing and
+    enumerating with two separate calls would leave the very race this
+    guards (probe answers, the real call times out).
 
-    So probe the SAME command it runs: rc 0 (matches) and rc 1 (no matches)
-    are both real answers; anything else, including a timeout, is not.
+    rc 0 (matches) and rc 1 (no matches) are both real answers; anything
+    else, including a timeout, is not.
     """
     if shutil.which("pgrep") is None:
         raise RuntimeError(
@@ -72,6 +76,9 @@ def _require_enumerable_pgrep() -> None:
         raise RuntimeError(
             f"pgrep exited {proc.returncode} — enumeration is unreliable; "
             f"refusing to report clean")
+    pids = [int(ln.strip()) for ln in proc.stdout.splitlines()
+            if ln.strip().isdigit()]
+    return pids
 
 
 def census(*, deep: bool = False, jobs: int = 8) -> dict:
@@ -88,19 +95,20 @@ def census(*, deep: bool = False, jobs: int = 8) -> dict:
     accumulating. That is the exact fail-open the tool exists to catch, so
     it raises instead (and `main` maps that to exit 2).
     """
-    _require_enumerable_pgrep()
     from tortoise.embedded_reaper import (
         _PROC_INFO_CACHE,
         _active_client_count,
         _batch_process_info,
         _classify_dir,
         _owner_records,
-        _pgrep_redis_servers,
         _socket_dir_from_cmdline,
         _socket_dir_missing,
     )
 
-    pids = _pgrep_redis_servers()
+    # Enumerated STRICTLY here (not via _pgrep_redis_servers) so a
+    # probe-then-timeout race cannot report a clean census — see
+    # _enumerate_servers_strict.
+    pids = _enumerate_servers_strict()
     _PROC_INFO_CACHE.update(_batch_process_info(pids))
     try:
         orphans: list[dict] = []

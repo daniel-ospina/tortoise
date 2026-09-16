@@ -570,6 +570,40 @@ def owner_record_dir(socket_file: str) -> str:
 _owner_refcounts: dict[str, int] = {}
 
 
+def _adopt_owner_records_after_fork() -> None:
+    """Re-establish owner records for inherited clients in a forked child.
+
+    #3599 adversarial review (fail-open): `_owner_refcounts` is inherited
+    across `fork()` but the child is a DIFFERENT process, so the parent's
+    record does not name it. Without this hook the child's `record_owner`
+    would short-circuit on the inherited count and write no
+    `<child-pid>-<start>` file; when the parent was then SIGKILLed (no
+    `forget_owner` runs) the child — a live owner holding the inherited
+    connection — would be invisible, `_owner_records` would report 0 live
+    owners, and the reaper would kill the server out from under it.
+
+    So in the child: drop the parent's counts and re-record every socket the
+    parent had claimed, making the child an explicit owner in its own right.
+
+    RESIDUAL (narrower, documented): the child cannot know HOW MANY clients
+    it inherited, so the re-adopted refcount is 1 per socket. Closing one of
+    two inherited clients would drop the record while the other is still
+    live. The load-bearing property — a parent SIGKILL cannot make a forked
+    child's live server look orphaned — does hold.
+    """
+    inherited = list(_owner_refcounts)
+    _owner_refcounts.clear()
+    for sock in inherited:
+        try:
+            record_owner(sock)
+        except Exception:  # noqa: BLE001 - never break the child over this
+            pass
+
+
+if hasattr(os, "register_at_fork"):  # POSIX; absent on Windows
+    os.register_at_fork(after_in_child=_adopt_owner_records_after_fork)
+
+
 def owner_socket_of(client) -> str | None:
     """Socket path of the redislite server a client owns, or None.
 
