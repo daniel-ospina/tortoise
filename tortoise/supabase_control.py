@@ -2546,7 +2546,7 @@ def insert_graph(cp, row: dict) -> None:
 def delete_graph_row(cp, org_id: str, graph_id: str) -> None:
     """Hard-delete a graphs row by (id, org) — the rollback path for a
     failed mint (D11: no orphan graph). Never touches the default graph
-    (no row exists for it — it is derived from teams.graph_name)."""
+    (no row exists for it — it is derived from organizations.graph_name)."""
     cp.query("graphs", method="DELETE",
              filters=[("id", "eq", graph_id), ("org_id", "eq", org_id)])
 

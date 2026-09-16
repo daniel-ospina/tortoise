@@ -1066,7 +1066,7 @@ def test_enumerate_eligible_teams_supabase_fail_closed():
 
 
 def test_team_graph_name_reads_from_teams(shared_proj):
-    """Sweep reads graph_name from teams (the column is the source of truth)."""
+    """Sweep reads graph_name from organizations (the column is the source of truth)."""
     cp = _fake_teams()
     assert org_graph_name(cp, "team_b") == _BETA_GRAPH  # the row value, seamed
     # Registry mode: deterministic org_{id} (no graph_name stored there).
@@ -1123,7 +1123,7 @@ def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
         keys = [k for k in store.list("backups/team_x/") if k.endswith("manifest.json")]
         assert len(keys) == 1
         manifest = json.loads(store.download(keys[0]))
-        assert manifest["graph_name"] == _MYAPP_GRAPH  # from teams, not org_{id}
+        assert manifest["graph_name"] == _MYAPP_GRAPH  # from organizations, not org_{id}
         # Stamps land on the team's Supabase row (PATCH via the fake).
         row = cp.query("organizations", select=["backup_latest_at"],
                        filters=[("id", "eq", "team_x")])

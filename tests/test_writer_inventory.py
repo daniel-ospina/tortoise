@@ -999,7 +999,7 @@ class TestGraphSurface:
         assert "Upgrade" in r.json()["detail"]
 
     def test_list_graphs_derives_default_and_key_count(self, user_client):
-        """E7/C2: list derives the default graph from teams.graph_name;
+        """E7/C2: list derives the default graph from organizations.graph_name;
         rows carry status + key_count; point_count dropped."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
@@ -1445,7 +1445,7 @@ class TestBackupEndpointsSupabaseGraphName:
             pass
 
     def test_backup_create_fail_closed_when_team_vanished(self, pro_backup_client):
-        """A team missing from teams (or without graph_name) 503s — never a
+        """A team missing from organizations (or without graph_name) 503s — never a
         backup of a guessed/wrong graph."""
         tc, fake, _ = pro_backup_client  # noqa: RUF059
         app.dependency_overrides[get_current_org] = lambda: dict(

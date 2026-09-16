@@ -365,7 +365,7 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             #             for POST /v1/team/keys + per-graph key mints,
             #             REST _check_org_limit, MCP enforce_org_limit).),
             #   users:    status IS NULL OR status = 'active'
-            #   graphs:   the default graph derived from teams.graph_name
+            #   graphs:   the default graph derived from organizations.graph_name
             #             PLUS custom graph rows from the ``graphs`` table
             #             (20260901000001, C1 #2110) — custom ACTIVE graphs
             #             count toward max_graphs; deleted rows excluded.

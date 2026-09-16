@@ -3,7 +3,7 @@
 Covers the lookup scheme (plan P1-1: lookup_hash exact-match against
 api_keys then org_memberships), authoritative revocation (P1-2:
 api_keys.revoked_at), #742 expiry, E2E-7-negative (registry-only key → None),
-fail-closed error behavior (P1-3 pattern), and tier/quota from teams — all
+fail-closed error behavior (P1-3 pattern), and tier/quota from organizations — all
 against the in-memory FakeControlPlane (zero network).
 
 See also tests/test_auth_flip.py for the REST + MCP end-to-end flips.
@@ -1386,7 +1386,7 @@ class TestOnboardingState:
         # and the read back merges over defaults
 
     def test_email_read_patch_round_trip(self, fake):
-        """E2E-5: team email read-patch from teams (wired via the onboarding
+        """E2E-5: team email read-patch from organizations (wired via the onboarding
         endpoints — #764 review P2: the email seam must not be dead code)."""
         fake.tables["organizations"][0]["email"] = None  # fixture has none set
         assert org_email(fake, "team-free-001") is None
@@ -1702,7 +1702,7 @@ class TestTask8Helpers:
     def test_graph_metadata_derives_default(self, fake):
         """C1 (#2110): the seam emits the registry-shaped row
         {graph_id, org_id, name, kind, namespace, status} — default derived
-        from teams.graph_name (no row needed), status active."""
+        from organizations.graph_name (no row needed), status active."""
         fake.tables["organizations"][0]["graph_name"] = "team_team-free-001"
         assert graph_metadata(fake, "team-free-001") == [{
             "graph_id": "default", "org_id": "team-free-001",

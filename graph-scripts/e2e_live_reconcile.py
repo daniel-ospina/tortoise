@@ -90,7 +90,7 @@ COUNT_KINDS = (
 # namespace); Q1 selects enough to count + report offender emails.
 TEAMS_SQL = """
     SELECT t.id, t.name, t.email, t.created_at::text AS created_at
-    FROM public.teams t
+    FROM public.organizations t
     WHERE t.email LIKE 'e2e-live-%@premise-labs.dev'
     ORDER BY t.created_at;
 """

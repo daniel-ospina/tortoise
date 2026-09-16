@@ -11514,7 +11514,7 @@ async def delete_graph(graph_id: str, org_id: str,
         graph_key_ids as sb_graph_key_ids,
     )
     # Default-graph guard: the Supabase derived id is the literal
-    # 'default' (no row exists — derived from teams.graph_name); the
+    # 'default' (no row exists — derived from organizations.graph_name); the
     # registry kind='default' node carries a random gid. Guard BOTH: the
     # literal id (mode-agnostic callers may use either) AND a kind lookup
     # (else registry default → 404, P1 review note).

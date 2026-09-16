@@ -15457,7 +15457,7 @@ class TortoiseSDK:
         into it is C2/C3 (provisioning service, out of C1 scope), so this
         method still returns the deterministic id WITHOUT persisting; the
         registry-shaped list seam (graph_metadata/graph_list) derives the
-        default graph from teams.graph_name and reads custom rows once they
+        default graph from organizations.graph_name and reads custom rows once they
         exist. Selfhost (registry mode) keeps the registry Graph node. The
         zero-registry-writes cutover contract (registry node count == 0)
         requires this gate.

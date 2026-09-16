@@ -3,7 +3,7 @@
 Endpoint-level (TestClient over the real app, REAL get_current_org resolving
 against the in-memory FakeControlPlane) coverage of the Task 6-7 seams:
 
-- onboarding_state read-patch round-trips from teams (jsonb — no string
+- onboarding_state read-patch round-trips from organizations (jsonb — no string
   wrapping), E2E-5.
 - GitHub connect callback stores github_token_enc + github_org on the teams
   row via the service-role seam (the column is REVOKEd from
@@ -84,7 +84,7 @@ def _registry_client():
             yield tc
 
 
-# ── Onboarding state (E2E-5: read-patch from teams) ─────────────────────────
+# ── Onboarding state (E2E-5: read-patch from organizations) ───────────────────
 
 class TestOnboardingStateFlip:
     def test_read_returns_defaults_for_empty_state(self, supabase_client):
@@ -144,7 +144,7 @@ class TestOnboardingStateFlip:
         assert "not_a_field" not in r.json()["onboarding"]
 
     def test_email_read_patch_via_onboarding_endpoint(self, supabase_client):
-        """E2E-5: email read-patch from teams via the onboarding endpoints
+        """E2E-5: email read-patch from organizations via the onboarding endpoints
         (#764 review P2 — the email seam is wired, not dead code)."""
         tc, fake = supabase_client
         # read: fixture seeds owner@example.com on the teams row
