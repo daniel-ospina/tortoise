@@ -34,6 +34,14 @@ doc_status: live
 >   **conceptual** (`objectKind: document`); Documents carry `:Document` and not
 >   `:Object`, so the Object-labelled supersession fold never reaches them and
 >   supersession is unreachable for a Document.
+> - §4.7/§4.1/§12 (correction): `validTo` is the successor's `validFrom` **only
+>   when the successor carries one** — `supersede_point` falls back to the
+>   successor's `createdAt`, then `now` (monotone, never a gap), so exact
+>   contiguity holds only for a dated successor and an undated one **overlaps**
+>   (the companion to the open-start ⚠️ above). The §4.7 start row no longer
+>   claims `create_point`'s CREATE map writes only `createdAt`/`updatedAt` — the
+>   base map seeds no `validFrom`; caller props (including `validFrom`) are
+>   appended.
 > - §4.1: `expiredAt` description split — transaction-time expiry (the record
 >   stopped being current) is not "when a supersession/withdrawal terminated the
 >   record"; supersession is a separate fact (`status='superseded'`) and both
@@ -417,7 +425,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated only by write paths that supply a date (the hosted commit path sets it from the payload `when`); **absent ⇒ open/unbounded start** (`restore_point_at`), not a clock-stamped one. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
-| `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` (contiguous window); `invalidate_point` stamps `now` (no successor ⇒ no contiguity). §4.7 |
+| `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` stamps `now` (no successor ⇒ no contiguity). §4.7 |
 | `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as `status='superseded'` (Point has no `supersededAt`); the `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do **not** distinguish the two. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
 | `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Indexed via the plain `:Point(lastDreamedAt)` index, created idempotently at init on ALL engines — `is_operator` is never indexed (#522 embedded stale bool type table; #3154 docker/server `GRAPH.COPY` drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it, and leaving the copy destination unable to rebuild it) |
@@ -532,8 +540,8 @@ window, independent of when Tortoise learned it. Canonical pair:
 
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
-| start | `validFrom` | `prov:generatedAtTime` | Populated only by write paths that supply a date (the hosted commit path sets it from the payload `when`; §4.1). `create_point`'s CREATE map writes only `createdAt`/`updatedAt`, so an **absent** `validFrom` means an **open/unbounded start** — not a clock-stamped one (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
-| end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` — **contiguous Graphiti (Zep) windows: the old fact stops being true exactly when the new one starts being true** (`supersede_point`, E6 #1538). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity) |
+| start | `validFrom` | `prov:generatedAtTime` | Populated only by write paths that supply a date (the hosted commit path sets it from the payload `when`; §4.1). `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` never **synthesizes** a clock-stamped start, and an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
+| end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity) |
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
@@ -580,8 +588,12 @@ declared, not built (implementation is tracked separately):
 
 > **Point valid start is ⚠️, not ✅** — populated only by date-carrying write
 > paths; an absent `validFrom` is an **open start**, and `validFrom` → `createdAt`
-> is a *render* fallback (`_render_date`), not a stamp. This matches the ⚠️
-> convention `capturedAt` follows; §4.1 marks `validFrom` and `validTo` separately.
+> is a *render* fallback (`_render_date`), not a stamp. The open start is why the
+> supersession **end** is conditional too: an undated successor contributes its
+> `createdAt` (fallback chain above), not a `validFrom`, so its overlap with the
+> old window is the open start's consequence — never read contiguity as
+> unconditional. This matches the ⚠️ convention `capturedAt` follows; §4.1 marks
+> `validFrom` and `validTo` separately.
 
 > † **Document's inheritance of the Object column is CONCEPTUAL only**
 > (`objectKind: document`, §4.4) — Documents carry the `:Document` label and
@@ -1038,5 +1050,5 @@ the bottom of the recursion (leaf confidence = mean EP of attached points).
 | **Schema.org** | Event with startTime/endTime. Action pattern: `performs`=schema:agent inverse (the "direct performer or driver of the action"), `produces`=schema:result, `uses`=schema:instrument (mechanisms) / schema:input. |
 | **BIBO** | Document subclasses — `documentKind` vocabulary. |
 | **OWL-Time** | Event is the temporal entity (`startedAt`/`endedAt` = the valid-time alias, §4.7). Non-event validity windows (`validFrom`/`validTo`) are intervals on the same axis. Transaction time is the record clock, not an OWL-Time interval. |
-| **Bi-temporal (Graphiti/Zep)** | Two orthogonal axes — **valid time** (`validFrom`/`validTo`) and **transaction time** (`createdAt`/`expiredAt`) — plus supersession as a third, separate fact (`supersededAt` on Object; `status='superseded'` on Point — the `outdated` flag + `CORRECTS` edge are shared with invalidation and do not distinguish the two). Contiguous windows on **supersession**: `validTo` = the successor's `validFrom`; `invalidate_point` instead stamps `validTo=now` (no successor ⇒ no contiguity) (§4.7). |
+| **Bi-temporal (Graphiti/Zep)** | Two orthogonal axes — **valid time** (`validFrom`/`validTo`) and **transaction time** (`createdAt`/`expiredAt`) — plus supersession as a third, separate fact (`supersededAt` on Object; `status='superseded'` on Point — the `outdated` flag + `CORRECTS` edge are shared with invalidation and do not distinguish the two). Window contiguity on **supersession** is the Graphiti (Zep) **intent, conditional**: `validTo` = the successor's `validFrom` **when it carries one**, else its `createdAt`, else `now` (exact contiguity only for a dated successor); `invalidate_point` instead stamps `validTo=now` (no successor ⇒ no contiguity) (§4.7). |
 | **RDF-star** | Operators are reified edges with metadata (label + confidence) — RDF-star-like reification for epistemic edges. |
