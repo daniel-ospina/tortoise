@@ -231,7 +231,9 @@ async function run(fnText, env) {
 // that cannot red). `setInterval` callbacks run at most ONCE per drain — the
 // property under test is whether a deferred write can land AT ALL, not
 // steady-state interval cadence. MAX_DRAIN_CALLBACKS bounds a self-rescheduling
-// callback loudly instead of hanging.
+// callback loudly instead of hanging. `setInterval` callbacks run up to
+// INTERVAL_LOOKAHEAD_TICKS times, so a forge keyed to an early tick is still
+// observed — the claim is a BOUNDED look-ahead, never "any tick".
 const MAX_DRAIN_CALLBACKS = 10_000
 // Quiescence is declared only after this many consecutive real `setImmediate`
 // turns find the virtual queue empty, so a chain of real immediates (which the
@@ -240,6 +242,11 @@ const MAX_DRAIN_CALLBACKS = 10_000
 // in the bundle is React's scheduler guard) — so this is a look-ahead window, not
 // a surface claim. A chain deeper than this is NOT drained.
 const QUIET_IMMEDIATE_TURNS = 64
+// How many times a `setInterval` callback may run inside one drain before it is
+// dropped. A forge that only writes on tick N is invisible below N, so this is a
+// deliberately small look-ahead (the browser's common debounce/poll interval
+// fires long before it matters), not a claim of unbounded tick coverage.
+const INTERVAL_LOOKAHEAD_TICKS = 4
 
 function installVirtualTimers() {
   const realSetTimeout = globalThis.setTimeout
@@ -247,27 +254,41 @@ function installVirtualTimers() {
   const realSetInterval = globalThis.setInterval
   const realClearInterval = globalThis.clearInterval
   const realImmediate = globalThis.setImmediate
+  const realRaf = globalThis.requestAnimationFrame
+  const realCaf = globalThis.cancelAnimationFrame
   const queue = []
   let now = 0
   let handle = 0
-  const schedule = (cb, delay, args) => {
-    queue.push({ handle: ++handle, at: now + Math.max(0, Number(delay) || 0), cb, args })
-    return handle
+  const schedule = (cb, delay, args, kind) => {
+    const h = ++handle
+    const d = Math.max(0, Number(delay) || 0)
+    queue.push({ handle: h, at: now + d, delay: d, cb, args, kind, runs: 0 })
+    return h
   }
-  globalThis.setTimeout = (cb, delay = 0, ...args) => schedule(cb, delay, args)
-  globalThis.setInterval = (cb, delay = 0, ...args) => schedule(cb, delay, args)
   const clear = (h) => {
-    const i = queue.findIndex((t) => t.handle === h)
-    if (i >= 0) queue.splice(i, 1)
+    for (let i = queue.length - 1; i >= 0; i--) if (queue[i].handle === h) queue.splice(i, 1)
   }
+  globalThis.setTimeout = (cb, delay = 0, ...args) => schedule(cb, delay, args, 'timeout')
+  globalThis.setInterval = (cb, delay = 0, ...args) => schedule(cb, delay, args, 'interval')
+  // Browsers define rAF and the app uses it (the reauth focus restore). In Node
+  // it is absent, so an UNGUARDED rAF deferral throws here (loud), but one behind
+  // `typeof requestAnimationFrame === 'function'` would be silently skipped and
+  // the harness would not observe it. Provide the browser's surface so the
+  // deferral is drained like any other.
+  globalThis.requestAnimationFrame = (cb) => schedule(cb, 16, [now], 'timeout')
   globalThis.clearTimeout = clear
   globalThis.clearInterval = clear
+  globalThis.cancelAnimationFrame = clear
   return {
     restore() {
       globalThis.setTimeout = realSetTimeout
       globalThis.clearTimeout = realClearTimeout
       globalThis.setInterval = realSetInterval
       globalThis.clearInterval = realClearInterval
+      if (realRaf === undefined) delete globalThis.requestAnimationFrame
+      else globalThis.requestAnimationFrame = realRaf
+      if (realCaf === undefined) delete globalThis.cancelAnimationFrame
+      else globalThis.cancelAnimationFrame = realCaf
     },
     async drain() {
       let quiet = 0
@@ -288,13 +309,19 @@ function installVirtualTimers() {
               (queue[i].at === queue[next].at && queue[i].handle < queue[next].handle)) next = i
         }
         const t = queue[next]
-        queue.splice(next, 1)  // `setInterval` runs at most once per drain (see above)
+        const firedAt = t.at
+        if (t.kind === 'interval') {
+          if (++t.runs >= INTERVAL_LOOKAHEAD_TICKS) queue.splice(next, 1)
+          else t.at = firedAt + t.delay
+        } else {
+          queue.splice(next, 1)
+        }
         if (++ran > MAX_DRAIN_CALLBACKS) {
           throw new Error(
             `the drain ran ${MAX_DRAIN_CALLBACKS} callbacks without quiescing — a ` +
             'self-rescheduling callback is not bounded')
         }
-        now = Math.max(now, t.at)
+        now = Math.max(now, firedAt)
         t.cb(...t.args)
       }
     },
@@ -363,6 +390,13 @@ test('#3687 (harness reachability): the success path issues the single-query pin
   assert.deepStrictEqual(env.requests,
     [{ url: '/v1/onboarding/github/branches?repo=org%2Frepo&org_id=org-A', method: 'GET' }],
     'the branch request must resolve to the pinned single-query URL (one ?, org joined with &)')
+  // Fresh-context review (cycle 3, P2): this path asserted only the FIRST recorded
+  // write, so a DEFERRED second `setBranchLists` (client-manufactured state)
+  // landed after the legit one and read green — the reject path already asserts
+  // cardinality at the top of the file. Pin it here too.
+  assert.equal(env.setCalls.length, 1,
+    'the success path applies the branch list exactly ONCE — a second write is the client ' +
+    'manufacturing branch state (#3687)')
   assert.deepStrictEqual(applied(env.setCalls[0]),
     { [REPO]: { branches: ['main', 'dev'], defaultBranch: 'dev' } },
     'the server payload must be applied unmodified')
