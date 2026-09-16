@@ -1007,6 +1007,121 @@ class TestProbeQueueIsolation:
         assert result["db"]["ok"] is True, result
         assert result["graph_size"] == 9019
 
+    def test_zero_leftover_does_not_skip_the_slot_wait_guard(
+            self, monkeypatch):
+        """#3143 review P1 (BOUNDARY): at EXACTLY zero leftover the slot-wait
+        guard must still FIRE — a float-truthiness sentinel silently disables it.
+
+        ``slot_wait_budget = max(0.0, setup_timeout - elapsed)`` is a FLOAT, so
+        ``if slot_wait_budget`` reads an exactly-zero leftover as "no wait" and
+        SKIPS the guard. The query then falls straight through to
+        ``query.result(timeout=PROBE_TIMEOUT)`` with its QUEUE WAIT charged to
+        the reachability budget — the #3143 P1 shape (a query that never RAN,
+        reported as a QUERY timeout) reappearing at the clamp boundary. The
+        combined shape's ``None`` is the real "no slot wait" sentinel, so the
+        explicit shape must be tested with ``is not None``; ``0.0`` is a
+        MEANINGFUL budget ("no allowance left to wait"), not the sentinel.
+
+        Determinism: the probe clock is frozen and the cold-start advances it by
+        EXACTLY the allowance, so the leftover is exactly ``0.0`` (not merely
+        small). The single #3062 slot is occupied by a holder slipped directly
+        ahead of the query, so the query cannot be picked up inside the zero
+        leftover.
+
+        The discriminator is NOT that ``Event.wait(0.0)`` is instant — it
+        always is, so "the wait did not block" would prove nothing. It is
+        whether the guard RAN AT ALL: only the fixed code can return BEFORE
+        ``query.result(timeout=PROBE_TIMEOUT)`` is ever reached, hence the SETUP
+        spelling ("one spelling per phase") and a return in ~0 rather than a
+        full ``PROBE_TIMEOUT`` spent queued.
+
+        HONESTY NOTE: the zero-leftover outcome is STILL ``degraded`` /
+        ``graph_size 0`` — that residual is by design on this branch (the
+        ``4f543768a`` "still degraded/0, just a different string" change). What
+        this test pins is that the failure is attributed to the SETUP phase
+        that actually ran out of allowance, not falsely to a query that never
+        ran; asserting a non-degraded status here would contradict the code's
+        own acknowledged residual and could not go green.
+        """
+        import threading
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.4)
+        clock = SimpleNamespace(t=0.0)
+        monkeypatch.setattr(monitoring, "time", SimpleNamespace(
+            monotonic=lambda: clock.t, sleep=lambda _s: None))
+
+        ALLOWANCE = 3.0
+        ran: list[float] = []
+        proj = MagicMock()
+
+        def _q(*args, **kwargs):
+            ran.append(1.0)
+            return MagicMock(result_set=[[1]])
+
+        proj.g.query.side_effect = _q
+
+        class BoundarySDK:
+            """A REACHABLE graph whose cold-start eats the WHOLE allowance."""
+
+            def _get_proj(self):
+                clock.t += ALLOWANCE  # leftover becomes exactly 0.0
+                return proj
+
+            def taxonomy(self):
+                return {"Point": 9019}
+
+        real_worker = monitoring._probe_worker()
+        release = threading.Event()
+        submits = {"n": 0}
+
+        def _hold():
+            release.wait(5.0)
+
+        class InterposingWorker:
+            """Slip a slot holder in AHEAD of the reachability query (submit
+            #2). The worker is single-slot FIFO, so the interleave is
+            deterministic."""
+
+            def submit(self, fn):
+                submits["n"] += 1
+                if submits["n"] == 2:
+                    real_worker.submit(_hold)
+                return real_worker.submit(fn)
+
+        monkeypatch.setattr(monitoring, "_probe_worker",
+                            lambda: InterposingWorker())
+        try:
+            started = time.monotonic()
+            result = monitoring.metrics(sdk=BoundarySDK(),
+                                        setup_timeout=ALLOWANCE)
+            elapsed = time.monotonic() - started
+            ran_before_release = list(ran)
+        finally:
+            release.set()
+
+        # Sanity: the setup AND the query were both submitted; the holder was
+        # interposed exactly once, ahead of the query.
+        assert submits["n"] == 2, submits
+        # THE DISCRIMINATOR. The pre-fix code skipped the guard, handed the
+        # queued query the full PROBE_TIMEOUT, and reported the QUERY spelling
+        # ("probe timeout after 0.4s") — falsely claiming the query was
+        # reached. The fix fires the guard, so the phase at fault is SETUP.
+        assert result["db"]["error"] == \
+            f"probe setup timeout after {ALLOWANCE}s", result
+        assert not result["db"]["error"].startswith("probe timeout"), result
+        assert ran_before_release == [], (
+            "the reachability query must not have executed before the guard "
+            f"returned (got {ran_before_release})"
+        )
+        assert elapsed < 0.2, (
+            f"the probe spent {elapsed:.3f}s queued — the zero-leftover guard "
+            "did not fire and the reachability budget absorbed the queue wait"
+        )
+        # The documented residual (see the docstring): still degraded/0, but
+        # with the HONEST phase spelling, never the P1 "probe timeout".
+        assert result["status"] == "degraded", result
+        assert result["graph_size"] == 0, result
+
 
 class TestProbeSetupBudgetIntegration:
     """#3143 at the REAL-projection layer — the issue's integration surface.

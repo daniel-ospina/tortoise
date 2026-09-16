@@ -652,7 +652,18 @@ def _probe_once(sdk, timeout=None,
     query = _probe_worker().submit(_run_query)
     # The ``query.done()`` guard skips the wait when ``submit()`` refused the
     # submission outright (saturated #2850 backlog) — fail fast.
-    if (slot_wait_budget and not query.done()
+    # ``is not None``, NOT truthiness: ``slot_wait_budget`` is the ``None``
+    # sentinel for the COMBINED shape (no slot wait at all), but for the
+    # EXPLICIT shape it is a FLOAT that clamps to exactly ``0.0`` whenever the
+    # cold-start finishes at/just past its allowance. A truthiness test would
+    # treat that ``0.0`` as "no wait" and SKIP the guard entirely, handing the
+    # reachability query the full ``PROBE_TIMEOUT`` and charging its queue wait
+    # to it — reintroducing the #3143 P1 shape (a reachable graph reported
+    # ``probe timeout …``/degraded) at that boundary. A zero leftover means
+    # there is no allowance left to wait for the worker to pick the query up,
+    # so the phase at fault is SETUP and the guard must fire (``wait(0.0)``
+    # returns immediately rather than skipping the check).
+    if (slot_wait_budget is not None and not query.done()
             and not query_started.wait(slot_wait_budget)):
         # The worker never BEGAN the query inside the leftover allowance, so the
         # query never ran. That is a distinct error STRING, NOT a distinct
