@@ -411,12 +411,31 @@ def test_tortoise_decide_skill_ships_the_workflow():
 def test_welcome_provisioning_pipeline_is_dead_since_1566():
     """#1566 (review P2): welcome.html's provisioning pipeline must STAY dead
     — restoring it would recreate the double-provision surface #1082/#1566
-    guard against. The bridge (runSessionBridge) must contain NO provisioning
-    symbols (the #1730 strip removed them entirely)."""
+    guard against.
+
+    #3501 removed the session bridge itself, so the pipeline is now dead by
+    CONSTRUCTION rather than by having had its symbols stripped out of a
+    still-present bridge. The assertion is therefore inverted and widened: the
+    bridge must no longer exist at all, and neither may the provisioning
+    symbols it used to host.
+
+    Pinning the stronger property matters here — the old form
+    (``assert "runSessionBridge" in src``) would now FAIL on the correct
+    implementation, and the tempting "fix" of deleting that line would leave
+    the provisioning symbols themselves unpinned.
+    """
     src = Path("website/welcome.html").read_text()
-    assert "runSessionBridge" in src, "session bridge missing"
+    # Comments in welcome.html name the removed markers to explain #3501, so
+    # the absence checks must run against comment-stripped source.
+    src_code = re.sub(r"<!--.*?-->", "", src, flags=re.S)
+    src_code = re.sub(r"/\*.*?\*/", "", src_code, flags=re.S)
+    src_code = re.sub(r"^[ \t]*//.*$", "", src_code, flags=re.M)
     for dead in ("provisionViaEdgeFunction", "waitForProvisioning",
-                 "revealKeyOnce", "claimStatusGuard"):
-        assert dead not in src, f"provisioning symbol {dead} must not exist"
+                 "revealKeyOnce", "claimStatusGuard",
+                 "runSessionBridge"):
+        assert dead not in src_code, (
+            f"{dead} must not exist — the provisioning surface is dead "
+            "(#1566) and its host bridge was removed in #3501"
+        )
 
 

@@ -11,6 +11,14 @@ redirect lands on the dashboard LOGIN screen).
 
 Pure static text assertions: no browser, no network. Source files, not bundles,
 so regex anchoring to declaration patterns is reliable.
+
+⚠️ THIS MODULE PINS A DESIGN THAT IS BEING RETIRED (#3501). The parent-domain
+cookie is a REVERSAL, not a fallback: it is JavaScript-readable by construction,
+which is the property #3501 exists to remove. This suite stays green for the
+pages not yet migrated, and each migration must REMOVE its page from `PAGES`
+rather than delete its assertions — that way the remaining legacy surface is
+always listed explicitly, and the end state (an empty `PAGES`) doubles as the
+"no page is on the legacy bridge" proof. See #3559 for the migration backlog.
 """
 
 from __future__ import annotations  # noqa: I001
@@ -27,7 +35,18 @@ OAUTH = REPO_ROOT / "tortoise" / "oauth.py"
 PAGES = [
     REPO_ROOT / "website" / "signup.html",
     REPO_ROOT / "website" / "signin.html",
-    REPO_ROOT / "website" / "welcome.html",
+    # welcome.html is NOT here: #3501 migrated it off the cross-subdomain
+    # bridge entirely. It no longer loads supabase-session.js, no longer
+    # reads a JavaScript-visible session, and delegates the auth decision to
+    # `functions/welcome.ts`. Its EXCLUSION from this adapter-compatibility
+    # set is the point — asserting the old wiring on it would pin the very
+    # design #3501 removed.
+    #
+    # signup.html / signin.html / the dashboard are still on the legacy bridge
+    # because they are still being migrated: see #3559. When each lands, it
+    # moves out of this list and into tests/test_no_legacy_token_path.py, which
+    # asserts absence for the migrated surfaces.
+    #
     # #1511: the dashboard loads the shared script + gate helpers (its gate
     # never calls createTortoiseSupabaseClient — the client is built in
     # main.jsx — so the wiring assertion below relaxes the factory check for
@@ -391,7 +410,12 @@ def test_adapters_share_size_guard_and_localhost_handling() -> None:
 
 def test_all_tortoise_pages_wire_the_shared_bridge() -> None:
     """A dropped script tag or an unwired page passes the constant checks but
-    silently returns the login-wall bug — assert the wiring directly."""
+    silently returns the login-wall bug — assert the wiring directly.
+
+    Scope is the set of pages STILL on the cross-subdomain bridge (see the
+    PAGES comment). welcome.html left this set in #3501; its absence from the
+    bridge is pinned by tests/test_no_legacy_token_path.py instead.
+    """
     for page in PAGES:
         text = _read(page)
         assert 'src="/assets/supabase-session.js"' in text, (
