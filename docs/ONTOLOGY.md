@@ -25,10 +25,12 @@ doc_status: live
 >   `startedAt`; Event's transaction-time start is `capturedAt`.
 > - §4.7 (correction): Point supersession is `status='superseded'` — the
 >   `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do
->   not distinguish the two. §4.7's `validFrom` start is ⚠️ (populated only by
->   date-carrying write paths; **absent ⇒ open start**), and `when` documented
->   as the occurrence-date input that fills `validFrom` on the commit path, not
->   a second slot.
+>   not distinguish the two. §4.7's `validFrom` start is ⚠️ (populated by the
+>   date-carrying write paths — hosted commit `when`; mining W-4 session date —
+>   but the legacy mining W-4 post-pass falls back to the **wall clock** when the
+>   session carries no date, so a clock-stamped start is a real, reachable write;
+>   **absent ⇒ open start**), and `when` documented as the occurrence-date input
+>   that fills `validFrom` on the commit path, not a second slot.
 > - §4.7 (correction): the Document column carries explicit per-cell markers,
 >   not "inherits Object" — Document inheritance of the Object column is
 >   **conceptual** (`objectKind: document`); Documents carry `:Document` and not
@@ -56,6 +58,11 @@ doc_status: live
 >   yet on every Event write path); cross-references §4.7.
 > - §12: temporal standards mapping added — `prov:generatedAtTime`/
 >   `prov:invalidatedAtTime`, OWL-Time, and the Graphiti/Zep bi-temporal lineage.
+> - §10.5/§3.1 (correction, sweep): the §10.5 design-decisions row and the §3.1
+>   `CORRECTS` row still described `outdated` as set only by supersession and
+>   gave a four-value status list — corrected to the explicit terminalizing
+>   writes (`supersede_point` / `invalidate_point`) and §5's six-value
+>   vocabulary, with `CORRECTS` framed as the shared replacement marker (§4.7 ‡).
 >
 > **Changelog v3.11 (2026-09-12, issue #3263 — provenance written by construction):**
 > - §3.3: `extractedFrom` cardinality amended **`many→1` → `many→many`**. The
@@ -240,9 +247,9 @@ Each layer answers a different question. All four are live mechanisms.
 | `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
 | `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). Default bidirectional; an agent may declare `unidirectional` for a directed attack (attacker's truth penalizes the target, no back-pressure — #753). **Extraction-emitted NANDs default `unidirectional`** — see extraction policy in the direction-flag note below (#909 §4.3 #5). |
 | `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
-| `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point (supersession). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see supersession semantics — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4282) / `invalidate_point` (sdk.py:4184). |
+| `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point — the shared structural replacement marker (supersession *or* invalidation, §4.7 ‡). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see the shared replacement-edge semantics below — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4282) / `invalidate_point` (sdk.py:4184). |
 
-> **Supersession semantics:** `CORRECTS` is the structural replacement edge. `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + dispose of old's edges per the **restatement-vs-correction policy** (#2421). `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
+> **Supersession / invalidation semantics (the shared `CORRECTS` edge):** `CORRECTS` is the structural replacement edge — both writes below create it, and only `status='superseded'` separates them (§4.7). `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + dispose of old's edges per the **restatement-vs-correction policy** (#2421). `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 >
 > **Structural-edge transfer is journaled + replayable (#2489):** the 2b structural-edge transfer (`extractedFrom` + snapshot-derivable `about*` edges) is journaled as flat `DirectEdgeRepoint` descriptors `{src=old_id, tgt=<replay key>, target_label, edge_type}` emitted **before** the transfer, and replayed by `rebuild_all` pass-2b (delete the pass-2 resurrection at old + create at the final successor). The journaled set is the **snapshot-derivable rel set only** — `extractedFrom`, `aboutSubject`/`aboutObject`/`aboutEvent`/`aboutDocument`/`aboutPoint` (the edges rebuild pass-2 re-creates from a point's immutable `extractedFrom` prop / `aboutEntities` list). `aboutAction` (Action dissolved in Ontology v3.0), `aboutSource`, and `wasDerivedFrom` are never snapshot-recreated → no descriptor (they never resurrect at old; the A10 raw-edge family is out of scope). Keys are label-scoped and resolved via the shared resolver in `projection/edges.py` (`stub_key`/`resolve_structural_target` — Subjects/Sources MERGE by name/url, Documents by name-or-title; never `target.id`). Full `about*` parity additionally depends on #2501 (create_point never live-wires `aboutEntities` — the only lane where 2b sees live `about*` edges is rebuild→supersede→rebuild). The 2b no-self-edge guard (target node == successor) emits a `delete_only` descriptor instead of a transfer. **Pre-fix journal boundary:** descriptors exist only for supersedes journaled post-deploy — a pre-fix journal rebuilt with this consumer replays with no delete-leg, so old's pass-2 resurrection persists (rebuild does NOT repair pre-existing graphs; a #2500-style backfill is out of scope).
 >
@@ -424,7 +431,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
-| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated only by write paths that supply a date (the hosted commit path sets it from the payload `when`); **absent ⇒ open/unbounded start** (`restore_point_at`), not a clock-stamped one. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
+| `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`) falls back to the **wall clock** when the session carries no date, so a clock-stamped start is possible though not the intent; **absent ⇒ open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
 | `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` stamps `now` (no successor ⇒ no contiguity). §4.7 |
 | `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as `status='superseded'` (Point has no `supersededAt`); the `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do **not** distinguish the two. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
@@ -540,7 +547,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
-| start | `validFrom` | `prov:generatedAtTime` | Populated only by write paths that supply a date (the hosted commit path sets it from the payload `when`; §4.1). `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` never **synthesizes** a clock-stamped start, and an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
+| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`, mining.py) falls back to the **wall clock** (`_now()`) when the session carries no `date`/`startedAt`, so a clock-stamped start is a real, reachable write — though not the intent. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start, and an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
 | end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity) |
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
@@ -586,8 +593,10 @@ declared, not built (implementation is tracked separately):
 | txn end | `expiredAt` ✅ | `expiredAt` ❌ | `expiredAt` ❌ | `expiredAt` ❌ † | — | `expiredAt` ❌ |
 | supersession | `status='superseded'` ✅ ‡ | — | `supersededAt` ✅ | — † | — | — |
 
-> **Point valid start is ⚠️, not ✅** — populated only by date-carrying write
-> paths; an absent `validFrom` is an **open start**, and `validFrom` → `createdAt`
+> **Point valid start is ⚠️, not ✅** — populated by the date-carrying write
+> paths, with the legacy mining W-4 post-pass falling back to the wall clock when
+> the session carries no date (a clock-stamped start is reachable, though not the
+> intent); an absent `validFrom` is an **open start**, and `validFrom` → `createdAt`
 > is a *render* fallback (`_render_date`), not a stamp. The open start is why the
 > supersession **end** is conditional too: an undated successor contributes its
 > `createdAt` (fallback chain above), not a `validFrom`, so its overlap with the
@@ -978,7 +987,7 @@ and the invalidate→rebuild→vacuity parity test ships with it.
 |----------|----------|
 | Ontology concept vs implementation detail? | **Derived behavior**, documented here; no new stored entity |
 | Dedicated edge type (DEPENDS_ON)? | **No** — reverse traversal of IMPL/NAND operators is sufficient; a stored DEPENDS_ON edge would duplicate structure and drift |
-| Representation of "potentially invalidated"? | **Elevated posterior variance** (v > 0.04 → contested), not a stored `pointStatus` — statuses are `{live, draft, outdated, archived}`; `outdated` is set only by explicit supersession, never auto-inferred |
+| Representation of "potentially invalidated"? | **Elevated posterior variance** (v > 0.04 → contested), not a stored `pointStatus` — statuses are `{draft, live, retracted, superseded, outdated, archived}` (§5); `outdated` is set only by an explicit terminalizing write (`supersede_point` / `invalidate_point`), never auto-inferred — it does **not** identify a supersession (§4.7) |
 | Terminal claims' posterior after terminalization? | **Decay to vacuity** (0.5, posterior (1,1)) at the terminalizing write + rebuild fold (#2490) — never a frozen pre-terminal posterior; `ep_alpha`/`ep_beta` retained as the sole recovery vector |
 | Interaction with CORRECTS? | CORRECTS is the *structural* replacement; cascading invalidation is the *belief-level* consequence — both fire from the same write (`supersede_point` → `_mark_dirty`) |
 
