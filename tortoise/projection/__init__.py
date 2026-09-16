@@ -2897,10 +2897,15 @@ class FalkorProjection(
         try:
             # #1475: route through db._t_close (when present) so the db's
             # _t_closed flag is set — the GC finalizer must recognize this
-            # client as explicitly closed and stay a strict no-op (a bare
-            # db.close() is a redis-py pool disconnect that leaves the
-            # server + socket intact). Host-mode db (no _t_close) keeps the
-            # plain close.
+            # client as explicitly closed and stay a strict no-op. Note the
+            # installed redislite `FalkorDB.close()` is NOT a bare redis-py
+            # pool disconnect: it shadows that and calls
+            # `self.client._cleanup()`, tearing the server down. `_t_close`
+            # is still the correct entry point here because it is the one
+            # that also drives the flag plus the #3599 owner-record release
+            # (a bare `db.close()` now releases the owner record too — see
+            # `tortoise.FalkorDB.close`). Host-mode db (no _t_close) keeps
+            # the plain close.
             close = getattr(self.db, "_t_close", None) or self.db.close
             close()
         except Exception:
