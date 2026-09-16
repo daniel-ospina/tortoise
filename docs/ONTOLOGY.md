@@ -58,11 +58,12 @@ doc_status: live
 >   yet on every Event write path); cross-references §4.7.
 > - §12: temporal standards mapping added — `prov:generatedAtTime`/
 >   `prov:invalidatedAtTime`, OWL-Time, and the Graphiti/Zep bi-temporal lineage.
-> - §10.5/§3.1 (correction, sweep): the §10.5 design-decisions row and the §3.1
->   `CORRECTS` row still described `outdated` as set only by supersession and
->   gave a four-value status list — corrected to the explicit terminalizing
->   writes (`supersede_point` / `invalidate_point`) and §5's six-value
->   vocabulary, with `CORRECTS` framed as the shared replacement marker (§4.7 ‡).
+> - §10.5/§3.1 (correction, sweep): the §10.5 design-decisions row still
+>   described `outdated` as set only by supersession and gave a four-value
+>   status list; the §3.1 `CORRECTS` row likewise called the shared edge a
+>   supersession. Corrected to the explicit terminalizing writes
+>   (`supersede_point` / `invalidate_point`) and §5's six-value vocabulary,
+>   with `CORRECTS` framed as the shared replacement marker (§4.7 ‡).
 >
 > **Changelog v3.11 (2026-09-12, issue #3263 — provenance written by construction):**
 > - §3.3: `extractedFrom` cardinality amended **`many→1` → `many→many`**. The
@@ -247,7 +248,7 @@ Each layer answers a different question. All four are live mechanisms.
 | `IMPL` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A supports/implies B. Direction is an explicit operator flag — **default bidirectional**, option to declare unidirectional (source→target only). Not inferred from label. |
 | `NAND` | Point → Point | default bidirectional; optional unidirectional | N-ary | Epistemic (EP confidence) | A contradicts B (logically mutual — "A and B can't both be true"). Default bidirectional; an agent may declare `unidirectional` for a directed attack (attacker's truth penalizes the target, no back-pressure — #753). **Extraction-emitted NANDs default `unidirectional`** — see extraction policy in the direction-flag note below (#909 §4.3 #5). |
 | `hasPart` | Point → Point | bidirectional (composition) | N-ary | Structural via operator label | A contains B (parts/whole cascade). |
-| `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point — the shared structural replacement marker (supersession *or* invalidation, §4.7 ‡). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see the shared replacement-edge semantics below — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4282) / `invalidate_point` (sdk.py:4184). |
+| `CORRECTS` | Point → Point | unidirectional | 1→1 | — | New point **corrects/replaces** an outdated point — the shared structural replacement marker (supersession *or* invalidation, §4.7 ‡). Marks target `outdated: true`; edge disposition is **restatement-scoped per #2421** (see the shared replacement-edge semantics below — semantic edges are triaged carry/drop/pend; v1 still transfers, the triage is pending). Created by `supersede_point` (sdk.py:4765) / `invalidate_point` (sdk.py:4654). |
 
 > **Supersession / invalidation semantics (the shared `CORRECTS` edge):** `CORRECTS` is the structural replacement edge — both writes below create it, and only `status='superseded'` separates them (§4.7). `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + dispose of old's edges per the **restatement-vs-correction policy** (#2421). `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 >
@@ -553,7 +554,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
 > copies verbatim into `validFrom` on the same node
-> (`point_props["validFrom"] = point_props["when"]`, hosted_api.py:9461-9484).
+> (`point_props["validFrom"] = pr.point.when`, hosted_api.py:9461-9484).
 > It is the same value under the §4.1 spelling, not a second slot — the
 > pre-v3.12 map grouped them (`validFrom/To + when`) for this reason.
 
