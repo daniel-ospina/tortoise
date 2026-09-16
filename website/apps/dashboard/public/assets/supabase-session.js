@@ -32,7 +32,13 @@
   var COOKIE_DOMAIN = '.premiselabs.co';
   var COOKIE_PATH = '/';
   var EXPIRY_MS = 7 * 24 * 3600 * 1000; // 7 days — #572 parity
-  var SIZE_GUARD = 3800; // encoded bytes; cookie limit is 4096
+  var SIZE_GUARD = 3800; // encoded bytes; strip provider tokens above this
+  // The browser's per-cookie limit is 4096 bytes and an over-limit write is
+  // dropped SILENTLY (no exception, any previous value kept) — the observed
+  // drop boundary is ~4077 encoded bytes. Refusing above it is the honest
+  // signal: storeSession() re-reads and returns false, so the caller keeps the
+  // fragment instead of destroying the only copy of the credential (#3503).
+  var SIZE_CAP = 4077;
 
   var isLocal = function () {
     var h = window.location.hostname;
@@ -106,6 +112,13 @@
         } catch (e) { /* not JSON — leave as-is */ }
         if (encoded.length > SIZE_GUARD + 100) {
           console.warn('sb-tortoise-auth-token session exceeds cookie size cap (' + encoded.length + ' bytes) — session may not bridge subdomains');
+        }
+        if (encoded.length > SIZE_CAP) {
+          // Do NOT write past the browser's limit: the write is a silent no-op
+          // there, so the caller would believe the session was stored. Refuse
+          // and report — storeSession()'s read-back then returns false (#3503).
+          console.error('sb-tortoise-auth-token session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write; the session was NOT stored');
+          return;
         }
       }
       var expires = new Date(Date.now() + EXPIRY_MS).toUTCString();
@@ -331,10 +344,14 @@
       if (pt) session.provider_token = pt;
       var prt = p.get('provider_refresh_token');
       if (prt) session.provider_refresh_token = prt;
-      storeSession(session);
-      // Strip the fragment to prevent supabase-js from redundantly
-      // re-processing the same fragment (which may log console errors).
-      history.replaceState(null, '', window.location.pathname + window.location.search);
+      // Strip the fragment ONLY when the credential is safely stored: when
+      // storeSession() fails the fragment is the ONLY copy left, and erasing
+      // it strands the user on /auth with no credential anywhere (#3503).
+      if (storeSession(session)) {
+        // Strip the fragment to prevent supabase-js from redundantly
+        // re-processing the same fragment (which may log console errors).
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
     } catch (e) { /* best-effort */ }
   })();
 
