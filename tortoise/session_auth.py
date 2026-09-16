@@ -17,12 +17,13 @@ standard, key-rotation-safe path.
 outside the ``_fetch_jwks`` seam) rather than httpx's per-phase timeout, and
 ``prefetch_jwks()`` warms the cache at process start so the first request does
 NOT normally pay the fetch. The warm-up makes its bounded attempt with
-``arm_cooldown=False``: a boot-time blip therefore does not arm the
-request-path cooldown, so the first request still makes its own bounded
-attempt — UNLESS the request-path failure/miss cooldown is already armed (it
-is a module global, so it survives lifespans), in which case that request is
-answered from the cooldown with NO fetch, not with its own attempt. The bound,
-not the warm-up, is the #3284 guarantee, and every 503 carries
+``arm_cooldown=False``: it never arms the request-path cooldown, so a
+boot-time blip cannot arm it; an inherited armed cooldown (it is a module
+global, so it survives lifespans) does short-circuit the warm-up itself, at
+ZERO fetches. The first request still makes its own bounded attempt — UNLESS
+the request-path failure/miss cooldown is already armed, in which case that
+request is answered from the cooldown with NO fetch, not with its own attempt.
+The bound, not the warm-up, is the #3284 guarantee, and every 503 carries
 ``Retry-After``.
 
 Issue #1460: the verifier previously only handled RS256 (`jwk["n"]` KeyError
@@ -215,14 +216,14 @@ class _JWKSCache:
         - Fetch failure / zero-usable-keys / miss (force + kid absent after a
           successful refetch) arm the cooldown (`_last_failure_at`).
         - `force` bypasses the TTL but NOT the cooldown.
-        - ``arm_cooldown=False`` is for the BOOT warm-up (#3284): it makes the
-          bounded attempt but does not arm the request-path cooldown, so a
-          boot-time blip cannot refuse every request for ``_COOLDOWN_S``
-          without trying. The first real request then makes its own (still
-          bounded) attempt — UNLESS that cooldown is already armed (it is a
-          module global, so it survives lifespans), in which case the request
-          is answered from the cooldown with NO fetch. The #3284 guarantee is
-          untouched.
+        - ``arm_cooldown=False`` is for the BOOT warm-up (#3284): it makes its
+          bounded attempt unless an already-armed cooldown short-circuits it
+          first, and it does not arm the request-path cooldown, so a boot-time
+          blip cannot refuse every request for ``_COOLDOWN_S`` without trying.
+          The first real request then makes its own (still bounded) attempt —
+          UNLESS that cooldown is already armed (it is a module global, so it
+          survives lifespans), in which case the request is answered from the
+          cooldown with NO fetch. The #3284 guarantee is untouched.
 
         WHY the returned set was served (fresh fetch vs a stale last-good
         serve) is available from ``get_with_origin``; ``get`` is the thin
@@ -452,18 +453,24 @@ async def prefetch_jwks() -> dict:
     first user request); our cache already had every OTHER property.
 
     ``force=True`` (the #3284 design round): the warm-up PAYS for a fresh key
-    set rather than trusting an inherited, possibly stale in-process cache.
+    set rather than trusting an inherited, possibly stale in-process cache —
+    UNLESS an already-armed cooldown short-circuits it first, at zero fetches
+    (the warm-up READS an inherited cooldown even though it never arms one;
+    see ``transport_error`` below).
 
     ``arm_cooldown=False`` is the load-bearing half (#3284 review P1): a warm-up
     runs milliseconds after boot, exactly when DNS/egress are least ready, so a
     single boot-time blip must not spend the ONE attempt the request path is
     allowed and then refuse every request for ``_COOLDOWN_S`` without trying.
-    The warm-up still makes its bounded attempt; it just does not arm the
-    request-path cooldown, so the first real request makes its own bounded
-    attempt and recovers as soon as the upstream does (the #3284 bound is
-    untouched) — UNLESS the cooldown is already armed (it is a module global,
-    so it survives lifespans), in which case the first real request is
-    answered from the cooldown with NO fetch, not with its own attempt.
+    Not arming the cooldown is not the same as ignoring it: the warm-up READS
+    an inherited one, so it makes its bounded attempt only if that cooldown is
+    not already armed (it is a module global, so it survives lifespans) — an
+    armed one short-circuits the warm-up itself at zero fetches. The warm-up
+    never arms the request-path cooldown, so the first real request makes its
+    own bounded attempt and recovers as soon as the upstream does (the #3284
+    bound is untouched) — UNLESS the cooldown is already armed, in which case
+    the first real request is answered from the cooldown with NO fetch, not
+    with its own attempt.
 
     Deliberately NON-RAISING — the caller runs it as a background task behind
     the listener, and a warm-up must never break boot. The report carries an
