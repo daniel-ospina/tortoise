@@ -12,8 +12,19 @@ This runs BEFORE the deploy, so a missing binding blocks the change instead of
 reaching users. The failure mode being defended against is specifically "deploy
 succeeds, runtime 503s".
 
+WHY THE MANIFEST LIVES IN config/, NOT website/
+-----------------------------------------------
+Because `wrangler pages deploy .` uploads EVERYTHING under `website/`, and
+`.wranglerignore` is NOT honoured by `wrangler pages deploy`. A cycle-4 review
+verified that four ways: wrangler's `pages/validate.ts` uses a hardcoded
+IGNORE_LIST with no ignore-file read; the string `wranglerignore` appears in 0
+files across all locally installed wrangler versions; `wrangler pages deploy
+--help` exposes no include/exclude; and live,
+`https://tortoise.premiselabs.co/.wranglerignore` returns 200 while `apps/` is
+served despite being listed. Anything left under `website/` WILL be published.
+
 Usage:
-    check_pages_bindings.py --manifest website/required-bindings.yml \\
+    check_pages_bindings.py --manifest config/required-bindings.yml \\
         [--account-id <id>] [--api-token <token>] [--json]
 
 Exit codes:
@@ -184,7 +195,7 @@ def fetch_configs(account_id: str, project: str, api_token: str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--manifest", default="website/required-bindings.yml")
+    ap.add_argument("--manifest", default="config/required-bindings.yml")
     ap.add_argument("--account-id", default=os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
     ap.add_argument("--api-token", default=os.environ.get("CLOUDFLARE_API_TOKEN"))
     ap.add_argument("--json", action="store_true", help="machine-readable output")
@@ -215,6 +226,10 @@ def main(argv: list[str] | None = None) -> int:
     missing_required, missing_recommended = evaluate(manifest, configs)
 
     if args.json:
+        # Diagnostics go to STDERR. Emitting them after the document made
+        # `--json` unparseable: `json.loads(stdout)` failed with "Extra data:
+        # line 12 column 1" because the `::warning::` lines and the success line
+        # followed the JSON on stdout. stdout must be exactly one document.
         print(
             json.dumps(
                 {
@@ -225,6 +240,17 @@ def main(argv: list[str] | None = None) -> int:
                 indent=2,
             )
         )
+        for item in missing_recommended:
+            print(
+                f"::warning::binding absent (recommended, code has a default): {item}",
+                file=sys.stderr,
+            )
+        if missing_required:
+            for item in missing_required:
+                print(f"::error::REQUIRED binding missing: {item}", file=sys.stderr)
+            return 1
+        print(f"\u2705 {project}: all required bindings present", file=sys.stderr)
+        return 0
 
     for item in missing_recommended:
         print(f"::warning::binding absent (recommended, code has a default): {item}")
@@ -235,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "\nThe code cannot serve its purpose without these. Bind them on the "
             f"`{project}` Pages project before deploying — see "
-            "website/required-bindings.yml and issue #3616.",
+            "config/required-bindings.yml and issue #3616.",
             file=sys.stderr,
         )
         return 1

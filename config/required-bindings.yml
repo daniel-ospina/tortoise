@@ -34,19 +34,23 @@
 # fixed. That is the intended fail-closed behaviour, not an oversight. (Verified
 # 2026-09-16: preview does carry SESSIONS.)
 #
-# This file is a deploy config, not a public asset: it is listed in
-# website/.wranglerignore so it is not served at
-# https://tortoise.premiselabs.co/required-bindings.yml.
+# This file is a deploy config, not a public asset. It lives in `config/` for
+# that reason: `wrangler pages deploy .` uploads EVERYTHING under `website/`, and
+# `.wranglerignore` is NOT honoured by `wrangler pages deploy` (verified live —
+# https://tortoise.premiselabs.co/.wranglerignore itself returns 200, and
+# `apps/`, though listed, is served). Anything under `website/` WILL be served.
 
 project: premise-labs
 
 bindings:
-  # The session store. Without it every /auth/* and /welcome request answers 503
-  # — the #3616 outage. NOTE: /api/session is NOT in that list, and deliberately
-  # so: its missing-cookie branch returns 401 `not_signed_in` BEFORE the
-  # missing-binding check, so an anonymous request looks healthy whether or not
-  # this binding exists. That ordering is exactly why the outage evaded
-  # detection, and why the deploy probe targets /auth/start instead.
+  # The session store. Without it every /auth/<endpoint> and /welcome request
+  # answers 503 — the #3616 outage. (The /auth PAGE itself is a static asset
+  # rewritten by _middleware.ts, so it is unaffected; only the functions 503.)
+  # NOTE: /api/session is NOT in that list, and deliberately so: its
+  # missing-cookie branch returns 401 `not_signed_in` BEFORE the missing-binding
+  # check, so an anonymous request looks healthy whether or not this binding
+  # exists. That ordering is exactly why the outage evaded detection, and why the
+  # deploy probe targets /auth/start instead.
   - name: SESSIONS
     kind: required
     type: d1_databases
@@ -77,9 +81,9 @@ bindings:
     envs: [production]
     note: >-
       server-side blog/admin writes. The explicit ``503 not_configured`` sites
-      are functions/blog/api/posts/[[path]].ts (2), generate-cover.ts and
-      generate-seo.ts; functions/admin/[[path]].ts reports `unavailable`.
-      functions/blog/_shared/admin-auth.ts also reads it (via `?? ""`).
+      are functions/blog/api/posts/[[path]].ts (2), blog/api/purge.ts,
+      generate-cover.ts and generate-seo.ts; functions/admin/[[path]].ts reports
+      `unavailable`. functions/blog/_shared/admin-auth.ts also reads it (`?? ""`).
 
   # Cover and SEO generation. Absent -> ``503 not_configured``.
   - name: OPENROUTER_API_KEY

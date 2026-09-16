@@ -7,8 +7,8 @@ a checker that always returns [] would have let #3616 ship again.
 
 from __future__ import annotations
 
+import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO / "tools"))
 
 import check_pages_bindings as cpb  # noqa: E402
 
-MANIFEST_PATH = REPO / "website" / "required-bindings.yml"
+MANIFEST_PATH = REPO / "config" / "required-bindings.yml"
 
 
 def _manifest() -> dict:
@@ -270,14 +270,46 @@ PREFLIGHT = "Preflight — required Pages bindings exist"
 PROBE = "Post-deploy — sign-in is actually reachable"
 DEPLOY = "Deploy to Cloudflare Pages (premise-labs project)"
 
-#: Strip `#`-comments from a shell run block. The group-1 alternation keeps a
-#: `#` that is not at a token boundary (e.g. inside a URL fragment) while
-#: removing real comments, including indented ones.
-_BASH_COMMENT_RE = re.compile(r"(?m)(^|[ \t])#[^\n]*")
-
+#: Strip `#`-comments from a shell run block. Quote-aware: a `#` inside single
+#: or double quotes, inside a `${VAR#...}` expansion, or escaped with `\#` is NOT
+#: a comment. A naive `(^|\s)#[^\n]*` regex corrupts quoted text — cycle 4 showed
+#: it reduced `echo 'see issue #3616.'` to `echo 'see issue `, which would turn
+#: any assertion about a quoted token into a false alarm. (Removal-only, so it
+#: could never cause a false PASS, but a fragile guard is still a bad guard.)
 
 def _strip_bash_comments(script: str) -> str:
-    return _BASH_COMMENT_RE.sub(lambda m: m.group(1), script)
+    out: list[str] = []
+    for line in script.splitlines(keepends=True):
+        in_s = in_d = False
+        i = 0
+        cut = len(line)
+        while i < len(line):
+            ch = line[i]
+            if in_s:
+                if ch == "'":
+                    in_s = False
+            elif in_d:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_d = False
+            elif ch == "\\":
+                i += 2
+                continue
+            elif ch == "'":
+                in_s = True
+            elif ch == '"':
+                in_d = True
+            # `#` starts a comment only at a word boundary: start of the line,
+            # or preceded by whitespace. That preserves `a#b`, `${VAR#p}`, and
+            # `http://x/#frag`.
+            elif ch == "#" and (i == 0 or line[i - 1] in " \t"):
+                cut = i
+                break
+            i += 1
+        out.append(line[:cut].rstrip() + ("\n" if line.endswith("\n") else ""))
+    return "".join(out)
 
 
 def _deploy_steps() -> list[dict]:
@@ -316,7 +348,7 @@ def test_the_preflight_checks_the_manifest_in_this_repo() -> None:
     """The step must gate on the checked-in manifest, not a copy of the list."""
     code = _step_code(PREFLIGHT)
     assert "tools/check_pages_bindings.py" in code
-    assert "website/required-bindings.yml" in code
+    assert "config/required-bindings.yml" in code
     assert MANIFEST_PATH.exists()
 
 
@@ -355,11 +387,29 @@ def test_the_probe_asserts_the_right_behaviours_in_CODE_not_comments() -> None:
     assert "session_store_unavailable" in code, "no #3616 diagnostic in the probe"
     assert "/auth/start" in code, "not probing the endpoint that checks SESSIONS first"
     assert "302" in code
-    # The comments must NOT be what satisfies the checks above.
+    # The comments must NOT be what satisfies the checks above. Assert the
+    # stripper behaves, rather than merely "changed something" — cycle 4 showed
+    # the length comparison could pass while stripping nothing useful.
     raw = next(s for s in _deploy_steps() if s.get("name") == PROBE)["run"]
+    assert _strip_bash_comments("# whole line\necho ok\n") == "\necho ok\n"
+    assert _strip_bash_comments("echo ok  # trailing\n") == "echo ok\n"
+    assert _strip_bash_comments("echo 'a # b'\n") == "echo 'a # b'\n"
+    assert _strip_bash_comments('echo "a # b"\n') == 'echo "a # b"\n'
+    assert _strip_bash_comments("x=${V#p}\n") == "x=${V#p}\n"
+    assert _strip_bash_comments("echo http://x/#frag\n") == "echo http://x/#frag\n"
     assert len(_strip_bash_comments(raw)) < len(raw), (
-        "the stripper removed nothing — it is not working"
+        "the real probe block has no comments — the stripper is not being exercised"
     )
+
+
+def test_the_comment_stripper_is_quote_aware() -> None:
+    r"""A naive `(^|\s)#[^\n]*` regex eats quoted text. It removed the `#3616`
+    from `echo 'see issue #3616.'`, which is a REAL line in the probe's 503
+    diagnostic — so any assertion about a quoted token would false-alarm."""
+    assert _strip_bash_comments("echo 'see issue #3616.'\n") == "echo 'see issue #3616.'\n"
+    assert _strip_bash_comments('echo "see #42"\n') == 'echo "see #42"\n'
+    # A real trailing comment is still removed.
+    assert _strip_bash_comments("echo x # note\n") == "echo x\n"
 
 
 def test_the_probe_requires_a_302_and_a_pkce_challenge() -> None:
@@ -377,7 +427,7 @@ def test_the_gate_files_select_a_surface_so_their_test_runs() -> None:
     manifest = cs.load_manifest()
     for path in (
         "tools/check_pages_bindings.py",
-        "website/required-bindings.yml",
+        "config/required-bindings.yml",
     ):
         result = cs.select([path], "pull_request", manifest)
         assert result.get("surfaces"), (
@@ -712,6 +762,37 @@ def test_a_non_string_kind_is_a_ValueError_not_a_TypeError(tmp_path) -> None:
         cpb.load_manifest(p)
 
 
+def test_json_output_is_a_single_parseable_document(monkeypatch, capsys) -> None:
+    """`--json` must print exactly one JSON document on stdout.
+
+    Cycle 4 found the `::warning::` lines and the success line followed the JSON
+    on stdout, so `json.loads(stdout)` failed with "Extra data: line 12 column
+    1" — i.e. the flag was not machine-readable. Diagnostics go to stderr.
+    """
+    monkeypatch.setattr(cpb, "fetch_configs", lambda *a, **k: _complete_configs())
+    rc = cpb.main(
+        ["--manifest", str(MANIFEST_PATH), "--account-id", "a",
+         "--api-token", "t", "--json"]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)  # must not raise
+    assert payload["missing_required"] == []
+    assert payload["project"] == "premise-labs"
+    assert rc == 0
+
+
+def test_json_output_still_reports_missing_required_and_exits_1(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cpb, "fetch_configs", lambda *a, **k: {})
+    rc = cpb.main(
+        ["--manifest", str(MANIFEST_PATH), "--account-id", "a",
+         "--api-token", "t", "--json"]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["missing_required"], "a missing binding must appear in the JSON"
+    assert rc == 1
+
+
 def test_a_malformed_success_payload_exits_2_not_1(monkeypatch) -> None:
     """`success: true` with no `result` is could-not-determine (2), not
     binding-missing (1).
@@ -733,3 +814,152 @@ def test_a_malformed_success_payload_exits_2_not_1(monkeypatch) -> None:
     monkeypatch.setattr(cpb.urllib.request, "urlopen", lambda *a, **k: _Resp())
     with pytest.raises(RuntimeError, match="malformed payload"):
         cpb.fetch_configs("acct", "proj", "token")
+
+
+# ---------------------------------------------------------------------------
+# The PREFLIGHT is executed too.
+#
+# Cycle 4 showed the preflight could be turned into a no-op with all 49 tests
+# green — e.g. `exit $rc` -> `exit 0`, or replacing the checker invocation with
+# an `echo`. The preflight's ONLY job is to fail the deploy, so a suite that
+# cannot tell it from `echo` is not testing the gate at all. This is the #3616
+# pattern one level up, again.
+# ---------------------------------------------------------------------------
+
+STUB_CHECKER = r"""#!/bin/bash
+# Stub standing in for tools/check_pages_bindings.py. Records each invocation so
+# the harness can prove the checker was ACTUALLY RUN (an `echo` replacement
+# would leave the log empty), then exits with the code from STUB_EXITS.
+dir=$STUB_DIR
+n=$(cat "$dir/checker_calls" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$dir/checker_calls"
+echo "STUB_CHECKER_INVOKED:$n"
+exits="$STUB_EXITS"
+i=1
+code=""
+for e in $exits; do
+  if [ "$i" -eq "$n" ]; then code=$e; break; fi
+  i=$((i+1))
+done
+[ -z "$code" ] && code=$(echo "$exits" | awk '{print $NF}')
+exit "$code"
+"""
+
+
+def _preflight_script(tmp_path: Path) -> Path:
+    """Extract the real Preflight run block with only these rewrites:
+      - the checker path -> the stub on PATH
+      - 3 attempts -> 3, sleep 10 -> sleep 0 (so failures are fast)
+    The `rc=$?` capture, the `&& rc=0 && break` idiom, the no-sleep-on-last
+    -attempt guard and `exit $rc` are all left exactly as shipped.
+    """
+    step = next(s for s in _deploy_steps() if s.get("name") == PREFLIGHT)
+    run = step["run"]
+    rewritten = (
+        run.replace("python3 tools/check_pages_bindings.py", "check_stub")
+        .replace("python3 -m pip install --quiet 'pyyaml==6.0.3'", ":")
+        .replace("sleep 10", "sleep 0")
+    )
+    assert "exit $rc" in rewritten, "the preflight no longer propagates its exit code"
+    assert "check_stub" in rewritten, "the checker invocation was not substituted"
+    p = tmp_path / "preflight.sh"
+    p.write_text(rewritten, encoding="utf-8")
+    return p
+
+
+def _run_preflight(tmp_path: Path, exits: str) -> tuple[int, str, int]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (tmp_path / "bin" / "check_stub").write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    stem = tmp_path / "check_stub_impl"
+    stem.write_text(STUB_CHECKER, encoding="utf-8")
+    stem.chmod(0o755)
+    (bin_dir / "check_stub").write_text(
+        f'#!/bin/bash\nexec "{stem}"\n', encoding="utf-8"
+    )
+    (bin_dir / "check_stub").chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "STUB_EXITS": exits,
+    }
+    r = subprocess.run(
+        ["bash", "-e", str(_preflight_script(tmp_path))],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    calls_file = tmp_path / "checker_calls"
+    calls = int(calls_file.read_text()) if calls_file.exists() else 0
+    return r.returncode, r.stdout + r.stderr, calls
+
+
+@pytest.mark.parametrize(
+    ("exits", "want_rc", "want_calls"),
+    [
+        ("0 0 0", 0, 1),      # healthy: one call, done
+        ("1 1 1", 1, 3),      # a REQUIRED binding is absent -> still fails
+        ("2 2 0", 0, 3),      # transient API failure -> retry saves the deploy
+        ("2 2 2", 2, 3),      # API down -> fail closed with the right code
+    ],
+)
+def test_the_preflight_shell_behaves_correctly(
+    tmp_path, exits: str, want_rc: int, want_calls: int
+) -> None:
+    rc, out, calls = _run_preflight(tmp_path, exits)
+    assert rc == want_rc, f"exits={exits!r} rc={rc} want={want_rc}\n{out}"
+    assert calls == want_calls, f"exits={exits!r} checker calls={calls} want={want_calls}"
+
+
+def test_the_preflight_actually_invokes_the_checker(tmp_path) -> None:
+    """The anti-neutering assertion.
+
+    Replacing the checker invocation with an `echo` (or `exit 0`) leaves every
+    source-level string in place; only counting invocations catches it.
+    """
+    _rc, _out, calls = _run_preflight(tmp_path, "0 0 0")
+    assert calls >= 1, (
+        "the preflight never invoked the checker — it can be turned into a no-op "
+        "that passes every other test"
+    )
+    assert "STUB_CHECKER_INVOKED:1" in _out
+
+
+def test_the_preflight_does_not_sleep_after_its_last_attempt(tmp_path) -> None:
+    """A genuinely-missing binding must not cost 3 x sleep before failing."""
+    step = next(s for s in _deploy_steps() if s.get("name") == PREFLIGHT)
+    code = _strip_bash_comments(step["run"])
+    assert "sleep" in code, "no retry delay at all"
+    assert "[ \"$attempt\" -lt 3 ] && sleep" in code, (
+        "the retry sleeps unconditionally, including after the final attempt"
+    )
+
+
+def test_the_probe_does_not_sleep_after_its_last_attempt() -> None:
+    code = _step_code(PROBE)
+    assert '[ "$attempt" -lt 10 ] && sleep' in code, (
+        "the probe sleeps after its final attempt"
+    )
+
+
+def test_the_manifest_is_not_inside_the_pages_upload_root() -> None:
+    """`wrangler pages deploy .` uploads ALL of `website/`.
+
+    `.wranglerignore` is NOT honoured by `wrangler pages deploy` (verified four
+    ways in cycle 4, including a live 200 on
+    https://tortoise.premiselabs.co/.wranglerignore). So any file left under
+    `website/` is published — which is why the manifest lives in `config/`.
+    A future move back under `website/` would silently publish the binding
+    inventory and the D1 id.
+    """
+    assert MANIFEST_PATH.exists(), f"manifest missing: {MANIFEST_PATH}"
+    assert MANIFEST_PATH.parent.name == "config", (
+        f"the manifest is at {MANIFEST_PATH} — anything under website/ is served "
+        "publicly by wrangler pages deploy"
+    )
+    assert "required-bindings" not in [
+        p.name for p in (REPO / "website").glob("required-bindings*")
+    ]
