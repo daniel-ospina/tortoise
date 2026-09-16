@@ -201,15 +201,92 @@ function environment(overrides = {}) {
 async function run(fnText, env) {
   let result = null
   let error = null
-  try {
-    result = await build(fnText, env)(REPO)
-  } catch (e) {
-    error = e
-  }
-  // P1-A (cycle 10): drain ONE macrotask so a detached (setTimeout/`0`)
-  // side-effect lands inside this run's assertion window, not after it.
-  await new Promise((r) => setTimeout(r, 0))
+  await withDrainedTimers(async () => {
+    try {
+      result = await build(fnText, env)(REPO)
+    } catch (e) {
+      error = e
+    }
+  })
   return { result, error }
+}
+
+// ── draining the debounce window, not one tick ──────────────────────────────
+// A single 0 ms macrotask does NOT drain a debounce. Any `setTimeout(fn, 1+)` or
+// an ordinary 50-300 ms React debounce lands AFTER the assertion window, so a
+// DEFERRED write — the aliased-write forge, scheduled instead of immediate —
+// reads GREEN. The previous one-macrotask drain here had the same hole the
+// measured forge in refreshOnboardingExec.test.js demonstrated (7/7 green on a
+// 50 ms-deferred `completed_steps` write).
+//
+// So drain VIRTUAL time instead of racing the wall clock: install a queue-backed
+// `setTimeout` for the duration of the run and run its callbacks to quiescence (a
+// callback that schedules another extends the drain). A timer scheduled beyond
+// DEBOUNCE_BUDGET_MS of virtual time FAILS the test loudly — truncating the drain
+// silently is exactly the false PASS being removed.
+const DEBOUNCE_BUDGET_MS = 1000
+const MAX_DRAIN_CALLBACKS = 10_000
+
+function installVirtualTimers() {
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const setImmediateFn = globalThis.setImmediate
+  const queue = []
+  let now = 0
+  let handle = 0
+  globalThis.setTimeout = (cb, delay = 0, ...args) => {
+    queue.push({ handle: ++handle, at: now + Math.max(0, Number(delay) || 0), cb, args })
+    return handle
+  }
+  globalThis.clearTimeout = (h) => {
+    const i = queue.findIndex((t) => t.handle === h)
+    if (i >= 0) queue.splice(i, 1)
+  }
+  return {
+    restore() {
+      globalThis.setTimeout = realSetTimeout
+      globalThis.clearTimeout = realClearTimeout
+    },
+    async drain() {
+      for (let ran = 0; ; ran++) {
+        // `setImmediate` is deliberately NOT stubbed: it drains the whole
+        // microtask queue, so an await continuation that schedules a timer is
+        // visible to the next pass.
+        await new Promise((r) => setImmediateFn(r))
+        if (queue.length === 0) return
+        let next = 0
+        for (let i = 1; i < queue.length; i++) {
+          if (queue[i].at < queue[next].at ||
+              (queue[i].at === queue[next].at && queue[i].handle < queue[next].handle)) next = i
+        }
+        const t = queue[next]
+        if (t.at > DEBOUNCE_BUDGET_MS) {
+          throw new Error(
+            `a timer scheduled at ${t.at} ms is beyond the ${DEBOUNCE_BUDGET_MS} ms drain budget — ` +
+            'the debounce window is not covered, so a deferred forge would read green')
+        }
+        if (ran >= MAX_DRAIN_CALLBACKS) {
+          throw new Error(`the drain ran ${MAX_DRAIN_CALLBACKS} callbacks without quiescing`)
+        }
+        queue.splice(next, 1)
+        now = t.at
+        t.cb(...t.args)
+      }
+    },
+  }
+}
+
+async function withDrainedTimers(fn) {
+  const timers = installVirtualTimers()
+  try {
+    return await fn()
+  } finally {
+    try {
+      await timers.drain()
+    } finally {
+      timers.restore()
+    }
+  }
 }
 
 // Every setBranchLists call in these paths is the stale-safe UPDATER form; the
