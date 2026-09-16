@@ -170,9 +170,11 @@ test('#2325 (review P2): labels never exceed the server\'s 64-char clamp, and th
 // above the lede "your agent isn't connected yet" — the headline said the
 // opposite of the state. The overrides are pure logic, so they are unit-tested
 // here instead of pinned by a source grep.
-test('#2912: wizardStageLabel names the stage, with the org-holding and paused overrides', () => {
-  // the plain case: the step's own label, for every step
+test('#2912 + #3428: wizardStageLabel names the stage, with org-holding, paused and not-connected overrides', () => {
+  // the plain case: the step's own label, for every step EXCEPT step 3, whose
+  // own label is a connection CLAIM (asserted separately below).
   for (const [i, s] of WIZARD_STEPS.entries()) {
+    if (i === 3) continue
     assert.equal(wizardStageLabel(i), s.label, `step ${i} label`)
   }
   // step 0 on an org-holding account is a read-only summary
@@ -184,9 +186,31 @@ test('#2912: wizardStageLabel names the stage, with the org-holding and paused o
   // the paused reconnect: "You're all set" would contradict the step
   assert.equal(wizardStageLabel(3, { paused: true }),
     'Setup paused — your agent is not connected yet')
-  assert.equal(wizardStageLabel(3), "You're all set")
+  // #3428/#2937 (lane B3): "You're all set" is a harness-connected CLAIM, and
+  // the DELETED human writer used to manufacture it from a click. Step 3 may
+  // only say it on a server-observed connection. The default is the honest
+  // understatement (fail-honest), so a caller that forgets `connected` can
+  // never claim a connection we did not observe.
+  assert.equal(wizardStageLabel(3), 'Not connected yet')
+  assert.equal(wizardStageLabel(3, { connected: false }), 'Not connected yet')
+  assert.equal(wizardStageLabel(3, { connected: true }), "You're all set")
+  // review cycle 4 (item 13): the build fork's body says "we can't tell it's
+  // connected yet", so its heading must not out-claim it with the categorical
+  // "Not connected yet". The build arm is explicit; the self fork is unchanged.
+  assert.equal(wizardStageLabel(3, { buildFork: true }), 'No connection observed yet')
+  assert.equal(wizardStageLabel(3, { buildFork: false }), 'Not connected yet')
+  // `connected` and `paused` still outrank the fork arm
+  assert.equal(wizardStageLabel(3, { buildFork: true, connected: true }), "You're all set")
+  assert.equal(wizardStageLabel(3, { buildFork: true, paused: true }),
+    'Setup paused — your agent is not connected yet')
+  // a server connection OUTRANKS a local skip (#2361 r3): a connected org that
+  // pressed Skip must read as connected, never as paused. The two flags must
+  // not compose into the false reading.
+  assert.equal(wizardStageLabel(3, { connected: true, paused: true }), "You're all set")
   // paused only applies to the done step
   assert.equal(wizardStageLabel(2, { paused: true }), WIZARD_STEPS[2].label)
+  // `connected` is likewise a step-3-only override
+  assert.equal(wizardStageLabel(2, { connected: true }), WIZARD_STEPS[2].label)
   // the three step-2 ledes are distinct — the header says what each fork does
   assert.equal(WIZARD_STEPS[2].sub, 'Pick which harness to connect.')
   assert.ok(!/Connect Tortoise to your Organization/.test(WIZARD_STEPS[2].sub))

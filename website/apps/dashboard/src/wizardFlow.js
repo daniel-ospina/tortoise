@@ -62,8 +62,33 @@ export const WIZARD_STEPS = Object.freeze([
 //     "You're set up, but your agent isn't connected yet" contradicted itself.
 // Pure + exported so it is unit-tested (wizardFlow.test.js) instead of pinned
 // by a source-text grep.
-export function wizardStageLabel(step, { hasOrg = false, paused = false } = {}) {
-  if (step === 3 && paused) return 'Setup paused — your agent is not connected yet'
+export function wizardStageLabel(step, { hasOrg = false, paused = false, connected = false, buildFork = false } = {}) {
+  if (step === 3) {
+    // A real connection OUTRANKS the local skip (#2361 r3): connect → Back →
+    // Skip must still read as connected, never as paused. Checked first so the
+    // two flags cannot compose into the false "paused" reading.
+    if (connected) return WIZARD_STEPS[3]?.label ?? ''
+    if (paused) return 'Setup paused — your agent is not connected yet'
+    // #3428/#2937 (lane B3): step 3's own label ("You're all set") is itself a
+    // harness-connected CLAIM — the very claim the deleted human writer used to
+    // manufacture. With the writer gone, a user who finishes the connect step
+    // without a server-observed connection lands here with `paused` false, and
+    // the old code greeted them with "You're all set". `connected` is the
+    // caller's server-derived `serverHarnessConnected`.
+    //
+    // The default is deliberately `false` (fail-honest): a caller that forgets
+    // to pass `connected` understates the connection, which is the harmless
+    // direction — it can never claim a connection we did not observe.
+    //
+    // review cycle 4 (item 13): the build fork's body admits uncertainty
+    // ("we can't tell it's connected yet" — its step 2 is the REST call, which
+    // files no onboarding step), so the categorical "Not connected yet" would
+    // out-claim it. The build arm states what was OBSERVED instead of asserting
+    // the connection is absent; the self fork keeps its label (pinned by the
+    // lane's e2e evidence).
+    if (buildFork) return 'No connection observed yet'
+    return 'Not connected yet'
+  }
   if (step === 0 && hasOrg) return 'Your Organization'
   return WIZARD_STEPS[step]?.label ?? ''
 }
