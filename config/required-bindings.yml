@@ -1,0 +1,141 @@
+# Required Cloudflare Pages bindings for the `premise-labs` project.
+#
+# WHY THIS FILE EXISTS (issue #3616)
+# ---------------------------------
+# #3501 shipped the BFF auth re-architecture without the `SESSIONS` D1 binding
+# that the code requires. The deploy succeeded, the workflow went green, and
+# production `/auth/start` returned `503 session_store_unavailable` for every
+# visitor — a total sign-in outage. The requirement had been written in a PR
+# body, which is not a gate.
+#
+# This file makes the requirement machine-readable so `deploy-pages.yml` can
+# verify it BEFORE deploying and fail loudly if it is unmet.
+#
+# Field meanings
+# --------------
+#   kind: required      the code cannot serve its purpose without this binding.
+#                       Preflight FAILS the deploy when it is absent.
+#         recommended   the code has a correct in-source default (or no caller
+#                       yet), so absence is not an outage — preflight WARNS.
+#   type: d1_databases | env_vars | kv_namespaces | r2_buckets
+#   envs: which deployment configs must carry it.
+#
+# Keep this list honest: adding a binding here without adding it to the project
+# will red the deploy, which is the intended direction of failure.
+#
+# SCOPE: this is the `premise-labs` Pages project only (the `tortoise-dashboard`
+# project is deployed by the `deploy-dashboard` job and is not covered).
+#
+# WHY `preview` IS GATED TOO, even though deploy-pages.yml only deploys
+# production (`--branch=main`): a preview environment that cannot sign anyone in
+# is a broken preview, and the whole point of this gate is to catch that class of
+# gap before launch rather than after. The consequence is deliberate and worth
+# stating plainly — a preview-only gap blocks production deploys until it is
+# fixed. That is the intended fail-closed behaviour, not an oversight. (Verified
+# 2026-09-16: preview does carry SESSIONS.)
+#
+# This file is a deploy config, not a public asset. It lives in `config/` for
+# that reason: `wrangler pages deploy .` uploads EVERYTHING under `website/`, and
+# `.wranglerignore` is NOT honoured by `wrangler pages deploy` (verified live —
+# https://tortoise.premiselabs.co/.wranglerignore itself returns 200, and
+# `apps/`, though listed, is served). Anything under `website/` WILL be served.
+
+project: premise-labs
+
+bindings:
+  # The session store. Without it every /auth/<endpoint> and /welcome request
+  # answers 503 — the #3616 outage. (The /auth PAGE itself is a static asset
+  # rewritten by _middleware.ts, so it is unaffected; only the functions 503.)
+  # NOTE: /api/session is NOT in that list, and deliberately so: its
+  # missing-cookie branch returns 401 `not_signed_in` BEFORE the missing-binding
+  # check, so an anonymous request looks healthy whether or not this binding
+  # exists. That ordering is exactly why the outage evaded detection, and why the
+  # deploy probe targets /auth/start instead.
+  - name: SESSIONS
+    kind: required
+    type: d1_databases
+    envs: [production, preview]
+    note: >-
+      Opaque session handles + auth_flows. Created 2026-09-16 as
+      tortoise-sessions (id c16d027e-8c66-4f3d-aeda-5772ea54e101).
+      Tables are created at runtime by ensureSchema / ensureFlowTable.
+
+  # Server-to-server Supabase calls (token exchange, refresh, profile lookup).
+  - name: SUPABASE_URL
+    kind: required
+    type: env_vars
+    envs: [production]
+    note: Supabase project URL, used by _shared/auth/supabase.ts.
+
+  - name: SUPABASE_ANON_KEY
+    kind: required
+    type: env_vars
+    envs: [production]
+    note: Public anon key — the BFF exchanges codes/passwords with Supabase.
+
+  # Blog/admin write path. Same failure shape as #3616: without it the blog API
+  # answers ``503 not_configured`` while the deploy stays green.
+  - name: SUPABASE_SERVICE_ROLE_KEY
+    kind: required
+    type: env_vars
+    envs: [production]
+    note: >-
+      server-side blog/admin writes. The explicit ``503 not_configured`` sites
+      are functions/blog/api/posts/[[path]].ts (2), blog/api/purge.ts,
+      generate-cover.ts and generate-seo.ts; functions/admin/[[path]].ts reports
+      `unavailable`. functions/blog/_shared/admin-auth.ts also reads it (`?? ""`).
+
+  # Cover and SEO generation. Absent -> ``503 not_configured``.
+  - name: OPENROUTER_API_KEY
+    kind: required
+    type: env_vars
+    envs: [production]
+    note: blog/api/generate-cover.ts, blog/api/generate-seo.ts.
+
+  # Deliberately NOT required: blog/_shared/cloudflare-purge.ts is a best-effort
+  # cache purge that returns boolean `false` and logs a warning when these are
+  # absent (lines 37-38, 41-42). A missing purge token degrades staleness; it
+  # does not break serving.
+  - name: CF_API_TOKEN
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: Cache purge is best-effort and fail-open by design (functions/blog/_shared/cloudflare-purge.ts:37-38).
+
+  - name: CF_ZONE_ID
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: Cache purge is best-effort and fail-open by design (functions/blog/_shared/cloudflare-purge.ts:37-38).
+
+  # Has a correct in-code default (https://app.premiselabs.co), so absence is
+  # not an outage. Set it explicitly to decouple the redirect target from code.
+  - name: APP_ORIGIN
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: >-
+      Where /welcome redirects a signed-in visitor. Defaults to
+      https://app.premiselabs.co in functions/welcome.ts.
+
+  # Also defaulted in code: `${request origin}/auth/callback`. Setting it
+  # explicitly is required only if the callback ever moves off-origin.
+  - name: AUTH_CALLBACK_URL
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: >-
+      Supabase redirect_to. Defaults to <origin>/auth/callback, which is the
+      colocated-topology decision (ADR-001).
+
+  # Recommended, NOT required: /api/v1/* answers 503 proxy_not_configured
+  # without it, but that proxy has ZERO client callers today (it is scaffolding
+  # for the #3559 client-surface migration). It becomes `required` the moment a
+  # client calls it.
+  - name: API_ORIGIN
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: >-
+      Upstream for the /api/v1 Token Handler proxy. Must be set before #3559
+      lands; today nothing calls the proxy.
