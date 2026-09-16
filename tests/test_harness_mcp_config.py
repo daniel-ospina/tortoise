@@ -243,9 +243,12 @@ class TestCommittedRepoMcpJson:
     Covers all five fields of the entry: `url`, `type`, `headers`, the absence
     of a stdio `env`/`command`/`args`, and no literal token anywhere in the
     file. Reads the file on disk (the committed blob in any clean checkout /
-    CI). A machine-local uncommitted edit to `.mcp.json` is deliberately NOT
-    covered -- that is exactly what the entry's `_comment` tells a self-hoster
-    to make.
+    CI). This class pins what the repo SHIPS, so it is deliberately not
+    override-aware: a self-hoster who follows the entry's `_comment` and points
+    `url` at their own daemon WILL see `test_tortoise_entry_targets_hosted_endpoint`
+    fail locally. That is expected -- the message describes the shipped default,
+    not their tree -- and it is why this pins the shipped file rather than an
+    effective or merged config.
     """
 
     COMMITTED = REPO_ROOT / ".mcp.json"
