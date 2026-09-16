@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions  # noqa: I001
 from tortoise.auth import API_KEY_PREFIXES
+from tortoise.oauth import ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # #984 contract (merged to main): the hosted endpoint always carries the
@@ -296,12 +297,21 @@ class TestCommittedRepoMcpJson:
 
     def test_no_literal_api_key_in_committed_config(self):
         # This file ships to users -- a literal token leaks a credential.
-        # Prefixes come from the minting source of truth so a NEW prefix cannot
-        # silently escape this guard. The scan is over the whole file on
-        # purpose: a key pasted into a `_comment` is the same leak.
+        # The scan covers the whole file on purpose: a token pasted into a
+        # `_comment` is the same leak. Prefixes come from the minting sources of
+        # truth (tenant API keys + OAuth access/refresh tokens) so a family
+        # minted there is covered without editing this test.
         text = self.COMMITTED.read_text(encoding="utf-8")
-        for marker in API_KEY_PREFIXES:
+        for marker in (*API_KEY_PREFIXES, ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX):
             assert marker not in text, (
                 f"literal {marker!r} key material in committed .mcp.json -- "
                 f"keys must stay env-indirect"
             )
+        # Structural backstop: the Authorization header is the only
+        # credential-bearing value in the file, so every `Bearer ` in it must
+        # introduce an env expression. Catches a token family this test -- and
+        # the prefix list above -- has never heard of.
+        assert text.count("Bearer ") == text.count("Bearer ${"), (
+            "committed .mcp.json has a literal Bearer token -- every `Bearer ` "
+            "in a user-shipped config must be followed by a ${VAR} expression"
+        )
