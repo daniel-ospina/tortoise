@@ -61,10 +61,16 @@ ZERO vs NO-SIGNAL
 -----------------
 Every stage carries ``state`` in ``{measured, unavailable, not_measurable}``
 and a ``reason``. A ``0`` is only ever emitted with ``state == "measured"``.
-An unreadable store, a truncating page cap, a window predating a working
-analytics write path, or an org that has never produced memory all yield
-``value: null`` — never a confident zero. This rule is the whole point: a
-scorecard that cannot say "unmeasured" reproduces the bug it was built to fix.
+An unreadable store, a truncating page cap, or an org that has never
+produced memory all yield ``value: null`` — never a confident zero. This rule
+is the whole point: a scorecard that cannot say "unmeasured" reproduces the bug
+it was built to fix.
+
+⚠️ One case the rule CANNOT cover: a window that merely PREDATES the analytics
+write-path repair. Nothing records when the repair landed, so such a window is
+indistinguishable from a window in which no tool call happened — it reports
+``measured 0``, not ``null``. Reconcile a zero against the deploy time before
+citing it. (Same shape: a configured-but-REJECTED credential.)
 
 MEASURABILITY DEPENDS ON REPAIRS OUTSIDE THIS MODULE
 ----------------------------------------------------

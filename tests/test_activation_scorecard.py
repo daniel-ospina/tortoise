@@ -500,22 +500,76 @@ def test_graph_unavailable_is_unavailable_never_zero(client, monkeypatch):
     assert "org_graph_unavailable" in resp.json()["integrity"], resp.json()
 
 
-def test_memory_without_transcript_is_flagged_on_the_response(client):
+def test_memory_without_transcript_flagged_at_the_unit_level():
     """Turn points are written BEFORE extraction, so a session with memory and
     ZERO event points is impossible in production. If it appears, the funnel's
-    premise is broken and the flag must surface — pinned here because a
-    regression that dropped it would otherwise be silent."""
+    premise is broken and the flag must surface — a regression that dropped it
+    would otherwise be silent.
+
+    Unit-level on purpose: an earlier version seeded the graph through the app
+    fixture and was FLAKY (`integrity: []` on a run where the seeded rows were
+    not visible in the fixture's shared temp DB — the #1497/#1950/#2090
+    keepalive-anchor class, caught by review cycle 3's VGATE). The transform is
+    pure, so it is pinned where it is deterministic.
+    """
+    from tortoise.activation_scorecard import stage_counts
+
+    since, until = "2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00"
+    # (session_id, created_at, turn_points, extracted) — memory but no turns.
+    stages, detail = stage_counts([("inv", "2026-09-16T10:00:00+00:00", 0, 1)],
+                                  since, until)
+    assert "memory_without_transcript" in detail["integrity"], detail
+    # The counts still stand — the row is in-window; the flag carries the doubt.
+    assert stages["captured"]["state"] == "measured", stages
+    assert stages["captured"]["value"] == 1, stages
+    # `stored` counts sessions with a TRANSCRIPT (turn points), `memory_produced`
+    # counts sessions with memory — so this row IS the inversion: memory with no
+    # transcript. That is the anomaly, stated explicitly rather than assumed.
+    assert stages["stored"]["value"] == 0, stages
+    assert stages["memory_produced"]["value"] == 1, stages
+    # And it is NOT a window failure, so no stage is withheld.
+    assert stages["memory_produced"]["reason"] is None, stages
+
+    # The healthy shape must NOT raise the flag, or the flag is noise.
+    _, clean = stage_counts([("ok", "2026-09-16T10:00:00+00:00", 3, 1)],
+                            since, until)
+    assert "memory_without_transcript" not in clean["integrity"], clean
+    # ...and a transcript-only session (extracted 0) is also not the inversion.
+    _, no_mem = stage_counts([("nm", "2026-09-16T10:00:00+00:00", 3, 0)],
+                             since, until)
+    assert "memory_without_transcript" not in no_mem["integrity"], no_mem
+
+
+def test_memory_without_transcript_reaches_the_endpoint(client, monkeypatch):
+    """The unit test above pins the flag; this pins that it SURVIVES to the
+    response surface. Graph rows come from a stubbed `_data_sdk`, so there is
+    no shared-DB seeding to race (the flake review cycle 3 caught)."""
     import tortoise.hosted_api as ha
-    proj = ha._make_sdk(namespace=ORG["org_id"])._get_proj()
-    proj.g.query("MERGE (s:Session {id:'inv'}) SET s.created_at=$c",
-                 params={"c": "2026-09-16T10:00:00+00:00"})
-    proj.g.query("MERGE (p:Point {id:'inv_p'}) SET p.pointKind='statement'")
-    proj.g.query(
-        "MATCH (s:Session {id:'inv'}),(p:Point {id:'inv_p'}) MERGE (s)-[:CONTAINS]->(p)")
+    from tortoise.activation_scorecard import FUNNEL_QUERY as _FUNNEL
+
+    class _Res:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    class _G:
+        def query(self, q, params=None):
+            if q is _FUNNEL:
+                # (session_id, created_at, turn_points, extracted): memory, no
+                # transcript — the impossible inversion.
+                return _Res([("inv", "2026-09-16T10:00:00+00:00", 0, 1)])
+            return _Res([("2026-09-16T10:00:00+00:00", 1)])
+
+    class _SDK:
+        def _get_proj(self):
+            class _Proj:
+                g = _G()
+            return _Proj()
+
+    monkeypatch.setattr(ha, "_data_sdk", lambda org: _SDK())
     body = client.get("/v1/activation/scorecard", params=WINDOW).json()
     assert "memory_without_transcript" in body["integrity"], body["integrity"]
-    # The counts still stand — the rows are in-window; the flag carries doubt.
-    assert body["stages"]["memory_produced"]["state"] == "measured", body
+    assert body["stages"]["captured"]["value"] == 1, body
+    assert body["stages"]["captured"]["state"] == "measured", body
 
 
 def test_analytics_unreachable_is_unavailable_never_zero(client, monkeypatch):
@@ -1008,37 +1062,40 @@ class TestCohortGuards:
     def test_redirects_are_not_followed(self):
         """CPython's redirect handler copies request headers to the new origin,
         so following one would hand `Authorization: Bearer <key>` to whatever
-        host answered."""
-        import http.server
-        import threading
+        host answered. Asserted against the HANDLER rather than a live socket:
+        deterministic, and no background thread to perturb neighbouring
+        fixtures (review cycle 3 flagged a `dictionary changed size during
+        iteration` flake in a co-run module)."""
         import urllib.error
 
         from tools.activation_cohort import _no_redirect_opener
 
-        class _Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(302)
-                self.send_header("Location", "https://evil.example/x")
-                self.end_headers()
+        opener = _no_redirect_opener()
+        # `build_opener` keeps only the LAST handler for a protocol, so our
+        # subclass must be the one that answers — not the stdlib default.
+        handlers = [h for h in opener.handlers
+                    if type(h).__name__ == "_RefuseRedirects"]
+        assert handlers, "the refusing handler was not installed"
+        req = urllib.request.Request(
+            "https://api.example/v1/activation/scorecard",
+            headers={"Authorization": "Bearer SECRET"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            handlers[0].redirect_request(
+                req, None, 302, "Found", {}, "https://evil.example/x")
+        assert exc.value.code == 302, exc.value
+        assert "evil.example" in str(exc.value), exc.value
 
-            def log_message(self, *a):
-                pass
+    def test_fetch_scorecard_uses_the_refusing_opener(self):
+        """The handler being correct is not enough — `fetch_scorecard` must
+        actually route through it. Swapping it for `urlopen` would restore the
+        header-copying default."""
+        import inspect
 
-        srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
-        thread = threading.Thread(target=srv.serve_forever, daemon=True)
-        thread.start()
-        try:
-            url = f"http://127.0.0.1:{srv.server_port}/v1/activation/scorecard"
-            req = urllib.request.Request(
-                url, headers={"Authorization": "Bearer SECRET"})
-            with pytest.raises(urllib.error.HTTPError) as exc:
-                _no_redirect_opener().open(req, timeout=5)
-            assert exc.value.code == 302, exc.value
-            assert "evil.example" in str(exc.value)
-        finally:
-            srv.shutdown()
-            srv.server_close()
-            thread.join(timeout=5)
+        from tools import activation_cohort as ac
+
+        src = inspect.getsource(ac.fetch_scorecard)
+        assert "_no_redirect_opener().open(" in src, src
+        assert "urllib.request.urlopen(" not in src, src
 
     def test_duplicate_org_is_rejected(self):
         """A copy-paste duplicate would inflate both the cohort number and its
@@ -1056,7 +1113,10 @@ class TestCohortGuards:
 
     def test_roll_up_arity_mismatch_raises(self):
         from tools.activation_cohort import roll_up
-        with pytest.raises(ValueError):
+        # `match=` is load-bearing: `zip(..., strict=True)` ALREADY raised a bare
+        # ValueError, so asserting only the type would pass with this guard
+        # reverted (mutation-verified by review cycle 3).
+        with pytest.raises(ValueError, match="one entry per org"):
             roll_up(["a", "b"], [None])
 
     def test_duplicate_orgs_cannot_double_count(self):

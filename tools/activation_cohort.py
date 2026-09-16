@@ -86,15 +86,30 @@ def _assert_https(api_base: str) -> None:
     rejects the shapes a prefix test waves through: ``https://`` with no host,
     and ``https://host?x=`` — which would be mangled into
     ``https://host?x=/v1/activation/scorecard``."""
-    parts = urllib.parse.urlsplit(api_base)
-    if parts.scheme != "https" or not parts.netloc:
-        raise SystemExit(
-            f"--api-base must be an https:// URL with a host (got {api_base!r}) "
-            f"— this tool sends tenant API keys")
-    if parts.query or parts.fragment:
+    # A bare `?`/`#` parses to an EMPTY query/fragment, so `parts.query` alone
+    # cannot see it — but `https://host#` still makes the fragment swallow the
+    # joined scorecard path. Test the raw string.
+    if "?" in api_base or "#" in api_base:
         raise SystemExit(
             f"--api-base must not carry a query or fragment (got {api_base!r}) "
             f"— it is joined with the scorecard path")
+    parts = urllib.parse.urlsplit(api_base)
+    # `netloc` is not "has a host": `https://:443` has netloc ':443' and an
+    # EMPTY hostname (the request would then go to localhost:443), and
+    # `https://@` has netloc '@' and hostname None.
+    if parts.scheme != "https" or not parts.hostname:
+        raise SystemExit(
+            f"--api-base must be an https:// URL with a host (got {api_base!r}) "
+            f"— this tool sends tenant API keys")
+    if parts.username is not None or parts.password is not None:
+        raise SystemExit(
+            f"--api-base must not carry credentials (got {api_base!r}) — the "
+            f"tenant key is sent as a bearer token, never in the URL")
+    try:
+        _ = parts.port
+    except ValueError:
+        raise SystemExit(
+            f"--api-base has an invalid port (got {api_base!r})") from None
 
 
 def _validate_key(org_id: str, key: str) -> None:

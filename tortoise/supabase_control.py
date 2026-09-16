@@ -346,6 +346,14 @@ class SupabaseControlPlane:
         # caller's request shape changes.
         by_col: dict[str, list[tuple[str, object]]] = {}
         for col, op, value in filters or []:
+            if col == "and":
+                # `and` is the PostgREST logic-tree key this method itself
+                # writes. A filter on a column of that name would be silently
+                # overwritten by the grouped form — refuse it outright, not
+                # only when it happens to carry several conditions.
+                raise ValueError(
+                    "filter column 'and' collides with the PostgREST logic-"
+                    "tree key used to combine same-column conditions")
             by_col.setdefault(col, []).append((op, value))
         grouped: list[str] = []
         for col, conds in by_col.items():
@@ -353,10 +361,6 @@ class SupabaseControlPlane:
                 op, value = conds[0]
                 params[col] = _encode(op, value)
             else:
-                if col == "and":
-                    raise ValueError(
-                        "filter column 'and' collides with the PostgREST logic-"
-                        "tree key used to combine same-column conditions")
                 grouped.extend(
                     f"{col}.{_encode(op, value, in_logic_tree=True)}"
                     for op, value in conds)
