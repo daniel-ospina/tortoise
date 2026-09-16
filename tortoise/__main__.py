@@ -2850,6 +2850,23 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
     from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
+    # #3615: capture is a DATA-SHARING act, not an authentication act. The
+    # Bearer credential (api_key, already resolved by the caller) authenticates
+    # the upload; it must never *authorize* it — exporting TORTOISE_API_KEY for
+    # the MCP Authorization header must not opt the machine into shipping
+    # transcripts. Explicit consent or nothing (default OFF). Gated here, at
+    # the primitive, so a stale copied hook calling this CLI cannot bypass it.
+    from tortoise.capture_consent import (CAPTURE_DECLINED_HINT,
+                                          capture_consent_enabled,
+                                          record_capture_declined)
+    if not capture_consent_enabled():
+        # Durable + one-time: a stale copied hook discards this stderr
+        # (`2>/dev/null`), so the same notice is also written to
+        # ~/.tortoise/capture-consent-notice and pushed to stderr by the next
+        # interactive command (see `_flush_pending_capture_notice`).
+        record_capture_declined()
+        print(f"capture declined — {CAPTURE_DECLINED_HINT}", file=_sys.stderr)
+        return 1
 
     transcript_path = Path(args.file)
     if not transcript_path.exists():
@@ -2994,6 +3011,21 @@ def _cmd_sessions_import(args) -> int:
     from urllib.error import URLError, HTTPError
 
     from tortoise.session_import import parse_transcript
+    # #3615: this is the SECOND transcript-upload primitive (same
+    # POST /v1/sessions) — it carries the same explicit-consent gate so it
+    # cannot be used as a consent bypass for the first.
+    from tortoise.capture_consent import (CAPTURE_DECLINED_HINT,
+                                          capture_consent_enabled,
+                                          record_capture_declined)
+    if not capture_consent_enabled():
+        # Intent: the gate is FIRST (before the local receipt no-op at the
+        # bottom) because consent is a precondition OF THIS COMMAND, and a
+        # fail-fast refusal has no *import* side effects (no receipt, no parse).
+        # The durable notice mirrors `session capture` (stale hooks discard
+        # stderr; the next interactive command pushes it).
+        record_capture_declined()
+        print(f"import declined — {CAPTURE_DECLINED_HINT}", file=_sys.stderr)
+        return 1
 
     file_path = Path(args.file)
     if not file_path.exists():
@@ -4718,6 +4750,27 @@ def _cmd_doctor(args):
             except Exception as e:
                 results.append(("Graph: health", "❌", str(e)[:60]))
 
+    # 4.6 Session capture consent (#3615) — capture is a DATA-SHARING act and
+    # requires the explicit TORTOISE_CAPTURE opt-in; a lone credential no longer
+    # authorizes it. Surfaced here because `doctor` is a diagnostic surface a
+    # user reaches when capture silently stopped. The glyph is deliberately NOT
+    # ⚠️: capture-off is the privacy-correct DEFAULT, and painting every healthy
+    # install as "1 warn" is the alert-fatigue pattern this migration avoids.
+    from tortoise.capture_consent import (
+        CAPTURE_OPT_IN_ENV,
+        capture_consent_enabled,
+        capture_notice_path,
+    )
+    if capture_consent_enabled():
+        results.append(("Session capture", "✅",
+                        f"explicit consent granted ({CAPTURE_OPT_IN_ENV})"))
+    else:
+        _notice = capture_notice_path()
+        _hint = (f" — migration notice at {_notice}" if _notice.exists() else "")
+        results.append(("Session capture", "ℹ️",
+                        "off (default) — explicit consent not granted; set "
+                        f"{CAPTURE_OPT_IN_ENV}=1 to file sessions{_hint}"))
+
     # 5. MCP server
     mcp_running = False
     try:
@@ -5770,6 +5823,42 @@ def _cmd_key_create(args) -> int:
     return 0
 
 
+#: Commands that run UNATTENDED (session close, index sweeps, MCP serve) or
+#: that are themselves the refusal path. They must stay quiet, and they must
+#: never consume the human-facing #3615 migration notice.
+_CAPTURE_NOTICE_SILENT = frozenset({
+    ("index", None),
+    ("serve", None),
+    ("session", "capture"),
+    ("session", "probe"),
+    ("sessions", "import"),
+})
+
+
+def _flush_pending_capture_notice(args) -> None:
+    """Push the #3615 migration notice to stderr at most once per machine.
+
+    `record_capture_declined` writes the notice whenever a capture is refused —
+    including from a STALE copied hook that swallows the CLI's stderr (`2>/dev/null`),
+    which is exactly the population a breaking change must not migrate silently.
+    A file nobody reads is evidence, not notification: the user's whole view of
+    this change would be "capture quietly stopped", with `tortoise doctor` —
+    which they have no reason to run — as the only consumer. So the next command
+    a human actually runs delivers it, once (stamped separately from the notice
+    file so a machine run cannot consume the human's one sighting).
+    """
+    sub = getattr(args, "session_cmd", None) or getattr(args, "sessions_cmd", None)
+    if (args.cmd, None) in _CAPTURE_NOTICE_SILENT \
+            or (args.cmd, sub) in _CAPTURE_NOTICE_SILENT:
+        return
+    from tortoise.capture_consent import mark_capture_notice_shown, pending_capture_notice
+    text = pending_capture_notice()
+    if not text:
+        return
+    print(text, file=sys.stderr)
+    mark_capture_notice_shown()
+
+
 def main(argv: list[str] | None = None) -> int:
     import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
@@ -6008,7 +6097,11 @@ def main(argv: list[str] | None = None) -> int:
     # tortoise session <subcommand>
     session = sp.add_parser("session", help="Manage Tortoise Cloud sessions")
     session_sp = session.add_subparsers(dest="session_cmd")
-    session_capture = session_sp.add_parser("capture", help="Capture a session from a transcript file")
+    session_capture = session_sp.add_parser(
+        "capture",
+        help="Capture a session from a transcript file "
+             "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
+             "is not consent)")
     session_capture.add_argument("--file", required=True, help="Path to transcript file")
     # #1727 Slice 2 (Task 14, T1-P11): the hook forwards Claude Code's real
     # session_id (idempotency key — re-capture converges to one Session) and
@@ -6046,7 +6139,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Backfill agent sessions from historical transcripts (#1727 Task 15)")
     sessions_sp = sessions.add_subparsers(dest="sessions_cmd")
     sess_import = sessions_sp.add_parser(
-        "import", help="Import a session transcript from a harness store")
+        "import",
+        help="Import a session transcript from a harness store "
+             "(requires TORTOISE_CAPTURE=1 — explicit consent; a credential "
+             "is not consent)")
     sess_import.add_argument("--file", required=True,
                              help="Path to the session transcript (JSONL or text)")
     sess_import.add_argument(
@@ -6137,6 +6233,7 @@ def main(argv: list[str] | None = None) -> int:
     # Idempotent; a no-op for commands that never open an embedded server.
     from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
     install_embedded_signal_cleanup()
+    _flush_pending_capture_notice(args)
     if args.cmd == "rebuild":
         _cmd_rebuild(args)
         return 0

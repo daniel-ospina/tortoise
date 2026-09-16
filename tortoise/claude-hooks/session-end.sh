@@ -16,9 +16,15 @@
 #   #   { "hooks": { "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command",
 #   #       "command": ".claude/hooks/session-end.sh" }] }] } }
 #
-# Requires TORTOISE_API_KEY + TORTOISE_API_URL (hosted) or a local `tortoise`
-# install with hosted capture configured. For a LOCAL-only graph, replace the
-# capture step with: tortoise index --dir ~/.tortoise/docs/conversations/.
+# CAPTURE REQUIRES EXPLICIT CONSENT (#3615): TORTOISE_CAPTURE=1 (truthy:
+# 1/true/yes/on). It is INDEPENDENT of the credential — TORTOISE_API_KEY +
+# TORTOISE_API_URL are the hosted credential/endpoint used to reach the API,
+# and exporting the key for the MCP `Authorization: Bearer` header must NEVER
+# opt the machine into shipping transcripts. With the opt-in absent the capture
+# step is skipped (one-time notice on stderr) and the hook still exits 0; the
+# LOCAL reindex sweep below still runs — it never leaves the machine.
+# For a LOCAL-only graph, replace the capture step with:
+#   tortoise index --dir ~/.tortoise/docs/conversations/.
 #
 # The hook ALWAYS exits 0 — Claude Code must never be blocked by memory
 # capture failing (offline, uninstalled, no transcript).
@@ -82,6 +88,55 @@ PYEOF
 
 [ -s "$TMP" ] || exit 0  # nothing parseable — skip silently
 
+# ── Explicit capture consent (#3615) ─────────────────────────────────────
+# Consent is a separate concept from authentication: a credential is an
+# authentication artifact; capture is data-sharing with a vendor. The opt-in
+# must be explicit and CANNOT be inferred from credential presence. The truthy
+# set here MUST match tortoise/capture_consent.py::capture_consent_enabled
+# (parity pinned by tests/test_session_capture_e2e.py — the bash matrix —
+# and tests/test_capture_consent.py — the Python/CLI side). The bash/CLI
+# duplication is deliberate defense-in-depth: this gate keeps the ambient path
+# from even attempting the upload; the CLI gate stops a STALE copied hook
+# (hooks are copied per-project and never update themselves).
+CAPTURE_ENABLED=0
+# Trim leading/trailing whitespace, then lowercase — mirrors Python's
+# str(...).strip().lower() so the two implementations agree exactly.
+CAPTURE_RAW="${TORTOISE_CAPTURE:-}"
+CAPTURE_RAW="${CAPTURE_RAW#"${CAPTURE_RAW%%[![:space:]]*}"}"
+CAPTURE_RAW="${CAPTURE_RAW%"${CAPTURE_RAW##*[![:space:]]}"}"
+case "$(printf '%s' "$CAPTURE_RAW" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on) CAPTURE_ENABLED=1 ;;
+esac
+
+if [ "$CAPTURE_ENABLED" != "1" ]; then
+  # Non-silent MIGRATION notice for hosts that would have captured under the old
+  # contract (a resolvable credential). A capture-off host (no credential) sees
+  # nothing. Best-effort + non-blocking; never fails the hook. The marker's
+  # CONTENT is the instruction (not an empty stamp) so it is a durable channel
+  # even when hook stderr is not surfaced; the CLI primitive writes the same
+  # file, which is what reaches users whose copied hook is stale and swallows
+  # stderr. The visible stderr line is deliberately NOT gated on the marker's
+  # absence: a stale copied hook makes the CLI write that marker, so a
+  # marker-gated notice was permanently suppressed on precisely the hosts it
+  # targets (solution-verify cycle 2 P1). One quiet line per session close is
+  # the cost of not migrating a breaking change in silence.
+  LEGACY_KEY="${TORTOISE_API_KEY:-}"
+  LEGACY_KEY="${LEGACY_KEY#"${LEGACY_KEY%%[![:space:]]*}"}"
+  LEGACY_KEY="${LEGACY_KEY%"${LEGACY_KEY##*[![:space:]]}"}"
+  if [ -n "$LEGACY_KEY" ] || [ -f "$PWD/.tortoise" ] \
+      || [ -f "${HOME:-/nonexistent}/.tortoise/credentials.json" ]; then
+    NOTICE_MARKER="${HOME:-/nonexistent}/.tortoise/capture-consent-notice"
+    if [ ! -f "$NOTICE_MARKER" ]; then
+      mkdir -p "$(dirname "$NOTICE_MARKER")" 2>/dev/null || true
+      printf '%s\n' \
+        "Tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." \
+        > "$NOTICE_MARKER" 2>/dev/null || true
+    fi
+    printf '%s\n' \
+      "tortoise: session capture is OFF — it now requires explicit consent. Re-enable with TORTOISE_CAPTURE=1 (docs/quickstart-cloud.md)." >&2
+  fi
+fi
+
 # Prefer a local install; fall back to the repo checkout (mirrors session-start.sh).
 TORTOISE_BIN="$(command -v tortoise || true)"
 if [ -z "$TORTOISE_BIN" ]; then
@@ -125,8 +180,10 @@ raise SystemExit(main(['index', 'directory', '$SWEEP_CORPUS', '--metadata']))
   # #1727 (Task 14): harness + the real session_id (idempotency key) pass
   # through to the capture payload — via env (the session id is untrusted
   # shell input; never interpolated into the -c string).
-  TORTOISE_HOOK_SESSION_ID="$SESSION_ID" \
-  "$PYTHON_BIN" -c "
+  # #3615: only when capture consent is explicit (see the gate above).
+  if [ "$CAPTURE_ENABLED" = "1" ]; then
+    TORTOISE_HOOK_SESSION_ID="$SESSION_ID" \
+    "$PYTHON_BIN" -c "
 import sys, os
 sys.path.insert(0, '$TORTOISE_MODULE')
 from tortoise.__main__ import main
@@ -135,6 +192,7 @@ if os.environ.get('TORTOISE_HOOK_SESSION_ID'):
     argv += ['--session-id', os.environ['TORTOISE_HOOK_SESSION_ID']]
 raise SystemExit(main(argv))
 " 2>/dev/null || exit 0
+  fi
 else
   # Round-10 P3: sweep first (capture failure must not disable reindexing).
   # The corpus dir is resolved via session_corpus_dir() (honors
@@ -158,7 +216,10 @@ print(session_corpus_dir())" 2>/dev/null || true)"
   fi
   # #1727 (Task 14, T1-P11): capture with harness + the real session_id
   # (idempotency key — re-POST converges to one Session, one receipt).
-  CAPTURE_ARGS=(--file "$TMP" --harness claude)
-  [ -n "$SESSION_ID" ] && CAPTURE_ARGS+=(--session-id "$SESSION_ID")
-  tortoise session capture "${CAPTURE_ARGS[@]}" 2>/dev/null || exit 0
+  # #3615: only when capture consent is explicit (see the gate above).
+  if [ "$CAPTURE_ENABLED" = "1" ]; then
+    CAPTURE_ARGS=(--file "$TMP" --harness claude)
+    [ -n "$SESSION_ID" ] && CAPTURE_ARGS+=(--session-id "$SESSION_ID")
+    tortoise session capture "${CAPTURE_ARGS[@]}" 2>/dev/null || exit 0
+  fi
 fi
