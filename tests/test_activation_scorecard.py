@@ -23,6 +23,7 @@ cannot reintroduce them:
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -234,6 +235,32 @@ def test_naive_datetime_is_refused_rather_than_assumed_utc():
     assert "unparseable_created_at" in detail["integrity"], detail
 
 
+def test_point_with_no_pointkind_is_memory_produced(client):
+    """Stage 3's predicate is `pointKind IS NULL OR pointKind <> 'event'`, and
+    the NULL branch is the shape extraction actually writes. Without a test for
+    it, replacing the predicate with the known-defective
+    `pointKind IN ['decision','statement']` (the #3555 bug) passed the whole
+    suite — green-lighting the exact defect the code documents."""
+    import tortoise.hosted_api as ha
+    proj = ha._make_sdk(namespace=ORG["org_id"])._get_proj()
+    proj.g.query("MERGE (s:Session {id:'nullkind'}) SET s.created_at=$c",
+                 params={"c": "2026-09-16T10:00:00+00:00"})
+    proj.g.query("MERGE (t:Point {id:'nullkind_t'}) SET t.pointKind='event'")
+    proj.g.query(
+        "MATCH (s:Session {id:'nullkind'}),(t:Point {id:'nullkind_t'}) "
+        "MERGE (s)-[:CONTAINS]->(t)")
+    # A memory point with NO pointKind at all — the production shape.
+    proj.g.query("MERGE (p:Point {id:'nullkind_p'})")
+    proj.g.query(
+        "MATCH (s:Session {id:'nullkind'}),(p:Point {id:'nullkind_p'}) "
+        "MERGE (s)-[:CONTAINS]->(p)")
+
+    stages = _stages(client.get("/v1/activation/scorecard", params=WINDOW))
+    assert stages["captured"]["value"] == 1, stages
+    assert stages["stored"]["value"] == 1, stages
+    assert stages["memory_produced"]["value"] == 1, stages
+
+
 # ── Stage 4: conditioning, allowlist, and the zero/no-signal rule ──────────
 
 def test_recall_is_conditioned_on_lifetime_memory(client, monkeypatch):
@@ -265,6 +292,78 @@ def test_recall_is_conditioned_on_lifetime_memory(client, monkeypatch):
     assert stage["state"] == "measured", body
     assert stage["value"] == 1, stage
     assert body["detail"]["recall_attempted_any"] == 2, body["detail"]
+
+
+def test_recall_measured_zero_is_reported_as_zero(client, monkeypatch):
+    """The suite must exercise the TRUE-ZERO direction too, not only the
+    false-zero direction. Patching `recall_stages` to refuse every zero passed
+    all prior tests, so a regression that treated a real zero as unmeasurable
+    (hiding the actual finding) would have shipped."""
+    import tortoise.supabase_control as sc
+    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 1)  # memory produced
+
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    class _CP:
+        def query(self, *a, **kw):
+            # A tool call, but not a RETRIEVAL tool — so no recall happened.
+            return [{"properties": {"tool_name": "tortoise_health"},
+                     "created_at": "2026-09-16T13:00:00+00:00"}]
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["state"] == "measured", stage
+    assert stage["value"] == 0, stage
+    assert stage["reason"] is None, stage
+
+
+def test_first_memory_at_unparseable_is_unavailable():
+    """A lifetime row whose min(created_at) will not parse must refuse, not
+    fall back to a lower bound."""
+    from tortoise.activation_scorecard import recall_stages
+    stage, detail = recall_stages([], "not-a-date", memory_sessions=1)
+    assert stage["state"] == "unavailable", stage
+    assert stage["value"] is None, stage
+    assert stage["reason"] == "first_memory_at_unparseable", stage
+    assert detail["recall_rows_fetched"] == 0, detail
+
+
+def test_truncated_page_does_not_mask_a_no_memory_org():
+    """The no-lifetime-memory fact comes from the GRAPH, so it is independent of
+    how many analytics rows were fetched. Checking truncation first reported an
+    org with no memory as `unavailable` (a recoverable reporting failure) —
+    putting it in a cohort's `orgs_unavailable` list."""
+    from tortoise.activation_scorecard import recall_stages
+    stage, _ = recall_stages([{}] * 1000, None, truncated=True, memory_sessions=0)
+    assert stage["state"] == "not_measurable", stage
+    assert stage["reason"] == "no_memory_produced_in_lifetime", stage
+    # ...but truncation still refuses when the org DOES have memory.
+    stage, _ = recall_stages([{}] * 1000, "2026-09-16T01:00:00+00:00",
+                             truncated=True, memory_sessions=1)
+    assert stage["reason"] == "analytics_page_cap_truncated", stage
+
+
+def test_properties_as_a_json_string_is_counted(client, monkeypatch):
+    """PostgREST can hand `properties` back as a JSON-encoded string. The
+    `isinstance(props, str)` branch was never exercised."""
+    import tortoise.supabase_control as sc
+    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 1)
+
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+
+    class _CP:
+        def query(self, *a, **kw):
+            return [{"properties": '{"tool_name": "tortoise_recall"}',
+                     "created_at": "2026-09-16T13:00:00+00:00"}]
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+    stage = client.get("/v1/activation/scorecard", params=WINDOW).json()[
+        "stages"]["recall_attempted"]
+    assert stage["state"] == "measured", stage
+    assert stage["value"] == 1, stage
 
 
 def test_unparseable_analytics_timestamp_refuses_the_recall_count(client, monkeypatch):
@@ -396,6 +495,27 @@ def test_graph_unavailable_is_unavailable_never_zero(client, monkeypatch):
         assert stages[name]["value"] is None, stages
         assert stages[name]["reason"] == "org_graph_unavailable"
     assert resp.json()["stages"]["recall_attempted"]["value"] is None
+    # The doubt must reach the RESPONSE surface, not just detail. A regression
+    # that always returned integrity: [] would otherwise pass every test.
+    assert "org_graph_unavailable" in resp.json()["integrity"], resp.json()
+
+
+def test_memory_without_transcript_is_flagged_on_the_response(client):
+    """Turn points are written BEFORE extraction, so a session with memory and
+    ZERO event points is impossible in production. If it appears, the funnel's
+    premise is broken and the flag must surface — pinned here because a
+    regression that dropped it would otherwise be silent."""
+    import tortoise.hosted_api as ha
+    proj = ha._make_sdk(namespace=ORG["org_id"])._get_proj()
+    proj.g.query("MERGE (s:Session {id:'inv'}) SET s.created_at=$c",
+                 params={"c": "2026-09-16T10:00:00+00:00"})
+    proj.g.query("MERGE (p:Point {id:'inv_p'}) SET p.pointKind='statement'")
+    proj.g.query(
+        "MATCH (s:Session {id:'inv'}),(p:Point {id:'inv_p'}) MERGE (s)-[:CONTAINS]->(p)")
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    assert "memory_without_transcript" in body["integrity"], body["integrity"]
+    # The counts still stand — the rows are in-window; the flag carries doubt.
+    assert body["stages"]["memory_produced"]["state"] == "measured", body
 
 
 def test_analytics_unreachable_is_unavailable_never_zero(client, monkeypatch):
@@ -618,8 +738,18 @@ def test_bad_window_is_422(client, params):
 
 
 def test_default_window_is_24h(client):
+    """The name has to be true: `since < until` holds for ANY positive span, so
+    asserting only that would pass with a 7-day default (mutation-verified)."""
+    from datetime import datetime
+
+    from tortoise.activation_scorecard import DEFAULT_WINDOW, MAX_WINDOW
+
+    assert timedelta(hours=24) == DEFAULT_WINDOW
+    assert timedelta(days=90) == MAX_WINDOW
     body = client.get("/v1/activation/scorecard").json()
-    assert body["window"]["since"] < body["window"]["until"]
+    since = datetime.fromisoformat(body["window"]["since"])
+    until = datetime.fromisoformat(body["window"]["until"])
+    assert until - since == timedelta(hours=24), (since, until)
 
 
 # ── The analytics write-path repair ───────────────────────────────────────

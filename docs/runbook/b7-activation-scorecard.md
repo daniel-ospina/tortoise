@@ -13,12 +13,15 @@ aboutObjects: tortoise
 
 ## Why this exists
 
-The beta's success criterion is **activation**, not registration. Before this,
-nothing in the hosted platform could distinguish a session that activated from
-one that merely signed up: `website/apps/dashboard/src/captureStatus.js:23`
-marks a session `active` off the capture **receipt** alone, and
-`analytics.py:114` calls `first_api_call` the "Activation event" — which fires on
-any `POST /v1/*` returning < 400. Both label signup as activation.
+The beta is judged on **activation**, not registration. Before this, nothing
+in the hosted platform could answer *is this session activated?*:
+`website/apps/dashboard/src/captureStatus.js:23` answers a DIFFERENT question —
+*was this captured?* — off the capture **receipt** alone (a receipt proves a
+durable hosted 2xx capture, and it is server-written on purpose; it is not a
+mislabel of anything, it is simply not activation). `analytics.py:114` calls
+`first_api_call` the "Activation event", but it fires on any `POST /v1/*`
+returning < 400 — so a request that stored a transcript and produced no memory
+scores as activation.
 
 ## The definition
 
@@ -102,8 +105,15 @@ naive (no timezone), non-positive, or over-long windows are 422.
 ### Cohort roll-up
 
 The free tier allows one org per person with no invites, so **each tester is
-their own org** and the beta cohort is structurally multi-org. An org-scoped
-endpoint alone reports n=1 — a dogfood metric, not an activation metric.
+their own org** and a cohort is structurally multi-org. An org-scoped endpoint
+alone reports n=1 — a dogfood read.
+
+**This is not a success gate.** The owner withdrew the proposed "≥5 of 10" aha
+bar and the minimum-N requirement on #3497 §7.4 (2026-09-15): *"there should eb
+no number. stop creating bureocracy and focus on shipping and iterating with
+feedback."* Beta exit is shipping-and-iterating. The tool reports a funnel over
+whatever cohort the operator names — there is no N anyone must reach, and no
+rate.
 
 ```bash
 # Run with the PROJECT interpreter (this package requires Python >= 3.12).
@@ -163,8 +173,23 @@ cohort") needs exactly:
    in Supabase `analytics_events` — before the repair every event was appended
    to `~/.tortoise/analytics_fallback.jsonl` on an ephemeral Fly VM and lost.
 
-Until step 3 is observed, `recall_attempted` will still read `unavailable`
-(`analytics_write_path_unconfigured`), and that is the honest answer.
+Until step 3 is observed, `recall_attempted` reads `unavailable`
+(`analytics_write_path_unconfigured`) — the honest answer.
+
+### Two ways a zero here can still mislead
+
+**A configured writer is not a working writer.** The pre-check is a *config*
+probe (URL + a service key), not a liveness probe. A present-but-rejected
+credential (rotated/revoked key, a 4xx from the store) drops every event with no
+fallback and no signal, so a configured-but-dark writer reads as `measured 0`.
+Detectability is #3677 — do not read a post-deploy zero as "no recall happened"
+until `mcp_tool_call` rows are actually observed landing.
+
+**A window predating the repair cannot be told apart from a window with no
+events.** Every event written before the repair is gone (ephemeral disk), and
+nothing records when the repair landed, so a pre-deploy window reports
+`measured 0`. Reconcile against the deploy time before citing a zero that
+straddles it. This is in the payload's `limitations` too.
 
 ## Known limitations
 

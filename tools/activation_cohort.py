@@ -20,6 +20,15 @@ the results. It is deliberately the operator's tool, not a product surface:
 * The output always carries ``cohort_definition``, so the number can never be
   read without its denominator.
 
+IT DOES NOT ENCODE A SUCCESS THRESHOLD
+--------------------------------------
+The owner WITHDREW the proposed ">=5 of 10" aha bar and the minimum-N
+requirement on #3497 section 7.4 (2026-09-15): "there should eb no number. stop
+creating bureocracy and focus on shipping and iterating with feedback." Beta
+exit is shipping-and-iterating, not a statistical gate. So this tool reports a
+FUNNEL over whatever cohort the operator names — never a sample size anyone is
+required to reach, and never a rate.
+
 IT REFUSES TO REPORT AN ACTIVATION RATE
 ---------------------------------------
 ``recall_attempted`` is an ATTEMPT, not an answer — ``mcp_tool_call.status ==
@@ -69,6 +78,46 @@ def _assert_no_activation_claim(payload: dict) -> None:
             stack.extend(node)
 
 
+def _assert_https(api_base: str) -> None:
+    """Refuse a non-https base. The per-org keys are full tenant credentials,
+    so a plain-http base would put them on the wire in cleartext."""
+    if not api_base.lower().startswith("https://"):
+        raise SystemExit(
+            f"--api-base must be https:// (got {api_base!r}) — this tool sends "
+            f"tenant API keys")
+
+
+def _validate_key(org_id: str, key: str) -> None:
+    """Reject a key that cannot go in a header, naming the ORG but never the
+    key. Without this, a key pasted with a trailing newline reaches
+    ``putheader``, which raises ``ValueError: Invalid header value b'Bearer
+    <FULL_KEY>'`` — putting the whole credential into the error output."""
+    if key and all(0x20 < ord(ch) < 0x7F for ch in key):
+        return
+    raise SystemExit(
+        f"--org {org_id}: the key contains a control character or non-ASCII "
+        f"byte (stray newline/whitespace from a secrets file?) — refusing "
+        f"before it reaches a header")
+
+
+def _no_redirect_opener() -> urllib.request.OpenerDirector:
+    """An opener that never follows a redirect.
+
+    ``urlopen``'s default opener FOLLOWS 301/302/303/307/308, and CPython's
+    redirect handler copies every request header to the new origin (it strips
+    only content-length/content-type) — so a redirect would hand
+    ``Authorization: Bearer <tt_key>`` to whatever host answered.
+    """
+
+    class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, f"refusing to follow a redirect to {newurl}",
+                headers, fp)
+
+    return urllib.request.build_opener(_RefuseRedirects)
+
+
 def fetch_scorecard(api_base: str, key: str, since: str | None,
                     until: str | None, timeout: float = 30.0) -> dict:
     """One GET against the org-scoped scorecard. Raises on transport/HTTP error
@@ -83,7 +132,7 @@ def fetch_scorecard(api_base: str, key: str, since: str | None,
         url += "?" + urllib.parse.urlencode(query)
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {key}", "Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _no_redirect_opener().open(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -196,8 +245,11 @@ def main(argv: list[str] | None = None) -> int:
         if "=" not in spec:
             ap.error(f"--org must be ORG_ID=KEY, got {spec!r}")
         org_id, key = spec.split("=", 1)
+        _validate_key(org_id, key)
         orgs.append(org_id)
         keys.append(key)
+
+    _assert_https(args.api_base)
 
     payloads: list[dict | None] = []
     errors: list[str | None] = []
@@ -216,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             errors.append(type(exc).__name__)
             payloads.append(None)
-            print(f"  ! {org_id}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            print(f"  ! {org_id}: {type(exc).__name__}", file=sys.stderr)
 
     report = roll_up(orgs, payloads, errors)
     text = json.dumps(report, indent=2, sort_keys=True)

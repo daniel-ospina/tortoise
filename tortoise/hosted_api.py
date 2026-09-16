@@ -10096,6 +10096,11 @@ async def activation_scorecard(
         if life:
             lifetime = {"first_memory_at": life[0][0],
                         "sessions_with_memory": life[0][1]}
+    except HTTPException:
+        # An authorization/tenancy denial from `_data_sdk` is NOT a graph
+        # outage — swallowing it would convert a 403 into a 200 with
+        # `unavailable` stages, defeating the guard this try block sits under.
+        raise
     except Exception:
         graph_error = "org_graph_unavailable"
         log.warning("activation scorecard graph unavailable (fail-soft): %s",
@@ -10138,11 +10143,15 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
                  event: str, cap: int):
     """Read the analytics rows for the window and fold them into stage 4.
 
-    Returns `(stage_cell, detail)`. Deliberately returns an `unavailable` cell
+    Returns `(stage_cell, detail)`. Deliberately returns a NON-measured cell
     — NEVER a zero — for every case where the store cannot be trusted to be
-    complete: not configured, unreachable, a full page (no offset support on
-    the read helper, so a full page is a lower bound), or no memory has ever
-    been produced (nothing could have been answered from memory).
+    complete. Which of the two non-measured states applies follows the
+    module's vocabulary rule: `unavailable` for the RECOVERABLE failures (not
+    configured, unreachable, a full page — the read helper has no offset
+    support, so a full page is a lower bound), and `not_measurable` for an org
+    that has never produced memory, where there is nothing to recall from and
+    no retry would change it. Conflating those two would accuse a healthy org
+    of failing to report.
     """
     from tortoise.activation_scorecard import (
         analytics_write_path_configured,
@@ -19439,8 +19448,12 @@ def _track_analytics_event(org_id: str, event_name: str,
         "created_at": datetime.now(UTC).isoformat(),
     }
     url = os.environ.get("SUPABASE_URL")
-    key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-           or os.environ.get("SUPABASE_SERVICE_KEY"))
+    # One declaration of the key names (`supabase_control._SERVICE_KEY_ENV`),
+    # not a third hand-rolled lookup — the tuple's whole reason to exist is to
+    # name these env vars once (see #3677's sibling audit).
+    from tortoise.supabase_control import _SERVICE_KEY_ENV
+    key = next((os.environ.get(n) for n in _SERVICE_KEY_ENV
+                if os.environ.get(n)), None)
     if url and key:
         try:
             import httpx

@@ -414,9 +414,15 @@ def analytics_write_path_configured() -> bool:
     """
     import os
 
+    # Function-local import keeps this module import-pure (stdlib only at
+    # module level). The env-name tuple has exactly ONE home — re-declaring it
+    # here is how the analytics write path ended up reading a name the hosted
+    # deployment never sets (#3677).
+    from tortoise.supabase_control import _SERVICE_KEY_ENV
+
     url = os.environ.get("SUPABASE_URL")
-    key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-           or os.environ.get("SUPABASE_SERVICE_KEY"))
+    key = next((os.environ.get(n) for n in _SERVICE_KEY_ENV
+                if os.environ.get(n)), None)
     return bool(url and key)
 
 
@@ -447,11 +453,14 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     rows = list(rows)
     detail["recall_rows_fetched"] = len(rows)
     detail["recall_truncated"] = truncated
-    if truncated:
-        # A full page with no offset support means the count is a lower bound.
-        # A lower bound is not a count: refuse rather than under-report.
-        return _stage(None, "calls", "analytics_page_cap_truncated"), detail
 
+    # ORDER MATTERS: the no-lifetime-memory fact comes from the GRAPH
+    # (`LIFETIME_MEMORY_QUERY`), so it is independent of how many analytics
+    # rows were fetched. Testing truncation first would report an org that has
+    # never produced memory as `unavailable` (a recoverable reporting failure)
+    # whenever it happened to have a full page of calls — the state inversion
+    # this module exists to prevent, and one that would land the org in a
+    # cohort's `orgs_unavailable` list.
     if first_memory_at is None:
         # Distinguish the two reasons `first_memory_at` can be NULL, because
         # they carry opposite meanings. `LIFETIME_MEMORY_QUERY` returns a
@@ -468,9 +477,17 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         return _stage(None, "calls", "no_memory_produced_in_lifetime",
                       state=STATE_NOT_MEASURABLE), detail
 
-    try:
-        memory_at = _parse_iso(first_memory_at, "first_memory_at")
-    except WindowError:
+    if truncated:
+        # A full page with no offset support means the count is a lower bound.
+        # A lower bound is not a count: refuse rather than under-report.
+        return _stage(None, "calls", "analytics_page_cap_truncated"), detail
+
+    # Same coercion the row timestamps get, so both legs accept exactly the
+    # same value shapes (an epoch int is placeable on the timeline; refusing it
+    # here would brick stage 4 with a misleading reason and no retry would fix
+    # it).
+    memory_at = _coerce_created_at(first_memory_at)
+    if memory_at is None:
         return _stage(None, "calls", "first_memory_at_unparseable"), detail
 
     narrow, unparseable, unclassifiable = _count_allowlisted(
@@ -575,7 +592,15 @@ LIMITATIONS: tuple[str, ...] = (
     "MCP dispatch point. A locally-hosted (stdio) MCP server and the REST "
     "recall surface emit no per-call event, so their recall is invisible here.",
     "Analytics history before the write-path repair is unrecoverable "
-    "(forward-only). Windows predating it report unavailable, never 0.",
+    "(forward-only) — the events were written to an ephemeral VM and lost. "
+    "This surface cannot detect a window that predates the repair, so such a "
+    "window reports `measured 0`, not `unavailable`: reconcile against the "
+    "deploy time before citing a zero that straddles it.",
+    "The analytics write path being CONFIGURED is not proof it WORKS. A "
+    "present-but-rejected credential (rotated/revoked key, a 4xx from the "
+    "store) drops every event with no fallback and no signal, so a "
+    "configured-but-dark writer reads as `measured 0`. Detectability is "
+    "tracked in #3677.",
     "Extraction outcome (capture_ok / capture_extractor) is recorded on the "
     "Session but exposed by no read surface (owned by #3520).",
     "The analytics leg's interval is EXCLUSIVE at both ends (created_at gt "

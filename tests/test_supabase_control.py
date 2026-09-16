@@ -1457,6 +1457,75 @@ class TestGithubCredentials:
                                      token_enc="x", org="acme")
 
 
+# ── Real-client request encoding (#3686 review) ─────────────────────────────
+
+class TestRealQueryParamEncoding:
+    """#3686 review: ``query`` builds its query string in a dict keyed by
+    COLUMN, so two conditions on the SAME column overwrote each other —
+    ``created_at gt since`` was silently DROPPED when a ``created_at lt until``
+    followed, and the analytics read lost its lower bound while still reporting
+    a confident count. ``FakeControlPlane`` applies ``filters`` as a list, so no
+    fake-based test could ever catch it; these assert the transmitted params."""
+
+    @staticmethod
+    def _capturing_cp():
+        from tortoise.supabase_control import SupabaseControlPlane
+        cp = SupabaseControlPlane(url="https://x.supabase.co", service_key="k")
+        seen: dict = {}
+
+        class _Resp:
+            status_code = 200
+            content = b"[]"
+
+            def json(self):
+                return []
+
+        class _HTTP:
+            def get(self, url, params=None, headers=None, **kw):
+                seen["params"] = dict(params or {})
+                seen["url"] = url
+                return _Resp()
+
+        cp._http = _HTTP()
+        return cp, seen
+
+    def test_two_conditions_on_one_column_both_survive(self):
+        cp, seen = self._capturing_cp()
+        cp.query("analytics_events",
+                 filters=[("org_id", "eq", "o1"),
+                          ("created_at", "gt", "2026-09-01T00:00:00+00:00"),
+                          ("created_at", "lt", "2026-10-01T00:00:00+00:00")])
+        p = seen["params"]
+        assert p["org_id"] == "eq.o1", p
+        # Collapsed into one AND group — neither bound is left as a bare key.
+        assert "created_at" not in p, p
+        assert p["and"] == (
+            "(created_at.gt.2026-09-01T00:00:00+00:00,"
+            "created_at.lt.2026-10-01T00:00:00+00:00)"), p
+
+    def test_single_condition_columns_keep_the_flat_form(self):
+        cp, seen = self._capturing_cp()
+        cp.query("t", filters=[("a", "eq", 1), ("b", "neq", 2)])
+        assert seen["params"]["a"] == "eq.1", seen["params"]
+        assert seen["params"]["b"] == "neq.2", seen["params"]
+        assert "and" not in seen["params"], seen["params"]
+
+    def test_is_null_and_multi_column_groups_coexist(self):
+        cp, seen = self._capturing_cp()
+        cp.query("t", filters=[("a", "is", None),
+                               ("c", "gt", 1), ("c", "lt", 9),
+                               ("d", "eq", "z")])
+        p = seen["params"]
+        assert p["a"] == "is.null", p
+        assert p["d"] == "eq.z", p
+        assert p["and"] == "(c.gt.1,c.lt.9)", p
+
+    def test_unsupported_op_still_raises(self):
+        cp, _ = self._capturing_cp()
+        with pytest.raises(ValueError):
+            cp.query("t", filters=[("a", "wat", 1)])
+
+
 # ── Fake adapter semantics (query dialect parity) ───────────────────────────
 
 class TestFakeControlPlane:
