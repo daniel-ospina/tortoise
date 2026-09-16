@@ -9,7 +9,8 @@ import {
   HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS,
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
-  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT,
+  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
+  PI_CAPTURE_INSTALL,
   HARNESS_OAUTH, CANONICAL_MCP_URL,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName,
@@ -265,4 +266,37 @@ test('A0 rollback: legacy HARNESS_* exports preserved (archived #1643 wizard + c
   assert.equal(typeof HARNESS_CAPTURE_SUPPORT, 'object')
   // the legacy exports still render a per-harness command for the archived surface
   assert.match(HARNESS_INSTALL.claude(KEY), /claude mcp add/)
+})
+
+// #3575: the capture-INSTALL seam — `HARNESS_CAPTURE_SUPPORT[h] === true` is a
+// capability claim, and it is only honest when the product actually INSTALLS a
+// capture step. These pin the three legs (declared seam ⟺ in-repo artifact ⟺
+// install step) so the Pi false PASS — `pi: true` with no capture install —
+// cannot regress.
+test('#3575: capture support is derived from the seam, and every supported harness installs it', () => {
+  const seamHarnesses = Object.keys(HARNESS_CAPTURE_SEAM)
+  for (const h of HARNESS_ORDER) {
+    assert.equal(
+      HARNESS_CAPTURE_SUPPORT[h],
+      seamHarnesses.includes(h),
+      `${h}: HARNESS_CAPTURE_SUPPORT must equal seam presence (derived, not asserted)`,
+    )
+    if (!HARNESS_CAPTURE_SUPPORT[h]) continue
+    const artifact = HARNESS_CAPTURE_SEAM[h]
+    assert.match(artifact, /^tortoise\//, `${h}: seam artifact must be in-repo`)
+    const install = HARNESS_INSTALL[h](KEY)
+    assert.ok(
+      install.includes(artifact),
+      `HARNESS_INSTALL.${h} must install its declared seam ${artifact}`,
+    )
+  }
+})
+
+test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  assert.match(pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+  assert.match(pi, /\.pi\/agent\/extensions/)
+  // the Memory-sources inline row installs the SAME seam (one shared constant)
+  assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
+  assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
 })

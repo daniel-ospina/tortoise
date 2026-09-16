@@ -2985,8 +2985,8 @@ def _cmd_sessions_import(args) -> int:
     2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
     same content is a no-op (receipt exists ⇒ already imported) — and even a
     re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi REUSES the codex parser (named reuse — pi session
-    JSONL is tree-structured JSONL like codex's, plan P2 Task 15).
+    zero new nodes). pi parses its own record shape (#3667 — it no longer
+    aliases the codex parser, which returned 0 turns for real Pi sessions).
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
@@ -6052,8 +6052,8 @@ def main(argv: list[str] | None = None) -> int:
     sess_import.add_argument(
         "--harness", required=True,
         choices=["codex", "claude-desktop", "desktop", "pi"],
-        help="Harness format to parse (pi reuses the codex parser; "
-             "'desktop' is an alias for claude-desktop)")
+        help="Harness format to parse (each harness has its own record "
+             "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(
         "--session-id", default=None,
         help="Explicit idempotency key (default: content-hash derived)")

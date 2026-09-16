@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -224,3 +225,111 @@ class TestPrintHarnessInstructions:
                     end = i
                     break
             json.loads("\n".join(lines[start : end + 1]))
+
+
+class TestCaptureInstallSeam:
+    """#3575: the capture-INSTALL seam.
+
+    ``HARNESS_CAPTURE_SUPPORT[h] === true`` is a capability claim, and it is
+    only honest when the product actually INSTALLS a capture step. This pins
+    the three legs the claim requires: (a) HARNESS_CAPTURE_SEAM names an
+    in-repo artifact, (b) that artifact is committed, and (c)
+    HARNESS_INSTALL[h] installs it. The #3575 defect was `pi: true` with no
+    (a)/(b)/(c) — a false PASS the user could not falsify.
+    """
+
+    HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
+
+    @classmethod
+    def _src(cls) -> str:
+        return cls.HARNESSES.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _object(src: str, name: str) -> str:
+        """Brace-balanced JS object literal for a harnesses.js const."""
+        idx = src.index(f"export const {name} =")
+        open_brace = src.index("{", idx)
+        depth = 0
+        for j in range(open_brace, len(src)):
+            if src[j] == "{":
+                depth += 1
+            elif src[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[open_brace : j + 1]
+        raise AssertionError(f"unbalanced object literal for {name}")
+
+    def _seam(self) -> dict[str, str]:
+        block = self._object(self._src(), "HARNESS_CAPTURE_SEAM")
+        return dict(re.findall(r"(\w+):\s*'([^']+)'", block))
+
+    @staticmethod
+    def _install_body(install: str, harness: str) -> str:
+        """Slice one harness's arrow-function body out of HARNESS_INSTALL."""
+        m = re.search(rf"\n\s+'?{re.escape(harness)}'?:\s*\((?:key)?\)", install)
+        assert m, f"HARNESS_INSTALL.{harness} not found"
+        tail = install[m.end() :]
+        nxt = re.search(r"\n\s+'?[a-zA-Z][\w-]*'?:\s*\((?:key)?\)", tail)
+        return tail[: nxt.start()] if nxt else tail
+
+    @staticmethod
+    def _constant_text(src: str, name: str) -> str:
+        """Body of an `export const NAME = ...` JS template literal ('' if the
+        constant is not a template literal — e.g. a plain string URL)."""
+        marker = f"export const {name} = `"
+        if marker not in src:
+            return ""
+        start = src.index(marker) + len(marker)
+        return src[start : src.index("`", start)]
+
+    def _expanded_install_body(self, install: str, harness: str) -> str:
+        """The harness's install body with any `${CONST}` it interpolates
+        expanded to that constant's text — so the artifact can live in a
+        shared constant (PI_CAPTURE_INSTALL) and still be pinned here."""
+        body = self._install_body(install, harness)
+        for const in re.findall(r"\$\{([A-Z_][A-Z0-9_]*)\}", body):
+            body += "\n" + self._constant_text(self._src(), const)
+        return body
+
+    def test_pi_install_step_delivers_the_in_repo_capture_extension(self):
+        """#3575 bite: remove the capture step from HARNESS_INSTALL.pi (or the
+        artifact it copies) and this test fails."""
+        install = self._object(self._src(), "HARNESS_INSTALL")
+        pi_install = self._expanded_install_body(install, "pi")
+        assert "tortoise/pi-hooks/tortoise-capture.ts" in pi_install, (
+            "HARNESS_INSTALL.pi no longer installs the in-repo Pi capture extension"
+        )
+        assert ".pi/agent/extensions" in pi_install, (
+            "HARNESS_INSTALL.pi no longer installs the extension into Pi's discovery dir"
+        )
+        artifact = REPO_ROOT / "tortoise" / "pi-hooks" / "tortoise-capture.ts"
+        assert artifact.is_file(), f"seam artifact missing: {artifact}"
+
+    def test_capture_support_is_derived_from_the_seam_not_asserted(self):
+        """The #3575 defect was a hand-written `pi: true`. The supported
+        harnesses must be DERIVED from HARNESS_CAPTURE_SEAM."""
+        block = self._object(self._src(), "HARNESS_CAPTURE_SUPPORT")
+        for harness in ("claude", "pi"):
+            assert re.search(
+                rf"{harness}:\s*CAPTURE_SEAM_HARNESSES\.has\('{harness}'\)", block
+            ), f"HARNESS_CAPTURE_SUPPORT.{harness} must be derived, not asserted"
+        # any literal `true` must also be a declared seam
+        literal_true = set(re.findall(r"(\w[\w-]*):\s*true\b", block))
+        assert literal_true <= set(self._seam())
+
+    def test_every_seam_harness_is_committed_and_installed(self):
+        """The seam map is the general contract the other harnesses can be
+        checked against: declared ⟺ committed ⟺ installed."""
+        src = self._src()
+        seam = self._seam()
+        assert seam.get("pi") == "tortoise/pi-hooks/tortoise-capture.ts"
+        assert seam.get("claude") == "tortoise/claude-hooks/session-end.sh"
+        install = self._object(src, "HARNESS_INSTALL")
+        for harness, artifact in seam.items():
+            assert (REPO_ROOT / artifact).is_file(), (
+                f"HARNESS_CAPTURE_SEAM.{harness} names a missing artifact: {artifact}"
+            )
+            body = self._expanded_install_body(install, harness)
+            assert artifact in body, (
+                f"HARNESS_INSTALL.{harness} does not install its declared seam {artifact}"
+            )

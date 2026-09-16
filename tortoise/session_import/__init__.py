@@ -6,8 +6,10 @@ harness's session store into conversation turns, POSTs to hosted
 receipt only on 2xx (Task 15 acceptance: 403/402/503 ⇒ fail, no receipt,
 honest error; Codex + Desktop parsers idempotent on re-import).
 
-pi REUSES the codex parser (named reuse, pinned by the plan): pi session
-JSONL is a tree-structured JSONL like codex's.
+Each harness has its own record shape (#3667): pi's
+``{"type": "message", "message": {"role": ..., "content": [...]}}`` is NOT
+codex's ``payload`` shape — the codex-parser alias it replaced returned 0
+turns for every real Pi session.
 """
 from __future__ import annotations
 

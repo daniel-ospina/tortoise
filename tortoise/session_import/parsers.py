@@ -16,9 +16,13 @@ Supported stores:
     "role": ..., "content": [{"type": "input_text"/"output_text", "text":
     ...}]}}``; legacy shapes (``user_message`` / ``assistant_message`` with a
     string ``content``) are tolerated. Tool calls / results are skipped.
-  - ``pi``: REUSES the codex parser (named reuse, plan P2 Task 15) — pi
-    session JSONL is a tree-structured JSONL like codex's, so the same
-    record-shape walk applies.
+  - ``pi``: Pi session JSONL (v2/v3 tree). Records are ``{"type":
+    "message", "message": {"role": ..., "content": [...]}}``; every
+    non-message entry (session header, ``model_change``,
+    ``thinking_level_change``, compaction, …) is skipped. #3667: this is a
+    DEDICATED shape branch, not the codex parser the plan aliased it to —
+    the alias matched codex's ``payload`` shape and returned 0 turns for
+    every real Pi session.
   - ``claude-desktop``: Claude project JSONL (``~/.claude/projects/*/
     *.jsonl`` — the same store Claude Desktop and Claude Code share).
     Records are ``{"message": {"role": ..., "content": <str | parts>}}`` —
@@ -57,10 +61,12 @@ def _text_from_parts(parts) -> str:
 
 
 def _walk_codex_records(path: Path, *, role_key: str) -> list[dict]:
-    """Shared JSONL walk for codex-shaped stores.
+    """Shared JSONL walk for the JSONL session stores.
 
     ``role_key`` selects where the message role lives (codex: the payload's
-    ``type == "message"`` record; claude-desktop: the ``message`` sub-object).
+    ``type == "message"`` record; claude-desktop: the ``message`` sub-object
+    of a user/assistant-typed record; pi: the ``message`` sub-object of a
+    ``type == "message"`` record).
     Tolerant of malformed lines (skipped, logged at debug) — a single broken
     line must not fail the whole backfill.
     """
@@ -109,6 +115,13 @@ def _role_content(rec: dict, role_key: str) -> tuple[str | None, object]:
             return None, None
         msg = rec.get("message") or {}
         return msg.get("role"), msg.get("content")
+    if role_key == "pi":
+        # Pi session store (#3667): the message role lives in the `message`
+        # sub-object and the record type is the literal "message".
+        if (rec.get("type") or "") != "message":
+            return None, None
+        msg = rec.get("message") or {}
+        return msg.get("role"), msg.get("content")
     # codex path
     rtype = rec.get("type") or ""
     if rtype == "response_item":
@@ -131,12 +144,14 @@ def parse_codex(path: str | Path) -> list[dict]:
     return _walk_codex_records(Path(path), role_key="payload")
 
 
-# NAMED REUSE of the codex parser (plan P2 Task 15): pi session JSONL is a
-# tree-structured JSONL like codex's — the same parser, ALIASED (not a
-# divergent copy), so idempotency and shape tolerance are inherited. If the
-# pi store ever diverges, split a dedicated pi.py parser here (the CLI
-# dispatch in PARSERS is the single seam).
-parse_pi = parse_codex
+def parse_pi(path: str | Path) -> list[dict]:
+    """Parse a Pi session JSONL (v2/v3 tree) into conversation turns.
+
+    #3667: Pi's shape is ``{"type": "message", "message": {"role": ...,
+    "content": [...]}}`` — a DEDICATED branch, not the codex parser this used
+    to be aliased to (the codex parse matched the ``payload`` shape instead
+    and silently returned 0 turns for every real Pi session)."""
+    return _walk_codex_records(Path(path), role_key="pi")
 
 
 def parse_claude_desktop(path: str | Path) -> list[dict]:
