@@ -337,7 +337,12 @@ class TestInviteCreate:
         r = client.post("/v1/invites",
                         json={"org_id": "team-ghost", "email": "bob@example.com"})
         assert r.status_code == 404
-        assert "Unknown team" in r.json()["detail"]
+        # #3543: the 404 detail now carries the renamed vocabulary (the route
+        # is /v1/organizations/...). The earlier #2391 sweep had classified
+        # these detail strings as programmatic keeps; #3543 renames them so no
+        # user-visible surface mixes `team` and `org`. This assertion is the
+        # co-move, not an incidental edit.
+        assert "Unknown organization" in r.json()["detail"]
 
     def test_email_is_lowercased(self, client, reg):
         _seed_team_with_owner(reg, "team-t")

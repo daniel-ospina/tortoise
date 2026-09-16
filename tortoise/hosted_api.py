@@ -3214,7 +3214,7 @@ async def _session_user_org(request: Request, user: dict) -> dict:
                          _ORG_ADDITIVE_0015_TIER,
                          _ORG_ADDITIVE_BILLING_TIER])
     if row is None:
-        raise HTTPException(status_code=403, detail="Team not found")
+        raise HTTPException(status_code=403, detail="Organization not found")
     # #1828 review P2: a suspended org must 403 on SESSION-authed
     # management reads too — the key-auth lane enforces this in
     # get_current_org; the session lane resolved the org without
@@ -10672,7 +10672,7 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
         if "HTTP 409" in str(e):
             raise HTTPException(status_code=409,  # noqa: B904
                                 detail="Organization name already exists")
-        raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
+        raise HTTPException(status_code=500, detail="Organization creation failed")  # noqa: B904
     return {"org_id": org_id, "graph_name": graph_name,
             "tier": "free", "name": name}
 
@@ -10731,7 +10731,7 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
     except Exception as e:
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
             raise HTTPException(status_code=409, detail="Organization name already exists")  # noqa: B904
-        raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
+        raise HTTPException(status_code=500, detail="Organization creation failed")  # noqa: B904
 
     # #1877 second-model P1: the owner Membership is created INSIDE
     # org_create (rollback-protected — a membership failure tears the Org
@@ -11089,7 +11089,7 @@ async def create_org_graph(org_id: str, body: dict,
         raise HTTPException(status_code=422, detail="name required")
     if key_ctx.get("org_id") != org_id:
         # Cross-org key → 404 (no existence oracle, P1 #6).
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     if key_ctx.get("delegation_depth") == 0 or key_ctx.get("key_id") is None:
         # Minted/unknown key → 403 (one-level-deep: minted keys cannot
         # provision, E2E-4).
@@ -11101,7 +11101,7 @@ async def create_org_graph(org_id: str, body: dict,
                             detail="Missing graphs:create scope")
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     await _provision_preflight(org)
     async with _provision_lock(org_id):
         # Duplicate-active check INSIDE the lock (registry has no unique
@@ -11147,7 +11147,7 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
         raise HTTPException(status_code=403, detail="No membership in team")
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     await _provision_preflight(org)
     async with _provision_lock(org_id):
         existing = _make_sdk(namespace="registry").graph_list(org_id)
@@ -11267,10 +11267,10 @@ async def _apply_graph_recording_override(
     kind='default' row). Unknown graph → 404. Suspended org → 403.
     """
     if key_ctx.get("org_id") != org_id:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     # #1853: suspended orgs locked down (parity with delete_graph's inline
     # check — the dual-auth dependency also 403s, defense-in-depth).
     _ensure_not_suspended(org)
@@ -11384,10 +11384,10 @@ async def _apply_graph_rename(
     suspended org → 403.
     """
     if key_ctx.get("org_id") != org_id:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     if key_ctx.get("key_id"):
         scopes = key_ctx.get("scopes") or []
@@ -11495,10 +11495,10 @@ async def delete_graph(graph_id: str, org_id: str,
     flips deleg=0 on per-graph data surfaces; graph management stays
     owner-class."""
     if key_ctx.get("org_id") != org_id:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     # Auth: key with graphs:delete (or legacy full access) — else the
     # caller is a session user whose membership role must be owner/admin.
@@ -11765,7 +11765,7 @@ async def list_trash(org_id: str,
     await _require_owner_admin_session(user, org_id)
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     sdk = _make_sdk(namespace="registry")
     from tortoise.supabase_control import (
@@ -11800,7 +11800,7 @@ async def restore_trash_graph(request: Request, graph_id: str, org_id: str,
     await _require_owner_admin_session(user, org_id)
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     # The probe+flip run under the per-org sweep lock: the purge sweep
     # holds the SAME lock while it erases an org's tombstones, so a restore
@@ -11966,7 +11966,7 @@ async def trash_graph_points(graph_id: str, org_id: str,
     await _require_owner_admin_session(user, org_id)
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     row = await _graph_row_probe(org_id, graph_id)
     if row is None:
@@ -12061,7 +12061,7 @@ async def list_graphs(org_id: str, user: dict = Depends(get_current_user)):  # n
         raise HTTPException(status_code=403, detail="No membership in team")
     org = await _org_node(org_id)
     if org is None:
-        raise HTTPException(status_code=404, detail="Unknown team")
+        raise HTTPException(status_code=404, detail="Unknown organization")
     _ensure_not_suspended(org)
     sdk = _make_sdk(namespace="registry")
     graphs = sdk.graph_list(org_id)
@@ -12382,7 +12382,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             await _require_owner_admin(user["user_id"], org_id)
             org = org_by_id(get_control_plane(), org_id)
             if org is None:
-                raise HTTPException(status_code=404, detail="Unknown team")
+                raise HTTPException(status_code=404, detail="Unknown organization")
             # #1875: tier gate matches pricing (free=1, solo=1, pro=2,
             # org=∞). Pro capacity = active members + PENDING invitations
             # (the authoritative invitations source — never
@@ -12452,7 +12452,7 @@ async def invite_to_org(body: dict, user: dict = Depends(get_current_user)):  # 
             params={"id": org_id},
         ).result_set
         if not org_row:
-            raise HTTPException(status_code=404, detail="Unknown team")
+            raise HTTPException(status_code=404, detail="Unknown organization")
         org_node = org_row[0][0]
         tier = org_node.get("tier", "free")
         # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Pro →
@@ -14139,7 +14139,7 @@ async def export_org(org_id: str, request: Request,
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
     if org_node is None:
-        raise HTTPException(status_code=404, detail="Team not found")
+        raise HTTPException(status_code=404, detail="Organization not found")
     if deleted_at:
         raise HTTPException(status_code=410, detail="Team is scheduled for deletion")
 
@@ -14875,7 +14875,7 @@ async def import_org(org_id: str, request: Request,
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
     if org_node is None:
-        raise HTTPException(status_code=404, detail="Team not found")
+        raise HTTPException(status_code=404, detail="Organization not found")
     if deleted_at:
         raise HTTPException(status_code=410, detail="Team is scheduled for deletion")
 
@@ -15222,7 +15222,7 @@ async def delete_org(org_id: str, request: Request,
     deleted_at = org_node.get("deleted_at") if org_node else None
     await _require_owner(user["user_id"], org_id, allow_removed=deleted_at)
     if org_node is None:
-        raise HTTPException(status_code=404, detail="Team not found")
+        raise HTTPException(status_code=404, detail="Organization not found")
 
     grace_hours = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
     if deleted_at:

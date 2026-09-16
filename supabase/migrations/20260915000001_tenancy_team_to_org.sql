@@ -392,8 +392,9 @@ BEGIN
     VALUES (p_org_id, p_org_name, p_tier, p_graph_name, p_email,
             p_max_users, p_max_graphs, p_ops_allowance, p_graph_size_cap)
     ON CONFLICT (id) DO UPDATE
-        SET name  = EXCLUDED.name,
-            email = COALESCE(EXCLUDED.email, organizations.email);
+        SET name       = EXCLUDED.name,
+            graph_name = EXCLUDED.graph_name,
+            email      = COALESCE(EXCLUDED.email, organizations.email);
 
     -- ── membership: exactly one row per (user, org). Order matters ──────
     UPDATE public.org_memberships
