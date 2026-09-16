@@ -41,13 +41,18 @@ except ImportError:  # pragma: no cover - the workflow installs pyyaml
     print("pyyaml is required: pip install pyyaml", file=sys.stderr)
     sys.exit(2)
 
+#: The only legal `kind` values. `required` fails the deploy, `recommended` warns.
+KIND_ENUM = frozenset({"required", "recommended"})
+
 
 def load_manifest(path: Path) -> dict:
     """Load and validate a binding manifest.
 
-    Validation is deliberately strict: a manifest that declares nothing (or
-    declares an entry without a name/type) would make the gate vacuous, and a
-    vacuous gate is how #3616 shipped. Reject it rather than pass it.
+    Validation is deliberately strict: a manifest that declares nothing, or
+    declares an entry with an unvalidated field, makes the gate vacuous — and a
+    vacuous gate is how #3616 shipped. Every field `evaluate()` reads is checked
+    here, because a field the loader ignores is a field an attacker (or a typo)
+    can use to turn `required` into a warning.
     """
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -66,6 +71,30 @@ def load_manifest(path: Path) -> dict:
         for key in ("name", "type"):
             if not spec.get(key):
                 raise ValueError(f"{path}: bindings[{i}] is missing `{key}`")
+
+        # `kind` MUST be validated against an enum. Without this, a one-character
+        # typo (`kind: Required`, `kind: rquired`) silently downgrades a binding
+        # to a warning and the deploy goes green — which is precisely the #3616
+        # failure mode this gate exists to prevent. A misspelling must be a hard
+        # error, not a fail-open.
+        kind = spec.get("kind", "required")
+        if kind not in KIND_ENUM:
+            raise ValueError(
+                f"{path}: bindings[{i}] ({spec.get('name')}) has invalid kind "
+                f"{kind!r}; expected one of {sorted(KIND_ENUM)}"
+            )
+
+        # `envs: []` must be rejected. `.get("envs", default)` does NOT apply the
+        # default when the key is present-but-empty, so an empty list made the
+        # binding invisible to `evaluate()` — neither required nor recommended,
+        # silently skipped. Validate the shape here rather than relying on the
+        # default in two places.
+        envs = spec.get("envs", ["production"])
+        if not isinstance(envs, list) or not envs:
+            raise ValueError(
+                f"{path}: bindings[{i}] ({spec.get('name')}) `envs` must be a "
+                "non-empty list of environment names"
+            )
 
     if not any(s.get("kind", "required") == "required" for s in bindings):
         raise ValueError(
@@ -93,8 +122,9 @@ def evaluate(manifest: dict, configs: dict[str, dict]) -> tuple[list[str], list[
         for envname in spec.get("envs", ["production"]):
             env = configs.get(envname) or {}
             bucket = env.get(btype) or {}
-            present = name in bucket
-            if present:
+            # Truthiness, not key membership: a null-valued binding
+            # (`{"SESSIONS": None}`) is not a usable binding.
+            if bucket.get(name):
                 continue
             label = f"{envname}:{btype}:{name}"
             if kind == "required":

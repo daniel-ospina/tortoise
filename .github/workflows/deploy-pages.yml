@@ -90,6 +90,9 @@ jobs:
           mkdir -p ../../admin
           cp -r dist/* ../../admin/
           test -s ../../admin/index.html
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       # #3616: #3501 shipped a BFF auth layer requiring a `SESSIONS` D1 binding
       # that did not exist. The deploy went green and production /auth/start
       # answered `503 session_store_unavailable` for every visitor. The
@@ -98,7 +101,7 @@ jobs:
       # deploy, because the failure mode is "deploy succeeds, runtime 503s".
       - name: Preflight — required Pages bindings exist
         run: |
-          python3 -m pip install --quiet pyyaml
+          python3 -m pip install --quiet 'pyyaml==6.0.2'
           python3 tools/check_pages_bindings.py --manifest website/required-bindings.yml
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -111,20 +114,30 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
       # #3616: bindings, secrets and code can each be individually correct while
-      # the deployed site still cannot sign anyone in. /auth/start is the one
-      # request that exercises the whole chain at once — it needs SESSIONS (to
-      # persist the PKCE flow), the Supabase env vars, and a valid callback URL;
-      # a 302 to Supabase proves all three. Note `curl` without -f: a 5xx is the
-      # signal, so it must not abort the step.
+      # the deployed site still cannot sign anyone in. /auth/start exercises the
+      # whole chain in one request: it needs SESSIONS (to persist the PKCE flow),
+      # SUPABASE_URL (an unset value makes `new URL()` throw, so a 302 proves it),
+      # and it performs an awaited INSERT into auth_flows, so a 302 also proves
+      # that write did not throw. It does NOT prove the row is readable later,
+      # and it does not touch SUPABASE_ANON_KEY — start.ts does not import
+      # supabase.ts. Those are covered by the preflight above.
+      # `curl` deliberately without -f: a 5xx IS the signal, so it must be
+      # captured, not turned into an abort.
       - name: Post-deploy — sign-in is actually reachable
         run: |
           url=https://tortoise.premiselabs.co/auth/start
           code=000
           # Poll: Pages can briefly serve the previous deployment after upload.
           for attempt in $(seq 1 10); do
-            # No -f: a 5xx IS the signal, so it must not abort the step.
+            # No -f: a 5xx IS the signal, so it must not abort the step. Also no
+            # `|| echo 000` — curl already writes 000 via -w on a connection
+            # failure, and the fallback would concatenate into "000000", which is
+            # the least useful diagnostic in the path that has to explain an
+            # outage. Capture the exit status separately instead.
             code=$(curl -sS -o /tmp/start.body -D /tmp/start.hdr \
-                        -w '%{http_code}' -m 20 "$url" || echo 000)
+                        -w '%{http_code}' -m 20 "$url" 2>/tmp/start.err)
+            curl_rc=$?
+            [ "$curl_rc" -ne 0 ] && code="curl-failed(rc=$curl_rc)"
             [ "$code" = "302" ] && break
             sleep 15
           done
@@ -132,25 +145,27 @@ jobs:
 
           if [ "$code" = "503" ]; then
             echo "::error::/auth/start returned 503 — the session store is unavailable."
-            echo "::error::Almost always a missing SESSIONS D1 binding; see #3616."
-            cat /tmp/start.body
+            echo "::error::Expected `session_store_unavailable` (session.ts). Almost always"
+            echo "::error::a missing SESSIONS D1 binding — see issue #3616."
+            cat /tmp/start.body 2>/dev/null || true
             exit 1
           fi
           if [ "$code" != "302" ]; then
             echo "::error::expected a 302 to Supabase, got $code"
-            cat /tmp/start.body
+            cat /tmp/start.err 2>/dev/null || true
+            cat /tmp/start.body 2>/dev/null || true
             exit 1
           fi
 
-          # A 302 alone is not enough: the redirect must carry a PKCE challenge,
-          # which proves the flow row was written to SESSIONS. A redirect without
-          # one would mean the store accepted a write it silently dropped.
+          # A 302 alone is not enough: the redirect must carry a PKCE challenge.
+          # The challenge is generated in-process, so this proves the awaited
+          # INSERT into auth_flows did not throw (not that the row is readable).
           if ! grep -qi 'code_challenge_method=s256' /tmp/start.hdr; then
-            echo "::error::302 did not include a PKCE code_challenge — the flow was not persisted"
+            echo "::error::302 did not include a PKCE code_challenge"
             cat /tmp/start.hdr
             exit 1
           fi
-          echo "✅ sign-in reachable, SESSIONS writable, PKCE challenge issued"
+          echo "✅ sign-in reachable, SESSIONS write succeeded, PKCE challenge issued"
 
   # ── Dashboard (app.premiselabs.co → tortoise-dashboard Pages) ──────────
   # #1112: wire the dashboard into CI — closes #1086 + #1109 (two

@@ -22,6 +22,9 @@
 #
 # Keep this list honest: adding a binding here without adding it to the project
 # will red the deploy, which is the intended direction of failure.
+#
+# SCOPE: this is the `premise-labs` Pages project only (the `tortoise-dashboard`
+# project is deployed by the `deploy-dashboard` job and is not covered).
 
 project: premise-labs
 
@@ -49,6 +52,38 @@ bindings:
     type: env_vars
     envs: [production]
     note: Public anon key — the BFF exchanges codes/passwords with Supabase.
+
+  # Blog/admin write path. Same failure shape as #3616: without it the blog API
+  # answers ``503 not_configured`` while the deploy stays green.
+  - name: SUPABASE_SERVICE_ROLE_KEY
+    kind: required
+    type: env_vars
+    envs: [production]
+    note: >-
+      server-side blog/admin writes (blog/api/posts, admin/[[path]], the
+      cover/SEO generators). Read at blog/_shared/admin-auth.ts and 5 others.
+
+  # Cover and SEO generation. Absent -> ``503 not_configured``.
+  - name: OPENROUTER_API_KEY
+    kind: required
+    type: env_vars
+    envs: [production]
+    note: blog/api/generate-cover.ts, blog/api/generate-seo.ts.
+
+  # Deliberately NOT required: blog/_shared/cloudflare-purge.ts is a best-effort
+  # cache purge and returns early with `skipped: true` when these are absent. A
+  # missing purge token degrades staleness, it does not break serving.
+  - name: CF_API_TOKEN
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: Cache purge is best-effort and fail-open by design (cloudflare-purge.ts).
+
+  - name: CF_ZONE_ID
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: Cache purge is best-effort and fail-open by design (cloudflare-purge.ts).
 
   # Has a correct in-code default (https://app.premiselabs.co), so absence is
   # not an outage. Set it explicitly to decouple the redirect target from code.

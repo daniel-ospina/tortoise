@@ -94,7 +94,25 @@ SOURCE_PATTERNS = {
                    # self-hosted.html -> test_harness_mcp_config.py.
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
-                   "website/docs.html", "website/faq.html"),
+                   "website/docs.html", "website/faq.html",
+                   # #3616: the deploy-binding gate is a PAIR — the checker and
+                   # the manifest it reads. Neither path is under a Python
+                   # package prefix, so without these two entries a PR that
+                   # edits the gate's logic or downgrades a binding to
+                   # `recommended` selects NO surface (surfaces=[], full=False)
+                   # and test_pages_bindings.py never runs on the PR that owns
+                   # it. That is the #3616 pattern one level up: the thing that
+                   # decides whether the gate works would not itself be gated.
+                   "tools/check_pages_bindings.py",
+                   "website/required-bindings.yml",
+                   # #3616: the deploy workflow carries the preflight ordering
+                   # and the post-deploy probe target. tests/test_pages_bindings
+                   # .py asserts both, so a change to this file must select the
+                   # surface that runs it. (deploy-pages.yml currently reaches
+                   # onboarding only via the broad .github/workflows/ rule; this
+                   # entry makes the intent explicit and survives a narrowing
+                   # of that rule.)
+                   ".github/workflows/deploy-pages.yml"),
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
