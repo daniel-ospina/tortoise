@@ -1046,15 +1046,17 @@ durations:
   test_delivery_tenancy.py: 11.4
   test_ep_selector.py: 11.4
   test_longmem_reader_prompting.py: 10.2
-  # #3616: 33 test functions / 49 collected cases over the binding-manifest
-  # comparison and the deploy workflow's probe shell.
+  # #3616: the deploy-binding gate, plus #3620's staged-upload-root gate (the
+  # deploy step's staging + survival guards and the post-deploy 404 assertions,
+  # both EXECUTED against stubbed `npx`/`curl`, not string-matched).
   #
   # DURATION IS HIGH-VARIANCE — do not trust a single sample. Observed across
-  # runs: ~1.7-2.1s warm, 6.3-14.4s standalone, and 86s on a cold conftest
-  # import (the repo's heavy tests/conftest.py graph dominates; the tests
-  # themselves are millisecond-scale). A first draft recorded 85.0 from the cold
-  # run, which is ~40x the warm cost and would over-weight the LPT packing. 10.0
-  # is a deliberately loose middle. Re-measure rather than trusting it.
+  # runs: ~6-45s warm (58 test functions / 89 collected cases; three warm samples
+  # on one machine were 41.3s / 41.1s / 34.3s), and 86s on a cold conftest import
+  # (the repo's heavy tests/conftest.py graph dominates; the tests themselves are
+  # millisecond-scale). A first draft recorded 85.0 from the cold run, which was
+  # ~40x the warm cost and would over-weight the LPT packing. 10.0 is a
+  # deliberately loose middle. Re-measure rather than trusting it.
   test_pages_bindings.py: 10.0
   test_abuse_integration.py: 9.5
   test_github_index_lifecycle.py: 9.4
