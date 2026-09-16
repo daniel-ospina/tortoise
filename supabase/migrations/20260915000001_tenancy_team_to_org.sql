@@ -34,8 +34,10 @@
 -- `recover_team_key`, `revoke_signup_token`) — #3543 slice S1 renames RPC
 -- *parameters*, not RPC names; the names are a wire contract with
 -- tortoise/supabase_control.py and supabase/functions/tenant-provision/
--- index.ts, which this slice must not edit. Parameter names change
--- (`p_team_id` → `p_org_id`) — see the caller-coupling note at the end.
+-- index.ts. Parameter names DO change (`p_team_id` → `p_org_id`), so every
+-- caller — `index.ts` included — must co-move in the same landing window or
+-- the control plane fails closed: see the caller-coupling note at the end of
+-- this file, which enumerates the surfaces that must move with it.
 --
 -- Owner: #3543. Scope: supabase/migrations only.
 -- ============================================================================

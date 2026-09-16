@@ -633,15 +633,21 @@ class TestAskMetering:
     def test_migration_code_contract(self, monkeypatch):
         """Plan Task 6 Step 1: the migration↔code contract — the RPC name
         ``metering_increment_ask`` and the ask_* column set the CODE calls
-        MUST match the real migration file (20260829000001), so a column
-        reword or RPC rename in either direction fails loudly. Covers both
+        MUST match the real migration files, so a column reword or RPC rename
+        in either direction fails loudly. Covers both
         record_ask_usage (supabase branch → RPC body keys) and
-        get_ask_usage (supabase branch → the ask_* select)."""
+        get_ask_usage (supabase branch → the ask_* select).
+
+        #3543: migrations are append-only (``check-migration-append-only``), so
+        the RPC's parameter rename lives in the NEWEST file that redefines it —
+        the tenancy migration (``20260915000001``), which DROPs and recreates
+        the function with ``p_org_id``. The column set is still owned by the
+        original metering migration, which stays byte-identical.
+        """
         import re as _re
         from pathlib import Path
-        mig = (Path(__file__).resolve().parent.parent
-               / "supabase" / "migrations"
-               / "20260829000001_metering_ask_columns.sql").read_text()
+        migdir = Path(__file__).resolve().parent.parent / "supabase" / "migrations"
+        mig = (migdir / "20260829000001_metering_ask_columns.sql").read_text()
         # (a) the ADD COLUMN set the migration defines
         cols = set(_re.findall(r"ADD COLUMN IF NOT EXISTS\s+(\w+)", mig))
         assert cols == {"ask_calls", "ask_tokens_in", "ask_tokens_out",
@@ -650,10 +656,16 @@ class TestAskMetering:
         # envelope is ~10x over the integer range)
         assert "ask_tokens_in   bigint" in mig
         assert "ask_tokens_out  bigint" in mig
-        # (b) the RPC name + parameter set the migration defines
-        rpc = _re.search(r"CREATE OR REPLACE FUNCTION public\.(\w+)\(", mig)
-        assert rpc is not None and rpc.group(1) == "metering_increment_ask"
-        params = set(_re.findall(r"p_(\w+)\s+\w+", mig))
+        # (b) the RPC name + parameter set the EFFECTIVE migration defines —
+        # the newest file that recreates it (append-only: the parameter rename
+        # cannot be an edit to 20260829000001).
+        eff = (migdir / "20260915000001_tenancy_team_to_org.sql").read_text()
+        sig = _re.search(
+            r"CREATE OR REPLACE FUNCTION public\.metering_increment_ask\((.*?)\)\s*RETURNS",
+            eff, _re.S)
+        assert sig is not None, (
+            "the effective migration must recreate metering_increment_ask")
+        params = set(_re.findall(r"p_(\w+)\s+\w+", sig.group(1)))
         assert params == {"org_id", "period", "calls", "tokens_in",
                           "tokens_out", "cost_usd"}
         # (c) the supabase-mode record path calls the SAME RPC with the

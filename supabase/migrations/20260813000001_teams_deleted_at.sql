@@ -13,7 +13,7 @@
 --
 --   deleted_at  — set by DELETE /v1/teams/{team_id}; the boot + hourly
 --                 purge sweep hard-deletes teams whose deleted_at is past
---                 the grace window. org_by_id selects it so export/delete
+--                 the grace window. team_by_id selects it so export/delete
 --                 return 410 while pending.
 --   grace_hours — the grace window AS PROMISED at schedule time. The purge
 --                 and the idempotent replay honor the stored value (falling
