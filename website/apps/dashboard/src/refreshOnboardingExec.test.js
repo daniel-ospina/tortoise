@@ -160,7 +160,16 @@ function environment(overrides = {}) {
     onboardingRefreshSeqRef: { current: 0 },
     onboardingTeamQ: () => '?org_id=org-A',
     onboardingStaleRef: { current: false },
-    setOnboarding: (v) => onboardingCalls.push(typeof v === 'function' ? v(structuredClone(SERVER_PAYLOAD)) : v),
+    // P1 regression (cycle 10): record BOTH the record-time SNAPSHOT (`next`)
+    // and the LIVE reference (`ref`). The snapshot closes `mutate → set →
+    // revert`; the live reference closes `set → mutate in place` (the handler
+    // holds the object it passed and edits it after the call). Either record
+    // alone leaves one direction green. An updater hands no reachable object
+    // back to the caller, so only a plain value is aliased.
+    setOnboarding: (v) => onboardingCalls.push({
+      next: structuredClone(typeof v === 'function' ? v(structuredClone(SERVER_PAYLOAD)) : v),
+      ref: typeof v === 'function' ? null : v,
+    }),
     setOnboardingComplete: (v) => completeCalls.push(v),
     setOnboardingLoading: (v) => loadingCalls.push(v),
     ...overrides,
@@ -176,6 +185,10 @@ async function run(fnText, env) {
   } catch (e) {
     error = e
   }
+  // P1-A (cycle 10): drain ONE macrotask so a detached (setTimeout/`0`)
+  // side-effect lands inside this run's assertion window, not after it. Every
+  // test that asserts on a recorded side effect goes through `run`.
+  await new Promise((r) => setTimeout(r, 0))
   return { result, error }
 }
 
@@ -198,6 +211,9 @@ test('#3428/#2937 (cycle 8 P0): a 403 no-team rejection returns the same discrim
   const { result, error } = await run(REAL_TEXT, env)
   assert.equal(error, null, `the first-timer 403 path must not throw — got ${error && error.name}: ${error && error.message}`)
   assert.deepStrictEqual(result, { applied: false, superseded: false })
+  assert.deepStrictEqual(env.loadingCalls, [],
+    'the 403 swallow returns BEFORE the loading clear — a swallowed no-team 403 must not touch ' +
+    'the loading flag (MUTATION: removing the swallow `refresh_403_removed` makes this [false])')
 })
 
 test('#3428/#2937 (cycle 9 property 2b): a superseded rejection is side-effect-free', async () => {
@@ -216,6 +232,24 @@ test('#3428/#2937 (cycle 9 property 2b): a superseded rejection is side-effect-f
     'a superseded refresh must not clear the loading flag the newer request owns')
 })
 
+test('#3428/#2937 (cycle 10 property 2d): a superseded SUCCESS is not applied and reports the discriminated outcome', async () => {
+  // P1-B (cycle 10): the superseded REJECTION has a test (2b) but the superseded
+  // SUCCESS did not. MUTATION that fails: `refresh_apply_neuter` (`main.jsx:2709`
+  // → `_superseded = false`) makes a superseded successful refresh APPLY and
+  // report `{applied:true}`. The frozen-diff pin delegates this behaviour here
+  // (wizardConnectTripwire.test.js:1035-1038) — the delegation was unmet until now.
+  const env = environment()
+  env.api = async () => { env.onboardingRefreshSeqRef.current = 99; return { onboarding: structuredClone(SERVER_PAYLOAD) } }
+  const { result, error } = await run(REAL_TEXT, env)
+  assert.equal(error, null, `a superseded success must not throw — got ${error && error.name}: ${error && error.message}`)
+  assert.deepStrictEqual(result, { applied: false, superseded: true },
+    'a superseded response has no truth to bank — its outcome must be {applied:false, superseded:true}')
+  assert.deepStrictEqual(env.onboardingCalls, [],
+    'a superseded refresh must not apply its projection')
+  assert.deepStrictEqual(env.loadingCalls, [],
+    'a superseded refresh must not clear the loading flag the newer request owns')
+})
+
 test('#3428/#2937 (cycle 9 property 2c): success applies the server payload unmodified', async () => {
   // The state contract: the ONLY thing the client may hand `setOnboarding` is the
   // server's own payload. MUTATION that fails: the M4b assignment forge mutates
@@ -227,8 +261,11 @@ test('#3428/#2937 (cycle 9 property 2c): success applies the server payload unmo
   assert.equal(error, null, `success must not throw — got ${error && error.name}: ${error && error.message}`)
   assert.deepStrictEqual(result, { applied: true, superseded: false })
   assert.equal(env.onboardingCalls.length, 1, 'the projection is applied exactly once')
-  assert.deepStrictEqual(env.onboardingCalls[0], SERVER_PAYLOAD,
+  assert.deepStrictEqual(env.onboardingCalls[0].next, SERVER_PAYLOAD,
     'setOnboarding received a value that is NOT the server projection — the client manufactured state (#3428/#2937)')
+  assert.deepStrictEqual(env.onboardingCalls[0].ref, SERVER_PAYLOAD,
+    'the value handed to setOnboarding was mutated IN PLACE after the call — the client ' +
+    'post-edited the server projection instead of applying it (#3428/#2937)')
 })
 
 test('#3428/#2937 (cycle 8 P0): the no-session early exit returns the discriminated outcome and does NOT throw', async () => {

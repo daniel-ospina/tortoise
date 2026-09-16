@@ -159,7 +159,22 @@ function environment(overrides = {}) {
     onboardingRefreshSeqRef: { current: 0 },
     onboardingTeamQ: () => '?org_id=org-A',
     onboardingStaleRef: { current: false },
-    setOnboarding: (v) => onboardingCalls.push(typeof v === 'function' ? v(structuredClone(SERVER_PAYLOAD)) : v),
+    // P1-A (cycle 10): a `setTimeout`-deferred write would land AFTER the
+    // assertion window, so every caller drains a macrotask before asserting
+    // (see `drainSideEffects`).
+    // P1 regression (cycle 10): record BOTH the record-time SNAPSHOT and the
+    // LIVE reference. The snapshot closes `mutate → set → revert` (the
+    // assertion sees the value as it was HANDED, not as it was left); the live
+    // reference closes `set → mutate in place` (the handler keeps the object it
+    // passed and edits it after the call, so the assertion sees the edit).
+    // Either record alone leaves one of those two forges green.
+    setOnboarding: (v) => onboardingCalls.push({
+      next: structuredClone(typeof v === 'function' ? v(structuredClone(SERVER_PAYLOAD)) : v),
+      // An updater hands no reachable object back to the caller (the recorder
+      // itself computes the produced value), so only a plain value can be
+      // aliased after the call.
+      ref: typeof v === 'function' ? null : v,
+    }),
     setOnboardingComplete: () => {},
     setOnboardingLoading: (v) => loadingCalls.push(v),
     setWizardConnectBusy: () => {},
@@ -172,11 +187,26 @@ function environment(overrides = {}) {
   return env
 }
 
+// P1-A (cycle 10): drain ONE macrotask so a detached (setTimeout/`0`)
+// side-effect lands inside the assertion window instead of after it. Registered
+// after the handler's own `setTimeout(…, 0)`, so the handler's timer fires first.
+async function drainSideEffects() {
+  await new Promise((r) => setTimeout(r, 0))
+}
+
 function assertProjectionAppliedUnmodified(calls, label) {
-  for (const value of calls) {
-    assert.deepStrictEqual(value, SERVER_PAYLOAD,
+  for (const call of calls) {
+    assert.deepStrictEqual(call.next, SERVER_PAYLOAD,
       `${label}: setOnboarding received a value that is NOT the server projection — ` +
       'the client manufactured state instead of applying what the server returned (#3428/#2937)')
+    // The live reference is the SAME object the handler passed; if it now
+    // differs from the record-time snapshot, the handler post-edited it in
+    // place (the `set → mutate` forge the snapshot alone cannot see).
+    if (call.ref !== null) {
+      assert.deepStrictEqual(call.ref, SERVER_PAYLOAD,
+        `${label}: the value handed to setOnboarding was mutated IN PLACE after the call — ` +
+        'the client post-edited the server projection instead of applying it (#3428/#2937)')
+    }
   }
 }
 
@@ -189,6 +219,7 @@ test('#3428/#2937 (cycle 9 property 1): the Continue handler issues no /onboardi
   const env = environment()
   const handler = buildContinue({ realRefresh: false, deps: env })
   await handler()
+  await drainSideEffects()
 
   const stateRequests = env.requests.filter((r) => r.url.includes('/onboarding/state'))
   assert.deepStrictEqual(stateRequests, [],
@@ -208,6 +239,7 @@ test('#3428/#2937 (cycle 9 property 1): the real Continue path issues ONLY the p
   const env = environment()
   const handler = buildContinue({ realRefresh: true, deps: env })
   await handler()
+  await drainSideEffects()
 
   const stateRequests = env.requests.filter((r) => r.url.includes('/onboarding/state'))
   assert.equal(stateRequests.length, 1,
@@ -230,6 +262,7 @@ test('#3428/#2937 (cycle 9 property 2): the real Continue path applies the serve
   const env = environment()
   const handler = buildContinue({ realRefresh: true, deps: env })
   await handler()
+  await drainSideEffects()
 
   assert.equal(env.onboardingCalls.length, 1,
     'the Continue path applies the projection exactly once (the single server assignment)')

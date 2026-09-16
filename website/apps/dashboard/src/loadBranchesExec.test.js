@@ -177,7 +177,22 @@ function environment(overrides = {}) {
     },
     orgIdRef: { current: 'org-A' },
     branchLists: {},
-    setBranchLists: (v) => setCalls.push(v),
+    // P1-A (cycle 10): Apply the updater to a structuredClone of the pristine
+    // list and store the RESULT (never the live updater), so the
+    // mutate-set-revert family cannot alias the recorded state. The stale-safe
+    // updater form is preserved and asserted through `applied`.
+    // P1 regression (cycle 10): record BOTH the record-time SNAPSHOT (`next`)
+    // and the LIVE reference (`ref`). The snapshot closes `mutate → set →
+    // revert`; the live reference closes `set → mutate in place` (a handler that
+    // captures the object it hands the setter and edits it after the call).
+    // Either record alone leaves one direction green.
+    setBranchLists: (v) => {
+      const isUpdater = typeof v === 'function'
+      // The live value the caller handed React: the produced next state for the
+      // stale-safe updater form, the argument itself for a plain value.
+      const produced = isUpdater ? v(structuredClone(env.branchLists)) : v
+      setCalls.push({ isUpdater, next: structuredClone(produced), ref: produced })
+    },
     ...overrides,
   }
   return env
@@ -191,15 +206,27 @@ async function run(fnText, env) {
   } catch (e) {
     error = e
   }
+  // P1-A (cycle 10): drain ONE macrotask so a detached (setTimeout/`0`)
+  // side-effect lands inside this run's assertion window, not after it.
+  await new Promise((r) => setTimeout(r, 0))
   return { result, error }
 }
 
 // Every setBranchLists call in these paths is the stale-safe UPDATER form; the
-// assertion reads the value the updater PRODUCES, not the updater itself.
-function applied(updater) {
-  assert.equal(typeof updater, 'function',
-    'setBranchLists must receive an updater (the stale-safe form) — got ' + typeof updater)
-  return updater({})
+// recorder has already applied it to a snapshot of the pristine list and stored
+// the RESULT, so `applied` reads the produced next state.
+function applied(recorded) {
+  assert.ok(recorded && typeof recorded === 'object' && 'isUpdater' in recorded,
+    'setBranchLists must record a snapshot of the produced state — got ' + typeof recorded)
+  assert.equal(recorded.isUpdater, true,
+    'setBranchLists must receive an updater (the stale-safe form) — got a plain value')
+  // The live reference is the SAME object the handler handed the setter; if it
+  // now differs from the record-time snapshot the handler post-edited it in
+  // place (the `set → mutate` forge the snapshot alone cannot see).
+  assert.deepStrictEqual(recorded.ref, recorded.next,
+    'the value handed to setBranchLists was mutated IN PLACE after the call — the produced ' +
+    'next state must not be post-edited (#3687)')
+  return recorded.next
 }
 
 function rejectingEnv() {
