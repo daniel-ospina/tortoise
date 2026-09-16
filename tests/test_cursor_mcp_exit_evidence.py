@@ -50,6 +50,44 @@ legacy ``cursor://anysphere.cursor-mcp/oauth/callback`` exthost scheme.
   ``/oauth/authorize``. The gate SKIPS with that reason rather than passing
   vacuously, and activates automatically once the scheme is accepted.
 
+Acceptance — mutation-reds / legitimate-green
+---------------------------------------------
+A test that reads a file and greps it reports on a SPELLING; this suite
+reports on BEHAVIOUR. Every claim below is driven through the real handler
+(the OAuth AS app + the mounted MCP app under ``TestClient`` over one
+in-memory ``FakeControlPlane``) and compared against what the server
+RESOLVED — never against a literal re-typed here. Two consequences:
+
+* the receipt key is RESOLVED through the production derivation
+  (``hosted_api._capture_receipt_key``); the literal spelling the exit
+  criterion names is pinned exactly ONCE, explicitly, as a contract in
+  ``TestCursorHarnessRegistration``;
+* the capture's receipt is asserted on the VALUE the production state setter
+  receives (``_update_onboarding_state`` wrapped, recording + delegating) —
+  deep-equal to the tool payload's ``provenance.ingested_at`` — not on a
+  truthy read-back, which any other writer could satisfy.
+
+| # | Exit claim | Mutation that REDS it | Legitimate form that stays GREEN |
+|---|---|---|---|
+| 1 | Cursor's client registers via DCR (201) with its redirect set | ``register_client`` drops/rewrites a registered URI | extra URIs registered; a different client name/scope |
+| 2 | ``/oauth/authorize`` accepts the REGISTERED redirect | the authorize-leg redirect validation is deleted → 400/OAuthError | consent-page markup/template changes |
+| 3 | The consent leg resolves the redirect target back to the registered URI | ``oauth_consent`` echoes a re-derived/divergent URI | the loopback matcher is relaxed (native-client portless form) — still the URI the client sent |
+| 4 | The token leg binds redemption to that SAME resolved redirect | the ``redirect_uri != code_row["redirect_uri"]`` check is dropped (``TestCursorRedirectBinding`` reds) | internal token hashing/mint refactors |
+| 5 | PKCE S256 exchange mints an ``oat_`` token | verifier check removed, or a non-``oat_`` token returned | the prefix helper/rotation internals change; ``oat_`` stays the contract |
+| 6 | The ``oat_`` token authenticates the MCP boundary and lists the capture tool | ``mcp_auth`` drops the ``resolve_oauth_access_token`` leg → 401 | more tools are registered (asserted by membership, not by exact list) |
+| 7 | The capture handler hands the state setter the receipt key with the payload's stamp | the receipt write is removed, or writes a different value | refactors of the capture path — the key comes from the production derivation and the stamp from the response payload, so neither is re-spelled. A change to the DERIVATION itself reds the single contract pin by design (it is a dashboard contract) |
+| 8 | The receipt is observable on ``GET /v1/onboarding/state`` and on a fresh org's defaults | the key leaves ``_ALLOWED_STATE_KEYS`` / the default state / the PATCH model | the read-projection internals change; the key still round-trips |
+| 9 | The receipt is not an orphan marker — a durable ``cursor``-tagged Session exists | the Session MERGE stops stamping ``harness`` | Session property names are added alongside ``harness`` |
+
+Verified, not asserted-on-paper: removing the receipt write, and writing a
+different value, were each applied to the real handler —
+``TestCursorDocumentedPairEndToEnd`` reds with the state-setter message in both
+cases; dropping the token leg's ``redirect_uri`` binding reds
+``TestCursorRedirectBinding``. The legitimate-green side was confirmed by
+re-running this suite with a DIFFERENT client loopback port — all green, because
+the assertions compare against what the client sent / the server resolved,
+never against a literal.
+
 Nothing here reaches the network: the in-memory ``FakeControlPlane`` is the
 control plane and the real FastAPI apps (OAuth AS + mounted MCP) run under
 ``TestClient``. This is a server-side confirmation — NOT an observed desktop
@@ -76,10 +114,7 @@ from tests.test_oauth_mcp import (
 )
 from tortoise import hosted_api as _ha
 from tortoise.hosted_api import (
-    _ALLOWED_STATE_KEYS,
-    _ONBOARDING_DEFAULT_STATE,
-    _SESSION_HARNESS_VALUES,
-    OnboardingStatePatchRequest,
+    SessionRequest,
     _get_onboarding_state,
     app,  # noqa: F401 — the OAuth AS app under test
 )
@@ -91,7 +126,11 @@ CURSOR_CB_HTTPS = "https://www.cursor.com/agents/mcp/oauth/callback"
 CURSOR_CB_LOOPBACK = "http://localhost:8787/callback"
 CURSOR_CB_SCHEME = "cursor://anysphere.cursor-mcp/oauth/callback"
 
-RECEIPT_KEY = "session_capture_receipt_cursor"
+# RESOLVED through the production derivation, never re-spelled here: a test
+# asserting its own copy of the derivation rule is evidence about a spelling,
+# not about what the handler writes. The literal the exit criterion names is
+# pinned exactly once, explicitly — TestCursorHarnessRegistration.
+RECEIPT_KEY = _ha._capture_receipt_key("cursor")
 
 _CONV = [
     {"role": "user", "content": "Cursor connected to Tortoise over MCP today."},
@@ -155,12 +194,16 @@ def _result_text(body: dict) -> str:
                    body.get("result", {}).get("content", []))
 
 
-def _drive_cursor_connect(tc, *, client_id: str, redirect_uri: str) -> str:
-    """authorize -> consent -> PKCE exchange; returns the ``oat_`` token.
+def _authorize_and_consent(tc, *, client_id: str,
+                           redirect_uri: str) -> tuple[str, str]:
+    """authorize -> consent; returns ``(code_verifier, code)``.
 
-    The authorize leg is driven first (its validation is part of the exit
-    criterion); consent then mints the code and the token endpoint performs
-    the S256 exchange.
+    (a) the request's RESOLVED path is asserted HERE, spelling-independent:
+    the consent leg hands back the redirect target the server resolved for
+    THIS request, compared against the URI the client registered (passed in).
+    Driving the authorize leg first is part of the exit criterion — a real
+    client is redirected to its callback with the consent page, so the server
+    must not reject the registered URI at that leg either.
     """
     verifier, challenge = _pkce()
     r = tc.get("/oauth/authorize", params={
@@ -172,16 +215,21 @@ def _drive_cursor_connect(tc, *, client_id: str, redirect_uri: str) -> str:
         "scope": "mcp",
         "state": "cursor-st-1",
     })
-    # A real client is redirected to its callback with the consent page; the
-    # server must not reject the registered URI at this leg.
     assert r.status_code == 200, r.text
 
     r = _consent(tc, client_id=client_id, redirect_uri=redirect_uri,
                  challenge=challenge)
     assert r.status_code == 200, r.text
-    code = r.json()["code"]
-    assert code
+    consented = r.json()
+    assert consented["code"], consented
+    assert consented["redirect_uri"] == redirect_uri, consented
+    assert consented["state"] == "cursor-st-1", consented
+    return verifier, consented["code"]
 
+
+def _exchange_code(tc, *, client_id: str, redirect_uri: str,
+                   verifier: str, code: str) -> str:
+    """PKCE S256 exchange at the token endpoint; returns the ``oat_`` token."""
     r = tc.post("/oauth/token", data={
         "grant_type": "authorization_code",
         "code": code,
@@ -195,14 +243,57 @@ def _drive_cursor_connect(tc, *, client_id: str, redirect_uri: str) -> str:
     return access
 
 
+def _drive_cursor_connect(tc, *, client_id: str, redirect_uri: str) -> str:
+    """authorize -> consent -> PKCE exchange; returns the ``oat_`` token."""
+    verifier, code = _authorize_and_consent(
+        tc, client_id=client_id, redirect_uri=redirect_uri)
+    return _exchange_code(tc, client_id=client_id, redirect_uri=redirect_uri,
+                          verifier=verifier, code=code)
+
+
+def _patch_session_auth(monkeypatch) -> None:
+    """Install the session-JWT verifier seam for the onboarding-state surface.
+
+    ``GET``/``PATCH /v1/onboarding/state`` resolve the session through
+    ``session_auth.get_current_user`` → the ``session_auth`` module's
+    ``verify_session_jwt`` — a DIFFERENT seam from the OAuth-consent leg,
+    which ``test_oauth_mcp``'s ``session_user`` fixture patches in
+    ``hosted_api``. Both must be installed for one request to clear session
+    auth; the header's value is never decoded once both are in place.
+    """
+    import tortoise.session_auth as _sa
+
+    async def _fake_verify(_request):
+        return {"user_id": _U1, "email": "u@example.com", "sub": _U1}
+
+    monkeypatch.setattr(_sa, "verify_session_jwt", _fake_verify)
+
+
 def _assert_cursor_receipt_end_to_end(tc, cp, access: str, org_id: str,
-                                      monkeypatch) -> str:
+                                      monkeypatch,
+                                      *, harness: str = "cursor") -> str:
     """tools/list + the capture tool call + the receipt read-back.
 
-    Returns the receipt value. Asserts the graph-side Session too, so the
-    receipt cannot be satisfied by a marker without durable data (the
-    T1-P12 receipt<->Session invariant).
+    (b) the VALUE the state setter receives: the production writer
+    ``_update_onboarding_state`` is WRAPPED (recording every field handed to
+    it, then delegating to the real writer), so this asserts what the handler
+    actually wrote — the key the production derivation resolves, with a value
+    deep-equal to the tool payload's ``provenance.ingested_at``. A truthiness
+    read-back alone cannot distinguish that from any other path dropping a
+    marker on the org.
+
+    Also asserts the graph-side Session, so the receipt cannot be satisfied by
+    a marker without durable data (the T1-P12 receipt<->Session invariant).
     """
+    written: list[dict] = []
+    _real_update = _ha._update_onboarding_state
+
+    def _recording_update(oid, **fields):
+        written.append({"org_id": oid, **fields})
+        return _real_update(oid, **fields)
+
+    monkeypatch.setattr(_ha, "_update_onboarding_state", _recording_update)
+
     mcp_tc = _mounted_test_client(create_http_app(allowed_origins=[]))
     mcp_tc.headers.update(_mcp_headers(access))
     with mcp_tc:
@@ -216,7 +307,7 @@ def _assert_cursor_receipt_end_to_end(tc, cp, access: str, org_id: str,
             f"capture tool absent from the Cursor-facing tool list: {names}"
 
         rr = _mcp_call(mcp_tc, "tortoise_session_capture",
-                       {"conversation": _CONV, "harness": "cursor"})
+                       {"conversation": _CONV, "harness": harness})
         assert rr.status_code == 200, rr.text
         body = _parse_sse_json(rr)
         assert "result" in body, body
@@ -224,39 +315,44 @@ def _assert_cursor_receipt_end_to_end(tc, cp, access: str, org_id: str,
         payload = _json.loads(_result_text(body))
         assert payload.get("status") == "ok", f"capture tool errored: {payload}"
         assert payload.get("error") is None, f"capture tool errored: {payload}"
-        assert payload["provenance"]["source_harness"] == "cursor", payload
+        assert payload["provenance"]["source_harness"] == harness, payload
+        ingested_at = payload["provenance"]["ingested_at"]
+        assert ingested_at, payload
+
+    # (b) what the state setter ACTUALLY received for the receipt key.
+    receipt_writes = [w for w in written if RECEIPT_KEY in w]
+    assert receipt_writes, (
+        f"the capture handler never handed {RECEIPT_KEY} to the state "
+        f"setter — fields seen: {written}")
+    assert receipt_writes[-1]["org_id"] == org_id, receipt_writes
+    assert receipt_writes[-1][RECEIPT_KEY] == ingested_at, (
+        f"state setter received {receipt_writes[-1][RECEIPT_KEY]!r} for "
+        f"{RECEIPT_KEY}; the tool payload said {ingested_at!r}")
 
     # Receipt observed on the org's onboarding state — the lane's exit marker.
     state = _get_onboarding_state(org_id)
-    assert state.get(RECEIPT_KEY), \
-        f"no {RECEIPT_KEY} after a cursor MCP capture: {state}"
+    assert state.get(RECEIPT_KEY) == ingested_at, \
+        f"no {RECEIPT_KEY}={ingested_at!r} after a {harness} MCP capture: {state}"
 
     # ... and OBSERVABLE on the public read surface the dashboard consumes
     # (GET /v1/onboarding/state -> onboarding{} -> the 4-state capture-status
     # derivation in captureStatus.js, where a receipt resolves to `active`).
-    # The session-JWT seam here is session_auth's verifier (get_current_user
-    # resolves it in that module) — distinct from the OAuth consent seam that
-    # test_oauth_mcp's session_user fixture patches.
-    import tortoise.session_auth as _sa
-
-    async def _fake_verify(_request):
-        return {"user_id": _U1, "email": "u@example.com", "sub": _U1}
-
-    monkeypatch.setattr(_sa, "verify_session_jwt", _fake_verify)
+    _patch_session_auth(monkeypatch)
     r = tc.get("/v1/onboarding/state",
                headers={"Authorization": "Bearer eyJ.sess"})
     assert r.status_code == 200, r.text
     public = r.json()["onboarding"]
-    assert public.get(RECEIPT_KEY), \
-        f"{RECEIPT_KEY} not on the public onboarding-state surface: {public}"
+    assert public.get(RECEIPT_KEY) == ingested_at, \
+        f"{RECEIPT_KEY} not on the public onboarding-state surface at " \
+        f"{ingested_at!r}: {public}"
 
     # The receipt is not an orphan marker: the Session is durable, harness-tagged.
     sdk = _ha._make_sdk(namespace=org_id)
     rows = sdk._get_proj().g.query(
         "MATCH (s:Session) RETURN s.id, s.harness").result_set
     assert rows, "capture receipt landed with no Session (T1-P12 violation)"
-    assert any(r[1] == "cursor" for r in rows), \
-        f"no cursor-harness Session persisted: {rows}"
+    assert any(r[1] == harness for r in rows), \
+        f"no {harness}-harness Session persisted: {rows}"
     return state[RECEIPT_KEY]
 
 
@@ -283,19 +379,89 @@ class TestCursorDocumentedPairEndToEnd:
             tc, client_id=client_id, redirect_uri=CURSOR_CB_LOOPBACK)
         receipt = _assert_cursor_receipt_end_to_end(
             tc, cp, access, "team-free-001", monkeypatch)
-        assert receipt  # a server timestamp — truthy, non-empty
+        # the receipt IS the server-stamped value the state setter received
+        # (deep-equal'd against the tool payload inside the helper)
+        assert isinstance(receipt, str) and receipt
 
-    def test_cursor_harness_is_in_the_capture_vocabulary(self):
-        """The receipt only exists because ``cursor`` is a first-class capture
-        harness. Pin all three registration surfaces — an unregistered key is
-        SILENTLY DROPPED by the state allowlist, which would make this lane's
-        exit marker unobservable."""
-        assert "cursor" in _SESSION_HARNESS_VALUES
-        assert RECEIPT_KEY in _ALLOWED_STATE_KEYS
-        assert RECEIPT_KEY in _ONBOARDING_DEFAULT_STATE
-        assert RECEIPT_KEY in OnboardingStatePatchRequest.model_fields, \
-            "receipt key absent from the PATCH registration surface — an " \
-            "unregistered key is silently dropped by the allowlist filter"
+
+class TestCursorHarnessRegistration:
+    """``cursor`` is a first-class capture harness and its receipt key is
+    registered on every surface the write/read path touches.
+
+    Replaces the constant-membership scan this suite used to carry
+    (``"cursor" in _SESSION_HARNESS_VALUES``, ``RECEIPT_KEY in
+    _ALLOWED_STATE_KEYS`` / ``_ONBOARDING_DEFAULT_STATE`` / the PATCH
+    model_fields). A scan reports that three frozensets contain a string — not
+    that the behaviour they gate actually holds. Each test below EXECUTES the
+    thing the register protects: the Pydantic harness validator, the state
+    allowlist filter, the defaults merge, the PATCH round-trip.
+    """
+
+    def test_receipt_key_literal_is_pinned_once(self):
+        """The ONE explicit spelling assertion in this file.
+
+        The exit criterion names ``session_capture_receipt_cursor`` (the
+        dashboard's capture-status derivation reads exactly that key), so the
+        spelling is a contract — pinned here in the open, while every
+        behavioural assertion resolves the key through the production
+        derivation instead.
+        """
+        assert RECEIPT_KEY == "session_capture_receipt_cursor"
+        # ... and the derivation is per-harness, with the legacy no-harness form
+        assert _ha._capture_receipt_key("codex") == \
+            "session_capture_receipt_codex"
+        assert _ha._capture_receipt_key(None) == "session_capture_receipt"
+
+    def test_capture_validator_accepts_cursor_and_refuses_a_typo(self):
+        """Behaviour behind ``cursor in _SESSION_HARNESS_VALUES``: the real
+        ``SessionRequest`` validator — the boundary that would 422 a Cursor
+        capture — admits ``cursor`` and refuses an unregistered harness."""
+        from pydantic import ValidationError
+
+        assert SessionRequest(conversation=_CONV, harness="cursor").harness \
+            == "cursor"
+        with pytest.raises(ValidationError):
+            SessionRequest(conversation=_CONV, harness="cursor-typo")
+
+    def test_receipt_key_round_trips_get_and_patch(
+            self, api_client, session_user, monkeypatch):  # noqa: F811
+        """Behaviour behind the three registration surfaces, executed rather
+        than scanned.
+
+        * ``_ONBOARDING_DEFAULT_STATE`` — a FRESH org's GET already carries
+          the key (unset), because the read merges defaults;
+        * ``OnboardingStatePatchRequest`` + ``_ALLOWED_STATE_KEYS`` — a PATCH
+          of the key round-trips to the persisted state and back out;
+        * negative control — an UNREGISTERED spelling is silently dropped.
+          Without it the positive assertion could pass vacuously on a filter
+          that admits everything.
+        """
+        tc, _ = api_client
+        session_user()
+        _patch_session_auth(monkeypatch)
+        auth = {"Authorization": "Bearer eyJ.sess"}
+
+        r = tc.get("/v1/onboarding/state", headers=auth)
+        assert r.status_code == 200, r.text
+        fresh = r.json()["onboarding"]
+        assert RECEIPT_KEY in fresh, fresh
+        assert fresh[RECEIPT_KEY] is None, fresh
+
+        stamp = "2026-01-01T00:00:00+00:00"  # server-time in prod; any str here
+        r = tc.patch("/v1/onboarding/state", json={RECEIPT_KEY: stamp},
+                     headers=auth)
+        assert r.status_code == 200, r.text
+        assert r.json()["onboarding"][RECEIPT_KEY] == stamp, r.text
+
+        r = tc.get("/v1/onboarding/state", headers=auth)
+        assert r.json()["onboarding"][RECEIPT_KEY] == stamp
+
+        typo = RECEIPT_KEY[:-1] + "x"
+        r = tc.patch("/v1/onboarding/state", json={typo: stamp}, headers=auth)
+        assert r.status_code < 500, r.text
+        r = tc.get("/v1/onboarding/state", headers=auth)
+        assert typo not in r.json()["onboarding"], \
+            "an unregistered key was NOT dropped — the filter is not gating"
 
 
 @pytest.mark.skipif(
@@ -327,4 +493,37 @@ class TestCursorRealPayloadEndToEnd:
             tc, client_id=client_id, redirect_uri=CURSOR_CB_SCHEME)
         receipt = _assert_cursor_receipt_end_to_end(
             tc, cp, access, "team-free-001", monkeypatch)
-        assert receipt
+        assert isinstance(receipt, str) and receipt
+
+
+class TestCursorRedirectBinding:
+    """The resolved redirect is bound for the WHOLE flow, not just DCR.
+
+    A server that resolved the redirect only at registration (and never bound
+    it into the code / redemption) would pass the happy-path tests above. This
+    control reds the moment the token leg stops binding the redemption to the
+    redirect the code was minted for (RFC 6749 §4.1.3).
+    """
+
+    def test_token_leg_refuses_a_different_registered_redirect(
+            self, api_client, session_user):  # noqa: F811
+        tc, _ = api_client
+        session_user()
+
+        r = _register_cursor_client(tc, [CURSOR_CB_HTTPS, CURSOR_CB_LOOPBACK])
+        assert r.status_code == 201, r.text
+        client_id = r.json()["client_id"]
+
+        verifier, code = _authorize_and_consent(
+            tc, client_id=client_id, redirect_uri=CURSOR_CB_LOOPBACK)
+        # BOTH URIs are registered for this client, so the swap is legal at
+        # DCR — and must still be refused at redemption.
+        r = tc.post("/oauth/token", data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": CURSOR_CB_HTTPS,
+            "client_id": client_id,
+            "code_verifier": verifier,
+        })
+        assert r.status_code == 400, r.text
+        assert r.json()["error"] == "invalid_grant", r.text
