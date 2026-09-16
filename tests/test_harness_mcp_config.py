@@ -243,13 +243,16 @@ class TestCommittedRepoMcpJson:
     Covers all five fields of the entry: `url`, `type`, `headers`, the absence
     of a stdio `env`/`command`/`args`, and no literal credential in the file.
     "No literal credential" is scoped deliberately: every `env` and `headers`
-    value of EVERY server must be structurally env-indirect (those are the
-    credential-carrying fields a client sends), and every token family this
-    repo mints is forbidden anywhere in the file -- including prose and argv,
-    since a key pasted there is the same leak. A THIRD-PARTY secret in PROSE or
-    in `args`/`command` is out of scope: argv legitimately holds package names
-    and flags, and telling a secret from ordinary text needs a heuristic that
-    hyphenated keys defeat, so either check would be theatre.
+    value of EVERY server must be structurally env-indirect and a non-empty
+    string (those are the credential-carrying fields a client sends), and every
+    token family this repo mints today -- `tt_`/`tk_` (tortoise/auth.py),
+    `oat_`/`ort_`/`ct_`/`cs_` (tortoise/oauth.py), `st_`
+    (tortoise/hosted_api.py) -- is forbidden anywhere in the file, including
+    prose and argv, since a key pasted there is the same leak. A THIRD-PARTY
+    secret in PROSE or in `args`/`command` is out of scope: argv legitimately
+    holds package names and flags, and telling a secret from ordinary text
+    needs a heuristic that hyphenated keys defeat, so either check would be
+    theatre.
     Reads the file on disk (the committed blob in any clean checkout /
     CI). This class pins what the repo SHIPS, so it is deliberately not
     override-aware: a self-hoster who follows the entry's `_comment` and points
@@ -373,15 +376,24 @@ class TestCommittedRepoMcpJson:
         # This file ships to users -- a literal credential leaks one.
         text = self.COMMITTED.read_text(encoding="utf-8")
         # (a) Every token family this repo MINTS, anywhere in the raw text: a
-        # key pasted into a `_comment` is the same leak. `tt_`/`tk_` come from
-        # tortoise/auth.py, `oat_`/`ort_` from tortoise/oauth.py, and `ct_`/
-        # `cs_` are minted inline there too (client id / client secret).
+        # key pasted into a `_comment` or into `args` is the same leak. `tt_`/
+        # `tk_` come from tortoise/auth.py, `oat_`/`ort_` and the client id/
+        # secret `ct_`/`cs_` from tortoise/oauth.py, `st_` from
+        # tortoise/hosted_api.py. A family minted by NEW code is not covered
+        # here -- the values a client sends are, by (b).
         #
         # Anchored to a token START -- which is how every consumer checks these
         # prefixes (str.startswith, never a substring search) -- so ordinary
         # prose cannot red the guard: "support_ticket" and "float_value"
         # contain "ort_"/"oat_" mid-word and are not tokens.
-        families = (*API_KEY_PREFIXES, ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX, "ct_", "cs_")
+        families = (
+            *API_KEY_PREFIXES,
+            ACCESS_TOKEN_PREFIX,
+            REFRESH_TOKEN_PREFIX,
+            "ct_",
+            "cs_",
+            "st_",
+        )
         prefixes = "|".join(re.escape(p) for p in families)
         leak = re.search(rf"(?<![A-Za-z0-9_])(?:{prefixes})", text)
         assert leak is None, (
@@ -404,8 +416,10 @@ class TestCommittedRepoMcpJson:
                     f"-- got {type(values).__name__}"
                 )
                 for key, value in (values or {}).items():
-                    if not isinstance(value, str) or not value:
-                        continue
+                    assert isinstance(value, str) and value, (
+                        f"committed .mcp.json {server}.{section}.{key} must be "
+                        f"a non-empty string -- got {type(value).__name__}"
+                    )
                     if section == "env":
                         direct = self.ENV_EXPR.fullmatch(value) is not None
                     else:
