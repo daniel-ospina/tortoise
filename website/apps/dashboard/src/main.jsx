@@ -2975,12 +2975,16 @@ function claimIntentInFlight() {
   // neither main nor master.
   async function loadBranches(repo) {
     if (Object.prototype.hasOwnProperty.call(branchLists, repo)) return  // already loaded
+    // #3687: declared at FUNCTION scope (mirrors loadRepos) so the `catch` below
+    // can read it. A try-scoped binding is not in scope in the catch, so every
+    // failed branch load threw ReferenceError instead of degrading to the
+    // best-effort empty list.
+    const _teamAtCall = orgIdRef.current
     try {
       const q = encodeURIComponent(repo)
       // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
       // The URL already carries ?repo= — join org_id with & (a second `?`
       // would corrupt the repo value and silently unpin the team).
-      const _teamAtCall = orgIdRef.current
       const res = await api(`/v1/onboarding/github/branches?repo=${q}${onboardingTeamQ('&')}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return  // stale switch response
       const branches = res && Array.isArray(res.branches) ? res.branches : []
