@@ -103,13 +103,31 @@ def _resolve_fetch_total() -> float:
     this one clamps up. The direction is deliberate — the floor here IS the
     safe value (a lower hard deadline strands a worker), so the operator's
     requested value is preserved as far as is safe instead of being discarded.
+
+    NON-FINITE values are REJECTED, not clamped (mirrors
+    ``_health_probe_interval``). ``float()`` accepts ``nan`` and ``inf``, and a
+    bare ``v > 0`` is NaN-safe but NOT inf-safe: ``inf`` — and ``1e309``, which
+    ``float()`` evaluates to ``inf`` — passes it, is not ``< floor``, and lands
+    in ``asyncio.timeout(inf)``, which NEVER fires. One env value would silently
+    revert the #3284 hard deadline this function resolves. ``nan`` is equally
+    meaningless. Both fall back to the floor.
     """
     floor = _JWKS_FETCH_PHASE_TOTAL_S + _JWKS_FETCH_MARGIN_S
     try:
         v = float(os.environ.get("TORTOISE_JWKS_TIMEOUT", floor))
     except ValueError:
         return floor
-    if not v > 0:  # NaN-safe (NaN comparisons are False)
+    if not math.isfinite(v):
+        logger.warning(
+            "TORTOISE_JWKS_TIMEOUT=%s is not finite — falling back to the "
+            "floor %.2fs; an infinite total disables the per-fetch hard "
+            "deadline (asyncio.timeout never fires) and a nan one is "
+            "meaningless",
+            v,
+            floor,
+        )
+        return floor
+    if v <= 0:  # zero/negative: the floor is the safe value
         return floor
     if v < floor:
         logger.warning(
@@ -199,23 +217,65 @@ class _JWKSCache:
           boot-time blip cannot refuse every request for ``_COOLDOWN_S``
           without trying. The first real request then makes its own (still
           bounded) attempt — the #3284 guarantee is untouched.
+
+        WHY the returned set was served (fresh fetch vs a stale last-good
+        serve) is available from ``get_with_origin``; ``get`` is the thin
+        wrapper for callers that only need the keys.
+        """
+        keys, _origin = await self._resolve(
+            force=force, kid=kid, arm_cooldown=arm_cooldown)
+        return keys
+
+    async def get_with_origin(
+        self, force: bool = False, kid: str | None = None,
+        arm_cooldown: bool = True,
+    ) -> tuple[dict[str, dict], str | None]:
+        """``get()`` plus WHY the returned key set was served (#3284 boot log).
+
+        ``origin`` is ``None`` when THIS call obtained a fresh, usable key set
+        from the upstream, and a short reason otherwise: the fetch raised, the
+        upstream answered with zero usable keys, or an armed cooldown blocked
+        the attempt — in which case a previously-cached (STALE) set was served.
+
+        The boot warm-up needs the distinction. With last-good keys cached, a
+        failed fetch returns THEM (stale-serve), so keying ``ok`` off the
+        returned set alone reports a genuinely down upstream as ``ready``
+        (#2922: every failure states its reason). Every other caller wants
+        ``get()``.
+        """
+        return await self._resolve(
+            force=force, kid=kid, arm_cooldown=arm_cooldown)
+
+    async def _resolve(
+        self, force: bool, kid: str | None, arm_cooldown: bool,
+    ) -> tuple[dict[str, dict], str | None]:
+        """Shared body of ``get``/``get_with_origin`` — ``(keys, stale_reason)``.
+
+        ``stale_reason is None`` ⇔ this call fetched a fresh, usable key set.
+        Any non-None value means a previously-cached set is being served, and
+        says why.
         """
         now = time.monotonic()
         # The TTL fast path requires a USABLE key set, not just a non-None one:
         # an empty parse leaves ``_fetched_at == 0.0`` with ``_keys == {}``, and
         # on a host whose monotonic clock is below the TTL that reads as
-        # "fetched just now" — serving ``{}`` (a 401 "Unknown signing key") for
-        # up to a full TTL with the upstream healthy.
+        # "fetched just now", so a bare ``self._keys is not None`` serves ``{}``
+        # — presenting an empty set as a fresh cache entry. This is correct
+        # ``get()`` semantics and is DEFENSIVE for the current caller:
+        # ``verify_session_jwt`` force-refetches on any kid miss (R16), so it
+        # recovers from an empty serve — the change closes NO user-visible
+        # window today. It is pinned so that ``get()``, as a contract, and any
+        # future non-force caller cannot be handed a TTL-"fresh" empty set.
         if not force and self._keys and now - self._fetched_at < _JWKS_TTL:
-            return self._keys
+            return self._keys, None
         if kid is not None and self._keys is not None and kid in self._keys:
-            return self._keys
+            return self._keys, None
         async with self._lock:
             now = time.monotonic()
             if not force and self._keys and now - self._fetched_at < _JWKS_TTL:
-                return self._keys
+                return self._keys, None
             if kid is not None and self._keys is not None and kid in self._keys:
-                return self._keys
+                return self._keys, None
             # Failure/miss cooldown — inside the lock (single-flight: exactly
             # one fetch attempt per cooldown window under concurrency).
             if self._last_failure_at is not None and now - self._last_failure_at < _COOLDOWN_S:
@@ -225,7 +285,12 @@ class _JWKSCache:
                         detail="Session verification unavailable",
                         headers={"Retry-After": str(self._retry_after_s())},
                     )
-                return self._keys
+                # A cooldown-skipped fetch did NOT refresh: this is a stale
+                # serve too, so the warm-up must not report it as "ready".
+                return self._keys, (
+                    "refetch not attempted — within the "
+                    f"{_COOLDOWN_S:.0f}s failure/miss cooldown"
+                )
             try:
                 content = await _fetch_jwks_bounded()
                 if len(content) > _MAX_JWKS_BYTES:
@@ -240,7 +305,15 @@ class _JWKSCache:
                     if self._keys is None:
                         self._keys = {}
                     logger.warning("JWKS fetch returned zero usable keys — serving stale/empty")
-                    return self._keys
+                    if not self._keys:
+                        # Cold (or already-empty) cache: nothing last-good to
+                        # serve stale. The warm-up reports this as its own
+                        # "empty" outcome, not as a stale serve.
+                        return self._keys, None
+                    return self._keys, (
+                        "upstream JWKS answered 200 with 0 usable keys "
+                        "(empty body / bad rotation)"
+                    )
                 self._keys = parsed
                 self._fetched_at = time.monotonic()
                 if kid is not None and kid not in parsed and arm_cooldown:
@@ -273,7 +346,8 @@ class _JWKSCache:
                         headers={"Retry-After": str(self._retry_after_s())},
                     ) from exc
                 logger.warning("JWKS fetch failed — serving stale: %s", exc)
-            return self._keys
+                return self._keys, f"JWKS fetch failed: {type(exc).__name__}: {exc}"[:200]
+            return self._keys, None
 
 
 def _parse_jwks(content: bytes) -> dict[str, dict]:
@@ -361,15 +435,25 @@ async def prefetch_jwks() -> dict:
     the listener, and a warm-up must never break boot. The report carries an
     ``outcome`` so the boot log can be TRUTHFUL about which case it was:
 
-    * ``"ready"`` — keys cached; the first request pays nothing;
-    * ``"empty"`` — a 200 with ZERO usable keys (bad rotation / empty body).
-      This is NOT a transport outage: a zero-key body is cached as ``{}`` and
-      verifies as an unknown kid, so the request answers **401** "Unknown
-      signing key", never 503, and it re-attempts the fetch (the warm-up did
-      not arm the cooldown);
-    * ``"transport_error"`` — the bounded fetch failed (network/timeout/HTTP).
-      The first request makes its own bounded attempt and answers a bounded
-      ``503`` + ``Retry-After`` only if the upstream is STILL unreachable.
+    * ``"ready"`` — a FRESH key set was fetched and cached; the first request
+      pays nothing;
+    * ``"empty"`` — a 200 with ZERO usable keys (bad rotation / empty body)
+      against a COLD cache. This is NOT a transport outage: a zero-key body is
+      cached as ``{}`` and verifies as an unknown kid, so the request answers
+      **401** "Unknown signing key", never 503, and it re-attempts the fetch
+      (the warm-up did not arm the cooldown);
+    * ``"stale"`` — the fetch did not yield a fresh usable set (it raised, the
+      upstream answered with zero usable keys, or an armed cooldown blocked it)
+      but last-good keys WERE cached, so ``get()`` serves the old set. This is
+      reported as a failure, with its reason (#2922), instead of as ``ready``
+      while the cache logs "serving stale": the first request is served from
+      the stale set and a kid miss still triggers its own bounded refetch —
+      which, if it also fails, answers **401** from that set (never an
+      unbounded wait and never a 503, since last-good keys exist);
+    * ``"transport_error"`` — the bounded fetch failed with NO last-good keys
+      to fall back on (network/timeout/HTTP). The first request makes its own
+      bounded attempt and answers a bounded ``503`` + ``Retry-After`` only if
+      the upstream is STILL unreachable.
 
     Returns a small boot-log report:
     ``{"ok", "keys", "elapsed_ms", "error", "outcome"}``.
@@ -386,7 +470,8 @@ async def prefetch_jwks() -> dict:
         }
 
     try:
-        keys = await _jwks.get(force=True, arm_cooldown=False)
+        keys, stale_reason = await _jwks.get_with_origin(
+            force=True, arm_cooldown=False)
     except HTTPException as exc:
         return _report(
             False, 0, f"HTTPException {exc.status_code}: {exc.detail}",
@@ -402,6 +487,15 @@ async def prefetch_jwks() -> dict:
             "upstream JWKS answered 200 with 0 usable keys "
             "(empty body / bad rotation)",
             "empty")
+    if stale_reason is not None:
+        # The fetch did NOT produce a fresh set, but last-good keys existed and
+        # were served. Keying off ``keys`` alone reported this as "ready" while
+        # ``get()`` logged "serving stale" (#2922 — a fourth case that the
+        # empty/transport_error taxonomy collapsed into ready).
+        return _report(
+            False, len(keys),
+            f"{stale_reason} — serving {len(keys)} last-good cached key(s)",
+            "stale")
     return _report(True, len(keys), None, "ready")
 
 

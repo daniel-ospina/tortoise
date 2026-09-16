@@ -1299,17 +1299,77 @@ class TestColdStartBound:
         assert sa._jwks._keys == {}
         sa._jwks._fetched_at = time.monotonic()  # host uptime < TTL case
 
+        # Assert on ``get()`` DIRECTLY — no ``verify_session_jwt``. R16 makes
+        # that caller force-refetch on a kid miss, so its fetch count is 2 with
+        # OR without the fix (an empty serve is followed by the forced
+        # refetch) and it cannot discriminate. ``get()`` can: with the
+        # usable-key-set guard the empty set is re-attempted (count 2); with
+        # ``self._keys is not None`` it is TTL-served (count 1).
+        keys = _run(sa._jwks.get())
+        assert keys == {}
+        assert stub.count == 2, (
+            "the empty key set was TTL-served instead of re-attempted")
+
+        # And the request path must still answer 401 "Unknown signing key"
+        # from the empty set (never 503), at no additional fetch cost.
         priv, _ = u.make_ec_keypair()
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         with pytest.raises(HTTPException) as ei:
             verify_ok(tok)
         assert ei.value.status_code == 401  # unknown signing key, not 503
-        assert stub.count == 2, (
-            "the empty key set was TTL-served instead of re-attempted")
+        assert stub.count == 2
+
+    def test_prewarm_that_serves_stale_keys_is_not_reported_ready(
+            self, monkeypatch):
+        """A failed warm-up that served last-good keys is NOT ``ready`` (#2922).
+
+        With last-good keys cached, a raising fetch makes ``get()`` log
+        "serving stale" and return the OLD set — so the pre-fix ``if not keys``
+        check is false and the report said ``ok=True/outcome="ready"`` for a
+        genuinely down upstream. The report must say the warm-up did not
+        refresh, and carry the reason.
+        """
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
+        good = FetchStub(body=json.dumps(u.build_ec_jwks(pub, "kid-1")).encode())
+        monkeypatch.setattr(sa, "_fetch_jwks", good)
+        _run(sa._jwks.get(force=True))
+        assert sa._jwks._keys, "precondition: last-good keys must be cached"
+
+        monkeypatch.setattr(sa, "_fetch_jwks",
+                            FetchStub(error=OSError("jwks down")))
+        report = _run(sa.prefetch_jwks())
+        assert report["ok"] is False, report
+        assert report["outcome"] == "stale", report
+        assert report["keys"] == 1, report
+        assert report["error"] and "jwks down" in report["error"], report
+
+    def test_prewarm_serving_stale_after_an_empty_rotation_is_not_ready(
+            self, monkeypatch):
+        """A zero-usable-key 200 against a WARM cache is also a stale serve.
+
+        The upstream answered (200) but with no usable keys: the warm-up did
+        NOT refresh, it serves the last-good set, and the boot report must not
+        say ``ready`` (nor ``empty`` — the served cache is not empty).
+        """
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
+        good = FetchStub(body=json.dumps(u.build_ec_jwks(pub, "kid-1")).encode())
+        monkeypatch.setattr(sa, "_fetch_jwks", good)
+        _run(sa._jwks.get(force=True))
+        assert sa._jwks._keys, "precondition: last-good keys must be cached"
+
+        monkeypatch.setattr(sa, "_fetch_jwks", FetchStub(body=b'{"keys": []}'))
+        report = _run(sa.prefetch_jwks())
+        assert report["ok"] is False, report
+        assert report["outcome"] == "stale", report
+        assert report["keys"] == 1, report
+        assert "0 usable keys" in report["error"], report
 
     def test_prefetch_cannot_raise_even_if_the_cache_explodes(self, monkeypatch):
         class _Exploding:
             async def get(self, *args, **kwargs):
+                raise RuntimeError("cache exploded")
+
+            async def get_with_origin(self, *args, **kwargs):
                 raise RuntimeError("cache exploded")
 
         monkeypatch.setattr(sa, "_jwks", _Exploding())
@@ -1362,4 +1422,15 @@ class TestColdStartBound:
         monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "not-a-number")
         assert sa._resolve_fetch_total() == floor
         monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "0")
+        assert sa._resolve_fetch_total() == floor
+        # NON-FINITE values are rejected, not clamped (review P2-1). The old
+        # ``not v > 0`` guard is NaN-safe but NOT inf-safe: ``inf`` (and
+        # ``1e309``, which ``float()`` evaluates to ``inf``) passed it, was not
+        # ``< floor``, and landed in ``asyncio.timeout(inf)`` — which NEVER
+        # fires, silently disabling the #3284 hard deadline.
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "inf")
+        assert sa._resolve_fetch_total() == floor
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "1e309")
+        assert sa._resolve_fetch_total() == floor
+        monkeypatch.setenv("TORTOISE_JWKS_TIMEOUT", "nan")
         assert sa._resolve_fetch_total() == floor

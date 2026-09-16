@@ -8886,6 +8886,40 @@ class TestFirstContactPrewarm:
             "an empty key body answers 401, not 503: " + text)
         assert sa._jwks._last_failure_at is None
 
+    def test_stale_serve_prewarm_log_is_not_ready(self, monkeypatch, caplog):
+        """#2922: a warm-up that served last-good keys must not log "ready".
+
+        With last-good keys cached, a raising fetch makes ``get()`` log
+        "serving stale" and return the OLD set, so the pre-fix empty-check is
+        false and the boot log said "JWKS pre-warm ready … (N keys)" for a down
+        upstream. The log must say the warm-up did NOT refresh.
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise OSError("jwks unreachable")
+
+        cache = sa._JWKSCache()
+        cache._keys = {"kid-1": {"kid": "kid-1", "kty": "EC"}}
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "JWKS pre-warm ready" not in text, (
+            "a stale serve must not be logged as ready: " + text)
+        assert "did NOT refresh" in text, text
+        assert "last-good" in text, text
+        assert "jwks unreachable" in text, text
+
     def test_slow_dead_jwks_still_yields_a_bounded_503_with_retry_after(
             self, unauth_client, monkeypatch):
         """The #3284 regression on the REAL HTTP surface.

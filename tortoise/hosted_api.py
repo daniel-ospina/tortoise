@@ -851,6 +851,18 @@ async def _first_contact_prewarm() -> None:
                 report["elapsed_ms"],
                 report["error"],
             )
+        elif outcome == "stale":
+            _logger.warning(
+                "auth: JWKS pre-warm did NOT refresh in %.0fms (%s) — serving "
+                "%d last-good cached key(s). The first session-authenticated "
+                "request is served from that set; a kid miss still triggers "
+                "its own bounded refetch and, if that also fails, answers 401 "
+                "'Unknown signing key' from the stale set (never a 503 — "
+                "last-good keys exist — and never an unbounded wait).",
+                report["elapsed_ms"],
+                report["error"],
+                report["keys"],
+            )
         else:
             _logger.warning(
                 "auth: JWKS pre-warm failed in %.0fms (%s) — the first "
