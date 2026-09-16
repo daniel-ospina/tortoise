@@ -616,6 +616,35 @@ def remove_stale_aof(db_path: str | os.PathLike) -> None:
             logger.warning("removed stale AOF dir %s (restore/migrate contract, #915)", d)
 
 
+# ── #3590 S0: the `rebuild == live` invariant surface (R8/R9) ──────────
+#
+# Types the projection deliberately gives NO entity-graph effect. The S0
+# catch-all in `apply()`/`rebuild_all` records every type it has no branch
+# for as a non-fold — an explicitly no-effect lane is NOT an unhandled type,
+# and recording it would fail the R9 invariant on a legitimate journal:
+#   * IngestStarted — reaches `apply()` LIVE via `EventAPI._emit`; documented
+#     "no graph effect" (`_apply_one` below).
+#   * ConfidenceChanged — documented "no graph effect (audit-only event)"
+#     (rebuild_all pass-1b).
+#   * CalibrationRecorded — writes a `:Meta` marker, which the entity
+#     materialisation does not compare (JSONL-only audit record).
+# OperatorAnnotated / DedupeRecorded / DedupeRejected / BatchIdStamped /
+# DirectEdgeCreated are deliberately NOT here: they are real folds the
+# projection is missing (#3597, cited and not fixed in S0).
+_PROJECTION_NOEFFECT_EVENT_TYPES = frozenset({
+    "IngestStarted",
+    "ConfidenceChanged",
+    "CalibrationRecorded",
+})
+
+# Properties excluded from `materialize()`'s comparison: recomputed/volatile
+# by construction (updatedAt is re-stamped on every rebuild; embedding is
+# recomputed server-side). Everything else in the node property dict IS
+# compared — the allowlist is explicit so that adding a property to the model
+# automatically widens the invariant (no hand-picked identity-field list).
+_VOLATILE_ENTITY_PROPS = frozenset({"updatedAt", "embedding"})
+
+
 def _norm(ev: dict) -> dict:
     """Normalize event shape — tolerates API (flat) and script (nested point).
 
@@ -712,7 +741,7 @@ def split(points: dict[str, dict]) -> tuple[list[dict], list[dict]]:
 
 @runtime_checkable
 class Projection(Protocol):
-    def apply(self, event: dict) -> None: ...
+    def apply(self, event: dict, journal_pos: int | None = None) -> None: ...
     def rebuild(self, log) -> None: ...
 
 
@@ -720,7 +749,11 @@ class InMemoryProjection:
     def __init__(self):
         self.points: dict[str, dict] = {}
 
-    def apply(self, event: dict) -> None:
+    def apply(self, event: dict, journal_pos: int | None = None) -> None:
+        # journal_pos is the #3590 S0 replay coordinate — the in-memory fold
+        # keeps no non-folded set (it is Object-blind by design and therefore
+        # excluded from the invariant harness); the parameter exists for
+        # Projection-protocol signature parity only.
         _apply_one(self.points, event)
 
     def rebuild(self, log) -> None:
@@ -1077,6 +1110,12 @@ class FalkorProjection(
         self.g = _GuardedGraph(self.db.select_graph(graph_name), self)
         self.graph_name = graph_name
         self._graph_name = graph_name
+        # #3590 S0 (R8/R9): every event that folded nothing on this
+        # projection — the LIVE path and any replay engine both append here.
+        # RECORDING ONLY: nothing reads it to make a decision at S0; the
+        # invariant harness (`materialize()`) and S2's fail-loud replay
+        # entry points are the consumers.
+        self.non_folded: list[NonFoldedEntry] = []
         self._skip_guard = False
         self._is_embedded = (path is not None)
         self._path = path
@@ -1287,7 +1326,7 @@ class FalkorProjection(
             return {**ev, **ev["point"]}
         return ev
 
-    def apply(self, event: dict) -> None:
+    def apply(self, event: dict, journal_pos: int | None = None) -> None:
         ev = self._norm(event)
         t = ev.get("type")
         if not isinstance(t, str):
@@ -1297,6 +1336,9 @@ class FalkorProjection(
             logger.warning(
                 "FalkorProjection.apply: skipping malformed event with "
                 "missing/non-string 'type' (event_id=%s)", ev.get("event_id"))
+            # #3590 S0 (R8/R9): a skip is a non-fold — record it so the
+            # invariant can see it. Recording only; never raises.
+            self._record_non_fold(journal_pos, ev, shape="malformed-event")
             return
         if t in ("PointAdded", "OperatorAdded"):
             # #331 (review r3): ev.get — missing 'point' key handled by the
@@ -1308,6 +1350,7 @@ class FalkorProjection(
                 logger.warning(
                     "FalkorProjection.apply: skipping %s with non-dict point "
                     "(event_id=%s)", t, ev.get("event_id"))
+                self._record_non_fold(journal_pos, ev, shape="malformed-event")
                 return
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
@@ -1316,6 +1359,7 @@ class FalkorProjection(
                 logger.warning(
                     "FalkorProjection.apply: skipping %s with missing point "
                     "id (event_id=%s)", t, ev.get("event_id"))
+                self._record_non_fold(journal_pos, ev, shape="malformed-event")
                 return
             # Phase 1 stop-writes: strip context from v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
@@ -1392,11 +1436,44 @@ class FalkorProjection(
             # popped here so it never reaches _persist_extra_props.
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+        elif t in _PROJECTION_NOEFFECT_EVENT_TYPES:
+            # Documented no-entity-graph-effect lane (see the constant) — NOT
+            # an unhandled type; recording it would fail the R9 invariant on
+            # a legitimate journal.
+            return
+        else:
+            # #3597 (cited, NOT fixed in S0): apply() has no branch for this
+            # type, so the fold is a no-op. #3590 S0 records the non-fold
+            # (R8/R9) without changing behaviour; the fail-loud raise on a
+            # non-empty set is S2.
+            self._record_non_fold(journal_pos, ev,
+                                  shape="unhandled-event-type")
+
+    def _record_non_fold(self, journal_pos: int | None, ev: dict, *,
+                         shape: str) -> None:
+        """#3590 S0 (R8/R9) — record an event that folded nothing.
+
+        RECORDING ONLY: never raises and never alters a fold or a write path.
+        ``journal_pos`` is the durable replay position (the line index passed
+        by ``rebuild``/``rebuild_all``/``recover_from_log``) or ``None`` on
+        the live path, which records the literal ``"live"`` — so the position
+        field is present and explicit on both paths, never omitted.
+
+        The fail-loud consumption (``rebuild``/``rebuild_all`` raising on a
+        non-empty set) lands in S2; S0's ``materialize()`` exposes the set to
+        the invariant harness, which is what makes the recorder non-vacuous.
+        """
+        self.non_folded.append(NonFoldedEntry(
+            journal_pos=journal_pos if journal_pos is not None else "live",
+            shape=shape,
+            type_name=(ev or {}).get("type"),
+            event_id=(ev or {}).get("event_id"),
+        ))
 
     def rebuild(self, log) -> None:
         self.g.query("MATCH (n) DETACH DELETE n")
-        for ev in log.read_all():
-            self.apply(ev)
+        for pos, ev in enumerate(log.read_all()):
+            self.apply(ev, pos)
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -1750,7 +1827,19 @@ class FalkorProjection(
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
-            # ConfidenceChanged: no graph effect (audit-only event)
+            elif t in _PROJECTION_NOEFFECT_EVENT_TYPES:
+                # Documented no-entity-graph-effect lane (see the constant) —
+                # the `ConfidenceChanged: no graph effect` fall-through this
+                # replaces, made explicit for parity with apply().
+                continue
+            else:
+                # #3590 S0 (R8/R9, recording ONLY): pass-1b has no fold for
+                # this type — OperatorAnnotated / DedupeRecorded /
+                # DedupeRejected / BatchIdStamped / DirectEdgeCreated among
+                # them (#3597 is the cited gap, deliberately not fixed here).
+                # `seq` is the durable replay position, never a rebuild-time
+                # value; the fail-loud raise is S2.
+                self._record_non_fold(seq, ev, shape="unhandled-event-type")
 
         # Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
         # creation events (see the branch above). Warn on 0-row folds — a
@@ -3082,6 +3171,97 @@ class FalkorProjection(
         svbp = TortoiseSVBP(**svbp_kwargs)
         svbp.run(factors, evidence=evidence)
         return svbp
+
+
+class NonFoldedEntry(NamedTuple):
+    """One event the projection did not fold (#3590 S0, R8/R9).
+
+    Hashable, so the invariant compares the non-folded set as a set rather
+    than a list — a duplicate record cannot mask a missing one.
+    """
+
+    journal_pos: int | str
+    shape: str
+    type_name: str | None
+    event_id: str | None
+
+
+class Materialized(NamedTuple):
+    """Canonical, comparable projection snapshot (#3590 S0).
+
+    ``nodes``/``edges`` are order-stable tuples derived from the graph, so two
+    materialisations of the same state compare equal and any single-side
+    difference breaks the equality. ``non_folded`` is the R9 refused set of
+    the projection that produced it.
+    """
+
+    nodes: tuple
+    edges: tuple
+    non_folded: frozenset
+
+    @property
+    def state(self) -> tuple:
+        """The (nodes, edges) pair the invariant compares live-vs-replay."""
+        return (self.nodes, self.edges)
+
+
+def _canon_value(v):
+    """Value canonicaliser for `materialize()`: maps/lists become sorted
+    tuples so a dict's Python insertion order can never fake a divergence."""
+    if isinstance(v, dict):
+        return tuple(sorted((k, _canon_value(x)) for k, x in v.items()))
+    if isinstance(v, (list, tuple)):
+        return tuple(_canon_value(x) for x in v)
+    return v
+
+
+def materialize(proj) -> Materialized:
+    """The R9 materialisation of *proj* — canonical and TOTAL.
+
+    TOTAL, and falsifiably so: the compared property set is the node's FULL
+    property dict minus ``_VOLATILE_ENTITY_PROPS`` (an explicit allowlist),
+    never a hand-picked identity-field list — so ``outdated``, ``supersededBy``,
+    ``deletedAt`` and the ``_persist_extra_props`` payload are all compared. A
+    property added to the model widens the invariant automatically.
+
+    Scoped to the ENTITY labels (``_RESOLVE_BRANCHES``) — the event-store
+    labels (``:GraphEvent``/``:GraphEventMeta``), the ``:Meta`` index markers
+    and the ``:Batch`` markers are live-only infrastructure, not fold output;
+    comparing them would fail the invariant for a legitimate reason.
+
+    The EDGE set (type + both endpoint keys) is materialised too: a silently
+    dropped edge is the same harm class as a buried node, and a
+    properties-only comparison cannot see it. Tombstones are KEPT (``status``
+    is compared) — that is what lets R9 see a ``Deleted``, and what
+    distinguishes "deleted then replayed" from "never created".
+    """
+    # Constant label set, interpolated — never caller data (same posture as
+    # `_resolve_entity`'s constant-tuple label interpolation).
+    label_list = ", ".join(
+        f"'{lbl}'" for lbl in sorted({lbl for lbl, _ in proj._RESOLVE_BRANCHES}))
+    label_test = f"any(l IN labels({{alias}}) WHERE l IN [{label_list}])"
+    node_rows = proj.g.query(
+        "MATCH (n) WHERE " + label_test.format(alias="n") + " "
+        "RETURN labels(n), coalesce(n.id, n.eventId, n.url, n.name), properties(n)"
+    ).result_set
+    nodes = []
+    for node_labels, key, props in node_rows:
+        clean = tuple(sorted(
+            (k, _canon_value(v)) for k, v in (props or {}).items()
+            if k not in _VOLATILE_ENTITY_PROPS))
+        nodes.append((tuple(sorted(node_labels or [])), key, clean))
+    edge_rows = proj.g.query(
+        "MATCH (a)-[r]->(b) WHERE " + label_test.format(alias="a")
+        + " AND " + label_test.format(alias="b") + " "
+        "RETURN type(r), coalesce(a.id, a.eventId, a.url, a.name), "
+        "       coalesce(b.id, b.eventId, b.url, b.name)"
+    ).result_set
+    edges = [(r[0], r[1], r[2]) for r in edge_rows]
+    return Materialized(
+        nodes=tuple(sorted(nodes, key=repr)),
+        edges=tuple(sorted(edges, key=repr)),
+        non_folded=frozenset(getattr(proj, "non_folded", ())),
+    )
 
 
 def is_missing_graph_error(e: Exception) -> bool:
