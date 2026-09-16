@@ -693,6 +693,35 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
         self.assertIn("--closed-pr-timeout must be > 0", proc.stderr)
 
+    def test_usage_error_on_non_finite_closed_pr_timeout(self):
+        # `nan` / `inf` defeat a bare positivity check (`nan <= 0` and
+        # `inf <= 0` are BOTH False) and then raise inside
+        # subprocess.run(timeout=…) — an uncaught ValueError/OverflowError, so
+        # the run ends exit 1 (the COLLISION code) with a traceback and no
+        # VERDICT at all. They must be EXIT_USAGE.
+        # `--closed-pr-timeout -inf` (space-separated) is rejected by argparse
+        # itself as an option-like token, so the `=` form is used to reach the
+        # validator under test.
+        for bad in ("nan", "inf", "-inf", "abc", "60s"):
+            with self.subTest(bad=bad):
+                rc, out = self.run_tool(extra_args=[f"--closed-pr-timeout={bad}"])
+                self.assertEqual(rc, 3, f"{bad}: {out}")
+                self.assertIn("--closed-pr-timeout", out)
+                self.assertNotIn("Traceback", out)
+
+    def test_usage_error_on_bad_closed_pr_timeout_env(self):
+        # The env seam is a documented input too. The old eager
+        # `float(os.environ[...])` ran at add_argument time, so a typo'd or
+        # empty variable raised an uncaught ValueError -> exit 1 + traceback,
+        # i.e. a misconfiguration reported as a phantom COLLISION.
+        for bad in ("abc", "nan", "inf", "0", ""):
+            with self.subTest(bad=bad):
+                rc, out = self.run_tool(
+                    env_extra={"COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT": bad})
+                self.assertEqual(rc, 3, f"{bad}: {out}")
+                self.assertIn("--closed-pr-timeout", out)
+                self.assertNotIn("Traceback", out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

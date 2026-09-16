@@ -105,6 +105,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -118,8 +119,10 @@ EXIT_INCOMPLETE = 2
 EXIT_USAGE = 3
 
 DEFAULT_TIMEOUT = 60.0
-# PR caps are completeness bounds, not sampling windows: the lists are fetched
-# with `--limit cap+1` and a longer list is reported TRUNCATED -> INCOMPLETE.
+# PR caps are completeness bounds, not sampling windows: OPEN PRs are fetched
+# with `--limit cap+1`, CLOSED PRs are fetched to exhaustion with
+# `gh api --paginate` (#3587) and the cap is applied to the full result — either
+# way a list longer than its cap is reported TRUNCATED -> INCOMPLETE.
 # `gh pr list --search` is deliberately never used: the search API silently
 # caps at 1000 results (observed on this repo's closed surface), which is the
 # exact partial-query failure mode this tool exists to prevent.
@@ -133,7 +136,10 @@ CLOSED_PR_LIMIT = 5000
 # surface gets its own wall-clock budget: a single GraphQL call's 60 s budget
 # would falsely report a large repo's COMPLETE enumeration as INCOMPLETE. This
 # is a budget, not a completeness relaxation — exceeding it is still
-# INCOMPLETE (exit 2), never CLEAN.
+# INCOMPLETE (exit 2), never CLEAN. The cap and the budget bound different
+# things: `--closed-pr-limit` truncates the SCAN of the fully-fetched list,
+# while this budget bounds the FETCH — lowering the cap cannot shorten (or
+# fail fast) the enumeration.
 CLOSED_PR_TIMEOUT = 600.0
 # REST page size. A page is one HTTP response; the issue's suggested
 # ``per_page=100`` resets on this host (3/3 runs, ~40 s) while ``per_page=20``
@@ -967,11 +973,17 @@ def main(argv: list[str] | None = None) -> int:
                              f"(default {PR_LIMIT}; env COLLISION_PREFLIGHT_PR_LIMIT)")
     parser.add_argument("--closed-pr-limit", type=int,
                         default=int(os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", CLOSED_PR_LIMIT)),
-                        help="closed-PR completeness cap; a longer list is TRUNCATED/INCOMPLETE "
+                        help="closed-PR completeness cap applied to the full REST enumeration; a "
+                             "longer list is TRUNCATED/INCOMPLETE. It truncates the SCAN, not the "
+                             "fetch — the enumeration itself is bounded only by --closed-pr-timeout "
                              f"(default {CLOSED_PR_LIMIT}; env COLLISION_PREFLIGHT_CLOSED_PR_LIMIT)")
-    parser.add_argument("--closed-pr-timeout", type=float,
-        default=float(os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT",
-                                     CLOSED_PR_TIMEOUT)),
+    # Deliberately NO ``type=float`` here. A bad value must be EXIT_USAGE, and
+    # neither argparse's own error path (exits 2 == EXIT_INCOMPLETE) nor an
+    # eagerly-converted env default (uncaught ValueError -> exit 1 ==
+    # EXIT_COLLISION) reports a misconfiguration as itself. Validated below.
+    parser.add_argument("--closed-pr-timeout",
+        default=os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT", CLOSED_PR_TIMEOUT),
+        metavar="SECS",
         help="wall-clock budget (secs) for the closed-PR REST enumeration, which is "
              f"multi-request (default {CLOSED_PR_TIMEOUT:g}; env "
              "COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT)")
@@ -994,7 +1006,17 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_USAGE
 
-    if args.closed_pr_timeout <= 0:
+    # `nan`/`inf` are the trap: `nan <= 0` and `inf <= 0` are both False, so a
+    # bare positivity check passes them to subprocess.run(timeout=…), where they
+    # raise ValueError/OverflowError out of `_run` — no VERDICT line, exit 1 (the
+    # COLLISION code). Reject non-numeric and non-finite explicitly.
+    try:
+        closed_pr_timeout = float(args.closed_pr_timeout)
+    except (TypeError, ValueError):
+        print("collision-preflight: --closed-pr-timeout must be a number > 0",
+              file=sys.stderr)
+        return EXIT_USAGE
+    if not math.isfinite(closed_pr_timeout) or closed_pr_timeout <= 0:
         print("collision-preflight: --closed-pr-timeout must be > 0", file=sys.stderr)
         return EXIT_USAGE
 
@@ -1002,7 +1024,7 @@ def main(argv: list[str] | None = None) -> int:
         ordered, title, keywords, issue, _ = run_preflight(
             args.issue, args.repo, args.gh, args.git, args.timeout, args.keywords,
             args.min_keywords, args.pr_limit, args.closed_pr_limit,
-            args.closed_pr_timeout,
+            closed_pr_timeout,
         )
         report, code = format_report(
             ordered, issue, args.repo, title, keywords, args.min_keywords
