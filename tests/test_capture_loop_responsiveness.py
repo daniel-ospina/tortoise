@@ -179,10 +179,13 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
       stall still shows up here as one long interval.
     * the ``/health`` request is answered while the stall is still OPEN. The
       probe is fired only after the fake signals ENTRY (a shared event, not a
-      fixed sleep), and the answer is read against the fake's EXIT event — so
-      no ordering between independent monotonic readings is required and a
-      loaded scheduler cannot invert it (#3581), while a probe that merely
-      queues behind a blocking capture still fails.
+      fixed sleep, asserted at the point it matters — so a run whose probe
+      would precede the stall fails instead of proving nothing), and the
+      answer is read against the fake's EXIT event. No ordering between the
+      two ``perf_counter`` readings — sampled in different threads — is
+      required (#3581); the probe must still complete inside the stall, whose
+      ``STALL_S`` budget is orders of magnitude above the in-memory /health
+      path, and a probe that merely queues behind a blocking capture fails.
 
     Mutation check (must stay true): calling the extraction inline
     (`return fn(*args, **kwargs)` instead of dispatching to the pool) makes the
@@ -242,6 +245,13 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
                 if entered_evt.is_set():
                     break
                 await asyncio.sleep(0.05)
+            # Asserted HERE, before the probe: on an exhausted wait the request
+            # below would be served BEFORE the stall opened and the run would
+            # pass vacuously on the exit-event read (#3581 review) — the
+            # unconditional run-validity guard the old ordering assert carried.
+            assert entered_evt.is_set(), (
+                "the capture never reached the extraction within 30s — the "
+                "stall window never opened, so this run proves nothing (#3060)")
             health = await ac.get("/health")
             # The invariant, read the moment the response is in hand: the stall
             # must still be OPEN. No clocks compared.
@@ -253,9 +263,6 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
 
     ticks, health, health_served_in_stall, cap = asyncio.run(_run())
 
-    assert entered_evt.is_set(), (
-        "the capture never reached the extraction — the stall window never "
-        "opened, so this run proves nothing (#3060)")
     assert health.status_code == 200, health.text
 
     entered, exited = state["entered"], state["exited"]
