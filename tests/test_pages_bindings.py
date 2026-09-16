@@ -8,6 +8,7 @@ a checker that always returns [] would have let #3616 ship again.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -255,6 +256,12 @@ def test_a_null_valued_binding_does_not_count_as_present() -> None:
 # actually contains the preflight and the probe, or that the preflight precedes
 # the deploy — the "requirement that cannot fail" pattern of #3616, one level
 # up. These pin the wiring to the workflow file itself.
+#
+# IMPORTANT: every source-level assertion below runs against the run block with
+# BASH COMMENTS STRIPPED. A comment is not code — cycle 3 proved that raw
+# substring checks were satisfied by the prose explaining the very bug they were
+# meant to catch (`assert "|| curl_rc=$?" in run` passed on a workflow where the
+# guard existed only in a comment).
 # ---------------------------------------------------------------------------
 
 WF_PATH = REPO / ".github" / "workflows" / "deploy-pages.yml"
@@ -263,10 +270,26 @@ PREFLIGHT = "Preflight — required Pages bindings exist"
 PROBE = "Post-deploy — sign-in is actually reachable"
 DEPLOY = "Deploy to Cloudflare Pages (premise-labs project)"
 
+#: Strip `#`-comments from a shell run block. The group-1 alternation keeps a
+#: `#` that is not at a token boundary (e.g. inside a URL fragment) while
+#: removing real comments, including indented ones.
+_BASH_COMMENT_RE = re.compile(r"(?m)(^|[ \t])#[^\n]*")
+
+
+def _strip_bash_comments(script: str) -> str:
+    return _BASH_COMMENT_RE.sub(lambda m: m.group(1), script)
+
 
 def _deploy_steps() -> list[dict]:
     wf = cpb.yaml.safe_load(WF_PATH.read_text(encoding="utf-8"))
     return wf["jobs"]["deploy"]["steps"]
+
+
+def _step_code(name: str) -> str:
+    """The step's run block with comments removed — the only thing assertions
+    about behaviour may read."""
+    step = next(s for s in _deploy_steps() if s.get("name") == name)
+    return _strip_bash_comments(step["run"])
 
 
 def test_the_workflow_has_a_preflight_and_a_probe() -> None:
@@ -291,10 +314,21 @@ def test_the_preflight_runs_before_the_deploy_and_the_probe_after() -> None:
 
 def test_the_preflight_checks_the_manifest_in_this_repo() -> None:
     """The step must gate on the checked-in manifest, not a copy of the list."""
-    step = next(s for s in _deploy_steps() if s.get("name") == PREFLIGHT)
-    assert "tools/check_pages_bindings.py" in step["run"]
-    assert "website/required-bindings.yml" in step["run"]
+    code = _step_code(PREFLIGHT)
+    assert "tools/check_pages_bindings.py" in code
+    assert "website/required-bindings.yml" in code
     assert MANIFEST_PATH.exists()
+
+
+def test_the_preflight_retries_a_transient_api_failure() -> None:
+    """A Cloudflare API blip must not red the deploy.
+
+    The probe retries 10x; the preflight had no retry at all, so a single 5xx or
+    rate-limit cost a manual re-run — the "required check failing for unrelated
+    reasons" pattern that teaches people to ignore it.
+    """
+    code = _step_code(PREFLIGHT)
+    assert "for " in code and "seq 1" in code, "no retry loop in the preflight"
 
 
 def test_the_preflight_receives_both_cloudflare_credentials() -> None:
@@ -306,17 +340,31 @@ def test_the_preflight_receives_both_cloudflare_credentials() -> None:
     assert env.get("CLOUDFLARE_ACCOUNT_ID")
 
 
+def test_the_probe_asserts_the_right_behaviours_in_CODE_not_comments() -> None:
+    """Every assertion here reads the comment-stripped block.
+
+    Cycle 3 mutation-tested the previous version: deleting the guard from the
+    CODE while leaving the comment that mentions it kept every test green.
+    """
+    code = _step_code(PROBE)
+    assert "code_challenge_method=s256" in code, "the PKCE assertion is gone"
+    assert "|| curl_rc=$?" in code, (
+        "the `|| curl_rc=$?` guard is gone from the CODE — under `bash -e` a "
+        "failed curl aborts the step and makes the retry loop unreachable"
+    )
+    assert "session_store_unavailable" in code, "no #3616 diagnostic in the probe"
+    assert "/auth/start" in code, "not probing the endpoint that checks SESSIONS first"
+    assert "302" in code
+    # The comments must NOT be what satisfies the checks above.
+    raw = next(s for s in _deploy_steps() if s.get("name") == PROBE)["run"]
+    assert len(_strip_bash_comments(raw)) < len(raw), (
+        "the stripper removed nothing — it is not working"
+    )
+
+
 def test_the_probe_requires_a_302_and_a_pkce_challenge() -> None:
-    """The probe must not accept a bare 200, and must assert the PKCE challenge
-    (which is what proves the auth_flows INSERT succeeded)."""
-    step = next(s for s in _deploy_steps() if s.get("name") == PROBE)
-    run = step["run"]
-    assert "session_store_unavailable" in run, "no #3616 diagnostic in the probe"
-    assert "code_challenge_method=s256" in run, "the PKCE assertion is gone"
-    assert "302" in run
-    # Probed at the documented endpoint — the one whose FIRST check is
-    # `if (!env.SESSIONS)` and therefore actually touches the store.
-    assert "/auth/start" in run
+    """Legacy alias retained: the substantive checks live in the test above."""
+    test_the_probe_asserts_the_right_behaviours_in_CODE_not_comments()
 
 
 def test_the_gate_files_select_a_surface_so_their_test_runs() -> None:
@@ -499,12 +547,16 @@ def _probe_script(tmp_path: Path) -> Path:
     """
     step = next(s for s in _deploy_steps() if s.get("name") == PROBE)
     run = step["run"]
-    assert "|| curl_rc=$?" in run, (
+    assert "|| curl_rc=$?" in _strip_bash_comments(run), (
         "the `|| curl_rc=$?` guard is gone — under `bash -e` a failed curl "
         "aborts the step and makes the retry loop unreachable"
     )
+    # Quote the temp directory: an unquoted path breaks the generated shell when
+    # TMPDIR contains a space (cycle-3 review: `TMPDIR='/tmp/x y' pytest` produced
+    # 3 spurious failures). `"$PROBE_TMP"/start.body` quotes the variable while
+    # leaving the literal suffix safe.
     rewritten = (
-        run.replace("/tmp/start.", str(tmp_path) + "/start.")
+        run.replace("/tmp/start.", '"$PROBE_TMP"/start.')
         .replace("$(seq 1 10)", "$(seq 1 3)")
         .replace("sleep 15", "sleep 0")
     )
@@ -525,6 +577,7 @@ def _run_probe(tmp_path: Path, mode: str) -> tuple[int, str]:
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "STUB_MODE": mode,
         "STUB_DIR": str(tmp_path),
+        "PROBE_TMP": str(tmp_path),
     }
     # `bash -e` mirrors GitHub Actions' default Linux shell — the exact condition
     # under which the original bug reproduced.
@@ -557,15 +610,25 @@ def test_the_probe_shell_behaves_correctly(tmp_path, mode: str, want_rc: int) ->
 
 
 def test_the_probe_reports_the_503_error_code_verbatim(tmp_path) -> None:
-    """The diagnostic must survive bash, not merely exist in the YAML source.
+    """The DIAGNOSTIC MESSAGE must survive bash, not merely exist in the YAML.
 
-    Backticks around `session_store_unavailable` were command substitution: bash
-    ran the token, stripped it from the message, and printed 'command not found'.
-    A source-level string assertion could not see that.
+    Two separate bugs lived here and a source-level check saw neither:
+      - backticks around `session_store_unavailable` were command substitution:
+        bash ran the token, stripped it from the message, and printed 'command
+        not found'.
+      - cycle 3 deleted the message text and every test stayed green, because
+        the assertion was satisfied by `cat /tmp/start.body` echoing the stub's
+        JSON body.
     """
     _rc, out = _run_probe(tmp_path, "503")
-    assert "session_store_unavailable" in out
     assert "command not found" not in out
+    # The operator-facing line itself — what a human reads when sign-in is down.
+    # Cycle 3 gutted this sentence and all 47 tests stayed green, because the
+    # assertion was satisfied by `cat /tmp/start.body` echoing the stub's JSON.
+    # The diagnostic must be asserted in the LOG, not inferred from a file.
+    assert "the session store is unavailable" in out
+    assert "SESSIONS D1 binding" in out
+    assert "#3616" in out
 
 
 def test_the_probe_retries_a_transient_transport_failure(tmp_path) -> None:

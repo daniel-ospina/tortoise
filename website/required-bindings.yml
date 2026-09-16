@@ -25,6 +25,18 @@
 #
 # SCOPE: this is the `premise-labs` Pages project only (the `tortoise-dashboard`
 # project is deployed by the `deploy-dashboard` job and is not covered).
+#
+# WHY `preview` IS GATED TOO, even though deploy-pages.yml only deploys
+# production (`--branch=main`): a preview environment that cannot sign anyone in
+# is a broken preview, and the whole point of this gate is to catch that class of
+# gap before launch rather than after. The consequence is deliberate and worth
+# stating plainly — a preview-only gap blocks production deploys until it is
+# fixed. That is the intended fail-closed behaviour, not an oversight. (Verified
+# 2026-09-16: preview does carry SESSIONS.)
+#
+# This file is a deploy config, not a public asset: it is listed in
+# website/.wranglerignore so it is not served at
+# https://tortoise.premiselabs.co/required-bindings.yml.
 
 project: premise-labs
 
@@ -64,8 +76,10 @@ bindings:
     type: env_vars
     envs: [production]
     note: >-
-      server-side blog/admin writes (blog/api/posts, admin/[[path]], the
-      cover/SEO generators). Read at blog/_shared/admin-auth.ts and 5 others.
+      server-side blog/admin writes. The explicit ``503 not_configured`` sites
+      are functions/blog/api/posts/[[path]].ts (2), generate-cover.ts and
+      generate-seo.ts; functions/admin/[[path]].ts reports `unavailable`.
+      functions/blog/_shared/admin-auth.ts also reads it (via `?? ""`).
 
   # Cover and SEO generation. Absent -> ``503 not_configured``.
   - name: OPENROUTER_API_KEY
@@ -75,19 +89,20 @@ bindings:
     note: blog/api/generate-cover.ts, blog/api/generate-seo.ts.
 
   # Deliberately NOT required: blog/_shared/cloudflare-purge.ts is a best-effort
-  # cache purge and returns early with `skipped: true` when these are absent. A
-  # missing purge token degrades staleness, it does not break serving.
+  # cache purge that returns boolean `false` and logs a warning when these are
+  # absent (lines 37-38, 41-42). A missing purge token degrades staleness; it
+  # does not break serving.
   - name: CF_API_TOKEN
     kind: recommended
     type: env_vars
     envs: [production]
-    note: Cache purge is best-effort and fail-open by design (cloudflare-purge.ts).
+    note: Cache purge is best-effort and fail-open by design (functions/blog/_shared/cloudflare-purge.ts:37-38).
 
   - name: CF_ZONE_ID
     kind: recommended
     type: env_vars
     envs: [production]
-    note: Cache purge is best-effort and fail-open by design (cloudflare-purge.ts).
+    note: Cache purge is best-effort and fail-open by design (functions/blog/_shared/cloudflare-purge.ts:37-38).
 
   # Has a correct in-code default (https://app.premiselabs.co), so absence is
   # not an outage. Set it explicitly to decouple the redirect target from code.

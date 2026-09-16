@@ -1,1 +1,4 @@
 apps/
+# #3616: a deploy config, not a public asset — do not serve it at
+# https://tortoise.premiselabs.co/required-bindings.yml
+required-bindings.yml

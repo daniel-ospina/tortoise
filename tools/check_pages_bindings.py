@@ -169,7 +169,17 @@ def fetch_configs(account_id: str, project: str, api_token: str) -> dict:
         raise RuntimeError(
             f"Cloudflare API returned success with a malformed payload: {str(payload)[:300]}"
         )
-    return result.get("deployment_configs") or {}
+    # `deployment_configs` must be PRESENT. `result.get(...) or {}` would turn a
+    # missing key into "every binding is absent" (exit 1, "a required binding is
+    # missing") — the wrong reason, sending an operator to hunt for a binding
+    # that is not the problem. Both fail closed; the diagnosis must be right.
+    configs = result.get("deployment_configs")
+    if not isinstance(configs, dict):
+        raise RuntimeError(
+            "Cloudflare API returned success but no `deployment_configs` — the "
+            "project payload shape is not what this gate expects"
+        )
+    return configs
 
 
 def main(argv: list[str] | None = None) -> int:
