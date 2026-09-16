@@ -14,9 +14,12 @@ PRE-REGISTERED METRIC SEMANTICS (plan Task 7, second-model P2-4):
 
 Geometry contracts (pinned by Task 1's committed fixture tests — Task 7 is
 forbidden from editing the substrate):
-  * R9 deep-rank substrate (87 rows): A-DEFAULT admits pDeepG1 (fieldtrip)
-    only; A-WIDENED (pool 40→120 window AND item cap) admits BOTH; the
-    assembled arm admits BOTH on the same graph.
+  * R9 deep-rank substrate (87 rows): the DEFAULT pool-40 admits NEITHER
+    deep gold; A-WIDENED (pool 40→120 window AND item cap) admits BOTH; the
+    assembled arm admits BOTH on the same graph — the pool DEPTH is the
+    discriminator. #3095 re-measurement (post-#3018): the pre-#3018
+    contract had pDeepG1 in-pool; #3018's deterministic-ranking fix moved
+    the opaque fulltext order (same rows), so both golds are now deep.
   * R16(b) out-of-subgraph canary: A-DEFAULT admits ≥1 gold (A≥1); B admits
     ZERO (B=0) — the canary question's gold lives on a THIRD object outside
     the resolved subjects' subgraphs.
@@ -114,6 +117,13 @@ def sdk(monkeypatch):
 Q_DATE = "2026-09-10"
 
 
+def _n_rows(evidence: str) -> int:
+    """Number of evidence CHUNKS (header included) — the evidence-shape count
+    the R9 pool-depth bounds compare. Shares ``ag.evidence_chunks`` so the
+    parse rule lives in one place."""
+    return len(ag.evidence_chunks(evidence))
+
+
 def _legacy(sdk, monkeypatch, question, *, widen=False):
     """A-arm: flag-OFF legacy ask() (DEFAULT or WIDENED caps) with the stub
     FakeReader — evidence text is reader-independent (metric a)."""
@@ -174,18 +184,63 @@ def test_r16b_canary_admission_table(sdk, monkeypatch):
 
 # ── R9 geometry: A-default / A-widened / B admission ──────────────────────
 def test_r9_admission_table_default_widened_assembled(sdk, monkeypatch):
-    """R9 deep-rank substrate (87 rows): A-DEFAULT admits pDeepG1 only;
-    A-WIDENED admits BOTH golds; the assembled arm admits BOTH on the same
-    graph. A-default admission ≠ A-widened admission (the strawman control
-    cannot collapse)."""
+    """R9 deep-rank substrate (87 rows): the DEFAULT pool-40 admits FEWER
+    THAN 2 of the two deep golds; A-WIDENED (pool 40→120) admits BOTH; the
+    assembled arm admits BOTH on the same graph. A-default admission ≠
+    A-widened admission (the strawman control cannot collapse) — the POOL
+    DEPTH is the discriminator.
+
+    #3095: pre-#3018 this asserted A-default admits G1 ('fieldtrip') only,
+    against a substrate whose all-tied FTS scores made the row order an
+    opaque engine-internal sequence. #3018 (`deterministic ranking order for
+    a static store`) removed the second post-CREATE write whose index-stat
+    skew produced that sequence; the stored data is byte-identical, but the
+    opaque order moved and G1 fell outside the default window.
+
+    This test owns the ORDER-INDEPENDENT pool-depth contract:
+      * A-DEFAULT admits FEWER THAN 2 of the two deep golds (measured
+        post-#3018: 0; pre-#3018: 1 — both satisfy it, so a future engine
+        re-order that moves a tied row across the cutoff does not falsely
+        fail here);
+      * A-WIDENED admits BOTH golds on the SAME graph;
+      * the DEFAULT window is non-empty and genuinely narrower than the
+        widened one (the depth discriminator cannot collapse).
+    It deliberately does NOT pin which deep gold lands where. (The
+    A-default-admits-something property is pinned on THIS substrate by the
+    non-vacuity control below; ``test_r16b_canary_admission_table`` pins the
+    A≥1-gold admission on the base-graph canary substrate, a different
+    fixture.)"""
     d = ag.build_deep_rank_substrate(sdk)
     q = d["question"]
     a_def = _legacy(sdk, monkeypatch, q)
-    assert "fieldtrip" in a_def["evidence"], "A-default admits G1"
-    assert "almanac" not in a_def["evidence"], \
-        "A-default: the deep gold must NOT leak (pool-40 binds)"
+    # ORDER-INDEPENDENT gold admission (the invariant this test owns): the
+    # DEFAULT window admits FEWER than 2 of the two deep golds.
+    n_gold_def = sum(m in a_def["evidence"]
+                     for m in ("fieldtrip", "almanac"))
+    assert n_gold_def < 2, (
+        f"A-default admits both deep golds ({n_gold_def}/2) — the pool-40 "
+        "no longer binds above them, so the A-widened arm is vacuous")
+    # non-vacuity: a starved/empty default window must fail, not silently
+    # pass both `not in` assertions above (a known in-pool crowd row)
+    assert "deep-subject milestone" in a_def["evidence"], \
+        "A-default: the pool-40 must still admit in-pool crowd rows"
+    assert _n_rows(a_def["evidence"]) >= 20, \
+        "A-default: the pool-40 must still admit in-pool crowd rows"
     a_wid = _legacy(sdk, monkeypatch, q, widen=True)
+    assert "fieldtrip" in a_wid["evidence"], "A-widened admits G1"
     assert "almanac" in a_wid["evidence"], "A-widened admits G2"
+    # #3095 depth RELATIONSHIP, not just non-emptiness: widening must
+    # actually widen, and the DEFAULT window must still be the pool-40
+    # default (a default that collapsed, or that silently widened to the
+    # 120 fetch, would make the discriminator this whole test owns vacuous).
+    n_def, n_wid = _n_rows(a_def["evidence"]), _n_rows(a_wid["evidence"])
+    assert n_wid > n_def, (
+        f"A-widened must admit MORE chunks than A-default (got {n_wid} vs "
+        f"{n_def}) — otherwise the pool depth is not the discriminator")
+    assert n_def <= 45, (
+        f"A-default admits {n_def} evidence chunks — the DEFAULT window "
+        "silently widened (measured 41 chunks: 40 pool rows + header); the "
+        "strawman guard would be vacuous")
     assert a_def["evidence"] != a_wid["evidence"], \
         "A-default admission ≠ A-widened admission (strawman guard)"
     # B arm on the SAME graph with a FIRED shape (current-state on the deep

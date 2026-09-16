@@ -42,7 +42,7 @@ _GRAPH_SCRIPTS = str(Path(__file__).resolve().parent.parent / "graph-scripts")
 if _GRAPH_SCRIPTS not in sys.path:
     sys.path.insert(0, _GRAPH_SCRIPTS)
 
-TEAM_ID = "test-team-1"
+ORG_ID = "test-team-1"
 
 
 # ── fixtures ──────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ def _no_embeddings(monkeypatch):
                         lambda *a, **k: None)
 
 
-def _provision(db_path: str, *, team_id: str = TEAM_ID,
+def _provision(db_path: str, *, org_id: str = ORG_ID,
                max_points: int | None = 10000) -> None:
     """Provision a Team node (mirrors hosted provision_tenant shape) with an
     encrypted GitHub token + org — on the SAME temp store the TestClient
@@ -65,12 +65,12 @@ def _provision(db_path: str, *, team_id: str = TEAM_ID,
         "CREATE (t:Team {id:$id, name:$name, tier:'free', "
         "max_users:1, max_graphs:1, max_api_keys:2, "
         "max_points:$mp})",
-        params={"id": team_id, "name": team_id, "mp": max_points},
+        params={"id": org_id, "name": org_id, "mp": max_points},
     )
     reg_sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) "
         "SET t.github_token_enc=$tok, t.github_org=$org",
-        params={"id": team_id,
+        params={"id": org_id,
                 "tok": encrypt_token("fake-token"), "org": "acme"},
     )
     reg_sdk.close()
@@ -80,16 +80,16 @@ def _provision(db_path: str, *, team_id: str = TEAM_ID,
 def client(tmp_path):
     """TestClient with all SDK construction redirected to a temp store.
 
-    The team_id is UNIQUE PER TEST: _make_sdk(namespace=team_id) mints a
+    The org_id is UNIQUE PER TEST: _make_sdk(namespace=org_id) mints a
     TEST-PREFIXED graph name (test_<id>_tortoise) that the URI redirect
     honors VERBATIM — a fixed id would share ONE server graph across the
     whole session and pollute every later test's walk."""
     import uuid
     db_path = str(tmp_path / "lifecycle.db")
-    team_id = f"test-team-{uuid.uuid4().hex[:10]}"
+    org_id = f"test-team-{uuid.uuid4().hex[:10]}"
 
     from types import SimpleNamespace
-    ctx = SimpleNamespace(tc=None, team_id=team_id, db_path=db_path)
+    ctx = SimpleNamespace(tc=None, org_id=org_id, db_path=db_path)
     # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
     # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
     # __init__ → deterministic anchor close → clear overrides at exit.
@@ -98,9 +98,9 @@ def client(tmp_path):
     # (the old comment's "/data/tortoise.db positional split" hazard) and
     # the forced drop keeps every construction on it.
     with patched_tortoise_sdk(db_path):
-        from tortoise.hosted_api import get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": team_id, "tier": "free", "key_id": "k1",
+        from tortoise.hosted_api import get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
+            "org_id": org_id, "tier": "free", "key_id": "k1",
             "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
@@ -121,7 +121,7 @@ def client(tmp_path):
 @pytest.fixture
 def provisioned(client, tmp_path):
     """A provisioned team (Team node + encrypted GitHub token + org)."""
-    _provision(client.db_path, team_id=client.team_id)
+    _provision(client.db_path, org_id=client.org_id)
     return client
 
 
@@ -231,7 +231,7 @@ def test_in_flight_single_flight_reuses(provisioned, mock_github, monkeypatch):
     (guard-check FIRST), and the reused POST spawns NO second run — two
     concurrent POSTs produce EXACTLY ONE _run_indexing execution (P1-1:
     single-flight dedupes the RUN, not just the entry)."""
-    _team_id = provisioned.team_id
+    _org_id = provisioned.org_id
     calls = []
     import asyncio as _asyncio
 
@@ -264,8 +264,8 @@ def test_stuck_started_evicted(provisioned, mock_github):
     """A `started` entry older than the 30-min TTL is presumed-dead and
     evicted — a hung run never bricks the team."""
     from tortoise.hosted_api import _INDEX_JOB_TTL_S
-    team_id = provisioned.team_id
-    stale, _ = _start_index_job(team_id)
+    org_id = provisioned.org_id
+    stale, _ = _start_index_job(org_id)
     _INDEX_JOBS[stale]["started_at"] = time.time() - _INDEX_JOB_TTL_S - 10
     r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
     assert r.status_code == 200
@@ -278,8 +278,8 @@ def test_stuck_started_evicted(provisioned, mock_github):
 def test_terminal_jobs_evicted_on_enqueue(provisioned, mock_github):
     """Terminal (completed) entries for the team are cleared on the next
     enqueue (T1-P14)."""
-    team_id = provisioned.team_id
-    job_id, _ = _start_index_job(team_id)
+    org_id = provisioned.org_id
+    job_id, _ = _start_index_job(org_id)
     _INDEX_JOBS[job_id]["status"] = "completed"
     r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
     new_job = r.json()["job_id"]
@@ -429,7 +429,7 @@ def test_auto_index_after_connect(provisioned, mock_github, monkeypatch):
     """Connect fires the first index (quota-gated, ONE repo). The Team node
     must pre-exist for the callback's token MATCH (provisioned fixture)."""
     from tortoise.hosted_api import _GITHUB_STATES
-    _GITHUB_STATES["test-state"] = {"team_id": provisioned.team_id, "org": "acme",
+    _GITHUB_STATES["test-state"] = {"org_id": provisioned.org_id, "org": "acme",
                                     "created_at": time.time()}
     async def _fake_exchange(code):
         return "oauth-token"
@@ -438,10 +438,10 @@ def test_auto_index_after_connect(provisioned, mock_github, monkeypatch):
                            follow_redirects=False)
     assert r.status_code == 302
     # an index job was enqueued for the team
-    jobs = [j for j in _INDEX_JOBS.values() if j.get("team_id") == provisioned.team_id]
+    jobs = [j for j in _INDEX_JOBS.values() if j.get("org_id") == provisioned.org_id]
     assert jobs, "auto-index job must be enqueued after connect"
     job_id = next(jid for jid, j in _INDEX_JOBS.items()
-                  if j.get("team_id") == provisioned.team_id)
+                  if j.get("org_id") == provisioned.org_id)
     body = _poll_until(provisioned.tc, job_id, "completed")
     assert body["repos_total"] == 1
 
@@ -460,7 +460,7 @@ def test_re_poll_scoped_repo(provisioned, monkeypatch):
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repos):
+    async def _capture(job_id, org_id, org, repos):
         seen.append((org, repos))
         ha._INDEX_JOBS[job_id]["status"] = "completed"  # settle the drain
 
@@ -477,7 +477,7 @@ def test_re_poll_multi_repo_scope(provisioned, monkeypatch):
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repos):
+    async def _capture(job_id, org_id, org, repos):
         seen.append((org, repos))
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
@@ -494,7 +494,7 @@ def test_re_poll_empty_repos_is_full_org(provisioned, monkeypatch):
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repos):
+    async def _capture(job_id, org_id, org, repos):
         seen.append((org, repos))
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
@@ -512,7 +512,7 @@ def test_re_poll_invalid_repo_400(provisioned, monkeypatch):
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repos):
+    async def _capture(job_id, org_id, org, repos):
         seen.append((org, repos))
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
@@ -532,7 +532,7 @@ def test_re_poll_whitespace_repo_is_full_org(provisioned, monkeypatch):
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repos):
+    async def _capture(job_id, org_id, org, repos):
         seen.append((org, repos))
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
@@ -548,7 +548,7 @@ def test_re_poll_no_repo_is_full_org(provisioned, monkeypatch):
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repos):
+    async def _capture(job_id, org_id, org, repos):
         seen.append((org, repos))
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
@@ -586,7 +586,7 @@ def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
     (its first issues request carries `since`) and stays exact-once.
     Pre-fix: the 0-processed re-poll left `last is None` → the persisted
     cursor kept truncated forever (the production freeze)."""
-    _provision(client.db_path, team_id=client.team_id)
+    _provision(client.db_path, org_id=client.org_id)
     S = "2026-08-18T02:49:35Z"
     t = MockGitHubTransport(
         issues=[gh_issue(n, updated_at=S) for n in range(1, 601)],
@@ -630,7 +630,7 @@ def test_backfill_marker_set_only_on_success(client, tmp_path, monkeypatch):
     """P2: github_legacy_backfill_done is set ONLY when the backfill
     SUCCEEDS — a transient failure must not skip the one-time migration
     forever (the job still completes; the backfill re-runs next time)."""
-    _provision(client.db_path, team_id=client.team_id)
+    _provision(client.db_path, org_id=client.org_id)
     t = MockGitHubTransport(issues=[gh_issue(1)])
 
     async def _fake_get_client(self):
@@ -665,7 +665,7 @@ def test_resolve_repos_404_fails_job(client, tmp_path, monkeypatch):
     """P2: an org that 404s on BOTH orgs/ and users/ must FAIL the job
     with a readable error — never silently complete with 0 points +
     github_indexed=True."""
-    _provision(client.db_path, team_id=client.team_id)
+    _provision(client.db_path, org_id=client.org_id)
     t = MockGitHubTransport(issues=[], resolve_repos_404=True)
 
     async def _fake_get_client(self):
@@ -700,7 +700,7 @@ def test_issue_ingest_no_longer_consumes_points_quota(client, tmp_path,
     FAILED this job). Pre-change: each issue consumed one statement point, so
     max_points=1 let exactly one issue through and stamped the cursor
     truncated on the quota break."""
-    _provision(client.db_path, team_id=client.team_id, max_points=0)
+    _provision(client.db_path, org_id=client.org_id, max_points=0)
     t = MockGitHubTransport(issues=[gh_issue(1), gh_issue(2)])
 
     async def _fake_get_client(self):
@@ -731,7 +731,7 @@ def test_resolve_repos_failure_preserves_persisted_cursors(client, tmp_path,
     (Formerly the points-quota preflight failure; that gate is removed in
     #1844 — the object-only job writes zero points — so the pre-walk failure
     surface is now resolve_repos.)"""
-    _provision(client.db_path, team_id=client.team_id, max_points=10000)
+    _provision(client.db_path, org_id=client.org_id, max_points=10000)
     t = MockGitHubTransport(issues=[gh_issue(1)])
 
     async def _fake_get_client(self):
@@ -769,7 +769,7 @@ def test_owner_token_eviction_aborts_stale_run(client, tmp_path, monkeypatch):
     gone) must settle SILENTLY — no KeyError on status writes, no
     resurrection of the entry (pre-fix: `_INDEX_JOBS[job_id].update` raised
     KeyError on the missing entry)."""
-    _provision(client.db_path, team_id=client.team_id)
+    _provision(client.db_path, org_id=client.org_id)
     t = MockGitHubTransport(issues=[gh_issue(1)])
 
     async def _fake_get_client(self):
@@ -779,7 +779,7 @@ def test_owner_token_eviction_aborts_stale_run(client, tmp_path, monkeypatch):
 
     monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
     from tortoise.hosted_api import _INDEX_JOB_OWNERS, _run_indexing
-    stale_job, _ = _start_index_job(client.team_id)
+    stale_job, _ = _start_index_job(client.org_id)
     # entry + owner gone — as after a TTL eviction + replacement by a newer
     # run (the stale coroutine still holds its old job_id)
     _INDEX_JOBS.pop(stale_job, None)
@@ -788,7 +788,7 @@ def test_owner_token_eviction_aborts_stale_run(client, tmp_path, monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(
-            _run_indexing(stale_job, client.team_id, "acme", None))
+            _run_indexing(stale_job, client.org_id, "acme", None))
     finally:
         loop.close()
     # the stale run settled without resurrecting its entry (ownership-gated

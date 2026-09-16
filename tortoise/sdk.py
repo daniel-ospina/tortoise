@@ -27,6 +27,7 @@ from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
+from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
@@ -40,7 +41,7 @@ import collections
 from datetime import UTC
 
 # ── Ask-lane reader-model cache (#1987 Task 5) ─────────────────────────────
-# Per-namespace cache (keyed by team/namespace — NEVER a module-global
+# Per-namespace cache (keyed by org/namespace — NEVER a module-global
 # model): LRU bound (≤ N entries), in-flight entries NEVER evicted (an LRU
 # eviction can never race an in-flight ask), closed clients on eviction,
 # failed builds never cached, per-key build single-flight. The cache holds
@@ -109,7 +110,7 @@ class _LockedReader:
     ``complete()`` + usage capture under a per-instance ``threading.Lock`` —
     the mutable ``last_completion_tokens`` write at the end of the inner
     adapter's ``complete()`` is closed against cross-thread read-after-write
-    (contention bounded by the per-team in-flight cap 4). Forwards
+    (contention bounded by the per-org in-flight cap 4). Forwards
     ``model``/``provider``/``route``/``last_route``/``last_prompt_tokens``/
     ``last_completion_tokens``/``last_finish_reason`` and ``close()``.
     """
@@ -278,9 +279,12 @@ DECIDE_PART_KINDS = frozenset({"decision", "option", "criterion", "evidence"})
 DECIDE_DEFAULT_CREDIBILITY = "medium"  # → Beta(3,1) via source_credibility
 
 
-def _baseline_create_fields() -> str:
-    """Extra CREATE-map fields for the #2199 baseline (see create_point)."""
-    return ", ep_alpha:$ba, ep_beta:$bb, baseline_set:true, baseline_source:$bsrc"
+def _baseline_create_fields() -> list[tuple[str, str]]:
+    """Extra CREATE-map (key, expression) pairs for the #2199 baseline (#2952:
+    returned as pairs, not a pre-rendered fragment, so create_point can
+    merge them with the caller's props without producing duplicate keys)."""
+    return [("ep_alpha", "$ba"), ("ep_beta", "$bb"),
+            ("baseline_set", "true"), ("baseline_source", "$bsrc")]
 
 
 def _baseline_create_params(baseline: tuple[float, float, str]) -> dict:
@@ -714,7 +718,11 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "live": frozenset({"retracted", "superseded"}),    # via retract_point / supersede_point
     "retracted": frozenset(),                            # terminal
     "superseded": frozenset(),                           # terminal
-    "outdated": frozenset({"retracted"}),               # outdated stays a flag; retract allowed
+    # #2498: `outdated` is TERMINAL for the shared lifecycle guard
+    # (`live.TERMINAL_EXCLUDED_STATUSES` + the legacy `outdated=true` flag),
+    # so it has no outgoing transition. The pre-#2498 `{"retracted"}` entry
+    # diverged from the guard — a dead claim could be re-terminalized.
+    "outdated": frozenset(),
     "archived": frozenset(),                             # terminal (reserved — no v1 write path)
 }
 
@@ -765,7 +773,7 @@ _logger = logging.getLogger(__name__)
 # ── #2600 server-resolved human actor ───────────────────────────────────────
 # `_current_actor_user_id` carries the server-resolved human actor for
 # session + write-event stamps. SET ONLY at auth seams (mcp_auth
-# TeamResolutionMiddleware dispatch + hosted_api._data_sdk) — NEVER from
+# OrgResolutionMiddleware dispatch + hosted_api._data_sdk) — NEVER from
 # client input. sdk.py is the neutral home: both mcp_auth and hosted_api
 # already import sdk, and sdk must not import either (no import cycle).
 _current_actor_user_id: ContextVar[str | None] = ContextVar(
@@ -797,19 +805,19 @@ def _is_uuid_shape(value: object) -> bool:
         return False
 
 
-def _alias_actor_user_id(team: dict) -> dict:
-    """#2600: canonical ``actor_user_id`` key on a resolved team dict —
+def _alias_actor_user_id(org: dict) -> dict:
+    """#2600: canonical ``actor_user_id`` key on a resolved org dict —
     UUID-gated, never fabricated. Reads the RAW resolver fields (``user_id``
     / ``created_by`` / ``session_user_id`` — each auth lane carries whichever
     applies) and aliases to ``actor_user_id`` ONLY when UUID-shaped. Additive:
-    never removes an existing key. Shared by mcp_auth.TeamResolutionMiddleware
+    never removes an existing key. Shared by mcp_auth.OrgResolutionMiddleware
     and the hosted_api REST DI terminals (single implementation, both planes).
     """
-    raw = team.get("user_id") or team.get("created_by") or team.get(
+    raw = org.get("user_id") or org.get("created_by") or org.get(
         "session_user_id")
     if _is_uuid_shape(raw):
-        team["actor_user_id"] = raw
-    return team
+        org["actor_user_id"] = raw
+    return org
 
 #: C2 (#2518, #2513): max Object-spine anchors resolved from the query text
 #: (the entity/fact-augmented key expansion pass's additive term source).
@@ -1812,12 +1820,12 @@ class TortoiseSDK:
                 )
         self._namespace = namespace
         # C5 #2114 (D-C5-1): explicit FULL graph-name override — the data-plane
-        # tenancy seam. Custom graphs (team_{tid}_{gid}) cannot be expressed
+        # tenancy seam. Custom graphs (org_{tid}_{gid}) cannot be expressed
         # through ``namespace`` (the _get_proj derivation would prepend
-        # ``team_`` → ``team_team_{tid}_{gid}``). When set, _get_proj binds the
+        # ``org_`` → ``org_org_{tid}_{gid}``). When set, _get_proj binds the
         # projection to ``graph_name`` VERBATIM (default-graph callers never
         # pass it — they keep the namespace derivation, byte-identical).
-        # Charset mirrors the namespace rule (+128 len for team_{tid}_{gid});
+        # Charset mirrors the namespace rule (+128 len for org_{tid}_{gid});
         # mutually exclusive with ``namespace`` by construction (the spine
         # passes exactly one).
         if graph_name is not None and not re.match(
@@ -1881,6 +1889,15 @@ class TortoiseSDK:
             "last_pass_at": None,
             "last_pass_output": 0,
             "last_pass_mode": None,
+            # #3139: why the last pass did no EP work — None (work done),
+            # "no_ep_factors" (legitimately empty window), "no_dirty_roots",
+            # "budget_zero", "stale_run_guard", or "silent_no_op" (the pass
+            # raised DreamNoOpError). A silent no-op raises instead of
+            # landing in a success shape.
+            "last_pass_no_op_reason": None,
+            # #3139 (review P1): belief state written by the last pass, as
+            # distinct from ``last_pass_output`` (which counts stamps).
+            "last_belief_write_count": None,
             "per_mode_counts": {},
             "pass_count": 0,
             "failure_count": 0,
@@ -1945,7 +1962,7 @@ class TortoiseSDK:
                 graph_name = "registry_tortoise"
             elif self._graph_name is not None:
                 # C5 #2114 (D-C5-1): explicit graph-name override (a custom
-                # team_{tid}_{gid} graph). Never a namespace derivation — the
+                # org_{tid}_{gid} graph). Never a namespace derivation — the
                 # name is used verbatim.
                 graph_name = self._graph_name
             elif self._namespace:
@@ -1957,18 +1974,18 @@ class TortoiseSDK:
                 elif self._namespace.startswith("test-"):
                     # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-*
                     # family (test-tiers, test-invites, test-hosted, test-e1,
-                    # test-team-722, ...) is a TEST namespace too — normalize
+                    # test-org-722, ...) is a TEST namespace too — normalize
                     # '-' → '_' so it maps to the guard-passing
                     # test_<ns>_tortoise graph (test-tiers →
                     # test_tiers_tortoise). Without the branch it falls
-                    # into team_<ns> (team_test-tiers) — a NON-test graph that
+                    # into org_<ns> (org_test-tiers) — a NON-test graph that
                     # is invisible to `grep -v 'namespace="test_'` and fails
                     # _assert_test_graph on bulk wipe.
                     graph_name = f"{self._namespace.replace('-', '_')}_tortoise"
                 else:
-                    # Team SDK: isolated team graph (matches provision's
-                    # team_{team_id} namespace creation, #7886).
-                    graph_name = f"team_{self._namespace}"
+                    # Org SDK: isolated org graph (matches provision's
+                    # org_{org_id} namespace creation, #7886).
+                    graph_name = f"org_{self._namespace}"
             else:
                 # No namespace: honor the URI's own graph (the conftest
                 # session graph for tests). Fixes #7886 regression that
@@ -1980,6 +1997,17 @@ class TortoiseSDK:
                 self._proj = FalkorProjection.from_uri(self._db_uri, graph_name=graph_name)
             else:
                 self._proj = FalkorProjection(self._db_path, graph_name=graph_name)
+            # (B) #2952: explicit embedder warm-up at ENGINE INIT —
+            # best-effort, non-fatal, and non-blocking (daemon thread) so a
+            # load failure surfaces ONCE here instead of masquerading as a
+            # per-query _FAIL_COOLDOWN_S gap. The outcome is declared via
+            # EmbeddingModel.status() and retrieval_legs(); the cooldown
+            # itself is unchanged (never sticky-off).
+            try:
+                from .embeddings import EmbeddingModel
+                EmbeddingModel.start_warm_up()
+            except Exception:  # noqa: BLE001, RUF100 — warm-up is never fatal
+                pass
         return self._proj
 
     def _get_event_log(self):
@@ -2055,7 +2083,7 @@ class TortoiseSDK:
                 registry_name = f"{ns}_control_plane"
             else:
                 registry_name = "control_plane"
-            self._registry_g = proj.db.select_graph(registry_name)
+            registry_graph = proj.db.select_graph(registry_name)
             # Epic #1647 (CI P2): the registry name derived from a TEST graph
             # is `{ns}_{test_graph}_control_plane` — NOT test-prefixed (starts
             # with registry_/ns_), so wipe_server's test-prefix filter skips
@@ -2066,6 +2094,13 @@ class TortoiseSDK:
             # outside a test session).
             from tortoise.projection import _journal_append_product
             _journal_append_product(registry_name)
+            # #3214 (review P2): cache the handle only AFTER the append
+            # succeeds. select_graph is client-side (no server call), so a
+            # raise above mints nothing — but caching first left a
+            # half-initialized handle whose next call would return it and skip
+            # both the journal and the indexes, minting the registry graph
+            # UNOWNED (the E2E-7 leak this append exists to stop).
+            self._registry_g = registry_graph
             self._ensure_registry_indexes()
         return self._registry_g
 
@@ -2076,12 +2111,12 @@ class TortoiseSDK:
             return
         indexes = [
             ("Team", "name"),
-            ("Membership", "team_id"),
+            ("Membership", "org_id"),
             ("Membership", "user_id"),
-            ("APIKey", "team_id"),
+            ("APIKey", "org_id"),
             ("APIKey", "key_hash"),
             ("APIKey", "key_prefix"),
-            ("Invitation", "team_id"),
+            ("Invitation", "org_id"),
             ("Invitation", "token_hash"),
             ("SignupToken", "lookup_key"),
         ]
@@ -2171,7 +2206,7 @@ class TortoiseSDK:
         after=None → tail (oldest retained). Expired cursor → ValueError(
         'cursor expired — replay from tail'); malformed → ValueError('invalid cursor').
         Types are validated against the EventCodec registry (unknown → ValueError).
-        Events live in THIS SDK's graph namespace (the team partition).
+        Events live in THIS SDK's graph namespace (the org partition).
         """
         from .event_store import read_after
 
@@ -2222,7 +2257,7 @@ class TortoiseSDK:
         import os
         import time
 
-        interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
+        interval = monitoring.event_retention_interval()
         now = time.monotonic()
         if now - TortoiseSDK._EVENT_PURGE_LAST < interval:
             return
@@ -2385,6 +2420,72 @@ class TortoiseSDK:
         props = _sanitize_props(props)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #3263: provenance is INFERRED from the write context, never demanded.
+        # A write that carries a session context has a derivable Source — the
+        # same `session:<id>` ref the capture path wires explicitly (#1350).
+        # Without this, every session-context write that did not hand-supply
+        # `extractedFrom` (the eval ingest paths, session_continuity, ...)
+        # landed as an orphan Point, leaving source-tier calibration
+        # unsatisfiable BY CONSTRUCTION (issues #3263/#3139). The inferred ref
+        # flows through the SAME `extractedFrom` prop path as an explicit one,
+        # so it is journaled on PointAdded and replayed by _upsert_point_edges
+        # (live == rebuild). An explicit `extractedFrom` always wins.
+        #
+        # #3263 (review P2): only a non-empty SCALAR session id can name a
+        # Source. A non-scalar would stringify into a bogus ref
+        # (`session:['s1', 's2']`) and mint a corrupt Source — an invented
+        # source is worse than none (design contract #3), so we skip and say so
+        # rather than fabricate.
+        _session_id = props.get("session_id")
+        # #3263 (cycle-4 P2): validate the ref SHAPE before any write. A
+        # non-string scalar (123) previously reached _link_source, whose
+        # fan-out does list(source_ref) — raising TypeError AFTER the Point was
+        # CREATEd but BEFORE PointAdded was journaled, so the graph gained an
+        # orphan that a rebuild would drop (live != rebuild). Fail closed here,
+        # pre-write, matching the bundle Phase-1 contract.
+        _ef_in = props.get("extractedFrom")
+        if _ef_in is not None:
+            if isinstance(_ef_in, str):
+                if not _ef_in.strip():
+                    # explicit "no provenance" == absent (the bundle contract
+                    # allows an empty list for the same reason), so session
+                    # inference may still apply below.
+                    props.pop("extractedFrom", None)
+            elif isinstance(_ef_in, (list, tuple)):
+                _clean = [r for r in _ef_in
+                          if isinstance(r, str) and r.strip()]
+                if len(_clean) != len(_ef_in):
+                    raise ValueError(
+                        "create_point: extractedFrom must be a non-empty "
+                        f"string or a list of non-empty strings (got {_ef_in!r})"
+                    )
+                if _clean:
+                    props["extractedFrom"] = _clean
+                else:
+                    props.pop("extractedFrom", None)
+            else:
+                raise ValueError(
+                    "create_point: extractedFrom must be a non-empty string "
+                    f"or a list of non-empty strings (got {_ef_in!r}); a "
+                    "non-string scalar would mint a corrupt Source, and raised "
+                    "after the write would leave an un-journaled Point (#3263)"
+                )
+        if not props.get("extractedFrom"):
+            # #3263: branch on TYPE, not truthiness. The contract is "a
+            # non-empty string can name a Source", so anything else that is
+            # present is a caller error worth surfacing — `0`, `0.0` and
+            # `False` are neither strings nor absence, and keying on truthiness
+            # silently skipped them (re-review P2). `None` alone means "no
+            # session context" and stays silent.
+            if isinstance(_session_id, str) and _session_id.strip():
+                props["extractedFrom"] = f"session:{_session_id}"
+            elif _session_id is not None:
+                _logger.warning(
+                    "create_point: session_id=%r is not a non-empty string — "
+                    "provenance not inferred (pass extractedFrom explicitly); "
+                    "refusing to mint an invented Source (#3263)",
+                    _session_id,
+                )
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
@@ -2510,6 +2611,56 @@ class TortoiseSDK:
                     _logger.warning(
                         "credibility=%r ignored — point %s already exists and dedup=True",
                         credibility, pid)
+                # #3263 (review P1): `extractedFrom` must NOT ride the
+                # update_point prop path on a dedup hit. update_point writes the
+                # node property but never calls _link_source, so the Point would
+                # end up carrying `extractedFrom` with NO `:Source` edge — still
+                # an orphan — and `list_drafts` reads that prop, so it would
+                # report provenance that does not exist as an edge. It is not
+                # replayed either (_revise_point restores content/embedding
+                # only), so the rebuilt graph drops the prop entirely and
+                # live != rebuild for the very property this path introduced.
+                # The Point already exists: if it was created with a session
+                # context it already carries the edge. Retrofitting provenance
+                # onto an existing Point needs a journaled path, which does not
+                # exist yet — tracked separately (#3292).
+                _dropped_ef = props.pop("extractedFrom", None)
+                if _dropped_ef is not None:
+                    # #3263 (re-review P2): decide per REF, not per call. Two
+                    # coarse predicates were wrong: `is not None` also matched
+                    # an explicit empty list (so a caller who supplied NO ref
+                    # got a warning on every idempotent re-ingest), and "any
+                    # edge exists" treated a CHANGED ref as present — silently
+                    # discarding the new one. Normalise to the supplied non-empty
+                    # refs, then warn only for those genuinely absent from the
+                    # Point's edges. No refs supplied => nothing to report.
+                    _supplied = (
+                        [_dropped_ef] if isinstance(_dropped_ef, str)
+                        else [r for r in _dropped_ef if r]
+                    )
+                    if _supplied:
+                        _present = {
+                            row[0] for row in proj.g.query(
+                                "MATCH (p:Point {id:$id})-[:extractedFrom]->"
+                                "(s:Source) WHERE s.url IN $refs "
+                                "RETURN DISTINCT s.url",
+                                params={"id": pid,
+                                        "refs": _supplied}).result_set
+                        }
+                        _missing = [r for r in _supplied
+                                    if r not in _present]
+                        if _missing:
+                            _logger.warning(
+                                "create_point dedup hit on %s: extractedFrom %r "
+                                "not applied — those refs are absent from the "
+                                "Point's Source edges, and update_point cannot "
+                                "wire one (the value is not replayed, so "
+                                "applying it would diverge live from rebuild). "
+                                "Retrofitting provenance onto an existing "
+                                "Point needs a journaled path (#3292); pass the "
+                                "ref on the FIRST write, or re-create the Point",
+                                pid, _missing,
+                            )
                 if props:
                     # Only touch the existing point when the caller passed
                     # other props — a pure dedup hit (no props) must not bump
@@ -2559,32 +2710,133 @@ class TortoiseSDK:
             _alpha, _beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
             _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SYSTEM_DEFAULT)
 
+        # #2952: EVERY property of a new Point is written in the CREATE's
+        # property map — ONE graph write per point, no post-CREATE clause. A
+        # post-CREATE write (the `SET n.embedding = ...` clause and the
+        # per-prop `SET n += $props` loop that used to live here) makes the
+        # engine delete+re-add the document in its fulltext index; the re-add
+        # double-counts the index's collection statistics (document count /
+        # total field length — the idf and fieldNorm terms of the fulltext
+        # ``score``), and only an ASYNC engine pass reconciles them tens of
+        # seconds later. Net effect: the same unchanged graph returns
+        # different fulltext scores — hence a different RRF order and a
+        # different top-k — purely as a function of elapsed wall-clock time.
+        # Measured: a point created with zero post-CREATE writes scores
+        # identically at t+0 and after settle (8.0); adding ONE post-CREATE
+        # SET drops it to 6.0 and it drifts back ~30-60s later. This is the
+        # same embedded-fulltext delete/re-add hazard #2199 fixed for the
+        # baseline fields — extended here to the embedding and every prop.
+        # #2952: the EP dirty stamp rides the SAME write. `_mark_dirty`'s
+        # post-CREATE `SET n.ep_dirty = ...` was the last remaining second
+        # write on the new node; folding it here makes the whole fresh-create
+        # path ONE graph write. The epoch is advanced NOW so the stamp and
+        # the persist agree on one value (see _advance_ep_version).
+        #
+        # #2422 (born-terminal exception): a point whose BORN status is
+        # terminal must NOT carry that stamp. `status` is a write-path
+        # argument, so the only place the terminal exclusion is read is
+        # `_mark_dirty`'s persist query's WHERE — and that query is skipped
+        # entirely when every dirty id arrives `pre_stamped` (`persisted |=
+        # _stamped & set(dirty_ids)` below), which is precisely what an
+        # inline stamp would do. The result is the #2422 ghost class: a
+        # terminal point can never enter an EP affected set, so
+        # `_sweep_dirty_roots` can never clear its flag — a NEVER-clearable
+        # dirty root that pins `_auto_dream_mode` to 'local' forever (the
+        # comment in `_mark_dirty` forbids exactly this). So a born-terminal
+        # point gets no `ep_dirty`/`ep_dirty_at` in the CREATE map, and is
+        # NOT reported as pre-stamped: it flows through the persist WHERE
+        # (matches nothing → no write) into the terminal classification
+        # (`terminal_ids`), which clears any stale flag and keeps the id out
+        # of the in-memory mirror. `_sanitize_props` already rejects the
+        # legacy `outdated` flag prop (#2491), so `status` is the complete
+        # born-terminal surface.
+        _born_terminal = status in TERMINAL_EXCLUDED_STATUSES
+        _epv = self._advance_ep_version(proj)
         _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
-                                "now": now, "embedding": embedding}
+                                "now": now, "embedding": embedding,
+                                "_epv": _epv}
+        # Server-owned EP-dirty flags are never caller props — drop any that
+        # slipped in so the CREATE map keeps exactly one key of each name.
+        props.pop("ep_dirty", None)
+        props.pop("ep_dirty_at", None)
+        # #2952: a point born from a Source is inherit-eligible by definition
+        # (#398) — the inheritance gate must start invalid. The generic helper
+        # expresses that as `REMOVE n.inherited_at` AFTER the prop write, but
+        # a fresh point has no stamp of its own and the caller's (if any) is
+        # invalidated anyway, so the prop is dropped HERE: the CREATE map
+        # never writes it and no post-CREATE REMOVE is needed (final node
+        # state identical, ONE write instead of two).
+        if props.get("extractedFrom"):
+            props.pop("inherited_at", None)
+        # CREATE-map (key -> expression), in the order the CREATE has always
+        # written the fields. Built as a MAPPING because a caller prop whose
+        # key collides with a field here must REPLACE it, not duplicate it:
+        # the pre-#2952 code applied props in a post-CREATE `SET n += $props`
+        # (so props won), and `createdAt` is a normal caller prop — api.py,
+        # ingest.py and the source-inheritance path all pass one.
+        _create_map: dict[str, str] = {
+            "id": "$id", "content": "$c", "pointKind": "$k",
+            "is_operator": "false", "status": "$st",
+            "createdAt": "$now", "updatedAt": "$now",
+        }
+        if not _born_terminal:
+            _create_map["ep_dirty"] = "true"
+            _create_map["ep_dirty_at"] = "$_epv"
         if _create_baseline is not None:
             _create_params.update(_baseline_create_params(_create_baseline))
+            _create_map.update(_baseline_create_fields())
+        # ``vecf32()`` is accepted inline in the property map on both engines
+        # (embedded FalkorDBLite and server 4.x), so the embedding is no
+        # longer a trailing SET clause. $embedding is None when the embedder
+        # is unavailable — identical to the old `SET ... = vecf32(null)`.
+        # A caller-supplied `embedding` prop is the embedding itself (the old
+        # ordering applied the prop loop after the embedding SET, so props
+        # won) — popped here so the map carries exactly one `embedding` key.
+        # TYPE CHANGE GUARD (P2, PR #3018 review): the pre-#2952 props loop
+        # stored a caller-supplied `embedding` RAW (it merely won the
+        # assignment race against `SET n.embedding = vecf32($embedding)`), so
+        # it must NOT be coerced here either — a silent float64-list →
+        # vecf32/float32 rewrite of an explicitly caller-owned value would
+        # change what a vector read returns. The server-computed embedding
+        # keeps the original `vecf32()` coercion (unchanged).
+        _embedding_expr = "vecf32($embedding)"
+        if "embedding" in props:
+            embedding = props.pop("embedding")
+            _embedding_expr = "$embedding"  # caller value stored verbatim
+        _create_params["embedding"] = embedding
+        for _i, (_key, _val) in enumerate(props.items()):
+            _pname = f"_cp{_i}"
+            _create_params[_pname] = _val
+            _create_map[_key] = f"${_pname}"
+        # The embedding is written LAST (and `embedding` was popped from props
+        # above), so the map carries exactly one `embedding` key.
+        _create_map["embedding"] = _embedding_expr
+        _create_fields = "".join(
+            f", `{str(_k).replace('`', '``')}`: {_v}"
+            for _k, _v in _create_map.items())
         proj.g.query(
-            "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
-            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now"
-            + (_baseline_create_fields() if _create_baseline is not None else "") + "}) "
-            "SET n.embedding = vecf32($embedding)",
+            "CREATE (n:Point {" + _create_fields.lstrip(", ") + "})",
             params=_create_params,
         )
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
         if isinstance(tags, list):
             self._sync_tags(proj, pid, tags)
-        for key, val in props.items():
-            proj.g.query(
-                "MATCH (n:Point {id:$id}) SET n += $props",
-                params={"id": pid, "props": {key: val}},
-            )
         # P1-1: Ontology v2.1 — link Point → Source via extractedFrom
         if props.get("extractedFrom"):
             proj._link_source(pid, props["extractedFrom"])
             # Inheritance gate dirty-mark: a freshly-sourced point is always
             # inherit-eligible on the next EP run (no interval wait, #398).
-            self._invalidate_inheritance_gate([pid])
+            # #2952: a born point carries no `inherited_at` stamp, so the
+            # `REMOVE n.inherited_at` the generic helper
+            # (`_invalidate_inheritance_gate`) issues is a no-op on the final
+            # state — and a no-op write on the node still costs a fulltext
+            # re-add. The `extractedFrom` invalidation therefore happens in
+            # the PROPS (see the up-front pop of `inherited_at` above): a
+            # caller-supplied stamp is dropped BEFORE the CREATE map is built
+            # instead of being written and then taken back out, so this path
+            # is ONE graph write too. The EP dirty-marking half is issued once
+            # below.
 
         # Apply the starting belief (only on new creation, not dedup).
         #
@@ -2622,7 +2874,15 @@ class TortoiseSDK:
             self._get_ep().invalidate_messages()
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
-        self._mark_dirty([pid])
+        # #2952: the graph stamp was written by the CREATE above — this call
+        # only fills the in-memory mirror (no second write on the node).
+        # #2422: a born-terminal point was NOT stamped by its CREATE — it is
+        # not pre-stamped, so `_mark_dirty` runs the persist query (whose
+        # terminal WHERE matches nothing: no write) and then classifies the
+        # id as terminal, keeping it out of `_dirty_roots` (the exact
+        # observable the P1 regression test pins).
+        self._mark_dirty([pid], ep_version=_epv,
+                         pre_stamped=set() if _born_terminal else {pid})
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         self._emit_event("PointAdded", {"id": pid, "kind": kind, "content_hash": ch},
@@ -3216,14 +3476,49 @@ class TortoiseSDK:
                     # its original ingest; re-stamping would clobber the first
                     # session's single-eventId provenance.
                     source_harness = harness or "unknown"
+                    minted_ids = _capture_minted_ids(extracted)
                     proj.g.query(
                         "MATCH (n:Point) WHERE n.id IN $ids "
                         "SET n.eventId=$eid, n.source_session=$sid, "
                         "    n.source_harness=$harness, n.ingested_at=$ing",
-                        params={"ids": _capture_minted_ids(extracted),
+                        params={"ids": minted_ids,
                                 "eid": event_id, "sid": session_id,
                                 "harness": source_harness, "ing": now},
                     )
+                    # #2552 (layer-2 WIRE — the structural leg): reified
+                    # operator Points created by THIS capture must enter the
+                    # retrievable memory layer too. The point path above
+                    # stamps eventId; operators were left unstamped, so the
+                    # eventId-keyed memory layer (MEMORY_ROW_QUERY /
+                    # `MATCH (p:Point) WHERE p.eventId IN $eids`) never
+                    # admitted them — `operator_counts` was silently {} on
+                    # every real run and a committed operator node was
+                    # invisible to the retrievable graph (measured 0/4).
+                    # Scope: operators that touch a MINTED point of this
+                    # capture (the extraction-created topology) and are still
+                    # draft (the #780 extraction default — a pre-existing
+                    # LIVE operator touching a folded point is never
+                    # re-provenanced) and carry no eventId (never clobber a
+                    # prior capture's provenance). The OperatorPromoted
+                    # event emitted later by _apply_capture_ingest_ep
+                    # snapshots the stamped state, so the provenance is
+                    # rebuild-durable (the m2 lane has no OperatorAdded
+                    # journal record; OperatorPromoted is its only durable
+                    # record).
+                    if minted_ids:
+                        proj.g.query(
+                            "MATCH (o:Point {is_operator:true})-"
+                            "[:IMPL|NAND]->(c:Point) "
+                            "WHERE c.id IN $ids "
+                            "AND (o.status IS NULL OR o.status = 'draft') "
+                            "AND o.eventId IS NULL "
+                            "SET o.eventId=$eid, o.source_session=$sid, "
+                            "    o.source_harness=$harness, "
+                            "    o.ingested_at=$ing",
+                            params={"ids": minted_ids,
+                                    "eid": event_id, "sid": session_id,
+                                    "harness": source_harness, "ing": now},
+                        )
                     if retry_failed_capture:
                         # #2335 WI-2b / review (PR #2473): a RETRY heals the
                         # failed first attempt's provenance gap. The retry's
@@ -4030,12 +4325,13 @@ class TortoiseSDK:
         """Materialize the typed session Source (#1352).
 
         The M2 extraction projection auto-creates a Source stub at
-        ``session:{session_id}`` via ``_link_source`` with the DEFAULT
-        ``sourceKind: 'document'`` (title=url, empty contentHash, no capture
-        metadata) — but the ontology v3.6 §4.6 registers the session source
-        kind as ``agentSession``. This MERGE upgrades the stub IN PLACE
-        (sourceKind, contentHash of the stored transcript, cheap summary +
-        topics, sessionId, capturedAt, eventId) and wires
+        ``session:{session_id}`` via ``_link_source`` (title=url, empty
+        contentHash, no capture metadata). ``_link_source``'s default is now
+        ref-appropriate — ``agentSession`` for ``session:`` refs (ontology
+        §4.6 + #909 §4.3 #6 register it as the session source kind), else
+        ``document`` (#3263) — so this MERGE now mainly upgrades LEGACY stubs
+        minted before that change, plus: contentHash of the stored transcript,
+        cheap summary + topics, sessionId, capturedAt, eventId. It wires
         ``(Source)-[:references]->(sessionCaptured Event)`` — parity with the
         ``_session_event_write`` agentSession pattern and the backfill's
         references edge (test_backfill_sources.py).
@@ -4306,19 +4602,77 @@ class TortoiseSDK:
 
     # ── Invalidate / Supersede (#6999 GAP-12) ────────────────────
 
+    def _assert_lifecycle_guard(self, point_id: str, *, method: str,
+                                role: str = "point",
+                                missing_ok: bool = False) -> dict | None:
+        """Single authoritative terminal/operator guard for point lifecycle
+        transitions (#2498).
+
+        ``supersede_point`` / ``retract_point`` / ``invalidate_point`` all
+        terminalize a claim, but each carried its OWN guard and they drifted:
+        the first two hardcoded the 3-status subset
+        ``("retracted", "superseded", "archived")`` (so a point whose status
+        is ``outdated``/``deprecated``, or whose legacy ``outdated=true`` flag
+        is set, passed the guard and could be terminalized a second time),
+        and ``invalidate_point`` had no guard at all (it flagged an OPERATOR
+        node outdated and re-stamped already-terminal points).
+
+        The predicate is the SHARED vocabulary — ``live.is_terminal_status``,
+        the Python mirror of the Cypher terminal predicate the read surfaces
+        and EP already use: ``status in live.TERMINAL_EXCLUDED_STATUSES``
+        (= retracted, superseded, outdated, archived, deprecated) OR the
+        legacy ``outdated=true`` flag. Never a locally hardcoded subset.
+
+        Returns ``{"id", "status", "outdated"}`` for a legal input. Raises
+        ``ValueError`` for a missing point (unless ``missing_ok``, used by
+        ``invalidate_point``'s retry-friendly contract — then returns
+        ``None``), an operator node, or an already-terminal claim.
+        """
+        row = self._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) "
+            "RETURN n.is_operator, n.status, coalesce(n.outdated, false)",
+            params={"id": point_id},
+        ).result_set
+        if not row:
+            if missing_ok:
+                return None
+            raise ValueError(f"No point {point_id!r}")
+        is_op, status, outdated = bool(row[0][0]), row[0][1], bool(row[0][2])
+        if is_op:
+            raise ValueError(
+                f"Point {point_id!r} is an operator — {method} is for "
+                f"statement points")
+        if is_terminal_status(status, outdated):
+            marker = ("outdated" if outdated
+                      and status not in TERMINAL_EXCLUDED_STATUSES
+                      else (status or "live"))
+            raise ValueError(
+                f"Point {point_id!r} is already terminal ({marker}) — "
+                f"{method} cannot terminalize a dead {role}")
+        return {"id": point_id, "status": status, "outdated": outdated}
+
     def invalidate_point(self, id: str, corrected_by_id: str) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
 
-        Validation contract (#330) — all checks run BEFORE any write so a
-        failure can never leave a partial graph state:
+        Validation contract (#330/#2498) — all checks run BEFORE any write so
+        a failure can never leave a partial graph state:
         - id == corrected_by_id → ValueError (a self-CORRECTS edge poisons
           traversal/credibility chains).
         - old point missing (never existed or already deleted) →
           {"invalidated": False} with no writes (retry-friendly).
-        - corrected_by point missing → ValueError (structural failure: would
-          orphan an outdated point with no replacement).
-        Re-invalidating a point that still EXISTS re-asserts (returns True,
-        MERGE keeps a single CORRECTS edge).
+        - old point is an OPERATOR or already terminal (shared terminal
+          vocabulary: status in TERMINAL_EXCLUDED_STATUSES OR the legacy
+          outdated=true flag) → ValueError via the single shared lifecycle
+          guard, #2498 — an operator has no place in a CORRECTS chain, and a
+          dead claim must not be re-stamped / re-edged.
+        - corrected_by point missing, an OPERATOR, or already terminal →
+          ValueError (structural failure: would orphan an outdated point, or
+          wire a CORRECTS edge from an operator / a dead claim).
+        Because ``outdated=true`` is itself terminal, repeating an invalidate
+        now raises (#2498) instead of re-asserting: the old #330 "re-assert"
+        contract let a dead claim's ``expiredAt`` move forward and minted one
+        CORRECTS edge per distinct corrector onto a node every read surface
+        already excludes.
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -4326,20 +4680,20 @@ class TortoiseSDK:
             raise ValueError(
                 f"invalidate_point: corrected_by cannot be the point itself ({id!r})"
             )
-        old_exists = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n) > 0", params={"id": id},
-        ).result_set[0][0]
-        if not old_exists:
+        # #2498: the shared lifecycle guard replaces the pre-#2498
+        # existence-only probe. `missing_ok` preserves the retry-friendly
+        # missing-id contract (#330) while rejecting operator/terminal input.
+        if self._assert_lifecycle_guard(
+                id, method="invalidation", role="source",
+                missing_ok=True) is None:
             return {"invalidated": False, "id": id, "corrected_by": corrected_by_id}
-        new_exists = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN count(n) > 0",
-            params={"id": corrected_by_id},
-        ).result_set[0][0]
-        if not new_exists:
-            raise ValueError(
-                f"invalidate_point: corrected_by point {corrected_by_id!r} does not "
-                f"exist — refusing to orphan outdated point {id!r}"
-            )
+        # #2498: guard the CORRECTOR leg too — `supersede_point` guards BOTH
+        # endpoints and `supersede(..., transfer_edges=False)` routes here, so
+        # an unguarded corrector let `(operator|terminal)-[:CORRECTS]->(point)`
+        # through on one leg and not the other. A missing corrector still
+        # raises (structural failure — would orphan an outdated point).
+        self._assert_lifecycle_guard(
+            corrected_by_id, method="invalidation", role="corrector")
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # #2488 (rebuild-parity fix): kwargs-style PointInvalidated emission —
@@ -4348,7 +4702,10 @@ class TortoiseSDK:
         # ev.get("ts") (fallback clock), and a drift from the live SET clock
         # breaks exact-stamp rebuild parity. Crash after emit/before write is
         # convergent: re-run revalidates + re-emits; duplicate events fold
-        # idempotently; double-invalidate is already legal.
+        # idempotently. #2498: double-invalidate is NO LONGER legal (the shared
+        # lifecycle guard treats the outdated=true flag as terminal), so a
+        # crash-replay after the write raises — the fold replay is what stays
+        # idempotent.
         self._emit_event(
             "PointInvalidated",
             id=id, corrected_by=corrected_by_id,
@@ -4399,7 +4756,7 @@ class TortoiseSDK:
 
         Returns {invalidated, id, corrected_by} (+ edges_transferred when
         transfer_edges=True). Raises ValueError on missing/self/terminal input
-        (the underlying point-level guards, unchanged).
+        (both legs now route through the ONE shared lifecycle guard, #2498).
         """
         if transfer_edges:
             return self.supersede_point(old_id, new_id)
@@ -4431,22 +4788,14 @@ class TortoiseSDK:
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
-        # #432: transition guard — old point must exist, be a statement (not
-        # an operator), and not already be terminal (mirrors the retract
-        # guard; supersede is already multi-query so the read is cheap).
-        guard = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": old_id},
-        ).result_set
-        if not guard:
-            raise ValueError(f"No point {old_id!r}")
-        is_op, cur = guard[0][0], guard[0][1]
-        if is_op:
-            raise ValueError(
-                f"Point {old_id!r} is an operator — supersession is for statement points")
-        if cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {old_id!r} is already terminal ({cur!r}) — supersession is terminal")
+        # #432/#2498: the SHARED transition guard — old point must exist, be
+        # a statement (not an operator), and not already be terminal. The
+        # pre-#2498 body hardcoded a 3-status subset, so an `outdated` /
+        # `deprecated` status or the legacy `outdated=true` flag slipped
+        # through and a dead claim could be re-superseded — transferring
+        # edges off a terminal node.
+        self._assert_lifecycle_guard(old_id, method="supersession",
+                                     role="source")
 
         # P1 (Qwen review): validate the NEW point too — it must exist, be a
         # statement, not be terminal, and differ from the old point. A missing /
@@ -4454,20 +4803,11 @@ class TortoiseSDK:
         # replacement (phantom PointSuperseded).
         if old_id == new_id:
             raise ValueError("supersede_point: old_id and new_id must differ")
-        new_guard = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": new_id},
-        ).result_set
-        if not new_guard:
-            raise ValueError(f"No point {new_id!r}")
-        n_is_op, n_cur = new_guard[0][0], new_guard[0][1]
-        if n_is_op:
-            raise ValueError(
-                f"Point {new_id!r} is an operator — supersession target must be a statement")
-        if n_cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {new_id!r} is already terminal ({n_cur!r}) — cannot supersede into it")
-
+        # #2498: the SAME shared guard for the successor — a terminal (or
+        # operator) target would terminalize the old point with no valid
+        # replacement (phantom PointSuperseded).
+        self._assert_lifecycle_guard(new_id, method="supersession",
+                                     role="target")
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -4844,7 +5184,8 @@ class TortoiseSDK:
         path.
 
         Raises ValueError if the point is missing, is an operator node, or is
-        already terminal (retracted/superseded/archived).
+        already terminal (the shared terminal vocabulary: a status in
+        live.TERMINAL_EXCLUDED_STATUSES OR the legacy outdated=true flag).
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
@@ -4852,31 +5193,25 @@ class TortoiseSDK:
         # before the guard produced phantom PointRetracted events on the
         # NORMAL invalid-input path (missing / operator / terminal), which
         # poll consumers would see as retractions that never happened.
-        row = proj.g.query(
-            "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status",
-            params={"id": id}).result_set
-        if not row:
-            raise ValueError(f"No point {id!r}")
-        is_op, cur = row[0][0], row[0][1]
-        if is_op:
-            raise ValueError(
-                f"Point {id!r} is an operator — retraction is for statement points")
-        if cur in ("retracted", "superseded", "archived"):
-            raise ValueError(
-                f"Point {id!r} is already terminal ({cur!r}) — retraction is terminal")
+        # #432/#2498: the SHARED transition guard (see
+        # _assert_lifecycle_guard) — the pre-#2498 body hardcoded the same
+        # 3-status subset as supersede_point.
+        self._assert_lifecycle_guard(id, method="retraction")
         # #432 Task 3: durable PointRetracted event (append-before-mutation;
         # only after the input contract validates).
         self._emit_event("PointRetracted", {"id": id}, id=id)
         # P1 (Qwen review): CAS the SET — the WHERE re-checks terminal state so
-        # a concurrent retract/supersede can't both pass validation and have a
-        # terminal overwrite (retracted overwriting superseded, or vice versa).
+        # a concurrent retract/supersede/invalidate can't both pass validation
+        # and have a terminal overwrite. #2498: the CAS now uses the SAME
+        # shared vocabulary as the guard and the read path — the generic
+        # `_terminal_excluded` predicate also rejects the legacy
+        # `outdated=true` flag, not just a hardcoded status subset.
         r = proj.g.query(
             "MATCH (n:Point {id:$id}) "
-            "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
+            f"WHERE {_terminal_excluded('n.status')} "
             "SET n.status = 'retracted', n.updatedAt = $now, "
             f"{decay_clause('n')} RETURN properties(n)",
-            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
-                    "terminal": ["retracted", "superseded", "archived"]})
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
         if not r.result_set:
             raise ValueError(
                 f"Point {id!r} is already terminal — retraction is terminal")
@@ -5071,7 +5406,8 @@ class TortoiseSDK:
                 and point.get("temporal_reviewed") == "merge"):
             for tgt in temporal_targets:
                 trow = proj.g.query(
-                    "MATCH (n:Point {id:$id}) RETURN n.status",
+                    "MATCH (n:Point {id:$id}) RETURN n.status, "
+                    "coalesce(n.outdated, false)",
                     params={"id": tgt},
                 ).result_set
                 if not trow:
@@ -5084,7 +5420,10 @@ class TortoiseSDK:
                         "exists — skipping the wire", tgt, point_id)
                     continue
                 tstatus = trow[0][0] or "live"
-                if tstatus == "live":
+                # #2498: the SHARED terminal predicate — a flag-outdated
+                # target is terminal too, so it must not be NAND-wired or
+                # (temporal_replacement) sent to supersede_point.
+                if not is_terminal_status(tstatus, bool(trow[0][1])):
                     live_targets.append(tgt)
                 else:
                     _logger.warning(
@@ -5590,6 +5929,14 @@ class TortoiseSDK:
                 "id": props.get("id"),
                 "content": props.get("content"),
                 "pointKind": props.get("pointKind"),
+                # #3263: a str when a single string is passed (this includes
+                # the inference path, and an explicit scalar); a list whenever a
+                # SEQUENCE is passed — even a one-element one, which is NOT
+                # collapsed. So `extractedFrom='x'` → str, `['x']` → ['x'].
+                # Arrays are not equality-matchable (see entities.py), so a
+                # caller wanting `WHERE n.extractedFrom = '<url>'` must pass the
+                # scalar. The EDGES are the authoritative surface either way —
+                # this is the raw node prop, so callers must not assume a str.
                 "provenance": props.get("provenance")
                 or props.get("extractedFrom"),
                 "dedup_context": dedup_context,
@@ -6458,6 +6805,34 @@ class TortoiseSDK:
                                f"calibrated-pipeline-write-only — ingest never "
                                f"writes calibrated confidence",
                 })
+            # #3263 (re-review P2): every provenance ref must be a non-empty
+            # string. Validated HERE because Phase 1 rejection is free, whereas
+            # reaching Phase 2 with a non-string element either raises a raw
+            # ResponseError AFTER earlier sections committed (partial write —
+            # the same zero-mutation invariant the content check above
+            # protects) or silently mints a Source whose url is an array.
+            # An empty LIST is allowed (explicit "no provenance" == absent).
+            ef = item.get("extractedFrom")
+            if ef is not None:
+                # NB: a distinct sentinel, not ``None`` — ``None`` is itself a
+                # bad element, so ``next(gen, None)`` cannot tell "found the bad
+                # value None" from "found nothing", and let ["s1", None]
+                # through to a raw ResponseError.
+                _no_bad = object()
+                if isinstance(ef, (list, tuple)):
+                    bad_ef = next(
+                        (x for x in ef
+                         if not (isinstance(x, str) and x.strip())), _no_bad)
+                else:
+                    bad_ef = (_no_bad if (isinstance(ef, str) and ef.strip())
+                              else ef)
+                if bad_ef is not _no_bad:
+                    violations.append({
+                        "section": section, "index": index,
+                        "message": f"ingest: points[{index}] extractedFrom must "
+                                   f"be a non-empty string or a list of "
+                                   f"non-empty strings (got {ef!r})",
+                    })
         elif section == "sources":
             url = item.get("url")
             if not url or not isinstance(url, str):
@@ -6806,15 +7181,43 @@ class TortoiseSDK:
     def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
         """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
         restricted to TERMINAL hits — the Phase-1 mechanism behind the
-        bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18)."""
+        bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18).
+
+        #2971: the content-hash MATCH alone is not enough. After a
+        ``rebuild_all`` the journal replay leaves every Point with
+        ``content_hash = NULL`` (``_upsert_point_props``'s fixed SET list
+        omits it and ``_emit_event`` strips it), so the hash MATCH misses for
+        EVERY point and this guard silently stops matching — an ingest bundle
+        could then wire a direct edge to a superseded/retracted Point. On a
+        miss, fall back to the SAME hash-less ``content+kind`` scan
+        ``create_point`` / ``_content_exists`` use (the A10 fallback, #2892),
+        keeping the identical terminal-status + ``coalesce(outdated,false)``
+        scoping so the fallback resolves exactly the points the hash path
+        would have resolved were the hash present. Order pin: hash query
+        first, fallback only on the miss — the hash-present path is
+        unchanged."""
         proj = self._get_proj()
+        terminal = sorted(self._INGEST_TERMINAL_STATUSES)
         rows = proj.g.query(
             "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
             "AND n.pointKind = $kind AND n.status IN $terminal "
             "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
             params={"ch": _content_hash(content), "kind": kind,
-                    "terminal": sorted(self._INGEST_TERMINAL_STATUSES)},
+                    "terminal": terminal},
         ).result_set
+        if not rows:
+            # #2971 A10 CONTENT+KIND FALLBACK SCAN: a JSONL rebuild (or a
+            # create_point crash between the node CREATE and the props SET)
+            # leaves the terminal point hash-less — without this scan the
+            # cycle-17/18 guard cannot see it.
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.is_operator = false "
+                "AND n.pointKind = $kind AND n.content_hash IS NULL "
+                "AND n.content = $content AND n.status IN $terminal "
+                "AND coalesce(n.outdated, false) = false RETURN n.id LIMIT 1",
+                params={"kind": kind, "content": content,
+                        "terminal": terminal},
+            ).result_set
         return rows[0][0] if rows else None
 
     def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
@@ -7361,10 +7764,22 @@ class TortoiseSDK:
             if viols:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             content = item.pop("content", None)
-            # extractedFrom may address a bundle source by its local ref
-            if isinstance(item.get("extractedFrom"), str) \
-                    and item["extractedFrom"] in source_refs:
-                item["extractedFrom"] = refs[item["extractedFrom"]]
+            # extractedFrom may address a bundle source by its local ref.
+            # #3263: many-to-many — resolve a LIST element-wise, mirroring
+            # canonical._resolve_ref_field (whose list branch also precedes its
+            # str branch). Handling only the scalar case left a list of local
+            # refs unresolved, so _link_source minted Sources named after the
+            # LOCAL refs ('s1', 's2') and the real bundle Sources were never
+            # linked — inventing exactly the provenance this fix forbids.
+            # Already-resolved ids/urls stay literal (refs.get(x, x) semantics).
+            _ef = item.get("extractedFrom")
+            if isinstance(_ef, str) and _ef in source_refs:
+                item["extractedFrom"] = refs[_ef]
+            elif isinstance(_ef, list):
+                item["extractedFrom"] = [
+                    refs[r] if isinstance(r, str) and r in source_refs else r
+                    for r in _ef
+                ]
             existed = proj.g.query(
                 "MATCH (n:Point {content_hash:$ch}) "
                 "WHERE n.is_operator = false "
@@ -7610,18 +8025,33 @@ class TortoiseSDK:
                 if rel == "extractedFrom":
                     # (Point)-[:extractedFrom]->(Source) — MERGE-based, so
                     # re-ingest is safe. Source side resolves by url/ref.
-                    existed = proj.g.query(
-                        "MATCH (n:Point {id:$pid})-[:extractedFrom]->"
-                        "(s:Source {url:$url}) RETURN count(*)",
-                        params={"pid": src, "url": dsts[0]},
-                    ).result_set
-                    if not existed or not existed[0][0]:
-                        proj._link_source(src, dsts[0])
-                        created["connections"] += 1
-                    else:
-                        deduped["connections"] += 1
-                    conn_result = {"relation": rel, "from": src, "to": dsts[0],
-                                   "deduped": bool(existed and existed[0][0])}
+                    # #3263 (re-review P2): `to` may be multi-valued — a claim
+                    # extracted from several sources. Fan out over EVERY target;
+                    # handling only dsts[0] silently dropped the rest and
+                    # undercounted created/deduped, on the surface this change
+                    # set amended to many→many.
+                    first_existed = None
+                    for dst in dsts:
+                        existed = proj.g.query(
+                            "MATCH (n:Point {id:$pid})-[:extractedFrom]->"
+                            "(s:Source {url:$url}) RETURN count(*)",
+                            params={"pid": src, "url": dst},
+                        ).result_set
+                        hit = bool(existed and existed[0][0])
+                        if hit:
+                            deduped["connections"] += 1
+                        else:
+                            proj._link_source(src, dst)
+                            created["connections"] += 1
+                        if first_existed is None:
+                            first_existed = hit
+                    # Preserve the historical shape for the scalar case so
+                    # existing consumers/tests see an unchanged `to`.
+                    conn_result = {
+                        "relation": rel, "from": src,
+                        "to": dsts[0] if len(dsts) == 1 else list(dsts),
+                        "deduped": bool(first_existed),
+                    }
                 else:
                     existed = proj.g.query(
                         f"MATCH (a)-[r:{rel}]->(b) "
@@ -8386,14 +8816,14 @@ class TortoiseSDK:
         """List all graph names in the database."""
         return self._get_proj().list_graphs()
 
-    def _audit(self, team_id: str, actor_user_id: str | None,
+    def _audit(self, org_id: str, actor_user_id: str | None,
                 operation: str, **kwargs) -> None:
         """Log an audit event. No-op if audit logger not initialized."""
         if self._audit_logger is None:
             from .audit_events import AuditLogger
             self._audit_logger = AuditLogger()
         self._audit_logger.append(
-            team_id=team_id,
+            org_id=org_id,
             actor_user_id=actor_user_id,
             operation=operation,
             **kwargs,
@@ -8477,7 +8907,7 @@ class TortoiseSDK:
         sub = rows[0][0]
         chain["subject"] = {"id": sub.get("id"), "name": sub.get("name"),
                              "kind": sub.get("subjectKind", "")}
-        # ponytail: follow outgoing rels for Role → Team delegation
+        # ponytail: follow outgoing rels for Role → Org delegation
         rels = proj.g.query(
             "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], properties(n)",
             params={"sid": sub["id"]},
@@ -9109,6 +9539,7 @@ class TortoiseSDK:
         with issue in (contradictory, stale, contested) — a single edge may
         carry multiple issues (one entry each, deduped).
         """
+        from .search_engine import ep_measured_cypher  # #3276 canonical predicate
         edges = self._epistemic_edges()
         if not edges:
             return []
@@ -9141,7 +9572,10 @@ class TortoiseSDK:
         # Contested claims: high posterior variance (stored EP params only —
         # an unmeasured uniform prior is NOT contested) OR an incoming NAND
         # operator edge on a LIVE point (the derived `challenged` condition,
-        # ontology §5).
+        # ontology §5). #3276: "stored EP params" is the canonical measured
+        # predicate — a #2199 baseline prior alone is prior-only (unmeasured),
+        # so a low-credibility baseline can no longer read contested here
+        # while annotate_ep_batch reads it unmeasured.
         # #2490: terminal claims are EXCLUDED from the variance scan — they
         # decay to vacuity (v=1/12 > threshold) at the terminalizing write and
         # must surface as "stale" (above), never "contested". Deliberate
@@ -9154,7 +9588,7 @@ class TortoiseSDK:
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
             f"  AND {_terminal_excluded('n.status')} "
-            "  AND (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+            f"  AND {ep_measured_cypher('n')} "
             "  AND (n.posterior_beta IS NOT NULL OR n.ep_beta IS NOT NULL) "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
@@ -9393,18 +9827,73 @@ class TortoiseSDK:
         backlog = len(self._dirty_roots)
         last_output = self._dream_metrics.get("last_pass_output", 0)
         last_pass_at = self._dream_metrics.get("last_pass_at")
-        alarm = (backlog > 0 and last_output == 0
-                 and last_pass_at is not None)
+        # #3139 (review P1): the previous alarm was
+        #     backlog > 0 and last_output == 0 and last_pass_at is not None
+        # which stayed FALSE in BOTH dishonest states the issue measured.
+        #
+        #  (a) A graph that had never run a pass has `last_pass_at is None`,
+        #      so it reported `alarm_verdict: False, alarm_reason: 'ok'` with a
+        #      live backlog and 0% coverage — literally the state the issue
+        #      recorded.
+        #  (b) A silent no-op still trivially stamps operator-less claims, so
+        #      `affected_claims` (→ last_pass_output) is NON-zero even though no
+        #      belief state was written; and `coverage_pct` counts STAMPS too,
+        #      so it RISES. Keying the alarm on stamps cannot see a
+        #      belief-state no-op — the health surface got *more* reassuring
+        #      the worse the failure was.
+        #
+        # So the alarm now also keys on the two belief-state signals: the
+        # proven silent no-op, and a live backlog with no coverage at all.
+        #
+        # But it must NOT contradict the guard's own classification of a
+        # LEGITIMATE no-op. `_guard_dream_progress` says of the #1163
+        # stale-run stand-down "Zero writes is correct here" — yet the
+        # backlog terms below would page on it, because the stand-down
+        # deliberately retains the dirty root. Excuse the reasons the guard
+        # calls legitimate instead of false-paging on them.
+        no_op_reason = self._dream_metrics.get("last_pass_no_op_reason")
+        coverage = self._metrics_coverage()
+        _LEGITIMATE_NO_OP = {
+            "stale_run_guard", "budget_zero", "no_dirty_roots",
+            "no_ep_factors",
+        }
+        if no_op_reason in _LEGITIMATE_NO_OP:
+            alarm = False
+        else:
+            alarm = bool(
+                no_op_reason == "silent_no_op"
+                or (backlog > 0 and last_output == 0)
+                or (backlog > 0 and coverage == 0.0)
+            )
+        # Derive the reason FROM the verdict: a reason without an alarm would
+        # report a failure that `alarm_verdict` denies (and would leak a
+        # backlog-terms reason on a deliberately excused legitimate no-op).
+        if not alarm:
+            alarm_reason = "ok"
+        elif no_op_reason == "silent_no_op":
+            alarm_reason = "silent_no_op"
+        elif backlog > 0 and last_output == 0:
+            alarm_reason = "zero_output_with_backlog"
+        else:
+            alarm_reason = "zero_coverage_with_backlog"
         state = self.dream_health_state()
         stale_backlog = sum(  # noqa: F841
             1 for _ in self._dirty_roots)  # non-empty check below
         return {
             "alarm_verdict": alarm,
-            "alarm_reason": (
-                "zero_output_with_backlog" if alarm else "ok"),
+            "alarm_reason": alarm_reason,
             "stale_backlog": backlog,
             "last_pass_at": last_pass_at,
             "last_pass_output": last_output,
+            # #3139 (review P1): belief state WRITTEN — as distinct from
+            # `last_pass_output`, which counts stamps. Their divergence is
+            # exactly what a silent no-op looks like on this surface.
+            "last_belief_write_count": self._dream_metrics.get(
+                "last_belief_write_count"),
+            # #3139: legitimate-no-op vs silent-no-op is a difference the
+            # caller must be able to see. The silent case raised
+            # DreamNoOpError; this reports the proven-empty case.
+            "no_op_reason": self._dream_metrics.get("last_pass_no_op_reason"),
             "coverage_pct": self._metrics_coverage(),
             "failure_rate": (
                 self._dream_metrics["failure_count"]
@@ -9445,8 +9934,22 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         self._dream_metrics["last_pass_at"] = datetime.now(
             timezone.utc).isoformat()  # noqa: UP017
-        self._dream_metrics["last_pass_output"] = len(
-            result.get("affected_claims", []))
+        # #3139: full mode reports ``total_affected`` (a count) instead of an
+        # ``affected_claims`` list — reading the absent key recorded 0 output
+        # for a pass that DID write belief state, so the zero-output alarm
+        # fired on healthy full passes.
+        affected_claims = result.get("affected_claims")
+        if affected_claims is None:
+            last_output = int(result.get("total_affected", 0) or 0)
+        else:
+            last_output = len(affected_claims)
+        self._dream_metrics["last_pass_output"] = last_output
+        # #3139 (review P1): record belief writes alongside the stamp count so
+        # the health surface can distinguish "wrote beliefs" from "stamped
+        # claims" — the difference a silent no-op hides behind.
+        _dw = getattr(self._get_dreamer(), "_last_belief_write_count", None)
+        if _dw is not None:
+            self._dream_metrics["last_belief_write_count"] = int(_dw)
         self._dream_metrics["last_pass_mode"] = result.get("mode", mode)
         counts = self._dream_metrics["per_mode_counts"]
         counts[mode] = counts.get(mode, 0) + 1
@@ -9571,7 +10074,23 @@ class TortoiseSDK:
             claim_ids = [r[0] for r in rows]
         return op_ids, claim_ids
 
-    def _mark_dirty(self, point_ids: list[str]) -> None:
+    def _advance_ep_version(self, proj) -> int:
+        """Advance the graph-wide EP epoch and return the new value (#1163).
+
+        Split out of :meth:`_mark_dirty` (#2952) so a create path can stamp
+        ``ep_dirty_at`` with the SAME epoch inside the CREATE statement that
+        writes the point — instead of issuing a second, post-CREATE ``SET``
+        (see create_point for why that second write is not free).
+        """
+        rows = proj.g.query(
+            "MERGE (m:EpMeta) "
+            "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
+            "RETURN m.ep_version"
+        ).result_set
+        return int(rows[0][0]) if rows else 1
+
+    def _mark_dirty(self, point_ids: list[str], *, ep_version: int | None = None,
+                    pre_stamped: set[str] | None = None) -> None:
         """Mark claims whose confidence is now stale after a write.
 
         1-hop reverse BFS (#85 contract): from the mutated point, collect the
@@ -9585,6 +10104,18 @@ class TortoiseSDK:
         ``ep_version`` epoch advances (every write that dirties EP bumps it).
         The in-memory ``_dirty_roots`` set stays as the hot-path mirror; any
         process (fresh request-scoped SDK) hydrates from the graph.
+
+        ``ep_version`` (default None → advance the epoch here): the ordering
+        stamp to persist. Pass the value already stamped by a caller's own
+        CREATE so the two writes agree.
+
+        ``pre_stamped`` (default None): ids whose ``ep_dirty``/``ep_dirty_at``
+        were written by that same CREATE. They are excluded from this call's
+        persist SET (no second graph write) and counted as persisted, so the
+        terminal/zombie classification below still treats them correctly.
+        #2952: a create path that writes one property-twice entry into the
+        fulltext index skews the engine's collection statistics — see
+        create_point.
         """
         # #1375: every write that dirties EP also invalidates the degraded-
         # fallback corpus snapshot (covers create/update/supersede/retract/
@@ -9601,18 +10132,20 @@ class TortoiseSDK:
         proj = self._get_proj()
         # #1163: advance the graph-wide EP epoch FIRST — the new value is the
         # ordering stamp for this write's dirty markings (and the stale-run
-        # guard's discriminator).
-        rows = proj.g.query(
-            "MERGE (m:EpMeta) "
-            "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
-            "RETURN m.ep_version"
-        ).result_set
-        ep_version = int(rows[0][0]) if rows else 1
+        # guard's discriminator). A caller that already advanced it (a CREATE
+        # that stamped ep_dirty_at inline) passes the value in.
+        if ep_version is None:
+            ep_version = self._advance_ep_version(proj)
         # Operators targeting the mutated points, then the claims those
         # operators target (shared 1-hop reverse-BFS — delete_point's
         # pre-delete neighbor capture uses the same helper, #1916).
         _op_ids, claim_ids = self._reverse_bfs_neighbors(proj, point_ids)
         dirty_ids = list(point_ids) + claim_ids
+        # #2952: ids already stamped by their own CREATE skip the persist SET
+        # (a second write on the node costs an extra fulltext index entry) —
+        # and when that covers every dirty id the persist statement is not
+        # issued at all.
+        _stamped = set(pre_stamped or ())
         # #2422 (dirty-root retention): a TERMINAL point can never enter an
         # EP affected set (every admission point terminal-excludes), so
         # _sweep_dirty_roots can never clear its ep_dirty flag — it would sit
@@ -9623,18 +10156,25 @@ class TortoiseSDK:
         # at persist time) so a point terminalized by a concurrent writer
         # between the filter read and the persist cannot be re-flagged — the
         # exclusion is atomic with the marking.
-        persisted_rows = proj.g.query(
-            "UNWIND $ids AS pid "
-            "MATCH (n:Point {id: pid}) "
-            "WHERE NOT coalesce(n.status, 'live') IN $terminal "
-            "AND coalesce(n.outdated, false) = false "
-            "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
-            "RETURN pid",
-            params={"ids": dirty_ids,
-                    "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
-                    "ep": ep_version},
-        ).result_set
-        persisted = {r[0] for r in persisted_rows} if persisted_rows else set()
+        persisted: set[str] = set()
+        if dirty_ids and not set(dirty_ids) <= _stamped:
+            persisted_rows = proj.g.query(
+                "UNWIND $ids AS pid "
+                "MATCH (n:Point {id: pid}) "
+                "WHERE NOT coalesce(n.status, 'live') IN $terminal "
+                "AND coalesce(n.outdated, false) = false "
+                "AND NOT pid IN $stamped "
+                "SET n.ep_dirty = true, n.ep_dirty_at = $ep "
+                "RETURN pid",
+                params={"ids": dirty_ids,
+                        "terminal": sorted(TERMINAL_EXCLUDED_STATUSES),
+                        "ep": ep_version,
+                        "stamped": sorted(_stamped)},
+            ).result_set
+            persisted = {r[0] for r in persisted_rows} if persisted_rows else set()
+        # #2952: a pre-stamped id is persisted by its own CREATE — it is not
+        # a terminal/live classification case, it simply needs no SET here.
+        persisted |= _stamped & set(dirty_ids)
         # Classify the non-persisted input ids: a point that NO LONGER EXISTS
         # is a delete zombie (delete_point marks the pre-deleted id dirty —
         # #1916; _prune_nonexistent_dirty_roots removes it post-dream) — it
@@ -9846,6 +10386,14 @@ class TortoiseSDK:
         "budget=0 → no-op result (not an error)"). No EP, no stamps;
         converged flags are vacuously True (matches dream_window's budget=0
         contract)."""
+        # #3139: an explicit budget=0 is a legitimate no-op — report why.
+        self._dream_metrics["last_pass_no_op_reason"] = "budget_zero"
+        # #3139 (review P2): this pass wrote no belief state, so the belief
+        # count must not survive from a previous pass — a field documented as
+        # "beliefs written by the LAST pass" reporting a stale non-zero value
+        # on a no-op pass is the same class of quiet lie this change set
+        # exists to remove.
+        self._dream_metrics["last_belief_write_count"] = 0
         if mode == "local":
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
@@ -9856,6 +10404,147 @@ class TortoiseSDK:
         return {"mode": "full", "batches": 0, "total_affected": 0,
                 "converged_all": True, "budget_used": 0, "coverage": 0.0,
                 "scanned_count": 0}
+
+    def _count_ep_factors(self, window: list[str] | None) -> int:
+        """Index-independent count of EP factors reachable in ``window``
+        (#3139).
+
+        Counts the two factor families the dream/EP path propagates:
+        DERIVED-LIVE operators (>=2 live non-operator endpoints — the
+        GATE-2 Q3 participation rule) and operator-less direct IMPL|NAND
+        edges between two live plain Points. ``window=None`` = graph-wide
+        (full mode); a list scopes the probe to the pass's window/closure.
+
+        Deliberately avoids the bare ``X.is_operator = false`` spelling:
+        that predicate is served by the boolean range index, and a
+        GRAPH.COPY'd graph has every ``false`` entry dropped from it
+        (#3154) — the probe would then lie in exactly the case it exists to
+        detect. The ``IS NULL OR = false`` form is index-independent
+        (verified against a GRAPH.COPY'd graph).
+        """
+        from .live import _live_only
+        proj = self._get_proj()
+        live_op = f"AND {_live_only('op.status')}"
+        live_t = f"AND {_live_only('t.status')}"
+        live_u = f"AND {_live_only('u.status')}"
+        live_a = f"AND {_live_only('a.status')}"
+        live_b = f"AND {_live_only('b.status')}"
+        params: dict = {}
+        scope_op = ""
+        if window is not None:
+            params["ids"] = list(window)
+            # Candidate stage: >=1 live endpoint in the window. The selector
+            # finds an operator from a SINGLE frontier endpoint — the other
+            # endpoint only has to be live ANYWHERE in the graph — so the
+            # window filter must NOT gate the derived-liveness count.
+            scope_op = "AND t.id IN $ids "
+        op_rows = proj.g.query(
+            # Candidate stage is DIRECTED (op -> endpoint), exactly as
+            # `_bfs_select_operators` selects operators: an edge *into* an
+            # operator (legacy/imported data) can never be selected, so it
+            # must not count as an eligible factor here.
+            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(t:Point) "
+            "WHERE (t.is_operator IS NULL OR t.is_operator = false) "
+            "AND t.op_type IS NULL "
+            f"{live_op} "
+            f"{live_t} "
+            f"{scope_op}"
+            "WITH DISTINCT op "
+            # Derived-liveness stage: >=2 live non-operator endpoints,
+            # GRAPH-WIDE — mirrors `_derived_live_operators` exactly.
+            "MATCH (op)-[:IMPL|NAND]-(u:Point) "
+            "WHERE (u.is_operator IS NULL OR u.is_operator = false) "
+            "AND u.op_type IS NULL "
+            f"{live_u} "
+            "WITH op, count(DISTINCT u) AS live_conn "
+            "WHERE live_conn >= 2 "
+            "RETURN count(op)",
+            params=params,
+        ).result_set
+        # Direction-aware, mirroring `_bfs_select_operators`'s direct-edge
+        # walk (analyze.py): forward from a window member (a.id IN $ids)
+        # ALWAYS; backward into a window member (b.id IN $ids) ONLY for NAND
+        # or a non-unidirectional IMPL edge. A pass over just the TARGET of a
+        # unidirectional direct IMPL edge legitimately selects nothing — a
+        # direction-blind probe would false-fire the guard (and, via the
+        # lazy read path, break get_confidence). The directed match + count(r)
+        # gives one row per factor.
+        if window is None:
+            dir_scope = ""
+        else:
+            dir_scope = (
+                "AND (a.id IN $ids OR (b.id IN $ids AND "
+                "(type(r) = 'NAND' OR "
+                "coalesce(r.direction, 'bidirectional') <> 'unidirectional'))) "
+            )
+        dir_rows = proj.g.query(
+            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
+            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
+            "AND a.op_type IS NULL "
+            "AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "AND b.op_type IS NULL "
+            f"{live_a} {live_b}"
+            f"{dir_scope}"
+            "RETURN count(r)",
+            params=params,
+        ).result_set
+        n_ops = int(op_rows[0][0]) if op_rows else 0
+        n_dir = int(dir_rows[0][0]) if dir_rows else 0
+        return n_ops + n_dir
+
+    def _guard_dream_progress(self, dreamer, mode: str, result: dict,
+                              *, window: list[str] | None) -> None:
+        """Refuse a success-shaped pass that wrote ZERO belief state while EP
+        factors exist in its window (#3139).
+
+        Every mode's result shape reports ``converged``/``converged_all:
+        True`` with ``budget_used: 0`` when the selector silently returns
+        nothing — indistinguishable from a legitimately empty graph. This
+        guard makes the distinction explicit:
+
+        - zero EP factors in the window → legitimate no-op; returns normally
+          and records ``no_op_reason`` for the health surface;
+        - factors present but zero belief-state writes → the silent no-op;
+          raises ``DreamNoOpError`` (before any dirty-root sweep, so the
+          failed pass cannot erase its own backlog).
+
+        Callers MUST run this before mutating dirty-root state.
+        """
+        if getattr(dreamer, "_last_flush_skipped", False):
+            # #1163 stale-run guard: a concurrent write advanced the epoch
+            # and the pass stood down. Zero writes is correct here.
+            self._dream_metrics["last_pass_no_op_reason"] = "stale_run_guard"
+            return
+        if not result.get("converged", result.get("converged_all", False)):
+            self._dream_metrics["last_pass_no_op_reason"] = None
+            return
+        wrote = getattr(dreamer, "_last_belief_write_count", 0) or 0
+        # #3139 (review P1): expose belief writes on the health surface, in
+        # the same units as the guard — `last_pass_output` counts stamps, so a
+        # no-op that stamped operator-less claims looks productive there.
+        self._dream_metrics["last_belief_write_count"] = wrote
+        if wrote > 0:
+            self._dream_metrics["last_pass_no_op_reason"] = None
+            return
+        eligible = self._count_ep_factors(window)
+        if eligible > 0:
+            from .exceptions import DreamNoOpError
+            self._dream_metrics["last_pass_no_op_reason"] = "silent_no_op"
+            # Record the failed pass BEFORE raising so the C7 health surface
+            # (failure_rate / zero-output alarm / last_pass_at) reflects it —
+            # otherwise a silent no-op is invisible to every metric except
+            # no_op_reason.
+            self._record_dream_metrics(result, mode)
+            self._dream_metrics["failure_count"] += 1
+            raise DreamNoOpError(
+                f"dream(mode={mode!r}) reported convergence but wrote zero "
+                f"belief state while {eligible} EP factor(s) are reachable "
+                f"from its window — refusing the silent no-op (#3139). The "
+                f"usual cause is a dropped boolean is_operator index "
+                f"(GRAPH.COPY, #3154); repair the index or report this graph.",
+                mode=mode, eligible_factors=eligible,
+            )
+        self._dream_metrics["last_pass_no_op_reason"] = "no_ep_factors"
 
     def _dream_local(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
                      budget: int | None, warm_start: bool = True) -> dict:
@@ -9868,6 +10557,10 @@ class TortoiseSDK:
         """
         anchors = list(self._dirty_roots)
         if not anchors:
+            self._dream_metrics["last_pass_no_op_reason"] = "no_dirty_roots"
+            # #3139 (review P2): no beliefs written by THIS pass — see the
+            # note in _dream_noop; a stale count would misdescribe the pass.
+            self._dream_metrics["last_belief_write_count"] = 0
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
         result = dreamer.dream(
@@ -9877,6 +10570,9 @@ class TortoiseSDK:
             warm_start=warm_start,
         )
         affected = set(result.get("affected_claims", []))
+        # #3139: fail closed BEFORE any dirty-root mutation — a silent no-op
+        # that swept its own backlog would leave the graph permanently stale.
+        self._guard_dream_progress(dreamer, "local", result, window=anchors)
         # Epic 903-C5 (#1243) — W4 retention (the A2-bug fix): affected
         # claim-roots are cleared ONLY when the run CONVERGED. A failed run
         # keeps them dirty (retry) and registers the attempt — the old
@@ -9925,6 +10621,9 @@ class TortoiseSDK:
                                      warm_start=warm_start)
         window = getattr(dreamer, "_last_window", []) or []
         affected = set(result.get("affected_claims", []))
+        # #3139: fail closed before the dirty-root sweep (see _dream_local).
+        self._guard_dream_progress(dreamer, "stale-first", result,
+                                   window=window)
         if result.get("converged") and not getattr(
                 dreamer, "_last_flush_skipped", False):
             # #1163: guarded sweep (a concurrent process's newer marking
@@ -9958,6 +10657,9 @@ class TortoiseSDK:
             max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at,
             budget=budget, warm_start=warm_start,
         )
+        # #3139: fail closed before the dirty-root sweep — a full pass that
+        # scanned zero anchors over a populated graph must not report success.
+        self._guard_dream_progress(dreamer, "full", result, window=None)
         # P2-review (#1243): a CONVERGED full pass resolves every reachable
         # region — clear the affected roots' retry state so a later failed
         # window pass cannot surface an already-converged region as
@@ -9966,7 +10668,12 @@ class TortoiseSDK:
         # concurrent process re-marked dirty mid-pass).
         if result.get("converged_all", False) and not getattr(
                 dreamer, "_last_flush_skipped", False):
-            affected = set(result.get("affected_claims", []))
+            # #3139: the full pass returns a COUNT (pinned I1 key-set), so the
+            # reachable-affected set comes from the Dreamer; reading
+            # ``result["affected_claims"]`` (absent in full mode) swept an
+            # empty set and left the whole backlog dirty forever.
+            affected = set(getattr(
+                dreamer, "_last_affected_claims", set()) or set())
             self._sweep_dirty_roots(
                 affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
             self._prune_nonexistent_dirty_roots()
@@ -10031,8 +10738,12 @@ class TortoiseSDK:
                     "WHERE a.id IN $ids AND b.id <> a.id "
                     "AND (a.status IS NULL OR a.status <> 'draft') "
                     "AND (b.status IS NULL OR b.status <> 'draft') "
-                    "AND a.is_operator = false AND a.op_type IS NULL "
-                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    # #3139/#3154: index-independent non-operator predicate
+                    # (the `= false` form is emptied by a GRAPH.COPY'd index).
+                    "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                    "AND a.op_type IS NULL "
+                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.op_type IS NULL "
                     "RETURN DISTINCT a.id, b.id",
                     params={"ids": frontier},
                 ).result_set
@@ -11563,7 +12274,12 @@ class TortoiseSDK:
             decisions / EP-tagged claims ('we already decided this'). Hits must
             clear a relevance gate (measured belief >= 0.5, or >= 2 shared tokens
             with the query) — otherwise the stage reports no matches instead of
-            counting false positives.
+            counting false positives. Gate-passing hits are then re-ranked
+            (#3277) so an EP-confirmed claim WITH incoming evidence precedes
+            unmeasured lexical matches BEFORE `[:limit]` — the shipped default
+            limit=2 otherwise truncated the 'we already decided this' signal
+            away (see `_issue_insight_measured_ep`'s #3276 caveats: the
+            predicate does not prove measurement).
           * Repo (when repo= given): structural count of indexed GitHub
             observation points for that repo (source='github').
         Fail-closed: empty graph -> no_prior_knowledge; repo given + graph
@@ -11594,7 +12310,14 @@ class TortoiseSDK:
             semantic_hits = [
                 h for h in semantic_hits
                 if self._issue_insight_relevant(h, text)
-            ][:limit]
+            ]
+            # #3277: re-rank BEFORE truncating — retrieval order is
+            # mode-dependent (#3254/#2573), so two unmeasured lexical matches
+            # can precede a measured EP-confirmed claim and [:limit] at the
+            # shipped default (2) then drops the decision entirely. See
+            # _issue_insight_rank; the [:limit] cap still holds (reorder, not
+            # exempt), so `data_points <= limit` is preserved.
+            semantic_hits = self._issue_insight_rank(semantic_hits)[:limit]
 
         repo_points: list[dict] = []
         if repo:
@@ -11676,21 +12399,111 @@ class TortoiseSDK:
         """#1196 review c70 — semantic-stage relevance gate.
 
         A hit counts as "relates to this issue" when it is EP-confirmed
-        (has_ep AND confidence_mean >= 0.5 — the 'we already decided this'
-        signal) OR it shares >= 2 tokens with the query text. has_ep is
-        required post-#2206 because an unmeasured point reads the neutral
-        Beta(1,1) mean 0.5 — a bare >= 0.5 floor would count every
-        never-measured hit as "confirmed". The token floor protects the
-        TF-IDF fallback path (ep=None) from single-token coincidences and
-        keeps unmeasured FTS hits out unless they show real lexical overlap.
+        (measured AND confidence_mean >= 0.5 — the 'we already decided this'
+        signal) OR it shares >= 2 tokens with the query text. A measurement
+        flag is required post-#2206 because an unmeasured point reads the
+        neutral Beta(1,1) mean 0.5 — a bare >= 0.5 floor would count every
+        never-measured hit as "confirmed". #3276: ``has_ep`` now means EP
+        MEASURED, so a #2199 auto-baselined decide part (prior mean 0.75 but
+        no EP run) no longer clears the gate; ``measured`` is preferred when
+        the caller supplies it, with ``has_ep`` as the honest fallback. The
+        token floor protects the TF-IDF fallback path (ep=None) from
+        single-token coincidences and keeps unmeasured FTS hits out unless
+        they show real lexical overlap.
         """
         ep = hit.get("ep")
-        if ep is not None and ep.get("has_ep") and ep.get("confidence_mean") is not None \
+        measured = ep is not None and ep.get("measured", ep.get("has_ep"))
+        if measured and ep.get("confidence_mean") is not None \
                 and ep["confidence_mean"] >= self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
             return True
         q_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall(query_text.lower()))
         c_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall((hit.get("content") or "").lower()))
         return len(q_tokens & c_tokens) >= self._ISSUE_INSIGHT_MIN_SHARED_TOKENS
+
+    def _issue_insight_measured_ep(self, hit: dict) -> bool:
+        """#3277 — rank predicate: does this hit carry an EP belief signal AND
+        incoming structural evidence?
+
+        Deliberately STRICTER than `_issue_insight_relevant`'s first branch:
+        ``has_ep`` AND ``confidence_mean >= 0.5`` **plus** real incoming
+        IMPL/NAND evidence (``ep.evidence.total > 0``).
+
+        The evidence requirement is the #3276 guard, and its LIMITS must be
+        stated plainly (the ep payload carries no posterior-vs-prior flag):
+          * it rejects the EDGELESS kind-prior false positive — a never-measured
+            decision whose only signal is the kind-derived Beta(3,1) prior
+            reads ``has_ep=True`` at 0.75 with ``evidence.total == 0``, which
+            ``has_ep AND >= 0.5`` alone would count as 'we already decided
+            this';
+          * it does NOT prove measurement: an unmeasured decision that HAS an
+            incoming edge also clears it (``total > 0``). Distinguishing that
+            case from a genuinely measured claim requires #3276's
+            measurement-derived ``has_ep`` / a posterior flag — explicitly out
+            of scope here.
+        Behaviour vs #3276:
+          * pre-#3276  → edgeless kind-prior false positives are rejected; the
+            edge-having kind-prior case is NOT (undecidable from the payload);
+          * post-#3276 → ``has_ep`` becomes measurement-derived, so no kind
+            prior clears this predicate at all.
+        A genuinely measured claim whose belief came from an OUTGOING edge, or
+        an explicit edgeless EP seed, is NOT boosted (``evidence`` counts
+        incoming edges only). That is the deliberate fail-safe direction —
+        never invent a 'decided' signal. The residual BECOMES CLOSEABLE once
+        #3276 lands: with measurement-derived ``has_ep`` the evidence
+        requirement could then be relaxed (dropping it is the follow-up change
+        in this predicate), which would boost edgeless measured claims. It is
+        never dropped by the RANKING: the relevance gate still admits it on
+        lexical overlap, it just keeps retrieval order (and therefore remains
+        subject to `[:limit]`).
+        """
+        ep = hit.get("ep")
+        if ep is None or not ep.get("has_ep"):
+            return False
+        mean = ep.get("confidence_mean")
+        try:
+            if mean is None or float(mean) < self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
+                return False
+        except (TypeError, ValueError):
+            return False
+        evidence = ep.get("evidence") or {}
+        try:
+            return int(evidence.get("total") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _issue_insight_rank(self, hits: list[dict]) -> list[dict]:
+        """#3277 — stable, deterministic re-rank: EP-confirmed claims first.
+
+        `tortoise_fts_query` returns hits in retrieval order, which is
+        mode-dependent (dense/RRF vs sparse lane with no dense leg —
+        #3254/#2573). This sort makes the head of the list mode-independent for
+        the confirmed claim and uses a total, deterministic key:
+
+          1. hits clearing `_issue_insight_measured_ep` (EP belief signal +
+             incoming structural evidence; see its #3276 caveats) come first;
+          2. among them, higher belief mean first (mode-independent);
+          3. the hit's original retrieval index — the deterministic tie-break,
+             so equal-belief confirmed hits and the whole unmeasured tail keep
+             their relevance order (never set/hash order).
+
+        Truncation happens AFTER this rank, so the documented
+        ``data_points <= limit`` contract is preserved (reorder, not exempt):
+        the highest-belief confirmed claim is index 0 in every EP-ANNOTATED
+        retrieval mode (dense leg present or absent), and therefore survives the
+        shipped default ``limit=2``. A lower-belief confirmed claim, and the
+        whole unmeasured tail, remain subject to the cap as before. In the true
+        ``ep=None`` TF-IDF fallback there is no EP-confirmed claim to rank, so
+        the predicate is inert and retrieval order is unchanged.
+        """
+        def _key(item: tuple[int, dict]):
+            idx, hit = item
+            if self._issue_insight_measured_ep(hit):
+                # `confidence_mean` is already a float here (the predicate
+                # float()-validated it), so no defensive branch is reachable.
+                return (0, -float((hit.get("ep") or {}).get("confidence_mean")), idx)
+            return (1, 0.0, idx)
+
+        return [hit for _, hit in sorted(enumerate(hits), key=_key)]
 
     # ── Ask-path hit annotation (#1987 Task 4) ──────────────────
 
@@ -12883,7 +13696,7 @@ class TortoiseSDK:
                 code=VALIDATION_CODE_BAD_DATE)
 
     def ask(self, question: str, *, question_type: str | None = None,
-            question_date: str | None = None, team_id: str | None = None,
+            question_date: str | None = None, org_id: str | None = None,
             _reader_factory=None, _selfhost_transport: bool = False) -> dict:
         """Answer a question about captured memory (#1987 Task 5) — ONE
         bounded RAG pass locally (or a POST to hosted ``/v1/ask`` when
@@ -12918,7 +13731,7 @@ class TortoiseSDK:
         ``_looks_abstained`` (abstained is ALWAYS the model's written
         decision; the blank→``NO_EVIDENCE_TEXT`` substitution is a
         retired defensive invariant) → best-effort
-        ``record_ask_usage`` (ONLY with an explicit ``team_id``; default
+        ``record_ask_usage`` (ONLY with an explicit ``org_id``; default
         None → no-op).
 
         #2070 retrieval knobs (ask-lane only — the search lane is
@@ -12946,7 +13759,9 @@ class TortoiseSDK:
             assembly caps — raising only the assemble cap changes nothing).
           * A7 rerank — ``TORTOISE_ASK_RERANK`` (default OFF, phase 2):
             cross-encoder + MMR port (tortoise/rerank.py), degrade-to-
-            current contract.
+            current contract + a context/token budget guard (#2976): a
+            reranked set over the 8000-token / 32 KiB caps is refused whole
+            (unreranked order), never silently truncated.
           * A8 evidence-package assembly (Slice A #2683, epic #2080) —
             ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF, fail-safe):
             collapses a distilled point's own source raw chunks/turns into
@@ -13125,11 +13940,19 @@ class TortoiseSDK:
                     )
                 # A7 (#2070): cross-encoder + MMR rerank (env-gated, default
                 # OFF — phase 2). Degrade-to-current: any failure keeps the
-                # deduped pool untouched; the rerank never raises.
+                # deduped pool untouched; the rerank never raises. Budget
+                # guard (#2976): the measured lever costs ~6.6x context, so a
+                # reranked set that overruns the SAME 8000-token / 32 KiB caps
+                # ``assemble_context`` enforces is refused WHOLE — degrade to
+                # the unreranked order (declared in the stats), never a silent
+                # truncation of the reranked set.
                 from tortoise.rerank import ask_lane_rerank
                 deduped, _rerank_stats = ask_lane_rerank(
                     question, deduped, proj=self._get_proj(),
-                    top_k=caps["context_item_cap"])
+                    top_k=caps["context_item_cap"],
+                    max_context_tokens=caps["context_token_cap"],
+                    max_context_bytes=32768,
+                    question_date=question_date)
                 # A8 (Slice A #2683): package the evidence pool BEFORE the
                 # reader window fill — a distilled point's own source raw
                 # chunks/turns collapse to one package entry, cross-item
@@ -13195,18 +14018,18 @@ class TortoiseSDK:
         if abstained and not answer:
             answer = NO_EVIDENCE_TEXT
 
-        # 7. Metering (best-effort; ONLY with an explicit team_id).
+        # 7. Metering (best-effort; ONLY with an explicit org_id).
         # #2069: the record's cost_usd is metered at the SERVING lane's
         # family rates (``select_ask_meter_rates`` on ``_LockedReader.model``
         # — the strong lane never under-counts at the deepseek envelope).
-        if team_id:
+        if org_id:
             try:
                 from tortoise.metering import record_ask_usage
                 input_tokens = (estimate_tokens_ask(system_prompt_for(qtype))
                                 + estimate_tokens_ask(evidence))
                 out_tokens = reader_out_tokens or 500
                 record_ask_usage(
-                    team_id,
+                    org_id,
                     tokens_in=input_tokens, tokens_out=out_tokens,
                     cost_usd=estimate_ask_cost_usd(
                         input_tokens, out_tokens,
@@ -13788,6 +14611,7 @@ class TortoiseSDK:
         centrality_weight: float = 0.10,
         object_centric: bool = True,
         state_ranker=None,
+        leg_trace: list[dict] | None = None,
     ) -> list[dict]:
         """UC1 "state" recall (epic #898 Wave A) — what is true and
         high-confidence right now.
@@ -13817,6 +14641,21 @@ class TortoiseSDK:
         (score breakdown), and state-context keys (``contested``,
         ``counter_evidence``, ``arguments``, ``nands``, ``mitigations``,
         ``related_objects`` / ``related_points``).
+
+        leg_trace (#2985): PRIVATE pass-through of the R3 #1542 D4 per-leg
+            trace contract into the underlying ``tortoise_fts_query``
+            call(s) — the same shape ``{"leg", "ran", "degraded", "reason",
+            "count"}``. It exists so an evaluation lane can PROVE the vector
+            leg was actually submitted before it records a score (a lane that
+            ran FTS-only measured a different, keyword-only surface).
+            Append-only, observational: passing it never changes retrieval —
+            default None is byte-identical behavior. When ``object_centric``
+            is True both the Point and Object reads append to the list (an
+            entry per query), so consumers should test which entries RAN
+            rather than assume one entry per leg. #2952: combine with
+            :func:`tortoise.search_engine.declared_degraded_read` (declare the
+            single-leg read) or :func:`tortoise.search_engine.require_hybrid_read`
+            (fail loud) — see also :meth:`retrieval_legs`.
         """
         from .ranking import StateRanker
 
@@ -13856,10 +14695,14 @@ class TortoiseSDK:
             # enrichment on the PRE-rerank pool would fold + project ~30k
             # candidates that StateRanker then discards ~2/3 of. Enrich
             # POST-rerank on the final top-limit list instead (see below).
-            w4_enrich=False)
+            w4_enrich=False,
+            # #2985: observational only — the call is byte-identical when
+            # leg_trace is None (the product default).
+            leg_trace=leg_trace)
         object_results = (
             self.tortoise_fts_query(
-                query, kind=kind, entity_type="object", limit=pool)
+                query, kind=kind, entity_type="object", limit=pool,
+                leg_trace=leg_trace)
             if object_centric else []
         )
         # #1350: Object status filter (decision 2a — completed/in_progress
@@ -13941,6 +14784,67 @@ class TortoiseSDK:
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
         return out
+
+    def retrieval_legs(
+        self,
+        query: str,
+        *,
+        kind: str | None = None,
+        limit: int = 10,
+        lane: str | None = None,
+        require_hybrid: bool = False,
+    ) -> dict:
+        """(C) #2952 — probe the hybrid read surface and DECLARE its legs.
+
+        Runs ONE ``recall_state`` call with the observational ``leg_trace``
+        contract (the same call shape ``recall_state`` uses — single source)
+        and returns the declared state::
+
+            {"legs": [...], "declared_degraded_read": <marker|None>,
+             "hybrid": bool, "embedder": <EmbeddingModel.status()>}
+
+        ``declared_degraded_read`` is the explicit
+        ``vector_leg_unavailable`` marker when the vector leg did not run
+        healthy (``hybrid`` is then False), never a silent keyword-only
+        read. When ``require_hybrid=True`` a single-leg read raises
+        ``HybridReadUnavailableError`` instead of returning — the fail-loud
+        capability a real-lane measurement uses to REFUSE to label a
+        keyword-only read as the product's hybrid retrieval (#2985 / PR
+        #3005 posture).
+
+        ``require_hybrid`` defaults to False: the probe is observational and
+        never changes retrieval, matching the product's default behavior.
+        Note the probe runs at the production 500ms collective cap: a
+        ``reason == "timeout"`` marker means the vector leg was SLOW, not
+        absent — a measurement that must distinguish the two should re-probe.
+        """
+        from .embeddings import EmbeddingModel
+        from .exceptions import HybridReadUnavailableError
+        from .search_engine import declared_degraded_read, require_hybrid_read
+        leg_trace: list[dict] = []
+        self.recall_state(query, kind=kind, limit=limit, leg_trace=leg_trace)
+        # ``declared_degraded_read`` is the C1 DECLARATION (None for a
+        # structural-only read by design); ``hybrid`` comes from the one
+        # gate predicate so it can never disagree with
+        # ``require_hybrid=True``. The refusal reason is reported separately
+        # so the two fields keep their own contracts (review P1, #2952).
+        marker = declared_degraded_read(leg_trace)
+        refusal_reason: str | None = None
+        try:
+            require_hybrid_read(leg_trace or None, lane=lane)
+            hybrid = True
+        except HybridReadUnavailableError as exc:
+            if require_hybrid:
+                raise
+            hybrid = False
+            refusal_reason = exc.reason
+        return {
+            "legs": leg_trace,
+            "declared_degraded_read": marker,
+            "hybrid": hybrid,
+            "hybrid_refusal_reason": refusal_reason,
+            "embedder": EmbeddingModel.status(),
+        }
 
     # ── Phase-1 volunteering-memory delivery (#2103) ─────────────────────
     # Issue #2103 (epic #2080, S9): ONE canonical pipeline (tortoise/volunteer.py
@@ -14318,40 +15222,40 @@ class TortoiseSDK:
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
-    # ── Control Plane: Team CRUD ───────────────────────────────────
+    # ── Control Plane: Org CRUD ───────────────────────────────────
 
-    def team_create(self, name: str, *, idempotency_key: str | None = None,
+    def org_create(self, name: str, *, idempotency_key: str | None = None,
                     mint_key: bool = True, owner_user_id: str | None = None) -> dict:
-        """Create a team with its own graph namespace.
+        """Create an org with its own graph namespace.
 
         Writes to the control_plane registry graph. Creates a tenant
-        graph (team_{name}) for Point/Operator storage.
+        graph (org_{name}) for Point/Operator storage.
 
         Returns {name, graph_name, api_key, id} on first creation; on an
         idempotent re-call (same idempotency_key) returns
         {name, graph_name, id, existing: True} with NO api_key — the caller
         already holds the plaintext from the original creation (#1710).
-        mint_key=False (#1716, onboarding sub-team parity) provisions a
-        KEYLESS team: no tt_ mint and no api_key hash on the Team node — the
-        return dict omits api_key entirely. The team stays keyless until a
+        mint_key=False (#1716, onboarding sub-org parity) provisions a
+        KEYLESS org: no tt_ mint and no api_key hash on the Org node — the
+        return dict omits api_key entirely. The org stays keyless until a
         session-key mint (apikey_create / POST /v1/session/key). A minted
         key whose plaintext is never returned is an unrecoverable dead
         credential.
 
-        owner_user_id (#1748, onboarding sub-team parity): when set, the
+        owner_user_id (#1748, onboarding sub-org parity): when set, the
         user becomes an OWNER member (Membership role=owner/status=active,
-        the registry twin of provision_team's membership upsert) so the
-        keyless team is reachable by session-key mint / team list / owner
-        delete. Without it a keyless team has NO membership — an unmintable,
+        the registry twin of provision_org's membership upsert) so the
+        keyless org is reachable by session-key mint / org list / owner
+        delete. Without it a keyless org has NO membership — an unmintable,
         undeletable orphan. Default None = no membership (back-compat for
         CLI/MCP/embedded callers with no user context).
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): the SDK
         control-plane backend stays REGISTRY-BACKED — the
         TORTOISE_CONTROL_PLANE env gate lives at the hosted layer
-        (hosted_api.py), and the hosted create-team writers (POST /v1/teams,
-        /v1/agent/signup, /v1/register, onboarding sub-team) route their
-        Supabase writes through the atomic provision_team RPC instead of
+        (hosted_api.py), and the hosted create-org writers (POST /v1/organizations,
+        /v1/agent/signup, /v1/register, onboarding sub-org) route their
+        Supabase writes through the atomic provision_org RPC instead of
         this method. Selfhost + embedded (where this SDK runs) have no
         Supabase control plane — the registry IS the control plane there.
         """
@@ -14370,12 +15274,12 @@ class TortoiseSDK:
                 f"Invalid team name: {name!r}. Use alphanumeric, hyphens, underscores, spaces."
             )
 
-        graph_name = f"team_{name}".replace(' ', '_')
+        graph_name = f"org_{name}".replace(' ', '_')
         proj = self._get_proj()
         reg = self._get_registry()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
-        # Idempotency — check registry graph for existing team
+        # Idempotency — check registry graph for existing org
         if idempotency_key:
             existing = reg.query(
                 "MATCH (t:Team {idempotency_key:$ik}) RETURN t.id, t.name",
@@ -14392,10 +15296,10 @@ class TortoiseSDK:
 
         # Mint the key only on the CREATE path (after the idempotency check)
         # so the existing branch never mints or persists anything (#1710).
-        # #1716: mint_key=False provisions a KEYLESS team — no tt_ mint and
-        # no api_key hash on the Team node (the onboarding sub-team path: a
+        # #1716: mint_key=False provisions a KEYLESS org — no tt_ mint and
+        # no api_key hash on the Org node (the onboarding sub-org path: a
         # minted key whose plaintext is never returned is an unrecoverable
-        # dead credential). The team stays keyless until a session-key mint.
+        # dead credential). The org stays keyless until a session-key mint.
         api_key = key_hash = None
         if mint_key:
             api_key = f"tt_{uuid.uuid4().hex}"
@@ -14410,15 +15314,15 @@ class TortoiseSDK:
             raise ControlPlaneError(f"Team {name!r} already exists")
 
         tid = ulid()
-        # Tier-driven limits from product/pricing.json (decision 1d) — no max_teams
-        # field: multi-team is a user-level capability, NOT a tier limit.
+        # Tier-driven limits from product/pricing.json (decision 1d) — no max_orgs
+        # field: multi-org is a user-level capability, NOT a tier limit.
         from tortoise.pricing import tier_limits
         lim = tier_limits("free")  # provision defaults to Free; upgrades = billing epic
-        # #1716 keyless: the api_key property is omitted from the Team node
+        # #1716 keyless: the api_key property is omitted from the Org node
         # (a NULL property is a delete in redisgraph semantics; omitting the
         # attribute + param is the unambiguous keyless shape).
         key_attr = "api_key:$key, " if mint_key else ""
-        team_params = {"id": tid, "name": name, "gn": graph_name,
+        org_params = {"id": tid, "name": name, "gn": graph_name,
                        "now": now,
                        "max_graphs": lim["max_graphs_per_team"],
                        "max_users": lim["max_users_per_team"],
@@ -14426,14 +15330,14 @@ class TortoiseSDK:
                        "ops": lim["included_write_ops_per_month"],
                        "nodes": lim["max_graph_nodes"]}
         if mint_key:
-            team_params["key"] = key_hash
+            org_params["key"] = key_hash
         reg.query(
             "CREATE (t:Team {id:$id, name:$name, " + key_attr
             + "graph_name:$gn, createdAt:$now, tier:'free', "
             + "max_graphs:$max_graphs, max_users:$max_users, "
             + "max_api_keys:$max_keys, ops_allowance:$ops, "
             + "graph_size_cap:$nodes})",
-            params=team_params,
+            params=org_params,
         )
         if idempotency_key:
             reg.query(
@@ -14441,11 +15345,11 @@ class TortoiseSDK:
                 params={"id": tid, "ik": idempotency_key},
             )
         try:
-            team_graph = proj.db.select_graph(graph_name)
+            org_graph = proj.db.select_graph(graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
             # TeamMeta (graph-side atomicity). compact = creator's prior
             # memberships > 0 (registry Membership nodes); fork inherited from
-            # the creator's EARLIEST prior team's OnboardingState.fork with
+            # the creator's EARLIEST prior org's OnboardingState.fork with
             # 'self' fallback (never re-asks the fork card); None when the
             # creator has no prior orgs (fork card asked exactly once) or no
             # user context (CLI/embedded mint).
@@ -14456,16 +15360,16 @@ class TortoiseSDK:
             if owner_user_id:
                 rows = reg.query(
                     "MATCH (m:Membership {user_id:$uid, status:'active'}) "
-                    "WHERE m.team_id <> $org "
-                    "RETURN m.team_id, m.created_at ORDER BY m.created_at",
+                    "WHERE m.org_id <> $org "
+                    "RETURN m.org_id, m.created_at ORDER BY m.created_at",
                     params={"uid": owner_user_id, "org": tid},
                 ).result_set
                 prior_ids = [r[0] for r in rows]
                 prior_fork = None
                 if prior_ids:
                     try:
-                        # registry graphs are team_{name} — resolve the
-                        # earliest prior team's graph before reading its fork.
+                        # registry graphs are org_{name} — resolve the
+                        # earliest prior org's graph before reading its fork.
                         _prior = reg.query(
                             "MATCH (t:Team {id:$id}) RETURN t.graph_name",
                             params={"id": prior_ids[0]},
@@ -14482,22 +15386,43 @@ class TortoiseSDK:
                 "CREATE (:TeamMeta {name:$name, created:$now})",
                 {"name": name, "now": now},
                 org_id=tid, fork=init_fork, compact=init_compact)
-            team_graph.query(_init_q, params=_init_p)
-            # #1686: journal the minted team_{name} graph IMMEDIATELY after
+            org_graph.query(_init_q, params=_init_p)
+            # #1686: journal the minted org_{name} graph IMMEDIATELY after
             # the TeamMeta CREATE succeeds (and before _graph_create, whose
-            # failure rolls back only the registry Team node — the graph is
+            # failure rolls back only the registry Org node — the graph is
             # already minted; journaling before it captures the orphan). The
-            # session-end sweep drops journaled names, so team_* graphs no
+            # session-end sweep drops journaled names, so org_* graphs no
             # longer accumulate on the docker. No-op outside test sessions
             # (journal env absent).
             from tortoise.projection import _journal_append_product
-            _journal_append_product(graph_name)
-            # Graph node (team→graph 1:N, product ontology): the default graph
+            try:
+                _journal_append_product(graph_name)
+            except Exception:
+                # #3214 (review P2): the append raising means the org graph
+                # created immediately above cannot be recorded as this
+                # session's — no sweep can attribute it, so the raise must
+                # not itself leave an UNOWNED graph behind. Drop it (the
+                # same select_graph(...).delete() rollback the hosted mint
+                # paths use) before re-raising; the outer handler below rolls
+                # the registry Org node back. Best-effort: if the drop fails
+                # too (the backend fault that broke the append), the graph
+                # survives and is named in the WARNING. The general fix —
+                # journal BEFORE the CREATE at every mint site — is #3390.
+                try:
+                    org_graph.delete()
+                except Exception as _drop_err:  # noqa: BLE001, RUF100
+                    _logger.warning(
+                        "unjournalable team graph %s could not be dropped "
+                        "after the journal append failed — it is UNOWNED "
+                        "and must be removed manually: %r",
+                        graph_name, _drop_err)
+                raise
+            # Graph node (org→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
             # #1748: the owner Membership for the session user — INSIDE the
-            # rollback-protected try so a membership failure tears the Team
-            # node down (a keyless team with no membership is an unmintable,
-            # undeletable orphan). Mirrors the Supabase provision_team
+            # rollback-protected try so a membership failure tears the Org
+            # node down (a keyless org with no membership is an unmintable,
+            # undeletable orphan). Mirrors the Supabase provision_org
             # membership upsert (role=owner, status=active, user_id=session
             # user) and membership_create (BELONGS_TO edge).
             if owner_user_id:
@@ -14516,14 +15441,14 @@ class TortoiseSDK:
             result["api_key"] = api_key  # plaintext delivered exactly once
         return result
 
-    def _graph_create(self, team_id: str, name: str, *, kind: str = "custom",
+    def _graph_create(self, org_id: str, name: str, *, kind: str = "custom",
                       namespace: str | None = None) -> dict:
-        """Create a Graph node in the registry (team→graph 1:N).
+        """Create a Graph node in the registry (org→graph 1:N).
 
-        The tenant namespace for a custom graph is team_{team_id}_{graph_id};
+        The tenant namespace for a custom graph is org_{org_id}_{graph_id};
         custom namespaces are NOT minted until a consumer exists (E2E-11
         decision — v1 writes resolve the default graph only). The default
-        graph's namespace is the team namespace itself (back-compat).
+        graph's namespace is the org namespace itself (back-compat).
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): in
         Supabase control-plane mode (TORTOISE_CONTROL_PLANE=supabase / creds
@@ -14532,7 +15457,7 @@ class TortoiseSDK:
         into it is C2/C3 (provisioning service, out of C1 scope), so this
         method still returns the deterministic id WITHOUT persisting; the
         registry-shaped list seam (graph_metadata/graph_list) derives the
-        default graph from teams.graph_name and reads custom rows once they
+        default graph from organizations.graph_name and reads custom rows once they
         exist. Selfhost (registry mode) keeps the registry Graph node. The
         zero-registry-writes cutover contract (registry node count == 0)
         requires this gate.
@@ -14542,54 +15467,54 @@ class TortoiseSDK:
         from datetime import datetime, timezone as _tz
         from tortoise.supabase_control import is_supabase_enabled
         if is_supabase_enabled():
-            # Deterministic per-(team, name) id — stable across calls so a
+            # Deterministic per-(org, name) id — stable across calls so a
             # re-created graph maps to the same display key; namespace shape
-            # matches the registry mode (team_{team_id}_{gid}).
-            gid = f"g_{_hashlib.sha256(f'{team_id}:{name}'.encode()).hexdigest()[:16]}"
-            ns = namespace or f"team_{team_id}_{gid}"
+            # matches the registry mode (org_{org_id}_{gid}).
+            gid = f"g_{_hashlib.sha256(f'{org_id}:{name}'.encode()).hexdigest()[:16]}"
+            ns = namespace or f"org_{org_id}_{gid}"
             return {"graph_id": gid, "name": name, "kind": kind,
                     "namespace": ns}
         reg = self._get_registry()
         gid = f"g_{_uuid.uuid4().hex[:16]}"
-        ns = namespace or f"team_{team_id}_{gid}"
+        ns = namespace or f"org_{org_id}_{gid}"
         now = datetime.now(_tz.utc).isoformat()  # noqa: UP017
         # C1 (#2110): Graph node gains status (v1 lifecycle: active only —
         # delete = soft tombstone; no archive). recording stays absent =
-        # NULL = inherit team default (back-compat with pre-C1 nodes).
+        # NULL = inherit org default (back-compat with pre-C1 nodes).
         reg.query(
-            "CREATE (g:Graph {id:$gid, team_id:$tid, name:$name, kind:$kind, "
+            "CREATE (g:Graph {id:$gid, org_id:$tid, name:$name, kind:$kind, "
             "namespace:$ns, status:'active', created_at:$now})",
-            params={"gid": gid, "tid": team_id, "name": name,
+            params={"gid": gid, "tid": org_id, "name": name,
                     "kind": kind, "ns": ns, "now": now},
         )
         return {"graph_id": gid, "name": name, "kind": kind, "namespace": ns}
 
-    def graph_list(self, team_id: str) -> list[dict]:
-        """List Graph nodes for a team (default graph first).
+    def graph_list(self, org_id: str) -> list[dict]:
+        """List Graph nodes for an org (default graph first).
 
         #765 (plan Task 8 reader inventory): in Supabase control-plane mode
         the default graph is derived from ``teams.graph_name`` via the seam
         (graph_metadata — C1 now also lists custom graphs table rows); the
         registry Graph-node read stays for selfhost. Registry-shaped rows
-        (graph_id/team_id/name/kind/namespace/status) so callers are
+        (graph_id/org_id/name/kind/namespace/status) so callers are
         mode-agnostic.
         """
         from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, graph_metadata, is_supabase_enabled,
         )
         if is_supabase_enabled():
-            return graph_metadata(get_control_plane(), team_id)
+            return graph_metadata(get_control_plane(), org_id)
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN properties(g) "
+            "MATCH (g:Graph {org_id:$tid}) RETURN properties(g) "
             "ORDER BY CASE g.kind WHEN 'default' THEN 0 ELSE 1 END, g.created_at",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         out = []
         for (props,) in rows:
             out.append({
                 "graph_id": props.get("id"),
-                "team_id": props.get("team_id"),
+                "org_id": props.get("org_id"),
                 "name": props.get("name"),
                 "kind": props.get("kind", "custom"),
                 "namespace": props.get("namespace"),
@@ -14598,19 +15523,19 @@ class TortoiseSDK:
                 # with the Supabase seam, which always emits "active"; deep
                 # review P2: a consumer filtering status=='active' must not
                 # silently drop legacy selfhost graphs). recording None =
-                # inherit team default.
+                # inherit org default.
                 "status": props.get("status") or "active",
                 "recording": props.get("recording"),
             })
         return out
 
-    def graph_count(self, team_id: str) -> int:
-        """Graph count for a team — the quota meter's source (C1 #2110).
+    def graph_count(self, org_id: str) -> int:
+        """Graph count for an org — the quota meter's source (C1 #2110).
 
         Supabase mode: 1 (the default graph — always present, derived from
         teams.graph_name) + count(custom active). Deleted rows excluded
         (delete frees the slot; v1 has no archive). Registry mode: the
-        existing MATCH (team_create :12055 creates the kind='default' node,
+        existing MATCH (org_create :12055 creates the kind='default' node,
         so the registry count already includes the default). C2 (#2111):
         registry branch now filters status <> 'deleted' (soft-delete must
         free the slot — E2E-8; pre-C1 nodes without the prop count as
@@ -14624,7 +15549,7 @@ class TortoiseSDK:
             try:
                 rows = cp.query(
                     "graphs", select=["id"],
-                    filters=[("team_id", "eq", team_id),
+                    filters=[("org_id", "eq", org_id),
                              ("kind", "eq", "custom"),
                              ("status", "eq", "active")],
                 )
@@ -14637,13 +15562,13 @@ class TortoiseSDK:
             return 1 + len(rows)
         reg = self._get_registry()
         return reg.query(
-            "MATCH (g:Graph {team_id:$tid}) "
+            "MATCH (g:Graph {org_id:$tid}) "
             "WHERE g.status IS NULL OR g.status <> 'deleted' "
             "RETURN count(g)",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set[0][0]
 
-    def graph_delete(self, team_id: str, graph_id: str) -> bool:
+    def graph_delete(self, org_id: str, graph_id: str) -> bool:
         """Soft-delete a Graph node (status='deleted' tombstone — the v1
         lifecycle, C2 #2111). Returns True when a non-default node was
         tombstoned; False when unknown OR the default (callers map to
@@ -14655,8 +15580,8 @@ class TortoiseSDK:
         """
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
-            params={"gid": graph_id, "tid": team_id},
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.kind",
+            params={"gid": graph_id, "tid": org_id},
         ).result_set
         if not rows:
             return False
@@ -14664,14 +15589,14 @@ class TortoiseSDK:
             return False
         from datetime import datetime
         reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) "
             "SET g.status = 'deleted', g.deleted_at = $ts",
-            params={"gid": graph_id, "tid": team_id,
+            params={"gid": graph_id, "tid": org_id,
                     "ts": datetime.now(UTC).isoformat()},
         )
         return True
 
-    def graph_restore(self, team_id: str, graph_id: str) -> bool:
+    def graph_restore(self, org_id: str, graph_id: str) -> bool:
         """#2304 trash restore: flip a tombstoned custom node back to active
         and clear the deletion stamp. Returns False when nothing matched
         (unknown / active / default / ALREADY PURGED — callers 404/403/410).
@@ -14684,27 +15609,27 @@ class TortoiseSDK:
         # between any pre-read and this write matches 0 nodes, so a purge
         # can never be clobbered by a restore. Returns whether it flipped.
         res = reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) "
             "WHERE g.status = 'deleted' AND g.purged_at IS NULL "
             "AND coalesce(g.kind, 'custom') <> 'default' "
             "SET g.status = 'active' REMOVE g.deleted_at, g.purged_at, "
             "g.purged_residual RETURN count(g)",
-            params={"gid": graph_id, "tid": team_id},
+            params={"gid": graph_id, "tid": org_id},
         ).result_set
         return bool(res and int(res[0][0]) > 0)
 
-    def trash_graphs(self, team_id: str) -> list[dict]:
-        """#2304: tombstoned custom nodes of a team (the trash list) — the
+    def trash_graphs(self, org_id: str) -> list[dict]:
+        """#2304: tombstoned custom nodes of an org (the trash list) — the
         owner restore surface. ``deleted_at`` absent = legacy tombstone
         (predates the prop; purge treats it as past-grace). Purged nodes
         (purged_at set) are excluded — data is physically gone."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {team_id:$tid, status:'deleted'}) "
+            "MATCH (g:Graph {org_id:$tid, status:'deleted'}) "
             "WHERE coalesce(g.kind, 'custom') <> 'default' "
             "AND g.purged_at IS NULL "
             "RETURN g.id, g.name, g.namespace, g.deleted_at",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         return [
             {"graph_id": r[0], "name": r[1], "namespace": r[2],
@@ -14712,24 +15637,24 @@ class TortoiseSDK:
             for r in rows
         ]
 
-    def graph_set_recording(self, team_id: str, graph_id: str,
+    def graph_set_recording(self, org_id: str, graph_id: str,
                             value: bool | None) -> bool:
         """C6 #2115: set the session_recording override on a Graph node.
 
         ``value`` True/False = explicit override; None = remove the override
-        (FalkorDB SET null removes the prop → inherit team default, #1927
+        (FalkorDB SET null removes the prop → inherit org default, #1927
         default-ON preserved). Resolves the literal ``default`` id to the
-        team's kind='default' node (the default graph IS graph 0 — settable
+        org's kind='default' node (the default graph IS graph 0 — settable
         per epic §6.3); real gids match directly. Returns True when the node
         was found (override written/cleared), False on unknown graph —
         callers map to 404."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, "
             "coalesce(g.status, 'active')",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
-        # The literal ``default`` id maps to the team's kind='default' node
+        # The literal ``default`` id maps to the org's kind='default' node
         # (mode-agnostic callers use either); any other id must match a real
         # node exactly. Soft-deleted nodes (status='deleted') are NOT
         # patchable — treat as unknown (mirror list_graphs' tombstone skip).
@@ -14743,24 +15668,24 @@ class TortoiseSDK:
         if node is None:
             return False
         reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.recording = $v",
-            params={"gid": node, "tid": team_id, "v": value},
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.recording = $v",
+            params={"gid": node, "tid": org_id, "v": value},
         )
         return True
 
-    def graph_key_ids(self, team_id: str, graph_id: str) -> list[str]:
+    def graph_key_ids(self, org_id: str, graph_id: str) -> list[str]:
         """APIKey node ids bound to a graph — the delete-cascade source
         (every key dies with the graph, E2E-8). Revoked or not — the
         cascade must revoke rows that are somehow still active AND clean
         up revoked ones (idempotent)."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) RETURN k.id",
-            params={"tid": team_id, "gid": graph_id},
+            "MATCH (k:APIKey {org_id:$tid, graph_id:$gid}) RETURN k.id",
+            params={"tid": org_id, "gid": graph_id},
         ).result_set
         return [r[0] for r in rows]
 
-    def graph_active_key_count(self, team_id: str, graph_id: str) -> int:
+    def graph_active_key_count(self, org_id: str, graph_id: str) -> int:
         """ACTIVE (non-revoked) APIKey nodes bound to a graph — the
         key_count source for GET /v1/graphs (parity with the Supabase
         count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
@@ -14777,13 +15702,13 @@ class TortoiseSDK:
         they stay listable + revocable via the unfiltered key list."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) "
+            "MATCH (k:APIKey {org_id:$tid, graph_id:$gid}) "
             "WHERE k.revoked_at IS NULL RETURN count(k)",
-            params={"tid": team_id, "gid": graph_id},
+            params={"tid": org_id, "gid": graph_id},
         ).result_set
         return int(rows[0][0]) if rows else 0
 
-    def graph_set_name(self, team_id: str, graph_id: str,
+    def graph_set_name(self, org_id: str, graph_id: str,
                        name: str) -> bool:
         """#2701 — rename a graph's DISPLAY name on its registry Graph node.
 
@@ -14791,7 +15716,7 @@ class TortoiseSDK:
         storage key) are untouched, so a rename never orphans points/keys
         (the default graph is renameable too — graph 0's node carries
         ``name`` as a label distinct from ``namespace``). Resolves the
-        literal ``default`` id to the team's kind='default' node (mode-
+        literal ``default`` id to the org's kind='default' node (mode-
         agnostic callers use either); real gids match directly. Returns
         True when the node was found (name written), False on unknown
         graph — callers map to 404. Soft-deleted nodes (status='deleted')
@@ -14799,9 +15724,9 @@ class TortoiseSDK:
         tombstone skip + graph_set_recording)."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "MATCH (g:Graph {org_id:$tid}) RETURN g.id, g.kind, "
             "coalesce(g.status, 'active')",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         if graph_id == "default":
             node = next((r[0] for r in rows
@@ -14813,37 +15738,37 @@ class TortoiseSDK:
         if node is None:
             return False
         reg.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.name = $name",
-            params={"gid": node, "tid": team_id, "name": name},
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.name = $name",
+            params={"gid": node, "tid": org_id, "name": name},
         )
         return True
 
-    def team_get(self, team_id: str) -> dict | None:
-        """Get a team by ID. Returns None if not found."""
+    def org_get(self, org_id: str) -> dict | None:
+        """Get an org by ID. Returns None if not found."""
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (t:Team {id:$id}) RETURN properties(t)",
-            params={"id": team_id},
+            params={"id": org_id},
         ).result_set
         return rows[0][0] if rows else None
 
-    def team_list(self) -> list[dict]:
-        """List all teams."""
+    def org_list(self) -> list[dict]:
+        """List all orgs."""
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (t:Team) RETURN properties(t) ORDER BY t.createdAt"
         ).result_set
         return [r[0] for r in rows]
 
-    def team_update(self, team_id: str, **fields) -> dict:
-        """Update mutable team fields."""
+    def org_update(self, org_id: str, **fields) -> dict:
+        """Update mutable org fields."""
         from .exceptions import ControlPlaneError
         allowed = {
             "name", "tier", "stripe_customer_id", "subscription_id",
             "backup_enabled", "max_users", "max_graphs",
             # #329 relief path: quota limits settable via the control plane so
-            # a team at cap can be upgraded (no REST surface exists yet — the
-            # fields are SDK/registry-level; get_current_team honors them).
+            # an org at cap can be upgraded (no REST surface exists yet — the
+            # fields are SDK/registry-level; get_current_org honors them).
             "max_points", "max_api_keys", "max_sessions",
         }
         invalid = set(fields.keys()) - allowed
@@ -14852,26 +15777,26 @@ class TortoiseSDK:
         reg = self._get_registry()
         reg.query(
             "MATCH (t:Team {id:$id}) SET t += $fields",
-            params={"id": team_id, "fields": fields},
+            params={"id": org_id, "fields": fields},
         )
-        self._audit(team_id, None, "team_update", resource_type="team",
-                     resource_id=team_id)
-        return self.team_get(team_id) or {}
+        self._audit(org_id, None, "team_update", resource_type="team",
+                     resource_id=org_id)
+        return self.org_get(org_id) or {}
 
-    def team_delete(self, team_id: str, *, confirmation: str) -> dict:
-        """Delete a team and all associated control-plane entities.
+    def org_delete(self, org_id: str, *, confirmation: str) -> dict:
+        """Delete an org and all associated control-plane entities.
 
         Cascading: Membership, APIKey, Invitation nodes are deleted.
         Tenant graphs are dropped (best-effort — FalkorDBLite may skip).
         Postgres audit_events are preserved (immutable).
 
-        Requires confirmation matching the team name.
+        Requires confirmation matching the org name.
         """
         from .exceptions import ControlPlaneError
-        team = self.team_get(team_id)
-        if team is None:
-            raise ControlPlaneError(f"Team {team_id!r} not found")
-        if confirmation != team.get("name", ""):
+        org = self.org_get(org_id)
+        if org is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
+        if confirmation != org.get("name", ""):
             raise ControlPlaneError(
                 "Confirmation must match team name exactly"
             )
@@ -14879,24 +15804,24 @@ class TortoiseSDK:
         reg = self._get_registry()
         # Cascade delete: Membership, APIKey, Invitation
         reg.query(
-            "MATCH (m:Membership {team_id:$tid}) DETACH DELETE m",
-            params={"tid": team_id},
+            "MATCH (m:Membership {org_id:$tid}) DETACH DELETE m",
+            params={"tid": org_id},
         )
         reg.query(
-            "MATCH (k:APIKey {team_id:$tid}) DETACH DELETE k",
-            params={"tid": team_id},
+            "MATCH (k:APIKey {org_id:$tid}) DETACH DELETE k",
+            params={"tid": org_id},
         )
         reg.query(
-            "MATCH (i:Invitation {team_id:$tid}) DETACH DELETE i",
-            params={"tid": team_id},
+            "MATCH (i:Invitation {org_id:$tid}) DETACH DELETE i",
+            params={"tid": org_id},
         )
         reg.query(
             "MATCH (t:Team {id:$id}) DETACH DELETE t",
-            params={"id": team_id},
+            params={"id": org_id},
         )
 
         # Best-effort tenant graph deletion
-        graph_name = team.get("graph_name", f"team_{team.get('name', '')}")
+        graph_name = org.get("graph_name", f"org_{org.get('name', '')}")
         proj = self._get_proj()
         try:
             # #2163: proj.db (falkordb.FalkorDB on every lane) has NO
@@ -14917,23 +15842,23 @@ class TortoiseSDK:
                 _logger.debug("Failed to delete tenant graph %s — skipping",
                               graph_name)
 
-        self._audit(team_id, None, "team_delete", resource_type="team",
-                     resource_id=team_id)
-        return {"deleted": True, "team_id": team_id}
+        self._audit(org_id, None, "team_delete", resource_type="team",
+                     resource_id=org_id)
+        return {"deleted": True, "org_id": org_id}
 
-    def migrate_teams_to_registry(self) -> dict:
-        """One-shot: move Team nodes from tortoise graph to control_plane graph.
+    def migrate_orgs_to_registry(self) -> dict:
+        """One-shot: move Org nodes from tortoise graph to control_plane graph.
 
         Idempotent — running twice produces the same state.
-        Existing Team nodes in the tortoise graph are marked as outdated.
+        Existing Org nodes in the tortoise graph are marked as outdated.
         """
         proj = self._get_proj()
         reg = self._get_registry()
-        teams = proj.g.query("MATCH (t:Team) RETURN properties(t)").result_set
+        orgs = proj.g.query("MATCH (t:Team) RETURN properties(t)").result_set
         migrated, skipped = 0, 0
-        for row in teams:
-            team = row[0]
-            name = team.get("name", "")
+        for row in orgs:
+            org = row[0]
+            name = org.get("name", "")
             # Check if already in registry
             existing = reg.query(
                 "MATCH (t:Team {name:$name}) RETURN count(t) > 0",
@@ -14946,11 +15871,11 @@ class TortoiseSDK:
                 "CREATE (t:Team {id:$id, name:$name, api_key:$key, "
                 "graph_name:$gn, createdAt:$now})",
                 params={
-                    "id": team.get("id", ulid()),
+                    "id": org.get("id", ulid()),
                     "name": name,
-                    "key": team.get("api_key", ""),
-                    "gn": team.get("graph_name", f"team_{name}"),
-                    "now": team.get("createdAt", ""),
+                    "key": org.get("api_key", ""),
+                    "gn": org.get("graph_name", f"org_{name}"),
+                    "now": org.get("createdAt", ""),
                 },
             )
             migrated += 1
@@ -14960,11 +15885,11 @@ class TortoiseSDK:
 
     # ── Control Plane: Membership CRUD ─────────────────────────────
 
-    def membership_create(self, team_id: str, user_id: str, role: str) -> dict:
-        """Add a user to a team with a given role.
+    def membership_create(self, org_id: str, user_id: str, role: str) -> dict:
+        """Add a user to an org with a given role.
 
-        Validates role, team existence, and max_users constraint.
-        Creates BELONGS_TO edge to Team.
+        Validates role, org existence, and max_users constraint.
+        Creates BELONGS_TO edge to Org.
         """
         from datetime import datetime, timezone  # noqa: I001
         from .exceptions import ControlPlaneError
@@ -14974,18 +15899,18 @@ class TortoiseSDK:
                 f"Invalid role {role!r}. Must be 'owner', 'admin', or 'member'."
             )
 
-        team = self.team_get(team_id)
-        if team is None:
-            raise ControlPlaneError(f"Team {team_id!r} not found")
+        org = self.org_get(org_id)
+        if org is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
 
         # Check max_users constraint
-        max_users = team.get("max_users")
+        max_users = org.get("max_users")
         if max_users is not None:
             reg = self._get_registry()
             count = reg.query(
-                "MATCH (m:Membership {team_id:$tid}) "
+                "MATCH (m:Membership {org_id:$tid}) "
                 "WHERE m.status = 'active' RETURN count(m)",
-                params={"tid": team_id},
+                params={"tid": org_id},
             ).result_set[0][0]
             if count >= max_users:
                 raise ControlPlaneError(
@@ -14996,21 +15921,21 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         reg = self._get_registry()
         reg.query(
-            "CREATE (m:Membership {id:$id, user_id:$uid, team_id:$tid, "
+            "CREATE (m:Membership {id:$id, user_id:$uid, org_id:$tid, "
             "role:$role, status:'active', joinedAt:$now, created_at:$now})",
-            params={"id": mid, "uid": user_id, "tid": team_id,
+            params={"id": mid, "uid": user_id, "tid": org_id,
                     "role": role, "now": now},
         )
         # Create BELONGS_TO edge
         reg.query(
             "MATCH (m:Membership {id:$mid}), (t:Team {id:$tid}) "
             "CREATE (m)-[:BELONGS_TO]->(t)",
-            params={"mid": mid, "tid": team_id},
+            params={"mid": mid, "tid": org_id},
         )
 
-        self._audit(team_id, user_id, "membership_create",
+        self._audit(org_id, user_id, "membership_create",
                      resource_type="membership", resource_id=mid)
-        return {"id": mid, "team_id": team_id, "user_id": user_id, "role": role}
+        return {"id": mid, "org_id": org_id, "user_id": user_id, "role": role}
 
     def membership_get(self, membership_id: str) -> dict | None:
         """Get a membership by ID."""
@@ -15021,12 +15946,12 @@ class TortoiseSDK:
         ).result_set
         return rows[0][0] if rows else None
 
-    def membership_list(self, team_id: str) -> list[dict]:
-        """List all memberships for a team."""
+    def membership_list(self, org_id: str) -> list[dict]:
+        """List all memberships for an org."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (m:Membership {team_id:$tid}) RETURN properties(m)",
-            params={"tid": team_id},
+            "MATCH (m:Membership {org_id:$tid}) RETURN properties(m)",
+            params={"tid": org_id},
         ).result_set
         return [r[0] for r in rows]
 
@@ -15046,7 +15971,7 @@ class TortoiseSDK:
             "MATCH (m:Membership {id:$id}) SET m.role = $role",
             params={"id": membership_id, "role": new_role},
         )
-        self._audit(m["team_id"], m["user_id"], "membership_update_role",
+        self._audit(m["org_id"], m["user_id"], "membership_update_role",
                      resource_type="membership", resource_id=membership_id)
         return self.membership_get(membership_id) or {}
 
@@ -15060,7 +15985,7 @@ class TortoiseSDK:
             "MATCH (m:Membership {id:$id}) DETACH DELETE m",
             params={"id": membership_id},
         )
-        self._audit(m["team_id"], m["user_id"], "membership_delete",
+        self._audit(m["org_id"], m["user_id"], "membership_delete",
                      resource_type="membership", resource_id=membership_id)
         return {"deleted": True, "membership_id": membership_id}
 
@@ -15077,7 +16002,7 @@ class TortoiseSDK:
         on key_prefix (key[:10] = "tt_<8 hex chars>"). The key_prefix index
         (created in _ensure_registry_indexes) makes this O(1) per lookup.
         Falls back to full scan for legacy provision_tenant keys whose
-        key_prefix was set to team_id[:8] (which won't match token[:10]).
+        key_prefix was set to org_id[:8] (which won't match token[:10]).
         """
         from tortoise.auth import API_KEY_PREFIXES, verify_api_key
         reg = self._get_registry()
@@ -15097,7 +16022,7 @@ class TortoiseSDK:
             if out:
                 return out
             # Fall through to full scan for legacy provision_tenant keys
-            # (key_prefix = team_id[:8] won't match token[:10] = "tt_<8 hex>")
+            # (key_prefix = org_id[:8] won't match token[:10] = "tt_<8 hex>")
 
         rows = reg.query(
             f"MATCH (n:{label}) RETURN n.{prop}, properties(n)"
@@ -15108,7 +16033,7 @@ class TortoiseSDK:
                 out.append(props)
         return out
 
-    def apikey_create(self, team_id: str, created_by: str,
+    def apikey_create(self, org_id: str, created_by: str,
                       *, graph_id: str | None = None,
                       scopes: list | None = None,
                       created_by_key_id: str | None = None,
@@ -15117,12 +16042,12 @@ class TortoiseSDK:
                       name: str | None = None,
                       created_via: str | None = None,
                       expires_at: str | None = None) -> dict:
-        """Generate an API key for a team.
+        """Generate an API key for an org.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
 
         C1 (#2110) tenancy kwargs (all optional — absent = legacy shape,
-        back-compat for existing callers): graph_id (NULL = team-wide key
+        back-compat for existing callers): graph_id (NULL = org-wide key
         → default graph), scopes (FLAT allowlist, default []), mint lineage
         (created_by_key_id + delegation_depth; 0 = minted cannot-escalate,
         NULL = owner-minted). C2 (#2111): ``prefix`` (default "tt_") lets
@@ -15162,9 +16087,9 @@ class TortoiseSDK:
                     _ESCALATION_SCOPES & set(scopes))) + ".",
             )
 
-        team = self.team_get(team_id)
-        if team is None:
-            raise ControlPlaneError(f"Team {team_id!r} not found")
+        org = self.org_get(org_id)
+        if org is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
 
         api_key = f"{prefix}{uuid.uuid4().hex}"
         key_hash = hash_api_key(api_key)
@@ -15178,7 +16103,7 @@ class TortoiseSDK:
         # with safe defaults). C3 (#2112): name/created_via ride the same
         # optional-props pattern.
         extra = ""
-        params = {"id": kid, "tid": team_id, "kh": key_hash,
+        params = {"id": kid, "tid": org_id, "kh": key_hash,
                   "kp": key_prefix, "cb": created_by, "now": now}
         if graph_id is not None:
             extra += ", graph_id:$gid"; params["gid"] = graph_id  # noqa: E702 (baseline #1503)
@@ -15195,7 +16120,7 @@ class TortoiseSDK:
         if expires_at is not None:
             extra += ", expires_at:$ea"; params["ea"] = expires_at  # noqa: E702 (baseline #1503)
         reg.query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+            "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"
             + (extra or "") + "})",
             params=params,
@@ -15204,28 +16129,28 @@ class TortoiseSDK:
         reg.query(
             "MATCH (k:APIKey {id:$kid}), (t:Team {id:$tid}) "
             "CREATE (k)-[:BELONGS_TO]->(t)",
-            params={"kid": kid, "tid": team_id},
+            params={"kid": kid, "tid": org_id},
         )
 
-        self._audit(team_id, created_by, "apikey_create",
+        self._audit(org_id, created_by, "apikey_create",
                      resource_type="apikey", resource_id=kid)
         return {"id": kid, "key_prefix": key_prefix, "api_key": api_key,
-                "team_id": team_id, "created_at": now}
+                "org_id": org_id, "created_at": now}
 
-    def apikey_list(self, team_id: str) -> list[dict]:
-        """List API keys for a team (no plaintext or hashes).
+    def apikey_list(self, org_id: str) -> list[dict]:
+        """List API keys for an org (no plaintext or hashes).
 
         C1 (#2110): rows gain the tenancy props (graph_id/scopes/
         delegation_depth/created_by_key_id) — absent on pre-C1 nodes →
-        None-safe defaults (graph_id None = team-wide, scopes [] = legacy).
+        None-safe defaults (graph_id None = org-wide, scopes [] = legacy).
         """
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (k:APIKey {team_id:$tid}) "
+            "MATCH (k:APIKey {org_id:$tid}) "
             "RETURN k.id, k.key_prefix, k.created_by, k.created_at, "
             "k.last_used_at, k.revoked_at, "
             "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         keys = []
         for r in rows:
@@ -15242,7 +16167,7 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at, k.team_id",
+            "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at, k.org_id",
             params={"id": key_id},
         ).result_set
         if not rows:
@@ -15261,9 +16186,9 @@ class TortoiseSDK:
     def apikey_verify(self, key_plaintext: str) -> dict | None:
         """Verify an API key against stored hashes.
 
-        Returns {team_id, key_id} if valid, None if not found or revoked.
+        Returns {org_id, key_id} if valid, None if not found or revoked.
         C2 (#2111): also returns delegation_depth + scopes when present on
-        the node (MCP's TeamResolutionMiddleware rejects deleg=0 minted
+        the node (MCP's OrgResolutionMiddleware rejects deleg=0 minted
         keys — the REST surface is gated; MCP must not be the fail-open
         lane for handed-out per-graph keys). Uses salted-hash verification
         (per-key salt means exact-hash lookup never matches — see #130,
@@ -15276,8 +16201,8 @@ class TortoiseSDK:
         set on the node) also resolves graph_id + graph_namespace (the
         Graph node's namespace) — the SAME C1 tenancy fields REST's
         registry lane and the Supabase lane (resolve_api_key) carry, so
-        MCP's TeamResolutionMiddleware routes a per-graph key to ITS graph
-        and the team-surface tool gates can reject it. Missing/drifted
+        MCP's OrgResolutionMiddleware routes a per-graph key to ITS graph
+        and the org-surface tool gates can reject it. Missing/drifted
         Graph node → namespace None (graph-delete revokes the graph's keys,
         C3, so a real deleted graph never reaches here) — mirrors REST's
         registry lane, which also resolves None without failing the hash
@@ -15303,8 +16228,8 @@ class TortoiseSDK:
             # (graph_id on the node) ALSO resolves graph_id/graph_namespace
             # (the Graph node's namespace) — the same C1 tenancy fields REST's
             # registry lane and the Supabase lane carry, so MCP's
-            # TeamResolutionMiddleware routes the key to ITS graph and the
-            # team-surface tool gates can reject it. A missing Graph node →
+            # OrgResolutionMiddleware routes the key to ITS graph and the
+            # org-surface tool gates can reject it. A missing Graph node →
             # namespace None (graph-delete revokes the graph's keys — C3 — so
             # a real deleted graph never reaches here; mirrors REST's registry
             # lane, which resolves None without failing the hash auth).
@@ -15312,13 +16237,13 @@ class TortoiseSDK:
             graph_id = m.get("graph_id")
             if graph_id:
                 g_rows = self._get_registry().query(
-                    "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+                    "MATCH (g:Graph {id:$gid, org_id:$tid}) "
                     "RETURN g.namespace",
-                    params={"gid": graph_id, "tid": m["team_id"]},
+                    params={"gid": graph_id, "tid": m["org_id"]},
                 ).result_set
                 graph_namespace = (
                     g_rows[0][0] if (g_rows and g_rows[0][0]) else None)
-            return {"team_id": m["team_id"], "key_id": m["id"],
+            return {"org_id": m["org_id"], "key_id": m["id"],
                     "graph_id": graph_id,
                     "graph_namespace": graph_namespace,
                     "delegation_depth": delegation_depth,
@@ -15356,7 +16281,7 @@ class TortoiseSDK:
             return None
         # [SECOND-MODEL-GATE] P2: exact-match on the deterministic lookup_key
         # (SHA-256+pepper, stored at mint) FIRST — avoids the O(keys) PBKDF2
-        # full-scan per probe (a distributed-IP DoS vector on multi-team
+        # full-scan per probe (a distributed-IP DoS vector on multi-org
         # selfhosts). PBKDF2 verify below is defense-in-depth (the minted
         # node carries both hashes).
         from tortoise.auth import lookup_hash as _lookup_hash
@@ -15374,14 +16299,14 @@ class TortoiseSDK:
         return matches[0] if matches else None
 
     def signup_token_recover(self, token_plaintext: str) -> dict:
-        """Keyless recovery: mint a NEW key on the token's team.
+        """Keyless recovery: mint a NEW key on the token's org.
 
         Registry parity for recover_team_key (Supabase lane). Cap + revoke-
         oldest-non-bootstrap (#750.10 semantics) mirror the SQL; created_by
         is token-attributable ('st_' + left(token_hash, 12)) — never a
-        caller-supplied identity. Returns {api_key, team_id, team_name,
+        caller-supplied identity. Returns {api_key, org_id, org_name,
         tier, graph_name}. Raises ControlPlaneError (→ uniform 422) when the
-        token is unknown/revoked or the team is soft-deleted.
+        token is unknown/revoked or the org is soft-deleted.
         """
         from datetime import datetime, timezone as _tz  # noqa: I001
         from .exceptions import ControlPlaneError
@@ -15389,9 +16314,9 @@ class TortoiseSDK:
         node = self.signup_token_lookup(token_plaintext)
         if node is None:
             raise ControlPlaneError("signup token not found or revoked")
-        team_id = node.get("team_id") or ""
-        team = self.team_get(team_id)
-        if team is None or team.get("deleted_at"):
+        org_id = node.get("org_id") or ""
+        org = self.org_get(org_id)
+        if org is None or org.get("deleted_at"):
             raise ControlPlaneError("signup token team deleted")
 
         import uuid  # noqa: I001
@@ -15406,13 +16331,13 @@ class TortoiseSDK:
             node = self.signup_token_lookup(token_plaintext)
             if node is None:
                 raise ControlPlaneError("signup token not found or revoked")
-            if node.get("team_id") != team_id:
+            if node.get("org_id") != org_id:
                 raise ControlPlaneError("signup token not found or revoked")
             # cap: active non-bootstrap keys; insert FIRST, re-count AFTER,
             # revoke-oldest only when genuinely over cap ([SECOND-MODEL-GATE]
             # P2: mirrors the SQL's self-healing ordering — an unlocked race
             # still converges to <= cap, unlike count-then-revoke-then-insert).
-            max_keys = int(team.get("max_api_keys")
+            max_keys = int(org.get("max_api_keys")
                            or self._default_max_api_keys())
             kid = ulid()
             # C1 (#2110) decision record: the recovery-mint is NOT extended
@@ -15422,10 +16347,10 @@ class TortoiseSDK:
             # intended (E2E-5 zero behavior shift); C3 must NOT assume minted
             # keys are all deleg=0 — recovery keys are owner-class.
             reg.query(
-                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:$cb, created_via:'recovery', "
                 "created_at:$now, expires_at:null})",
-                params={"id": kid, "tid": team_id, "kh": key_hash,
+                params={"id": kid, "tid": org_id, "kh": key_hash,
                         "kp": api_key[:10], "cb": "st_" + token_hash[:12],
                         "now": now_iso},
             )
@@ -15436,39 +16361,39 @@ class TortoiseSDK:
             # let the oldest-LIVE key be the revoke collateral for expired
             # rows above the cap; matches the session-key recovery lanes).
             rows = reg.query(
-                "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
                 "AND (k.expires_at IS NULL OR k.expires_at > $now) "
                 "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
                 "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
-                params={"tid": team_id, "now": now_iso},
+                params={"tid": org_id, "now": now_iso},
             ).result_set
             if len(rows) > max_keys and rows:
                 reg.query(
                     "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
                     params={"id": rows[0][0], "now": now_iso},
                 )
-        self._audit(team_id, "st_" + token_hash[:12], "apikey_create",
+        self._audit(org_id, "st_" + token_hash[:12], "apikey_create",
                      resource_type="apikey", resource_id=kid)
-        return {"api_key": api_key, "team_id": team_id,
-                "team_name": team.get("name"), "tier": team.get("tier") or "free",
-                "graph_name": team.get("graph_name") or f"team_{team_id}"}
+        return {"api_key": api_key, "org_id": org_id,
+                "org_name": org.get("name"), "tier": org.get("tier") or "free",
+                "graph_name": org.get("graph_name") or f"org_{org_id}"}
 
-    def signup_token_revoke(self, token_plaintext: str, team_id: str) -> dict:
+    def signup_token_revoke(self, token_plaintext: str, org_id: str) -> dict:
         """Revoke a signup token (set revoked_at) — registry parity (#1715).
 
-        Team-scoped: the SignupToken node's team_id must match ``team_id`` or
-        the revoke is refused (a caller can only kill their own team's
-        token). Idempotent: an unknown / other-team / already-revoked token
+        Org-scoped: the SignupToken node's org_id must match ``org_id`` or
+        the revoke is refused (a caller can only kill their own org's
+        token). Idempotent: an unknown / other-org / already-revoked token
         is a no-op, never an error. Returns
-        ``{"team_id": str, "status": "revoked" | "already" |
+        ``{"org_id": str, "status": "revoked" | "already" |
         "not_found" | "not_owned"}`` — the endpoint maps status to
         200/404/403 (the no-oracle uniform-422 contract is preserved for
         malformed tokens upstream; an authenticated caller probing a valid
-        token learns only whether it is THEIR team's).
+        token learns only whether it is THEIR org's).
 
-        #1754: (a) the revoke WRITE is atomically team-scoped (parity with
-        the SQL lane's UPDATE ... AND team_id = p_team_id) — the pre-read
-        can never be raced by a foreign-team node; (b) a node carrying only
+        #1754: (a) the revoke WRITE is atomically org-scoped (parity with
+        the SQL lane's UPDATE ... AND org_id = p_org_id) — the pre-read
+        can never be raced by a foreign-org node; (b) a node carrying only
         token_hash (no lookup_key) is found via the PBKDF2 fallback (mirror
         signup_token_lookup) so it is REVOCABLE, not just recoverable.
         """
@@ -15487,32 +16412,32 @@ class TortoiseSDK:
             matches = list(self._verify_hashed_lookup(
                 "SignupToken", "token_hash", token_plaintext))
         if not matches:
-            return {"team_id": team_id, "status": "not_found"}
+            return {"org_id": org_id, "status": "not_found"}
         node = matches[0]
-        if node.get("team_id") != team_id:
-            return {"team_id": team_id, "status": "not_owned"}
+        if node.get("org_id") != org_id:
+            return {"org_id": org_id, "status": "not_owned"}
         if node.get("revoked_at") is not None:
-            return {"team_id": team_id, "status": "already"}
+            return {"org_id": org_id, "status": "already"}
         from datetime import datetime, timezone as _tz  # noqa: I001
         now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
-        # #1754 (a): the MATCH is team-scoped so the write itself can never
-        # revoke a foreign team's node. Hash-only fallback nodes (no
+        # #1754 (a): the MATCH is org-scoped so the write itself can never
+        # revoke a foreign org's node. Hash-only fallback nodes (no
         # lookup_key) are targeted by their stored salted hash — unique per
-        # token (random salt per mint) and team-scoped.
+        # token (random salt per mint) and org-scoped.
         if node.get("lookup_key"):
             self._get_registry().query(
-                "MATCH (n:SignupToken {lookup_key:$lk, team_id:$tid}) "
+                "MATCH (n:SignupToken {lookup_key:$lk, org_id:$tid}) "
                 "SET n.revoked_at = $now",
-                params={"lk": lk, "tid": team_id, "now": now_iso},
+                params={"lk": lk, "tid": org_id, "now": now_iso},
             )
         else:
             self._get_registry().query(
-                "MATCH (n:SignupToken {token_hash:$th, team_id:$tid}) "
+                "MATCH (n:SignupToken {token_hash:$th, org_id:$tid}) "
                 "SET n.revoked_at = $now",
-                params={"th": node["token_hash"], "tid": team_id,
+                params={"th": node["token_hash"], "tid": org_id,
                         "now": now_iso},
             )
-        return {"team_id": team_id, "status": "revoked"}
+        return {"org_id": org_id, "status": "revoked"}
 
     def _default_max_api_keys(self) -> int:
         from tortoise.pricing import tier_limits
@@ -15520,7 +16445,7 @@ class TortoiseSDK:
 
     # ── Control Plane: Invitation CRUD ─────────────────────────────
 
-    def invitation_create(self, team_id: str, email: str, role: str,
+    def invitation_create(self, org_id: str, email: str, role: str,
                           created_by: str) -> dict:
         """Create an invitation with 7-day expiry.
 
@@ -15531,21 +16456,21 @@ class TortoiseSDK:
         from tortoise.auth import hash_api_key
         from .exceptions import ControlPlaneError
 
-        team = self.team_get(team_id)
-        if team is None:
-            raise ControlPlaneError(f"Team {team_id!r} not found")
+        org = self.org_get(org_id)
+        if org is None:
+            raise ControlPlaneError(f"Team {org_id!r} not found")
         if role not in ("owner", "admin"):
             raise ControlPlaneError(
                 f"Invalid role {role!r}. Must be 'owner' or 'admin'."
             )
 
-        # Reject duplicate pending invitations for same email+team
+        # Reject duplicate pending invitations for same email+org
         reg = self._get_registry()
         dup = reg.query(
-            "MATCH (i:Invitation {team_id:$tid, email:$email}) "
+            "MATCH (i:Invitation {org_id:$tid, email:$email}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') "
             "RETURN count(i) > 0",
-            params={"tid": team_id, "email": email},
+            params={"tid": org_id, "email": email},
         ).result_set[0][0]
         if dup:
             raise ControlPlaneError(
@@ -15559,33 +16484,33 @@ class TortoiseSDK:
         expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # noqa: UP017
 
         reg.query(
-            "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, "
+            "CREATE (i:Invitation {id:$id, org_id:$tid, email:$email, "
             "role:$role, token_hash:$th, created_by:$cb, "
             "created_at:$now, expires_at:$exp, accepted_at:null})",
-            params={"id": iid, "tid": team_id, "email": email,
+            params={"id": iid, "tid": org_id, "email": email,
                     "role": role, "th": token_hash, "cb": created_by,
                     "now": now, "exp": expires_at},
         )
-        # FOR_TEAM edge
+        # FOR_ORG edge
         reg.query(
             "MATCH (i:Invitation {id:$iid}), (t:Team {id:$tid}) "
             "CREATE (i)-[:FOR_TEAM]->(t)",
-            params={"iid": iid, "tid": team_id},
+            params={"iid": iid, "tid": org_id},
         )
 
-        self._audit(team_id, created_by, "invitation_create",
+        self._audit(org_id, created_by, "invitation_create",
                      resource_type="invitation", resource_id=iid)
         return {"id": iid, "email": email, "role": role,
                 "expires_at": expires_at, "token": token}
 
-    def invitation_list(self, team_id: str) -> list[dict]:
-        """List invitations for a team (no token hashes)."""
+    def invitation_list(self, org_id: str) -> list[dict]:
+        """List invitations for an org (no token hashes)."""
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (i:Invitation {team_id:$tid}) "
+            "MATCH (i:Invitation {org_id:$tid}) "
             "RETURN i.id, i.email, i.role, i.created_by, i.created_at, "
             "i.expires_at, i.accepted_at, i.status",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         invs = []
         for r in rows:
@@ -15635,15 +16560,15 @@ class TortoiseSDK:
         )
 
         membership = self.membership_create(
-            team_id=inv["team_id"],
+            org_id=inv["org_id"],
             user_id=user_id,
             role=inv.get("role", "admin"),
         )
 
-        self._audit(inv["team_id"], user_id, "invitation_accept",
+        self._audit(inv["org_id"], user_id, "invitation_accept",
                      resource_type="invitation", resource_id=invitation_id)
         return {"membership_id": membership["id"],
-                "team_id": inv["team_id"], "accepted_at": now_iso}
+                "org_id": inv["org_id"], "accepted_at": now_iso}
 
     def invitation_get_by_id(self, invitation_id: str) -> dict | None:
         """Get an invitation by its ULID."""
@@ -15667,7 +16592,7 @@ class TortoiseSDK:
             "MATCH (i:Invitation {id:$id}) SET i.status = 'revoked'",
             params={"id": invitation_id},
         )
-        self._audit(inv["team_id"], None, "invitation_revoke",
+        self._audit(inv["org_id"], None, "invitation_revoke",
                      resource_type="invitation", resource_id=invitation_id)
         return {"revoked": True, "invitation_id": invitation_id}
 
@@ -15693,21 +16618,21 @@ class TortoiseSDK:
             "MATCH (i:Invitation) "
             "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
             "AND (i.status IS NULL OR i.status <> 'expired') "
-            "RETURN i.id, i.team_id",
+            "RETURN i.id, i.org_id",
             params={"now": now},
         ).result_set
         deleted = 0
-        for iid, team_id in pending:
+        for iid, org_id in pending:
             try:
                 reg.query(
-                    "MATCH (m:Membership {team_id:$tid, user_id:$fake}) DELETE m",
-                    params={"tid": team_id, "fake": f"invite-{iid}"},
+                    "MATCH (m:Membership {org_id:$tid, user_id:$fake}) DELETE m",
+                    params={"tid": org_id, "fake": f"invite-{iid}"},
                 )
                 deleted += 1
             except Exception as _e:
                 _logger.warning(
                     "invite ghost-cleanup failed for %s on %s (%s)",
-                    iid, team_id, _e)
+                    iid, org_id, _e)
         reg.query(
             "MATCH (i:Invitation) "
             "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
@@ -15741,12 +16666,12 @@ class TortoiseSDK:
         rows = reg.query(
             "MATCH (m:Membership) WHERE m.user_id STARTS WITH 'invite-' "
             "OPTIONAL MATCH (i:Invitation {id: substring(m.user_id, 7)}) "
-            "RETURN m.user_id, m.team_id, properties(i)",
+            "RETURN m.user_id, m.org_id, properties(i)",
         ).result_set
         ghosts: list[tuple[str, str]] = []
-        for fake_uid, team_id, inv_props in rows:
+        for fake_uid, org_id, inv_props in rows:
             if inv_props is None:
-                ghosts.append((fake_uid, team_id))  # orphaned fake row
+                ghosts.append((fake_uid, org_id))  # orphaned fake row
                 continue
             node = dict(inv_props)
             consumed = node.get("accepted_at") is not None \
@@ -15754,14 +16679,14 @@ class TortoiseSDK:
             expired = node.get("expires_at") is not None \
                 and node["expires_at"] < now
             if consumed or expired:
-                ghosts.append((fake_uid, team_id))
+                ghosts.append((fake_uid, org_id))
         failed = 0
         if not dry_run:
-            for fake_uid, team_id in ghosts:
+            for fake_uid, org_id in ghosts:
                 try:
                     reg.query(
-                        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) DELETE m",
-                        params={"tid": team_id, "uid": fake_uid},
+                        "MATCH (m:Membership {org_id:$tid, user_id:$uid}) DELETE m",
+                        params={"tid": org_id, "uid": fake_uid},
                     )
                 except Exception as _e:
                     # best-effort, mirroring _delete_fake_invite_membership
@@ -15769,7 +16694,7 @@ class TortoiseSDK:
                     failed += 1
                     _logger.warning(
                         "invite ghost-cleanup failed for %s on %s (%s)",
-                        fake_uid, team_id, _e)
+                        fake_uid, org_id, _e)
         return {"found": len(rows), "ghosts": len(ghosts),
                 "deleted": 0 if dry_run else len(ghosts) - failed}
 
@@ -16097,7 +17022,7 @@ class TortoiseSDK:
         return self._get_entity(canonical_id)
 
     def _get_entity(self, id_val: str) -> dict:
-        # NOTE (issue #327): Session/APIKey/Team/Tag nodes are intentionally
+        # NOTE (issue #327): Session/APIKey/Org/Tag nodes are intentionally
         # excluded from entity resolution — only Point/Subject/Object/Document/
         # Event/Source resolve (index-backed union). On a cross-label id
         # collision the first _RESOLVE_BRANCHES match wins (Point priority) —
@@ -16135,7 +17060,7 @@ class TortoiseSDK:
                     "be set via props.")
         # NOTE (issue #327): like _get_entity, entity mutation covers only the
         # canonical labels (Point/Subject/Object/Document/Source/Event).
-        # Session/APIKey/Team/Tag nodes are intentionally NOT updated — legacy
+        # Session/APIKey/Org/Tag nodes are intentionally NOT updated — legacy
         # matched them via id/eventId but no caller relies on it.
         # Per-label indexed writes (id OR eventId — original predicate; no url).
         # UNION cannot carry SET, so run each branch sequentially (#327).
@@ -16150,7 +17075,7 @@ class TortoiseSDK:
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
         # NOTE (issue #327): deletion covers only canonical entity labels —
-        # Session/APIKey/Team/Tag nodes are intentionally NOT deleted (legacy
+        # Session/APIKey/Org/Tag nodes are intentionally NOT deleted (legacy
         # matched them by id/eventId; no caller relies on it).
         total = 0
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
@@ -19187,7 +20112,7 @@ class TortoiseSDK:
         proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
 
     def get_org_structure(self, subject_id: str) -> dict:
-        """Return organisational structure: members, roles, sub-teams."""
+        """Return organisational structure: members, roles, sub-orgs."""
         proj = self._get_proj()
         # Issue #327: labeled Subject start (id|name OR both indexed -> Index
         # Scan) then traverse outward; roles filters the source Subject p.

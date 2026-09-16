@@ -1,0 +1,3093 @@
+{
+ "arm": "A-default-133q",
+ "methodology": {
+  "aggregative_flag": false,
+  "chunk_turns": 2,
+  "context_item_cap": 40,
+  "context_token_cap": 8000,
+  "dataset_fingerprint": "bfd78a75cf248eae",
+  "judge_model": "openai/gpt-4o-2024-08-06",
+  "judge_rubric_id_hash": "82d07b0de05daa48",
+  "reader_model": "deepseek/deepseek-v4-flash",
+  "reader_model_spec": "openrouter:deepseek/deepseek-v4-flash",
+  "reader_prompt_hash": "fda476721fe0ae86",
+  "retrieval_arm": "hybrid RRF (FTS+vector+structural, TF-IDF fallback) over graph turn points + raw session transcripts",
+  "tr_top_k": 12,
+  "applied_knobs": {
+   "knobs": null,
+   "note": "default knobs; census-joined 133-Q class"
+  }
+ },
+ "integrity": {
+  "criterion": "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND (n_excluded_hard == 0) AND (invalid_rate <= threshold) AND (outcome-derived attempted set non-empty whenever any entry was excluded or dropped — a fully excluded/dropped run never certifies; failures do not count as attempts for this guard); hard = fatal_*/ingest/unknown census classes + non-census error strings with an EMPTY census (mixed recoverable+structural grades recoverable — #1746 lane) + permanent eval failures + malformed inputs (present non-bool valid flag, non-iterable, non-str, or falsy-but-present NON-CONTAINER error_classes — 0/\"\"/False/PRESENT-null; empty dict/list are the legitimate no-census shapes and grade clean) fail closed to hard + excluded outcomes (shape-broken dicts / breaker_open drops) with a hard census still veto (n_excluded_hard); recoverable = parse_error/truncated/truncated_parse_error/partial_parse/transient_*/s1_chunk_summary census classes + reader/judge/ingest:retries_exhausted eval failures (rate-limited, not vetoed)",
+  "invalid_rate": 0.0,
+  "n_excluded": 0,
+  "n_excluded_hard": 0,
+  "n_failed": 0,
+  "n_hard_invalid": 0,
+  "threshold": 0.0,
+  "valid": true
+ },
+ "n_outcomes": 133,
+ "outcomes": [
+  {
+   "question_id": "gpt4_21adecb5",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no information about the completion of your undergraduate degree or the submission of your master's thesis.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 169,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_2312f94c",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_2487a7cb",
+   "label": false,
+   "hypothesis": "The context does not contain information about attending an 'Effective Time Management' workshop or a 'Data Analysis using Python' webinar, so I cannot answer which event was attended first.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_2655b836",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not contain any information about issues with your new car or its first service.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_2c50253f",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 168,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_2d58bcd6",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 156,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_2f56ae70",
+   "label": false,
+   "hypothesis": "I do not know — the memory context does not mention any streaming service you started using.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_2f584639",
+   "label": false,
+   "hypothesis": "The context does not contain information about buying a necklace for your sister or a photo album for your mom.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_385a5000",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no information about starting seeds for tomatoes or marigolds.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_59149c77",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not contain any information about visits to the Museum of Modern Art or the 'Ancient Civilizations' exhibit at the Metropolitan Museum of Art.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_59149c78",
+   "label": false,
+   "hypothesis": "I do not know — the memory context does not contain any information about an art-related event or its location.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 163,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_5dcc0aab",
+   "label": false,
+   "hypothesis": "The memory context does not contain any information about cleaning shoes last month.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_61e13b3c",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no information about selling baked goods at the Farmers' Market or participating in the Spring Fling Market.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_65aabe59",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context — there is no record of setting up a smart thermostat or a mesh network system.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 156,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_68e94287",
+   "label": false,
+   "hypothesis": "The context does not contain any information about your participation in the #PlankChallenge or your post about a vegan chili recipe, so I do not know which event happened first.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 167,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_68e94288",
+   "label": false,
+   "hypothesis": "I do not know — the memory context contains no information about social media activity on or around 5 days ago (2023-03-15). The most recent session is from 2023-02-18.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 1,
+      "21-40": 0,
+      "41-120": 0,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 156,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_45189cb4",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_468eb063",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no mention of meeting Emma.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_468eb064",
+   "label": false,
+   "hypothesis": "The context does not contain any information about who you met with during lunch on that day.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 1,
+      "21-40": 0,
+      "41-120": 0,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 166,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_483dd43c",
+   "label": false,
+   "hypothesis": "I do not know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 163,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_4929293a",
+   "label": false,
+   "hypothesis": "The context does not contain any information about your cousin's wedding or Michael's engagement party, so I cannot determine which happened first.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_4929293b",
+   "label": false,
+   "hypothesis": "I do not know. The context does not mention any life event of a relative that you participated in.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 166,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_4cd9eba1",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_4edbafa2",
+   "label": true,
+   "hypothesis": "I don't know. The context contains no information about a BBQ event in June or any BBQ event at all.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 155,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_4ef30696",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_0b2f1d21",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 172,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_18c2b244",
+   "label": false,
+   "hypothesis": "The context does not mention any of these three events.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 155,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_1916e0ea",
+   "label": false,
+   "hypothesis": "I don't know — the context does not mention cancelling a FarmFresh subscription or doing online grocery shopping from Instacart.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 175,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_1a1dc16d",
+   "label": false,
+   "hypothesis": "I do not know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_1d4ab0c9",
+   "label": false,
+   "hypothesis": "The memory context contains no information about your herb garden, watering, or harvesting — so I don't know how many days passed between those events.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 166,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_1d80365e",
+   "label": false,
+   "hypothesis": "I don't have any information about a solo camping trip to Yosemite National Park in the provided context.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": false
+   }
+  },
+  {
+   "question_id": "gpt4_1e4a8aeb",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no mention of a gardening workshop or planting tomato saplings.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 166,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_1e4a8aec",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 166,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_213fd887",
+   "label": false,
+   "hypothesis": "I do not know — the memory context does not mention any events such as a volleyball league or a charity 5K run.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "08f4fc43",
+   "label": false,
+   "hypothesis": "I don't know — the context contains no information about a Sunday mass at St. Mary's Church or an Ash Wednesday service at the cathedral.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "0bb5a684",
+   "label": false,
+   "hypothesis": "I do not know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 151,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "0bc8ad92",
+   "label": false,
+   "hypothesis": "I don’t know — the memory context contains no record of a museum visit with a friend.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 165,
+     "requested": 120
+    },
+    "reader_refusal": false
+   }
+  },
+  {
+   "question_id": "0bc8ad93",
+   "label": false,
+   "hypothesis": "The context does not contain any mention of visiting a museum, so I do not know whether you visited with a friend or not.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "0db4c65d",
+   "label": false,
+   "hypothesis": "I don't know — the context does not contain any information about finishing 'The Seven Husbands of Evelyn Hugo' or attending a book reading event at the local library.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "2a1811e2",
+   "label": false,
+   "hypothesis": "The memory context does not contain any mention of the Hindu festival of Holi or a Sunday mass at St. Mary's Church.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "2c63a862",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 167,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "2ebe6c90",
+   "label": false,
+   "hypothesis": "The memory context does not contain any information about 'The Nightingale' by Kristin Hannah or your reading progress, so I do not know how many days it took you to finish it.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 153,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "2ebe6c92",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 156,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_af6db32f",
+   "label": false,
+   "hypothesis": "The context does not mention you watching the Super Bowl, so I do not know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 154,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_b0863698",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not mention a 5K charity run.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 152,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_b4a80587",
+   "label": false,
+   "hypothesis": "The asked information is absent from the context; I cannot determine which event happened first.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_b5700ca0",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not contain any information about religious activities from last week.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 163,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_b5700ca9",
+   "label": false,
+   "hypothesis": "I do not know; there is no mention of attending a Maundy Thursday service in the memory context.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 167,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_c27434e8",
+   "label": false,
+   "hypothesis": "I do not know, as the memory context contains no mention of starting a Ferrari model or a Japanese Zero fighter plane model.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 166,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_c27434e8_abs",
+   "label": true,
+   "hypothesis": "The asked information is absent from the memory context — no session content mentions the Ferrari model or the Porsche 991 Turbo S model.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_cd90e484",
+   "label": false,
+   "hypothesis": "I do not know — the memory context does not contain any information about using new binoculars or seeing American goldfinches.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 165,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_d31cdae3",
+   "label": false,
+   "hypothesis": "The context does not contain information about any trips the narrator took.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 163,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_d6585ce8",
+   "label": false,
+   "hypothesis": "I do not know. The memory context contains no information about concerts or musical events you attended.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 5,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 5,
+     "marked_points_total": 5,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_d6585ce9",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not contain any information about a music event last Saturday or who you went with.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 152,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_d9af6064",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context — no sessions mention setting up a smart thermostat or a new router.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_e061b84f",
+   "label": false,
+   "hypothesis": "The context does not mention any sports events you participated in, so I cannot determine their order.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_e061b84g",
+   "label": false,
+   "hypothesis": "I don't have any information about a sports event mentioned two weeks ago.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 174,
+     "requested": 120
+    },
+    "reader_refusal": false
+   }
+  },
+  {
+   "question_id": "gpt4_e072b769",
+   "label": false,
+   "hypothesis": "The memory context does not mention Ibotta, so I do not know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_e414231e",
+   "label": false,
+   "hypothesis": "I don't know — the context contains no mention of fixing a mountain bike or deciding to upgrade a road bike's pedals.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_e414231f",
+   "label": false,
+   "hypothesis": "I do not know — the memory context lists session dates but contains no information about any bike repairs or servicing.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_ec93e27f",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context — there is no mention of bus or train usage in the provided sessions.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 163,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_f420262c",
+   "label": false,
+   "hypothesis": "I don't have any information in the context about airlines you flew with or the order of flights.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 5,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 5,
+     "marked_points_total": 5,
+     "pool_size": 156,
+     "requested": 120
+    },
+    "reader_refusal": false
+   }
+  },
+  {
+   "question_id": "gpt4_f420262d",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 151,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_f49edff3",
+   "label": false,
+   "hypothesis": "I do not know, as the memory context does not contain any information about the three events mentioned.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 165,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_fa19884c",
+   "label": false,
+   "hypothesis": "The context does not contain any information about the events mentioned in your question, so I cannot determine the number of days.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_fa19884d",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_fe651585",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 156,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_fe651585_abs",
+   "label": true,
+   "hypothesis": "I don't know — the context does not mention Tom, Alex, or anyone becoming a parent.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 163,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_8c8961ae",
+   "label": false,
+   "hypothesis": "I don't have any information about your trips to Europe or Thailand in the provided memory.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": false
+   }
+  },
+  {
+   "question_id": "gpt4_8e165409",
+   "label": false,
+   "hypothesis": "I don't have that information in the provided context.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_93159ced",
+   "label": false,
+   "hypothesis": "The context does not contain any information about when you started your current job at NovaTech or your previous work history, so I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_93159ced_abs",
+   "label": true,
+   "hypothesis": "I do not know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 0,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 0,
+     "marked_points_total": 0,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_93f6379c",
+   "label": false,
+   "hypothesis": "I do not know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 154,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_98f46fc6",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not contain any information about a charity gala or a charity bake sale.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_9a159967",
+   "label": false,
+   "hypothesis": "I don't know — the context does not contain any information about which airlines you flew with or the number of flights in March and April.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 155,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_a1b77f9c",
+   "label": false,
+   "hypothesis": "The asked information is absent from the provided memory context — there is no mention of reading \"The Nightingale\" or listening to \"Sapiens: A Brief History of Humankind\" or \"The Power,\" so I cannot say how many weeks were spent on them.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 6,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 6,
+     "marked_points_total": 6,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_a2d1d1f6",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "af082822",
+   "label": false,
+   "hypothesis": "I do not know — the context contains no mention of attending a friends and family sale at Nordstrom.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "b29f3365",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no information about your guitar lesson history or when you bought the amp.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "b46e15ed",
+   "label": false,
+   "hypothesis": "The context does not mention your participation in two charity events on consecutive days, so I do not know how many months have passed.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 1,
+      "21-40": 0,
+      "41-120": 4,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 5,
+     "marked_points_total": 5,
+     "pool_size": 163,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "b46e15ee",
+   "label": false,
+   "hypothesis": "I do not know—the memory context contains no information about a charity event or any session from around that time.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "b9cfe692",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "bbf86515",
+   "label": false,
+   "hypothesis": "I do not know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "bcbe585f",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "c8090214",
+   "label": false,
+   "hypothesis": "I don't know. The memory context contains no information about buying an iPhone 13 Pro or attending a Holiday Market.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "c8090214_abs",
+   "label": true,
+   "hypothesis": "The context does not contain any information about buying an iPad or attending a Holiday Market.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 171,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "8077ef71",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "8c18457d",
+   "label": false,
+   "hypothesis": "I do not know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "982b5123",
+   "label": true,
+   "hypothesis": "The context does not contain any information about booking an Airbnb in San Francisco.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "982b5123_abs",
+   "label": true,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "993da5e2",
+   "label": false,
+   "hypothesis": "I do not know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 165,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "9a707b81",
+   "label": false,
+   "hypothesis": "I don't know — the memory context doesn't include any details about a baking class or making a friend's birthday cake.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 171,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "9a707b82",
+   "label": false,
+   "hypothesis": "I don't know — the context does not contain any mention of cooking something for a friend.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "a3045048",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no information about your best friend's birthday party or when you ordered her gift.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 170,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "a3838d2b",
+   "label": false,
+   "hypothesis": "The memory context does not contain any information about charity events or a 'Run for the Cure' event, so I cannot answer how many you participated in before it.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 6,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 6,
+     "marked_points_total": 6,
+     "pool_size": 155,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "370a8ff4",
+   "label": false,
+   "hypothesis": "I do not know — the context contains no information about recovering from the flu or going on a 10th jog outdoors.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "4dfccbf7",
+   "label": false,
+   "hypothesis": "I do not know—the context contains no information about when you started ukulele lessons or when you decided to take your acoustic guitar for servicing.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "4dfccbf8",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no information about what you did with Rachel on the Wednesday two months ago.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "5e1b23de",
+   "label": false,
+   "hypothesis": "I don't know — there is no mention of a photography workshop in the provided context.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "6613b389",
+   "label": false,
+   "hypothesis": "The asked information is absent from the context.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 152,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "6e984301",
+   "label": false,
+   "hypothesis": "The memory context does not contain any information about sculpting classes or investing in sculpting tools, so I cannot determine the number of weeks.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 167,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "71017276",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not contain any mention of meeting your aunt or receiving a crystal chandelier.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "71017277",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 169,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "c9f37c46",
+   "label": false,
+   "hypothesis": "I do not know — the memory context contains no information about stand-up comedy specials or an open mic night.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "cc6d1ec1",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context; it contains no details about your bird watching history or the bird watching workshop.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "d01c6aa8",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 156,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "dcfa8644",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "e4e14d04",
+   "label": false,
+   "hypothesis": "I do not know; the memory context contains no information about your membership in \"Book Lovers Unite\" or attending a meetup for that group.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "eac54adc",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "eac54add",
+   "label": false,
+   "hypothesis": "I do not know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 0,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 0,
+     "marked_points_total": 1,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "f0853d11",
+   "label": false,
+   "hypothesis": "I do not know. The memory context does not mention the 'Walk for Hunger' or 'Coastal Cleanup' events.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_0a05b494",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no information about meeting a woman selling jam at the farmer's market or a tourist from Australia.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_6dc9b45b",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 159,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_6ed717ea",
+   "label": false,
+   "hypothesis": "I don't know. The memory context does not contain any information about purchasing a dog bed for Max, training pads for Luna, or any related purchase history.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_70e84552",
+   "label": false,
+   "hypothesis": "The context does not mention fixing the fence or trimming the goats' hooves.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_70e84552_abs",
+   "label": true,
+   "hypothesis": "The context does not contain information about fixing a fence or purchasing cows from Peter.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_74aed68e",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_76048e76",
+   "label": false,
+   "hypothesis": "The memory context contains no information about taking care of a bike or car in February, so I don't know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_78cf46a3",
+   "label": false,
+   "hypothesis": "The context does not contain any information about the narrator losing their phone charger or receiving a new phone case, so I cannot determine which happened first.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_7a0daae1",
+   "label": false,
+   "hypothesis": "The context does not contain information about buying or receiving a tennis racket.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 177,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_7abb270c",
+   "label": false,
+   "hypothesis": "The provided memory context does not contain any information about museums you visited or their order.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 6,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 6,
+     "marked_points_total": 6,
+     "pool_size": 161,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_7bc6cf22",
+   "label": false,
+   "hypothesis": "I don't know — the context does not mention reading the March 15th issue of The New Yorker.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 165,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_7ca326fa",
+   "label": false,
+   "hypothesis": "The asked information is absent from the memory context.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 167,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_7ddcf75f",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 158,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_7de946e7",
+   "label": false,
+   "hypothesis": "I don't know.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_7f6b06db",
+   "label": false,
+   "hypothesis": "The context does not mention any trips you took.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 3,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 3,
+     "marked_points_total": 3,
+     "pool_size": 167,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_8279ba02",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not mention buying a smoker.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_8279ba03",
+   "label": false,
+   "hypothesis": "I do not know—there is no information about buying any kitchen appliance in the provided memory context.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 164,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_85da3956",
+   "label": false,
+   "hypothesis": "I don't know — the memory context does not mention attending a 'Summer Nights' festival at Universal Studios Hollywood.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 1,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 1,
+     "marked_points_total": 1,
+     "pool_size": 165,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_88806d6e",
+   "label": false,
+   "hypothesis": "The context does not contain information about meeting Mark, Sarah, or Tom.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 162,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_4fc4f797",
+   "label": false,
+   "hypothesis": "The context does not contain any mention of receiving feedback about your car's suspension or testing a new suspension setup, so I cannot determine how many days passed between these events.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "requested": 120,
+     "pool_size": 158,
+     "marked_points_total": 2,
+     "marked_points_in_pool": 2,
+     "marked_points_bands": {
+      "top-20": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "121+": 0
+     },
+     "marked_chunks_in_pool": 0
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "6e984302",
+   "label": false,
+   "hypothesis": "I do not know — the memory context does not contain any mention of an investment for a competition from four weeks ago.",
+   "context_tokens": 92,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 0,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 0,
+     "marked_points_total": 1,
+     "pool_size": 157,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  },
+  {
+   "question_id": "gpt4_5438fa52",
+   "label": false,
+   "hypothesis": "I don't know — the memory context contains no mention of a cultural festival or Spanish classes.",
+   "context_tokens": 97,
+   "measure_facts": {
+    "gold_admitted_ids": [],
+    "pool_depth": {
+     "marked_chunks_in_pool": 0,
+     "marked_points_bands": {
+      "121+": 0,
+      "21-40": 0,
+      "41-120": 2,
+      "top-20": 0
+     },
+     "marked_points_in_pool": 2,
+     "marked_points_total": 2,
+     "pool_size": 160,
+     "requested": 120
+    },
+    "reader_refusal": true
+   }
+  }
+ ]
+}

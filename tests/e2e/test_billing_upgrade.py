@@ -67,7 +67,7 @@ def test_upgrade_checkout_live_leg():
                     "password": "supersecret1",
                 })
                 assert r.status_code == 200, r.text
-                team_id = r.json()["team_id"]
+                org_id = r.json()["org_id"]
                 key = r.json()["api_key"]
                 h = {"Authorization": f"Bearer {key}"}
                 # team info exposes the server-resolved default checkout price
@@ -82,7 +82,7 @@ def test_upgrade_checkout_live_leg():
                 # stripe_customer_id persisted synchronously BEFORE redirect
                 rows = sdk._get_registry().query(
                     "MATCH (t:Team {id:$id}) RETURN t.stripe_customer_id",
-                    params={"id": team_id}).result_set
+                    params={"id": org_id}).result_set
                 assert rows and rows[0][0], "stripe_customer_id must be persisted at checkout creation"
         finally:
             if old_uri:

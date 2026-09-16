@@ -59,15 +59,19 @@ FORK_VALUES = {FORK_SELF, FORK_BUILD}
 # per-key semantics enum
 FWW = "first-write-wins"      # step edges: idempotent keyed MERGE {org_id, step_id}
 SET_ONCE = "set-once"         # fork / compact: first write wins, changed → 409
-LWW = "last-write-wins"       # last_decide_attempt (with conditional skip)
+LWW = "last-write-wins"       # last_decide_attempt; fork_unsure_at (re-stamp on re-ask)
 SERVER_OWNED = "server-owned" # status / version: never client-writable, monotonic
 MAP_MERGE = "map-merge"       # member_progress: user-scoped JSON-string merge
 
 # FLOW keys — the graph-owned set. jsonb NEVER holds these (router strips
 # them before the allowlist filter; the registration-split negatives pin it).
+# fork_unsure_at (#2407, Data Model 1): the "not sure yet — decide later"
+# fork-card record. Server-stamped ISO timestamp; the set-once fork value is
+# NOT consumed (fork stays NULL so the card keeps rendering as answerable).
 FLOW_KEYS: frozenset[str] = frozenset({
     "fork", "status", "version", "completed_steps",
     "member_progress", "last_decide_attempt", "compact",
+    "fork_unsure_at",
 })
 
 PER_KEY_SEMANTICS: dict[str, str] = {step: FWW for step in STEP_IDS}
@@ -75,6 +79,7 @@ PER_KEY_SEMANTICS.update({
     "fork": SET_ONCE,
     "compact": SET_ONCE,
     "last_decide_attempt": LWW,
+    "fork_unsure_at": LWW,
     "status": SERVER_OWNED,
     "version": SERVER_OWNED,
     "member_progress": MAP_MERGE,
@@ -119,15 +124,27 @@ def validate_step_id(step_id: str) -> bool:
 
 def completion_gate_satisfied(completed_steps: Iterable[str],
                               fork: str | None,
-                              compact: bool) -> bool:
+                              compact: bool,
+                              *, fork_unsure_at: bool = False) -> bool:
     """Fork-aware completion gate (epic §2 WF-4, scope pin 12).
 
     compact-first: a compact org needs only the reduced checklist regardless
     of fork. fork=None/unknown → 'self' (read-time default — the J6 rule:
-    fork is only persisted on explicit opt-in).
+    fork is only persisted on explicit opt-in) UNLESS the org recorded the
+    #2407 unsure fork-card answer (fork_unsure_at): then the gate is NOT
+    evaluable on the read-time self default — onboarding must not auto-close
+    an org as 'self' while the fork question is still open (it can be
+    answered later; until then the org stays active).
     """
     done = set(completed_steps)
-    required = _GATE_COMPACT if compact else _GATES.get(fork or FORK_SELF, _GATE_SELF)
+    if compact:
+        required = _GATE_COMPACT
+    elif fork in FORK_VALUES:
+        required = _GATES[fork]
+    elif fork_unsure_at:
+        return False
+    else:
+        required = _GATE_SELF  # J6 read-time default
     return required <= done
 
 
@@ -142,6 +159,7 @@ def flow_defaults() -> dict[str, Any]:
         "member_progress": {},
         "last_decide_attempt": None,
         "compact": False,
+        "fork_unsure_at": None,
     }
 
 
@@ -171,7 +189,7 @@ def resolve_wire_completion(node_status: str | None,
 
     1. node.status == 'complete' → True (server-owned, gate-written).
     2. Grandfathered-window guard: node present but NOT complete, ZERO
-       AGENT step edges (the team-named edge is auto-satisfied at init and
+       AGENT step edges (the org-named edge is auto-satisfied at init and
        never counts), and jsonb onboarding_complete=true → True — kills the
        poisoned-false window for orgs completing via the legacy wizard
        during the T2→T7 carve-out. One-directional and self-terminating:
@@ -189,9 +207,9 @@ def resolve_wire_completion(node_status: str | None,
 
 def onboarding_node_init_fragment(*, fork: str | None = None,
                                   compact: bool = False,
-                                  team_named_edge: bool = True) -> str:
+                                  org_named_edge: bool = True) -> str:
     """Eager-init Cypher suffix — byte-identical for every TeamMeta lane
-    (register_user ×2, create_team, sdk.team_create, provision_tenant),
+    (register_user ×2, create_org, sdk.org_create, provision_tenant),
     the write-time create-on-write seam, and the backfill.
 
     The same string is APPENDED to the lane's existing TeamMeta statement
@@ -210,7 +228,7 @@ def onboarding_node_init_fragment(*, fork: str | None = None,
         "MERGE (n:OnboardingState {org_id: $org_id}) "
         "ON CREATE SET " + ", ".join(sets),
     ]
-    if team_named_edge:
+    if org_named_edge:
         lines.append(
             "MERGE (s_tn:OnboardingStep {org_id: $org_id, step_id: 'team-named'})"
         )
@@ -242,17 +260,17 @@ def read_prior_org_fork(graph: Any, prior_org_id: str) -> str | None:
     return fork if fork in FORK_VALUES else None
 
 
-def eager_init_query(team_meta_cypher: str, team_meta_params: dict[str, Any], *,
+def eager_init_query(org_meta_cypher: str, org_meta_params: dict[str, Any], *,
                      org_id: str, fork: str | None = None,
                      compact: bool = False) -> tuple[str, dict[str, Any]]:
     """Append the OnboardingState init to a TeamMeta CREATE so both land in
     ONE Cypher query (graph-side atomicity, scope pin 10). Returns the
     combined query + merged params for the lane's ``graph.query`` call."""
     fragment = onboarding_node_init_fragment(fork=fork, compact=compact)
-    params: dict[str, Any] = dict(team_meta_params)
+    params: dict[str, Any] = dict(org_meta_params)
     params["org_id"] = org_id
     params.update(_node_init_params(fork=fork, compact=compact))
-    return f"{team_meta_cypher}\n{fragment}", params
+    return f"{org_meta_cypher}\n{fragment}", params
 
 
 def _node_init_params(*, fork: str | None = None, compact: bool = False,
@@ -315,7 +333,7 @@ def ensure_onboarding_state_node(graph: Any, org_id: str, *,
                                  fork: str | None = None,
                                  compact: bool = False,
                                  status_from_mirror: bool | None = None,
-                                 team_named_edge: bool = True) -> None:
+                                 org_named_edge: bool = True) -> None:
     """Idempotent keyed-MERGE init (write-time create-on-write seam).
 
     Mirrors jsonb ``onboarding_complete`` → status ONE-DIRECTIONALLY at
@@ -324,7 +342,7 @@ def ensure_onboarding_state_node(graph: Any, org_id: str, *,
     """
     status = STATUS_COMPLETE if status_from_mirror is True else STATUS_ACTIVE
     cypher = onboarding_node_init_fragment(
-        fork=fork, compact=compact, team_named_edge=team_named_edge)
+        fork=fork, compact=compact, org_named_edge=org_named_edge)
     params = {"org_id": org_id}
     params.update(_node_init_params(fork=fork, compact=compact, status=status))
     with _org_lock(org_id):
@@ -450,6 +468,58 @@ def write_fork(graph: Any, org_id: str, fork: str, *,
                    "RETURN outcome",
                    params)
     return res.result_set[0][0]
+
+
+def write_fork_unsure_at(graph: Any, org_id: str, at: str, *,
+                         compact: bool = False,
+                         status_from_mirror: bool | None = None) -> str:
+    """#2407 "not sure yet — decide later" record (Data Model 1 encoding).
+
+    Records the moment the fork question was deferred WITHOUT consuming the
+    set-once fork value: ``fork`` stays NULL, so the fork card keeps
+    rendering as answerable ('ask'). The timestamp is server-stamped ISO
+    (the endpoint computes it); a repeat answer LWW re-stamps (never a 409).
+    Returns:
+      'recorded' — fork still unset and the org is not compact →
+        node.fork_unsure_at = $at. (A compact org is never asked the fork
+        card; its fork card does not render — recording unsure is a
+        contradictory client signal.)
+      'conflict' — fork already set (the org already answered) or the org
+        is compact → nothing recorded.
+    """
+    if not isinstance(at, str) or not at:
+        raise ValueError("fork_unsure_at must be a non-empty timestamp")
+    status = STATUS_COMPLETE if status_from_mirror is True else STATUS_ACTIVE
+    params = {"org_id": org_id, "at": at, "os_status": status}
+    params.update(_node_init_params(compact=compact))
+    with _org_lock(org_id):
+        res = _run(graph,
+                   f"MERGE (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+                   "ON CREATE SET n.status = $os_status, n.version = 1, "
+                   "n.member_progress = $os_member_progress "
+                   "WITH n, CASE WHEN n.fork IS NULL "
+                   "AND NOT coalesce(n.compact, false) THEN 'recorded' "
+                   "ELSE 'conflict' END AS outcome "
+                   "SET n.fork_unsure_at = CASE WHEN n.fork IS NULL "
+                   "AND NOT coalesce(n.compact, false) THEN $at "
+                   "ELSE n.fork_unsure_at END "
+                   f"MERGE (s_tn:{ONBOARDING_STEP_LABEL} "
+                   "{org_id: $org_id, step_id: 'team-named'}) "
+                   f"MERGE (n)-[:{COMPLETED_STEP_EDGE}]->(s_tn) "
+                   "RETURN outcome",
+                   params)
+    return res.result_set[0][0]
+
+
+def clear_fork_unsure_at(graph: Any, org_id: str) -> None:
+    """Remove the node's fork_unsure_at marker (#2407 invariant: the marker
+    is meaningful only while fork IS NULL — the checkpoint clears it the
+    moment a later self/build answer consumes the set-once fork)."""
+    with _org_lock(org_id):
+        _run(graph,
+             f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+             "REMOVE n.fork_unsure_at",
+             {"org_id": org_id})
 
 
 def write_compact(graph: Any, org_id: str, compact: bool, *,
@@ -604,7 +674,8 @@ def recompute_completion(graph: Any, org_id: str,
         write_status(graph, org_id, STATUS_COMPLETE)
         return "complete-grandfathered"
     if completion_gate_satisfied(steps, node.get("fork"),
-                                 bool(node.get("compact"))):
+                                 bool(node.get("compact")),
+                                 fork_unsure_at=bool(node.get("fork_unsure_at"))):
         write_status(graph, org_id, STATUS_COMPLETE)
         return "complete-gate"
     return "unchanged"

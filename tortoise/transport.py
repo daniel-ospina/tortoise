@@ -16,11 +16,11 @@ re-import one of them. The zero-import/stdlib-only/neutral contract is
 load-bearing: nothing here may grow an import, and both importers must
 stay importable from the other's context.
 
-Why a dedicated flag (not the team_id VALUE, not ``_transport_mode``):
+Why a dedicated flag (not the org_id VALUE, not ``_transport_mode``):
 
-  * hosted team ids are RAW — only graph names are ``team_``-prefixed
-    (``graph_name = f\"team_{team_id}\"``, hosted_api.py) — so a hosted team
-    legitimately named \"selfhost\" delivers the IDENTICAL team_id value to
+  * hosted org ids are RAW — only graph names are ``org_``-prefixed
+    (``graph_name = f\"org_{org_id}\"``, hosted_api.py) — so a hosted org
+    legitimately named \"selfhost\" delivers the IDENTICAL org_id value to
     the identical call site; keying the exemption on the value cannot
     distinguish hosted from selfhost.
   * the existing ``_transport_mode`` ContextVar is set to ``\"http\"`` on BOTH
@@ -29,9 +29,9 @@ Why a dedicated flag (not the team_id VALUE, not ``_transport_mode``):
 
 The flag is set True ONLY by the selfhost HTTP MCP transport
 (``TransportModeMiddleware.dispatch`` — a named Task 8 deliverable on
-``tortoise/mcp_auth.py``), the only selfhost transport whose team_id is
+``tortoise/mcp_auth.py``), the only selfhost transport whose org_id is
 truthy (\"selfhost\"). The stdio bootstrap and the selfhost REST handler
-rely on ``not team_id`` (team_id=None) and do NOT need the flag.
+rely on ``not org_id`` (org_id=None) and do NOT need the flag.
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ from contextvars import ContextVar
 
 #: True while a SELFHOST HTTP MCP transport is serving the request. Read by
 #: ``record_ask_usage`` (tortoise/metering.py) and the shared ask budget
-#: helper (tortoise/quota.py) alongside ``not team_id`` as the exemption
+#: helper (tortoise/quota.py) alongside ``not org_id`` as the exemption
 #: condition. Set ONLY by selfhost transport code.
 _selfhost_transport: ContextVar[bool] = ContextVar("_selfhost_transport",
                                                    default=False)

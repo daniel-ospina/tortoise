@@ -30,7 +30,7 @@ aboutObjects: supabase-auth, signup-page, welcome-page, ci
 Skipped — plan touches zero third-party dependencies (inline JS in checked-in HTML + stdlib-only Python). One external API surface was verified via search (GoTrue Admin API, supabase.com self-hosting auth docs + netlify/gotrue):
 
 - `GET /auth/v1/admin/users?filter=<email>` — `filter` is an email ILIKE substring query; returns `{"users": [...]}`. Requires `Authorization: Bearer <service_role_key>` (+ `apikey` header).
-- `DELETE /auth/v1/admin/users/{id}` — deletes the auth user; `team_memberships.user_id` FK is `ON DELETE CASCADE` (migration 0001, preserved through 0003/0009 renames) → the placeholder row created by `handle_new_user()` is cleaned too. Teams/api_keys/FalkorDB graphs are NOT cascaded (this is why Approach A was rejected).
+- `DELETE /auth/v1/admin/users/{id}` — deletes the auth user; `org_memberships.user_id` FK is `ON DELETE CASCADE` (migration 0001, preserved through 0003/0009 renames) → the placeholder row created by `handle_new_user()` is cleaned too. Teams/api_keys/FalkorDB graphs are NOT cascaded (this is why Approach A was rejected).
 
 **Repo-verified facts the plan depends on:**
 - #832 closed 2026-08-10: Resend→Supabase SMTP wired, confirmation emails verified, confirmations ON in prod. GoTrue email-send limiter is **project-wide** (built-in 2/hr; custom SMTP 30/hr), not per-IP as the issue claimed.
@@ -67,7 +67,7 @@ Skipped — plan touches zero third-party dependencies (inline JS in checked-in 
 ### Failure Modes
 - Prod email bucket trips during a CI run (parallel PRs / real traffic) → **Expected:** smoke fails with the 429 body in the assertion message — this is the monitored signal, not flake → **Test:** live smoke's `signup_status == 200` assert
 - Secrets missing → **Expected:** smoke skips + `::warning::` in welcome-e2e log → **Test:** skip-detection step (Task 3; env-var check, NOT pytest output parsing — `--collect-only` never prints skip status, verified)
-- Admin DELETE fails (network/4xx) → **Expected:** smoke still passes, cleanup logged as warning. An orphaned unconfirmed auth user + placeholder `team_memberships` row would persist until manual cleanup — **the `tenant_cleaned_up` auto-expiry is only an epic spec, NOT implemented** (verified: no such function exists in supabase/functions/; GoTrue auto-expires only anonymous users). Harmless but permanent; a weekly Admin-API sweep of `e2e-live-*@premise-labs.dev` users is the optional mitigation → **Test:** best-effort wrapper
+- Admin DELETE fails (network/4xx) → **Expected:** smoke still passes, cleanup logged as warning. An orphaned unconfirmed auth user + placeholder `org_memberships` row would persist until manual cleanup — **the `tenant_cleaned_up` auto-expiry is only an epic spec, NOT implemented** (verified: no such function exists in supabase/functions/; GoTrue auto-expires only anonymous users). Harmless but permanent; a weekly Admin-API sweep of `e2e-live-*@premise-labs.dev` users is the optional mitigation → **Test:** best-effort wrapper
 - Pre-confirmation team minting (junk premise) → **Expected:** NO teams/keys/graphs are minted by the smoke. Resolved: even though `supabase/config.toml` carries a stale "Remote state: hook_after_user_created_enabled=true" comment, #832 (2026-08-10) states the hook is DISABLED and `AUTH_HOOK_SECRET` was removed from `tenant-provision` — Path 2 of the function fails CLOSED (401) without the secret (verified in `index.ts`), so even a live hook could not mint. The only minting path (Path 1, user JWT from the welcome page) is never exercised by the smoke. Post-merge verification: confirm no new `e2e-live-*` teams appear after the first CI run
 - Per-push bucket consumption → **Expected:** each welcome-e2e run consumes exactly 1 email-send from the shared 30/hr prod bucket (real traffic + parallel PRs could trip it — red CI with the 429 body is the diagnosable signal). **Escalation threshold: if the smoke fails with a genuine 429 (not a code bug) more than 3 times in a rolling 7-day window, move it to a merge-to-main or `schedule` trigger** (coalescing). v1 keeps it per-push (the issue's "consecutive signups" evidence) → **Test:** live smoke
 - Password-reset / email-change surfaces share the same project-wide email bucket but are NOT protected by the client lockout (signin.html is out of scope for #801 — no password-reset UI exists on the signin page today; the attack vector exists via direct `/auth/v1/recover` calls). **Tracked as a follow-up issue** (recovery-surface hardening + mechanism-accurate error copy) → **Test:** none in this plan
@@ -388,7 +388,7 @@ import urllib.request
 def delete_user_by_email(base_url: str, service_key: str, email: str) -> bool:
     """Delete the auth user with the exact given email (no-op when absent).
 
-    Cascades to team_memberships (FK ON DELETE CASCADE, migration 0001).
+    Cascades to org_memberships (FK ON DELETE CASCADE, migration 0001).
     Returns True if a user was deleted."""
     headers = {
         "Authorization": f"Bearer {service_key}",
@@ -447,7 +447,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     prod team + api_keys row + FalkorDB graph (no cleanup endpoint in-repo).
 
     Teardown deletes the created auth user via the Admin API (best-effort;
-    the FK cascade removes the placeholder team_memberships row)."""
+    the FK cascade removes the placeholder org_memberships row)."""
     signup = {"status": None, "body": ""}
 
     def _on_response(resp):

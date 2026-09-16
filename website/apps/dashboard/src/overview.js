@@ -68,13 +68,26 @@ export function overviewDigest(points) {
     return {
       kind: 'empty',
       value: 0,
-      detail: 'No memories yet — your agent will file your first points.',
+      // #2361: ONE anchor term for what the graph stores — 'memories' —
+      // glossed in plain language. This branch is the module's documented
+      // pre-first-memory renderable; the USER-visible first-contact gloss
+      // lives on OverviewDigestCard's sibling welcome empty state in
+      // main.jsx (this one is only reached above zero, see below).
+      detail: 'No memories yet — decisions and findings your agent saves will show up here.',
     }
   }
   return {
     kind: 'populated',
     value: n,
-    detail: n === 1 ? 'point filed to your Organization graph' : 'points filed to your Organization graph',
+    // #2361: the count-of-record surface shares the anchor — 'memories',
+    // never 'points' (indicator 1 + 4: one term per object, everywhere).
+    // The gloss rides here because this is the branch users see: the
+    // digest card mounts only when point_count > 0, and the Billing tab
+    // renders the SAME team.point_count under a now-matching 'Memories'
+    // label (was 'Data points' — same object, two unexplained names).
+    detail: n === 1
+      ? 'memory filed to your Organization graph — decisions and findings your agent saves'
+      : 'memories filed to your Organization graph — decisions and findings your agent saves',
   }
 }
 

@@ -94,6 +94,10 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_ops_safety",
     "test_per_session_census",
     "test_pre_migration_safety",
+    # #3350: the embedded lane's socket timeout / retry-bound assertions are
+    # embedded-only (a redirected construction would run against the docker
+    # server, where none of them mean anything).
+    "test_projection_embedded_socket_timeout",
     "test_projection_lifecycle",
     "test_reaper",
     "test_reaper_orphan",
@@ -400,6 +404,12 @@ def _journal_append(name: str) -> None:
     wiring tests drive the REAL file journal). The product-side writer
     (tortoise.projection._journal_append_product) covers product seams
     (redirect/from_uri); in a normal session both write the same file.
+
+    Failure policy (#3214): the journal write is the OWNERSHIP CONTRACT — a
+    minted graph that cannot be journaled is UNOWNED, invisible to every live
+    peer's scope=None sweep, which may therefore delete it. An OSError
+    therefore RAISES (it used to be a silent no-op at DEBUG) so the session
+    stops at the first unowned mint; the no-journal-path no-op is unchanged.
     """
     _JOURNAL.append(name)
     path = _journal_file()
@@ -410,9 +420,26 @@ def _journal_append(name: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a") as fh:
             fh.write(name + "\n")
-    except OSError:
-        logging.getLogger(__name__).debug(
-            "journal append skipped for %r (%r)", name, path)
+    except OSError as e:
+        # #3214: the journal write is the OWNERSHIP CONTRACT, not hygiene
+        # bookkeeping. A minted graph that cannot be journaled is UNOWNED:
+        # every live peer's scope=None sweep finds no record of it and may
+        # delete it — the cross-session flake #3074 exists to stop. The old
+        # policy (a silent no-op logged at DEBUG) left that state invisible
+        # for the whole session. This RAISES so the session stops at the first
+        # unowned mint instead of letting the shared server accumulate graphs
+        # a peer sweep may destroy. "Treat as protected" is NOT an option: a
+        # peer's only ownership channel IS this file, and this write is what
+        # failed — there is nothing cross-process to fall back to (in-process,
+        # the session may always sweep its own graphs).
+        raise RuntimeError(
+            f"session journal append failed for {name!r} ({path!r}): {e!r} — "
+            f"the graph is minted but UNOWNED: a live peer's scope=None "
+            f"sweep has no record of it and may delete it (#3214). Stopping "
+            f"at the first mint whose ownership could not be recorded; the "
+            f"caller must drop any graph it already created (see #3390 for "
+            f"the write-ahead fix)."
+        ) from e
 
 
 def _created_since_last_wipe() -> set[str]:
@@ -456,6 +483,73 @@ def _projection_host(proj) -> str | None:
     return host
 
 
+def _live_peer_session_graphs() -> set[str]:
+    """Graph names journaled by a LIVE session OTHER than this process.
+
+    #3074: test graphs are server-GLOBAL names (the redirect derives
+    ``test_<stem>_<hash>`` on one shared Docker FalkorDB), and every
+    migrated test graph is ``test_``-prefixed — so a prefix-wide sweep is
+    indistinguishable from a cross-session wipe. A ``scope=None``
+    (server-global) sweep used to DETACH-DELETE every live peer's graphs,
+    which surfaces as a random test losing the nodes it wrote moments
+    earlier (``test_falkor_apply_points_merged``: ``count(a)==0``).
+    ``tests/test_wipe_server.py`` calls ``wipe_server(proj)`` (scope=None)
+    directly, so any concurrently running session's graphs were fair game.
+
+    Ownership is the session journal (the single source of truth for
+    graphs a session minted, cycle-8 P1-2) keyed by the LIVE session
+    nonces from ``active_suite_markers()``. THIS process's own nonce is
+    skipped: a session may always sweep its own graphs. Embedded
+    (redislite) markers carry a random uuid nonce with no journal — they
+    contribute nothing, which is correct (an embedded DB is not on the
+    server).
+    """
+    # #3214: the one-shot form of the ownership primitive. ``wipe_server``
+    # uses the two halves directly — the marker scan ONCE, then the journal
+    # reads per graph — because the journal CONTENTS are the only part of
+    # ownership a peer can change inside its deletion loop.
+    return _peer_journaled_graphs(_live_peer_journal_files())
+
+
+def _live_peer_journal_files() -> list[str]:
+    """Journal file paths of the LIVE peer sessions (the EXPENSIVE half).
+
+    #3214: split out of ``_live_peer_session_graphs`` so ``wipe_server`` can
+    pay the marker scan ONCE and then re-read only the cheap journal FILES
+    immediately before each delete. ``active_suite_markers`` is the costly
+    part — a directory scan plus a per-marker pid/start-time liveness probe
+    (which shells out), so calling the composition per graph is not an
+    option. The live-session SET is also stable across a deletion loop, and a
+    peer that starts DURING enumeration is still picked up because
+    ``wipe_server`` resolves this AFTER ``list_graphs()``.
+    """
+    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, active_suite_markers
+    ours = os.environ.get("TORTOISE_TEST_SESSION", "")
+    paths: list[str] = []
+    for marker in active_suite_markers():
+        token = marker.get("token") or ""
+        if "-" not in token:
+            continue
+        nonce = token.split("-", 1)[1]
+        if not nonce or nonce == ours:
+            continue  # our own session — its graphs are ours to sweep
+        paths.append(os.path.join(ACTIVE_SUITES_DIR,
+                                  f"{nonce}.graphs.jsonl"))
+    return paths
+
+
+def _peer_journaled_graphs(paths: list[str]) -> set[str]:
+    """The union of the given (live-peer) journal files' graph names.
+
+    The CHEAP half: re-run per graph inside the deletion loop, so the
+    protection cannot be stale by the length of the loop (#3214).
+    """
+    owned: set[str] = set()
+    for path in paths:
+        owned.update(_read_journal_file(path))
+    return owned
+
+
 def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None:
     """Server-mode hermeticity wipe (epic #1647, D-4).
 
@@ -467,7 +561,13 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
     scope (the session's created set, cycle-3 P1-7): when given, ONLY names
     in the scope are considered — a per-test wipe never blind-wipes another
     concurrent session's live graphs. scope=None is the server-global sweep,
-    reserved for the session-end/last-suite-standing sweep ONLY.
+    reserved for the session-end/last-suite-standing sweep ONLY — and since
+    #3074 it also SPARES every graph journaled by a LIVE PEER session
+    (``_live_peer_journal_files`` + ``_peer_journaled_graphs``), so no caller
+    can destroy a concurrently running session's graphs by accident. #3214:
+    the peer journals are re-read immediately before EACH graph's DETACH
+    (not snapshotted once up front), because the journal is a file another
+    process appends to — see the note at the loop.
 
     drop=True (cycle-4 P1-9): after DETACH, GRAPH.DELETE the wiped names via
     graph.delete() so server GRAPH.LIST stays bounded (E2E-7). Per-test
@@ -482,10 +582,21 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
         raise RuntimeError(
             f"wipe_server() refuses non-loopback host {host!r} — test wipes "
             f"are local-only (decision D-4)")
+    # #3074: the scope=None sweep is the ONLY path that names no graphs up
+    # front, so it is the ONLY one that can land on a live peer's graph.
+    # An explicit scope is journal-derived (the caller's own session).
+    is_global = scope is None
     failures: list[tuple[str, Exception]] = []
     dropped: list[str] = []
     default_graph = _uri_default_graph_name()
-    for g in proj.db.list_graphs() or []:
+    # #3214: enumerate FIRST, then resolve the live peers' journals. The old
+    # order snapshotted the protected set BEFORE enumerating, so a peer graph
+    # minted in that gap was visible to the loop yet already outside the
+    # snapshot — and swept. Resolving after enumeration also picks up a peer
+    # session that started while we were listing.
+    graphs = list(proj.db.list_graphs() or [])
+    peer_journals = _live_peer_journal_files() if is_global else []
+    for g in graphs:
         if scope is not None and g not in scope:
             continue  # cycle-3 P1-7: per-test wipes touch only the session's set
         # Cycle-8 P1-1: per-test scopes NEVER DETACH the shared URI-default
@@ -497,6 +608,17 @@ def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None
             continue
         if not g.startswith(("test_", "tortoise_test")):
             continue  # fail-closed: never wipe a non-test graph
+        # #3074/#3214: re-read the live peers' journals IMMEDIATELY before
+        # this graph's DETACH. The up-front snapshot's window was
+        # enumerate→delete for EVERY graph; re-reading per graph narrows it to
+        # re-read→delete for ONE. (The marker scan itself runs once above —
+        # the journal CONTENTS are the only part of ownership a peer can
+        # change inside the loop.) Still NOT atomic — see #3214 for the
+        # residual: ownership lives in a local file written by another
+        # process, and the delete is a server command on a different channel,
+        # with no conditional/transactional delete spanning the two.
+        if peer_journals and g in _peer_journaled_graphs(peer_journals):
+            continue  # a live PEER session owns this graph
         try:
             proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
         except Exception as e:  # P2-7: collect + re-raise, never pass silently
@@ -711,17 +833,25 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
                            skip_on_non_loopback=skip_on_non_loopback)
 
 
-def _team_sweep_allowed(uri: str) -> bool:
-    """#1686 (review P1-1): may the team_* stray pass run against `uri`?
+# The product's own mint namespace, for the journal-blind stray pass below.
+# `org_` is current (tenancy rename, #3543); `team_` is retained so an
+# opted-in run still reclaims graphs minted before the rename. Both identify
+# REAL tenant graphs — which is why the pass is opt-in only.
+_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
 
-    team_<name> is the PRODUCT's own mint namespace (hosted parity: real
-    tenant graphs are named team_...). A blanket team_* delete on a shared
-    or dev docker would destroy legitimate product data — the pre-#1686
-    design deliberately kept wipes fail-closed to test_/tortoise_test_
-    prefixes. Allowed ONLY via an explicit operator opt-in
-    (TORTOISE_TEST_SWEEP_TEAM_STRAYS=1). Journaled team_* graphs are always
-    dropped via _sweep_drop (the journal is the ownership record) — this
-    gate protects only the journal-blind residual pass.
+
+def _team_sweep_allowed(uri: str) -> bool:
+    """#1686 (review P1-1): may the product-namespace stray pass run on `uri`?
+
+    The product's own mint namespace (hosted parity: real tenant graphs) is
+    the _PRODUCT_GRAPH_PREFIXES family — `org_` since the tenancy rename
+    (#3543), `team_` for graphs minted before it. A blanket delete there on
+    a shared or dev docker would destroy legitimate product data — the
+    pre-#1686 design deliberately kept wipes fail-closed to
+    test_/tortoise_test_ prefixes. Allowed ONLY via an explicit operator
+    opt-in (TORTOISE_TEST_SWEEP_TEAM_STRAYS=1). Journaled product-namespace
+    graphs are always dropped via _sweep_drop (the journal is the ownership
+    record) — this gate protects only the journal-blind residual pass.
 
     #1884: the URI-path inference ("test" substring in the graph name) is
     RETRACTED. The longmem_eval re-validation runs against the SAME
@@ -729,7 +859,7 @@ def _team_sweep_allowed(uri: str) -> bool:
     container that concurrent docker-lane pytest sessions use; a session
     ending last-suite-standing inferred "dedicated test DB" from the path
     and the journal-blind pass DETACH-DELETEd + GRAPH.DELETEd the eval's
-    LIVE per-question graphs (team_default__default__{qid}) mid-ingest —
+    LIVE per-question graphs (then minted team_default__default__{qid}) mid-ingest —
     silent write loss (writes succeed client-side, the post-ingest census
     reads an empty namespace, gate red). A test-named path on a shared
     server is NOT an ownership record; the explicit opt-in is (CI's
@@ -739,22 +869,24 @@ def _team_sweep_allowed(uri: str) -> bool:
 
 
 def _sweep_team_strays(proj, uri: str) -> list[str]:
-    """Drop journal-blind stray team_* graphs (#1686 closure).
+    """Drop journal-blind stray product-namespace graphs (#1686 closure).
 
-    Guarded by _team_sweep_allowed(uri) — never on a shared/dev docker
-    (explicit opt-in only since #1884; the URI-path "test" inference
-    retracted — see _team_sweep_allowed). DETACH+DELETE per graph,
-    log-and-continue; returns the dropped names.
-    Runs AFTER wipe_server in _leftover_sweep (journaled team_* names were
-    already dropped by _sweep_drop; this closes the raw-select_graph class)."""
+    Matches _PRODUCT_GRAPH_PREFIXES. Guarded by _team_sweep_allowed(uri) —
+    never on a shared/dev docker (explicit opt-in only since #1884; the
+    URI-path "test" inference retracted — see _team_sweep_allowed).
+    DETACH+DELETE per graph, log-and-continue; returns the dropped names.
+    Runs AFTER wipe_server in _leftover_sweep (journaled product-namespace
+    names were already dropped by _sweep_drop; this closes the
+    raw-select_graph class)."""
     if not _team_sweep_allowed(uri):
         logging.getLogger(__name__).info(
-            "leftover team_* pass SKIPPED — %r (set "
-            "TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)", uri)
+            "leftover %s pass SKIPPED — %r (set "
+            "TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)",
+            "/".join(_PRODUCT_GRAPH_PREFIXES), uri)
         return []
     dropped: list[str] = []
     for g in proj.db.list_graphs() or []:
-        if not g.startswith("team_"):
+        if not g.startswith(_PRODUCT_GRAPH_PREFIXES):
             continue
         try:
             proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
@@ -762,19 +894,20 @@ def _sweep_team_strays(proj, uri: str) -> list[str]:
             dropped.append(g)
         except Exception as e:
             logging.getLogger(__name__).warning(
-                "leftover team_* drop failed for %r: %r", g, e)
+                "leftover product-namespace drop failed for %r: %r", g, e)
     return dropped
 
 
 def _leftover_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
     """LAST-suite-standing FULL sweep: every test-prefixed graph on the
     server (wipe_server scope=None → global, drop=True) PLUS, since #1686,
-    journal-blind stray team_* graphs — but ONLY when _team_sweep_allowed
-    (an explicit TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in; the URI-path
-    inference is retracted since #1884): team_* is the product's mint
-    namespace and a blanket delete on a shared/dev docker would destroy
-    real tenant data (review P1-1). Log-and-continue on errors — hygiene
-    never fails the suite."""
+    journal-blind stray product-namespace graphs (org_*/team_*) — but ONLY
+    when _team_sweep_allowed (an explicit
+    TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in; the URI-path inference is
+    retracted since #1884): that family is the product's mint namespace and
+    a blanket delete on a shared/dev docker would destroy real tenant data
+    (review P1-1). Log-and-continue on errors — hygiene never fails the
+    suite."""
     with _sweep_proj(uri) as proj:
         from tortoise.projection import _is_loopback_host
         host = _projection_host(proj)

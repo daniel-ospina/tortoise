@@ -90,6 +90,12 @@ class TestSemanticsTable:
     def test_last_decide_attempt_lww(self):
         assert PER_KEY_SEMANTICS["last_decide_attempt"] == LWW
 
+    def test_fork_unsure_at_lww(self):
+        # #2407: the deferral record is LWW — a repeat "not sure yet" answer
+        # re-stamps, never a set-once 409 (the set-once contract belongs to
+        # the fork VALUE, which stays None until an explicit self/build pick).
+        assert PER_KEY_SEMANTICS["fork_unsure_at"] == LWW
+
     def test_status_version_server_owned(self):
         assert PER_KEY_SEMANTICS["status"] == SERVER_OWNED
         assert PER_KEY_SEMANTICS["version"] == SERVER_OWNED
@@ -101,6 +107,7 @@ class TestSemanticsTable:
         assert {
             "fork", "status", "version", "completed_steps",
             "member_progress", "last_decide_attempt", "compact",
+            "fork_unsure_at",
         } == FLOW_KEYS
 
     def test_onboarding_complete_is_not_flow(self):
@@ -143,6 +150,44 @@ class TestCompletionGate:
         assert completion_gate_satisfied(done, None, False) is True
         missing = {"harness-connected", "first-points-filed", "decide-completed"}
         assert completion_gate_satisfied(missing, None, False) is False
+
+    def test_fork_none_with_unsure_never_auto_closes_as_self(self):
+        # #2407: "not sure yet — decide later" recorded (fork still None) —
+        # the gate must NOT evaluate on the read-time self default, even with
+        # the FULL self checklist done. Onboarding stays open until the org
+        # answers the fork (the Setup-guide fork row is the blocker).
+        self_done = {"team-named", "harness-connected", "first-points-filed",
+                     "decide-completed"}
+        assert completion_gate_satisfied(
+            self_done, None, False, fork_unsure_at=True) is False
+
+    def test_unsure_without_checklist_incomplete(self):
+        done = {"harness-connected"}
+        assert completion_gate_satisfied(
+            done, None, False, fork_unsure_at=True) is False
+
+    def test_unsure_with_unknown_fork_still_unsatisfied(self):
+        self_done = {"team-named", "harness-connected", "first-points-filed",
+                     "decide-completed"}
+        assert completion_gate_satisfied(
+            self_done, "bogus", False, fork_unsure_at=True) is False
+
+    def test_persisted_fork_wins_over_stale_unsure_marker(self):
+        # #2407 invariant: fork_unsure_at is meaningful only while fork IS
+        # NULL — a persisted fork evaluates its own gate regardless of the
+        # marker (the checkpoint clears it on fork-set, but reads never trust
+        # it).
+        done = {"harness-connected", "first-points-filed", "catalog-presented"}
+        assert completion_gate_satisfied(
+            done, "build", False, fork_unsure_at=True) is True
+
+    def test_compact_first_ignores_unsure_marker(self):
+        # compact-first: a compact org never sees the fork card (the server
+        # refuses to record unsure for compact orgs) and needs only the
+        # reduced checklist — an unsure marker can never block a compact org.
+        done = {"harness-connected", "first-points-filed"}
+        assert completion_gate_satisfied(
+            done, None, True, fork_unsure_at=True) is True
 
     def test_compact_first_wins_over_fork(self):
         # compact + any fork → reduced checklist (compact-first)
@@ -199,10 +244,12 @@ class TestFlowShapes:
         d = onboarding_state.flow_defaults()
         assert set(d) == {
             "fork", "status", "version", "completed_steps",
-            "member_progress", "last_decide_attempt", "compact"}
+            "member_progress", "last_decide_attempt", "compact",
+            "fork_unsure_at"}
         assert d["status"] == "active"
         assert d["version"] == 1
         assert d["completed_steps"] == []
+        assert d["fork_unsure_at"] is None
 
     def test_flow_unavailable_markers(self):
         u = onboarding_state.flow_unavailable()

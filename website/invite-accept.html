@@ -101,7 +101,7 @@
       <div class="card">
         <div class="invite-summary">
           <div class="org-logo"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></div>
-          <h1>You're invited to <span id="team-name" style="color:var(--accent)">…</span></h1>
+          <h1>You're invited to <span id="org-name" style="color:var(--accent)">…</span></h1>
           <div class="inviter"><span class="id" id="inviter-id">…</span> invited you to join their organization's memory graph in Tortoise</div>
         </div>
         <div class="perks">
@@ -135,15 +135,15 @@
           <span id="expiry-note">This invitation expires in 7 days and can only be used once.</span>
         </div>
       </div>
-      <div class="footer-note">By accepting, you agree to the <a href="https://tortoise.premiselabs.co/terms">Terms of Service</a> and <a href="https://tortoise.premiselabs.co/privacy">Privacy Policy</a>.</div>
+      <div class="footer-note">By accepting, you agree to the <a href="https://tortoise.premiselabs.co/tos">Terms of Service</a> and <a href="https://tortoise.premiselabs.co/privacy">Privacy Policy</a>.</div>
     </div>
 
     <!-- STATE: success -->
     <div id="state-success" style="display:none">
       <div class="card">
         <div class="checkmark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg></div>
-        <h1 class="success-title">Welcome to <span id="success-team">the organization</span></h1>
-        <div class="success-sub">You've joined <strong id="success-team2">…</strong> on Tortoise.</div>
+        <h1 class="success-title">Welcome to <span id="success-org">the organization</span></h1>
+        <div class="success-sub">You've joined <strong id="success-org2">…</strong> on Tortoise.</div>
         <button class="btn-primary" onclick="window.location.href='https://app.premiselabs.co'">Open dashboard</button>
       </div>
     </div>
@@ -172,9 +172,12 @@
         .then(function (r) { if (!r.ok) throw new Error('bad'); return r.json(); })
         .then(function (data) {
           invite = data;
-          $('team-name').textContent = data.team_name;
-          $('success-team').textContent = data.team_name;
-          $('success-team2').textContent = data.team_name;
+          // #3543: the /v1/invites/info response key is `org_name` (the
+          // tenancy rename); reading the old `team_name` rendered the literal
+          // string "undefined" in the invite headline.
+          $('org-name').textContent = data.org_name;
+          $('success-org').textContent = data.org_name;
+          $('success-org2').textContent = data.org_name;
           $('inviter-id').textContent = data.inviter_email;
           if (data.expires_at) {
             var exp = new Date(data.expires_at);

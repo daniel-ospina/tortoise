@@ -36,11 +36,11 @@ class _Channels:
     def close_issue(self, number, comment=None):
         self.issues.pop(number, None)
 
-    def search_open(self, kind, team_id=""):
+    def search_open(self, kind, org_id=""):
         return [
             n for n, t in self.issues.items()
             if f"[DR] {kind}" in t
-            and (team_id == "" or t.endswith(f" — {team_id}"))
+            and (org_id == "" or t.endswith(f" — {org_id}"))
         ]
 
     def push_telegram(self, text):
@@ -61,7 +61,7 @@ def _store(ch) -> AlertStore:
 
 def _status(**kw):
     base = dict(
-        now=FIXED, teams=[], r2_teams=[], state_teams=[], newest_ts_by_team={},
+        now=FIXED, orgs=[], r2_orgs=[], state_orgs=[], newest_ts_by_org={},
         simulate_age=None, driver_heartbeat_ts=None, r2_ok=True, known_good=True,
         stale_threshold_min=90, driver_down_threshold_min=240,
         in_grace=False, kill_switch_off=False,
@@ -71,21 +71,21 @@ def _status(**kw):
 
 
 def test_status_never_for_seam_team_without_archive():
-    s = _status(teams=["team_a"])
+    s = _status(orgs=["team_a"])
     assert s["per_team"]["team_a"] == "never"
 
 
 def test_status_stale_and_ok():
-    s = _status(teams=["team_a", "team_b"], r2_teams=["team_a", "team_b"],
-                state_teams=["team_a", "team_b"],
-                newest_ts_by_team={"team_a": _ts(1), "team_b": _ts(100)})
+    s = _status(orgs=["team_a", "team_b"], r2_orgs=["team_a", "team_b"],
+                state_orgs=["team_a", "team_b"],
+                newest_ts_by_org={"team_a": _ts(1), "team_b": _ts(100)})
     assert s["per_team"]["team_a"] == "ok"
     assert s["per_team"]["team_b"] == "stale"
 
 
 def test_status_stamp_missing():
-    s = _status(teams=["team_a"], r2_teams=["team_a"], state_teams=[],
-                newest_ts_by_team={"team_a": _ts(1)})
+    s = _status(orgs=["team_a"], r2_orgs=["team_a"], state_orgs=[],
+                newest_ts_by_org={"team_a": _ts(1)})
     assert s["per_team"]["team_a"] == "stamp_missing"
 
 
@@ -113,14 +113,14 @@ def test_status_driver_down_suppressed_by_kill_switch():
 
 
 def test_status_simulate_forces_stale():
-    s = _status(teams=["team_a"], r2_teams=["team_a"], state_teams=["team_a"],
-                newest_ts_by_team={"team_a": _ts(1)},
+    s = _status(orgs=["team_a"], r2_orgs=["team_a"], state_orgs=["team_a"],
+                newest_ts_by_org={"team_a": _ts(1)},
                 simulate_age=_ts(200))
     assert s["per_team"]["team_a"] == "stale"
 
 
 def test_status_backup_set_missing():
-    s = _status(state_teams=["team_x"], r2_teams=[])
+    s = _status(state_orgs=["team_x"], r2_orgs=[])
     assert s["backup_set_missing"] == ["team_x"]
 
 
@@ -133,7 +133,7 @@ def _seed_archive(storage, team: str, hours_ago: float) -> None:
     ts = _ts(hours_ago)
     key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     backup_id = f"{team}/{key}"
-    manifest = {"backup_id": backup_id, "team_id": team, "graph_name": f"team_{team}",
+    manifest = {"backup_id": backup_id, "org_id": team, "graph_name": f"org_{team}",
                 "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
                 "sha256": "0" * 64}
     storage.upload(f"backups/{backup_id}/manifest.json", json.dumps(manifest).encode())
@@ -147,12 +147,12 @@ def _seed_state(storage, team: str) -> None:
     )
 
 
-def _watcher(storage, ch, *, grace_min=0, teams=("team_a",), now_fn=None,
+def _watcher(storage, ch, *, grace_min=0, orgs=("team_a",), now_fn=None,
               graph_provider=None) -> BackupWatcher:
     store = _store(ch)
     return BackupWatcher(
         storage, store,
-        team_provider=lambda: list(teams),
+        org_provider=lambda: list(orgs),
         state_reader=lambda t: {},
         graph_provider=graph_provider,
         driver_heartbeat_reader=lambda: {},
@@ -182,7 +182,7 @@ def test_watcher_opens_stale_incident_and_resolves():
 def test_watcher_never_fires_on_chronic_no_teams():
     ch = _Channels()
     storage = MemoryStorage()
-    w = _watcher(storage, ch, teams=())
+    w = _watcher(storage, ch, orgs=())
     status = w.poll()
     assert status["no_teams"] is True
     assert ch.issues == {}
@@ -195,7 +195,7 @@ def test_watcher_unknown_silence_on_r2_down_fresh():
             raise ConnectionError("r2 down")
 
     ch = _Channels()
-    w = _watcher(_Boom(), ch, teams=("team_a",))
+    w = _watcher(_Boom(), ch, orgs=("team_a",))
     status = w.poll()
     assert status["unknown"] is True
     assert ch.issues == {}
@@ -220,7 +220,7 @@ def test_watcher_driver_down_opens_incident():
     store = _store(ch)
     w = BackupWatcher(
         storage, store,
-        team_provider=lambda: [], state_reader=lambda t: {},
+        org_provider=lambda: [], state_reader=lambda t: {},
         driver_heartbeat_reader=_hb,
         stale_threshold_min=90, driver_down_threshold_min=240,
         grace_min=0, now=lambda: FIXED,
@@ -285,7 +285,7 @@ def _seed_graph_archive(storage, team: str, gid: str, hours_ago: float) -> None:
     ts = _ts(hours_ago)
     key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     backup_id = f"{team}/{gid}/{key}"
-    manifest = {"backup_id": backup_id, "team_id": team, "graph_id": gid,
+    manifest = {"backup_id": backup_id, "org_id": team, "graph_id": gid,
                 "graph_name": f"g-{gid}", "created_at": ts.isoformat(),
                 "node_count": 1, "edge_count": 0, "sha256": "0" * 64}
     storage.upload(f"backups/{backup_id}/manifest.json",
@@ -500,14 +500,14 @@ def test_watcher_legacy_custom_flat_does_not_gate_team_freshness():
     must not keep team freshness green while the default is stale."""
     storage = MemoryStorage()
     # default per-graph state names the default graph
-    _seed_default_state_with_name(storage, "team_a", "team_team_a")
+    _seed_default_state_with_name(storage, "team_a", "org_team_a")
     # stale DEFAULT flat dump
     _seed_archive(storage, "team_a", 200)
     # FRESH pre-#2313 custom-era flat dump (custom namespace as graph_name)
     ts = _ts(0.2)
     key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     backup_id = f"team_a/{key}"
-    m = {"backup_id": backup_id, "team_id": "team_a",
+    m = {"backup_id": backup_id, "org_id": "team_a",
          "graph_name": "team_team_a_g_custom",  # a custom namespace
          "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
          "sha256": "0" * 64}
@@ -556,7 +556,7 @@ def _seed_flat_manifest(storage, team: str, graph_name: str,
     key = (f"{ts.strftime('%Y%m%dT%H%M%S')}"
            f"{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}")
     backup_id = f"{team}/{key}"
-    m = {"backup_id": backup_id, "team_id": team, "graph_name": graph_name,
+    m = {"backup_id": backup_id, "org_id": team, "graph_name": graph_name,
          "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
          "sha256": "0" * 64}
     storage.upload(f"backups/{backup_id}/manifest.json",
@@ -614,7 +614,7 @@ def test_watcher_transient_manifest_read_failure_no_fabricated_stale():
     pre-#2313 key-derived parity — exists ⇒ counts this cycle."""
     ch = _Channels()
     storage = _ManifestBoomStorage()
-    _seed_default_state_with_name(storage, "team_a", "team_team_a")
+    _seed_default_state_with_name(storage, "team_a", "org_team_a")
     _seed_state(storage, "team_a")  # team mirror (team surface)
     _seed_archive(storage, "team_a", 0.5)  # fresh flat default (0.5 h)
     w = _watcher(storage, ch)

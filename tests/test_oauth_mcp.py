@@ -16,33 +16,46 @@ the browser-session JWT verification is stubbed via hosted_api.verify_session_jw
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import os
 import secrets
 import tempfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 
+import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.routing import Mount
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.hosted_api import app, verify_session_jwt  # noqa: E402, F401, I001, RUF100
+from tests._http_fixtures import patched_tortoise_sdk
+from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
+from tortoise import hosted_api as _ha_mod  # noqa: E402, RUF100
+from tortoise.hosted_api import (  # noqa: E402, F401, I001, RUF100
+    RateLimitMiddleware,
+    app,
+    verify_session_jwt,
+)
 from tortoise.mcp_server import create_http_app  # noqa: E402, RUF100
 from tortoise.oauth import (  # noqa: E402, RUF100
     ACCESS_TOKEN_PREFIX,
+    SCOPES_ACCEPTED,
+    SCOPES_SUPPORTED,
+    _sha256,
+    _valid_redirect_uri,
     mcp_resource_url,
-    team_resource_url,
+    org_resource_url,
 )
 
-from tests._http_fixtures import patched_tortoise_sdk
-from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
-
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
 
@@ -62,8 +75,8 @@ TEAM_TEAM = {
 }
 
 
-def _member(user_id: str, team_id: str, role: str = "owner") -> dict:
-    return {"user_id": user_id, "team_id": team_id, "role": role,
+def _member(user_id: str, org_id: str, role: str = "owner") -> dict:
+    return {"user_id": user_id, "org_id": org_id, "role": role,
             "status": "active"}
 
 
@@ -71,7 +84,7 @@ def _join_second_team(api_client) -> None:
     """Seed a second active membership for _U1 (team-team-001) on the
     fixture control plane."""
     _, cp = api_client
-    cp.tables["team_memberships"].append(
+    cp.tables["org_memberships"].append(
         _member(_U1, "team-team-001", "member"))
 
 
@@ -91,9 +104,26 @@ def _pkce() -> tuple[str, str]:
     return verifier, challenge
 
 
+def _consent(tc, *, client_id: str, redirect_uri: str, challenge: str,
+             state: str = "st-123", resource: str | None = None) -> httpx.Response:
+    """POST /oauth/consent without asserting — the caller asserts the
+    outcome, so negative cases reuse the same request shape."""
+    return tc.post("/oauth/consent", json={
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+        "scope": "mcp",
+        "resource": resource,
+    }, headers={"Authorization": "Bearer fake-session-jwt"})
+
+
 def _auth_code_flow(tc, cp, *, user_id: str = _U1,
                     resource: str | None = None,
-                    client_id: str | None = None) -> dict:
+                    client_id: str | None = None,
+                    redirect_uri: str = REDIRECT) -> dict:
     """Register → consent → return the auth code + client_id (P2 path).
 
     Assumes the caller has stubbed hosted_api.verify_session_jwt.
@@ -101,16 +131,8 @@ def _auth_code_flow(tc, cp, *, user_id: str = _U1,
     if client_id is None:
         client_id = _register_client(tc)["client_id"]
     verifier, challenge = _pkce()
-    r = tc.post("/oauth/consent", json={
-        "client_id": client_id,
-        "redirect_uri": REDIRECT,
-        "response_type": "code",
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": "st-123",
-        "scope": "mcp",
-        "resource": resource,
-    }, headers={"Authorization": "Bearer fake-session-jwt"})
+    r = _consent(tc, client_id=client_id, redirect_uri=redirect_uri,
+                 challenge=challenge, resource=resource)
     assert r.status_code == 200, r.text
     return {"client_id": client_id, "code": r.json()["code"],
             "verifier": verifier, "challenge": challenge}
@@ -154,8 +176,8 @@ def _exchange(tc, *, client_id: str, code: str, verifier: str,
 def supabase_cp(monkeypatch) -> FakeControlPlane:
     """Supabase mode on + fake control plane seeded with two teams."""
     cp = FakeControlPlane({
-        "teams": [dict(TEAM_FREE), dict(TEAM_TEAM)],
-        "team_memberships": [_member(_U1, "team-free-001")],
+        "organizations": [dict(TEAM_FREE), dict(TEAM_TEAM)],
+        "org_memberships": [_member(_U1, "team-free-001")],
         "api_keys": [],
     })
     _enable_supabase(monkeypatch, cp)
@@ -428,10 +450,10 @@ class TestAuthorizePage:
 
     def test_consent_html_team_picker_wiring(self, api_client):
         html = self._consent_html(api_client)
-        assert 'id="team-select"' in html
+        assert 'id="org-select"' in html
         # the Authorize POST carries the PICKER selection first, then the
         # client-declared resource (single-team flow unchanged)
-        assert "resource: teamResource || PARAMS.resource || null" in html
+        assert "resource: orgResource || PARAMS.resource || null" in html
         # options carry each membership's team-scoped resource as the value
         assert "opt.value = m.resource" in html
         assert "memberships.forEach" in html
@@ -440,10 +462,10 @@ class TestAuthorizePage:
         html = self._consent_html(api_client)
         # select present-but-hidden in the shared markup; only unhidden for
         # memberships.length > 1
-        assert 'id="team-select" style="display:none' in html
+        assert 'id="org-select" style="display:none' in html
         assert "memberships && memberships.length > 1" in html
-        assert 'id="team-line"' in html
-        assert html.count('id="team-select"') == 1
+        assert 'id="org-line"' in html
+        assert html.count('id="org-select"') == 1
 
     def test_consent_html_authorize_disabled_in_markup(self, api_client):
         html = self._consent_html(api_client)
@@ -458,11 +480,11 @@ class TestAuthorizePage:
         html = self._consent_html(api_client)
         # no silent auto-bind: a leading disabled placeholder forces an explicit
         # change event, and teamResource is set ONLY in the change handler
-        assert "Choose a team…" in html
+        assert "Choose an org…" in html
         assert "placeholder.disabled = true" in html
-        assert 'teamResource = teamSelectEl.value' in html
-        assert "teamResource = null" in html  # reset at every run entry
-        assert "if (teamResource) enableAuthorize(); else disableAuthorize();" in html
+        assert 'orgResource = orgSelectEl.value' in html
+        assert "orgResource = null" in html  # reset at every run entry
+        assert "if (orgResource) enableAuthorize(); else disableAuthorize();" in html
 
     def test_consent_html_401_recovery_refresh_first_no_signout(self, api_client):
         html = self._consent_html(api_client)
@@ -489,7 +511,7 @@ class TestAuthorizePage:
         # scratch (no duplicate rows on sequential re-runs)
         assert "let previewInFlight = false" in html
         assert "if (previewInFlight) return;" in html
-        assert "while (teamSelect.firstChild) teamSelect.removeChild" in html
+        assert "while (orgSelect.firstChild) orgSelect.removeChild" in html
         assert "onAuthStateChange" in html
         assert 'event === "INITIAL_SESSION"' in html
 
@@ -539,6 +561,355 @@ class TestAuthorizePage:
         assert "error=" in r.headers["location"]
 
 
+class TestLoopbackPortAgnostic:
+    """#2846 — RFC 8252 §7.3: for loopback redirect URIs the AS must ignore the
+    port, because a native client (Claude Code CLI) binds an ephemeral port at
+    request time and cannot know it at registration. Anthropic's connector docs
+    require the same.
+
+    Live repro before the fix: registering ``http://localhost/callback`` and
+    authorizing with ``http://localhost:3118/callback`` returned
+    ``400 redirect_uri is not registered for this client`` — identical to the
+    response for a genuinely wrong PATH, so the AS could not even distinguish
+    the two cases.
+    """
+
+    PORTLESS = "http://localhost/callback"
+
+    def test_full_flow_with_ephemeral_port(self, api_client, session_user):
+        """The issue's indicator: register WITHOUT a port, complete consent and
+        token exchange presenting an ephemeral port at every step."""
+        tc, cp = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        assert reg["redirect_uris"] == [self.PORTLESS]
+        presented = "http://localhost:3118/callback"
+        flow = _auth_code_flow(tc, cp, client_id=reg["client_id"],
+                               redirect_uri=presented)
+        r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                      verifier=flow["verifier"], redirect_uri=presented)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["access_token"].startswith(ACCESS_TOKEN_PREFIX)
+        assert body["token_type"] == "Bearer"
+        # The code is bound to the PRESENTED uri, so the token step's exact
+        # comparison (RFC 6749 §4.1.3) is satisfied without being loosened.
+        assert cp.tables["oauth_codes"][-1]["redirect_uri"] == presented
+
+    def test_authorize_page_accepts_ephemeral_port(self, api_client):
+        """The GET /oauth/authorize leg must also accept it (it validates
+        through the same helper). On rejection it redirects with ``error=``.
+
+        Also asserts the presented URI actually reached the rendered page's
+        embedded PARAMS — that embedding is what `redirectBack` later navigates
+        to, so a validation pass that silently dropped it would still fail the
+        real journey."""
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://localhost:3118/callback",
+            "response_type": "code", "state": "st-1",
+            "code_challenge": "x" * 43,
+            "code_challenge_method": "S256"},
+            follow_redirects=False)
+        assert r.status_code == 200, r.text
+        assert "error=" not in r.headers.get("location", "")
+        assert "localhost:3118" in r.text
+
+    def test_authorize_page_rejects_different_path(self, api_client):
+        """GET-level negative control, mirroring the consent-side one."""
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://localhost:3118/evil",
+            "response_type": "code", "state": "st-1",
+            "code_challenge": "x" * 43,
+            "code_challenge_method": "S256"},
+            follow_redirects=False)
+        assert "error=" in r.headers.get("location", "") or r.status_code == 400
+
+    def test_error_is_relayed_to_ephemeral_listener(self, api_client):
+        """REVIEW P2 — the invalid-params error path has its OWN open-redirect
+        guard, which used strict membership. A client that registered a PORTLESS
+        loopback URI therefore got a JSON 400 where its ephemeral listener was
+        waiting for a redirect, so the CLI could never surface the error. The
+        guard now uses the same matcher — and is still an open-redirect guard,
+        because the matcher refuses parse-differential input.
+        """
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        # response_type=token is invalid -> validate_authorize_params raises.
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://localhost:3118/callback",
+            "response_type": "token", "state": "st-1",
+            "code_challenge": "x" * 43,
+            "code_challenge_method": "S256"},
+            follow_redirects=False)
+        assert r.status_code in (302, 303, 307), r.text
+        loc = r.headers["location"]
+        assert loc.startswith("http://localhost:3118/callback")
+        assert "error=invalid_request" in loc
+
+    def test_error_path_does_not_echo_parser_differential(self, api_client):
+        """The error relay must not become a DIRECT open redirect: a
+        differential URI is refused by the matcher, so we return JSON rather
+        than a Location header pointing at the attacker."""
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://evil.example:8443\\@localhost/callback",
+            "response_type": "token", "state": "st-1"},
+            follow_redirects=False)
+        assert r.status_code == 400, r.text
+        assert "evil.example" not in r.headers.get("location", "")
+
+    def test_different_path_still_rejected(self, api_client, session_user):
+        """Negative control: the port is ignored, the PATH is not."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        _, challenge = _pkce()
+        r = _consent(tc, client_id=reg["client_id"],
+                     redirect_uri="http://localhost:3118/evil",
+                     challenge=challenge)
+        assert r.status_code == 400
+        assert "not registered" in r.json()["error_description"]
+
+    def test_host_is_not_relaxed(self, api_client, session_user):
+        """Only the PORT varies. ``127.0.0.1`` must not satisfy a registration
+        for ``localhost`` — both are loopback, but they are different hosts."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc, redirect_uris=[self.PORTLESS])
+        _, challenge = _pkce()
+        r = _consent(tc, client_id=reg["client_id"],
+                     redirect_uri="http://127.0.0.1:3118/callback",
+                     challenge=challenge)
+        assert r.status_code == 400
+        assert "not registered" in r.json()["error_description"]
+
+    def test_non_loopback_keeps_strict_exact_match(self, api_client, session_user):
+        """The hosted posture is unchanged for https: an explicit port is a
+        different string and must not match."""
+        tc, _ = api_client
+        session_user(_U1)
+        reg = _register_client(tc,
+                               redirect_uris=["https://app.example.com/callback"])
+        _, challenge = _pkce()
+        r = _consent(tc, client_id=reg["client_id"],
+                     redirect_uri="https://app.example.com:443/callback",
+                     challenge=challenge)
+        assert r.status_code == 400
+        assert "not registered" in r.json()["error_description"]
+
+
+class TestRedirectUriMatches:
+    """Unit coverage for the helper — the HTTP tests above prove it is wired,
+    these pin the predicate's boundaries directly."""
+
+    def test_loopback_port_ignored(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("http://localhost/callback", "http://localhost:3118/callback")
+        assert m("http://localhost:3118/callback", "http://localhost/callback")
+        assert m("http://127.0.0.1/cb", "http://127.0.0.1:8765/cb")
+        assert m("http://[::1]/cb", "http://[::1]:8765/cb")
+        assert m("http://localhost:1/cb", "http://localhost:2/cb")
+
+    def test_exact_match_still_true_for_non_loopback(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("https://app.example.com/cb", "https://app.example.com/cb")
+
+    def test_non_loopback_is_strict(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("https://app.example.com/cb", "https://app.example.com:443/cb")
+        assert not m("https://app.example.com/cb", "https://app.example.com/other")
+
+    def test_host_and_scheme_are_never_relaxed(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", "http://127.0.0.1:3118/cb")
+        assert not m("http://localhost/cb", "https://localhost:3118/cb")
+        # The relaxation keys on LOOPBACK, not on the http scheme — the issue's
+        # Target draws the boundary at "non-loopback URIs keep strict exact
+        # match". https-on-loopback is loopback, so the port rule applies to it
+        # too; scheme/host/path are still compared exactly. Pinned explicitly so
+        # this boundary is a decision rather than an accident.
+        assert m("https://localhost/cb", "https://localhost:3118/cb")
+
+    def test_path_query_and_fragment_are_compared(self):
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", "http://localhost:3118/evil")
+        assert not m("http://localhost/cb?x=1", "http://localhost:3118/cb?x=2")
+        assert not m("http://localhost/cb#a", "http://localhost:3118/cb#b")
+        assert m("http://localhost/cb?x=1", "http://localhost:3118/cb?x=1")
+
+    def test_non_string_inputs_never_raise(self):
+        """``redirect_uri`` is typed ``str | None`` at the call site, but a
+        corrupt row can hold anything — the helper must never raise.
+
+        ``123`` is the case where the isinstance guard is the ONLY protection
+        (``urlparse(None)`` does not raise — its ``.hostname`` is None, caught by
+        the hostname guard instead), so it is pinned separately from ``None``.
+        """
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", None)
+        assert not m(None, "http://localhost/cb")
+        assert not m("http://localhost/cb", 123)  # isinstance is the only guard
+        assert not m("http://localhost/cb", "")
+        assert not m("", "http://localhost:3118/cb")
+        assert not m("http://localhost/cb", "not a url")
+
+    def test_unparseable_input_returns_false(self):
+        """Actually exercises the ``except ValueError`` branch — an unbalanced
+        IPv6 bracket is one of the few inputs ``urlparse`` rejects outright.
+        (``"not a url"`` does NOT: it parses as a relative reference.)"""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", "http://[::1/cb")
+        assert not m("http://[::1/cb", "http://localhost/cb")
+
+    def test_hostless_uri_only_matches_itself(self):
+        """A hostless URI cannot be REGISTERED — `_valid_redirect_uri` requires
+        a hostname — so it can never enter `redirect_uris`. The exact-match
+        short-circuit runs before the hostname guard, which preserves the
+        pre-#2846 semantics for the equal case (a strict superset of behaviour)
+        while the guard still blocks any relaxation."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("http:///cb", "http:///cb")         # exact match, as before
+        assert not m("http:///cb", "http:///other")  # no host → no relaxation
+        assert not m("http:///cb", "http://localhost:1/cb")
+
+    def test_uppercase_host_and_scheme_relax(self):
+        """RFC 3986 §3.2.2 — the host is case-insensitive, so an uppercase
+        form must not defeat the relaxation."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("http://LOCALHOST/cb", "http://localhost:3118/cb")
+        assert m("HTTP://localhost/cb", "http://localhost:3118/cb")
+
+    def test_userinfo_must_match_exactly(self):
+        """Userinfo is compared, so a crafted userinfo cannot ride a loopback
+        registration. (`urlparse` takes the host after the LAST ``@``, so without
+        this check `http://evil@localhost/cb` would resolve to loopback.)"""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("http://localhost/cb", "http://evil@localhost:3118/cb")
+        assert not m("http://evil@localhost/cb", "http://localhost:3118/cb")
+        assert m("http://a@localhost/cb", "http://a@localhost:3118/cb")
+
+    def test_port_values_are_not_validated(self):
+        """Pinned deliberately: the matcher compares only that the port is
+        IGNORED, never that it is sane. ``urlparse`` raises on ``:abc`` only if
+        ``.port`` is touched, which this code never does, and a browser refuses
+        to navigate such a URL at all — so an insane port cannot become an
+        exfiltration path. Documented here so it is a known boundary."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert m("http://localhost/cb", "http://localhost:0/cb")
+        assert m("http://localhost/cb", "http://localhost:abc/cb")
+        assert m("http://localhost/cb", "http://localhost:99999/cb")
+
+    def test_unsafe_bytes_never_match(self):
+        r"""REVIEW P0 — a raw backslash moves the authority boundary between
+        Python's `urlsplit` and the browser's WHATWG parser, so
+        `http://evil.example\@localhost/cb` is host `localhost` to us and
+        `evil.example` to the browser. The code is delivered by navigating the
+        browser to the RAW string, so the pre-fix predicate validated that URI as
+        loopback and then handed the authorization code to the attacker.
+
+        The assertions are grouped by WHY they fail, because two review rounds
+        misattributed that. In particular the control characters are NOT
+        differentials: `urlsplit` strips tab/CR/LF exactly as a browser does, so
+        tab is refused by this gate only because the gate is broader than the
+        differential — not because the two parsers disagree.
+        """
+        from tortoise.oauth import _redirect_uri_matches as m
+        attack = "http://evil.example:8443\\@127.0.0.1/callback"
+
+        # ── Group 1: enforced by the byte gate ALONE ──────────────────────
+        # Each of these is mutation-verified to FAIL when
+        # `_unsafe_redirect_uri_bytes` is removed from `_redirect_uri_matches`.
+        #
+        # The exact-match short-circuit must also be gated, or a differential
+        # string already sitting in a client row bypasses the guard entirely.
+        assert not m(attack, attack)
+        assert not m("http://evil.example\\@localhost/callback",
+                     "http://evil.example\\@localhost/callback")
+        # Userinfo identical on both sides and differing ONLY by port, so
+        # nothing but the byte gate can refuse this pair.
+        assert not m("http://evil.example:8443\\@127.0.0.1:1/callback",
+                     "http://evil.example:8443\\@127.0.0.1:2/callback")
+        # Tab: both sides parse to the same loopback host, so again only the
+        # byte gate can refuse it.
+        assert not m("http://localhost/cb", "http://localhost\t:3118/cb")
+
+        # ── Group 2: behaviour pins, NOT gate isolation ────────────────────
+        # These stay False with the gate removed — they are refused by the
+        # loopback predicate (the parsed host is not a loopback host) or by the
+        # userinfo comparison. Kept because they pin the boundary, not because
+        # they prove the guard.
+        assert not m("http://127.0.0.1/callback", attack)
+        assert not m("http://localhost/callback",
+                     "http://evil.example\\@localhost:3118/callback")
+        # The backslash lands in the REGISTERED host, so `_is_loopback` rejects
+        # it before any comparison.
+        assert not m("http://localhost\\cb", "http://localhost:3118\\cb")
+        assert not m("http://localhost/cb", "http://local\x00host:3118/cb")
+        assert not m("http://localhost/cb", "http://localhost\x7f:3118/cb")
+
+    def test_differential_uris_are_refused_even_on_exact_match(self):
+        """The broad rejection is DELIBERATE, not an oversight: a byte we refuse
+        to reason about is refused before the exact-match short-circuit, so a URI
+        that registered before this gate existed stops matching. A raw backslash
+        is not legal in a URI (RFC 3986), so nothing legitimate is lost, and
+        fail-closed is the only safe direction on input that decides where a
+        credential is sent. Pinned so a future loosening is a decision."""
+        from tortoise.oauth import _redirect_uri_matches as m
+        assert not m("https://app.example.com/cb?q=C:\\Users\\x",
+                     "https://app.example.com/cb?q=C:\\Users\\x")
+        assert not m("https://app.example.com/cb?a=1\x7fb",
+                     "https://app.example.com/cb?a=1\x7fb")
+
+
+class TestRedirectUriParserDifferential:
+    """REVIEW P0 — a parse-differential redirect_uri must be refused at
+    REGISTRATION as well as at validation, or the same string can re-enter via
+    a client row created earlier."""
+
+    ATTACK = "http://evil.example:8443\\@127.0.0.1/callback"
+
+    def test_registration_rejects_backslash_authority(self, api_client):
+        tc, _ = api_client
+        r = tc.post("/register", json={
+            "client_name": "differential",
+            "redirect_uris": [self.ATTACK],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert r.status_code == 400, r.text
+        assert _valid_redirect_uri(self.ATTACK) is False
+
+    def test_registration_rejects_control_characters(self, api_client):
+        tc, _ = api_client
+        r = tc.post("/register", json={
+            "client_name": "differential",
+            "redirect_uris": ["http://localhost\t/cb"],
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+        })
+        assert r.status_code == 400, r.text
+
+    def test_valid_loopback_and_https_still_register(self, api_client):
+        """The guard must not over-reject: ordinary URIs still register."""
+        tc, _ = api_client
+        for uri in ("http://localhost/callback", "http://127.0.0.1:8765/callback",
+                    "http://[::1]/callback", "https://app.example.com/callback"):
+            assert _valid_redirect_uri(uri) is True, uri
+        assert _register_client(
+            tc, redirect_uris=["http://localhost/callback"])["client_id"]
+
+
 class TestConsentPreview:
     def test_preview_resolves_default_team(self, api_client, session_user):
         tc, _ = api_client
@@ -546,23 +917,23 @@ class TestConsentPreview:
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
-        assert r.json()["team_id"] == "team-free-001"
-        assert r.json()["team_name"] == "Free Team"
+        assert r.json()["org_id"] == "team-free-001"
+        assert r.json()["org_name"] == "Free Team"
 
     def test_preview_resolves_team_scoped_resource(self, api_client, session_user):
         tc, _ = api_client
         session_user(_U1)
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
-        assert r.json()["team_id"] == "team-free-001"
+        assert r.json()["org_id"] == "team-free-001"
 
     def test_preview_non_member_403(self, api_client, session_user):
         tc, _ = api_client
         session_user(_U1)
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-team-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-team-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
 
@@ -579,14 +950,14 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] is None
-        assert body["team_name"] is None
+        assert body["org_id"] is None
+        assert body["org_name"] is None
         assert body["resource"] == mcp_resource_url(TEST_BASE)
-        assert [m["team_id"] for m in body["memberships"]] == [
+        assert [m["org_id"] for m in body["memberships"]] == [
             "team-free-001", "team-team-001"]  # deterministic sort
         for m in body["memberships"]:
-            assert m["resource"] == team_resource_url(TEST_BASE, m["team_id"])
-            assert m["team_name"]
+            assert m["resource"] == org_resource_url(TEST_BASE, m["org_id"])
+            assert m["org_name"]
 
     def test_preview_multi_team_origin_root_echo_returns_memberships(self, api_client, session_user):
         """An OpenAI-style origin-root resource echo is treated as no team
@@ -598,7 +969,7 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] is None
+        assert body["org_id"] is None
         assert len(body["memberships"]) == 2
 
     def test_preview_single_team_origin_root_echo_binds_sole_team(self, api_client, session_user):
@@ -610,7 +981,7 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
+        assert body["org_id"] == "team-free-001"
         assert "memberships" not in body
 
     def test_preview_declared_bare_mcp_resource_keeps_resource_field(self, api_client, session_user):
@@ -623,8 +994,8 @@ class TestConsentPreview:
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
-        assert body["resource"] == team_resource_url(TEST_BASE, "team-free-001")
+        assert body["org_id"] == "team-free-001"
+        assert body["resource"] == org_resource_url(TEST_BASE, "team-free-001")
 
     def test_preview_memberships_exclude_suspended_teams(self, api_client, session_user):
         """2 active + 1 suspended membership → the chooser lists only the two
@@ -632,16 +1003,16 @@ class TestConsentPreview:
         tc, cp = api_client
         session_user(_U1)
         _join_second_team(api_client)
-        cp.tables["teams"].append({
+        cp.tables["organizations"].append({
             "id": "team-suspended-001", "name": "Suspended Team",
             "tier": "free", "suspended_at": "2026-08-15T00:00:00Z"})
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-suspended-001", "member"))
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert [m["team_id"] for m in body["memberships"]] == [
+        assert [m["org_id"] for m in body["memberships"]] == [
             "team-free-001", "team-team-001"]
 
     def test_preview_one_active_one_suspended_autobinds_active(self, api_client, session_user):
@@ -650,18 +1021,18 @@ class TestConsentPreview:
         tc, cp = api_client
         session_user(_U1)
         _join_second_team(api_client)
-        cp.tables["teams"][1]["suspended_at"] = "2026-08-15T00:00:00Z"  # team-team-001
+        cp.tables["organizations"][1]["suspended_at"] = "2026-08-15T00:00:00Z"  # team-team-001
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
         body = r.json()
-        assert body["team_id"] == "team-free-001"
+        assert body["org_id"] == "team-free-001"
         assert "memberships" not in body
 
     def test_preview_all_teams_suspended_403(self, api_client, session_user):
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
@@ -672,9 +1043,9 @@ class TestConsentPreview:
         preview — never a code that dies at a later exchange."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.get("/oauth/consent/preview",
-                   params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
+                   params={"resource": org_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
         assert r.json()["error"] == "invalid_grant"
@@ -701,12 +1072,12 @@ class TestCodeExchange:
         assert body["expires_in"] == 3600
         # token rows persist with the bound team (P4)
         acc = cp.tables["oauth_access_tokens"][0]
-        assert acc["team_id"] == "team-free-001"
+        assert acc["org_id"] == "team-free-001"
         assert acc["user_id"] == _U1
         assert acc["token_hash"] == hashlib.sha256(
             body["access_token"].encode()).hexdigest()
         ref = cp.tables["oauth_refresh_tokens"][0]
-        assert ref["team_id"] == "team-free-001"
+        assert ref["org_id"] == "team-free-001"
 
     def test_wrong_verifier_rejected(self, api_client, session_user):
         tc, cp = api_client
@@ -867,12 +1238,12 @@ class TestParseResource:
 
     def test_origin_root_maps_to_bare_mcp(self):
         from tortoise.oauth import parse_resource
-        canonical, team_id = parse_resource(TEST_BASE, TEST_BASE)
+        canonical, org_id = parse_resource(TEST_BASE, TEST_BASE)
         assert canonical == mcp_resource_url(TEST_BASE)
-        assert team_id is None
-        canonical2, team_id2 = parse_resource(TEST_BASE, TEST_BASE + "/")
+        assert org_id is None
+        canonical2, org_id2 = parse_resource(TEST_BASE, TEST_BASE + "/")
         assert canonical2 == mcp_resource_url(TEST_BASE)
-        assert team_id2 is None
+        assert org_id2 is None
 
     def test_origin_root_rejected_for_foreign_origin(self):
         from tortoise.oauth import OAuthError, parse_resource
@@ -889,16 +1260,16 @@ class TestParseResource:
 
     def test_bare_mcp_trailing_slash_accepted(self):
         from tortoise.oauth import parse_resource
-        canonical, team_id = parse_resource(TEST_BASE, mcp_resource_url(TEST_BASE) + "/")
+        canonical, org_id = parse_resource(TEST_BASE, mcp_resource_url(TEST_BASE) + "/")
         assert canonical == mcp_resource_url(TEST_BASE)
-        assert team_id is None
+        assert org_id is None
 
     def test_team_scoped_still_parses(self):
         from tortoise.oauth import parse_resource
-        resource = team_resource_url(TEST_BASE, "team-free-001")
-        canonical, team_id = parse_resource(TEST_BASE, resource)
+        resource = org_resource_url(TEST_BASE, "team-free-001")
+        canonical, org_id = parse_resource(TEST_BASE, resource)
         assert canonical == resource
-        assert team_id == "team-free-001"
+        assert org_id == "team-free-001"
 
 
 class TestRfc8707Mapping:
@@ -906,21 +1277,21 @@ class TestRfc8707Mapping:
         tc, cp = api_client
         session_user(_U1)
         # user-1 joins the second team
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-team-001", "member"))
-        resource = team_resource_url(TEST_BASE, "team-team-001")
+        resource = org_resource_url(TEST_BASE, "team-team-001")
         flow = _auth_code_flow(tc, cp, resource=resource)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"], resource=resource)
         assert r.status_code == 200, r.text
-        assert cp.tables["oauth_access_tokens"][0]["team_id"] == "team-team-001"
-        assert cp.tables["oauth_refresh_tokens"][0]["team_id"] == "team-team-001"
+        assert cp.tables["oauth_access_tokens"][0]["org_id"] == "team-team-001"
+        assert cp.tables["oauth_refresh_tokens"][0]["org_id"] == "team-team-001"
 
     def test_multi_team_default_requires_declaration(self, api_client, session_user):
         """D4 (no picker UI): a multi-team user MUST declare the resource."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["team_memberships"].append(
+        cp.tables["org_memberships"].append(
             _member(_U1, "team-team-001", "member"))
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
@@ -934,7 +1305,7 @@ class TestRfc8707Mapping:
     def test_resource_for_non_member_team_rejected(self, api_client, session_user):
         tc, cp = api_client  # noqa: RUF059
         session_user(_U1)
-        resource = team_resource_url(TEST_BASE, "team-team-001")  # not a member
+        resource = org_resource_url(TEST_BASE, "team-team-001")  # not a member
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -950,7 +1321,7 @@ class TestRfc8707Mapping:
         tc, cp = api_client
         session_user(_U1)
         flow = _auth_code_flow(tc, cp)  # bound to team-free-001
-        other = team_resource_url(TEST_BASE, "team-team-001")
+        other = org_resource_url(TEST_BASE, "team-team-001")
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"], resource=other)
         assert r.status_code == 400
@@ -971,7 +1342,7 @@ class TestRfc8707Mapping:
     def test_zero_team_user_rejected(self, api_client, session_user):
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["team_memberships"] = []
+        cp.tables["org_memberships"] = []
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -1046,7 +1417,7 @@ class TestRefreshRotation:
         prev_access = [t for t in cp.tables["oauth_access_tokens"]  # noqa: RUF015
                        if t["revoked_at"] is None][0]
         args = dict(client_id=flow["client_id"], user_id=_U1,
-                    team_id="team-free-001", scope="mcp", resource=None)
+                    org_id="team-free-001", scope="mcp", resource=None)
         # worker A wins the atomic claim
         out_a = _issue_tokens(cp, prev_refresh=prev,
                               prev_access_id=prev_access["id"], **args)
@@ -1120,7 +1491,7 @@ class TestSuspensionRevocation:
         session_user(_U1)
         tokens = self._granted(tc, cp)
         # suspend the team (durable suspended_at — the #308 authority)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "refresh_token": tokens["refresh_token"],
@@ -1143,13 +1514,13 @@ class TestSuspensionRevocation:
         cleanly instead of minting a code that dies at the later exchange."""
         tc, cp = api_client
         session_user(_U1)
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
             "code_challenge": "x" * 60, "code_challenge_method": "S256",
             "scope": "mcp",
-            "resource": team_resource_url(TEST_BASE, "team-free-001")},
+            "resource": org_resource_url(TEST_BASE, "team-free-001")},
             headers={"Authorization": "Bearer fake"})
         assert r.status_code == 403
         assert r.json()["error"] == "invalid_grant"
@@ -1162,7 +1533,7 @@ class TestSuspensionRevocation:
         tc, cp = api_client
         session_user(_U1)
         flow = _auth_code_flow(tc, cp)  # minted while active
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
         assert r.status_code == 403
@@ -1173,7 +1544,7 @@ class TestSuspensionRevocation:
         tc, cp = api_client
         session_user(_U1)
         tokens = self._granted(tc, cp)
-        cp.tables["team_memberships"] = []  # seat removed
+        cp.tables["org_memberships"] = []  # seat removed
         r = tc.post("/oauth/token", data={
             "grant_type": "refresh_token",
             "refresh_token": tokens["refresh_token"],
@@ -1240,7 +1611,7 @@ class TestMcpBoundary:
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
-        cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
+        cp.tables["organizations"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         mcp_tc = self._mcp(cp)
         mcp_tc.headers.update(_mcp_headers(r.json()["access_token"]))
         with mcp_tc:
@@ -1265,6 +1636,94 @@ class TestMcpBoundary:
             rr = mcp_tc.post("/mcp", json={
                 "jsonrpc": "2.0", "method": "tools/list", "id": 1})
             assert rr.status_code == 401
+
+    def test_revoked_oauth_token_401_on_a_warm_cache_within_ttl(self, api_client, session_user):
+        """#2864 — the 60s warm-token cache is REAL and this pins it.
+
+        ``TeamResolutionMiddleware`` keys its cache by raw token and serves a
+        warm hit for 60s WITHOUT re-introspecting (``mcp_auth.py:279-297``), so
+        ``resolve_oauth_access_token``'s ``revoked_at`` check is bypassed until
+        the entry ages out. ``test_revoked_oauth_token_401`` above cannot see
+        this: it builds a FRESH app per call, i.e. a cold cache.
+
+        This deliberately drives ONE client (one app -> one middleware -> one
+        cache) so the grace window is observable. The grace is a documented
+        design trade-off for the multi-machine deployment (a revocation on one
+        Fly machine cannot invalidate another's cache), not an accident —
+        pinning the exact bound is what stops it drifting silently.
+        """
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        access = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                           verifier=flow["verifier"]).json()["access_token"]
+        call = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+
+        mcp_tc = self._mcp(cp)
+        mcp_tc.headers.update(_mcp_headers(access))
+        with mcp_tc:
+            # 1. a good request warms the cache for this token
+            assert mcp_tc.post("/mcp", json=call).status_code == 200
+            # 2. revoke out of band. The revoke ENDPOINT returns 200 even for an
+            #    unknown or already-revoked token (RFC 7009 idempotence —
+            #    oauth.py::revoke_token), so a 200 proves NOTHING about whether
+            #    the row was actually marked. Assert the stored row instead, or
+            #    step 3 could pass while the revoke silently no-opped.
+            rev = tc.post("/oauth/revoke",
+                          data={"token": access,
+                                "token_type_hint": "access_token"})
+            assert rev.status_code == 200, rev.text
+            h = _sha256(access)
+            rows = cp.tables["oauth_access_tokens"]
+            assert any(r.get("token_hash") == h and r.get("revoked_at")
+                       for r in rows), (
+                f"revoke did not land: no oauth_access_tokens row for THIS token "
+                f"is marked revoked ({len(rows)} rows) — step 3 below would prove "
+                f"nothing. (Matching on token_hash, not just any revoked_at, so a "
+                f"revoke of some other token cannot make this pass.)")
+            # 3. warm hit still authenticates — the bounded grace
+            assert mcp_tc.post("/mcp", json=call).status_code == 200
+
+    def test_revoked_oauth_token_rejected_once_the_cache_entry_expires(
+            self, api_client, session_user, monkeypatch):
+        """#2864 — the other half of the bound: past 60s the entry is stale, the
+        token is re-introspected, and the revocation takes effect. Without this
+        half the grace above would be indistinguishable from a token that is
+        never revoked at all."""
+        from types import SimpleNamespace
+
+        import tortoise.mcp_auth as mcp_auth
+
+        tc, cp = api_client
+        session_user(_U1)
+        flow = _auth_code_flow(tc, cp)
+        access = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                           verifier=flow["verifier"]).json()["access_token"]
+        call = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+
+        mcp_tc = self._mcp(cp)
+        mcp_tc.headers.update(_mcp_headers(access))
+        with mcp_tc:
+            assert mcp_tc.post("/mcp", json=call).status_code == 200
+            rev = tc.post("/oauth/revoke",
+                          data={"token": access,
+                                "token_type_hint": "access_token"})
+            assert rev.status_code == 200, rev.text
+            h = _sha256(access)
+            assert any(r.get("token_hash") == h and r.get("revoked_at")
+                       for r in cp.tables["oauth_access_tokens"]), (
+                "revoke did not land for this token")
+
+            # Scope the clock shift to mcp_auth only — patching the stdlib
+            # `time` module itself would freeze time for every other consumer
+            # in the process for the duration of the test.
+            real_time = mcp_auth.time.time
+            monkeypatch.setattr(
+                mcp_auth, "time", SimpleNamespace(time=lambda: real_time() + 61))
+            rr = mcp_tc.post("/mcp", json=call)
+        assert rr.status_code == 401, (
+            "a cache entry older than the 60s TTL must re-introspect and reject"
+        )
 
     def test_bogus_oauth_token_401(self, api_client):
         tc, cp = api_client  # noqa: RUF059
@@ -1348,3 +1807,709 @@ class TestMcpBoundary:
         assert hits, "no PointAdded GraphEvent journaled"
         newest = hits[-1]
         assert newest.get("actor_user_id") == _U1, newest
+
+
+# ── #2975: the consent-page literal must parse without SyntaxWarning ─────────
+
+
+def test_consent_html_literal_parses_without_syntax_warning():
+    """#2975: ``_CONSENT_HTML`` embeds a JavaScript RFC-1918 regex
+    (``/^172\\.(1[6-9]|2\\d|3[01])\\./``) whose backslashes are invalid Python
+    escapes. Left in a non-raw literal they emit
+    ``SyntaxWarning: invalid escape sequence`` on *every* parse (and become a
+    ``SyntaxError`` on a future Python), polluting every test run. The literal
+    must therefore stay raw — and staying raw must not alter the emitted bytes.
+    """
+    import warnings
+    from pathlib import Path
+
+    oauth_path = Path(__file__).resolve().parent.parent / "tortoise" / "oauth.py"
+    source = oauth_path.read_text(encoding="utf-8")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SyntaxWarning)
+        compile(source, str(oauth_path), "exec")
+
+    # The raw prefix must not have re-interpreted any escape in the literal.
+    from tortoise.oauth import _CONSENT_HTML
+
+    assert r"/^172\.(1[6-9]|2\d|3[01])\./" in _CONSENT_HTML
+# ═══════════════════════════════════════════════════════════════════════════
+# #2866 — DCR capacity policy: bounded store, stated caps, CIDR exemption
+# ═══════════════════════════════════════════════════════════════════════════
+# Legs (a)–(y) of docs/plans/2026-09-11-2866-dcr-capacity-policy.md §5. Every
+# knob override uses monkeypatch.setenv (function-scoped, auto-restored) so
+# no bound masks another and no override leaks into a later leg. The window
+# is pinned with a fake clock (monkeypatch.setattr(hosted_api.time, ...)) for
+# the aging/ordering legs.
+
+_DCR_TRUSTED = "160.79.104.11"      # inside the default 160.79.104.0/21
+_DCR_TRUSTED_ALT = "160.79.104.12"  # same /21, distinct address
+_DCR_UNTRUSTED = "203.0.113.7"
+_DCR_CUSTOM_NET = "198.51.100.0/24"
+
+
+def _dcr_reset() -> None:
+    """Swap in fresh stores + a fresh lock by module-global lookup.
+
+    The limiter reads the four stores dynamically off the module globals (no
+    default-argument capture, no import-time alias), so a rebind here is
+    picked up on the next call. The fresh lock also keeps the concurrency
+    legs' ``asyncio.run`` loop from inheriting a lock already bound to the
+    TestClient portal loop.
+    """
+    _ha_mod._OAUTH_DCR_BUCKETS = OrderedDict()
+    _ha_mod._OAUTH_DCR_TRUSTED = OrderedDict()
+    _ha_mod._OAUTH_DCR_OVERFLOW = OrderedDict()
+    _ha_mod._OAUTH_DCR_ANON = OrderedDict()
+    _ha_mod._OAUTH_DCR_LOCK = asyncio.Lock()
+
+
+def _dcr_post(tc, ip=None, headers=None, **body_overrides):
+    body = {"client_name": "dcr-leg", "redirect_uris": [REDIRECT]}
+    body.update(body_overrides)
+    hdrs = dict(headers or {})
+    if ip is not None:
+        hdrs["Fly-Client-IP"] = ip
+    return tc.post("/register", json=body, headers=hdrs)
+
+
+def _find_rate_limit_middleware():
+    """The live generic RateLimitMiddleware instance (Starlette builds the
+    middleware stack lazily on the first ASGI call)."""
+    node = getattr(app, "middleware_stack", None)
+    while node is not None:
+        if isinstance(node, RateLimitMiddleware):
+            return node
+        node = getattr(node, "app", None)
+    return None
+
+
+class _CountingStore(OrderedDict):
+    """OrderedDict that counts every iteration entry point (#2866 leg f)."""
+
+    def __init__(self):
+        super().__init__()
+        self.iterations = 0
+
+    def reset(self):
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        return super().__iter__()
+
+    def items(self):
+        self.iterations += 1
+        return super().items()
+
+    def keys(self):
+        self.iterations += 1
+        return super().keys()
+
+    def values(self):
+        self.iterations += 1
+        return super().values()
+
+    def __reversed__(self):
+        self.iterations += 1
+        return super().__reversed__()
+
+    def copy(self):
+        self.iterations += 1
+        return super().copy()
+
+
+class TestDcrCapacityPolicy:
+    """#2866 — the DCR limiter's stated capacity policy."""
+
+    @pytest.fixture(autouse=True)
+    def _dcr_policy(self, api_client, monkeypatch):
+        """Function-scoped isolation (class scope would raise ScopeMismatch,
+        since it must depend on the function-scoped api_client).
+
+        Load-bearing: Starlette builds the middleware stack lazily on the
+        first ASGI call. ``TestClient(app).__enter__`` (inside api_client)
+        triggers that build while RATE_LIMIT_DISABLED=1 is still set
+        (tests/conftest.py:22 + this module's setdefault), so the generic
+        RateLimitMiddleware is constructed disabled and STAYS disabled after
+        the flag is deleted below. If an earlier test deleted the flag before
+        the session's first app call, that build is unrecoverable — fail
+        loudly rather than silently breaking the flood legs.
+        """
+        tc, _cp = api_client
+        tc.get("/health")  # belt-and-suspenders rebuild check (not the mechanism)
+        mw = _find_rate_limit_middleware()
+        assert mw is not None, "generic RateLimitMiddleware not found on the stack"
+        assert mw._disabled is True, (
+            "generic RateLimitMiddleware was NOT built with RATE_LIMIT_DISABLED=1 "
+            "— the DCR flood legs would trip it. The app's first ASGI call "
+            "happened after some test deleted the flag.")
+        monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        _dcr_reset()
+
+    # ── (a) anonymous per-key 429 + Retry-After ─────────────────────────
+    def test_a_anonymous_per_key_429(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1000")
+        assert _dcr_post(tc, ip=_DCR_UNTRUSTED).status_code == 201
+        assert _dcr_post(tc, ip=_DCR_UNTRUSTED).status_code == 201
+        r = _dcr_post(tc, ip=_DCR_UNTRUSTED)
+        assert r.status_code == 429, r.text
+        assert int(r.headers["Retry-After"]) >= 1
+
+    # ── (b) fresh-key flood: bounded store + overflow binds ─────────────
+    def test_b_fresh_key_flood_bounded_store_and_overflow(self, api_client,
+                                                          monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "8")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        for i in range(8):
+            assert _dcr_post(tc, ip=f"198.51.100.{i}").status_code == 201
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS) == 8
+        # the store is full: new keys are served by the shared overflow bucket
+        # until its derived cap (= PER_HOUR) binds.
+        assert _dcr_post(tc, ip="198.51.100.200").status_code == 201
+        assert _dcr_post(tc, ip="198.51.100.201").status_code == 201
+        r = _dcr_post(tc, ip="198.51.100.202")
+        assert r.status_code == 429, r.text
+        assert "Retry-After" in r.headers
+        # a genuine non-exempt new IP still 429s while the store is full
+        assert _dcr_post(tc, ip="198.51.100.203").status_code == 429
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS) <= 8
+
+    # ── (c) a tracked key's 429 is not reset by fresh keys ──────────────
+    def test_c_tracked_key_429_not_reset_by_fresh_keys(self, api_client,
+                                                       monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="192.0.2.10").status_code == 201
+        assert _dcr_post(tc, ip="192.0.2.10").status_code == 429
+        for i in range(6):
+            _dcr_post(tc, ip=f"192.0.2.{100 + i}")
+        assert _dcr_post(tc, ip="192.0.2.10").status_code == 429
+
+    # ── (d) ordering invariant: reclaim stops at the first active head ──
+    def test_d_ordering_invariant_reclaims_only_inactive_lru(self, api_client,
+                                                             monkeypatch):
+        tc, _ = api_client
+        now = [1_800_000_000.0]
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: now[0])
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "5")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="192.0.2.1").status_code == 201  # A
+        assert _dcr_post(tc, ip="192.0.2.2").status_code == 201  # B (store full)
+        now[0] += 3500
+        assert _dcr_post(tc, ip="192.0.2.1").status_code == 201  # A recharged → MRU
+        now[0] += 101  # t=3601: B's only charge has aged out, A's has not
+        assert _dcr_post(tc, ip="192.0.2.3").status_code == 201  # C
+        buckets = _ha_mod._OAUTH_DCR_BUCKETS
+        assert "192.0.2.3" in buckets, "new key must get a bucket, not overflow"
+        assert "192.0.2.2" not in buckets, "inactive LRU head must be reclaimed"
+        assert "192.0.2.1" in buckets, "an active key must never be evicted"
+
+    # ── (e) aged buckets are reclaimed; a recharged key survives ────────
+    def test_e_aged_buckets_reclaimed(self, api_client, monkeypatch):
+        tc, _ = api_client
+        now = [1_800_000_000.0]
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: now[0])
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "5")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="192.0.2.1").status_code == 201
+        assert _dcr_post(tc, ip="192.0.2.2").status_code == 201
+        now[0] += 3700
+        assert _dcr_post(tc, ip="192.0.2.1").status_code == 201  # A recharged
+        now[0] += 1
+        assert _dcr_post(tc, ip="192.0.2.3").status_code == 201  # reclaims B
+        buckets = _ha_mod._OAUTH_DCR_BUCKETS
+        assert "192.0.2.2" not in buckets
+        assert "192.0.2.1" in buckets, "the recharged key survives the reclaim"
+        assert "192.0.2.3" in buckets
+        # every remaining head is aged out: reclaim makes room again
+        now[0] += 5000
+        assert _dcr_post(tc, ip="192.0.2.4").status_code == 201
+        buckets = _ha_mod._OAUTH_DCR_BUCKETS
+        assert "192.0.2.1" not in buckets
+        assert "192.0.2.4" in buckets
+
+    # ── (f) lookups are not O(n) at store-cap scale ─────────────────────
+    def test_f_lookups_not_on_at_store_cap_scale(self, api_client, monkeypatch):
+        tc, _ = api_client
+        now = [1_800_000_001.0]
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: now[0])
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "50")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        counting = _CountingStore()
+        for i in range(10_001):
+            counting[f"10.{i // 256}.{i % 256}.1"] = [now[0] - 1.0]
+        counting["10.0.0.1"] = [now[0] - 1.0]  # tracked key
+        counting.reset()
+        _ha_mod._OAUTH_DCR_BUCKETS = counting
+        assert _dcr_post(tc, ip="10.0.0.1").status_code == 201
+        assert counting.iterations == 0, (
+            "a tracked key's charge must not iterate the store "
+            f"(saw {counting.iterations})")
+        # a new key at an all-live cap inspects at most the LRU head
+        counting2 = _CountingStore()
+        for i in range(8):
+            counting2[f"10.1.{i}.1"] = [now[0]]
+        counting2.reset()
+        _ha_mod._OAUTH_DCR_BUCKETS = counting2
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "8")
+        assert _dcr_post(tc, ip="10.9.9.9").status_code == 201
+        assert counting2.iterations <= 1, (
+            f"reclaim inspected {counting2.iterations} heads at an all-live cap")
+
+    # ── (g) IPv6 /64 collapse + recharge keeps the key usable/MRU ───────
+    def test_g_ipv6_64_collapse_and_recharge(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "5")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="2001:db8:aaaa:1::1").status_code == 201
+        assert _dcr_post(tc, ip="2001:db8:aaaa:1::2").status_code == 201
+        buckets = _ha_mod._OAUTH_DCR_BUCKETS
+        assert list(buckets) == ["2001:db8:aaaa:1::/64"], list(buckets)
+        assert len(buckets["2001:db8:aaaa:1::/64"]) == 2
+        # a further charged hit from the same /64 must not KeyError and must
+        # move the key to the MRU end (last-charge ordering)
+        assert _dcr_post(tc, ip="2001:db8:bbbb::1").status_code == 201
+        assert _dcr_post(tc, ip="2001:db8:aaaa:1::3").status_code == 201
+        assert list(buckets)[-1] == "2001:db8:aaaa:1::/64"
+        assert len(buckets["2001:db8:aaaa:1::/64"]) == 3
+
+    # ── (h) IPv4-mapped IPv6 is normalized BEFORE match/keying ──────────
+    def test_h_mapped_ipv6_normalized_before_match(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _ha_mod._oauth_dcr_store_key("::ffff:1.2.3.4") == "1.2.3.4"
+        # non-canonical mapped spellings must resolve to the SAME key, or one
+        # IPv4 address holds two bucket identities (its own + the shared /64)
+        for spelling in ("::FFFF:1.2.3.4", "0:0:0:0:0:ffff:1.2.3.4",
+                         "::ffff:0102:0304"):
+            assert _ha_mod._oauth_dcr_store_key(spelling) == "1.2.3.4", spelling
+            assert _ha_mod._oauth_dcr_trusted_net(spelling) is None, spelling
+        assert _dcr_post(tc, ip="::ffff:160.79.104.11").status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS, "trusted ⇒ no per-key bucket"
+        assert len(_ha_mod._OAUTH_DCR_TRUSTED["160.79.104.0/21"]) == 1
+        # ...and every spelling of a trusted address is exempt too
+        for spelling in ("::FFFF:160.79.104.11", "0:0:0:0:0:ffff:160.79.104.11"):
+            assert _ha_mod._oauth_dcr_trusted_net(spelling) is not None, spelling
+        assert _dcr_post(tc, ip="::ffff:1.2.3.4").status_code == 201
+        assert list(_ha_mod._OAUTH_DCR_BUCKETS) == ["1.2.3.4"], \
+            "mapped IPv4 must key as the IPv4 address, not as ::/64"
+
+    # ── (i) the trusted carve-out is REACHABLE ──────────────────────────
+    def test_i_trusted_carve_out_reachable(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR", "2")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        # A first-time trusted IP is an UNTRACKED key — a design that charges
+        # trusted traffic to the per-key/overflow path 429s the second
+        # request here (PER_HOUR=1). Discriminates by construction.
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_ANON.get(_ha_mod._OAUTH_DCR_ANON_KEY)
+        # ...then the trusted aggregate binds (one CIDR = one bucket)
+        r = _dcr_post(tc, ip=_DCR_TRUSTED_ALT)
+        assert r.status_code == 429, r.text
+        assert "Retry-After" in r.headers
+
+    # ── (j) flag unset ⇒ a spoofed Fly-Client-IP is NOT exempt ──────────
+    def test_j_flag_unset_spoofed_header_not_exempt(self, api_client,
+                                                    monkeypatch):
+        tc, _ = api_client
+        monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+        # ClientIPMiddleware fell back to request.client.host ("testclient")
+        assert _ha_mod._OAUTH_DCR_MALFORMED_KEY in _ha_mod._OAUTH_DCR_BUCKETS
+
+    # ── (k) flag set + no Fly header ⇒ a spoofed XFF is NOT exempt ──────
+    def test_k_flag_set_xff_not_trusted(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        # XFF is set to an address INSIDE the trusted range, so an impl that
+        # wrongly read XFF would exempt it.
+        assert _dcr_post(tc, headers={"X-Forwarded-For": _DCR_TRUSTED}
+                         ).status_code == 201
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+        assert _ha_mod._OAUTH_DCR_MALFORMED_KEY in _ha_mod._OAUTH_DCR_BUCKETS
+
+    # ── (l) the anonymous aggregate binds across distinct keys ──────────
+    def test_l_anonymous_aggregate_binds_across_keys(self, api_client,
+                                                    monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "3")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "10")
+        for i in range(3):
+            assert _dcr_post(tc, ip=f"203.0.113.{i}").status_code == 201
+        r = _dcr_post(tc, ip="203.0.113.99")
+        assert r.status_code == 429, r.text
+        assert len(_ha_mod._OAUTH_DCR_ANON[_ha_mod._OAUTH_DCR_ANON_KEY]) == 3
+        assert "203.0.113.99" not in _ha_mod._OAUTH_DCR_BUCKETS
+
+    # ── (m) atomicity both directions + overflow charges the aggregate ──
+    def test_m_atomicity_and_overflow_charges_aggregate(self, api_client,
+                                                        monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "10")
+        # direction 1: a 429 charges nothing and inserts nothing
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1")
+        assert _dcr_post(tc, ip="203.0.113.1").status_code == 201
+        assert _dcr_post(tc, ip="203.0.113.2").status_code == 429
+        assert "203.0.113.2" not in _ha_mod._OAUTH_DCR_BUCKETS
+        assert len(_ha_mod._OAUTH_DCR_ANON[_ha_mod._OAUTH_DCR_ANON_KEY]) == 1
+        # direction 2 (D9): an overflow charge hits overflow AND the aggregate
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "0")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "50")
+        assert _dcr_post(tc, ip="203.0.113.3").status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert len(_ha_mod._OAUTH_DCR_OVERFLOW[
+            _ha_mod._OAUTH_DCR_OVERFLOW_KEY]) == 1
+        assert len(_ha_mod._OAUTH_DCR_ANON[_ha_mod._OAUTH_DCR_ANON_KEY]) == 1
+
+    # ── (n) malformed inputs fail closed, never 500 ─────────────────────
+    def test_n_malformed_inputs_fail_closed(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        # malformed client IP → the single constant key, no 500
+        assert _dcr_post(tc, ip="not-an-ip").status_code == 201
+        assert _ha_mod._OAUTH_DCR_MALFORMED_KEY in _ha_mod._OAUTH_DCR_BUCKETS
+        # a mixed CIDR list keeps the valid entry and skips the malformed one
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS",
+                           "not-a-cidr, 160.79.104.0/21 ,, also-bad")
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert list(_ha_mod._OAUTH_DCR_TRUSTED) == ["160.79.104.0/21"]
+        # out-of-range prefixes fall back to 64 — never clamp to 0/1 (which
+        # would collapse EVERY IPv6 address into one bucket)
+        for bad in ("0", "129", "-1", "abc", "64x"):
+            _dcr_reset()
+            monkeypatch.setenv("TORTOISE_OAUTH_DCR_IPV6_PREFIX", bad)
+            assert _dcr_post(tc, ip="2001:db8:aaaa:1::1").status_code == 201
+            assert _dcr_post(tc, ip="2001:db8:aaaa:2::1").status_code == 201
+            keys = list(_ha_mod._OAUTH_DCR_BUCKETS)
+            assert len(keys) == 2, (bad, keys)
+
+    def test_n2_missing_client_early_returns(self, api_client):
+        """request.client is None ⇒ early-return like the shared primitive:
+        no AttributeError/500, no charge, no bucket (#2866 D6)."""
+        _dcr_reset()
+        req = Request({"type": "http", "method": "POST", "path": "/register",
+                       "headers": [], "query_string": b""})
+        asyncio.run(_ha_mod._check_oauth_dcr_rate_limit(req))
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_ANON
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+
+    # ── (o1) the zero rule denies the FIRST request, per dimension ──────
+    def test_o1_zero_rate_knobs_deny_first_request(self, api_client,
+                                                   monkeypatch):
+        tc, _ = api_client
+        # per-key dimension
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "0")
+        r = _dcr_post(tc, ip="203.0.113.1")
+        assert r.status_code == 429, r.text
+        assert r.headers["Retry-After"] == "3600"
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        # anonymous-aggregate dimension (per-key must pass first)
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "10")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "0")
+        r = _dcr_post(tc, ip="203.0.113.2")
+        assert r.status_code == 429, r.text
+        assert r.headers["Retry-After"] == "3600"
+        assert not _ha_mod._OAUTH_DCR_BUCKETS, "a 429 must not insert a bucket"
+        assert not _ha_mod._OAUTH_DCR_ANON.get(_ha_mod._OAUTH_DCR_ANON_KEY)
+        # trusted-aggregate dimension
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR", "0")
+        r = _dcr_post(tc, ip=_DCR_TRUSTED)
+        assert r.status_code == 429, r.text
+        assert r.headers["Retry-After"] == "3600"
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+
+    # ── (o2) PER_HOUR=1 → 201 then 429 ─────────────────────────────────
+    def test_o2_per_hour_one(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1000")
+        assert _dcr_post(tc, ip="203.0.113.5").status_code == 201
+        assert _dcr_post(tc, ip="203.0.113.5").status_code == 429
+        # (m)(ii): a PER-KEY 429 must leave the anonymous aggregate uncharged —
+        # otherwise one client hammering its own bucket burns the global
+        # budget for everybody (phase 2 is unreachable on a denied request).
+        assert len(_ha_mod._OAUTH_DCR_ANON[
+            _ha_mod._OAUTH_DCR_ANON_KEY]) == 1
+
+    # ── (o3) STORE_CAP=0 → served by overflow, then its cap binds ───────
+    def test_o3_store_cap_zero_uses_overflow(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "0")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        assert _dcr_post(tc, ip="203.0.113.1").status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert len(_ha_mod._OAUTH_DCR_OVERFLOW[
+            _ha_mod._OAUTH_DCR_OVERFLOW_KEY]) == 1
+        for i in range(2, 21):  # overflow charges 2..20 (= derived cap)
+            assert _dcr_post(tc, ip=f"203.0.113.{i}").status_code == 201
+        r = _dcr_post(tc, ip="203.0.113.21")
+        assert r.status_code == 429, r.text
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+
+    # ── (p) scope vectors + AS metadata + offline_access round trip ─────
+    def test_p_dcr_scope_vectors(self, api_client, session_user, monkeypatch):
+        tc, _ = api_client
+        assert SCOPES_SUPPORTED == ["mcp"]
+        assert set(SCOPES_SUPPORTED) <= set(SCOPES_ACCEPTED)
+        assert "offline_access" in SCOPES_ACCEPTED
+        # AS metadata advertises the ACCEPTED superset; the PRM document keeps
+        # the client-facing default set.
+        as_meta = tc.get("/.well-known/oauth-authorization-server").json()
+        assert as_meta["scopes_supported"] == SCOPES_ACCEPTED
+        prm = tc.get("/.well-known/oauth-protected-resource").json()
+        assert prm["scopes_supported"] == SCOPES_SUPPORTED
+        for scope in (None, "mcp", "mcp offline_access", "offline_access"):
+            body = {"client_name": "scope-vector", "redirect_uris": [REDIRECT]}
+            if scope is not None:
+                body["scope"] = scope
+            r = tc.post("/register", json=body)
+            assert r.status_code == 201, (scope, r.text)
+        r = tc.post("/register", json={"client_name": "bad",
+                                        "redirect_uris": [REDIRECT],
+                                        "scope": "admin"})
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_client_metadata"
+        assert "offline_access" in r.json()["error_description"]
+        # the offline_access round trip mints a refresh token that works
+        session_user(_U1)
+        reg = tc.post("/register", json={
+            "client_name": "offline",
+            "redirect_uris": [REDIRECT],
+            "scope": "mcp offline_access"}).json()
+        verifier, challenge = _pkce()
+        r = tc.post("/oauth/consent", json={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp offline_access", "resource": None},
+            headers={"Authorization": "Bearer fake-session-jwt"})
+        assert r.status_code == 200, r.text
+        tok = _exchange(tc, client_id=reg["client_id"], code=r.json()["code"],
+                        verifier=verifier)
+        assert tok.status_code == 200, tok.text
+        assert tok.json()["refresh_token"].startswith("ort_")
+        rr = tc.post("/oauth/token", data={
+            "grant_type": "refresh_token",
+            "refresh_token": tok.json()["refresh_token"],
+            "client_id": reg["client_id"]})
+        assert rr.status_code == 200, rr.text
+
+    # ── (q) RATE_LIMIT_DISABLED opts out ────────────────────────────────
+    def test_q_rate_limit_disabled_is_a_no_op(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "0")
+        assert _dcr_post(tc, ip="203.0.113.1").status_code == 201
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_ANON
+
+    # ── (r) default constants pin the stated policy ─────────────────────
+    def test_r_defaults_pin_the_stated_policy(self):
+        assert _ha_mod._OAUTH_DCR_PER_HOUR_DEFAULT == 20
+        assert _ha_mod._OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT == 600
+        assert _ha_mod._OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT == 1200
+        assert _ha_mod._OAUTH_DCR_STORE_CAP_DEFAULT == 256
+        assert _ha_mod._OAUTH_DCR_IPV6_PREFIX_DEFAULT == 64
+        assert _ha_mod._OAUTH_DCR_WINDOW_S == 3600
+        assert _ha_mod._OAUTH_DCR_TRUSTED_CIDRS_DEFAULT == "160.79.104.0/21"
+        # the cap must stay below the anonymous aggregate or the
+        # reject-new/overflow branch is dead at shipped defaults
+        assert (_ha_mod._OAUTH_DCR_STORE_CAP_DEFAULT
+                < _ha_mod._OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT)
+        # derived distinct-new-anonymous-key ceiling (STORE_CAP + PER_HOUR)
+        assert (_ha_mod._OAUTH_DCR_STORE_CAP_DEFAULT
+                + _ha_mod._OAUTH_DCR_PER_HOUR_DEFAULT) == 276
+        # unset env yields exactly the stated defaults (call-time reads)
+        for name, attr in (
+            ("TORTOISE_OAUTH_DCR_PER_HOUR", "_OAUTH_DCR_PER_HOUR_DEFAULT"),
+            ("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+             "_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR_DEFAULT"),
+            ("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR",
+             "_OAUTH_DCR_TRUSTED_PER_HOUR_DEFAULT"),
+            ("TORTOISE_OAUTH_DCR_STORE_CAP", "_OAUTH_DCR_STORE_CAP_DEFAULT"),
+        ):
+            assert os.environ.get(name) is None, f"{name} leaked into this test"
+            assert getattr(_ha_mod, attr) == int(
+                _ha_mod._int_env(name, getattr(_ha_mod, attr)))
+
+    # ── (s) registry-mode 503 precedes the limiter (no charge) ──────────
+    def test_s_registry_503_precedes_limiter(self, api_client, monkeypatch):
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patched_tortoise_sdk(os.path.join(tmpdir, "r.db")), \
+                TestClient(app) as tc:
+            r = tc.post("/register", json={"client_name": "x",
+                                            "redirect_uris": [REDIRECT]})
+            assert r.status_code == 503
+        assert not _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_ANON
+
+    # ── (t) parity: the DCR window helpers vs the shared primitive ──────
+    def test_t_window_helper_parity_with_primitive(self, monkeypatch):
+        now = 1_800_000_000.0
+        monkeypatch.setattr(_ha_mod.time, "time", lambda: now)
+        rows = (
+            [0.0],                       # just charged
+            [3600.0],                    # exactly at the boundary → pruned
+            [3599.5],                    # just inside
+            [0.0, 3599.75],              # two in-window entries
+            [3600.0, 3700.0],            # everything pruned
+            [3599.6666667, 100.0],       # non-integer remainder
+            [0.0, 1800.0, 3599.9],       # three in-window entries
+        )
+        for row in rows:
+            store = {"9.9.9.9": [now - age for age in row]}
+            req = Request({"type": "http", "method": "POST", "path": "/x",
+                           "headers": [], "query_string": b"",
+                           "client": ("9.9.9.9", 1234)})
+            pruned = _ha_mod._dcr_prune_window(list(store["9.9.9.9"]), now,
+                                               _ha_mod._OAUTH_DCR_WINDOW_S)
+            try:
+                asyncio.run(_ha_mod._check_ip_bucket_rate_limit(
+                    req, buckets=store, lock=asyncio.Lock(), limit=1,
+                    window_s=_ha_mod._OAUTH_DCR_WINDOW_S, detail="parity",
+                    retry_after_s=None, defer_charge=True))
+                denied = False
+            except HTTPException as exc:
+                denied = True
+                assert exc.status_code == 429
+                assert exc.headers["Retry-After"] == str(
+                    _ha_mod._dcr_retry_after_s(pruned, now,
+                                               _ha_mod._OAUTH_DCR_WINDOW_S))
+            assert denied == bool(pruned), (row, denied, pruned)
+            assert store["9.9.9.9"] == pruned, (row, store["9.9.9.9"], pruned)
+
+    # ── (u) concurrency: atomicity under interleaving ───────────────────
+    @staticmethod
+    def _burst(ips):
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await asyncio.gather(*[
+                    ac.post("/register",
+                            json={"client_name": "burst",
+                                  "redirect_uris": [REDIRECT]},
+                            headers={"Fly-Client-IP": ip})
+                    for ip in ips])
+        return asyncio.run(_run())
+
+    def test_u1_concurrent_same_key_single_winner(self, api_client, monkeypatch):
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        results = self._burst(["203.0.113.77"] * 6)
+        codes = sorted(r.status_code for r in results)
+        assert codes == [201] + [429] * 5, codes
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS["203.0.113.77"]) == 1
+
+    def test_u2_concurrent_distinct_keys_respect_cap(self, api_client,
+                                                     monkeypatch):
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_STORE_CAP", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "20")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        results = self._burst([f"203.0.113.{i}" for i in range(1, 5)])
+        assert all(r.status_code == 201 for r in results), [
+            r.text for r in results]
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS) <= 1
+
+    # ── (v) a repeat charge on a tracked key consumes the aggregate ─────
+    def test_v_repeat_charge_consumes_aggregate(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "3")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "10")
+        for _ in range(3):
+            assert _dcr_post(tc, ip="203.0.113.9").status_code == 201
+        assert _dcr_post(tc, ip="203.0.113.9").status_code == 429
+        assert len(_ha_mod._OAUTH_DCR_ANON[_ha_mod._OAUTH_DCR_ANON_KEY]) == 3
+
+    # ── (w) trusted traffic does not consume the anonymous aggregate ────
+    def test_w_trusted_does_not_consume_anonymous_aggregate(self, api_client,
+                                                            monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR", "100")
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert not _ha_mod._OAUTH_DCR_ANON.get(_ha_mod._OAUTH_DCR_ANON_KEY)
+        assert _dcr_post(tc, ip="203.0.113.4").status_code == 201
+
+    # ── (x) TRUSTED_CIDRS is a live knob (no cache, no falsy-coalesce) ──
+    def test_x_trusted_cidrs_is_a_live_knob(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_PER_HOUR", "1")
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS", _DCR_CUSTOM_NET)
+        # an address inside the DEFAULT range is no longer exempt (so an
+        # `or DEFAULT` read would fail this assertion)
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert _DCR_TRUSTED in _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 429
+        # an address in the CUSTOM range is exempt
+        assert _dcr_post(tc, ip="198.51.100.5").status_code == 201
+        assert _DCR_CUSTOM_NET in _ha_mod._OAUTH_DCR_TRUSTED
+        # an EMPTY value disables the exemption (the fail-closed lever)
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_TRUSTED_CIDRS", "")
+        assert _dcr_post(tc, ip=_DCR_TRUSTED).status_code == 201
+        assert _DCR_TRUSTED in _ha_mod._OAUTH_DCR_BUCKETS
+        assert not _ha_mod._OAUTH_DCR_TRUSTED
+
+    # ── (y) IPV6_PREFIX is a live knob ──────────────────────────────────
+    def test_y_ipv6_prefix_is_a_live_knob(self, api_client, monkeypatch):
+        tc, _ = api_client
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR",
+                           "1000000")
+        a, b = "2001:db8:aaaa:1::1", "2001:db8:aaaa:2::1"
+        # shipped default /64 → the pair is distinct
+        assert _dcr_post(tc, ip=a).status_code == 201
+        assert _dcr_post(tc, ip=b).status_code == 201
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS) == 2
+        # /48 → the pair collapses (a difference in the 3rd hextet would
+        # collapse under neither prefix, which is why the 4th is used)
+        _dcr_reset()
+        monkeypatch.setenv("TORTOISE_OAUTH_DCR_IPV6_PREFIX", "48")
+        assert _dcr_post(tc, ip=a).status_code == 201
+        assert _dcr_post(tc, ip=b).status_code == 201
+        keys = list(_ha_mod._OAUTH_DCR_BUCKETS)
+        assert keys == ["2001:db8:aaaa::/48"], keys
+        assert len(_ha_mod._OAUTH_DCR_BUCKETS[keys[0]]) == 2

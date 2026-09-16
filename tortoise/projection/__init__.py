@@ -13,6 +13,7 @@ Backends behind the `Projection` protocol:
 from __future__ import annotations  # noqa: I001
 
 import hashlib
+import math
 import re
 import os
 import shutil
@@ -21,7 +22,7 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import NamedTuple, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,138 @@ logger = logging.getLogger(__name__)
 # are never cached — the probe stays exact for them.
 # Keyed by tuple; value is (major, minor, patch) or None (undetermined).
 _FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
+
+
+# ── #2850 (P0 liveness/readiness decouple): bounded DB client timeouts ────
+#
+# WHY these are bounded with an env knob. Every blocking FalkorDB call runs
+# with these socket timeouts, and the socket read/connect timeouts are what
+# decide how long a stalled call can hold a thread (or, on the paths that
+# still call the client synchronously from the event loop, how long the LOOP
+# is stalled — which is what the /healthz heartbeat and the loop-stall
+# watchdog observe). The pre-#2850 literals were
+# ``socket_connect_timeout=5, socket_timeout=10``: a single blocked connect
+# could outlast Fly's 5s check budget by itself, and connect+read (15s) summed
+# to the whole 15s http_check timeout with nothing left for the response.
+#
+# connect: 5s → 2s. A TCP/TLS handshake to a reachable endpoint is
+# milliseconds; 5s of silence means a black hole / dead DNS / filtered port,
+# where waiting longer buys nothing. Lowering this is close to risk-free.
+#
+# read: UNCHANGED at 10s, deliberately. This timeout also bounds legitimate
+# long commands — a large ``GRAPH.QUERY`` reply, a backup dump, the chunked
+# ``vecf32`` restore batches (hosted_backup.py sizes its chunks around it).
+# Lowering it silently turns big-but-valid queries into failures, and a
+# timeout on an in-flight WRITE is not idempotent (the server may still apply
+# it while the client reports an error and retries). After #2850 no health
+# check waits on the DB at all, so the read timeout no longer sits in the
+# liveness budget; it is now configurable for operators who need a tighter
+# loop-stall ceiling (pair a lower value with a lower
+# TORTOISE_LOOP_STALL_EXIT_S, see monitoring.start_stall_watchdog — note that
+# self-kill is OPT-IN and disabled by default).
+_DB_CONNECT_TIMEOUT_DEFAULT = 2.0
+_DB_SOCKET_TIMEOUT_DEFAULT = 10.0
+#: Sanity ceiling on a configured DB socket timeout (round-3 review P2).
+#: ``float()`` accepts ``inf`` and ``1e308``; both are semantically "block
+#: forever" — the literal #2850 failure mode — and an ``inf`` passed to
+#: redis-py's ``sock.settimeout`` raises ``OverflowError`` (NOT caught by its
+#: ``except OSError``), so the DB client could never connect at all. Clamp to
+#: a value that still bounds a hung socket.
+_DB_TIMEOUT_MAX_S = 60.0
+#: Sanity floor on a configured DB socket timeout (round-4 review P2). No
+#: socket round trip ever completes in microseconds. ``float()`` accepts
+#: ``1e-9``, which turns every FalkorDB operation into an instant timeout —
+#: ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=1e-9`` is a typo-induced total outage
+#: (fail-closed, so not #2850, but the same "finite but absurd" class floored
+#: for the health-probe interval). Below the floor we fall back to the default.
+_DB_TIMEOUT_MIN_S = 0.05
+
+#: #3350: explicit, bounded retry policy for the EMBEDDED client.
+#:
+#: redis-py 8's client DEFAULT is ``Retry(ExponentialWithJitterBackoff(
+#: base=DEFAULT_RETRY_BASE, cap=DEFAULT_RETRY_CAP), retries=10)`` — TEN
+#: retries after the first attempt. Two consequences, both bad here:
+#:
+#:  * a read timeout costs ``11 x socket_timeout`` PLUS up to ~75s of
+#:    exponential jitter backoff, so ONE wedged embedded daemon parks
+#:    whatever thread is running the query for ~59s (measured, SIGSTOPped
+#:    daemon, before this constant existed) — and after
+#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S`` was wired in (#3350) the
+#:    DEFAULT 10s read timeout would have made that ~115s;
+#:  * it makes the bound UN-KNOWABLE from outside: setting
+#:    ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S=t`` still waited ~11t, so the
+#:    knob an operator lowers to tighten the loop-stall ceiling did not
+#:    tighten what actually parked the thread.
+#:
+#: ONE retry keeps the transient-blip recovery (a single reconnect) while
+#: capping the multiplier at 2, so the embedded lane's worst case is
+#: statically ``(1 + _EMBEDDED_RETRY_COUNT) * socket_timeout + backoff``
+#: rather than a dependency default that can change under us. That is the
+#: property ``monitoring``'s layered-timeout doctrine needs ("make the inner
+#: call bounded so the worker frees itself"). The HOST branch is deliberately
+#: untouched — its retry policy is not what #3350 is about.
+_EMBEDDED_RETRY_COUNT = 1
+_EMBEDDED_RETRY_BASE = 0.1
+_EMBEDDED_RETRY_CAP = 1.0
+
+
+def _embedded_retry():
+    """Bounded retry policy for the embedded client (#3350).
+
+    See ``_EMBEDDED_RETRY_COUNT`` for why this exists. Built per call rather
+    than shared so no state is aliased across clients.
+    """
+    from redis.backoff import ExponentialWithJitterBackoff
+    from redis.retry import Retry as _Retry
+
+    return _Retry(
+        backoff=ExponentialWithJitterBackoff(
+            base=_EMBEDDED_RETRY_BASE, cap=_EMBEDDED_RETRY_CAP),
+        retries=_EMBEDDED_RETRY_COUNT,
+    )
+
+
+def _socket_timeouts() -> tuple[float, float]:
+    """``(socket_connect_timeout, socket_timeout)`` from env, with defaults.
+
+    ``TORTOISE_FALKORDB_CONNECT_TIMEOUT_S`` / ``TORTOISE_FALKORDB_SOCKET_TIMEOUT_S``.
+    A non-numeric, NON-FINITE (``nan``/``inf``), non-positive, below-
+    ``_DB_TIMEOUT_MIN_S`` or above-``_DB_TIMEOUT_MAX_S`` value falls
+    back/clamps rather than disabling the bound (a 0/None redis timeout means
+    "block forever" — exactly the failure mode #2850 is about; ``inf``/``1e308``
+    mean the same and an ``inf`` socket timeout raises ``OverflowError`` inside
+    redis-py, bricking the client at boot; ``1e-9`` times out every operation
+    before it can complete).
+    """
+    def _one(name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).strip():
+            return default
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("%s=%r is not a number — using %ss", name, raw, default)
+            return default
+        if not math.isfinite(v):
+            logger.warning("%s=%r is not finite — using %ss (a non-finite "
+                           "socket timeout means 'block forever' or raises "
+                           "OverflowError in the client)", name, raw, default)
+            return default
+        if v <= 0:
+            return default
+        if v < _DB_TIMEOUT_MIN_S:
+            logger.warning("%s=%r is below the %.2fs floor — using %ss (a "
+                           "sub-floor timeout fails every DB operation before "
+                           "it can complete)", name, raw, _DB_TIMEOUT_MIN_S, default)
+            return default
+        if v > _DB_TIMEOUT_MAX_S:
+            logger.warning("%s=%r exceeds the %.0fs ceiling — clamping",
+                           name, raw, _DB_TIMEOUT_MAX_S)
+            return _DB_TIMEOUT_MAX_S
+        return v
+
+    return (_one("TORTOISE_FALKORDB_CONNECT_TIMEOUT_S", _DB_CONNECT_TIMEOUT_DEFAULT),
+            _one("TORTOISE_FALKORDB_SOCKET_TIMEOUT_S", _DB_SOCKET_TIMEOUT_DEFAULT))
 
 
 
@@ -81,7 +214,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
     up = cypher.upper()
     if "DETACH" not in up or "DELETE" not in up:
         return False
-    # Property map in MATCH => targeted (e.g. {id:$id}, {team_id:$id})
+    # Property map in MATCH => targeted (e.g. {id:$id}, {org_id:$id})
     if "{" in cypher:
         return False
     # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
@@ -375,7 +508,41 @@ def _journal_append_product(graph_name: str) -> None:
     P1-1: the parent dir exists only after _redislite_hygiene's session
     fixture — makedirs BEFORE every append so module-import/collect-only
     appends cannot FileNotFoundError). Absent env var → no-op, never fail
-    (the specified fallback)."""
+    (the specified fallback).
+
+    Failure policy (#3214): a WRITE failure is not hygiene bookkeeping — the
+    journal is the OWNERSHIP CONTRACT, so a minted graph that cannot be
+    journaled is UNOWNED: a live peer's scope=None sweep finds no record of
+    it and may delete it (the cross-session flake #3074 exists to stop). The
+    old policy (a silent no-op logged at DEBUG) hid that state for the whole
+    session, so an OSError now RAISES: the session stops at the first mint
+    whose ownership could not be recorded instead of letting the shared
+    server accumulate graphs a peer sweep may destroy.
+
+    NOT fail-closed, and not claimed to be: raising neither removes nor
+    protects the graph, so a caller that already created its graph holds an
+    UNOWNED one and must deal with it itself. The two sdk.py call sites do:
+      * the registry append (``_get_registry``) runs BEFORE the handle is
+        cached and BEFORE ``_ensure_registry_indexes`` writes, and
+        ``select_graph`` is client-side (no server call) — a raise there
+        mints nothing and leaves no half-initialized registry behind;
+      * the org-mint append (``org_create``) runs AFTER the org graph's
+        TeamMeta CREATE, and its failure path DROPS that graph (best-effort —
+        if the drop fails too the graph survives and is WARNING-logged)
+        before re-raising; ``org_create``'s own handler rolls the registry
+        Org node back.
+    The other call sites are MIXED, which is why this is a per-caller
+    contract and not a property of the function: some hosted mint lanes drop
+    the graph on failure (``provision_tenant``, ``register_user``'s provision
+    lane) and some do not (``register_user``'s first lane,
+    ``_eager_provision_org_graph``) — those propagate the raise with the
+    graph left in place. The projection redirect / from_uri seams append
+    BEFORE the projection (and so the graph) is materialized, so a raise
+    there mints nothing. The ordering behind all of them (CREATE before the
+    ownership line) is the real fix and is tracked in #3390.
+
+    The two no-op gates above (absent path, not a test session) are
+    unchanged, so production mints never reach the raise."""
     path = _journal_file_path()
     if not path:
         return
@@ -389,10 +556,18 @@ def _journal_append_product(graph_name: str) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a") as fh:
             fh.write(graph_name + "\n")
-    except Exception:
-        # never fail a construction over journaling (cycle-8 P2-3 spirit)
-        logging.getLogger(__name__).debug(
-            "journal append skipped for %r (%r)", graph_name, path)
+    except OSError as e:
+        # #3214: see the docstring — the journal write is the ownership
+        # contract, so an unjournalable mint stops the session instead of
+        # silently producing a graph no sweep can attribute to a session.
+        raise RuntimeError(
+            f"session journal append failed for {graph_name!r} ({path!r}): "
+            f"{e!r} — the graph is minted but UNOWNED: a live peer's "
+            f"scope=None sweep has no record of it and may delete it "
+            f"(#3214). Stopping at the first mint whose ownership could "
+            f"not be recorded; a caller that already created the graph "
+            f"must drop it (see #3390 for the write-ahead fix)."
+        ) from e
 
 
 # ── Mixins ────────────────────────────────────────────────────────────────
@@ -570,6 +745,45 @@ def _validate_uri_scheme(scheme: str) -> str:
     return scheme
 
 
+class DbEndpoint(NamedTuple):
+    """Resolved FalkorDB server endpoint (the canonical URI → client kwargs)."""
+
+    host: str
+    port: int
+    username: str | None
+    password: str | None
+    graph_name: str
+    ssl: bool
+
+
+def resolve_db_endpoint(uri: str, graph_name: str | None = None) -> DbEndpoint:
+    """Parse a connection URI into FalkorDB client endpoint parameters.
+
+    THE canonical URI → endpoint derivation (#2974): ``FalkorProjection.
+    from_uri`` (every product connection) and ``tortoise.backup._bgsave`` (the
+    backup snapshot) both call this, so a backup can never dial a different
+    instance than the product it is backing up. Before this existed the same
+    parse was inlined in ``from_uri`` and independently re-implemented by
+    callers — one of which hardcoded an embedded ``localhost:16379``.
+
+    ``graph_name`` overrides the URI-path-derived name (multi-tenant
+    isolation, #7886); when None the URI path is used (default "tortoise").
+    Unsupported schemes raise ValueError via ``_validate_uri_scheme``.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    _validate_uri_scheme(parsed.scheme)
+    return DbEndpoint(
+        host=parsed.hostname or "localhost",
+        port=parsed.port or 16379,
+        username=parsed.username or None,
+        password=parsed.password or None,
+        graph_name=(graph_name if graph_name is not None
+                    else (parsed.path.lstrip('/') or "tortoise")),
+        ssl=(parsed.scheme == "rediss"),
+    )
+
+
 # ── FalkorProjection ──────────────────────────────────────────────────────
 
 
@@ -716,7 +930,7 @@ class FalkorProjection(
                     _graph = graph_name
                 else:
                     # Cycle-2 P0-1b: explicit non-guard-passing names ("test",
-                    # "t", "team_...") derive PER-PATH names — the parity/
+                    # "t", "org_...") derive PER-PATH names — the parity/
                     # g_consistency pairs construct distinct paths with one
                     # shared explicit name and must land on DISTINCT server
                     # graphs (a shared rename makes the apply-vs-rebuild
@@ -736,9 +950,9 @@ class FalkorProjection(
                     _stem = re.sub(r"[^a-zA-Z0-9_]", "_", _stem)
                     # CI P2 fix: fold the explicit graph_name into the hash.
                     # The per-path-only derivation COLLAPSED namespaces — two
-                    # team_<ns> SDKs on the SAME temp path (test_hosted_api's
-                    # cross-team isolation, quota tests) derived the SAME
-                    # server graph, destroying team isolation. hash(path+name)
+                    # org_<ns> SDKs on the SAME temp path (test_hosted_api's
+                    # cross-org isolation, quota tests) derived the SAME
+                    # server graph, destroying org isolation. hash(path+name)
                     # keeps parity pairs (distinct paths, one shared name)
                     # distinct AND namespace pairs (one path, distinct names)
                     # distinct — the embedded same-file/same-name analog
@@ -806,18 +1020,49 @@ class FalkorProjection(
             aof_dir = (
                 os.path.basename(os.path.abspath(path)) + "-appendonlydir"
             ) if (path != ":memory:" and aof_enabled) else None
+            # #3350: the embedded client was built with NO socket timeouts of
+            # OUR choosing, so every blocking call on it was bounded only by
+            # redis-py's own implicit connection default (5s) — invisible to
+            # operators, and multiplied by the client's retry policy.
+            # Measured against a SIGSTOPped embedded daemon: one `RETURN 1`
+            # blocked ~59s, outliving the /health probe's 1.5s outer bound by
+            # ~40x and parking the probe worker that whole time (#3350).
+            # `TORTOISE_FALKORDB_SOCKET_TIMEOUT_S` — the knob monitoring.py's
+            # budgets are documented in terms of, and the one an operator
+            # lowers to tighten the loop-stall ceiling — had no effect on this
+            # lane at all. Wire the SAME resolved READ timeout the host branch
+            # uses (redis-py's UnixDomainSocketConnection applies
+            # `socket_timeout` to the socket after connect, which is the leg a
+            # wedged daemon parks on) and pair it with `_embedded_retry()` so
+            # the worst case is a knowable `2 x socket_timeout`, not an
+            # 11x-multiplied dependency default.
+            #
+            # NOT passed here: `socket_connect_timeout`. redis-py 8's
+            # ConnectionPool does not forward it for a unix-domain socket
+            # (verified: `Redis(unix_socket_path=..., socket_connect_timeout=
+            # 1.5)` leaves `conn.socket_connect_timeout` at redis-py's own 5s
+            # default), so passing it would be a bound that looks wired but
+            # is not — the trap this change exists to remove. Its own 5s
+            # default still applies, and a local UDS connect cannot be the
+            # black hole: the read leg is. (Operators wanting that leg too
+            # need a custom connection class — filed separately.)
+            read_to = _socket_timeouts()[1]
             self.db = FalkorDB(
                 path,
                 serverconfig=(
                     {"appendonly": "yes", "appenddirname": aof_dir}
                     if (path != ":memory:" and aof_enabled) else None
                 ),
+                socket_timeout=read_to,
+                retry=_embedded_retry(),
             )
         elif host is not None:
             # Docker FalkorDB
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
+            connect_to, read_to = _socket_timeouts()
             self.db = FalkorDB(host=host, port=port, username=username, password=password,
-                               socket_connect_timeout=5, socket_timeout=10, ssl=ssl)
+                               socket_connect_timeout=connect_to, socket_timeout=read_to,
+                               ssl=ssl)
             # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
             # wipe_server/session sweep/tripwire read it instead of the raw
             # client (redis-py 8.1.0 has no .host on the client — the host
@@ -1004,13 +1249,8 @@ class FalkorProjection(
 
         Unsupported schemes raise ValueError with an actionable message.
         """
-        from urllib.parse import urlparse
-        parsed = urlparse(uri)
-        _validate_uri_scheme(parsed.scheme)
-        username = parsed.username or None
-        password = parsed.password or None
-        if graph_name is None:
-            graph_name = parsed.path.lstrip('/') or "tortoise"
+        endpoint = resolve_db_endpoint(uri, graph_name)
+        graph_name = endpoint.graph_name
         # Epic #1647 (cycle-4 P2-2 / cycle-6 P2-13 / cycle-7 P2-9 / #1686): in
         # a TEST SESSION with a calling test frame (TORTOISE_TEST_MODE=1 AND
         # _resolve_caller_stem() is not None — the SAME predicate as the
@@ -1029,12 +1269,12 @@ class FalkorProjection(
         if os.environ.get("TORTOISE_TEST_MODE") == "1" \
                 and _resolve_caller_stem() is not None:
             _journal_append_product(graph_name)
-        return cls(host=parsed.hostname or "localhost",
-                   port=parsed.port or 16379,
-                   username=username,
-                   password=password,
+        return cls(host=endpoint.host,
+                   port=endpoint.port,
+                   username=endpoint.username,
+                   password=endpoint.password,
                    graph_name=graph_name,
-                   ssl=(parsed.scheme == "rediss"))
+                   ssl=endpoint.ssl)
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
@@ -1570,9 +1810,10 @@ class FalkorProjection(
         # is never live-truth, so keep the LAST supersede survivor per old
         # id (the earlier fold's CORRECTS S1→A would ghost beside the final
         # S2→A). PointInvalidated folds ALL survive the id filter and are
-        # NOT canonicalized — double-invalidate is live-legal (no terminal
-        # guard; outdated is a flag), so every survivor is live-truth and
-        # must fold (distinct corrected_by → 2 CORRECTS, acceptance b).
+        # NOT canonicalized — #2498: the SDK now REJECTS the repeat (the
+        # outdated=true flag is terminal), but a raw/legacy producer can still
+        # journal it, so every survivor folds (distinct corrected_by → 2
+        # CORRECTS, acceptance b).
         # Chains A→B→C have distinct old ids — each link folds independently.
         supersede_last: dict[str, tuple[int, dict]] = {}
         invalidate_survivors: list[tuple[int, dict]] = []
@@ -2281,26 +2522,30 @@ class FalkorProjection(
 
         FTS and vector indexes are gated on FalkorDB >= 4.x.
 
-        Embedded (redislite) note (#522): the is_operator RANGE index is
-        intentionally NOT created on embedded DBs. redislite merges
-        per-property indexes into a composite whose is_operator entries are
-        written with the FIRST process's type encoding; a later process
-        reopening the same DB file inherits a stale composite and
-        `n.is_operator = false` (which the query planner routes through the
-        index) silently matches ZERO rows — verified on the crash-recovery
-        reopen path (test_crash_recovery). The full label scan for
-        `= false` is correct on embedded; docker/server FalkorDB keeps the
-        index for the Node By Index Scan perf win.
+        Boolean-index policy (#522 embedded, #3154 docker/server): the
+        property ``is_operator`` is intentionally NEVER indexed, on any
+        backend. For embedded (redislite) the original reason was the stale
+        bool type table across reopen (#522). #3154 established the same
+        hazard on docker/server FalkorDB via ``GRAPH.COPY``: a copied
+        boolean index can contain no entry for ``false``, so
+        ``n.is_operator = false`` silently matches ZERO rows on graphs copied
+        with the index in its SDK-created position (the pre-#3154 shape — the
+        boolean index built alongside the other Point indexes; verified on
+        docker FalkorDB 4.20.4, the boolean-single and the
+        ``(is_operator, lastDreamedAt)`` composite schemas) — and the copy
+        DESTINATION cannot be healed by rebuilding: after ``DROP INDEX`` a
+        fresh ``CREATE INDEX`` on ``is_operator`` is corrupt too (also
+        measured). The full label scan for `= false` is correct on every
+        backend; ``lastDreamedAt`` (never ``is_operator``) carries the
+        staleness ordering. See the purge block below and
+        ``hosted_backup._audit_copied_boolean_indexes`` for the copy-path
+        verification.
         """
         # ── Range indexes (always safe, pre-4.x compatible) ──
-        # NOTE: the single `is_operator` index is NOT created here on
-        # server mode — the composite (is_operator, lastDreamedAt) below
-        # subsumes it (leftmost prefix serves `n.is_operator = false`), and
-        # FalkorDB rejects a composite containing an already-indexed
-        # attribute ("Attribute 'is_operator' is already indexed"), which
-        # silently disabled the lastDreamedAt composite (the epic-903
-        # staleness-ranking index). Embedded skips is_operator entirely
-        # (#522 stale-bool-type repair).
+        # NOTE: no index on `is_operator` is created here on ANY backend —
+        # see the boolean-index policy in the docstring and the #3154 purge
+        # below. The epic-903 staleness ordering rides on the plain
+        # lastDreamedAt index.
         point_props = ("id", "pointKind", "content_hash")
         for prop in point_props:
             try:
@@ -2314,65 +2559,62 @@ class FalkorProjection(
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
 
+        # ── #3154: purge boolean `is_operator` indexes (ALL backends) ──
+        # GRAPH.COPY silently drops the `false` postings of a boolean RANGE
+        # index: the destination's index can have no entry for `false`, so
+        # `n.is_operator = false` silently matches ZERO rows on graphs copied
+        # with the boolean index in its SDK-created position (verified on
+        # docker FalkorDB 4.20.4: a source built by the pre-#3154
+        # `_ensure_indexes` — id/pointKind/content_hash singles then the
+        # `(is_operator, lastDreamedAt)` composite — copies as 0 false + 5
+        # true, while `NOT n.is_operator` still returns 10 and
+        # `typeof(n.is_operator)` stays Boolean: the DATA is intact, the
+        # index is corrupt; a composite-ONLY source copies healthy, so the
+        # trigger is the index set, not the property alone). The copy destination is also poisoned for
+        # boolean index BUILDING: a freshly CREATEd is_operator index on it
+        # is corrupt too, so drop-and-recreate cannot heal a graph. The only
+        # durable fix is for the index not to exist.
+        #
+        # Unconditional best-effort DROP on every backend: an absent index
+        # raises "no such index" in O(1) (the healthy case, so there is no
+        # startup penalty on large graphs), while legacy and copied graphs
+        # are healed on open. Both the single `:Point(is_operator)` and the
+        # composite `(is_operator, lastDreamedAt)` forms are swept. This runs
+        # BEFORE the lastDreamedAt index is (re)created below so a loose
+        # match that also removed lastDreamedAt cannot leave the staleness
+        # ordering unindexed.
+        for _stmt in ("DROP INDEX ON :Point(is_operator)",
+                      "DROP INDEX ON :Point(is_operator, lastDreamedAt)"):
+            try:
+                self.g.query(_stmt)
+            except Exception as _e:
+                # Only "no such index" is the healthy case. Swallowing every
+                # failure would treat a genuine drop error as "nothing to
+                # drop", leaving a poisoned index in place with no diagnostic
+                # — the silent-failure class #3154 exists to close (#3154
+                # review P2).
+                if "no such index" not in str(_e).lower():
+                    logger.warning(
+                        "#3154: DROP INDEX %s failed: %s", _stmt, _e,
+                    )
+
         # ── lastDreamedAt freshness index (epic 903-C2, #1240) ──
         # Powers the stale-first scheduler's staleness ranking
-        # (ORDER BY lastDreamedAt ASC, null = stalest). Composite
-        # (is_operator, lastDreamedAt) on docker/server FalkorDB; embedded
-        # (redislite) gets the plain lastDreamedAt index only — a composite
-        # containing is_operator is #522-unsafe on embedded (stale bool type
-        # table across reopen silently zeroes `= false` lookups; the repair
-        # sweep below drops such composites on open). Idempotent +
-        # AOF-replay-safe (CREATE INDEX survives AOF replay —
+        # (ORDER BY lastDreamedAt ASC, null = stalest). #3154: the PLAIN
+        # lastDreamedAt index on every backend — `is_operator` is never
+        # indexed (see the purge above). Idempotent + AOF-replay-safe
+        # (CREATE INDEX survives AOF replay —
         # tests/test_embedded_concurrency.py:532).
-        if getattr(self, "_is_embedded", False):
-            dreamed_props = ("lastDreamedAt",)
-        else:
-            dreamed_props = ("is_operator", "lastDreamedAt")
         try:
-            self.g.query(
-                "CREATE INDEX FOR (n:Point) ON ("
-                + ", ".join(f"n.{p}" for p in dreamed_props) + ")"
-            )
+            self.g.query("CREATE INDEX FOR (n:Point) ON (n.lastDreamedAt)")
         except Exception as e:
             msg = str(e).lower()
-            if not getattr(self, "_is_embedded", False) \
-                    and ("is_operator" in msg or "lastdreamedat" in msg):
-                # Server mode only: single-property indexes from older
-                # _ensure_indexes runs (plain `is_operator` OR plain
-                # `lastDreamedAt`) block the composite — FalkorDB rejects a
-                # composite containing an already-indexed attribute.
-                # The composite subsumes both singles, so drop them and
-                # retry once. (Idempotent: a later startup with the
-                # composite present hits "already indexed" on the composite
-                # and no-ops below.) Embedded is deliberately EXCLUDED — the
-                # plain lastDreamedAt index there is the correct one and must
-                # not be dropped/recreated on every reopen (churn).
-                try:
-                    for _single in ("is_operator", "lastDreamedAt"):
-                        try:  # noqa: SIM105
-                            self.g.query(f"DROP INDEX ON :Point({_single})")
-                        except Exception:
-                            pass  # no such single index — fine
-                    self.g.query(
-                        "CREATE INDEX FOR (n:Point) ON ("
-                        + ", ".join(f"n.{p}" for p in dreamed_props) + ")"
-                    )
-                except Exception as e2:
-                    msg2 = str(e2).lower()
-                    if "already indexed" in msg2 or "already exists" in msg2:
-                        pass  # composite already exists from prior startup
-                    else:
-                        import logging
-                        logging.getLogger(__name__).error(
-                            "Failed to create index on :Point(%s): %s",
-                            ", ".join(dreamed_props), e2)
-            elif "already indexed" in msg or "already exists" in msg:
+            if "already indexed" in msg or "already exists" in msg:
                 pass  # expected — index exists from prior startup
             else:
                 import logging
                 logging.getLogger(__name__).error(
-                    "Failed to create index on :Point(%s): %s",
-                    ", ".join(dreamed_props), e)
+                    "Failed to create index on :Point(lastDreamedAt): %s", e)
 
         # ── Embedded repair: drop stale composite Point indexes (#522) ──
         # A composite index containing is_operator (created by an older
@@ -2655,10 +2897,15 @@ class FalkorProjection(
         try:
             # #1475: route through db._t_close (when present) so the db's
             # _t_closed flag is set — the GC finalizer must recognize this
-            # client as explicitly closed and stay a strict no-op (a bare
-            # db.close() is a redis-py pool disconnect that leaves the
-            # server + socket intact). Host-mode db (no _t_close) keeps the
-            # plain close.
+            # client as explicitly closed and stay a strict no-op. Note the
+            # installed redislite `FalkorDB.close()` is NOT a bare redis-py
+            # pool disconnect: it shadows that and calls
+            # `self.client._cleanup()`, tearing the server down. `_t_close`
+            # is still the correct entry point here because it is the one
+            # that also drives the flag plus the #3599 owner-record release
+            # (a bare `db.close()` now releases the owner record too — see
+            # `tortoise.FalkorDB.close`). Host-mode db (no _t_close) keeps
+            # the plain close.
             close = getattr(self.db, "_t_close", None) or self.db.close
             close()
         except Exception:
@@ -2848,9 +3095,9 @@ def is_missing_graph_error(e: Exception) -> bool:
     #2163: GRAPH.DELETE (select_graph(name).delete()) raises on an ABSENT
     graph — real server text (v4.16.7, empirically verified): "Invalid graph
     operation on empty key". Graph-drop callers treat this family as SUCCESS
-    so the deleted-team purge sweep's #926 retry anchor converges (a graph
+    so the deleted-org purge sweep's #926 retry anchor converges (a graph
     dropped by a previous sweep, never minted, or manually removed must not
-    keep the team row poisoned forever); genuine failures (auth, dead
+    keep the org row poisoned forever); genuine failures (auth, dead
     connection) still propagate. Canonical prod copy — tests/_embedded.py's
     private _is_missing_graph_error is kept in sync with these patterns.
     """

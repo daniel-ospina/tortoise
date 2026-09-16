@@ -500,323 +500,6 @@ def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
     return applied
 
 
-def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
-                       model: Any, *, chunk_turns: int = 2,
-                       session_workers: int = 1,
-                       model_factory: Callable | None = None) -> dict:
-    """v2 ingest: each haystack session through extract_session_v2 → the
-    payload written to the eval graph (Session + turn-granular raw chunks
-    retained — the verbatim recall mitigation). Returns stats for
-    provenance (mirrors ingest_haystack's shape). ``chunk_turns`` (R1
-    #1540) is the turns-per-window granularity of the raw chunks (>= 1).
-
-    ``session_workers`` (pilot #1549 — session-parallelism): when > 1, the
-    LLM extraction (the wall-clock dominant phase) runs across the sessions
-    of THIS question in parallel (the DeepSeek API sustains ~11 calls/s at
-    16 concurrent — measured). Graph writes stay sequential (thread-safe by
-    construction): phase A writes the session nodes + turn/chunk raw leg for
-    ALL sessions, phase B extracts in parallel (each worker uses its own
-    ``model_factory()`` model so the RoutingModel's mutable route/truncation
-    state is never shared across threads), phase C writes each payload +
-    consolidation records. ``model_factory`` (callable → fresh model) is
-    REQUIRED for session_workers > 1; otherwise the shared model is used.
-    """
-    from tortoise.extractor_v2 import _classify_error, extract_session_v2
-
-    qid = question["question_id"]
-    sessions: list[list[dict]] = question.get("haystack_sessions") or []
-    dates: list[str] = question.get("haystack_dates") or []
-    ids: list[str] = question.get("haystack_session_ids") or []
-    stats = {"sessions": 0, "turns": 0, "chunks": 0, "points": 0,
-             "events": 0, "entities": 0, "operators": 0, "evidence_points": 0,
-             "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
-             "supersessions_written": 0,
-             "objects_superseded": 0,   # #2164 — rolled up per session below
-             "noops_applied": 0, "deletions_applied": 0,
-             "evidence_marks": {"source_session": 0, "verbatim": 0,
-                                "raw_chunk": 0, "answer_string": 0}, "errors": [],
-             # M4 (#1524, D4): the per-question error census — rolled up from
-             # each session's extractor ``error_census`` + the session-level
-             # exception class; feeds outcome ``valid``/``error_classes``.
-             "error_census": {}}
-    # M6: the evidence-session id set (haystack sessions containing >=1
-    # has_answer turn) + ALL answer-turn contents (question-wide — marks
-    # (b)/(c) match against every answer turn, wherever it lives).
-    ev_sessions = evidence_sessions(question)
-    all_evidence_turns = [
-        str(t.get("content") or "")
-        for session in sessions for t in session if t.get("has_answer")]
-    # #1763: the GOLD ANSWER STRING (mark (d)) — a benchmark truth the eval
-    # harness holds via the question dict (the extractor LLM never sees it),
-    # so answer-string marks are computed at eval-ingest time, never at
-    # extraction. (Duplicate ingest_haystack_v2 — the live sequential copy
-    # below shadows this parallel one, tracked as #1744; kept in sync.)
-    gold_answer = str(question.get("answer") or "")
-
-    # ── Phase A (sequential, fast): session nodes + turn/chunk raw leg for
-    # ALL sessions — written BEFORE any extraction so verbatim retention +
-    # containment marks survive an extractor failure, AND so every session's
-    # S3 search sees the full raw graph (cross-session linking, E7). ──
-    ctxs: list[dict] = []
-    for si, session in enumerate(sessions):
-        sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
-        session_date = dates[si] if si < len(dates) else ""
-        s_node = f"lme:{qid}:s{si}"
-        evidence_turns = [str(t.get("content") or "") for t in session
-                          if t.get("has_answer")]
-        stats["evidence_turns"] += len(evidence_turns)
-        # R5 (#1544): points in a dated session carry the session date as
-        # their creation time; undated sessions get the explicit sentinel.
-        point_created_at = session_date or UNDATED_SENTINEL
-
-        # ── Session node (mirrors the deterministic leg) ──
-        sdk._get_proj().g.query(
-            "MERGE (s:Session {id:$id}) "
-            "SET s.created_at=coalesce(s.created_at, $ts), "
-            "    s.turn_count=$tc, s.is_episodic=true, s.lme_question_id=$qid, "
-            "    s.lme_session_index=$si, s.lme_source_session_id=$sid",
-            params={"id": s_node, "ts": session_date or _now_iso(), "tc": len(session),
-                    "qid": qid, "si": si, "sid": sid},
-        )
-        stats["sessions"] += 1
-        proj = sdk._get_proj()
-
-        # E7 (#1539 D6): ONE batch existence probe per session (turn ids +
-        # raw chunk ids) — the per-turn/per-chunk ``_point_exists`` N+1
-        # collapses to O(1) queries per session at 500-Q run scale.
-        turn_ids = [f"lme:{qid}:s{si}:t{ti}" for ti in range(len(session))]
-        session_chunks = list(_session_chunks(session, chunk_turns))
-        chunk_ids = [f"lme:{qid}:s{si}:c{ci}" for ci, _, _ in session_chunks]
-        existing = _existing_point_ids(proj, turn_ids + chunk_ids)
-
-        # ── E3 (D8): turn points — the speaker-derivation substrate. Same
-        # deterministic ids + speaker property as the v1 leg; has_answer is
-        # NOT set (v2 turn/evidence recall measures extracted points). ──
-        for ti, turn in enumerate(session):
-            role = str(turn.get("role") or "unknown")
-            turn_id = f"lme:{qid}:s{si}:t{ti}"
-            if turn_id not in existing:
-                sdk.create_point(
-                    "event", f"[{role}] {turn.get('content') or ''!s}",
-                    id=turn_id, session_id=sid, lme_question_id=qid,
-                    lme_session_index=si, speaker=role,
-                    is_episodic=True, status="draft",
-                    createdAt=point_created_at,  # R5: session date (sentinel)
-                )
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-                "MERGE (s)-[:CONTAINS]->(t)",
-                params={"sid": s_node, "tid": turn_id})
-
-        # ── Raw verbatim turn-granular chunks (R1 #1540) + containment
-        # marks (M6, mark c). Written BEFORE extraction so verbatim
-        # retention + marks survive an extractor failure on this session
-        # (fail-closed — the raw evidence leg is never silently lost). ──
-        for ci, text, turn_idxs in session_chunks:
-            chunk_id = f"lme:{qid}:s{si}:c{ci}"
-            contains_evidence = any(
-                bool(turn.get("has_answer"))
-                for ti, turn in enumerate(session) if ti in turn_idxs)
-            if chunk_id not in existing:
-                sdk.create_point(
-                    SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
-                    session_id=sid, lme_question_id=qid,
-                    lme_session_index=si, lme_chunk_index=ci,
-                    lme_chunk_turns=len(turn_idxs), is_episodic=True,
-                    has_answer=contains_evidence, status="draft",
-                    createdAt=point_created_at,  # R5: session date (sentinel)
-                )
-                stats["chunks"] += 1  # written (post-guard) — stats == graph
-            elif contains_evidence:
-                # Idempotent OR-in: never overwrite a True with False.
-                proj.g.query(
-                    "MATCH (p:Point {id:$id}) SET p.has_answer = true",
-                    params={"id": chunk_id})
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-                "MERGE (s)-[:CONTAINS]->(t)",
-                params={"sid": s_node, "tid": chunk_id},
-            )
-
-        ctxs.append({
-            "si": si, "sid": sid, "session_date": session_date,
-            "s_node": s_node, "session": session, "evidence_turns": evidence_turns,
-        })
-
-    # ── Phase B (parallel): the LLM extraction — the wall-clock dominant
-    # phase (pilot #1549 measured ~15-90s/session vs ~1s of graph writes).
-    # Each worker uses its OWN model (model_factory) so the RoutingModel's
-    # mutable route/last_finish_reason state is never shared across threads.
-    # The sdk is shared for S3 reads — FalkorDBLite/redis commands are
-    # thread-safe, and phase A has already written the full raw graph. ──
-    def _extract_ctx(ctx: dict) -> dict:
-        si = ctx["si"]
-        turns = [{"role": str(t.get("role") or "unknown"),
-                  "content": str(t.get("content") or "")}
-                 for t in ctx["session"]]
-        worker_model = model_factory() if model_factory else model
-        try:
-            return {"si": si,
-                    "out": extract_session_v2(
-                        worker_model, turns, sdk=sdk,
-                        session_id=ctx["s_node"],
-                        session_date=ctx["session_date"] or None)}
-        except Exception as ex:  # noqa: BLE001, RUF100
-            # #1786 (P2-2): provider transients propagate (see the session
-            # loop); deterministic bugs ride the result as today.
-            if retryable_transient(ex):
-                raise
-            return {"si": si, "exc": ex}
-
-    if session_workers > 1 and len(ctxs) > 1:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=session_workers) as _ex:
-            results = list(_ex.map(_extract_ctx, ctxs))
-    else:
-        results = [_extract_ctx(ctx) for ctx in ctxs]
-
-    # ── Phase C (sequential): payload writes + consolidation records + the
-    # extracted-point CONTAINS edges. All graph writes stay sequential. ──
-    for ctx, res in zip(ctxs, results):  # noqa: B905
-        si, s_node, session = ctx["si"], ctx["s_node"], ctx["session"]
-        sid, session_date = ctx["sid"], ctx["session_date"]
-        evidence_turns = ctx["evidence_turns"]
-        turns = [{"role": str(t.get("role") or "unknown"),
-                  "content": str(t.get("content") or "")}
-                 for t in session]
-        if "exc" in res:
-            ex = res["exc"]
-            stats["errors"].append(f"s{si}: {type(ex).__name__}: {ex}")  # kill the run
-            # M4 (D4): the session-level exception is CLASSIFIED into the same
-            # granular census vocabulary (S1/S2/S4 failures already ride in
-            # out["error_census"]).
-            _class = _classify_error(ex)
-            stats["error_census"][_class] = stats["error_census"].get(_class, 0) + 1
-            continue
-        out = res["out"]
-        payload = out.get("payload") or {}
-        stats["turns"] += len(session)
-        stats["minted_kinds"] += len(out.get("minted_kinds", []) or [])
-        stats["supersessions"] += len(out.get("supersessions", []) or [])
-        stats["errors"].extend(out.get("errors", []) or [])
-        for _class, count in (out.get("error_census") or {}).items():
-            stats["error_census"][_class] = stats["error_census"].get(_class, 0) + count
-
-        # the ACTUAL writes (the _write_payload stats are authoritative —
-        # they skip duplicates, so payload-len double-counts)
-        written = _write_payload(sdk, payload, sid=sid, qid=qid, si=si,
-                                 evidence_turns=all_evidence_turns,
-                                 turns=turns, ev_sessions=ev_sessions,
-                                 session_date=session_date or None,
-                                 gold_answer=gold_answer,
-                                 n_turns=len(session))
-        for k in ("points", "events", "entities", "operators",
-                  "evidence_points"):
-            stats[k] += written.get(k, 0)
-        stats["supersessions_written"] += written.get("supersessions_written", 0)
-        stats["objects_superseded"] += written.get("objects_superseded", 0)
-        for mk in ("source_session", "verbatim", "raw_chunk",
-                   "answer_string"):
-            stats["evidence_marks"][mk] = (
-                stats["evidence_marks"].get(mk, 0)
-                + written.get("evidence_marks", {}).get(mk, 0))
-
-        # E7 (D4/D5): apply the result-level consolidation records — NOOP
-        # folds (duplicates stamp + CONTAINS link + has_answer OR-in) and
-        # DELETE-soft retractions (retract_point tombstone). Both stay
-        # OUT of the Layer-1 payload (D8) — they ride the extractor result.
-        stats["noops_applied"] += _apply_noops(
-            sdk, out.get("noops") or [], s_node=s_node,
-            has_evidence=bool(evidence_turns))
-        stats["deletions_applied"] += _apply_deletions(
-            sdk, out.get("deletions") or [])
-
-        # ── Session CONTAINS the extracted points ──
-        for p in payload.get("points", []) or []:
-            pid = str(p.get("id", "")).strip()
-            if not pid:
-                continue
-            sdk._get_proj().g.query(
-                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-                "MERGE (s)-[:CONTAINS]->(t)",
-                params={"sid": s_node, "tid": pid},
-            )
-
-    return stats
-
-
-def _apply_noops(sdk: TortoiseSDK, noops: list[dict], *, s_node: str,
-                 has_evidence: bool) -> int:
-    """D4 write path: apply result-level NOOP records to the eval graph.
-
-    For each record — the folded session's ref is stamped onto the CANONICAL
-    point (additive ``duplicates`` list property, set-merge — idempotent:
-    a re-run appends nothing new), the Session gets the link-only CONTAINS
-    edge (existing edge types only — NO new edge type, NO IMPL), and when
-    the folded session carried an answer turn ``has_answer`` is OR'd onto
-    the canonical point (evidence-marking OR-in, mirrors the #1369 P2
-    collision OR-in). Physically ONE point → retrieval dedup by
-    construction (E2E-11 no-double-count). Best-effort: any failure is
-    warned and skipped. Returns the count applied."""
-    proj = sdk._get_proj()
-    applied = 0
-    for rec in noops or []:
-        pid = str(rec.get("point_id") or "").strip()
-        ref = str(rec.get("session_ref") or s_node or "").strip()
-        if not pid:
-            continue
-        try:
-            rows = proj.g.query(
-                "MATCH (p:Point {id:$id}) "
-                "SET p.duplicates = coalesce(p.duplicates, []) + "
-                "    CASE WHEN $ref IN coalesce(p.duplicates, []) "
-                "         THEN [] ELSE [$ref] END "
-                "RETURN p.id",
-                params={"id": pid, "ref": ref}).result_set
-            if not rows:
-                logger.warning("v2 noop target %s missing — skipped", pid)
-                continue
-            if has_evidence:
-                proj.g.query(
-                    "MATCH (p:Point {id:$id}) SET p.has_answer = true",
-                    params={"id": pid})
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                "MERGE (s)-[:CONTAINS]->(p)",
-                params={"sid": s_node, "pid": pid})
-            applied += 1
-        except Exception as ex:  # noqa: BLE001, RUF100 — best-effort in the eval
-            # #1786 (R1): re-raise-when-retryable — a timeout mid-consolidation
-            # must reach the stage-level retry loop (swallow-and-continue
-            # would silently drop the fold); deterministic per-item errors
-            # keep the log-and-continue posture.
-            if retryable_transient(ex):
-                raise
-            logger.warning("v2 noop stamp on %s failed: %s", pid, ex)
-    return applied
-
-
-def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
-    """D5 write path: apply result-level DELETE-soft records via the
-    EXISTING canonical ``retract_point`` — status='retracted' tombstone
-    (point stays in the graph; no resurrect on recall by construction —
-    default retrieval excludes terminal statuses, #1391). Best-effort:
-    a missing/already-terminal point raises ValueError → warned, the eval
-    never dies on a delete. Returns the count applied."""
-    applied = 0
-    for rec in deletions or []:
-        pid = str(rec.get("point_id") or "").strip()
-        if not pid:
-            continue
-        try:
-            sdk.retract_point(pid)
-            applied += 1
-        except ValueError as e:
-            logger.warning("v2 deletion %s skipped (fail-open): %s", pid, e)
-    return applied
-
-
 def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
                       s_node: str, session: list[dict], session_date: str,
                       point_created_at: str, chunk_turns: int) -> dict:
@@ -949,7 +632,32 @@ def _bump_retry(counter: dict[str, int], _exc: BaseException) -> None:
     counter["n"] += 1
 
 
-def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
+def _attach_ingest_usage(worker_model: Any, qid: str) -> None:
+    """#1744 (review P2): keep parallel-ingest cost telemetry attached.
+
+    ``run.py`` attaches the run-level usage collector to the SHARED
+    ``extractor_model`` only; the parallel workers call their own
+    ``model_factory()`` models, whose ``usage_sink`` starts ``None`` — so
+    without this the parallel path's token/cost reporting silently reads
+    zero. Attach the run-level collector (module singleton) to the worker
+    model and RE-BIND the question-key ContextVar: contextvars do NOT cross
+    ``ThreadPoolExecutor`` threads (CPython 3.12), so without the re-bind
+    the sink rows would land under the keyless overhead sentinel instead of
+    this question. Best-effort — metering must never flip an ingest outcome
+    — but a failure is logged loudly (never silent)."""
+    from . import usage as lme_usage
+    lme_usage.set_question_key(qid)
+    try:
+        lme_usage.get_collector().attach(worker_model, stage="ingest",
+                                         provider=None)
+    except Exception:
+        logger.warning(
+            "parallel-ingest usage attach failed for %r — token/cost "
+            "telemetry for this worker is lost",
+            type(worker_model).__name__, exc_info=True)
+
+
+def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                        model: Any, *, chunk_turns: int = 2,
                        session_workers: int = 1,
                        model_factory: Callable | None = None,
@@ -976,8 +684,30 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
     ``model_factory()`` model so the RoutingModel's mutable route/truncation
     state is never shared across threads), phase C writes each payload +
     consolidation records. ``model_factory`` (callable → fresh model) is
-    REQUIRED for session_workers > 1; otherwise the shared model is used.
+    REQUIRED for session_workers > 1 — a ``session_workers > 1`` call with
+    ``model_factory=None`` raises ``ValueError`` (fail closed: a shared
+    RoutingModel's mutable route/truncation state must never back the
+    worker pool). The sequential path uses the SHARED ``model`` exactly as
+    the pre-#1744 live behaviour did (a factory, if passed, is ignored).
+
+    #1744: the parallel path is BATCHED (A-all → B-parallel → C-all), so a
+    worker's S3 prior-graph search cannot see the payload points of the
+    EARLIER sessions of the same question (only their Phase-A raw leg).
+    Cross-session NOOP/DELETE/supersession derivation (E7/E2E-11) needs that
+    visibility, so the default sequential path stays INTERLEAVED (A→B→C per
+    session, byte-identical to the pre-#1744 live behaviour); the batched
+    order — and its cross-session consolidation trade-off — is entered only
+    when the caller explicitly opts into session parallelism. Because the
+    mode changes graph content, ``session_workers`` rides the run fingerprint
+    AND the per-question ingest-cache digest (run.py).
     """
+    if session_workers > 1 and model_factory is None:
+        raise ValueError(
+            "ingest_haystack_v2: session_workers > 1 requires a "
+            "model_factory (callable → fresh model); without one every "
+            "worker would share a single RoutingModel's mutable "
+            "route/truncation state (data race). Pass "
+            "model_factory=<callable> or use session_workers <= 1.")
     from tortoise.extractor_v2 import _classify_error, extract_session_v2
 
     qid = question["question_id"]
@@ -1023,7 +753,21 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
     # extraction.
     gold_answer = str(question.get("answer") or "")
 
-    for si, session in enumerate(sessions):
+    # ── Phase A (sequential, fast): session node + turn/chunk raw leg.
+    # #1744 — this live copy had lost the parallel extraction the older copy
+    # carried. The phases are A (raw leg) → B (LLM extraction) → C (payload
+    # writes + consolidation records). Their ORDER depends on the mode:
+    #   * session_workers <= 1 (the default): A→B→C INTERLEAVED per session —
+    #     exactly the pre-#1744 live behaviour. Session k's extractor S3
+    #     prior-graph search must see the payload points sessions < k have
+    #     already written: cross-session NOOP / DELETE / supersession
+    #     derivation (E7 / E2E-11) depends on it, so batching the phases in
+    #     this mode silently drops those records (7 consolidation tests).
+    #   * session_workers > 1: A-all → B-parallel → C-all (the pilot #1549
+    #     shape). Every session is extracted before any payload write, so
+    #     cross-session consolidation is not visible to the workers — the
+    #     documented trade-off of the parallel fast path.
+    def _phase_a_ctx(si: int, session: list[dict]) -> dict:
         sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
         session_date = dates[si] if si < len(dates) else ""
         s_node = f"lme:{qid}:s{si}"
@@ -1068,25 +812,65 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
         stats["chunks"] += _phase_a["chunks"]
         stats["ingest_retries"] += _retries_a["n"]
 
-        # ── The v2 extraction (production pipeline, embedded-safe S3) ──
-        turns = [{"role": str(t.get("role") or "unknown"),
-                  "content": str(t.get("content") or "")}
-                 for t in session]
+        return {
+            "si": si, "sid": sid, "session_date": session_date,
+            "s_node": s_node, "session": session,
+            "evidence_turns": evidence_turns,
+            "point_created_at": point_created_at,
+            "turns": [{"role": str(t.get("role") or "unknown"),
+                       "content": str(t.get("content") or "")}
+                      for t in session],
+        }
+
+    # ── Phase B (parallel): the LLM extraction — the wall-clock dominant
+    # phase (pilot #1549 measured ~15-90s/session vs ~1s of graph writes).
+    # Each worker uses its OWN model (``model_factory``) so the
+    # RoutingModel's mutable route/last_finish_reason state is never shared
+    # across threads. The sdk is shared for S3 reads — Phase A has already
+    # written the full raw graph (cross-session linking, E7). ──
+    def _extract_ctx(ctx: dict) -> dict:
+        # #1744 (review P2): the SEQUENTIAL branch must stay byte-identical
+        # to the pre-#1744 live behaviour — it uses the SHARED, fingerprinted
+        # run-level model. The factory exists purely to give each PARALLEL
+        # worker its own RoutingModel; consulting it when session_workers<=1
+        # (e.g. run.py's --per-session-census lane passes session_workers=1
+        # alongside a factory built for the OUTER value) would silently swap
+        # the extracting model away from the fingerprinted one. Only the
+        # parallel branch builds + attaches a worker model.
+        if session_workers > 1 and model_factory is not None:
+            worker_model = model_factory()
+            _attach_ingest_usage(worker_model, qid)
+        else:
+            worker_model = model
         try:
-            out = extract_session_v2(model, turns, sdk=sdk,
-                                     session_id=s_node,
-                                     session_date=session_date or None)
+            return {"si": ctx["si"],
+                    "out": extract_session_v2(
+                        worker_model, ctx["turns"], sdk=sdk,
+                        session_id=ctx["s_node"],
+                        session_date=ctx["session_date"] or None)}
         except Exception as ex:  # noqa: BLE001, RUF100
-            # #1786 (P2-2): an ingest-site LLM-provider transient (requests
-            # Timeout/URLError from the extractor) must REACH the run.py
-            # handler — retryable=True / attempts=0 → --retry-failed
-            # eligible. Swallow-and-continue would complete the question
-            # with partial evidence and NO failure entry (the transient
-            # would never be recoverable). Deterministic extractor bugs
-            # (retryable=False) stay swallowed → valid=False, rate-limited
-            # (the #1776 posture).
+            # #1786 (P2-2): a provider transient must RE-RAISE out of the
+            # worker so it reaches the run.py handler (retryable=True /
+            # attempts=0 → --retry-failed eligible) — ``_ex.map`` re-raises
+            # the first future's exception during iteration. Deterministic
+            # extractor bugs ride the result and Phase C does the EXACT
+            # sequential bookkeeping (error list + census + llm call).
             if retryable_transient(ex):
                 raise
+            return {"si": ctx["si"], "exc": ex}
+
+    # ── Phase C (sequential): payload writes + consolidation records + the
+    # extracted-point CONTAINS edges. All graph writes stay sequential. ──
+    def _write_ctx(ctx: dict, res: dict) -> None:
+        si, s_node, session = ctx["si"], ctx["s_node"], ctx["session"]
+        sid, session_date = ctx["sid"], ctx["session_date"]
+        evidence_turns = ctx["evidence_turns"]
+        turns = ctx["turns"]
+        if "exc" in res:
+            ex = res["exc"]
+            # #1786 (P2-2): as in Phase B — deterministic extractor bugs
+            # (retryable=False) stay swallowed → valid=False, rate-limited
+            # (the #1776 posture); a transient never reaches here.
             stats["errors"].append(f"s{si}: {type(ex).__name__}: {ex}")  # kill the run
             # M4 (D4): the session-level exception is CLASSIFIED into the same
             # granular census vocabulary (S1/S2/S4 failures already ride in
@@ -1096,7 +880,8 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
             # #1746 (D7): the session-level exception path contributes one
             # call / zero truncations to the llm roll-up.
             stats["llm"]["calls"] += 1
-            continue
+            return
+        out = res["out"]
         payload = out.get("payload") or {}
         stats["turns"] += len(session)
         stats["minted_kinds"] += len(out.get("minted_kinds", []) or [])
@@ -1188,6 +973,25 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
                 + _written.get("evidence_marks", {}).get(mk, 0))
         stats["noops_applied"] += _noops
         stats["deletions_applied"] += _deletions
+
+    # ── Driver: batched-parallel extraction (opt-in) vs the interleaved
+    # sequential path (default — see the Phase A note for why the order
+    # matters). ``_ex.map`` re-raises the first worker exception during
+    # iteration, so a retryable transient reaches run.py (#1786 P2-2); the
+    # ``with`` exit waits for in-flight workers first. ──
+    if session_workers > 1 and len(sessions) > 1:
+        import concurrent.futures
+        ctxs = [_phase_a_ctx(si, s) for si, s in enumerate(sessions)]
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=session_workers) as _ex:
+            results = list(_ex.map(_extract_ctx, ctxs))
+        for ctx, res in zip(ctxs, results):  # noqa: B905
+            _write_ctx(ctx, res)
+    else:
+        for si, session in enumerate(sessions):
+            _ctx = _phase_a_ctx(si, session)
+            _write_ctx(_ctx, _extract_ctx(_ctx))
+
     return stats
 
 

@@ -128,7 +128,7 @@ curl -s https://api.premiselabs.co/v1/team \
 
 ## 6. Migrating from self-hosted to cloud
 
-Running Tortoise yourself and moving to hosted? The primary path is **`tortoise export` → hosted import**: export your selfhost graph to a versioned, encrypted artifact (`tortoise-export-v1`), then import it into a fresh hosted team via `POST /v1/teams/{team_id}/import`. Point IDs and edge topology are preserved (belief scores are derived — EP recomputes server-side). Verified end-to-end by the **E2E-12-D** suite's `test_parity_export_import` case, which asserts structure parity (node/edge counts, Point IDs, operator topology). The manual **replay** path below remains the documented fallback (and the only path on versions without the export tool). See [quickstart-selfhosted.md](quickstart-selfhosted.md) for the daemon side.
+Running Tortoise yourself and moving to hosted? The primary path is **`tortoise export` → hosted import**: export your selfhost graph to a versioned, encrypted artifact (`tortoise-export-v1`), then import it into a fresh hosted team via `POST /v1/organizations/{org_id}/import`. Point IDs and edge topology are preserved (belief scores are derived — EP recomputes server-side). Verified end-to-end by the **E2E-12-D** suite's `test_parity_export_import` case, which asserts structure parity (node/edge counts, Point IDs, operator topology). The manual **replay** path below remains the documented fallback (and the only path on versions without the export tool). See [quickstart-selfhosted.md](quickstart-selfhosted.md) for the daemon side.
 
 > ✅ **Automated export → import is the primary path** — replay remains supported as a fallback.
 
@@ -150,7 +150,7 @@ Running Tortoise yourself and moving to hosted? The primary path is **`tortoise 
 4. **Import the artifact** into the team graph (owner session auth):
 
    ```bash
-   curl -X POST https://api.premiselabs.co/v1/teams/<team_id>/import \
+   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \
