@@ -56,6 +56,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
     "test_capture_session.py": {"registry": "session-capture"},
+    "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_index_docs_api.py": {"registry": "index-docs"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
@@ -488,6 +489,13 @@ def test_no_redirect_stems_registry_exact():
         # absolute similarity), so the module joins the carve-out lane —
         # registered in ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS.
         "test_precision_leak_4028",
+        # #3663: the cross-tenant read-isolation proof asserts PRODUCTION
+        # graph names (org_{org_id}) on the MCP list_graphs filter + the
+        # namespace probe; the class-level test redirect renames path-built
+        # graphs to test_<hash>, so no production name exists and those
+        # assertions FAIL — a hard RED, not a false pass. Runs embedded in
+        # every lane (same rationale as test_hosted_backup).
+        "test_cross_tenant_read_isolation",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
