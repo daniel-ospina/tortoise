@@ -153,7 +153,8 @@ The user-approved end state for the auth/marketing surfaces:
 
 ## 6. Deploy pipeline
 
-`.github/workflows/deploy-pages.yml` (on push to main touching `website/**`):
+`.github/workflows/deploy-pages.yml` (on push to main touching `website/**`,
+`tortoise/onboarding/**`, `product/pricing.json`, or the workflow file itself):
 
 1. **deploy** — verifies the onboarding skill mirror, syncs DNS, deploys
    `website/` → Pages project `premise-labs`
@@ -192,7 +193,7 @@ dashboard.
 | `website/sitemap-company.xml` | `premiselabs.co` | single URL (`/`) — company page |
 | `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/faq`, `/auth`, `/self-hosted`, `/security`, 5 legal pages (note: `/signup` and `/signin` are NOT in this sitemap — `/signin` 301s to `/auth`, and `/auth` is the indexed entry point) |
 | `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `.html` dedupe for non-auth pages |
-| `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/`; mirrored in committed `dist/` so a no-rebuild deploy still serves them |
+| `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/` at build time; `dist/` is itself a build artifact (untracked since #3775 — built by `deploy.sh`, `deploy-pages.yml` and the `dashboard-js-tests` CI job before it is served), so `public/` is the only committed copy |
 
 Rules:
 - **Host consolidation (the core fix):** legal pages + docs + FAQ + auth are
@@ -229,7 +230,7 @@ Rules:
 | Host routing | `website/functions/_middleware.ts` |
 | Security headers | `website/_headers` |
 | Dashboard source | `website/apps/dashboard/src/main.jsx` |
-| Dashboard build | `website/apps/dashboard/dist/` (committed) |
+| Dashboard build | `website/apps/dashboard/dist/` — a vite build artifact, untracked since #3775 (source is `src/` + `public/`; built by `deploy.sh`, `deploy-pages.yml` and the `dashboard-js-tests` CI job) |
 | Brand logos | `website/assets/premiselabs-logo.png` · prototype copies `docs/prototypes/assets/logo-*.png` |
 | Pricing (canonical) | `product/pricing.json` |
 | Hosted API | `tortoise/hosted_api.py` (Fly `tortoise-y4mjjq`) |

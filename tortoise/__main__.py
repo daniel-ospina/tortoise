@@ -2985,15 +2985,19 @@ def _cmd_sessions_import(args) -> int:
     2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
     same content is a no-op (receipt exists ⇒ already imported) — and even a
     re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi REUSES the codex parser (named reuse — pi session
-    JSONL is tree-structured JSONL like codex's, plan P2 Task 15).
+    zero new nodes). pi parses its own record shape (#3667 — it no longer
+    aliases the codex parser, which returned 0 turns for real Pi sessions).
+    The parsed conversation is windowed to the hosted turn cap
+    (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
+    capture extension applies) keeping the most recent turns, with the
+    truncation reported — never a silent drop.
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    from tortoise.session_import import parse_transcript
+    from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
 
     file_path = Path(args.file)
     if not file_path.exists():
@@ -3011,6 +3015,22 @@ def _cmd_sessions_import(args) -> int:
     if not turns:
         print("No conversation turns parsed from session file.", file=_sys.stderr)
         return 1
+
+    # The bound is the HANDLER's `MAX_SESSION_TURNS` (tortoise/quota.py) — not
+    # `SessionRequest.conversation`'s max_length=1000, which the handler then
+    # overrides with an HTTP 400 above 500. The live capture extension caps at
+    # the same constant, so this backfill leg must too — a 501–1000-turn file
+    # would otherwise clear the Pydantic boundary and still write no receipt.
+    # Keep the MOST RECENT turns and REPORT the truncation (never a silent drop).
+    parsed_total = len(turns)
+    turns, dropped_turns = window_turns(turns)
+    if dropped_turns:
+        print(
+            f"Session has {parsed_total} turns; truncating to the most recent "
+            f"{MAX_TURNS} ({dropped_turns} older turns dropped — hosted "
+            f"conversation limit).",
+            file=_sys.stderr,
+        )
 
     raw = file_path.read_bytes()
     session_id = args.session_id or (
@@ -6052,8 +6072,8 @@ def main(argv: list[str] | None = None) -> int:
     sess_import.add_argument(
         "--harness", required=True,
         choices=["codex", "claude-desktop", "desktop", "pi"],
-        help="Harness format to parse (pi reuses the codex parser; "
-             "'desktop' is an alias for claude-desktop)")
+        help="Harness format to parse (each harness has its own record "
+             "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(
         "--session-id", default=None,
         help="Explicit idempotency key (default: content-hash derived)")
