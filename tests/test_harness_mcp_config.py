@@ -161,6 +161,15 @@ class TestClaudeHookTimeouts:
     nothing (debug log: `SessionEnd:other [...] cancelled`), silently, because
     the hook is fail-open (`2>/dev/null || exit 0`).
 
+    That 60 s cap is the platform's only *documented* per-event ceiling, so the
+    guard's envelope is PER EVENT and each figure is labelled for what it is: 60 s
+    is SessionEnd's documented hard cap, while SessionStart is a command hook that
+    defaults to 600 s with no documented ceiling above it — the shipped 60 s
+    there is a PROJECT bound (~6× headroom over the digest path), not a
+    platform rule, so this guard must not reject a legitimate rise toward the
+    documented 600 s. The 9.26 s floor is a SessionEnd measurement, asserted
+    only where that measurement exists.
+
     FOUR surfaces ship the same `settings.json` snippet, and a copy that loses
     its `timeout` re-opens the bug on that surface alone:
 
@@ -177,8 +186,23 @@ class TestClaudeHookTimeouts:
 
     HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
     HOOKS = REPO_ROOT / "tortoise" / "claude-hooks"
-    MEASURED_S = 9.26  # #3754: real hosted run with the seam-literal settings
-    MAX_TIMEOUT_S = 60  # documented ceiling the per-hook timeout may raise to
+    # #3754: per-event envelope. SessionEnd 60 = documented hard cap (its hooks
+    # share a 1.5 s budget raised only to the highest per-hook `timeout`, "up to
+    # 60 seconds"). SessionStart 600 = the documented command-hook DEFAULT, and
+    # the bound this guard holds SessionStart to — the platform states no
+    # ceiling there, so claiming 60 for it was a false invariant.
+    MAX_TIMEOUT_S: ClassVar[dict[str, int]] = {"SessionEnd": 60, "SessionStart": 600}
+    # #3754: what each figure above IS, quoted into the failure message — a
+    # documented DEFAULT must never be reported as a ceiling (the exact
+    # overclaim this guard was corrected for).
+    ENVELOPE_KIND: ClassVar[dict[str, str]] = {
+        "SessionEnd": "the documented shared-budget cap",
+        "SessionStart": "the documented command-hook default",
+    }
+    # #3754: floors are MEASUREMENTS, and only SessionEnd has one (a real hosted
+    # run with the seam-literal settings). SessionStart carries the guard's upper
+    # bound only, rather than inheriting a session-END figure it never produced.
+    MEASURED_S: ClassVar[dict[str, float]] = {"SessionEnd": 9.26}
     # surface → {event: number of snippets carrying that event}
     SURFACES: ClassVar[dict[str, dict[str, int]]] = {
         "harnesses.js": {"SessionStart": 2, "SessionEnd": 2},
@@ -222,6 +246,10 @@ class TestClaudeHookTimeouts:
                             yield name, event, entry
 
     def test_every_shipped_snippet_pins_a_hook_timeout(self):
+        assert set(self.MAX_TIMEOUT_S) == set(self.ENVELOPE_KIND), (
+            "MAX_TIMEOUT_S and ENVELOPE_KIND must list the same events: "
+            f"{sorted(self.MAX_TIMEOUT_S)} != {sorted(self.ENVELOPE_KIND)}"
+        )
         for name, event, entry in self._walk():
             timeout = entry.get("timeout")
             assert isinstance(timeout, int) and not isinstance(timeout, bool), (
@@ -229,10 +257,21 @@ class TestClaudeHookTimeouts:
                 f'"timeout" ({entry!r}) — Claude Code cancels SessionEnd at its '
                 f"1.5s default, so the session is silently never filed"
             )
-            assert self.MEASURED_S < timeout <= self.MAX_TIMEOUT_S, (
-                f"#3754: {name} {event} timeout={timeout} is outside the "
-                f"documented envelope ({self.MEASURED_S}s measured, "
-                f"{self.MAX_TIMEOUT_S}s ceiling)"
+            bound = self.MAX_TIMEOUT_S.get(event)
+            assert bound is not None, (
+                f"#3754: {name} ships a {event} hook entry and no documented "
+                f"timeout envelope is recorded for that event — add its "
+                f"platform figure to MAX_TIMEOUT_S before shipping the snippet"
+            )
+            assert timeout <= bound, (
+                f"#3754: {name} {event} timeout={timeout}s is above this "
+                f"guard's {event} bound ({bound}s — {self.ENVELOPE_KIND[event]})"
+            )
+            measured = self.MEASURED_S.get(event)
+            assert measured is None or measured < timeout, (
+                f"#3754: {name} {event} timeout={timeout}s does not clear the "
+                f"{measured}s measured {event} run — the hook would be "
+                f"cancelled mid-flight"
             )
 
     def test_snippet_surfaces_are_fully_pinned(self):
