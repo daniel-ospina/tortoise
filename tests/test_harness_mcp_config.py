@@ -18,12 +18,15 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions  # noqa: I001
+from tortoise.auth import API_KEY_PREFIXES
+from tortoise.oauth import ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # #984 contract (merged to main): the hosted endpoint always carries the
@@ -224,3 +227,231 @@ class TestPrintHarnessInstructions:
                     end = i
                     break
             json.loads("\n".join(lines[start : end + 1]))
+
+
+class TestCommittedRepoMcpJson:
+    """#3601 regression: the COMMITTED root `.mcp.json` must reach the hosted
+    endpoint with an env-indirect key.
+
+    The classes above pin the EMITTED onboarding configs (`_harness_mcp_config`
+    / `init`); this pins the file the repo actually ships. It previously
+    declared `http://localhost:8000/mcp` with `"headers": {}`, so every agent
+    whose local daemon was not running got an opaque `fetch failed` -- and the
+    entry could not authenticate even when the daemon WAS up under the
+    documented `tortoise serve --http --auth tenant`.
+
+    Covers all five fields of the entry: `url`, `type`, `headers`, the absence
+    of a stdio `env`/`command`/`args`, and no literal credential in the file.
+    "No literal credential" is scoped deliberately: every `env` and `headers`
+    value of EVERY server must be structurally env-indirect and a non-empty
+    string (those are the credential-carrying fields a client sends), every
+    `env` value must additionally name ITS OWN section key verbatim
+    (`{"VAR": "${VAR}"}`): the `env` key IS the variable a client exports, so
+    a lookalike (`${VAR_TYPO}`) clears the shape check yet is unset in practice
+    and expands to `""` -- the same silent-401 class the Authorization header
+    guard pins. `headers` are exempt from the name-match because a header key
+    (`Authorization`) is a header name, not a variable name. And every token
+    family this repo mints today -- `tt_`/`tk_` (tortoise/auth.py),
+    `oat_`/`ort_`/`ct_`/`cs_` (tortoise/oauth.py), `st_`
+    (tortoise/hosted_api.py) -- is forbidden anywhere in the file, including
+    prose and argv, since a key pasted there is the same leak. A THIRD-PARTY
+    secret in PROSE or in `args`/`command` is out of scope: argv legitimately
+    holds package names and flags, and telling a secret from ordinary text
+    needs a heuristic that hyphenated keys defeat, so either check would be
+    theatre.
+
+    Reads the file on disk (the committed blob in any clean checkout /
+    CI). This class pins what the repo SHIPS, so it is deliberately not
+    override-aware: a self-hoster who follows the entry's `_comment` and points
+    `url` at their own daemon WILL see `test_tortoise_entry_targets_hosted_endpoint`
+    fail locally. That is expected -- the message describes the shipped default,
+    not their tree -- and it is why this pins the shipped file rather than an
+    effective or merged config.
+    """
+
+    COMMITTED = REPO_ROOT / ".mcp.json"
+    # Scheme words that may precede a ${...} expression in a header value.
+    GLUE = ("", "Bearer ", "Token ", "Basic ", "ApiKey ")
+    # A `${VAR}` expression must name a bare variable: content inside the
+    # braces -- a shell default (`${VAR:-literal}`) or a nested expression --
+    # can smuggle a literal past any check that only looks for `${`.
+    ENV_EXPR = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+    SPAN = re.compile(r"\$\{[^}]*\}")
+
+    @staticmethod
+    def _strip_env_spans(value: str) -> str:
+        """`value` with every ${...} span removed -- what is left is literal."""
+        return re.sub(r"\$\{[^}]*\}", "", value)
+
+    def _parse_strict(self, text: str) -> dict:
+        """Parse the way the CLIENT does.
+
+        `JSON.parse` rejects the non-standard `NaN`/`Infinity` tokens that
+        Python's `json` accepts, and the pi client treats a read failure as
+        "skipping MCP" -- i.e. every server, `tortoise` included, silently
+        stops working. Same failure class as #3601, so the guard has to see it.
+        """
+
+        def _reject(token: str):
+            raise AssertionError(
+                f"committed .mcp.json contains the non-JSON token {token!r} -- "
+                f"JSON.parse rejects it, so the client skips the whole file"
+            )
+
+        return json.loads(text, parse_constant=_reject)
+
+    def _servers(self) -> dict:
+        assert self.COMMITTED.is_file(), f"committed {self.COMMITTED} is missing"
+        cfg = self._parse_strict(self.COMMITTED.read_text(encoding="utf-8"))
+        servers = cfg.get("mcpServers")
+        assert isinstance(servers, dict), (
+            f"committed .mcp.json has no mcpServers object (got {type(servers).__name__})"
+        )
+        return servers
+
+    def _tortoise(self) -> dict:
+        servers = self._servers()
+        server = servers.get("tortoise")
+        assert isinstance(server, dict), (
+            f"committed .mcp.json has no 'tortoise' entry (have {sorted(servers)}); "
+            f"the entry is how an agent reaches the graph at all (#3601)"
+        )
+        return server
+
+    def test_tortoise_entry_targets_hosted_endpoint(self):
+        url = self._tortoise().get("url")
+        assert url == ENDPOINT, (
+            f"committed .mcp.json must target the hosted endpoint {ENDPOINT}; "
+            f"a local-daemon url breaks every agent without a running daemon "
+            f"(#3601) -- got {url!r}"
+        )
+
+    def test_tortoise_entry_keeps_http_type(self):
+        # This root file also serves Claude Code, whose schema treats `type` as
+        # load-bearing for a url entry; pi ignores `type` and picks the
+        # transport from url-vs-command. Pinned because the sibling doc
+        # docs/quickstart-cloud.md:47 names a DIFFERENT value (streamable-http)
+        # for the same object, and nothing else pins this field.
+        assert self._tortoise().get("type") == "http", (
+            f"committed .mcp.json tortoise entry must keep type='http' -- got "
+            f"{self._tortoise().get('type')!r}"
+        )
+
+    def test_tortoise_header_is_env_indirect(self):
+        headers = self._tortoise().get("headers")
+        # Diagnosable failure on every malformed shape, not just the empty one
+        # (#3601 was `"headers": {}`): a bare AttributeError tells a maintainer
+        # nothing about what drifted.
+        assert headers is None or isinstance(headers, dict), (
+            f"committed .mcp.json tortoise headers must be an object -- got "
+            f"{type(headers).__name__}"
+        )
+        auth = (headers or {}).get("Authorization")
+        assert auth, (
+            f"committed .mcp.json must carry an Authorization header -- an "
+            f"empty/absent headers block cannot authenticate even when the "
+            f"daemon is up (#3601); got headers={headers!r}"
+        )
+        assert isinstance(auth, str), (
+            f"committed .mcp.json Authorization must be a string -- got "
+            f"{type(auth).__name__}"
+        )
+        # Exact value, not a substring: a lookalike env var
+        # (`${TORTOISE_API_KEY_ALT}`) is unset in practice and expands to
+        # `Bearer ` -- a silent 401 that a substring check would pass. Matches
+        # what the emitted-config classes pin for the same header.
+        assert auth == "Bearer ${TORTOISE_API_KEY}", (
+            f"committed .mcp.json Authorization must be exactly "
+            f"'Bearer ${{TORTOISE_API_KEY}}' (env-indirect, no literal key) -- "
+            f"got {auth!r}"
+        )
+
+    def test_tortoise_entry_is_http_only(self):
+        # The entry must stay an HTTP entry. `_comment` and
+        # docs/infra-runbook.md section 4.5 both state that the committed entry
+        # carries no `env` (the DB target is resolved server-side by the hosted
+        # API), and the stdio command+args pattern was replaced in feat/338 --
+        # so re-adding any of these drifts the docs silently.
+        entry = self._tortoise()
+        for key in ("env", "command", "args"):
+            assert key not in entry, (
+                f"committed .mcp.json tortoise entry must not define {key!r} "
+                f"(it is an HTTP entry -- see its _comment); got {entry[key]!r}"
+            )
+
+    def test_no_literal_api_key_in_committed_config(self):
+        # This file ships to users -- a literal credential leaks one. Resolve
+        # the servers FIRST: an absent file must fail with this class's
+        # authored `committed ... is missing` message, as the other four
+        # tests do, not a bare FileNotFoundError from the raw read below. (An
+        # UNPARSEABLE file fails with its own JSONDecodeError -- an accurate
+        # message too, just not this class's authored one.)
+        servers = self._servers()
+        text = self.COMMITTED.read_text(encoding="utf-8")
+        # (a) Every token family this repo MINTS, anywhere in the raw text: a
+        # key pasted into a `_comment` or into `args` is the same leak. `tt_`/
+        # `tk_` come from tortoise/auth.py, `oat_`/`ort_` and the client id/
+        # secret `ct_`/`cs_` from tortoise/oauth.py, `st_` from
+        # tortoise/hosted_api.py. A family minted by NEW code is not covered
+        # here -- the values a client sends are, by (b).
+        #
+        # Anchored to a token START -- which is how every consumer checks these
+        # prefixes (str.startswith, never a substring search) -- so ordinary
+        # prose cannot red the guard: "support_ticket" and "float_value"
+        # contain "ort_"/"oat_" mid-word and are not tokens.
+        families = (
+            *API_KEY_PREFIXES,
+            ACCESS_TOKEN_PREFIX,
+            REFRESH_TOKEN_PREFIX,
+            "ct_",
+            "cs_",
+            "st_",
+        )
+        prefixes = "|".join(re.escape(p) for p in families)
+        leak = re.search(rf"(?<![A-Za-z0-9_])(?:{prefixes})", text)
+        assert leak is None, (
+            f"literal key material in committed .mcp.json (found "
+            f"{leak.group(0)!r}) -- keys must stay env-indirect"
+        )
+        # (b) Every `env` and `headers` VALUE of EVERY server must be
+        # STRUCTURALLY indirect. Substring checks are not enough: a value like
+        # `Bearer ${KEY}sk-live-...` contains `${` yet ships a literal, so the
+        # test is what remains after every `${...}` span is removed. Reads
+        # PARSED values, so a JSON-escaped literal the raw-text scan cannot see
+        # is caught too, and any token family is caught.
+        for server, entry in servers.items():
+            if not isinstance(entry, dict):
+                continue
+            for section in ("env", "headers"):
+                values = entry.get(section)
+                assert values is None or isinstance(values, dict), (
+                    f"committed .mcp.json {server}.{section} must be an object "
+                    f"-- got {type(values).__name__}"
+                )
+                for key, value in (values or {}).items():
+                    assert isinstance(value, str) and value, (
+                        f"committed .mcp.json {server}.{section}.{key} must be "
+                        f"a non-empty string -- got {type(value).__name__}"
+                    )
+                    if section == "env":
+                        direct = self.ENV_EXPR.fullmatch(value) is not None
+                    else:
+                        spans = self.SPAN.findall(value)
+                        direct = (
+                            bool(spans)
+                            and all(self.ENV_EXPR.fullmatch(s) for s in spans)
+                            and self._strip_env_spans(value) in self.GLUE
+                        )
+                    assert direct, (
+                        f"committed .mcp.json {server}.{section}.{key} is not "
+                        f"env-indirect ({value!r}) -- a user-shipped value must "
+                        f"be a ${{VAR}} expression, with at most a scheme word "
+                        f"around it"
+                    )
+                    if section == "env":
+                        assert value == f"${{{key}}}", (
+                            f"committed .mcp.json {server}.env.{key} must be "
+                            f"exactly '${{{key}}}' -- the env key names the "
+                            f"variable a client exports, so {value!r} is unset "
+                            f"in practice and expands to an empty value"
+                        )

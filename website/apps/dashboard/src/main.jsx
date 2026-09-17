@@ -3,12 +3,12 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js'
+import { captureStatusForHarness, captureClaimForHarness, lastErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
@@ -1225,6 +1225,15 @@ function claimIntentInFlight() {
   // blocks the scope hydration effect until the new team's state lands, so
   // the new team never seeds from (or persists over) the old team's scope.
   const onboardingStaleRef = React.useRef(false)
+  // #3428/#2937 (lane B3, review cycle 5 item 3): monotonic guard for
+  // refreshOnboarding. `Promise.race` abandons the 15 s refresh but does not
+  // CANCEL it, so a refresh started before a connection landed could resolve
+  // AFTER a newer refresh that observed it and apply the OLDER projection —
+  // flipping serverHarnessConnected true → false (the connected screen reverted
+  // to "Not connected yet", and the poll charged a failure although a refresh
+  // HAD applied). Every call takes a sequence number here; a response whose
+  // request was superseded by a NEWER issued request is dropped, never applied.
+  const onboardingRefreshSeqRef = React.useRef(0)
   // #1893 (scope-verify P1): PER-KEY pre-hydration touch tracking — a touch
   // on ONE key must never suppress seeding of the OTHER, and must never
   // persist the other key's un-seeded default over its stored server value.
@@ -1333,15 +1342,31 @@ function claimIntentInFlight() {
   // claim an agent is taking over.
   const [wizardPaused, setWizardPaused] = React.useState(false)
   const wizardCardRef = React.useRef(null)
-  // #2361 review-r4 (P2): connectedOnceRef is session-local — a re-opener
-  // whose org ALREADY connected (server checkpoint) must not see the paused
-  // 'not connected yet' copy when they skip. Read the projection the client
-  // already holds; refreshOnboarding at wizard-open + step-4 keeps it fresh.
-  // ⚠️ MUST be declared BEFORE effectivelyPaused (TDZ fix, #2621):
-  const connectedOnceRef = React.useRef(false)
+  // #3428/#2937 (lane B3, owner-approved charter comment 5703012625):
+  // `connectedOnceRef` — the session-local "the user told us it's connected"
+  // flag — is DELETED. It existed only so the connect step's Continue button
+  // could manufacture a connected state, which made the done step claim an
+  // agent was taking over on the strength of a click. That is precisely the
+  // false `harness-connected` claim this lane removes (#3428 keyed, #2937
+  // keyless — one handler, two leaves).
+  //
+  // `serverHarnessConnected` is now the ONLY source, read straight from the
+  // server projection (refreshOnboarding at wizard-open + the step-3 landing
+  // refresh keep it fresh).
   const serverHarnessConnected = Array.isArray(onboarding && onboarding.completed_steps) &&
     onboarding.completed_steps.includes('harness-connected')
-  const effectivelyPaused = wizardPaused && !connectedOnceRef.current && !serverHarnessConnected
+  // `wizardPaused` is set ONLY by the connect step's THREE live "Skip for now"
+  // escapes — the keyless/owner nav, the cap-remedy nav, and the main
+  // per-harness nav (`setWizardPaused(true)` has exactly three call sites) — so
+  // it now means exactly "the user skipped the connect step" — no session-local
+  // assertion can suppress it any more. (review cycle 1 P2-7: the count was
+  // stated as two, which made the invariant unauditable.)
+  const effectivelyPaused = wizardPaused && !serverHarnessConnected
+  // #3428 (lane B3, option (a)): the success screen's capture sentence is
+  // DERIVED, never asserted — 'present' | 'future' | 'none'. Computed here so
+  // the derivation is a plain value (unit-testable without a React harness,
+  // which this repo does not have).
+  const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
   const onboardingRefreshedAtDoneRef = React.useRef(false)
@@ -1355,10 +1380,179 @@ function claimIntentInFlight() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, welcomeMode, authed])
+  // #3428/#2937 (lane B3, review cycle 1 P1-4, cycle 2 P1-1): the
+  // not-connected body promises the connection "shows up here the moment it
+  // does" — so this refresh must live as long as that promise can still come
+  // true. It used to be a bounded poll (`maxTries = 5`, ~24 s), after which
+  // nothing on the page refetched onboarding: a user who read the promise,
+  // switched to their terminal, and filed a memory a minute later came back to
+  // a screen frozen on "not connected" FOREVER while the copy claimed the
+  // opposite. The effect's own guard is the only stop condition it needs — it
+  // ends when the connection lands (`serverHarnessConnected`), the user leaves
+  // step 3, or the wizard unmounts — so the try cap was the one thing making
+  // the sentence false. `refreshOnboarding` owns the team-identity guard, so
+  // every attempt is pinned to the org on screen.
+  // review cycle 3 (P2-8): that promise also cannot be kept by a failing
+  // refresh, and the old loop retried every 4 s forever with no counter, no
+  // backoff and no surface (the global error banner does not render in welcome
+  // mode). Consecutive failures now back off exponentially, and past a small
+  // threshold a quiet line states that we cannot check right now.
+  // review cycle 3 (P2-9): a HIDDEN tab throttles setInterval to ~1/min, so a
+  // user who tabs to their terminal and back can face a stale not-connected
+  // body even though the state already changed. Ticks are skipped while the
+  // document is hidden, and the document becoming visible again (or regaining
+  // focus) fires one immediate refresh.
+  const wizardConnectPollRef = React.useRef(null)
+  const wizardConnectPollFailsRef = React.useRef(0)
+  const wizardConnectPollSuccessesRef = React.useRef(0)
+  const wizardConnectPollNextAtRef = React.useRef(0)
+  const wizardConnectPollInFlightRef = React.useRef(false)
+  const [wizardConnectPollStalled, setWizardConnectPollStalled] = React.useState(false)
+  React.useEffect(() => {
+    if (!(welcomeMode && authed) || wizardStep !== 3 || serverHarnessConnected) return
+    // review cycle 4 (item 9): the failure/stall state was NEVER reset, so it
+    // out-lived the effect that produced it. Reachable false state: a user sees
+    // ≥3 failed checks, presses Back, re-enters step 3, and the connection
+    // lands via a NON-poll refresh (the step-3 landing refresh) — the effect
+    // tears down with nothing polling, yet the CONNECTED screen still printed
+    // "we'll keep trying". The stale `nextAt` also delayed the first re-entry
+    // check by up to 60 s. Reset every ref/flag on setup; the render also gates
+    // the notice on `!serverHarnessConnected` (belt and braces).
+    wizardConnectPollFailsRef.current = 0
+    wizardConnectPollSuccessesRef.current = 0
+    wizardConnectPollNextAtRef.current = 0
+    wizardConnectPollInFlightRef.current = false
+    setWizardConnectPollStalled(false)
+    // review cycle 5 (items 2 + 3): this effect's async work must be
+    // CANCELLABLE. `active` is flipped false in the cleanup and every callback
+    // returns on it; `connectTimeout` is the 15 s race timer, now CLEARED on
+    // teardown. Before this the timer always fired — after teardown it could
+    // clear a LATER generation's in-flight guard (starting a concurrent check,
+    // breaking single-flight) and render the stall notice on a healthy poll.
+    let active = true
+    let connectTimeout = null
+    const wizardConnectTick = (force = false) => {
+      // #3428/#2937 (lane B3, review cycle 7 item 2): the tick is a QUEUED
+      // interval callback — clearing the handle in the cleanup cannot recall an
+      // invocation the timer already queued. That stale tick used to set the
+      // SHARED in-flight ref, arm its own closure timer and fire a real request,
+      // then hit `if (!active) return` in its `.then` BEFORE releasing the ref —
+      // so the next generation's every tick returned at the in-flight guard and
+      // the poll died silently while the screen kept asserting a live update.
+      // The teardown guard is the tick's FIRST statement, before any ref write.
+      if (!active) return
+      if (document.hidden) return
+      // review cycle 5 (item 9): `force` — the visibility/focus handler —
+      // bypasses the schedule below, so a landing connection still surfaces
+      // immediately even while the not-connected success backoff is holding.
+      if (!force && Date.now() < wizardConnectPollNextAtRef.current) return
+      // review cycle 4 (item 10): with no in-flight guard every 4 s tick stacked
+      // another refresh behind a slow/hung response, and with no timeout a
+      // request that never settled left the failure counter untouched — so
+      // neither the backoff nor the stall notice ever ran while the screen kept
+      // promising the connection "shows up here the moment it does". One check
+      // at a time, and a 15 s ceiling that counts as a failed check.
+      if (wizardConnectPollInFlightRef.current) return
+      wizardConnectPollInFlightRef.current = true
+      // review cycle 6 (item 5): the PREVIOUS check's race timer may still be
+      // pending — a check that settled through `refreshOnboarding()` never
+      // cleared it, so the next tick overwrote the handle and the cleanup could
+      // only ever clear the newest one. Drop the stale handle BEFORE arming.
+      if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+      const wizardConnectCheck = Promise.race([
+        refreshOnboarding(),
+        new Promise((resolve) => { connectTimeout = setTimeout(() => resolve(false), 15000) }),
+      ]).catch(() => false)  // a rejection must clear the in-flight guard, not freeze the poll
+      wizardConnectCheck.then((outcome) => {
+        // review cycle 6 (item 5): clear THIS check's timer the moment it
+        // settles, whichever arm won — the cleanup alone only saw the last handle.
+        if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+        if (!active) return  // review cycle 5 (item 2): a torn-down generation must not mutate a later poll
+        wizardConnectPollInFlightRef.current = false
+        // review cycle 6 (item 4): a SUPERSEDED response is NEUTRAL — it did not
+        // land, so it must not bank a success, and it did not fail, so it must
+        // not charge a failure. Either charge makes the stall signal lie: a
+        // genuinely failing endpoint could have its notice suppressed by a
+        // concurrent refresh (a step-3 landing refresh, a job `onDone`, a
+        // toggle) that superseded the poll's own check.
+        if (outcome && outcome.superseded) return
+        const landed = !!(outcome && outcome.applied)
+        if (landed) {
+          wizardConnectPollFailsRef.current = 0
+          setWizardConnectPollStalled(false)
+          // review cycle 5 (item 9): `landed` means the projection was APPLIED
+          // — while this effect is still mounted it therefore observed NO
+          // connection. A flat 4 s cadence is ~900 GETs/hour for a user parked
+          // on the done step, so after a few consecutive not-connected
+          // successes ease off (capped like the failure arm). A forced tick
+          // (tab focus/visibility) still checks immediately.
+          // review cycle 6 (item 7): the success cap is 20 s, not 60 s. The body
+          // on this screen makes a STANDING promise ("it shows up here the
+          // moment it does") and the stall flag is false here, so the softened
+          // branch never renders; `force` fires only on focus/visibility, which
+          // does NOT fire for a user who keeps the dashboard visible on a second
+          // monitor and works in a terminal. A 60 s cap let the screen assert
+          // immediacy for a whole minute.
+          const successes = wizardConnectPollSuccessesRef.current + 1
+          wizardConnectPollSuccessesRef.current = successes
+          wizardConnectPollNextAtRef.current = successes >= 3
+            ? Date.now() + Math.min(4000 * 2 ** (successes - 2), 20000)
+            : 0
+          return
+        }
+        wizardConnectPollSuccessesRef.current = 0
+        const fails = wizardConnectPollFailsRef.current + 1
+        wizardConnectPollFailsRef.current = fails
+        wizardConnectPollNextAtRef.current = Date.now() + Math.min(4000 * 2 ** (fails - 1), 60000)
+        if (fails >= 3) setWizardConnectPollStalled(true)
+      })
+    }
+    wizardConnectPollRef.current = setInterval(wizardConnectTick, 4000)
+    const onWizardConnectVisible = () => { if (!active) return; if (!document.hidden) wizardConnectTick(true) }
+    document.addEventListener('visibilitychange', onWizardConnectVisible)
+    window.addEventListener('focus', onWizardConnectVisible)
+    return () => {
+      active = false
+      if (connectTimeout) clearTimeout(connectTimeout)
+      if (wizardConnectPollRef.current) {
+        clearInterval(wizardConnectPollRef.current)
+        wizardConnectPollRef.current = null
+      }
+      document.removeEventListener('visibilitychange', onWizardConnectVisible)
+      window.removeEventListener('focus', onWizardConnectVisible)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizardStep, welcomeMode, authed, serverHarnessConnected])
+  // #3428/#2937 (lane B3, review cycle 8 item 5): the stall flag was reset ONLY
+  // inside the poll effect's setup, which early-returns when `wizardStep !== 3`.
+  // Leaving step 3 after a stall therefore kept the flag set, and re-entering
+  // committed ONE paint frame with the live region already containing the
+  // message (not announced — the a11y reason the region is mounted up front)
+  // and the body rendering the softened clause the poll was about to retract.
+  // Clear it where the step is LEFT, so re-entry starts from the not-stalled
+  // state and the frame cannot render a withdrawn promise.
+  React.useEffect(() => {
+    if (wizardStep !== 3) setWizardConnectPollStalled(false)
+  }, [wizardStep])
   // #2361 review-r3 (P2-2): wizardPaused must not out-live a real connection —
   // connect → Back → Skip must still show 'connected', not 'paused'.
-  // (connectedOnceRef declaration moved up for TDZ fix, #2621)
+  // #3428/#2937: the declared-before-use ordering #2621's TDZ fix required is
+  // gone with connectedOnceRef — `effectivelyPaused` now reads the projection
+  // only, so there is no ref to hoist.
   const [wizardStepAnnounce, setWizardStepAnnounce] = React.useState('')
+
+  // #3428/#2937 (lane B3, review cycle 5 item 4): `wizardForkChosen` and the
+  // `wizardFork` / `isBuildFork` derivation are HOISTED above the step
+  // announcement effect so `isBuildFork` can be a DEP. It was previously read in
+  // the effect BODY only (a later-declared const cannot sit in a deps array
+  // without the #2426/#2621/#2709 TDZ white-screen), so when `onboarding.fork`
+  // flipped to 'build' while the user sat on step 3 the <h1> re-rendered to "No
+  // connection observed yet" while the sr-only announcement kept "Not connected
+  // yet" — none of the effect's other deps change on that flip. Both surfaces
+  // must share the one derivation; declaring the consts here makes the dep legal.
+  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
+  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
+  const isBuildFork = wizardFork === 'build'
 
   // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
   // Step 1 (org input) and step 3 (paste field / copy button) carry their own
@@ -1367,7 +1561,12 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
-    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })
+    // review cycle 5 (item 4): `isBuildFork` is derived ABOVE this effect and
+    // IS a dep (see the dep list), so an `onboarding.fork` flip to 'build' while
+    // the user sits on step 3 re-runs the announcement with the SAME arm the
+    // <h1> just rendered. It used to be body-only (a later-declared const in a
+    // deps array is the #2426 TDZ white-screen), which let the two disagree.
+    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })
     setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
     // #2361 review-r4 (P3): focus ONLY on step changes — toggling the paste
@@ -1388,7 +1587,14 @@ function claimIntentInFlight() {
     // without it the announcement keeps saying "Setup paused…" while the <h1>
     // and body have already flipped to "You're all set", re-creating the
     // h1/announcement disagreement the shared helper exists to prevent.
-  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused])
+    // #3428/#2937 (lane B3): `serverHarnessConnected` must ALSO be a dep now.
+    // `effectivelyPaused` is `wizardPaused && !serverHarnessConnected`, so it
+    // only tracks the projection while `wizardPaused` is true — a user who did
+    // NOT skip can have the connection land (the step-3 landing refresh) with
+    // `effectivelyPaused` unchanged, which would leave the announcement saying
+    // "Not connected yet" beneath a <h1> that had already flipped to "You're
+    // all set": the same disagreement this dep list exists to prevent.
+  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork])
   // ⛔ #2426 e2e catch (P0): welcomeHasOrg (~line 4890) and wizardShowPaste
   // (~1832) are declared LATER in this giant component — a hook dep array
   // evaluates eagerly DURING render, so listing either here threw "Cannot
@@ -2433,6 +2639,18 @@ function claimIntentInFlight() {
     // under team B, and must not clear the switch-stale flag for a stale
     // team). Mirrors the Round-10 _teamAtCall pattern in loadAll/loadGraphs.
     const _teamAtCall = orgIdRef.current
+    // #3428/#2937 (lane B3, review cycle 5 item 3): this call's monotonic
+    // sequence number — captured before the await so a response can be told
+    // apart from one issued LATER (see the apply guard below).
+    const _seq = ++onboardingRefreshSeqRef.current
+    // #3428/#2937 (lane B3, review cycle 8 item 1): `_superseded` is
+    // FUNCTION-scoped, declared before the try. Declared inside the try (cycle 7
+    // item 3) it was in the TDZ at the early no-session exit and completely
+    // UNBOUND in the `catch` (a try-scoped `const` is not in scope there), so
+    // EVERY error path threw `ReferenceError` instead of returning the
+    // discriminated outcome. It is assigned after each await, immediately before
+    // each use, so it always reflects the latest issued sequence.
+    let _superseded = false
     try {
       if (!sessionTokenRef.current) {
         // Mount race (#1838): the onboarding-state GET rides the session JWT —
@@ -2448,13 +2666,18 @@ function claimIntentInFlight() {
           const { data } = await supabaseClient.auth.getSession()
           session = (data && data.session) || null
         }
+        _superseded = _seq < onboardingRefreshSeqRef.current
         // P2 (review): strict validity check — a non-expired JWT is required,
         // otherwise fall through to the loading-off return below.
         if (session && session.access_token && session.expires_at && session.expires_at * 1000 > Date.now()) {
           sessionTokenRef.current = session.access_token
         } else {
-          setOnboardingLoading(false)
-          return
+          // #3428/#2937 (lane B3, review cycle 7 item 3): this exit and the two
+          // below return the SAME discriminated outcome as the success path —
+          // the poll consumes the shape, and a bare `false` also cleared the
+          // loading flag for a response a newer refresh already superseded.
+          if (!_superseded) setOnboardingLoading(false)
+          return { applied: false, superseded: _superseded }
         }
       }
       // #1893 (code-review P1): pin the SELECTED team so multi-membership
@@ -2471,15 +2694,47 @@ function claimIntentInFlight() {
       // effect's pinned refetch lands. The pinned refetch is authoritative;
       // the unpinned mount GET is discarded (harmless — the refetch corrects
       // onboarding, and the first-timer 403-swallow path is unaffected).
-      if (st && st.onboarding && _teamAtCall && orgIdRef.current === _teamAtCall) {
+      // review cycle 4 (item 11): `applied` — a refresh is 'landed' only when
+      // its projection was actually APPLIED below. The unconditional `return
+      // true` reported success for a DISCARDED response (the team-identity guard
+      // skipped `setOnboarding`, and a body without `st.onboarding` fell through
+      // both), so the poll reset its failure counter and cleared the stall
+      // notice while the projection never moved.
+      let applied = false
+      // #3428/#2937 (lane B3, review cycle 5 item 3): a SUPERSEDED response is
+      // never applied. If a newer request was issued while this one was in
+      // flight, this one is stale by definition and is dropped; `_superseded`
+      // is returned as a success below so the poll does not count it as a
+      // failed check.
+      _superseded = _seq < onboardingRefreshSeqRef.current
+      if (st && st.onboarding && _teamAtCall && orgIdRef.current === _teamAtCall && !_superseded) {
         // code-review P1: this response is for the CURRENT team (the team
         // did not move while the GET was in flight) — clear the switch-stale
         // flag so hydration can proceed.
         onboardingStaleRef.current = false
         setOnboarding(st.onboarding)
         if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
+        applied = true
       }
-      setOnboardingLoading(false)
+      // review cycle 6 (item 3): the loading flag belongs to THIS request. A
+      // superseded response must not flip it while the newer request is still in
+      // flight — it was the one mutation the monotonic apply guard did not cover.
+      if (!_superseded) setOnboardingLoading(false)
+      // #3428/#2937 (lane B3, review cycle 3 P2-8): the step-3 poll has to be
+      // able to tell a landed refresh from a failed one, and this function
+      // swallows its own errors (the swallow is deliberate — see the catch
+      // below), so it RETURNS the outcome instead. Callers that only fire and
+      // forget keep working unchanged; the poll counts the `false`s.
+      // review cycle 5 (item 3): a SUPERSEDED response is not a failure of THIS
+      // check, and a newer refresh owns the truth.
+      // review cycle 6 (item 4): it is not a SUCCESS either. The outcome is
+      // DISCRIMINATED — `{ applied, superseded }` — so the poll banks a success
+      // only on `applied` and treats `superseded` as neutral. The old
+      // `applied || _superseded` reported a DISCARDED response as landed
+      // (cycle 4 item 11's defect in a new form): it reset the failure counter,
+      // cleared the stall notice and advanced the success backoff for a
+      // projection that never moved.
+      return { applied, superseded: _superseded }
     } catch (e) {
       // #1847/#2323 (Option B): first-timer org-create race — the mount-time
       // refreshOnboarding() fires BEFORE the org exists (a teamless first-
@@ -2500,8 +2755,16 @@ function claimIntentInFlight() {
       // state leaves the panel in its initial state;
       // finishWelcomeLoads() re-fires this after org-create + provisioning
       // and is the authoritative load.
-      if (e && e.status === 403 && !e.suspended && !orgIdRef.current) return
-      setOnboardingLoading(false)  // best-effort — the surface renders its error state
+      // review cycle 8 item 1: re-read the sequence AFTER the rejection (the
+      // awaited call never resolved, so no post-await assignment ran) — reading
+      // an unbound identifier here was the ReferenceError the P0 fixes.
+      _superseded = _seq < onboardingRefreshSeqRef.current
+      if (e && e.status === 403 && !e.suspended && !orgIdRef.current) return { applied: false, superseded: _superseded }
+      // #3428/#2937 (lane B3, review cycle 7 item 3): a superseded REJECTION is
+      // superseded-aware too — the newer in-flight refresh owns the loading
+      // flag (cycle 6's side-effect-free claim covered only the response path).
+      if (!_superseded) setOnboardingLoading(false)  // best-effort — the surface renders its error state
+      return { applied: false, superseded: _superseded }
     }
   }
   React.useEffect(() => { refreshOnboarding() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -2524,9 +2787,14 @@ function claimIntentInFlight() {
   const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
-  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
-  // #1998 (W2): connect-consent state — the harness-connected checkpoint
-  // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
+  // `wizardForkChosen` is declared ABOVE the step-announcement effect (review
+  // cycle 5 item 4) so `isBuildFork` can be a DEP of it without a TDZ.
+  // #1998 (W2) / #3428 (lane B3): connect-step busy state. The advance no
+  // longer WRITES the harness-connected checkpoint — that click-writer was
+  // deleted, so this flag covers the refresh that sharpens the done step's read
+  // of the server projection. review cycle 4 (item 7): `wizardConnectError` is
+  // CLEARED by that advance (`setWizardConnectError('')`) and never given a
+  // message there; the only writer of a message is the copy-failure path.
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
   const [wizardConnectError, setWizardConnectError] = React.useState('')
   const [wizardKeyMode, setWizardKeyMode] = React.useState('included')
@@ -2551,6 +2819,11 @@ function claimIntentInFlight() {
 
   const [wizardDurableBusy, setWizardDurableBusy] = React.useState(false)
   const [wizardDurableError, setWizardDurableError] = React.useState('')
+  // #3428/#2937 (lane B3, review cycle 3 P2-7): the wizard's OWN mint 402. It
+  // is a different signal from `capNotice` (set only by the Keys-tab
+  // create/rotate 402s), so an owner who hits the cap inside the wizard needs
+  // this flag to stop the done step promising "running it creates a fresh key".
+  const [wizardDurableCapped, setWizardDurableCapped] = React.useState(false)
   // #1998 fold-in: optional paste-your-own-durable-key fallback (closes the
   // 402-cap loop — a user at max_api_keys regenerates in the API Keys tab and
   // pastes the shown-once replacement here instead of dead-ending).
@@ -2702,12 +2975,16 @@ function claimIntentInFlight() {
   // neither main nor master.
   async function loadBranches(repo) {
     if (Object.prototype.hasOwnProperty.call(branchLists, repo)) return  // already loaded
+    // #3687: declared at FUNCTION scope (mirrors loadRepos) so the `catch` below
+    // can read it. A try-scoped binding is not in scope in the catch, so every
+    // failed branch load threw ReferenceError instead of degrading to the
+    // best-effort empty list.
+    const _teamAtCall = orgIdRef.current
     try {
       const q = encodeURIComponent(repo)
       // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
       // The URL already carries ?repo= — join org_id with & (a second `?`
       // would corrupt the repo value and silently unpin the team).
-      const _teamAtCall = orgIdRef.current
       const res = await api(`/v1/onboarding/github/branches?repo=${q}${onboardingTeamQ('&')}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return  // stale switch response
       const branches = res && Array.isArray(res.branches) ? res.branches : []
@@ -3097,7 +3374,6 @@ function claimIntentInFlight() {
   async function wizardComplete() {
     setWizardDone(true)
     setWizardPaused(false)
-    connectedOnceRef.current = false
     // #2195/#2246 (durable connect key): the done step ends the connect flow —
     // the minted/pasted durable plaintext was shown once in the command; drop
     // it so a later re-entry re-gates (a revoked/regenerated key never
@@ -3106,6 +3382,10 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // review cycle 5 (item 8): the wizard's OWN mint-402 flag must not out-live
+    // the wizard — an owner who hit the cap, left, and re-entered without a
+    // fresh mint attempt permanently lost the fresh-key clause.
+    setWizardDurableCapped(false)
     setWizardShowPaste(false)    // #2361 review-r2: welcomeKey is the first-timer provisioned plaintext
     // #2710: the wizard never owns the shared key-create modal — clear any
     // queued flag on the way out so it cannot surface on the dashboard. The two
@@ -3961,6 +4241,10 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // #3428/#2937 (lane B3, review cycle 7 item 4): logout is the one connect
+    // exit that missed the mint-402 cap flag; a fresh session must not inherit
+    // it (the flag is session/team-scoped, like the key state beside it).
+    setWizardDurableCapped(false)
     setWizardShowPaste(false)
     // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
     // session-scoped; drop it with the other key state on logout.
@@ -4389,36 +4673,47 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1998 (W2): connect-consent Continue — the harness-connected checkpoint
-  // (surface 5/6 contract; W1's plan table left it "W2 owns"). The agent-side
-  // tortoise-onboarding skill writes it after tortoise_health passes (CLI
-  // harnesses via REST); Claude Desktop/Web have NO REST/curl surface, so the
-  // human's Continue writes it (session dual-auth — the checkpoint endpoint
-  // accepts session OR tt_ key). FWW keyed-MERGE → replay is a 200 no-op, so
-  // the agent write + this write (and repeat clicks) can all fire safely.
-  // Mirror handleWizardFork's failure handling: busy/disable, stay on step on
-  // 503/error (a fire-and-forget would strand Desktop/Web's gate with no
-  // retry affordance), advance on 2xx only.
+  // #3428 + #2937 (lane B3, owner-approved design 2026-09-14): the connect
+  // step's advance NO LONGER WRITES the harness-connected checkpoint.
+  //
+  // The old handler POSTed `{step:'harness-connected'}` and then raised a
+  // session-local "connected" flag, so the done step's connected copy was
+  // produced by the CLICK and not by the graph. `harness-connected` therefore
+  // carried two incompatible meanings: a fact the server observed, and a
+  // user's assertion. The click could not distinguish "my agent is running and
+  // has filed something" from "I pasted a command and hoped" — nor, on a
+  // keyless leaf (#2937), from "I clicked with no key at all". Same defect
+  // class this lane exists to kill: a gate that reports success without
+  // running.
+  //
+  // There is now exactly ONE writer class — server-observed:
+  //   - the agent-side tortoise-onboarding skill checkpoints it after
+  //     tortoise_health passes (CLI harnesses, via REST), and
+  //   - `_maybe_onboarding_auto_complete()` flips it server-side on the
+  //     harness's first successful graph write — which is what covers Claude
+  //     Desktop/Web, the REST-less group the human writer used to stand in for.
+  //
+  // The advance still ADVANCES: the user can always reach the dashboard, and
+  // the done step now REPORTS what the server observed
+  // (`serverHarnessConnected`) instead of what the click asserted. A
+  // not-yet-connected user is therefore not trapped — they are told the truth,
+  // pointed at the Setup guide, and the state resolves by itself the moment
+  // their agent files its first memory.
+  //
+  // The refresh is what makes the honest branch report the freshest truth: a
+  // user whose agent already checkpointed during the connect step (the normal
+  // happy path) lands on the connected screen, because the refresh reads the
+  // checkpoint the AGENT wrote.
   async function wizardHarnessContinue() {
     setWizardConnectBusy(true)
     setWizardConnectError('')
-    try {
-      await api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ step: 'harness-connected' }),
-      })
-      setWizardPaused(false)
-      connectedOnceRef.current = true
-      setWizardStep(3)
-    } catch (e) {
-      if (e?.status === 503) {
-        setWizardConnectError('The graph is temporarily unavailable — try again in a moment.')
-      } else {
-        setWizardConnectError(e?.message || 'Could not save your progress — try again.')
-      }
-    } finally {
-      setWizardConnectBusy(false)
-    }
+    // Best-effort, matching every other refreshOnboarding call site: it only
+    // sharpens the done step's reading of the server projection, and the write
+    // that used to justify a blocking error is gone.
+    await refreshOnboarding().catch(() => {})
+    setWizardPaused(false)
+    setWizardStep(3)
+    setWizardConnectBusy(false)
   }
 
   // #1998 fold-in (PR #2161 finding): the connect step must source a DURABLE
@@ -4437,6 +4732,7 @@ function claimIntentInFlight() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
     setWizardDurableError('')
+    setWizardDurableCapped(false)  // a retry re-reads the cap rather than trusting the last 402
     try {
       // Round-15 (P2) team pin (createKey pattern): resolve the ACTIVE team
       // explicitly so the mint lands on the onboarding org — a session JWT
@@ -4490,6 +4786,7 @@ function claimIntentInFlight() {
       // box, which for owner/admin sits behind the disclosure (#2325 review
       // P2) — open it so the error's "paste it below" lands on a visible field.
       if (e?.status === 402) {
+        setWizardDurableCapped(true)  // this session's mint is capped (P2-7)
         setWizardShowPaste(true)
         setWizardDurableError(isBuildFork
           // #3218: the remedy must name only affordances THIS branch renders —
@@ -4570,6 +4867,7 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardDurableCapped(false)  // review cycle 5 (item 8): the mint-402 flag is team-scoped too
     setWizardShowPaste(false)
     // #2246 (review, P1): welcomeKey is TEAM-scoped shown-once plaintext — a
     // switch must not leak the previous team's plaintext into the new team's
@@ -6048,9 +6346,74 @@ function claimIntentInFlight() {
   const wizardConnectHarness = wizardHarness
   // #1998 fork-aware connect: the fork choice determines what the connect step
   // shows — 'build' users see API key + SDK code; 'self' users see harness
-  // picker + setup command.
-  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
-  const isBuildFork = wizardFork === 'build'
+  // picker + setup command. `wizardFork` / `isBuildFork` are derived ONCE,
+  // above the step-announcement effect (review cycle 5 item 4), so the <h1>,
+  // the announcement and this render all share ONE derivation.
+  // #3428/#2937 (lane B3, review cycle 3 P1-A): the done step may name a
+  // harness — and print a per-harness capture sentence — ONLY when the connect
+  // step actually offered the chooser that sets `wizardHarness`. Two paths
+  // reach step 3 without one: the 'unsure' fork answer (handleWizardFork
+  // advances straight to step 3, so step 2's chooser never rendered) and the
+  // capped owner/admin re-entry (capNotice replaces the chooser with the
+  // mint-cap remedy). On both, `wizardHarness` still holds its untouched
+  // 'claude' default, so naming Claude there is the same defect class the build
+  // fork was fixed for: "names a harness the branch never offered". A pick is
+  // ESTABLISHED only when a self fork was chosen or persisted AND no cap remedy
+  // is standing in for the chooser.
+  const harnessPickEstablished = wizardFork === 'self' && !capNotice
+  // Both done-step claims key on that gate: the name falls back to the neutral
+  // 'your agent', and the capture claim falls to 'none' (silence) rather than
+  // asserting a harness-specific capability for a branch that never ran it.
+  const doneHarnessName = harnessPickEstablished
+    ? (knownHarnessName(wizardHarness) || 'your agent')
+    : 'your agent'
+  const doneCaptureClaim = harnessPickEstablished ? harnessCaptureClaim : 'none'
+  // #3428/#2937 (lane B3, review cycle 2 P2-4 / cycle 3 P1-D + P2-7): the
+  // not-connected body's remedy clause is DERIVED, the same way the capture
+  // claim is. "(running it creates a fresh key)" is true only where the user
+  // can actually mint a fresh key for a KEYED harness: false on the key-less
+  // OAuth leaves (no key is involved at all — the connector recipe has no
+  // command with a key) and false for any non-owner/admin (a member has no key
+  // and cannot mint one, so pointing them at the Setup guide's command is a
+  // dead end — the one action they have is asking an owner/admin).
+  // `wizardDurableCapped` is the wizard's OWN mint 402 (`capNotice` is set only
+  // by the Keys-tab create/rotate 402s), so an owner who hit the cap inside the
+  // wizard is not promised a fresh key either. Where the clause is false it is
+  // dropped rather than asserted.
+  // review cycle 4 (item 12): the remedy derives from the harness ONLY where a
+  // pick was established. `wizardHarness` keeps its untouched 'claude' default
+  // on the 'unsure' fork and the capped re-entry, so with no pick the arms below
+  // would tell a member to ask for an API key for a surface the branch never
+  // showed them, and promise an owner a fresh key for a recipe that may have no
+  // command at all. Without an established pick the neutral arm names the one
+  // surface every branch can reach.
+  const doneHarnessForRemedy = harnessPickEstablished ? wizardHarness : null
+  const doneKeylessLeaf = doneHarnessForRemedy !== null && HARNESS_OAUTH.includes(doneHarnessForRemedy)
+  const doneCanMintFresh = isOwnerAdmin && !capNotice && !wizardDurableCapped
+  // review cycle 9 (UX F1 + code F4): the Setup guide renders "Resume setup →"
+  // ONLY while it can render the active checklist — the card returns a skeleton
+  // while loading, an error card when the projection never landed, an
+  // "Unavailable" card when the server reports FLOW unavailable, and a
+  // collapsed card once complete; the button sits inside the active branch
+  // (SetupGuideCard: `onResume && g.status === 'active'`). Naming a control
+  // that is not on screen is the same defect class as naming a harness the
+  // branch never offered — and it is REACHABLE: a failed onboarding GET leaves
+  // `onboarding === null`, so this remedy's minting arm would point at a card
+  // that is concurrently rendering "Couldn't load setup status — refresh to
+  // retry." Derive the clause from the SAME predicate the card uses. The mint
+  // clause is true only when reopening would mint: a key already resolved
+  // (minted this session, or matching a durable row) is reused, not re-minted.
+  const guideCanResume = !!onboarding && !onboardingLoading && setupGuide(onboarding).status === 'active'
+  const doneReopenClause = guideCanResume
+    ? 'reopen it from Settings → Setup guide (Resume setup)'
+    : 'the steps are in Settings → Setup guide'
+  const doneSetupRemedy = (!harnessPickEstablished || doneKeylessLeaf)
+    ? 'the steps are in Settings → Setup guide'
+    : (!isOwnerAdmin
+        ? 'ask an owner or admin for an API key'
+        : (doneCanMintFresh && !harnessKey
+            ? `${doneReopenClause} — the connect step mints a fresh key`
+            : doneReopenClause))
 
   // #2710: the wizard's paste escape (shared verbatim with the member/capped
   // branch below — same markup, same validation, no copy or IA change). The
@@ -6167,7 +6530,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); connectedOnceRef.current = false; if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardDurableCapped(false); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -6211,17 +6574,23 @@ function claimIntentInFlight() {
                     <p className="welcome-eyebrow">{shownOrgName}</p>
                   )}
                   <h1 className="welcome-title">
-                    {wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })}
+                    {wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })}
                   </h1>
                   {(() => {
                     // Step 0 on an org-holding account is a read-only summary
                     // whose body already says "You're set up in <org>…" — a
-                    // second line here would repeat it. Same for the paused
-                    // reconnect: its <h1> already names the state, and the step-3
-                    // body carries the recovery (PR-gate UX: the old paused lede
-                    // restated both).
+                    // second line here would repeat it. Same for step 3 without
+                    // an observed connection: its <h1> already names the state
+                    // (wizardStageLabel's paused / not-connected arms) and
+                    // the body carries the recovery (PR-gate UX: the old paused
+                    // lede restated both). Review cycle 1 P1-1: keying this on
+                    // `effectivelyPaused` left the DIRECT Continue path
+                    // (`wizardPaused` false) rendering the lede "Your agent takes
+                    // over from here." beneath a "Not connected yet" <h1> — the
+                    // #2364/#2912 heading-vs-body contradiction, reassembled. It
+                    // is now keyed on the same derived flag the <h1> uses.
                     if (wizardStep === 0 && welcomeHasOrg) return null
-                    if (wizardStep === 3 && effectivelyPaused) return null
+                    if (wizardStep === 3 && !serverHarnessConnected) return null
                     // #2912 (review cycle 2): WIZARD_STEPS[2].sub is the harness
                     // pick's copy, but step 2 has THREE bodies — only the
                     // owner/self branch is a harness pick.
@@ -6475,8 +6844,13 @@ function claimIntentInFlight() {
                                   header escape — both of which also drop
                                   welcomeKey. This handler is kept in step with
                                   them so the `wizardDurable*` state can never
-                                  outlive the step on any path. */}
-                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setTab('keys'); finishWelcomeLoads('keys') }}>
+                                  outlive the step on any path. review cycle 6 (item 6): that contract includes
+                                  `wizardDurableCapped` — this was the one exit cycle 5
+                                  missed, so a capped build-fork owner who left via
+                                  this link and re-entered without a fresh mint
+                                  attempt kept the done screen's "(running it
+                                  creates a fresh key)" clause suppressed. */}
+                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardDurableCapped(false); setTab('keys'); finishWelcomeLoads('keys') }}>
                                 Manage API keys →
                               </button>
                             </div>
@@ -6487,7 +6861,7 @@ function claimIntentInFlight() {
                       {harnessKey && (
                         <WizardBlock step={2} title="Call the SDK">
                           <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
-                            Run this to verify your API key and file your first memory — it creates your graph and connects your project.
+                            Run this to verify your API key and file your first memory — it creates your graph.
                           </p>
                           <pre className="snippet" style={{ margin: 0 }}>
 {`curl https://api.premiselabs.co/v1/points \\
@@ -6497,7 +6871,7 @@ function claimIntentInFlight() {
                           </pre>
                           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                              {wizardConnectBusy ? 'Saving…' : "I've set it up — Continue →"}
+                              {wizardConnectBusy ? 'Checking…' : "I've set it up — Continue →"}
                             </button>
                             <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">
                               SDK documentation →
@@ -6795,7 +7169,7 @@ function claimIntentInFlight() {
                             <div className="wizard-nav-actions">
                               {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
                               <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                                {wizardConnectBusy ? 'Saving…' : (wizardKeyless
+                                {wizardConnectBusy ? 'Checking…' : (wizardKeyless
                                   ? (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've connected it — Continue →")
                                   : (['pi','cursor'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →"))}
                               </button>
@@ -6824,7 +7198,7 @@ function claimIntentInFlight() {
                         <div className="wizard-nav-actions">
                           {wizardDurableKey && (
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                              {wizardConnectBusy ? 'Saving…' : 'Continue to dashboard'}
+                              {wizardConnectBusy ? 'Checking…' : 'Continue to dashboard'}
                             </button>
                           )}
                           <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
@@ -6835,17 +7209,148 @@ function claimIntentInFlight() {
 
                   {wizardStep === 3 && (
                     <div className="done">
-                      {effectivelyPaused ? (
-                        <p className="dim">You're set up, but your agent isn't connected yet — nothing was installed on the connect step. Open Settings → Setup guide to follow what happens next — the setup command there creates a fresh key when you do.</p>
+                      {isBuildFork ? (
+                        // #3428/#2937 (lane B3, review cycle 2 P1-2): the build
+                        // fork never offers a harness — its step 2 is the SDK
+                        // call (`POST /v1/points`). That write files a point but
+                        // files NO onboarding step: no REST route reaches
+                        // `_maybe_onboarding_auto_complete()` (only the MCP tools
+                        // do — verified 2026-09-16, and reported to the lane
+                        // orchestrator as its own defect). The self-fork body is
+                        // therefore false twice here: "hasn't filed anything" is
+                        // false the moment the user runs the wizard's own curl,
+                        // and the harness name is the untouched 'claude' default
+                        // on a branch that never offered Claude. This body names
+                        // the SDK call the user actually has, asserts nothing
+                        // about filing, and ties the live update to the agent
+                        // tools that CAN file the step.
+                        serverHarnessConnected ? (
+                          <>
+                            <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
+                            <p style={{ fontWeight: 600, margin: '0 0 0.5rem' }}>Connected</p>
+                            <p className="dim" style={{ lineHeight: 1.6 }}>
+                              You can query your project's graph, use it to make decisions, and embed it in your workflows.
+                            </p>
+                            <p className="dim" style={{ fontWeight: 600, margin: '0.9rem 0 0' }}>
+                              Keep calling the SDK from your app.
+                            </p>
+                          </>
+                        ) : (
+                          // review cycle 6 (item 1): the stall notice below renders
+                          // on THIS screen too — it keys on the poll, not on the
+                          // fork — so the build arm's standing promise must soften
+                          // exactly as the self arm's does. Two sentences on one
+                          // screen cannot both be true (cycle 5 keyed only the
+                          // self arm).
+                          <p className="dim" style={{ lineHeight: 1.6 }}>
+                            Your project's graph is set up, but we can't tell it's connected yet — Tortoise
+                            marks a project connected when a write arrives through its agent tools, not
+                            through the <code>/v1/points</code> REST call. Connect an agent to Tortoise
+                            and {wizardConnectPollStalled
+                              ? "we'll show it as soon as we can check"
+                              : 'it shows up here on its own'}.
+                          </p>
+                        )
                       ) : (
-                        <p className="dim">Your agent is connected — it files your decisions and findings to this Organization's graph from here on. Open Settings → Setup guide to follow what happens next.</p>
+                        <>
+                          {serverHarnessConnected ? (
+                            // #3428/#2937 (lane B3, charter 5703012625): the
+                            // owner-approved success screen (2026-09-14). Reachable
+                            // ONLY on a server-observed `harness-connected` — the
+                            // deleted human writer can no longer produce it from a
+                            // click, and neither can a keyless one (#2937).
+                            <>
+                              <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
+                              <p style={{ fontWeight: 600, margin: '0 0 0.5rem' }}>Connected</p>
+                              <p className="dim" style={{ lineHeight: 1.6 }}>
+                                {/* Lane B3, option (a) / review cycle 3 P1-A, corrected in
+                                    cycle 4 (item 8): the TENSE follows the receipt
+                                    (present only on an observed per-harness receipt),
+                                    and the capability flag decides whether ANY sentence
+                                    prints at all ('none' for no install path, recording
+                                    off, or NO HARNESS PICKER offered). That is NOT a
+                                    guarantee that the printed sentence is
+                                    installed-truthful: HARNESS_CAPTURE_SUPPORT.pi is
+                                    true while Pi's installer ships no capture seam, so
+                                    a Pi user does read the 'future' sentence for a
+                                    capability that is not installed. That flag being
+                                    wrong is #3575 (lane B1) — this screen cannot
+                                    detect it. */}
+                                {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
+                                {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
+                                You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
+                              </p>
+                              {/* The redirect is PROSE, not a control: we cannot open
+                                  the user's terminal, so a "Go to your agent"
+                                  button would be a control that does nothing. */}
+                              <p className="dim" style={{ fontWeight: 600, margin: '0.9rem 0 0' }}>
+                                Head back to {doneHarnessName}.
+                              </p>
+                            </>
+                          ) : (
+                            // Not observed — either the user skipped the step, or
+                            // they finished it and their agent has not filed its
+                            // first memory yet. ONE body, true in BOTH cases: it
+                            // asserts nothing about the install and names the two
+                            // real next actions. Deliberately does not claim the
+                            // connection is absent forever, nor that it succeeded.
+                            // review cycle 2 (P2-4): the remedy is the derived
+                            // `doneSetupRemedy`, so this sentence never promises a
+                            // fresh key on a key-less leaf or to a non-minting role.
+                            // review cycle 3 (P1-A): the name is the derived
+                            // `doneHarnessName` (neutral when no picker was offered).
+                            // review cycle 5 (item 6): the body may only state what
+                            // was OBSERVED. "hasn't filed anything to this
+                            // Organization's graph yet" was false for a user whose
+                            // CAPTURED SESSION had already written Session nodes and
+                            // extracted points (that path files only the
+                            // `capture-disclosed` checkpoint, never
+                            // `harness-connected`), while Settings → Captured
+                            // sessions listed the session. State the missing
+                            // observation instead of the graph fact.
+                            // review cycle 5 (item 7): the live-update promise is
+                            // keyed on the stall flag — while the poll cannot check,
+                            // the body must not keep asserting the very promise the
+                            // stall notice below withdraws.
+                            <p className="dim" style={{ lineHeight: 1.6 }}>
+                              We haven't seen your agent's first write through its Tortoise tools yet — so we can't
+                              tell it's connected. If you haven't finished the setup, {doneSetupRemedy}. If you have,
+                              head back to {doneHarnessName} and ask it to file a memory; {wizardConnectPollStalled
+                                ? "we'll show it as soon as we can check"
+                                : 'it shows up here the moment it does'}.
+                            </p>
+                          )}
+                        </>
+                      )}
+                      {/* #3428/#2937 (lane B3, review cycle 3 P2-8): the poll
+                          backs off after consecutive failures; past its threshold
+                          the live-update promise can no longer be kept, so say so
+                          quietly instead of leaving the screen asserting it. */}
+                      {!serverHarnessConnected && (
+                        <p className="dim small" role="status" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                          {wizardConnectPollStalled
+                            ? "We haven't been able to check for your connection for a moment — we'll keep trying. If this persists, reload the page."
+                            : ''}
+                        </p>
                       )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                       </div>
                       <div className="wizard-actions">
-                        <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
-                        <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
+                        {/* #3428 (lane B3): the only real control is deliberately
+                            demoted — nothing on this screen IS the next step
+                            (the next step happens in another application), so
+                            the dashboard exit is a quiet text link: no fill, no
+                            border, and no arrow (an arrow means "advance", and
+                            this link is explicitly not the advance path).
+                            Owner-approved 2026-09-14. Lane B3 review cycle 1
+                            P2-2: the approved screen has exactly ONE control
+                            beneath the redirect (the design decision names this
+                            dashboard link as "the only real control"), so the
+                            docs link is dropped HERE to match it — it remains
+                            on the header/legacy surfaces. Spec fidelity, not a
+                            deletion. */}
+                        <button type="button" className="done-link" onClick={wizardComplete}>Go to dashboard</button>
                       </div>
                     </div>
                   )}
@@ -7642,7 +8147,7 @@ function claimIntentInFlight() {
                     : "Your Organization is live — finish the setup below to connect your agent. You'll need an API key: ask an owner or admin to share one, then paste it on the connect step.")}
             </p>
             <div className="empty-actions">
-              <button className="btn-primary" onClick={() => { connectedOnceRef.current = false; setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
+              <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
               {!snippetKey && (

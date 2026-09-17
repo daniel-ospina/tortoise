@@ -143,7 +143,7 @@ _KEEPALIVE_LOCK = threading.Lock()
 
 # ── #3060: dedicated executors for long / stallable work ───────────────────
 # `asyncio.to_thread` (the house style — see `list_packs`) submits to the
-# loop's SHARED default executor, which is where 79 other `to_thread` call
+# loop's SHARED default executor, which is where ~80 other `to_thread` call
 # sites and the auth middleware's abuse hooks (`_abuse_post_auth` et al.) run.
 # That is fine for short work. It is NOT fine for the capture extraction: on a
 # stalled provider it blocks for the token-scaled deadline (~800s at a 16K
@@ -206,8 +206,9 @@ _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
 # bounded wait; ``/health`` is now pure in-memory (it reads
 # ``_HEALTH_PROBE.snapshot()``) and does no I/O and no thread hand-off at all,
 # so the pool and the bound had no remaining caller. ``_submit_off_loop`` /
-# ``_run_off_loop`` BELOW are kept: the capture path still uses them to stay
-# off the shared default executor.
+# ``_run_off_loop`` BELOW are kept: the capture path uses both, and the #3718
+# dream pass uses ``_submit_off_loop`` alone (it needs the concurrent future) —
+# all to stay off the shared default executor.
 
 
 def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
@@ -784,6 +785,128 @@ def _health_probe_interval() -> float:
     return v
 
 
+async def _first_contact_prewarm() -> None:
+    """#3284 Move A — pre-pay the process's first contacts, behind the listener.
+
+    Two calls, both already-bounded seams, in ONE background task:
+
+    * the JWKS fetch the first session-authenticated request used to pay
+      inline (``session_auth.prefetch_jwks`` — ``_keys is None`` on a fresh
+      process, so a cold/slow/retried fetch was charged to a user-facing
+      call: a slow 401 the client reads as a hang);
+    * the Supabase control-plane client's first TLS handshake + PostgREST
+      round trip (``_CONTROL_PLANE_PROBE.run``), whose only other caller is
+      ``/health/ready`` — so it too is cold on a fresh process.
+
+    The FalkorDB data plane needs nothing: ``_health_probe_loop`` below already
+    pre-pays it on its first iteration.
+
+    ⛔ This MUST be a task, never awaited before ``yield``: uvicorn binds the
+    listening socket only after ``lifespan.startup()`` returns, so awaiting a
+    warm-up here means the machine accepts NOTHING until it finishes (#2953).
+    It is CREATED before the embedding pre-warm thread — but creating a task
+    does not START it, and there is no ``await`` between the two, so this is
+    NOT a wall-clock ordering guarantee: the torch thread may begin first. The
+    property it does guarantee is the load-bearing one — the warm-up runs
+    behind the listener, off the request path.
+
+    Both halves are gated on Supabase mode (the same predicate
+    ``/health/ready`` uses for its control-plane probe): registry/self-host
+    deployments have no Supabase session JWTs to verify and no control plane,
+    so there is nothing to warm — and no network I/O at boot. It never raises
+    (a warm-up must never break boot) and every skip/failure reason is logged
+    with its own line (#2922: no silently-dead subsystem).
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+        supabase_mode = is_supabase_enabled()
+    except Exception as exc:  # pragma: no cover — import/env edge
+        _logger.warning("first-contact pre-warm skipped (mode undeterminable): %s", exc)
+        return
+    if not supabase_mode:
+        _logger.info(
+            "first-contact pre-warm skipped: registry mode (no Supabase session "
+            "JWTs or control plane to warm)"
+        )
+        return
+
+    try:
+        from tortoise.session_auth import prefetch_jwks
+
+        report = await prefetch_jwks()
+        outcome = report.get("outcome")
+        if outcome == "ready":
+            _logger.info(
+                "auth: JWKS pre-warm ready in %.0fms (%d keys)",
+                report["elapsed_ms"],
+                report["keys"],
+            )
+        elif outcome == "empty":
+            _logger.warning(
+                "auth: JWKS pre-warm got an EMPTY key set in %.0fms (%s) — "
+                "an upstream 200 with zero usable keys (bad rotation / empty "
+                "body), NOT a transport outage. The first session-"
+                "authenticated request will re-attempt the fetch and, if the "
+                "upstream is still empty, answer 401 'Unknown signing key' — "
+                "not a 503.",
+                report["elapsed_ms"],
+                report["error"],
+            )
+        elif outcome == "stale":
+            _logger.warning(
+                "auth: JWKS pre-warm did NOT refresh in %.0fms (%s) — serving "
+                "%d last-good cached key(s). The first session-authenticated "
+                "request is served from that set; a kid miss triggers its "
+                "own bounded refetch UNLESS the failure/miss cooldown is "
+                "still armed (a cooldown an earlier lifespan armed also "
+                "blocks the request path) — either way the answer is 401 "
+                "'Unknown signing key' from the stale set, never a 503 "
+                "(last-good keys exist) and never an unbounded wait.",
+                report["elapsed_ms"],
+                report["error"],
+                report["keys"],
+            )
+        else:
+            # ``keys == 0`` with no successful parse covers TWO distinct cache
+            # states: COLD (``_keys is None`` — the request path answers a
+            # bounded 503) and EMPTY (``_keys == {}`` from a prior 200 — the
+            # request path answers 401 "Unknown signing key", never 503, since
+            # a keyless set is not a transport failure). The report does not
+            # distinguish them, so naming only 503 here was the #2922 misreport
+            # class for the empty case.
+            #
+            # A THIRD axis cuts across both: an already-armed failure/miss
+            # cooldown (``_last_failure_at`` is a module global that survives
+            # across lifespans, so a fresh boot can inherit one) short-circuits
+            # the request path at ZERO fetches, so the sentence must not
+            # promise a fetch attempt unconditionally. Every ``transport_error``
+            # report sets ``error`` — it is never ``None`` here.
+            _logger.warning(
+                "auth: JWKS pre-warm failed in %.0fms (%s) — the first "
+                "session-authenticated request makes its own bounded fetch "
+                "attempt UNLESS the request-path failure/miss cooldown is "
+                "already armed (the warm-up itself does not arm it, but it is "
+                "a module global that survives across lifespans), in which "
+                "case it is answered from the cooldown with NO fetch. If the "
+                "upstream is still unreachable (or still answering with zero "
+                "usable keys), that request answers a bounded 503 + "
+                "Retry-After when no key set has ever been cached, or 401 "
+                "'Unknown signing key' from an empty cached set",
+                report["elapsed_ms"],
+                report["error"],
+            )
+    except Exception as exc:  # a warm-up must never break boot
+        _logger.warning("auth: JWKS pre-warm not run: %s", exc)
+
+    try:
+        report = await _CONTROL_PLANE_PROBE.run()
+        _logger.info("control plane: pre-warm %s in %sms",
+                     "ready" if report.get("ok") else "not ready",
+                     report.get("latency_ms"))
+    except Exception as exc:  # a warm-up must never break boot
+        _logger.warning("control plane: pre-warm not run: %s", exc)
+
+
 async def _health_probe_loop() -> None:
     """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
 
@@ -891,6 +1014,7 @@ _LIVENESS_TASK_ATTRS = (
     "_health_probe_task",
     "_boot_sweep_task",
     "_event_retention_task",
+    "_first_contact_task",
 )
 
 
@@ -1005,6 +1129,22 @@ async def _lifespan(app):
         pass
 
     async with mcp_http_app.lifespan(mcp_http_app):
+        # ── #3284 Move A: pre-pay the first contacts, behind the listener.
+        # Two bounded calls (JWKS + control plane) in one background task, so
+        # the FIRST session-authenticated request after a (re)start does not
+        # pay for them. The task is created here, before the embedding pre-warm
+        # thread below — but creating a task does NOT start it and nothing
+        # awaits in between, so this is NOT a wall-clock ordering guarantee
+        # (torch may start first). Not awaited — uvicorn binds only after this
+        # half returns (#2953). Inert in registry mode (no Supabase session
+        # auth).
+        try:
+            app.state._first_contact_task = asyncio.get_event_loop().create_task(
+                _first_contact_prewarm()
+            )
+        except Exception as exc:
+            _logger.warning("first-contact pre-warm not scheduled: %s", exc)
+
         try:
 
             def _probe_loaded_model_id(model) -> str | None:
@@ -1293,6 +1433,12 @@ app.add_middleware(
     allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    # ``Retry-After`` is NOT a CORS-safelisted response header, so without this
+    # the dashboard JS on app.premiselabs.co cannot read the value the
+    # session-auth 503 carries (#3284) — the "retryable, not an outage" signal
+    # would exist only for non-browser clients. Starlette emits
+    # ``Access-Control-Expose-Headers`` only for listed names.
+    expose_headers=["Retry-After"],
 )
 
 
@@ -1423,12 +1569,145 @@ _DREAM_BATCH_MAX = 200
 # per-tenant queue/task dicts don't grow unboundedly across many tenants.
 _DREAM_QUEUE_TTL_S = 600
 
+# #3718 (code review P1 — five reviewers converged on this): the incremental
+# dream pass is a SECONDS-long synchronous graph traversal, NOT the ~35ms write
+# class. `asyncio.to_thread` submits to the loop's SHARED default executor, and
+# this module's own #3060 criterion (:145-160) is explicit that the shared pool
+# "is fine for short work" and "NOT fine" for long/stallable work. The ~80
+# other `to_thread` sites on that pool include the auth middleware's abuse
+# hooks (`_abuse_post_auth`, awaited on EVERY authenticated request), so a
+# burst of dream passes would park every worker (prod is 2 vCPU →
+# `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
+# while `/health` stays green by design (#2850), so nothing would notice. That
+# is the #3060 starvation path relocated, not removed. Dream therefore gets its
+# OWN pool: it can only ever starve itself.
+#
+# The queue is deliberately UNBOUNDED, unlike the capture pool's (whose queue
+# holds a ~MB transcript per waiting request — the #3060 OOM path). Here a
+# waiting item holds no live connection: `_data_sdk` returns a fresh
+# `TortoiseSDK` whose projection opens LAZILY on first `_get_proj()` (sdk.py),
+# and on this path that first call now happens INSIDE the pool worker — so a
+# queued dream costs a Future and a dict, not a socket. (The pre-off-load shape
+# never held a set of open SDKs "behind a frozen loop" either: the handler ran
+# `_data_sdk` → `sdk.dream` with no intervening await, so the single loop could
+# not dispatch a second request into that window.) Queueing is therefore a
+# latency cost for the dream surface, not an OOM path. This endpoint is
+# documented as background maintenance ("Fast-path queries never block on
+# this"), so "your dream waits behind other dreams" is the correct behaviour
+# rather than a new failure mode.
+#
+# Built at IMPORT time, so a malformed/zero knob must degrade to the default —
+# not raise and make `import tortoise.hosted_api` fail (the `_CAPTURE_EXECUTOR`
+# precedent). Default 2: the pass is CPU-bound (EP propagation) and prod runs
+# 2 vCPU.
+_DREAM_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_DREAM_WORKERS", 2), 8)),
+    thread_name_prefix="dream-pass")
+
+
+async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
+    """Run one long dream pass on the dream pool; the helper owns ``sdk.close()``.
+
+    #3718 (code review): the pass AND ``sdk.close()`` are ONE worker hand-off.
+    Letting the coroutine's ``finally`` close instead runs the close on the
+    LOOP while the worker is still inside the pass whenever the request is
+    cancelled — cancelling the await stops the AWAITABLE, not the thread
+    (CPython #87185, quoted at length in this file's #2988 timeout note: the
+    worker "is never cancelled and continues running forever despite the
+    timeout error") — and the SDK owns the projection/connection that pass is
+    reading.
+
+    The close therefore travels WITH THE WORK ITEM rather than with the
+    future: the submitted closure closes ``sdk`` in its own ``finally``, so
+    whoever ends up running the pass closes the SDK exactly once — on the
+    worker thread, so a cancellation can no longer tear the SDK down mid-pass,
+    and no caller can forget it (``TortoiseSDK.close()`` is idempotent —
+    ``_t_closed``).
+
+    Why not ``add_done_callback`` on the future — the first shape of this
+    change, corrected in review: ``ThreadPoolExecutor.submit`` puts the work
+    item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't start
+    new thread", so a submit ``RuntimeError`` does NOT prove the pass never
+    ran. Closing there could tear the SDK down under a pass the pool had
+    already picked up, and the never-attached callback would leak the SDK if
+    the worker re-opened the projection. Attaching the close to the ITEM makes
+    the submit outcome irrelevant; the ``except BaseException`` below covers
+    the other half (item never enqueued), and a duplicate close is a no-op, so
+    both cases are safe.
+    """
+    def _pass_and_close():
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sdk.close()
+
+    try:
+        cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
+    except BaseException:
+        sdk.close()
+        raise
+    return await asyncio.wrap_future(cfut)
+
 
 def _dream_key(org_id: str, graph_namespace: str | None) -> str:
     """C5 #2114 (sweep parity): the dream queue is PER GRAPH — a write on a
     custom graph must drain THAT graph, never the org default. Org-wide
     keys/session writes (graph_namespace None) keep the legacy org key."""
     return org_id if graph_namespace is None else f"{org_id}::{graph_namespace}"
+
+
+# #3718 (review P1): per-GRAPH dream serialization for the two POOLED pass
+# sites (REST /v1/dream and the write-triggered `_dream_worker` drain). The
+# contract is stated at :1556 — "Serialized per tenant (never two concurrent
+# dreams on one tenant graph)" — and repeated in the epic's test-design surface
+# map ("new modes must run inside the same serialized worker, not spawn parallel
+# dreams"). Before the off-load the single event loop made both bodies atomic
+# (no await before `sdk.dream`), so the invariant held by construction; now the
+# passes run in a pool, so the exclusion must be explicit or two same-graph
+# passes read and clear the SAME `ep_dirty` roots and interleave `warm_start`
+# writes. A reviewer reproduced max-concurrent passes for one org = 2.
+# `Dreamer._lock` cannot serve here: it is per-SDK-instance and every request
+# builds its own SDK.
+#
+# NOT covered by this lock, recorded so it is not read as process-wide: the
+# capture path's `_apply_capture_ingest_ep` (sdk.py:1232) still runs
+# `sdk.dream(mode="local", ...)` on the EVENT LOOP, from
+# `_capture_session_impl` (hosted_api.py:9166). It is on the loop, so taking a
+# `threading.Lock` there would freeze the loop for a whole pass — the very
+# thing #3718 removes; moving that pass to the pool is the capture-path
+# residual tracked by #3086, not this change.
+#
+# A `threading.Lock`, NOT an `asyncio.Lock`, is deliberate: it is acquired and
+# released INSIDE the worker thread, and asyncio primitives bind to the first
+# loop that waits on them — which breaks across the per-test loops (the
+# `_CAPTURE_IN_FLIGHT` note's rationale). It cannot deadlock: one lock per graph
+# key, a pass never takes a second key's lock, and this is never held on the
+# event loop.
+#
+# Residual, accepted and recorded here: a single tenant firing many concurrent
+# requests for ITS graph can hold both pool workers (one running, one waiting on
+# this lock), so other tenants' drains queue behind it. That is a latency
+# coupling on a background-maintenance surface only — no other surface shares
+# this pool — and the alternative (loop-side admission) needs a loop-bound
+# primitive, which is the cross-loop hazard above.
+_DREAM_LOCKS: dict[str, threading.Lock] = {}
+_DREAM_LOCKS_GUARD = threading.Lock()
+
+
+def _dream_lock(key: str) -> threading.Lock:
+    """One lock per graph key.
+
+    Deliberately NEVER evicted, unlike `_DREAM_QUEUES` (popped at idle,
+    `_DREAM_QUEUE_TTL_S`): dropping a lock an in-flight pass still holds would
+    break the exclusion it exists for. Growth is bounded by the distinct graph
+    keys the process has ever seen — tens of bytes each, the same class as
+    `_FALLBACK_KEEPALIVE` (see its TODO(#176)).
+    """
+    with _DREAM_LOCKS_GUARD:
+        lock = _DREAM_LOCKS.get(key)
+        if lock is None:
+            lock = _DREAM_LOCKS[key] = threading.Lock()
+        return lock
 
 
 def _enqueue_dream(org_id: str, dirty_roots: list[str],
@@ -1464,16 +1743,22 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
         gns = key.split("::", 1)[1] if "::" in key else None
         sdk = (_make_sdk(graph_name=gns) if gns is not None
                else _make_sdk(namespace=org_id))
-        try:
-            # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
-            sdk._mark_dirty(roots)
-            # Epic 903-C8 (#1246): explicit mode routing — a write-burst
-            # drain is LOCAL mode (W1; never silently full — the I1
-            # precedence table governs; scheduled stale-first passes call
-            # /v1/dream with mode="stale-first" explicitly).
-            sdk.dream(dirty_only=True, mode="local")
-        finally:
-            sdk.close()
+
+        def _drain() -> None:
+            # #3718: mark → dream on the DEDICATED dream pool, serialized per
+            # graph against a concurrent manual /v1/dream (see `_dream_lock`).
+            # `_run_dream_on_pool` owns the SDK's close, so a cancelled request
+            # cannot tear the connection down under a live pass.
+            with _dream_lock(key):
+                # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
+                sdk._mark_dirty(roots)
+                # Epic 903-C8 (#1246): explicit mode routing — a write-burst
+                # drain is LOCAL mode (W1; never silently full — the I1
+                # precedence table governs; scheduled stale-first passes call
+                # /v1/dream with mode="stale-first" explicitly).
+                sdk.dream(dirty_only=True, mode="local")
+
+        await _run_dream_on_pool(_drain, sdk)
     except Exception as exc:
         import logging
         _log = logging.getLogger("tortoise.api")
@@ -4534,7 +4819,15 @@ async def create_object(body: CreateObjectRequest, request: Request,
         props = {}
         if body.status:
             props["status"] = body.status
-        node = sdk.create_object(body.name, objectKind=body.objectKind, **props)
+        # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
+        # worker thread so THIS pinned call cannot freeze the single event loop
+        # while it runs. NOT a handler-level guarantee: `_check_org_limit`
+        # (a per-org count query on its own SDK) and `_data_sdk`'s connect still
+        # run on the loop before this point — a tracked residual, see the test
+        # module's SCOPE note. Same asyncio.to_thread pattern as /v1/search;
+        # response and error semantics are unchanged.
+        node = await asyncio.to_thread(
+            sdk.create_object, body.name, objectKind=body.objectKind, **props)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
@@ -4570,7 +4863,10 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     _check_org_limit(org, "points")
     sdk = _data_sdk(org)
     try:
-        node = sdk.create_subject(body.name, subjectKind=body.subjectKind)
+        # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
+        # create_object above for the pattern and rationale).
+        node = await asyncio.to_thread(
+            sdk.create_subject, body.name, subjectKind=body.subjectKind)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
@@ -4592,17 +4888,29 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     _check_org_limit(org, "points")
     sdk = _data_sdk(org)
     try:
-        result = sdk.create_point(
-            content=body.content,
-            kind=body.kind,
-            tags=body.tags,
-            dedup=body.dedup,
-        )
-        if body.about_object:
-            # #1643: ID-based edge (never the name-resolution path, which
-            # mints Subject stubs on miss — #334 class).
-            sdk._get_proj().create_about_edge(
-                result["id"], body.about_object, "aboutObject")
+        # #3718: sdk.create_point + the about edge are SYNC FalkorDB socket
+        # I/O — both run in ONE worker thread (a single hand-off keeps the
+        # write-then-edge ordering and the error semantics identical) so this
+        # pinned call cannot freeze the event loop while it runs.
+        # `_get_proj()` is inside the worker because its FIRST call opens the
+        # projection — though `_check_org_limit` above has already built its
+        # own SDK on the loop, so the handler as a whole is NOT on-loop-free
+        # (tracked residual, see the test module's SCOPE note).
+        def _write_point() -> dict:
+            out = sdk.create_point(
+                content=body.content,
+                kind=body.kind,
+                tags=body.tags,
+                dedup=body.dedup,
+            )
+            if body.about_object:
+                # #1643: ID-based edge (never the name-resolution path, which
+                # mints Subject stubs on miss — #334 class).
+                sdk._get_proj().create_about_edge(
+                    out["id"], body.about_object, "aboutObject")
+            return out
+
+        result = await asyncio.to_thread(_write_point)
     except HTTPException:
         raise
     except Exception:
@@ -4656,7 +4964,12 @@ async def events_poll(
     sdk = _data_sdk(org)
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
-        result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
+        # #3718: sync FalkorDB I/O — off-loaded off the event loop so a slow
+        # event-page read does not stall every concurrent request. The
+        # ValueError contract (410/400 mapping) is unchanged: the same
+        # exception propagates out of the worker thread.
+        result = await asyncio.to_thread(
+            sdk.events_poll, after=after, types=type_list or None, limit=limit)
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:
@@ -4795,31 +5108,61 @@ async def dream(
         bucket.append(now_ts)
 
     sdk = _data_sdk(org)
+
+    # The graph key is needed for the per-graph dream lock on EVERY branch.
+    _dk = _dream_key(org["org_id"],
+                     (org.get("graph_namespace")
+                      if org.get("graph_id") else None))
+
+    # Drain whatever is queued plus any in-memory dirty roots. LOOP-SIDE on
+    # purpose: `_DREAM_QUEUES` holds `asyncio.Queue`s, which are not
+    # thread-safe. Batch mark once (P3, #85) — one reverse-BFS pair, not N.
+    # C5 (#2114, review P2): create_point enqueues under the COMPOSITE key for
+    # graph-bound keys — read the same key or the manual drain misses the
+    # queued roots. Only the default (neither `mode=` nor `full=`) branch
+    # drains, exactly as before.
+    queued_roots: list[str] = []
+    # This block is guarded separately from the pass below: it runs on the LOOP,
+    # so it must restore the original `finally: sdk.close()` guarantee for its
+    # own region WITHOUT the await that the off-load moved off-loop (a
+    # BaseException handler around the whole `return await` would close the SDK
+    # on the loop under a pass the worker is still running — the race this
+    # off-load exists to remove). `close()` is idempotent (`_t_closed`).
+    #
+    # Accepted residual of the off-load (#3718 review): if the request is
+    # cancelled while its pass is still QUEUED, `wrap_future` cancels the item,
+    # so the roots drained above are not marked this cycle. They are not lost —
+    # `_mark_dirty` persists `ep_dirty`/`ep_dirty_at` on the graph, so the next
+    # hydrate/scheduler pass still sees them — but the IMMEDIATE mark is dropped,
+    # which the pre-change inline shape could not do (no await between dequeue
+    # and `sdk.dream`).
     try:
-        if mode is not None:
-            result = sdk.dream(mode=mode, budget=budget)
-        elif full:
-            result = sdk.dream(full=True)
-        else:
-            # Drain whatever is queued plus any in-memory dirty roots.
-            # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
-            # C5 (#2114, review P2): create_point enqueues under the
-            # COMPOSITE key for graph-bound keys — read the same key or the
-            # manual drain misses the queued roots.
-            _dk = _dream_key(org["org_id"],
-                             (org.get("graph_namespace")
-                              if org.get("graph_id") else None))
+        if mode is None and not full:
             q = _DREAM_QUEUES.get(_dk)
-            queued_roots: list[str] = []
             if q is not None and not q.empty():
                 while not q.empty():
                     queued_roots.append(q.get_nowait())
+    except BaseException:
+        sdk.close()
+        raise
+
+    def _run_dream():
+        # #3718: sdk.dream is a long, CPU-heavy SYNCHRONOUS graph pass — the
+        # worst on-loop blocker on this surface (seconds, not the ~35ms of a
+        # point write). All three branches run on the DEDICATED dream pool (see
+        # `_DREAM_EXECUTOR`), serialized per graph against the write-triggered
+        # `_dream_worker` drain (`_dream_lock`). `_run_dream_on_pool` owns the
+        # SDK's close.
+        with _dream_lock(_dk):
+            if mode is not None:
+                return sdk.dream(mode=mode, budget=budget)
+            if full:
+                return sdk.dream(full=True)
             if queued_roots:
                 sdk._mark_dirty(queued_roots)
-            result = sdk.dream(dirty_only=True)
-        return result
-    finally:
-        sdk.close()
+            return sdk.dream(dirty_only=True)
+
+    return await _run_dream_on_pool(_run_dream, sdk)
 
 
 @app.get("/v1/dream/health")
@@ -8568,6 +8911,33 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt.
         _record_write_op(org)
+        # #3359: one capture_cost row per capture ATTEMPT that ran an
+        # extraction (successful or errored — a failed extraction that made
+        # provider calls has real spend, and the deadline/deadline_aborts
+        # disclosure depends on that row existing). Replay/M2 captures carry
+        # no extractor telemetry and emit nothing. Idempotent for free: this
+        # sits behind the SAME replay guard the write-op meter uses, so a
+        # zero-node re-POST writes no second row; a genuine retry (#2335
+        # WI-2b) does write a second row, which is why the report aggregates
+        # by session_id before percentiling. Best-effort — analytics must
+        # never block a committed capture.
+        try:
+            _cost_props = _capture_cost_props(session_id, meta)
+            if _cost_props is not None:
+                # Off the event loop: `_track_analytics_event` POSTs
+                # synchronously (`httpx.Client`), and this API runs a single
+                # uvicorn worker — calling it inline stalls EVERY concurrent
+                # request for the duration of a Supabase round-trip (the
+                # #2988 / #3498 class of sync-HTTP-on-the-loop bug). This is
+                # the first call site on the highest-frequency path, so it is
+                # routed through `asyncio.to_thread` (the house style).
+                await asyncio.to_thread(
+                    _track_analytics_event,
+                    org["org_id"], "capture_cost", _cost_props)
+        except Exception:  # noqa: BLE001, RUF100 — never block capture
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture_cost analytics emit failed (non-fatal)")
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -19241,6 +19611,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     "questions", "step", "error_type",
     # #889: MCP tool-call telemetry (friction evidence for epic #888)
     "tool_name", "status", "latency_ms", "error_kind",
+    # #3359: capture_cost — the per-session cost driver (calibration data
+    # only; never on the billing path). All measured fields must survive
+    # the PII filter or the measurement is silently lost.
+    "calls", "retries", "prompt_tokens", "completion_tokens",
+    "cost_usd", "calls_without_cost", "calls_without_usage",
+    "deadline_aborts", "by_stage",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -19290,6 +19666,45 @@ def _track_analytics_event(org_id: str, event_name: str,
             f.write(_json.dumps(event) + "\n")
     except Exception:
         pass
+
+
+def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
+    """#3359: the per-session cost driver as an analytics ``properties`` dict.
+
+    Reads the extractor telemetry (``meta["stats"]["llm"]``) that
+    ``_rollup_llm`` now accumulates: provider calls, prompt/completion
+    tokens, the provider's own reported USD charge, the
+    ``calls_without_cost`` disclosure counter, and the per-stage/
+    per-route ``by_stage`` envelope (repricable at report time).
+
+    Returns ``None`` when the extractor produced no LLM roll-up (a
+    replayed / M2 capture: ``meta["stats"]`` is ``{}``) — no measurement
+    exists, so no row is written. A capture whose extraction ERRORED does
+    carry a roll-up (and therefore a row): the provider calls were made and
+    their spend is real.
+    """
+    llm = ((meta.get("stats") or {}).get("llm") or {})
+    if not llm:
+        return None
+    return {
+        "session_id": session_id,
+        "calls": int(llm.get("calls", 0) or 0),
+        "retries": int(llm.get("retries", 0) or 0),
+        "prompt_tokens": int(llm.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(llm.get("completion_tokens", 0) or 0),
+        "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
+        "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
+        # #3359: a call that returned NO usage block at all (no tokens, no
+        # charge) is a distinct disclosure from one that returned tokens but
+        # no charge — both ride the row, so neither is silently a clean $0.
+        "calls_without_usage": int(llm.get("calls_without_usage", 0) or 0),
+        # #3359: deadline-killed generations are BILLED upstream but produce
+        # no tokens, so they are spend this measurement cannot price. Carried
+        # on the row so the report can disclose it instead of reading the
+        # session as a clean $0 (#1787 P2-L is the counter's origin).
+        "deadline_aborts": int(llm.get("deadline_aborts", 0) or 0),
+        "by_stage": llm.get("by_stage") or {},
+    }
 
 
 def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
@@ -23427,8 +23842,17 @@ async def oauth_authorize(request: Request):
         # `_redirect_uri_matches` also refuses parse-differential input: this is
         # the one place the raw request param is echoed into a Location header,
         # so relaxing the match without that guard would BE the open redirect.
-        from tortoise.oauth import _redirect_uri_matches, get_client
-        client = get_client(cp, params["client_id"]) if params["client_id"] else None
+        from tortoise.oauth import _redirect_uri_matches, resolve_client
+        client = None
+        if params["client_id"]:
+            try:
+                # #2847: the resolver, not `get_client`, so a CIMD client's
+                # in-document redirect_uri is honoured on this path too.
+                # Best-effort: a refused fetch must not turn an OAuth error
+                # response into a 5xx, so this stays non-fatal.
+                client = resolve_client(cp, params["client_id"])
+            except Exception:
+                client = None
         registered_uris = (client.get("redirect_uris") or []) if client else []
         if not isinstance(registered_uris, (list, tuple)):
             registered_uris = [registered_uris]
