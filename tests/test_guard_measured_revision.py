@@ -94,14 +94,17 @@ class Repo:
         return _git(self.root, "rev-parse", "HEAD")
 
 
-def _forge_shadowed_bytecode(repo: Repo, module: str, payload: str) -> Path:
+def _forge_shadowed_bytecode(
+    repo: Repo, module: str, payload: str, *, cache_name: str | None = None
+) -> Path:
     """Write a REAL forged ``.pyc`` shadowing ``tortoise/<module>.py``.
 
     The header (magic + PEP 552 flags + source mtime + source size) is the one
     CPython itself writes for that exact source, so the interpreter must not
     recompile and must execute the marshalled payload instead. That is the
     #3712 bypass as an artifact — the tests below assert the payload really
-    runs before they assert the guard refuses it.
+    runs before they assert the guard refuses it. ``cache_name`` overrides the
+    file name (used to pin case-variant suffixes).
     """
     import marshal
     import py_compile
@@ -109,7 +112,7 @@ def _forge_shadowed_bytecode(repo: Repo, module: str, payload: str) -> Path:
     source = repo.path(f"tortoise/{module}.py")
     cache = source.parent / "__pycache__"
     cache.mkdir(exist_ok=True)
-    forged = cache / f"{module}.{sys.implementation.cache_tag}.pyc"
+    forged = cache / (cache_name or f"{module}.{sys.implementation.cache_tag}.pyc")
     py_compile.compile(str(source), cfile=str(forged), doraise=True)
     real = forged.read_bytes()
     # PEP 552 header: 4-byte magic + 4-byte flags + (mtime+size) or 8-byte hash
@@ -142,6 +145,18 @@ def _prove_the_forgery_executes(repo: Repo, module: str) -> None:
         timeout=60,
     )
     assert cp.stdout.strip() == "PWNED", f"forgery did not execute: {cp.stderr}"
+
+
+def _fs_is_case_insensitive(path: Path) -> bool:
+    """True when the filesystem behind ``path`` resolves case variants to the
+    same file — the condition under which a ``.PYC`` really is imported in
+    place of the ``.pyc`` CPython asks for."""
+    probe = path / "CaseProbe.tmp"
+    probe.write_text("x")
+    try:
+        return (path / "caseprobe.TMP").exists()
+    finally:
+        probe.unlink()
 
 
 def _guard_cli(repo: Repo, *extra: str, rev: str | None = None) -> subprocess.CompletedProcess:
@@ -435,6 +450,40 @@ def test_bytecode_present_at_rev_refuses_by_default(repo: Repo) -> None:
     cp = _guard_cli(repo, rev=new_rev)
     assert cp.returncode == 1, cp.stdout
     assert "byte-cache" in cp.stderr
+
+
+@pytest.mark.parametrize(
+    ("suffix", "importable"),
+    [(".PYC", True), (".Pyc", True), (".pyC", True), (".PYO", False)],
+)
+def test_case_variant_bytecache_refuses_by_default(
+    repo: Repo, suffix: str, importable: bool
+) -> None:
+    """#3712 (cycle-14 review): CPython's importer opens ``...cpython-312.pyc``
+    and on a case-insensitive filesystem (macOS/APFS) that open() RESOLVES to
+    ``...cpython-312.PYC`` — which then executes. The byte-cache match is
+    casefolded, so a case variant is refused in EVERY disposition
+    (untracked and index-tracked) and on EVERY platform (on a case-sensitive
+    one the refusal is merely stricter). ``importable`` marks the variants
+    CPython would really read (``.pyo`` is stale cache, never imported on
+    3.12 — still refused, just not an execution proof).
+    """
+    forged = _forge_shadowed_bytecode(
+        repo,
+        "a",
+        'PWNED = "PWNED"\n',
+        cache_name=f"a.{sys.implementation.cache_tag}{suffix}",
+    )
+    if importable and _fs_is_case_insensitive(forged.parent):
+        # the bypass premise, proved only where it is live
+        _prove_the_forgery_executes(repo, "a")
+    untracked = _guard_cli(repo)
+    assert untracked.returncode == 1, untracked.stdout
+    assert "byte-cache" in untracked.stderr
+    _git(repo.root, "add", "-f", str(forged.relative_to(repo.root)))
+    staged = _guard_cli(repo)
+    assert staged.returncode == 1, staged.stdout
+    assert "byte-cache" in staged.stderr
 
 
 def test_allow_bytecode_is_an_explicit_loud_opt_out(repo: Repo) -> None:

@@ -74,10 +74,14 @@ is this list's length):
     ``<rev>``, or present at ``<rev>`` — because git's bookkeeping says nothing
     about what CPython executes (the cycle-13 review reproduced an
     INDEX-tracked forged ``.pyc`` reported as "added after ``<rev>``" with the
-    guard still exiting 0). A sourceless ``pkg/__init__.pyc`` (no ``.py``
-    beside it) is refused the same way — ``python -B`` /
-    ``PYTHONDONTWRITEBYTECODE=1`` stop bytecode being WRITTEN, not READ, so
-    refusing every byte-cache is what closes the READ case too.
+    guard still exiting 0), and it holds CASE-VARIANT names too — the match is
+    casefolded, because on a case-insensitive filesystem the importer's
+    ``...cpython-312.pyc`` open() resolves to ``...cpython-312.PYC`` (the
+    cycle-14 review reproduced that executing while the guard exited 0). A
+    sourceless ``pkg/__init__.pyc`` (no ``.py`` beside it) is refused the same
+    way — ``python -B`` / ``PYTHONDONTWRITEBYTECODE=1`` stop bytecode being
+    WRITTEN, not READ, so refusing every byte-cache is what closes the READ
+    case too.
 
 Declarations (asserted, not refusals):
 
@@ -85,8 +89,8 @@ Declarations (asserted, not refusals):
 18. a file ADDED after ``<rev>`` is REPORTED, not refused (it did not exist
     during the run, so it cannot be what ran);
 19. untracked files are excused by SUFFIX only (``NOISE_SUFFIXES``) — never by
-    directory — and no byte-cache is excused unless the caller passes the
-    explicit ``--allow-bytecode`` opt-out (declaration 21);
+    directory, and casefolded — and no byte-cache is excused unless the caller
+    passes the explicit ``--allow-bytecode`` opt-out (declaration 21);
 20. the optional paths argument defaults to ``DEFAULT_PATHS`` (both the function
     default and the CLI default);
 21. ``--allow-bytecode`` (the opt-out) and ``--strict-bytecode`` (a no-op alias
@@ -238,8 +242,28 @@ def _shebang_changed(before: bytes, after: bytes) -> bool:
 
 
 def _is_noise(rel: str) -> bool:
-    """Excused from the untracked refusal ONLY by suffix — never by directory."""
-    return rel.endswith(NOISE_SUFFIXES)
+    """Excused from the untracked refusal ONLY by suffix — never by directory.
+
+    Casefolded: on a case-insensitive filesystem (macOS/APFS — the platform of
+    record) ``evil.SWP`` and ``evil.swp`` are the same file, and a
+    case-sensitive suffix test is defeatable for exactly the reason the
+    ``.GIT`` directory match was (see the nested-git walk). No member of
+    ``NOISE_SUFFIXES`` is executable, so widening the match cannot hide code.
+    """
+    return rel.casefold().endswith(NOISE_SUFFIXES)
+
+
+def _is_bytecode(rel: str) -> bool:
+    """True for a byte-cache the importer could run.
+
+    Casefolded (cycle-14 review P0): CPython's importer opens
+    ``...cpython-312.pyc``, and on a case-insensitive filesystem that open()
+    RESOLVES to ``...cpython-312.PYC`` — which executes. A case-sensitive
+    suffix test therefore let a forged ``.PYC`` run while the guard exited 0.
+    On a case-sensitive filesystem a case variant is simply refused too
+    (stricter, never a false pass).
+    """
+    return rel.casefold().endswith((".pyc", ".pyo"))
 
 
 def _modes_at_rev(root: Path, rev: str, paths: tuple[str, ...]) -> dict[str, str]:
@@ -457,7 +481,7 @@ def guard(
         {
             f
             for f in (*at_rev, *tracked, *untracked)
-            if f.endswith((".pyc", ".pyo"))
+            if _is_bytecode(f)
         }
     )
     if byte_caches and not allow_bytecode:
@@ -581,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  added after that revision (cannot have been executed): {scan.added or '(none)'}")
     # Byte-caches are the expected noise and would drown the signal; anything
     # else excused by the allowlist is worth naming.
-    odd = [f for f in scan.noise if not f.endswith((".pyc", ".pyo"))]
+    odd = [f for f in scan.noise if not _is_bytecode(f)]
     print(f"  cache/editor noise excused: {len(scan.noise)} file(s)"
           + (f" — unusual: {odd}" if odd else ""))
     if scan.byte_caches:
