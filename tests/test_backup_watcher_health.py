@@ -63,12 +63,33 @@ def _restore_watcher_state():
     hosted_api._WATCHER_START_ERROR = prev_error
 
 
+def _stub_db_ok(monkeypatch) -> dict:
+    """Make ``/health``'s DB verdict a clean ``ok`` on either seam.
+
+    The handler's DB source is version-dependent and this suite must survive
+    the rebase onto current main:
+
+    * pre-#2850 (this branch): ``health()`` awaits ``asyncio.to_thread(
+      _probe_db)``, so patching the module-level ``_probe_db`` is enough.
+    * current main (#2850): ``health()`` reads ``_HEALTH_PROBE.snapshot()``
+      — one in-memory value from a background refresher. ``_probe_db`` is
+      only reached from ``HealthProbe._run``, so patching it alone leaves a
+      cold probe (``{"ok": False, "error": "probe has not produced a
+      result"}``) and every ``ok``-state assertion fails for the wrong
+      reason. Stub the snapshot too when the seam exists.
+
+    Returns the verdict dict for callers that assert on ``body["db"]``.
+    """
+    verdict = {"ok": True, "latency_ms": 0.1, "error": None}
+    monkeypatch.setattr(hosted_api, "_probe_db", lambda: dict(verdict))
+    health_probe = getattr(hosted_api, "_HEALTH_PROBE", None)
+    if health_probe is not None:  # main-only seam (#2850)
+        monkeypatch.setattr(health_probe, "snapshot", lambda: dict(verdict))
+    return verdict
+
+
 def _health_with_db_ok(monkeypatch) -> dict:
-    monkeypatch.setattr(
-        hosted_api,
-        "_probe_db",
-        lambda: {"ok": True, "latency_ms": 0.1, "error": None},
-    )
+    _stub_db_ok(monkeypatch)
     return asyncio.run(hosted_api.health())
 
 
@@ -89,12 +110,22 @@ def test_lifespan_does_not_bind_os_as_a_local():
     A function-local ``import os`` (or ``os = ...``) binds ``os`` for the WHOLE
     function body, so the earlier ``os.environ.get(...)`` read raises
     ``UnboundLocalError`` — the exact crash that aborted the watcher-start block
-    on every hosted boot for ~31 days. ``co_varnames`` lists every name bound in
-    the function body, so this fails the moment the shadow is reintroduced.
+    on every hosted boot for ~31 days.
+
+    Two tables must be checked, not one. A plain local lands in
+    ``co_varnames``; the SAME binding lands in ``co_cellvars`` when a nested
+    function inside ``_lifespan`` also reads the name — CPython promotes the
+    enclosing local to a cell so the closure can capture it. ``_sweep_events``
+    (nested) reads ``os``, so a reintroduced ``import os`` compiles to
+    ``STORE_DEREF`` and appears ONLY in ``co_cellvars``. Checking
+    ``co_varnames`` alone was blind to exactly this mutation (verified: the
+    canonical #2851 ``import os`` mutation left the suite green).
     """
     code = inspect.unwrap(hosted_api._lifespan).__code__
     for shadowed in ("os", "asyncio", "threading", "logging"):
-        assert shadowed not in code.co_varnames, (
+        assert (
+            shadowed not in code.co_varnames and shadowed not in code.co_cellvars
+        ), (
             f"`{shadowed}` is bound locally inside _lifespan — a function-local "
             "import/assignment shadows the module global for the whole function "
             "and re-introduces the #2851 UnboundLocalError"
@@ -107,18 +138,29 @@ def test_watcher_start_failure_sets_the_health_marker():
     The start-failure ``except`` must record ``_WATCHER_START_ERROR`` — without
     it a failed watcher is indistinguishable from the legitimate disabled state
     and /health keeps reporting `ok` (the reported bug).
+
+    The assignment must be located in an ``except`` handler AND carry a
+    non-``None`` value. An unqualified "is the name assigned anywhere in
+    ``_lifespan``" search is satisfied by the per-instance ``= None`` reset at
+    the top of the function, so it stayed green with the failure-site
+    assignment deleted (verified).
     """
-    assigned = {
-        target.id
-        for node in ast.walk(_lifespan_node())
+    marker_in_handler = [
+        node
+        for handler in ast.walk(_lifespan_node())
+        if isinstance(handler, ast.ExceptHandler)
+        for node in ast.walk(handler)
         if isinstance(node, ast.Assign)
         for target in node.targets
         if isinstance(target, ast.Name)
-    }
-    assert "_WATCHER_START_ERROR" in assigned, (
-        "_lifespan never assigns `_WATCHER_START_ERROR` — the start-failure "
-        "handler must set it or /health cannot tell 'wanted but dead' from "
-        "'disabled' (#2877)"
+        and target.id == "_WATCHER_START_ERROR"
+        and not (isinstance(node.value, ast.Constant) and node.value.value is None)
+    ]
+    assert marker_in_handler, (
+        "the start-failure `except` in _lifespan must assign "
+        "`_WATCHER_START_ERROR` a non-None value — the `= None` reset at the "
+        "top of the function does not count, or /health cannot tell 'wanted "
+        "but dead' from 'disabled' (#2877)"
     )
 
 
@@ -184,9 +226,7 @@ def test_health_stays_ok_when_watcher_is_legitimately_disabled(monkeypatch):
 def test_health_never_raises_on_watcher_failure(monkeypatch):
     """Liveness must answer, not 5xx — a dead durability monitor is not a
     process death (#338 / the /health contract)."""
-    monkeypatch.setattr(
-        hosted_api, "_probe_db", lambda: {"ok": True, "latency_ms": 0.0, "error": None}
-    )
+    _stub_db_ok(monkeypatch)
 
     class _ExplodingWatcher:
         @property

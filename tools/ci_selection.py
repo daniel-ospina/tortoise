@@ -83,7 +83,36 @@ SHARED_MODULES = (
 SOURCE_PATTERNS = {
     "battery": ("battery/",),
     "onboarding": ("tortoise/onboarding/", "website/welcome.html",
-                   "website/self-hosted.html"),
+                   "website/self-hosted.html", "website/product.html",
+                   "website/index.html", "website/signup.html",
+                   "website/signin.html", "website/privacy.html",
+                   # #3332: the public pages that own a guard test in this surface.
+                   # docs.html + faq.html -> test_website_docs_consistency.py;
+                   # product.html + welcome.html -> test_website_static.py;
+                   # index.html + privacy.html -> test_waitlist_form.py;
+                   # signup.html + signin.html -> test_signup_form_safety.py;
+                   # self-hosted.html -> test_harness_mcp_config.py.
+                   # Listing a path is what makes a change to it select this
+                   # surface at all — otherwise its guard test never runs.
+                   "website/docs.html", "website/faq.html",
+                   # #3616: the deploy-binding gate is a PAIR — the checker and
+                   # the manifest it reads. Neither path is under a Python
+                   # package prefix, so without these two entries a PR that
+                   # edits the gate's logic or downgrades a binding to
+                   # `recommended` selects NO surface (surfaces=[], full=False)
+                   # and test_pages_bindings.py never runs on the PR that owns
+                   # it. That is the #3616 pattern one level up: the thing that
+                   # decides whether the gate works would not itself be gated.
+                   "tools/check_pages_bindings.py",
+                   "config/required-bindings.yml"),
+    # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
+    # A review pointed out that adding it would be a coverage DOWNGRADE: an
+    # unlisted path falls into the unknown-path branch -> FULL matrix (fail
+    # closed), whereas listing it selects only `onboarding`. Today the two tests
+    # that read that workflow both live in onboarding, so nothing is lost — but
+    # a future core-registered test reading it would silently stop running on
+    # the PR that edits it. Fail-closed is the right default for the file that
+    # owns the deploy.
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
@@ -100,7 +129,17 @@ SOURCE_PATTERNS = {
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
             "tools/ask_spotcheck_probe.py"),
-    "api": ("tortoise/hosted_api.py", "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+    "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
+            "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+            # #3154: hosted_api.py imports hosted_backup.py at module level (the
+            # backup/restore/import endpoints), and the boolean-index audit lives
+            # there — without this entry a hosted_backup.py-only change matched
+            # no pattern and fell through to `core`, skipping the api-registered
+            # tests that pin it (test_graphcopy_boolean_index_3154.py,
+            # test_hosted_backup.py, test_dr_endpoints.py). Paired with
+            # CORE_ALSO: many core-registered tests (test_backup_sweep.py,
+            # test_backup_multigraph_e2e.py, test_backup_watcher.py,
+            # test_alert_store.py) also pin it.
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py
@@ -132,6 +171,13 @@ SOURCE_PATTERNS = {
              "tools/embedder_probe.py", "tools/calibrate_thresholds.py",
              "tools/pair_label_runner.py", "benchmarks/",
              "graph-scripts/backfill_embeddings.py",
+             # #3359: the per-session cost report CLI consumes the eval-owned
+             # versioned PRICING_MAP (tools/longmem_eval/costing.py) and is
+             # exercised by tests/test_capture_cost_measurement.py — without
+             # this entry a report-CLI-only change selects NO surface
+             # (surfaces=[], full=False) and that test never runs on the PR
+             # that owns the launch-gate number (the #3616 pattern).
+             "tools/capture_cost_report.py",
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).
@@ -148,7 +194,7 @@ SOURCE_PATTERNS = {
 # would run only the selected surface's half of them. A path listed here adds
 # `core` alongside its matched surface(s) — narrower than promoting the whole
 # module to SHARED_MODULES (which forces the full matrix).
-CORE_ALSO = ("tortoise/api.py",)
+CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py")
 
 # Paths that are NOT python-relevant (docs/config PRs skip the matrix).
 NON_PYTHON_PREFIXES = (
@@ -157,6 +203,22 @@ NON_PYTHON_PREFIXES = (
     "capability/", "services/", "integrations/", "apps/", "spike/", "tools/",
     ".ci-checks/", "supabase/",
 )
+
+# website/ paths that ARE selection-relevant (#3332).
+#
+# Superseded by the generic rule in select() (`_selection_relevant`): a path that
+# SOURCE_PATTERNS already matches is selection-relevant whatever prefix it sits
+# under, so it no longer needs a second hand-maintained tuple. Kept empty as a
+# documented tombstone rather than deleted, so the next reader finds the reason
+# instead of re-inventing the same broken mirror.
+#
+# Why the mirror was the wrong shape (twice: #1349 for tools/, #3332 for
+# website/): the mirror is only as complete as whoever last edited it, and a
+# missing entry fails SILENTLY — the path is filtered to `changed == []`, the PR
+# drops to tier-1 smoke, and the guard test written for that exact file never
+# runs. SOURCE_PATTERNS is the single source of truth; the ratchet that keeps
+# this true is tests/test_ci_selection.py::test_every_source_pattern_is_selectable.
+SITE_CARVEOUTS: tuple[str, ...] = ()
 
 # tools/ paths that ARE python-relevant for selection (#1349). The flat
 # NON_PYTHON_PREFIXES tuple above includes "tools/", which would swallow
@@ -185,6 +247,20 @@ TOOL_CARVEOUTS = (
     # lands in the unknown-path fail-closed branch -> FULL matrix + both
     # legs — the heaviest but safest gate for the file that owns gating.
     "tools/ci_selection.py",
+    # #3261: the pre-dispatch collision check (#3061) owns
+    # tests/test_collision_preflight.py. Without this carve-out a
+    # preflight-only change is swallowed by the flat "tools/" prefix,
+    # `changed` comes back empty, and select() takes the docs-only path
+    # (surfaces=[] -> tier-1 smoke) — so the file's own guard test never
+    # runs on the PR that changes it. The assumption that such a change
+    # already "falls back to core" was never true: the early docs-only
+    # return bypasses the `if not matched: matched.add("core")` fallback
+    # entirely.
+    # No SOURCE_PATTERNS entry matches it, so like tools/ci_selection.py
+    # it lands in the unknown-path branch -> FULL matrix (fail closed).
+    # A narrower core-only mapping is possible but not needed: a
+    # collision-check change is rare and fail-closed is the safe default.
+    "tools/collision_preflight.py",
 )
 
 
@@ -299,11 +375,26 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         return _full_selection(manifest, slow)
 
     tier1 = set(manifest.get("tier1", [])) - slow
-    # Filter out non-python-relevant paths, but RE-INCLUDE the tools carve-out
-    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS).
+    # Filter out non-python-relevant paths — but a path that a SOURCE_PATTERNS
+    # entry already matches is selection-relevant BY DEFINITION, whatever prefix
+    # it sits under (#3332). Mirroring those paths into a second hand-maintained
+    # tuple (the #1349 TOOL_CARVEOUTS shape, and this PR's own first attempt at
+    # SITE_CARVEOUTS) drifts: a missing entry is silent, and the guard test
+    # written for that exact file never runs. SOURCE_PATTERNS is the single
+    # source of truth; test_every_source_pattern_is_selectable is the ratchet.
+    def _selection_relevant(path: str) -> bool:
+        return any(
+            path.startswith(p)
+            for surface, pats in SOURCE_PATTERNS.items()
+            if surface != "core"
+            for p in pats
+        ) or path.startswith(CORE_ALSO)
+
     changed = [c for c in changed_files
                if c and (not c.startswith(NON_PYTHON_PREFIXES)
-                         or c.startswith(TOOL_CARVEOUTS))]
+                         or _selection_relevant(c)
+                         or c.startswith(TOOL_CARVEOUTS)
+                         or c.startswith(SITE_CARVEOUTS))]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
         # is touched, so both diff-gated legs skip (#2147/#2148).

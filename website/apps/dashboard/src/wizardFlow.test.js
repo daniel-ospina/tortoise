@@ -170,9 +170,11 @@ test('#2325 (review P2): labels never exceed the server\'s 64-char clamp, and th
 // above the lede "your agent isn't connected yet" — the headline said the
 // opposite of the state. The overrides are pure logic, so they are unit-tested
 // here instead of pinned by a source grep.
-test('#2912: wizardStageLabel names the stage, with the org-holding and paused overrides', () => {
-  // the plain case: the step's own label, for every step
+test('#2912 + #3428: wizardStageLabel names the stage, with org-holding, paused and not-connected overrides', () => {
+  // the plain case: the step's own label, for every step EXCEPT step 3, whose
+  // own label is a connection CLAIM (asserted separately below).
   for (const [i, s] of WIZARD_STEPS.entries()) {
+    if (i === 3) continue
     assert.equal(wizardStageLabel(i), s.label, `step ${i} label`)
   }
   // step 0 on an org-holding account is a read-only summary
@@ -181,12 +183,48 @@ test('#2912: wizardStageLabel names the stage, with the org-holding and paused o
   // other steps are unaffected by hasOrg (the header used to leak the receipt
   // "Your Organization" above every later step)
   assert.equal(wizardStageLabel(2, { hasOrg: true }), WIZARD_STEPS[2].label)
-  // the paused reconnect: "You're all set" would contradict the step
+  // the paused reconnect: "You're all set" would contradict the step. review
+  // cycle 6 (item 2): the observation phrasing — the categorical "your agent is
+  // not connected yet" is false for a captured session, and the body beneath it
+  // refuses to assert the absence.
   assert.equal(wizardStageLabel(3, { paused: true }),
-    'Setup paused — your agent is not connected yet')
-  assert.equal(wizardStageLabel(3), "You're all set")
+    'Setup paused — no connection observed yet')
+  // #3428/#2937 (lane B3): "You're all set" is a harness-connected CLAIM, and
+  // the DELETED human writer used to manufacture it from a click. Step 3 may
+  // only say it on a server-observed connection. The default is the honest
+  // understatement (fail-honest), so a caller that forgets `connected` can
+  // never claim a connection we did not observe.
+  //
+  // MUTATION (cycle 6 item 2): reverting either self-fork arm to the categorical
+  // wording ("Not connected yet" / "Setup paused — your agent is not connected
+  // yet") fails here — pinning one arm while the other over-claims is exactly
+  // how the self-fork contradiction survived cycle 5.
+  assert.equal(wizardStageLabel(3), 'No connection observed yet')
+  assert.equal(wizardStageLabel(3, { connected: false }), 'No connection observed yet')
+  assert.equal(wizardStageLabel(3, { connected: true }), "You're all set")
+  // review cycle 4 (item 13) + cycle 6 (item 2): BOTH forks state what was
+  // OBSERVED, so the `buildFork` input no longer changes the outcome — it stays
+  // in the signature because both call sites pass it (wizardArchived.test.js
+  // pins that call shape). MUTATION: reintroducing a fork-specific label in
+  // either direction fails the matching assertion below.
+  assert.equal(wizardStageLabel(3, { buildFork: true }), 'No connection observed yet')
+  assert.equal(wizardStageLabel(3, { buildFork: false }), 'No connection observed yet')
+  // `connected` outranks every fork/paused arm.
+  assert.equal(wizardStageLabel(3, { buildFork: true, connected: true }), "You're all set")
+  assert.equal(wizardStageLabel(3, { buildFork: true, paused: true }),
+    'Setup paused — no connection observed yet')
+  // the paused arm is fork-INDEPENDENT now (cycle 6 item 2): a self-fork skip
+  // reads the same observation, never the categorical sentence.
+  assert.equal(wizardStageLabel(3, { buildFork: false, paused: true }),
+    'Setup paused — no connection observed yet')
+  // a server connection OUTRANKS a local skip (#2361 r3): a connected org that
+  // pressed Skip must read as connected, never as paused. The two flags must
+  // not compose into the false reading.
+  assert.equal(wizardStageLabel(3, { connected: true, paused: true }), "You're all set")
   // paused only applies to the done step
   assert.equal(wizardStageLabel(2, { paused: true }), WIZARD_STEPS[2].label)
+  // `connected` is likewise a step-3-only override
+  assert.equal(wizardStageLabel(2, { connected: true }), WIZARD_STEPS[2].label)
   // the three step-2 ledes are distinct — the header says what each fork does
   assert.equal(WIZARD_STEPS[2].sub, 'Pick which harness to connect.')
   assert.ok(!/Connect Tortoise to your Organization/.test(WIZARD_STEPS[2].sub))

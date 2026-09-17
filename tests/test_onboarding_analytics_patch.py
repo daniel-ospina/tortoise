@@ -21,9 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tortoise import hosted_api
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 
-TEAM = {"team_id": "test-team-529", "tier": "free", "key_id": "k1"}
+TEAM = {"org_id": "test-team-529", "tier": "free", "key_id": "k1"}
 
 
 @pytest.fixture
@@ -41,14 +41,14 @@ def client(tmp_path, monkeypatch):
     # DB-free: capture what reaches the state writer (the pop contract).
     captured_kwargs = {}
 
-    def fake_update(team_id, **fields):
+    def fake_update(org_id, **fields):
         captured_kwargs.update(fields)
-        captured_kwargs["__team_id__"] = team_id
+        captured_kwargs["__org_id__"] = org_id
         return dict(hosted_api.DEFAULT_ONBOARDING_STATE)
 
     monkeypatch.setattr(hosted_api, "_update_onboarding_state", fake_update)
-    monkeypatch.setattr(hosted_api, "_team_email", lambda team_id: None)
-    app.dependency_overrides[get_current_team] = lambda: TEAM
+    monkeypatch.setattr(hosted_api, '_org_email', lambda org_id: None)
+    app.dependency_overrides[get_current_org] = lambda: TEAM
     with TestClient(app) as c:
         c._captured_kwargs = captured_kwargs
         c._jsonl = tmp_path / "analytics_fallback.jsonl"
@@ -72,7 +72,7 @@ def test_patch_harness_section_emits_event(client):
     ev = events[0]
     assert ev["event_name"] == "artifact_copied"
     assert ev["properties"] == {"harness": "cursor", "section": "config"}
-    assert ev["team_id"] == "test-team-529"
+    assert ev["org_id"] == "test-team-529"
     # State pollution guard: harness/section popped before the merge.
     assert "harness" not in client._captured_kwargs
     assert "section" not in client._captured_kwargs
@@ -113,7 +113,7 @@ def test_patch_invalid_harness_or_section_ignored(client, payload):
     assert _events(client) == []
     # Nothing but the (empty) merge reached the state writer.
     state_kwargs = {k: v for k, v in client._captured_kwargs.items()
-                    if k != "__team_id__"}
+                    if k != "__org_id__"}
     assert state_kwargs == {}
 
 
@@ -129,7 +129,7 @@ def test_patch_chatgpt_harness_beacon_is_inert(client):
     assert resp.status_code == 200
     assert _events(client) == []
     state_kwargs = {k: v for k, v in client._captured_kwargs.items()
-                    if k != "__team_id__"}
+                    if k != "__org_id__"}
     assert state_kwargs == {}
 
 

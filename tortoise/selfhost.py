@@ -3,9 +3,9 @@
 Thin single-tenant FastAPI app: MCP Streamable HTTP at /mcp + /health.
 NO Supabase, NO hosted platform machinery (registry auth, tenant
 provisioning, dream queue). The self-host image ships this app — grep gate:
-no hosted_api / supabase / TeamResolutionMiddleware imports reachable from
+no hosted_api / supabase / OrgResolutionMiddleware imports reachable from
 this module (auth_mode is "static"|"none", so create_http_app never imports
-TeamResolutionMiddleware).
+OrgResolutionMiddleware).
 
 Environment:
   TORTOISE_DB_URI        durable FalkorDB (connection string) — recommended
@@ -46,8 +46,16 @@ ALLOWED_ORIGINS = os.environ.get(
 TOOL_GROUP = os.environ.get("TORTOISE_TOOL_GROUP")
 
 # #2988: wall bound for /health/ready's probe. A black-holed DB must be
-# REPORTED (503) rather than waited out — it is a safety net, not the mechanism
-# (see the ordering invariant on hosted_api._READY_PROBE_TIMEOUT_S).
+# REPORTED (503) rather than waited out — it is a safety net, not the mechanism.
+# NOTE this path does NOT share the hosted layered-timeout ALIGNMENT: the probe
+# below is ``asyncio.wait_for(to_thread(lambda: ..._get_proj()), 6.0)``, which
+# wraps a probe with NO inner bound of its own, and ``to_thread`` runs on the
+# SHARED default executor, whose thread is NON-daemon and is JOINED at loop
+# shutdown — so a DB call that outlives 6.0s leaves a worker that keeps blocking
+# process exit (a hang class the hosted HealthProbe path avoids with its own
+# daemon worker). ``hosted_api._READY_PROBE_TIMEOUT_S`` was superseded by the
+# hosted ``_READY_PROBE`` / ``CONTROL_PLANE_HARD_TIMEOUT`` bounds; this constant
+# is the self-host path's own independent backstop.
 _READY_PROBE_TIMEOUT_S = 6.0
 
 

@@ -67,7 +67,7 @@ def capability_catalog() -> list[dict]:
 
 ### D2 — Endpoint (`tortoise/hosted_api.py`)
 
-`GET /v1/capabilities` — hand-written route modeled on `GET /v1/onboarding/state`: `Depends(get_current_team_session_ungated)` (dual-auth; any authed team context — the catalog is org-independent static registry data), returns the accessor rows. **No MCP tool** (I-7 contract is the HTTP read; adding a tool would force `GROUP_BY_NAME` + `mcp_server.py` handler wiring for zero required surface). No graph touch → never 'unavailable'.
+`GET /v1/capabilities` — hand-written route modeled on `GET /v1/onboarding/state`: `Depends(get_current_org_session_ungated)` (dual-auth; any authed team context — the catalog is org-independent static registry data), returns the accessor rows. **No MCP tool** (I-7 contract is the HTTP read; adding a tool would force `GROUP_BY_NAME` + `mcp_server.py` handler wiring for zero required surface). No graph touch → never 'unavailable'.
 
 ### D3 — Dashboard (W1's placeholder SOURCE replaced)
 
@@ -116,7 +116,7 @@ Append the DM-5 note sentence to the **module docstrings** of every module liste
 5. **Tests**:
    - `tests/test_capability_catalog.py` (lane-agnostic unit): registry shape (4 modules, canonical names/kinds, one future), every `modules` path exists on disk, module-note inventory (each file's docstring carries note + catalog name), endpoint-shape pre-contract (accessor rows).
    - `tests/test_capabilities_endpoint.py` (docker-lane, module-level skip when `TORTOISE_DB_URI` unset): TestClient register → `GET /v1/capabilities` 200 shape + names + total; build-fork gate via checkpoint (`fork: build` → `harness-connected` → `first-points-filed` → `catalog-presented` → status complete; decide-completed alone stays active; replay of catalog-presented = 200 no-op).
-   - Register both files under the `onboarding` surface in `config/ci-surfaces.yml`. Add ROUTED_NAMESPACES entries only if a 'registry' namespace literal appears (helpers use TestClient register + `_make_sdk(namespace=team_id)` → likely none; verify with markers gate).
+   - Register both files under the `onboarding` surface in `config/ci-surfaces.yml`. Add ROUTED_NAMESPACES entries only if a 'registry' namespace literal appears (helpers use TestClient register + `_make_sdk(namespace=org_id)` → likely none; verify with markers gate).
 6. **Dashboard dist rebuild** (`vite build` in website/apps/dashboard) — committed dist is the served artifact (dashboard-js-tests + hosted-e2e read it).
 7. **Verify**: docker-lane pytest (registry + endpoint files, plus the wider onboarding set), carve-out pytest (unit file), `node --test` (wizardFlow), `uv run ruff`, markers gate, typecheck if touched signatures (none).
 

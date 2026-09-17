@@ -763,13 +763,13 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     # ── Multi-tenancy (#7001) ─────────────────────────────────────
     ToolDefinition(
-        name="tortoise_team_create",
+        name="tortoise_org_create",
         description="Create isolated team graph via FalkorDB select_graph. "
                     "EXCLUDED from tenant HTTP — provisioning belongs to "
                     "/internal/provision behind FASTAPI_INTERNAL_KEY.",
         annotations=_rw(),
         http_policy=False,
-        sdk_method="team_create",
+        sdk_method="org_create",
     ),
     # ── Entity CRUD (ONTOLOGY v2.5) ───────────────────────────────
     ToolDefinition(
@@ -1166,7 +1166,7 @@ class FastAPIRouterAdapter:
     """Register REST tool-ops from the registry onto a FastAPI APIRouter.
 
     Reads entries with rest_spec populated and registers routes. Surface
-    policies (audit logging, team limits, dream enqueue) stay in the route
+    policies (audit logging, org limits, dream enqueue) stay in the route
     handlers — the adapter only wires registration.
 
     Raw-Cypher ops (list_points, get_point, capture_session, list_sessions)
@@ -1210,7 +1210,7 @@ class FastAPIRouterAdapter:
 #   sessions  — session context, indexing, search
 #   sources   — sources, documents, corpus ingestion
 #   journal   — checkpoints, diary, decisions, approvals
-#   admin     — status, health, teams, governance, migrations
+#   admin     — status, health, orgs, governance, migrations
 #   onboarding — hosted onboarding flows
 #   ask       — the answer surface (#2013 PRODUCT-GATING): OFF by default —
 #               excluded from the ungrouped hosted surface unless
@@ -1287,7 +1287,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_file_human_approval": "journal",
     # admin
     "tortoise_status": "admin", "tortoise_health": "admin",
-    "tortoise_team_create": "admin", "tortoise_get_governance": "admin",
+    "tortoise_org_create": "admin", "tortoise_get_governance": "admin",
     "tortoise_backfill_v25": "admin",
     # onboarding
     "tortoise_onboarding_demo_create": "onboarding", "tortoise_onboarding_state": "onboarding",

@@ -18,14 +18,18 @@
 // raw key beside the connector header literal).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
 
-function stripComments(src) {
+// Strips ALL /* */ block comments + whole-line //. Unlike the shared
+// stripComments (./testSupport.js) it is NOT quote-aware and does NOT remove
+// INLINE/trailing // — so the claim below is scoped to whole-line comments
+// only. Unification onto the shared helper is tracked by issue #3102.
+function stripBlockAndWholeLineComments(src) {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n')
@@ -39,20 +43,43 @@ function slice(startMarker, endMarker, label) {
   const end = mainJsx.indexOf(endMarker, start + 1)
   assert.notEqual(end, -1, `${label}: end marker not found (${endMarker}) — refusing a slice to EOF`)
   assert.ok(end > start, `${label}: end marker precedes start`)
-  return stripComments(mainJsx.slice(start, end))
+  return stripBlockAndWholeLineComments(mainJsx.slice(start, end))
+}
+
+// review cycle 7 (item 7): a bounded callback slice — from `marker` (whose last
+// character is its opening brace) to the MATCHING closing brace. Used where a
+// pin is about the callback's CONTENT (both statements present) rather than
+// their incidental order, so a behaviour-identical swap stays green.
+function braceBody(src, marker, label) {
+  const start = src.indexOf(marker)
+  assert.notEqual(start, -1, `${label}: marker not found (${marker})`)
+  const open = src.indexOf('{', start)
+  assert.notEqual(open, -1, `${label}: opening brace not found`)
+  let depth = 0
+  for (let i = open; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}') { depth--; if (depth === 0) return src.slice(start, i + 1) }
+  }
+  assert.fail(`${label}: unbalanced braces — refusing a slice to EOF`)
 }
 
 // The whole connect step (affordance consts + chooser + numbered blocks).
-// Comments are stripped (inside slice()) so an explanatory comment can never
-// satisfy — or break — a code assertion.
+// Whole-line comments are stripped (inside slice()) so an explanatory
+// whole-line comment can never satisfy — or break — a code assertion. NOTE:
+// an INLINE/trailing // comment survives this stripper (see the helper), so
+// this file's negatives remain defeatable by a trailing comment — tracked by
+// issue #3102.
 const connectStep = () =>
   slice('const wizardPasteRow = (', '{wizardStep === 3 && (', 'connect step')
 
 // #2912: the owner/admin branch (chooser + key block + procedure block + nav).
 // Sliced on its own so a key-mode assertion cannot be satisfied by the
 // build-fork or member branch.
+// #2865: the gate is no longer role-only — members reach the same branch, so
+// the rail to slice on is the cap remedy below it. Assertions scoped to
+// owner-only behaviour live in their own `isOwnerAdmin`-anchored checks.
 const ownerBranch = () =>
-  slice(') : (isOwnerAdmin && !capNotice ? (',
+  slice(') : (!capNotice ? (',
         ') : (\n                    <div className="harness">', 'owner connect branch')
 
 // ── #2710: the connect step can mint/paste, and never queues the modal ──────
@@ -116,8 +143,11 @@ test('#2710/#2912: the no-key affordance is the KEY block branch — never a pla
   // `{true ? (` made the mint CTA unreachable and the suite stayed green.
   assert.match(owner, /<WizardBlock step=\{1\} title="Get your API key">\s*\{harnessKey \? \(/,
     'the key block condition is harnessKey (else the no-key branch is dead code)')
-  assert.match(owner, /\)\s*:\s*\(\s*wizardNoKeyAffordance\s*\)/,
-    'the key block renders the no-key affordance as its NO-KEY branch')
+  // #2865: the no-key branch is now role-aware. Only an owner/admin can mint
+  // (POST /v1/team/keys is `_require_owner_admin`), so a member on a keyed leaf
+  // gets the paste escape instead of a CTA that would 403.
+  assert.match(owner, /\)\s*:\s*\(\s*isOwnerAdmin \? wizardNoKeyAffordance : wizardPasteRow\s*\)/,
+    'the key block renders the mint affordance for owner/admins and the paste row for members')
   assert.doesNotMatch(owner, /YOUR_API_KEY/, 'no placeholder key may remain')
   assert.doesNotMatch(owner, /wizardKeyCodeStyle\}>\{harnessKey \|\| '…'\}/,
     'no fake key row may render before a key exists')
@@ -190,7 +220,7 @@ test('#2710: every wizard exit path clears the shared modal (per-path, not a glo
   // reformatting. Runs on the COMMENT-STRIPPED source like every other check
   // (cycle-3 finding: a commented-out clear satisfied the raw-text version).
   assert.match(
-    stripComments(mainJsx),
+    stripBlockAndWholeLineComments(mainJsx),
     /window\.history\.replaceState\(\{\}, '', '#\/' \+ tab\)[\s\S]{0,200}?setWelcomeMode\(false\)[\s\S]{0,200}?setKeyModalOpen\(false\)/,
     'the wizard header exit must clear keyModalOpen (#2710 stray-modal leak)',
   )
@@ -198,7 +228,7 @@ test('#2710: every wizard exit path clears the shared modal (per-path, not a glo
   // `setKeyModalOpen(true)` in main.jsx is the API-Keys tab's "+ New key"
   // button (the deleted auto-open effect was the original leak site, which sat
   // ABOVE the connect-step slice).
-  const strippedJsx = stripComments(mainJsx)
+  const strippedJsx = stripBlockAndWholeLineComments(mainJsx)
   const queued = [...strippedJsx.matchAll(/setKeyModalOpen\(true\)/g)]
   assert.equal(queued.length, 1,
     'exactly ONE setKeyModalOpen(true) call site may exist (the keys-tab + New key button)')
@@ -216,19 +246,16 @@ test('#2711: every shown-once key row can break/shrink its token', () => {
     assert.ok(style.includes(token),
       `the shared key style must carry ${token} (or the unbreakable tt_ token overflows)`)
   }
-  // The connector header literal is a different shape (`'Authorization: Bearer '
-  // + harnessKey`) and must break too — asserted on its own shared style.
-  const headerStyle = slice('const wizardHeaderCodeStyle = {', '\n', 'wizardHeaderCodeStyle')
-  for (const token of ["minWidth: 0", "overflowWrap: 'anywhere'", "wordBreak: 'break-all'"]) {
-    assert.ok(headerStyle.includes(token),
-      `the header-literal style must carry ${token}`)
-  }
+  // The connector header literal (`'Authorization: Bearer ' + harnessKey`)
+  // was the other shape that had to break — #2865 removed it from the live
+  // connect step entirely (no Bearer recipe on a connector surface), so
+  // `wizardHeaderCodeStyle` is gone and only the raw-key rows above remain.
   const connect = connectStep()
   // PER ROW: each rendered RAW-key token must be able to break or shrink — the
   // pre-fix agent rows carried NO breaking property and measured 531px at a
   // 390px viewport. #2912 renders the raw key in exactly TWO places: the shared
   // step-1 key row (all harnesses except Codex Desktop) and the build fork's
-  // own row; the manual tabs' connector header literal is covered above.
+  // own row.
   const codeEls = [...connect.matchAll(/<code style=\{\{?([^}]*)\}\}?>[\s\S]{0,80}?\{harnessKey/g)]
   assert.equal(codeEls.length, 2,
     'the connect step renders 2 raw-key tokens (shared key row + build-fork row)')
@@ -301,14 +328,14 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
   // PR-gate UX: the Codex Desktop leaf is a SINGLE numbered block — its key
   // lives inside the config block, so an empty "1 Get your API key" promised an
   // action that does not exist on that surface.
-  assert.match(connect, /\{wizardConnectHarness === 'codexDesktop' \? \(\s*<WizardBlock step=\{1\} title=\{harnessKey \? procedureTitle : 'Get your API key'\}>/,
+  assert.match(connect, /\) : wizardConnectHarness === 'codexDesktop' \? \(\s*<WizardBlock step=\{1\} title=\{harnessKey \? procedureTitle : 'Get your API key'\}>/,
     'the key-embedding Desktop surface renders ONE block, not an empty step 1')
   assert.match(owner, /const agentDriven1Step = \['claude', 'codex', 'codexDesktop'\]/,
     "'codexDesktop' must reach the 1-step procedure branch (its own leaf id)")
   // the derivation is now an identity — the old parallel boolean is gone
   assert.match(mainJsx, /const wizardConnectHarness = wizardHarness\n/,
     'wizardConnectHarness is the leaf (no second surface state)')
-  assert.doesNotMatch(stripComments(mainJsx), /wizardCodexDesktop/,
+  assert.doesNotMatch(stripBlockAndWholeLineComments(mainJsx), /wizardCodexDesktop/,
     'the parallel Codex Desktop boolean state must be gone')
   // every codexDesktop payload still renders
   assert.match(owner, /\{HARNESS_INTRO\.codexDesktop\}/,
@@ -324,7 +351,7 @@ test('#2912: the connect step renders a family→surface chooser wired to the le
 // body reads "Only owners and admins can create API keys." The lede must never
 // promise them a key — so the role/cap check has to run BEFORE the build fork.
 test('#2912: the step-2 lede asks what each branch actually does', () => {
-  const src = stripComments(mainJsx)
+  const src = stripBlockAndWholeLineComments(mainJsx)
   const i = src.indexOf('if (wizardStep === 2) {')
   assert.ok(i > -1, 'the step-2 lede fork exists')
   const lede = src.slice(i, i + 2200)
@@ -364,15 +391,34 @@ test('#2912: the org eyebrow renders only when an org exists AND its name is kno
     'the eyebrow is gated on welcomeHasOrg && shownOrgName')
   assert.match(head, /<h1 className="welcome-title">/,
     'the stage label is the h1 (the eyebrow is not the headline)')
+  // #3428 (lane B3, review cycle 1 P1-1): the step-3 lede is suppressed on the
+  // SAME derived flag the <h1> uses. Keying it on `effectivelyPaused` left the
+  // direct Continue path (`wizardPaused` false) rendering "Your agent takes over
+  // from here." beneath a "Not connected yet" heading — the #2364/#2912
+  // heading-vs-body contradiction, reassembled.
+  assert.match(head, /if \(wizardStep === 3 && !serverHarnessConnected\) return null/,
+    'the step-3 lede is suppressed whenever no connection was observed')
+  assert.doesNotMatch(head, /wizardStep === 3 && effectivelyPaused\) return null/,
+    'the lede guard must not key on the local paused flag alone')
 })
 
 // #2912 (PR-gate delta review): three follow-ups that a code-shape assertion
 // can pin cheaply. Each one was a real regression/finding in this commit.
 test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
-  const src = stripComments(mainJsx)
-  const i = src.indexOf("{wizardConnectHarness === 'codexDesktop' ? (")
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  // Anchor must match main.jsx's ACTUAL branch shape. The pre-rebase branch
+  // pinned "{wizardConnectHarness === 'codexDesktop' ? (" — that string does
+  // not occur in main.jsx (grep -c = 0), so indexOf returned -1 and this
+  // assertion would fail. main.jsx spells the Desktop arm as an else-arm of
+  // the harness ternary: ") : wizardConnectHarness === 'codexDesktop' ? (".
+  const i = src.indexOf(") : wizardConnectHarness === 'codexDesktop' ? (")
   assert.ok(i > -1, 'the single-block Desktop branch exists')
-  const desktop = src.slice(i, src.indexOf(') : (', i))
+  // review cycle 2 (P2-3): assert the end index before slicing — the file's own
+  // contract is that a lost marker fails loudly instead of silently widening.
+  const desktopEnd = src.indexOf(') : (', i)
+  assert.notEqual(desktopEnd, -1,
+    'the Desktop arm end marker (") : (") must exist — refusing a slice to EOF')
+  const desktop = src.slice(i, desktopEnd)
   // the merged block dropped the only unrecoverable-key cue on this surface
   // (HARNESS_INTRO.codexDesktop / UNIVERSAL_COMMAND.codexDesktop never say it)
   assert.match(desktop, /Your API key is inside the block below — keep it private\./,
@@ -384,19 +430,726 @@ test('#2912: the Codex Desktop block keeps the "shown once" advisory', () => {
 })
 
 test('#2912: the step announcement re-renders when the paused state is resolved', () => {
-  // the step-3 landing refresh can flip effectivelyPaused (serverHarnessConnected)
-  // without changing wizardStep — without this dep the announcement kept saying
-  // "Setup paused…" while the <h1> already said "You're all set".
-  assert.match(stripComments(mainJsx),
-    /\}, \[wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused\]\)/,
-    'effectivelyPaused must be in the step-announcement deps')
+  // the step-3 landing refresh can flip serverHarnessConnected (and therefore
+  // effectivelyPaused) without changing wizardStep — without these deps the
+  // announcement kept saying "Setup paused…" while the <h1> already said
+  // "You're all set". #3428/#2937 (lane B3): serverHarnessConnected is now a
+  // dep in its own right, because effectivelyPaused only tracks the projection
+  // while wizardPaused is true — a non-skipping user's late connection would
+  // otherwise leave the announcement (and the <h1>) disagreeing.
+  assert.match(stripBlockAndWholeLineComments(mainJsx),
+    /\}, \[wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork\]\)/,
+    'effectivelyPaused AND serverHarnessConnected AND isBuildFork must be in the step-announcement deps')
+})
+
+// ── #3428 / #2937 (lane B3): the wizard cannot falsely claim connected ────
+// The lane's exit evidence is negative: a completed wizard must be UNABLE to
+// claim `harness-connected` without a server-observed connection. The runtime
+// proof lives in tests/e2e/test_dashboard_onboarding.py (over the committed
+// dist); these are the cheap structural net for refactors.
+
+test('#3428: the connect-step advance no longer writes the harness-connected checkpoint', () => {
+  // The human writer is DELETED. Pinning its absence matters because re-adding
+  // the POST would silently restore the click-manufactured connection — and
+  // every copy assertion in this file would still pass.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const i = src.indexOf('async function wizardHarnessContinue()')
+  assert.ok(i > -1, 'the connect-step advance handler exists')
+  // brace-match the handler body so the assertion cannot bleed into neighbours
+  let depth = 0
+  const start = src.indexOf('{', i)
+  let j = start
+  for (; j < src.length; j++) {
+    if (src[j] === '{') depth++
+    else if (src[j] === '}') { depth--; if (depth === 0) break }
+  }
+  const body = src.slice(start, j + 1)
+  assert.doesNotMatch(body, /step: ['"]harness-connected['"]/,
+    'the connect step must NOT write harness-connected from a click (#3428)')
+  assert.doesNotMatch(body, /\/v1\/onboarding\/state\/checkpoint/,
+    'the connect step must not POST the checkpoint at all (#3428/#2937)')
+  assert.match(body, /refreshOnboarding\(\)/,
+    'it refreshes the projection instead, so the done step reports server truth')
+  assert.match(body, /setWizardStep\(3\)/,
+    'it still advances — the user is never trapped on the connect step')
+})
+
+// ── review cycle 8 (items 3 + 4): the SOURCE pin is cross-file + normalized ──
+// Cycle 7's pin read main.jsx only, on raw text. A writer therefore evaded it by
+// splitting the URL into a folded concatenation (M3), by carrying the step as a
+// value (M3/M10), and by living in a sibling module (M10) — all green. The
+// replacement scans EVERY non-test source module under src/, collapses literal
+// string concatenation first, and judges the serialized body by its VALUE (not
+// by deep-equality against the duplicated pair), so a whitespace reformat or a
+// behaviour-identical DRY dedupe of the two `catalog-presented` bodies stays
+// green while a split URL or a parameterized step does not.
+function sourceModules() {
+  const files = []
+  const walk = (dir) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, ent.name)
+      if (ent.isDirectory()) walk(p)
+      else if (/\.jsx?$/.test(ent.name) && !/\.test\.jsx?$/.test(ent.name)) files.push(p)
+    }
+  }
+  walk(here)
+  assert.ok(files.length >= 3, `the src walk found ${files.length} non-test modules`)
+  return files.map((p) => ({ file: p, src: collapseStringConcat(stripBlockAndWholeLineComments(readFileSync(p, 'utf8'))) }))
+}
+
+// Collapse adjacent string-literal concatenation ('a' + "b" → 'ab') so a split
+// URL or a split step cannot evade a literal scan. Purely lexical: the guard is
+// about a literal appearing in shipped source.
+function collapseStringConcat(source) {
+  let out = source
+  let prev
+  do {
+    prev = out
+    out = out.replace(/(['"])([^'"\n]*)\1\s*\+\s*(['"])([^'"\n]*)\3/g,
+      (m, q1, a, q3, b) => q1 + a + b + q1)
+  } while (out !== prev)
+  return out
+}
+
+// Quote/whitespace-insensitive form for comparing a body VALUE.
+function normalizeBodyValue(v) {
+  return v.replace(/['"`\s]/g, '')
+}
+
+test('#3428/#2937: exactly the three known checkpoint call sites may exist, each with an allowlisted body', () => {
+  // review cycle 7 (item 1-ii): the dist-level probe audits ONE serialized
+  // literal, so a writer can be reinstated by moving the POST into a small
+  // helper — the body becomes `{step:r}`, the exact probe never appears, and a
+  // reviewer BUILT that mutation: 33/33 tripwire + 4/4 distBundle green with the
+  // click-writer fully reinstated. This is the SOURCE-side backstop, hardened in
+  // review cycle 8 (items 3 + 4): cross-file, concatenation-collapsed, and
+  // VALUE-based. MUTATIONS that fail here: a 4th site; a split URL
+  // ('/v1/onboarding/' + 'state/checkpoint'); a step carried as a value
+  // (['harness','connected'].join('-') or a `{ step: param }` object); a writer in
+  // a sibling module; `JSON.stringify(checkpointBody(step))` (uninspectable).
+  const modules = sourceModules()
+  const sites = []
+  for (const mod of modules) {
+    for (const m of mod.src.matchAll(/\/v1\/onboarding\/state\/checkpoint/g)) {
+      sites.push({ file: mod.file, index: m.index, window: mod.src.slice(m.index, m.index + 400) })
+    }
+  }
+  assert.equal(sites.length, 3,
+    `exactly THREE /v1/onboarding/state/checkpoint call sites may exist across src/ — found ` +
+    `${sites.length} (${[...new Set(sites.map((s) => s.file.replace(`${here}/`, '')))].join(', ') || 'none'}). ` +
+    // review cycle 9 (test F1's smaller half): the message appended "A 4th means…"
+    // even when the count was LOWER than three, describing the wrong failure.
+    (sites.length > 3
+      ? 'A 4th means a checkpoint writer was re-introduced'
+      : 'Fewer than three means a legitimate checkpoint site is missing (or the src walk lost a module)'))
+  for (const site of sites) {
+    const rel = site.file.replace(`${here}/`, '')
+    assert.doesNotMatch(site.window, /harness-connected/,
+      `${rel}:${site.index} serializes a harness-connected step — a client writer cannot (#3428/#2937)`)
+    const body = site.window.match(/body:\s*JSON\.stringify\(\s*(\{[^}]{0,160}\}|[A-Za-z_$][\w$]*)\s*\)/)
+    assert.ok(body,
+      `${rel}:${site.index} must carry an inspectable JSON.stringify body — a parameterized helper ` +
+      'cannot move the POST out of the asserted body')
+    let value = body[1]
+    if (!value.startsWith('{')) {
+      // A bare identifier: resolve it to its declaration ANYWHERE in src/ (so a
+      // DRY'd shared body constant stays green), preferring a declaration whose
+      // value is a step/fork body — an unrelated `const body = …` elsewhere in
+      // the tree must not satisfy the guard — and fail when none resolves to a
+      // literal.
+      const decls = modules.flatMap((mod) =>
+        [...mod.src.matchAll(new RegExp(`(?:const|let|var)\\s+${value}\\s*=\\s*([^\\n;]+)`, 'g'))])
+      const candidates = decls.map((d) => collapseStringConcat(d[1]))
+      value = candidates.find((v) => {
+        const n = normalizeBodyValue(v)
+        return n.includes('step:') || /fork/.test(n)
+      })
+      assert.ok(value,
+        `${rel}:${site.index} body identifier \`${body[1]}\` has no literal step/fork declaration — a ` +
+        'checkpoint body must be a literal or a DRY constant, never a parameter')
+    }
+    value = collapseStringConcat(value)
+    const norm = normalizeBodyValue(value)
+    const step = norm.match(/step:([^,}]+)/)
+    if (step) {
+      assert.equal(step[1], 'catalog-presented',
+        `${rel}:${site.index} serializes a step other than catalog-presented (${norm}) — ` +
+        'the click-writer is back (#3428/#2937)')
+    } else {
+      assert.match(norm, /fork/,
+        `${rel}:${site.index} checkpoint body is neither a catalog-presented step nor the fork write`)
+      assert.doesNotMatch(norm, /harness-connected/,
+        `${rel}:${site.index} checkpoint body serializes harness-connected`)
+    }
+  }
+  // the fork site's `body` derivation, so re-pointing the variable at a
+  // harness-connected step cannot hide behind the allowlisted `body` name
+  const src = sourceModules().map((m) => m.src).join('\n')
+  assert.match(src, /const body = forkId === 'unsure' \? \{ fork_unsure_at: true \} : \{ fork: forkId \}/,
+    'the fork checkpoint body is the fork write, never a harness-connected step')
+})
+
+test('#3428/#2937 (cycle 8 item 4, M4): completed_steps is never written client-side', () => {
+  // M4 is the deepest mutation: a local `setOnboarding(o => ({ ...o,
+  // completed_steps: [...o.completed_steps, 'harness-connected'] }))` in the
+  // connect handler forges the claim with NO request at all, so no amount of
+  // checkpoint-watching can catch it. The state contract is the observable:
+  // `completed_steps` is a SERVER-owned projection and the client never writes
+  // it. Two pins: (a) the ONLY `setOnboarding(...)` call is the projected
+  // server response, and (b) no object literal anywhere in src/ writes a
+  // `completed_steps` array. MUTATIONS that fail: M4 above; a second
+  // `setOnboarding(...)` whose argument is not `st.onboarding`.
+  const modules = sourceModules()
+  const src = modules.map((m) => m.src).join('\n')
+  const calls = src.match(/setOnboarding\(/g) || []
+  assert.equal(calls.length, 1,
+    'exactly ONE setOnboarding call site may exist — the single projected server assignment; ' +
+    'a second call is a client-side write to the server-owned projection')
+  assert.match(src, /setOnboarding\(st\.onboarding\)/,
+    'setOnboarding takes the server projection (`st.onboarding`) — nothing else may be written')
+  // review cycle 9 (code F1): the old shape required a literal `[` immediately
+  // after the colon, so the identical write built with `.concat()` —
+  // `completed_steps: (o.completed_steps || []).concat('harness-connected')` —
+  // evaded it (MUT-S4 shipped green). The property is the VALUE, never the
+  // array literal. The `(?:[{,]\s*)` prefix is what distinguishes an
+  // object-property write from a ternary's `? x : y` colon (the minified bundle
+  // is one line, so a read's `:[]` window reaches the later `harness-connected`
+  // with no separator). Still only a backstop: the executing test in
+  // onboardingContinueExec.test.js owns the behaviour.
+  assert.doesNotMatch(src, /(?:[{,]\s*)completed_steps\s*:\s*[^;\n]{0,300}?harness-connected/,
+    'completed_steps must never be written client-side with a harness-connected value ' +
+    '(array literal, `.concat()`, or any other expression)')
+})
+
+test('#3428: the done screen is gated on the SERVER-observed connection, not a click', () => {
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const i = src.indexOf('{wizardStep === 3 && (')
+  assert.ok(i > -1, 'the done step renders')
+  // review cycle 1 (P2-4): assert the end marker before slicing. The file's own
+  // contract is that a lost marker fails loudly instead of silently widening the
+  // slice to EOF — the label this marker anchors was just renamed once.
+  const end = src.indexOf('Go to dashboard', i)
+  assert.notEqual(end, -1,
+    'the done-step slice end marker (Go to dashboard) must exist — refusing a slice to EOF')
+  const done = src.slice(i, end)
+  assert.match(done, /\{serverHarnessConnected \? \(/,
+    'the connected screen must be gated on serverHarnessConnected')
+  assert.doesNotMatch(done, /\{effectivelyPaused \? \(/,
+    'the connected screen must NOT be gated on the local paused/click state')
+  // the approved screen's sentences: the capture tense is derived, never fixed
+  assert.match(done, /doneCaptureClaim === 'present'/, 'present tense is claim-gated')
+  assert.match(done, /doneCaptureClaim === 'future'/, 'future tense is claim-gated')
+  // #3428 requirements 1-2: the harness name is dynamic with a neutral
+  // fallback — naming a harness we did not install for is a false claim.
+  // review cycle 3 (P1-A): the name is now the DERIVED `doneHarnessName`, which
+  // additionally requires that the connect step offered the picker (see the
+  // pick-established test below) — the lookup itself must not reappear in JSX.
+  assert.equal((done.match(/\{doneHarnessName\}/g) || []).length, 2,
+    'both self-fork arms name the derived harness (never a hardcoded one)')
+  assert.doesNotMatch(done, /knownHarnessName\(wizardHarness\)/,
+    'the knownHarnessName lookup lives in the derivation, not in the JSX')
+  assert.doesNotMatch(done, /HARNESS_NAMES\[wizardHarness\] \|\| 'your agent'/,
+    'a HARNESS_NAMES-only lookup sends a known Codex Desktop leaf to the fallback')
+  assert.doesNotMatch(done, /Claude Code/,
+    'the success screen must never hardcode a harness name')
+  // the redirect is prose and the dashboard exit is demoted: an arrow would
+  // read as "advance", and nothing on this screen is the next step
+  assert.match(done, /Head back to /, 'the redirect is prose, not a control')
+  assert.doesNotMatch(done, /btn-primary/, 'no filled primary control on the done step')
+  // review cycle 1 (P2-2): the owner-approved screen has exactly ONE control
+  // beneath the redirect (the design decision names the dashboard link as "the
+  // only real control") — the docs link lives on other surfaces.
+  assert.equal((done.match(/className="done-link"/g) || []).length, 1,
+    'the approved success screen has exactly one control (the dashboard link)')
+  assert.doesNotMatch(done, /Read the docs/,
+    'the docs link must not re-appear on the approved done step')
+  // review cycle 2 (P2-4) / cycle 3 (P1-D): the not-connected remedy is
+  // DERIVED, so the "(running it creates a fresh key)" clause cannot leak onto
+  // a key-less leaf, a member, or a capped owner/admin.
+  assert.match(done, /If you haven't finished the setup, \{doneSetupRemedy\}/,
+    'the not-connected remedy renders the derived clause, not a hardcoded one')
+  assert.doesNotMatch(done, /\(running it creates a fresh key\)/,
+    'the key-mint clause must live in the derivation, never in the JSX')
+})
+
+test('#3428/#2937: the done step names a harness ONLY when the connect step offered the picker', () => {
+  // review cycle 3 (P1-A): the 'unsure' fork answer advances to step 3 without
+  // ever rendering step 2's chooser, and the capped owner/admin re-entry
+  // replaces the chooser with the mint-cap remedy — yet `wizardHarness` keeps
+  // its untouched 'claude' default on BOTH. Naming Claude there would be the
+  // build-fork defect ("names a harness the branch never offered") on the two
+  // other paths every copy assertion above would still pass for.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const i = src.indexOf('const harnessPickEstablished =')
+  assert.ok(i > -1, 'the pick-established gate exists')
+  assert.match(src.slice(i, src.indexOf('\n', i)),
+    /const harnessPickEstablished = wizardFork === 'self' && !capNotice/,
+    'a real self fork with no cap remedy standing in for the chooser')
+  assert.match(src, /const doneHarnessName = harnessPickEstablished\n\s*\? \(knownHarnessName\(wizardHarness\) \|\| 'your agent'\)\n\s*: 'your agent'/,
+    'the done harness name falls back to the neutral phrase without a pick')
+  assert.match(src, /const doneCaptureClaim = harnessPickEstablished \? harnessCaptureClaim : 'none'/,
+    'the capture sentence is silenced (never asserted) without a pick')
+  // the path this gate exists for: 'unsure' never establishes a fork — it
+  // advances straight to step 3, which is why step 2's chooser never renders.
+  const forkFn = src.slice(src.indexOf('async function handleWizardFork('),
+                           src.indexOf('setWizardForkChosen(forkId)'))
+  assert.match(forkFn, /if \(forkId === 'unsure'\)[\s\S]{0,400}?setWizardStep\(3\)/,
+    "the 'unsure' answer reaches step 3 without setting a fork")
+  // review cycle 4 (item 2): the negative below used to run over `forkFn`, whose
+  // slice ENDS at the first `setWizardForkChosen(forkId)` — so the negated token
+  // could not be inside it by construction and the assertion could never fail.
+  // Bound the region to the 'unsure' branch BODY instead (from the branch guard
+  // to its own `return`): a LIVE fork write inserted anywhere in that branch now
+  // fails it.
+  const unsureStart = forkFn.indexOf("if (forkId === 'unsure') {")
+  const unsureReturn = forkFn.indexOf('return', unsureStart)
+  assert.ok(unsureStart > -1 && unsureReturn > unsureStart,
+    "the 'unsure' branch body was located for the negative assertion")
+  assert.doesNotMatch(forkFn.slice(unsureStart, unsureReturn), /setWizardForkChosen/,
+    "the 'unsure' answer never sets wizardForkChosen")
+})
+
+test('#3428/#2937: the not-connected remedy is derived per role, leaf and cap state', () => {
+  // review cycle 3 (P1-D + P2-7 + P2-10): the remedy has THREE arms — key-less
+  // OAuth leaves (the connector steps), a non-owner/admin (who cannot mint, so
+  // the one action they have is asking an owner/admin), and a keyed leaf for a
+  // user who can still mint (the only case that may promise a fresh key).
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const i = src.indexOf('const doneHarnessForRemedy = harnessPickEstablished ? wizardHarness : null')
+  assert.ok(i > -1, 'the remedy derivation exists')
+  const block = src.slice(i, src.indexOf('const wizardPasteRow = (', i))
+  assert.match(block, /const doneSetupRemedy = \(!harnessPickEstablished \|\| doneKeylessLeaf\)/,
+    'review cycle 4 (item 12): no established pick short-circuits to the neutral arm')
+  assert.match(block, /\? 'the steps are in Settings \u2192 Setup guide'/,
+    'the key-less leaf points at the connector steps')
+  assert.match(block, /!isOwnerAdmin\n\s*\? 'ask an owner or admin for an API key'/,
+    'a member is told the action they can actually take')
+  assert.match(block, /const doneCanMintFresh = isOwnerAdmin && !capNotice && !wizardDurableCapped/,
+    'the mint precondition is owner/admin and uncapped (Keys tab + wizard mint)')
+  // review cycle 9 (UX F1 + code F4): "(Resume setup)" renders ONLY under the
+  // Setup guide card's active branch — naming it unconditionally pointed at a
+  // control that is absent when the onboarding GET failed (the card then shows
+  // "Couldn't load setup status"). The clause is derived from the card's OWN
+  // predicate, and the mint clause may claim a FRESH key only when no key is
+  // already resolved (a minted/pasted key is reused on reopen, not re-minted).
+  assert.match(block,
+    /const guideCanResume\s*=\s*!!onboarding\s*&&\s*!onboardingLoading\s*&&\s*setupGuide\(onboarding\)\.status\s*===\s*'active'/,
+    "the Resume-setup clause is derived from the Setup guide card's own render predicate " +
+    '(projection present, not a loading transient, active branch) — never assumed')
+  assert.match(block,
+    /const doneReopenClause = guideCanResume\s*\?\s*'reopen it from Settings \u2192 Setup guide \(Resume setup\)'\s*:\s*'the steps are in Settings \u2192 Setup guide'/,
+    'the reopen clause names the button only when the card renders it, else names the surface')
+  assert.match(block,
+    /doneCanMintFresh\s*&&\s*!harnessKey\s*\?\s*`\$\{doneReopenClause\} \u2014 the connect step mints a fresh key`\s*:\s*doneReopenClause/,
+    'the fresh-key clause sits only on the no-key minting arm; every other arm names the same derived reopen clause')
+  assert.doesNotMatch(block, /the command is in Settings/,
+    'the Setup guide renders no command — the remedy must not send the user to one')
+  // P2-10: ONE canonical surface name. "Settings \u2192 Setup Guide" must not return.
+  assert.doesNotMatch(block, /Setup Guide/,
+    'the canonical spelling is "Setup guide" everywhere')
+  assert.doesNotMatch(src, /Settings \u2192 Setup Guide/,
+    'the non-canonical "Setup Guide" must be gone from main.jsx')
+})
+
+test('#3428/#2937: the build-fork done body names no harness and asserts nothing about filing', () => {
+  // review cycle 2 (P1-2): the build fork's step 2 is the SDK call
+  // (`POST /v1/points`), which files NO onboarding step — so the self-fork body
+  // ("hasn't filed anything … head back to Claude Code") is false the moment
+  // the user runs the wizard's own curl, and names a harness this branch never
+  // offered. The build leaf must say neither.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const i = src.indexOf('{wizardStep === 3 && (')
+  assert.ok(i > -1, 'the done step renders')
+  const end = src.indexOf('Go to dashboard', i)
+  assert.notEqual(end, -1,
+    'the done-step slice end marker (Go to dashboard) must exist — refusing a slice to EOF')
+  const done = src.slice(i, end)
+  assert.match(done, /\{isBuildFork \? \(/,
+    'the done step branches on the build fork (the self-fork body is false there)')
+  assert.match(done, /we can't tell it's connected yet/,
+    'the build body acknowledges that the REST write cannot be observed')
+  assert.match(done, /Keep calling the SDK from your app\./,
+    'the build connected redirect names the SDK, not a harness')
+  // review cycle 3 (P1-E + P1-F): the not-connected body may not point at a
+  // REST call the branch never rendered (the curl sits inside the harnessKey
+  // gate) nor at the fork-aware Setup guide, whose only affordance re-enters
+  // this wizard at step 0 — where a build-fork org ALWAYS gets the SDK branch.
+  assert.doesNotMatch(done, /REST call above/,
+    'the deictic pointed at an element the no-key branch never renders')
+  assert.match(done, /<code>\/v1\/points<\/code> REST call/,
+    'the endpoint is named instead, so the sentence is true with or without a key')
+  assert.doesNotMatch(done, /Settings \u2192 Setup guide\), and it shows up here on its own/,
+    'the build remedy must not name a surface that can never render harness setup')
+  assert.equal((done.match(/knownHarnessName\(wizardHarness\)/g) || []).length, 0,
+    'only the self-fork arms name a harness — the build branch must not')
+  // review cycle 6 (item 1): the stall notice renders on THIS screen too, so the
+  // build arm's standing promise must be keyed on the stall flag exactly as the
+  // self arm's is. MUTATION: restoring the unkeyed "...and it shows up here on
+  // its own." leaves this suite green (cycle 5 keyed only the self arm) while
+  // two sentences on one screen contradict each other.
+  const buildBodyStart = done.indexOf("Your project's graph is set up")
+  assert.ok(buildBodyStart > -1, 'the build not-connected body is located')
+  const buildBody = done.slice(buildBodyStart, done.indexOf('</p>', buildBodyStart))
+  assert.match(buildBody,
+    /wizardConnectPollStalled\n\s*\? "we'll show it as soon as we can check"\n\s*: 'it shows up here on its own'/,
+    'the build arm withdraws the live-update promise while the poll is stalled')
+})
+
+test('#3428/#2937: the step-3 refresh runs while the not-connected promise can still come true', () => {
+  // review cycle 2 (P1-1 + P2-1): the not-connected body promises the
+  // connection "shows up here the moment it does". A try cap made that false
+  // after ~24 s, so the effect's own guard is the ONLY stop condition. This pins
+  // the guard, the interval, the cleanup and the deps — a dropped cleanup would
+  // leak a live interval past the state it exists for, and a re-added cap would
+  // silently restore the frozen screen.
+  const poll = slice('const wizardConnectPollRef = React.useRef(null)',
+                     '// #2361 review-r3 (P2-2)', 'wizard connect poll')
+  assert.match(poll,
+    /if \(!\(welcomeMode && authed\) \|\| wizardStep !== 3 \|\| serverHarnessConnected\) return/,
+    'the poll runs only on step 3 with no observed connection')
+  assert.match(poll, /setInterval\(/, 'it refreshes on an interval')
+  assert.match(poll, /setInterval\(wizardConnectTick, 4000\)/, 'the pinned interval is 4 s')
+  assert.match(poll, /clearInterval\(wizardConnectPollRef\.current\)/,
+    'the effect must clear its own interval')
+  assert.match(poll, /\}, \[wizardStep, welcomeMode, authed, serverHarnessConnected\]\)/,
+    'the deps must end the poll when the connection lands or the step changes')
+  // review cycle 3 (P1-C): the interval ARGUMENT and its ref assignment had ZERO
+  // coverage — replacing the callback with `void 0`, or dropping the
+  // `wizardConnectPollRef.current = setInterval(...)` assignment, left every
+  // test green, so the "shows up here the moment it does" promise was unpinned
+  // behaviour. Pin both halves of the wiring.
+  assert.match(poll, /wizardConnectPollRef\.current = setInterval\(wizardConnectTick, 4000\)/,
+    'the ref must be assigned from setInterval (a dropped assignment leaks nothing to clear)')
+  // review cycle 4 (item 3): token presence alone is not behaviour — an
+  // unconditional `return` inserted as the tick's FIRST statement kept
+  // `refreshOnboarding()` and the interval wiring in the text and left this
+  // suite green (the file header discloses textual pinning, #3102, but the
+  // assertion's message claimed more than it proves). Pin the tick's opening
+  // statements instead: a dead-code no-op tick must fail here.
+  // review cycle 7 (item 2): the FIRST statement is now the teardown guard
+  // (`if (!active) return`), because the tick is a QUEUED interval callback that
+  // can run after the cleanup cleared the handle. It must precede the hidden-tab
+  // guard AND the shared in-flight write.
+  const tickStart = poll.indexOf('const wizardConnectTick = (force = false) => {')
+  const activeGuard = poll.indexOf('if (!active) return', tickStart)
+  const tickGuard = poll.indexOf('if (document.hidden) return', tickStart)
+  assert.ok(tickStart > -1 && activeGuard > tickStart && tickGuard > activeGuard,
+    'the tick and its two opening guards were located')
+  assert.match(poll.slice(tickStart, activeGuard),
+    /const wizardConnectTick = \(force = false\) => \{\s*$/,
+    'the tick opens with the teardown guard — an unconditional return (a no-op tick) fails this')
+  assert.match(poll.slice(activeGuard, tickGuard),
+    /if \(!active\) return\s*$/,
+    'the hidden-tab guard follows the teardown guard')
+  assert.ok(poll.indexOf('wizardConnectPollInFlightRef.current = true', tickStart) > tickGuard,
+    'a queued post-teardown tick returns BEFORE setting the shared in-flight ref')
+  assert.match(poll, /refreshOnboarding\(\)/,
+    'the tick references refreshOnboarding (textual — the guard-order pin above is what rules out a no-op)')
+  // review cycle 3 (P2-9): a hidden tab throttles setInterval to ~1/min, so the
+  // tick skips while hidden and one refresh fires when the document returns.
+  assert.match(poll, /if \(document\.hidden\) return/,
+    'ticks must be skipped while the tab is hidden')
+  assert.match(poll, /addEventListener\('visibilitychange', onWizardConnectVisible\)/,
+    'the document returning to view must refresh immediately')
+  assert.match(poll, /addEventListener\('focus', onWizardConnectVisible\)/,
+    'regaining focus must refresh immediately')
+  assert.match(poll, /removeEventListener\('visibilitychange', onWizardConnectVisible\)[\s\S]{0,120}?removeEventListener\('focus', onWizardConnectVisible\)/,
+    'both listeners must be torn down with the effect')
+  // review cycle 3 (P2-8): consecutive failures must back off and surface.
+  assert.match(poll, /const fails = wizardConnectPollFailsRef\.current \+ 1/,
+    'consecutive failures are counted')
+  assert.match(poll, /Math\.min\(4000 \* 2 \*\* \(fails - 1\), 60000\)/,
+    'the retry backs off exponentially (capped)')
+  assert.match(poll, /if \(fails >= 3\) setWizardConnectPollStalled\(true\)/,
+    'past the threshold the screen can say it cannot check')
+  // review cycle 3 (P2-2): the old no-cap pin was identifier-bound (`/maxTries|tries/`)
+  // — a re-added cap named `attempts` passed. Assert the BEHAVIOUR instead: the
+  // only clearInterval is the cleanup's, and no counter gates it or ends the poll.
+  assert.equal((poll.match(/clearInterval\(/g) || []).length, 1,
+    'exactly one clearInterval call site (the unconditional effect cleanup)')
+  assert.doesNotMatch(poll, /if \([^)]*(fails|tries|attempts|count)[^)]*\)[^\n]*clearInterval/,
+    'no failure/try counter may gate the clearInterval')
+  assert.doesNotMatch(poll, /maxTries|attempts/,
+    'no try cap — the guard already self-terminates, and a cap is the one thing ' +
+    'that makes the live-update promise false')
+})
+
+test('#3428/#2937: the step-3 poll is cancellable and backs off after not-connected successes', () => {
+  // review cycle 5 (items 2 + 3 + 9) — one async contract, three defects:
+  //  - the 15 s race timer was never cleared, so after teardown its callback
+  //    still cleared the in-flight ref (a later generation could then run a
+  //    CONCURRENT check) and could render the stall notice on a healthy poll;
+  //  - the abandoned refresh could apply an OLDER projection and revert the
+  //    connected screen (the monotonic guard in refreshOnboarding);
+  //  - a successful refresh that observed no connection reset the counters, so
+  //    a parked done step polled every 4 s forever (~900 GETs/hour).
+  const poll = slice('const wizardConnectPollRef = React.useRef(null)',
+                     '// #2361 review-r3 (P2-2)', 'wizard connect poll')
+  // item 2 — teardown cancels BOTH the timer and the pending callback.
+  assert.match(poll, /let active = true/,
+    'a locally-scoped active flag guards the async callbacks')
+  assert.match(poll, /connectTimeout = setTimeout\(\(\) => resolve\(false\), 15000\)/,
+    'the 15 s race timer handle is KEPT (it used to be fire-and-forget)')
+  assert.match(poll, /if \(!active\) return/,
+    'a torn-down generation returns before mutating the poll')
+  assert.match(poll, /active = false[\s\S]{0,200}?clearTimeout\(connectTimeout\)/,
+    'the cleanup clears the race timer and flips active')
+  // item 9 — successes without a connection must back off; the forced
+  // visibility/focus tick bypasses the schedule.
+  assert.match(poll, /wizardConnectPollSuccessesRef\.current = successes/,
+    'consecutive not-connected successes are counted')
+  assert.match(poll,
+    /wizardConnectPollNextAtRef\.current = successes >= 3\n\s*\? Date\.now\(\) \+ Math\.min\(4000 \* 2 \*\* \(successes - 2\), 20000\)/,
+    'the success arm backs off exponentially, capped at 20 s (cycle 6 item 7)')
+  // review cycle 6 (item 5): the race timer must be cleared on BOTH paths —
+  // before a new one is armed and again when the check settles. A check that
+  // settled via `refreshOnboarding()` never cleared it, so the next tick
+  // overwrote the handle and the cleanup could only ever clear the newest.
+  // MUTATION: deleting either clear leaves the leak this item is about.
+  assert.match(poll,
+    /if \(connectTimeout\) \{ clearTimeout\(connectTimeout\); connectTimeout = null \}\n\s*const wizardConnectCheck = Promise\.race\(/,
+    'the stale race timer is cleared BEFORE a new one is armed')
+  // review cycle 7 (item 7): the settle clear and the `!active` guard are both
+  // required, but their ORDER is incidental (teardown already cleared the
+  // handle, so either order is leak-free). Assert both are present in the
+  // callback without forcing the sequence — the ORDER pin above (clear-before-
+  // arm) is the semantic one and stays.
+  const settle = braceBody(poll, 'wizardConnectCheck.then((outcome) => {', 'wizardConnectCheck.then')
+  assert.match(settle, /if \(connectTimeout\) \{ clearTimeout\(connectTimeout\); connectTimeout = null \}/,
+    'the race timer is also cleared when the check settles')
+  assert.match(settle, /if \(!active\) return/,
+    'a torn-down generation returns before mutating the poll')
+  // review cycle 6 (item 4): only an APPLIED refresh is a success; a SUPERSEDED
+  // one is NEUTRAL. The old truthy `applied || _superseded` let a discarded
+  // response clear the stall notice and bank a success.
+  assert.match(poll, /if \(outcome && outcome\.superseded\) return/,
+    'a superseded check is neutral in the poll (neither success nor failure)')
+  assert.match(poll, /const landed = !!\(outcome && outcome\.applied\)/,
+    'only an applied projection counts as a landed check')
+  assert.match(poll, /const wizardConnectTick = \(force = false\)/,
+    'the tick accepts a force flag')
+  assert.match(poll, /if \(!force && Date\.now\(\) < wizardConnectPollNextAtRef\.current\) return/,
+    'the schedule guard yields to a forced (focus/visibility) tick')
+  // review cycle 7 (item 2): the visibility/focus handler no-ops after teardown
+  // too (belt-and-braces over the tick's own first statement).
+  assert.match(poll, /onWizardConnectVisible = \(\) => \{ if \(!active\) return; if \(!document\.hidden\) wizardConnectTick\(true\) \}/,
+    'the visibility/focus handler forces the immediate check (and returns on !active first)')
+})
+
+test('#3428/#2937 (cycle 7 item 2): a tick queued by the cleared interval cannot touch the poll after teardown', () => {
+  // The HTML timer spec lets a cleared interval suppress an already-queued
+  // invocation, but does not require it — so the tick itself must be safe to run
+  // after the cleanup. Without the teardown guard a queued tick set the SHARED
+  // in-flight ref, fired a real request, and its `.then` returned on `!active`
+  // BEFORE releasing the ref: every later tick then returned at the in-flight
+  // guard and the poll died silently while the done screen kept asserting the
+  // live-update promise. MUTATION: deleting `if (!active) return` (or moving it
+  // after the in-flight write) fails here.
+  const poll = slice('const wizardConnectPollRef = React.useRef(null)',
+                     '// #2361 review-r3 (P2-2)', 'wizard connect poll')
+  const tick = braceBody(poll, 'const wizardConnectTick = (force = false) => {', 'wizardConnectTick')
+  const activeGuard = tick.indexOf('if (!active) return')
+  const hiddenGuard = tick.indexOf('if (document.hidden) return')
+  const inFlightSet = tick.indexOf('wizardConnectPollInFlightRef.current = true')
+  assert.ok(activeGuard > -1 && hiddenGuard > activeGuard && inFlightSet > activeGuard,
+    'the teardown guard precedes BOTH the hidden-tab guard and the shared in-flight write')
+  assert.ok(inFlightSet > hiddenGuard,
+    'the in-flight write still sits behind the hidden-tab guard')
+  assert.match(tick.slice(0, activeGuard),
+    /const wizardConnectTick = \(force = false\) => \{\s*$/,
+    'the teardown guard is the tick\u2019s FIRST statement — nothing (not even an unconditional return) precedes it')
+  assert.match(poll, /onWizardConnectVisible = \(\) => \{ if \(!active\) return; if \(!document\.hidden\) wizardConnectTick\(true\) \}/,
+    'the visibility/focus handler returns on !active before forcing a tick')
+})
+
+test('#3428/#2937: the live-update promise and the poll cadence agree (cycle 6 item 7)', () => {
+  // The not-connected body makes a STANDING live-update promise while the stall
+  // flag is false, and the forced tick fires only on focus/visibility — which
+  // does NOT fire for a user who keeps the dashboard visible on a second monitor
+  // and works in a terminal. The success backoff is therefore the staleness
+  // bound for a claim of immediacy. MUTATION: raising the cap (the old 60 s) or
+  // dropping a promise string fails here.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src, /it shows up here the moment it does/,
+    'the self arm carries the standing live-update promise')
+  assert.match(src, /it shows up here on its own/,
+    'the build arm carries the same standing promise (cycle 6 item 1)')
+  const cap = src.match(/wizardConnectPollNextAtRef\.current = successes >= 3\n\s*\? Date\.now\(\) \+ Math\.min\(4000 \* 2 \*\* \(successes - 2\), (\d+)\)/)
+  assert.ok(cap, 'the success backoff cap is located')
+  assert.ok(Number(cap[1]) <= 20000,
+    `the success backoff cap (${cap[1]} ms) must not out-run the standing live-update promise: ` +
+    'a parked visible dashboard gets no forced tick, so the cap is the staleness bound')
+})
+
+test('#3428/#2937: every refreshOnboarding exit reports a discriminated outcome', () => {
+  // review cycle 7 (item 3): the success path returned `{ applied, superseded }`
+  // while three early/error exits still returned a bare `false`. The poll
+  // consumes by falsiness, so a superseded REJECTION was charged as a failed
+  // check and cleared the loading flag while the newer refresh was in flight —
+  // contradicting cycle 6's "a superseded response is side-effect-free
+  // everywhere" claim.
+  // MUTATION: a bare `return false` anywhere in the body, or dropping the
+  // `!_superseded` gate from a loading clear, fails here.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const fnStart = src.indexOf('async function refreshOnboarding()')
+  assert.ok(fnStart > -1, 'refreshOnboarding exists')
+  const body = src.slice(fnStart, src.indexOf('React.useEffect(() => { refreshOnboarding() }', fnStart))
+  assert.ok(body.length > 100, 'the refreshOnboarding body is located')
+  assert.doesNotMatch(body, /return false/,
+    'no exit may return a bare boolean — the poll reads applied/superseded')
+  assert.equal((body.match(/return \{ applied: false, superseded: _superseded \}/g) || []).length, 3,
+    'all three early/error exits return the discriminated object')
+  assert.equal((body.match(/if \(!_superseded\) setOnboardingLoading\(false\)/g) || []).length, 3,
+    'every non-applied path gates the loading clear on !_superseded (success + session-missing + catch)')
+})
+
+test('#3428/#2937: a superseded onboarding refresh is never applied', () => {
+  // review cycle 5 (item 3): `Promise.race` abandons the refresh WITHOUT
+  // cancelling it, so its response can land after a newer refresh already
+  // observed the connection — applying the OLDER projection flips
+  // serverHarnessConnected true → false. A monotonic sequence captured at call
+  // time gates the apply, and a superseded response must not be charged as a
+  // failed check.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src, /const _seq = \+\+onboardingRefreshSeqRef\.current/,
+    'each refresh takes a monotonic sequence number at call time')
+  // review cycle 8 item 2: the previous pin LOCATED the TDZ-forming declaration
+  // (`const _superseded = …` after the awaits) and counted the out-of-scope
+  // catch references, so it passed on broken code whose every error path threw
+  // ReferenceError. Scope is the thing to pin, and the only observable it has is
+  // ORDER: the declaration must sit at FUNCTION scope (before the `try`, so the
+  // early exit is not in its TDZ and the `catch` can see it) and must PRECEDE
+  // its first use. MUTATIONS that fail here: moving the declaration back inside
+  // the `try` (unbound in the catch), putting it after the awaits (TDZ at the
+  // early exit), or `const`-ing it (the later assignments throw).
+  const fnStart = src.indexOf('async function refreshOnboarding()')
+  assert.ok(fnStart > -1, 'refreshOnboarding exists')
+  const fnBody = src.slice(fnStart, src.indexOf('React.useEffect(() => { refreshOnboarding() }', fnStart))
+  // review cycle 9 (test F4): this pin false-redded in BOTH directions.
+  //   (a) `try` was located by exact indentation (`'\n    try {'`) — reindenting
+  //       the block 4→2 spaces REDed it ("the try block was located") while the
+  //       code was correct. Locate it by TOKEN.
+  //   (b) the exact-RHS assertion (`_superseded = _seq < onboardingRefreshSeqRef.current`)
+  //       REDed a behaviour-identical DRY dedupe that hoists the predicate into
+  //       `const isSuperseded = () => _seq < …` and assigns `_superseded =
+  //       isSuperseded()`. The RHS spelling is not the property, and the
+  //       executing test (refreshOnboardingExec.test.js) now owns the behaviour
+  //       (that a superseded result is never applied and is side-effect-free).
+  // What is left is what this pin can actually see: the flag is a
+  // function-scoped `let`, declared before the `try` and before any use.
+  const declMatch = fnBody.match(/\blet\s+_superseded\s*=\s*false\b/)
+  const decl = declMatch ? declMatch.index : -1
+  const tryIdx = fnBody.search(/(^|\n)\s*try\s*\{/)
+  // first occurrence of the identifier AFTER its own declaration token
+  const firstUse = declMatch ? fnBody.indexOf('_superseded', decl + declMatch[0].length) : -1
+  assert.ok(decl > -1, 'the flag is declared with `let` at function scope (never a try-scoped const)')
+  assert.ok(tryIdx > -1, 'the try block was located')
+  assert.ok(decl < tryIdx,
+    'the declaration must be OUTSIDE the try — declared inside it, the no-session exit is a TDZ ' +
+    'read and the catch references an unbound identifier (every error path throws ReferenceError)')
+  assert.ok(firstUse > decl,
+    'the declaration must PRECEDE its first use (the no-session exit)')
+  assert.match(src, /orgIdRef\.current === _teamAtCall && !_superseded\) \{/,
+    'a superseded response is not applied')
+  assert.match(src, /return \{ applied, superseded: _superseded \}/,
+    'the outcome is DISCRIMINATED — a superseded response is not reported as landed (cycle 6 item 4)')
+  assert.match(src, /if \(!_superseded\) setOnboardingLoading\(false\)/,
+    'a superseded response must not clear the loading flag while the newer request is in flight ' +
+    '(cycle 6 item 3)')
+})
+
+test('#3428/#2937: the not-connected body states only the observed fact and the stall notice is announced', () => {
+  // review cycle 5 (items 6 + 7).
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  // item 6 — no graph fact the projection cannot establish.
+  assert.doesNotMatch(src, /hasn't filed anything to this Organization's graph yet/,
+    'the body must not assert a graph fact a captured session can falsify')
+  assert.match(src, /We haven't seen your agent's first write through its Tortoise tools yet/,
+    'it states the missing OBSERVATION instead')
+  // review cycle 8 item 6: the observation is about the AGENT-TOOLS write path.
+  // A captured session writes Session nodes + extracted points WITHOUT the
+  // harness-connected checkpoint, so for that user the server HAS seen writes and
+  // the Overview shows them — the unqualified "first write" named an event this
+  // screen does not test. The qualifier mirrors the build arm's "through its
+  // agent tools".
+  assert.doesNotMatch(src, /We haven't seen your agent's first write yet/,
+    'the unqualified observation returns for a user whose captured session already wrote points')
+  // item 7 — the dynamically-inserted notice must be a live region, and the
+  // body's promise must be keyed on the stall flag.
+  // review cycle 7 (items 5 + 6): the notice is now MOUNTED unconditionally
+  // inside the step-3 not-connected arm (an inserted-already-populated live
+  // region is unreliably announced), with its message keyed on the stall flag
+  // INSIDE the region. The match is scoped to THIS site: the unrelated billing
+  // notice (`<p className="dim small" role="status">`, main.jsx ~9100) matched
+  // the old file-wide assertion identically, so removing `role="status"` from
+  // the stall notice left the suite 33/33 green (cycle-6 mutation finding).
+  // MUTATION: dropping `role="status"` (or re-adding the `wizardConnectPollStalled`
+  // mount gate) fails here.
+  assert.match(src,
+    /\{!serverHarnessConnected && \(\s*<p className="dim small" role="status"[^>]*>\s*\{wizardConnectPollStalled\n\s*\?\s*"We haven't been able to check for your connection for a moment[^"]*"\n\s*:\s*''\}/,
+    'the stall notice is a live region MOUNTED at step-3 entry, and the stall message is keyed on the flag inside it')
+  assert.match(src, /wizardConnectPollStalled\n\s*\? "we'll show it as soon as we can check"/,
+    'the live-update promise softens while stalled')
+})
+
+test('#3428/#2937 (cycle 8 item 9): the not-connected bodies pin their substantive clauses', () => {
+  // review cycle 8 item 9: the build body's disambiguation ("marks a project
+  // connected when a write arrives through its agent tools, not through the
+  // /v1/points REST call") and the self body's clauses were covered only by an
+  // e2e file that is NOT wired into CI, so nothing CI-running pinned the text
+  // that carries the claim. These are the substantive clauses — the ones whose
+  // removal would change the meaning, not the wording.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  const i = src.indexOf('{wizardStep === 3 && (')
+  assert.ok(i > -1, 'the done step renders')
+  const end = src.indexOf('Go to dashboard', i)
+  assert.notEqual(end, -1,
+    'the done-step slice end marker (Go to dashboard) must exist — refusing a slice to EOF')
+  const done = src.slice(i, end)
+  const buildStart = done.indexOf("Your project's graph is set up")
+  assert.ok(buildStart > -1, 'the build not-connected body is located')
+  const buildBody = done.slice(buildStart, done.indexOf('</p>', buildStart))
+  assert.match(buildBody,
+    /marks a project connected when a write arrives through its agent tools, not\s+through the <code>\/v1\/points<\/code> REST call/,
+    'the build body names the observable that actually marks a project connected')
+  assert.match(done,
+    /We haven't seen your agent's first write through its Tortoise tools yet — so we can't\s+tell it's connected/,
+    'the self body states the missing observation, qualified to the agent-tools write path')
+  assert.match(done, /If you haven't finished the setup, \{doneSetupRemedy\}/,
+    'the self body offers the DERIVED remedy')
+  // review cycle 9 (UX F2): "file its first memory" presupposed NOTHING was
+  // filed — false for a captured-session user (Session nodes + extracted points
+  // already written) and for a keyed agent that wrote without the checkpoint.
+  // The clause names the action without the ordinal.
+  assert.match(done, /head back to \{doneHarnessName\} and ask it to file\s+a memory/,
+    'the self body names the real next action without presupposing an empty graph')
+  assert.doesNotMatch(done, /file\s+its first memory/,
+    'the trailing clause must not presuppose nothing has been filed')
+})
+
+test('#3428/#2937 (cycle 8 item 5): the stall flag is cleared when step 3 is LEFT, not only on re-entry', () => {
+  // The flag was reset only inside the poll effect's setup, which early-returns
+  // when `wizardStep !== 3` — so leaving step 3 after a stall kept it set and
+  // re-entering committed one paint frame with the live region already holding
+  // the message (not announced) and the body rendering the softened clause the
+  // poll was about to retract. MUTATION: dropping this effect (leaving only the
+  // in-effect reset) fails here.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src,
+    /React\.useEffect\(\(\) => \{\s*if \(wizardStep !== 3\) setWizardConnectPollStalled\(false\)\s*\}, \[wizardStep\]\)/,
+    'leaving step 3 clears the stall flag so re-entry cannot paint a withdrawn promise')
 })
 
 test('#2912: the build-fork blocks own their rhythm (no inline margins stacking on the gap)', () => {
-  const src = stripComments(mainJsx)
+  const src = stripBlockAndWholeLineComments(mainJsx)
   const i = src.indexOf('<div className="connect-build">')
   assert.ok(i > -1, 'the build-fork container exists')
-  const build = src.slice(i, src.indexOf(') : (isOwnerAdmin && !capNotice ? (', i))
+  // review cycle 2 (P2-3): assert the end index before slicing (lost-marker
+  // contract — a rename of the sibling arm must fail, not widen to EOF).
+  const buildEnd = src.indexOf(') : (!capNotice ? (', i)
+  assert.notEqual(buildEnd, -1,
+    'the build-fork slice end marker ("owner connect branch") must exist — refusing a slice to EOF')
+  const build = src.slice(i, buildEnd)
   assert.match(build, /<pre className="snippet" style=\{\{ margin: 0 \}\}>/,
     'the snippet has no margin of its own')
   assert.doesNotMatch(build, /marginTop: '0\.9rem'/,
@@ -458,7 +1211,7 @@ test('#3218: the key surfaces state the visibility window + the recovery path, n
     'the build-fork caption is short — the note owns the window + recovery text')
   assert.doesNotMatch(connect, /Your API key is visible while you&apos;re on this step/,
     'the build fork must not restate the note\u2019s opening clause (review cycle 1, P2)')
-  assert.equal((stripComments(mainJsx).match(/KEY_VISIBILITY_NOTE/g) || []).length, 4,
+  assert.equal((stripBlockAndWholeLineComments(mainJsx).match(/KEY_VISIBILITY_NOTE/g) || []).length, 4,
     'one definition + three renders (shared key block, Codex Desktop block, build fork)')
   // #3218 (a11y): the circle ordinal is aria-hidden, so the heading's
   // accessible name must carry it — otherwise a screen reader hears three
@@ -472,14 +1225,38 @@ test('#3218: the key surfaces state the visibility window + the recovery path, n
 // wizardComplete and the header escape (both drop welcomeKey too) — the
 // build-fork handler this pins is its NO-KEY arm, so this is a drift guard for
 // a future key-present exit, not a leak fix.
-test('#3218: every wizard exit inside the connect step clears the in-memory plaintext', () => {
+test('#3218/#3428: every wizard exit inside the connect step clears the in-memory plaintext and the cap flag', () => {
   const connect = connectStep()
   const exits = [...connect.matchAll(/setWelcomeMode\(false\)/g)]
   assert.ok(exits.length >= 1, 'the connect step has at least one exit')
   for (const m of exits) {
     assert.match(connect.slice(m.index, m.index + 220), /setWizardDurableKey\(''\)/,
       'each connect-step exit must drop the plaintext it was showing')
+    // review cycle 6 (item 6): the same "cannot outlive the step" contract
+    // covers `wizardDurableCapped` — cycle 5 added it to three exits and missed
+    // the "Manage API keys" link, so a capped build-fork owner who left through
+    // it re-entered with the done screen's "(running it creates a fresh key)"
+    // clause permanently dropped. MUTATION: deleting `setWizardDurableCapped(false)`
+    // from any connect-step exit fails here.
+    assert.match(connect.slice(m.index, m.index + 220), /setWizardDurableCapped\(false\)/,
+      'each connect-step exit must also drop the mint-402 cap flag')
   }
+})
+
+test('#3428/#2937: logout drops the connect-step cap flag with the rest of the durable-key state', () => {
+  // review cycle 7 (item 4): the mint-402 cap flag is session/team-scoped, like
+  // the key state beside it. `logout()` was the one connect exit that cleared
+  // the four key flags but not `wizardDurableCapped`.
+  // SCOPED to the logout body — a file-wide cluster match was VACUOUS: the same
+  // five-line clear exists in `wizardComplete`, so the first version of this pin
+  // stayed green when the logout clear was deleted (caught by the cycle-7
+  // mutation run). `slice()` ends at the NEXT `setWelcomeKey('')`, which is the
+  // logout body's own.
+  // MUTATION: deleting `setWizardDurableCapped(false)` from logout fails here.
+  const logout = slice('async function logout() {', "setWelcomeKey('')", 'logout head')
+  assert.match(logout,
+    /setWizardDurableKey\(''\)\n\s*setWizardDurablePaste\(''\)\n\s*setWizardDurableError\(''\)\n\s*setWizardDurableCapped\(false\)\n\s*setWizardShowPaste\(false\)/,
+    'logout clears the mint-402 cap flag alongside the durable-key state')
 })
 
 // #3218 (item 2 follow-up, review cycle 1 P1): the numbered circles and the
@@ -507,4 +1284,102 @@ test('#3218: the Pi/Cursor step-1 prompts install the skills before the restart 
     'Cursor: skills install first, restart note last')
   assert.doesNotMatch(fn, /\$\{twoStepNote\} (Pi|Cursor)\.\\nThen install the Tortoise skills/,
     'the restart-before-skills order must not come back')
+})
+
+// ── #2865: key-less OAuth on the LIVE Claude Desktop / Claude Web leaves ───
+// The issue premise ("add an OAuth affordance") pointed at DEAD CODE:
+// `HARNESS_OAUTH` had ONE render consumer (`{LEGACY_WIZARD_ARCHIVED && …}`)
+// and `LEGACY_WIZARD_ARCHIVED = false`. These assertions are anchored on the
+// LIVE connect step (`connectStep()`), never on the archived block — the
+// archived block still contains the old `Request headers` recipe by design.
+test('#2865: the live connect step makes the two Claude leaves key-less OAuth', () => {
+  const connect = connectStep()
+  // the live branch keys off the shared vocabulary, not a second literal list
+  assert.match(connect, /const wizardKeyless = HARNESS_OAUTH\.includes\(wizardHarness\)/,
+    'the live OAuth branch reads HARNESS_OAUTH (one vocabulary with harnesses.js)')
+  // a key-less leaf opens on the CONNECTOR block — no "1 Get your API key"
+  // step. #3218's numbered prompt block still follows it, so the arm is a
+  // fragment wrapping (connector → prompt), never a key block.
+  assert.match(connect, /\{wizardKeyless \? \(\s*(?:<>\s*)?<WizardBlock step=\{1\} title=\{procedureTitle\}>/,
+    'a key-less OAuth leaf opens on the connector block, never a key block')
+  assert.match(connect, /\{procedureTail && \(\s*<WizardBlock step=\{2\} title=\{procedureTailTitle\}>/,
+    '#3218: the prompt hand-off keeps its own numbered block on the key-less leaf too')
+  // the recipe: connector name + canonical URL + sign-in → Authorize → org
+  const oauth = slice("} else if (wizardKeyless) {", '\n\n                      return (',
+                      'live OAuth branch')
+  assert.match(oauth, /Add custom connector/,
+    'the recipe names Add custom connector')
+  assert.match(oauth, /<code>\{CANONICAL_MCP_URL\}<\/code>/,
+    'the Server URL is the canonical connector constant (matches the PRM resource)')
+  assert.match(oauth, /sign in/, 'the recipe has a sign-in step')
+  assert.match(oauth, /<strong>Authorize<\/strong>/, 'the recipe has an Authorize step')
+  assert.match(oauth, /Pick the Organization/, 'the recipe has an org chooser step')
+  assert.match(oauth, /Leave <strong>Request headers<\/strong> empty/,
+    'the recipe tells the user the header field is empty, not required')
+  assert.match(oauth, /wizardWorkflowsText\('', 'included'\)/,
+    'the prompt is composed KEY-LESS (a connector surface never carries a key)')
+  // …and NO credential recipe survives on these surfaces.
+  assert.doesNotMatch(oauth, /Authorization: Bearer/,
+    'no Bearer recipe may render on a Claude connector surface')
+  assert.doesNotMatch(oauth, /wizardHeaderCodeStyle/,
+    'the old connector header literal must be gone')
+  assert.doesNotMatch(oauth, /rolling out in Anthropic/,
+    'the beta Request-headers caveat must be gone (it is the blocker, not a hint)')
+  assert.doesNotMatch(oauth, /use the Claude Code surface instead/,
+    'the divert-to-another-tab escape hatch must be gone')
+  assert.doesNotMatch(oauth, /harnessKey/,
+    'nothing in the key-less recipe may depend on a key')
+  // the whole live connect step no longer mentions the beta caveat anywhere
+  assert.doesNotMatch(connect, /rolling out in Anthropic/,
+    'no surface in the live connect step may carry the beta caveat')
+})
+
+test('#2865: the two Claude tabs are no longer hidden from members', () => {
+  // This call site came in from main (#3218-era drift) under the OLD local
+  // helper name `stripComments`; #3012 renamed that divergent sibling to
+  // stripBlockAndWholeLineComments, so the name must follow or this throws a
+  // ReferenceError (it is not imported from ./testSupport.js either).
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  // the old gate was `isOwnerAdmin && !capNotice` — role-only, which sent every
+  // member to a paste-a-key row and made an OAuth connect unreachable.
+  assert.doesNotMatch(src, /\)\s*:\s*\(isOwnerAdmin && !capNotice \? \(/,
+    'the connect-step gate must no longer be role-only')
+  assert.match(src, /\)\s*:\s*\(!capNotice \? \(/,
+    'the connect-step gate is the cap remedy alone (capNotice is owner/admin-only)')
+  // a member on a KEYED leaf keeps a paste escape, never a mint CTA that 403s
+  assert.match(ownerBranch(), /isOwnerAdmin \? wizardNoKeyAffordance : wizardPasteRow/,
+    'the keyed-leaf no-key branch is role-aware')
+  // the member-only dead-end subtree must be gone, not left unreachable
+  assert.doesNotMatch(src, /Only owners and admins can create API keys in this dashboard/,
+    'the pre-#2865 member paste-only subtree is deleted (no unreachable branch)')
+  // the step-2 lede must not promise a key to a member on an OAuth leaf
+  const lede = src.slice(src.indexOf('if (wizardStep === 2) {'),
+                        src.indexOf('if (wizardStep === 2) {') + 2600)
+  const oauthLede = lede.indexOf('Claude signs in to Tortoise')
+  const memberLede = lede.indexOf('Paste an API key to connect your agent.')
+  assert.ok(oauthLede > -1, 'the OAuth leaves get their own lede')
+  assert.ok(oauthLede < memberLede,
+    'the OAuth lede must precede the member paste lede (a member on Claude Desktop must not be told to paste a key)')
+})
+
+test('#2865: a user holding a key does NOT get a key row on a key-less OAuth leaf', () => {
+  // The issue asks explicitly whether the key path survives. Decision: on these
+  // two leaves it is retired (HARNESS_OAUTH is explicit and the AC calls them
+  // "unconditionally key-less") — the key-less single block never renders
+  // keyDisplayRow, the pills, or the step-2 gate, so a held key cannot leak in.
+  const connect = connectStep()
+  const i = connect.indexOf('{wizardKeyless ? (')
+  assert.ok(i > -1, 'the key-less branch exists')
+  // review cycle 2 (P2-3): assert the end index before slicing (lost-marker
+  // contract — a dropped/renamed Desktop arm must fail, not widen to EOF).
+  const keylessEnd = connect.indexOf(") : wizardConnectHarness === 'codexDesktop'", i)
+  assert.notEqual(keylessEnd, -1,
+    'the key-less slice end marker (the Codex Desktop arm) must exist — refusing a slice to EOF')
+  const keylessBlock = connect.slice(i, keylessEnd)
+  assert.doesNotMatch(keylessBlock, /keyDisplayRow/,
+    'no key row on a key-less OAuth leaf')
+  assert.doesNotMatch(keylessBlock, /keyModeToggleable/,
+    'no key-mode pills on a key-less OAuth leaf')
+  assert.doesNotMatch(keylessBlock, /\{harnessKey &&/,
+    'the key-less leaf block is not key-gated')
 })

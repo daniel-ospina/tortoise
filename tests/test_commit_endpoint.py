@@ -43,21 +43,21 @@ from tortoise.commit_schema import (
     compute_client_commit_id,
     point_content_id,
 )
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_org
 from tortoise.ids import content_hash
 from tortoise.sdk import TortoiseSDK
 
 # ── Test constants ───────────────────────────────────────────────────────────
 
-TEST_TEAM_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
+TEST_ORG_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while org_graph_name resolves team_team-001 (backup dump divergence)
 TEST_TEAM = {
-    "team_id": TEST_TEAM_ID,
+    "org_id": TEST_ORG_ID,
     "key_id": "test-key-001",
     # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
     # data-plane gates otherwise (mirrors the #2241 migration pattern).
     "legacy_full_access": True,
     "tier": "free",
-    # get_current_team always resolves the full limits dict — test stubs must
+    # get_current_org always resolves the full limits dict — test stubs must
     # match, or fail-closed quota enforcement 500s instead of passing (#310).
     "max_users": 1,
     "max_graphs": 1,
@@ -79,7 +79,7 @@ def client():
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
         # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
         # clear at enter; pop-pin → restore __init__ → deterministic anchor
@@ -106,7 +106,7 @@ def client_quota40():
         db_path = os.path.join(tmpdir, "test.db")
         team40 = dict(TEST_TEAM)
         team40["max_sessions"] = 40
-        app.dependency_overrides[get_current_team] = lambda: dict(team40)
+        app.dependency_overrides[get_current_org] = lambda: dict(team40)
         with patched_tortoise_sdk(db_path), TestClient(app) as tc:
             yield tc
 
@@ -114,7 +114,7 @@ def client_quota40():
 def _team_sdk() -> TortoiseSDK:
     """Fresh tenant SDK on the shared test DB (post-request read surface)."""
     import tortoise.hosted_api as ha_mod
-    return ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    return ha_mod._make_sdk(namespace=TEST_ORG_ID)
 
 
 def _reg_sdk():
@@ -125,9 +125,9 @@ def _reg_sdk():
 
 def _metering_rows():
     rows = _reg_sdk()._get_registry().query(
-        "MATCH (m:MeteringRecord {team_id:$tid}) "
+        "MATCH (m:MeteringRecord {org_id:$tid}) "
         "RETURN m.write_ops, m.nodes_written",
-        params={"tid": TEST_TEAM_ID},
+        params={"tid": TEST_ORG_ID},
     ).result_set
     return (int(rows[0][0]), int(rows[0][1])) if rows else (0, 0)
 
@@ -319,7 +319,7 @@ class TestFourNodeChain:
         flag explicitly False can still POST /v1/sessions/commit (the
         derived-commit receiver never consults it)."""
         import tortoise.hosted_api as ha_mod
-        ha_mod._update_onboarding_state(TEST_TEAM_ID, session_recording=False)
+        ha_mod._update_onboarding_state(TEST_ORG_ID, session_recording=False)
         r = _commit(client, _raw_payload(1))
         assert r.status_code == 200, r.text
         assert r.json()["duplicate"] is False
@@ -1271,13 +1271,13 @@ class TestBudgetDE2E7:
         """Quota fixture: max_sessions=40 → 40 minimal commits → 41st commit
         402; _count_resource('sessions') returns 40 (NOT the all-nodes count,
         the #947 P0 regression)."""
-        from tortoise.quota import count_team_usage
+        from tortoise.quota import count_org_usage
         sdk = _team_sdk()
         for i in range(40):
             raw = _raw_payload(1, session_id=f"qs{i}")
             r = _commit(client_quota40, raw)
             assert r.status_code == 200, f"commit {i} failed: {r.text}"
-        assert count_team_usage(TEST_TEAM_ID, "sessions", sdk=sdk) == 40
+        assert count_org_usage(TEST_ORG_ID, "sessions", sdk=sdk) == 40
         # 41st commit → 402
         r = _commit(client_quota40, _raw_payload(1, session_id="qs40"))
         assert r.status_code == 402
@@ -1812,7 +1812,7 @@ def _oversized_chunked(n_chunks: int = 8, step: int = 8192):
 class TestCommitBodySweepCap:
     def test_commit_oversized_chunked_413(self, client, monkeypatch):
         """commit_session — oversized chunked body → 413 with the commit
-        detail (auth-gated: the get_current_team override fires 401-free
+        detail (auth-gated: the get_current_org override fires 401-free
         first). The 413 must NOT be remapped into the 400 catch-all."""
         import tortoise.hosted_api as ha_mod
         monkeypatch.setattr(ha_mod, "_COMMIT_SESSION_MAX_BYTES", 8192)

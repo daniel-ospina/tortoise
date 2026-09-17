@@ -189,7 +189,7 @@ def resolve_wire_completion(node_status: str | None,
 
     1. node.status == 'complete' → True (server-owned, gate-written).
     2. Grandfathered-window guard: node present but NOT complete, ZERO
-       AGENT step edges (the team-named edge is auto-satisfied at init and
+       AGENT step edges (the org-named edge is auto-satisfied at init and
        never counts), and jsonb onboarding_complete=true → True — kills the
        poisoned-false window for orgs completing via the legacy wizard
        during the T2→T7 carve-out. One-directional and self-terminating:
@@ -207,9 +207,9 @@ def resolve_wire_completion(node_status: str | None,
 
 def onboarding_node_init_fragment(*, fork: str | None = None,
                                   compact: bool = False,
-                                  team_named_edge: bool = True) -> str:
+                                  org_named_edge: bool = True) -> str:
     """Eager-init Cypher suffix — byte-identical for every TeamMeta lane
-    (register_user ×2, create_team, sdk.team_create, provision_tenant),
+    (register_user ×2, create_org, sdk.org_create, provision_tenant),
     the write-time create-on-write seam, and the backfill.
 
     The same string is APPENDED to the lane's existing TeamMeta statement
@@ -228,7 +228,7 @@ def onboarding_node_init_fragment(*, fork: str | None = None,
         "MERGE (n:OnboardingState {org_id: $org_id}) "
         "ON CREATE SET " + ", ".join(sets),
     ]
-    if team_named_edge:
+    if org_named_edge:
         lines.append(
             "MERGE (s_tn:OnboardingStep {org_id: $org_id, step_id: 'team-named'})"
         )
@@ -260,17 +260,17 @@ def read_prior_org_fork(graph: Any, prior_org_id: str) -> str | None:
     return fork if fork in FORK_VALUES else None
 
 
-def eager_init_query(team_meta_cypher: str, team_meta_params: dict[str, Any], *,
+def eager_init_query(org_meta_cypher: str, org_meta_params: dict[str, Any], *,
                      org_id: str, fork: str | None = None,
                      compact: bool = False) -> tuple[str, dict[str, Any]]:
     """Append the OnboardingState init to a TeamMeta CREATE so both land in
     ONE Cypher query (graph-side atomicity, scope pin 10). Returns the
     combined query + merged params for the lane's ``graph.query`` call."""
     fragment = onboarding_node_init_fragment(fork=fork, compact=compact)
-    params: dict[str, Any] = dict(team_meta_params)
+    params: dict[str, Any] = dict(org_meta_params)
     params["org_id"] = org_id
     params.update(_node_init_params(fork=fork, compact=compact))
-    return f"{team_meta_cypher}\n{fragment}", params
+    return f"{org_meta_cypher}\n{fragment}", params
 
 
 def _node_init_params(*, fork: str | None = None, compact: bool = False,
@@ -333,7 +333,7 @@ def ensure_onboarding_state_node(graph: Any, org_id: str, *,
                                  fork: str | None = None,
                                  compact: bool = False,
                                  status_from_mirror: bool | None = None,
-                                 team_named_edge: bool = True) -> None:
+                                 org_named_edge: bool = True) -> None:
     """Idempotent keyed-MERGE init (write-time create-on-write seam).
 
     Mirrors jsonb ``onboarding_complete`` → status ONE-DIRECTIONALLY at
@@ -342,7 +342,7 @@ def ensure_onboarding_state_node(graph: Any, org_id: str, *,
     """
     status = STATUS_COMPLETE if status_from_mirror is True else STATUS_ACTIVE
     cypher = onboarding_node_init_fragment(
-        fork=fork, compact=compact, team_named_edge=team_named_edge)
+        fork=fork, compact=compact, org_named_edge=org_named_edge)
     params = {"org_id": org_id}
     params.update(_node_init_params(fork=fork, compact=compact, status=status))
     with _org_lock(org_id):

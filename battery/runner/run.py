@@ -45,6 +45,11 @@ from battery.config import (
 )
 from battery.enums import EpOutcome, ExitCode, ModelCallOutcome, Tier
 from battery.exceptions import ConfigError, IsolationBreach  # noqa: F401
+from battery.recall.matcher import TRIGGER_POPULATION, scenario_probes
+from battery.recall.prepass import (
+    build_matched_recall_block,
+    capture_factual_recall,
+)
 from battery.report.assemble import (
     write_family_files,
     write_recall_file,
@@ -62,6 +67,9 @@ from battery.runner.artifacts import (
 from battery.runner.emit import MANDATORY
 from battery.runner.episode import EpisodeResult, EpisodeTracker, TurnRecord  # noqa: F401
 from battery.runner.executor import (
+    SURFACING_INTENTS,
+    control_verdict_event,
+    control_verdict_from_events,
     envelope_events,
     execute_tvde_episode,
     state_events,
@@ -413,7 +421,7 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
     write_failed = False
     for idx, env in enumerate(ep.envelopes):
         for intent in env.intents:
-            if intent not in ("register_conflict", "file_nand"):
+            if intent not in SURFACING_INTENTS:
                 # Schema-bounded verbs the executor does not route to a
                 # product write this round: declared, so traced as unfiled
                 # (never silently dropped, never a fake ref).
@@ -477,6 +485,25 @@ def _execute_real_episode(*, config: RunConfig, arm, scenario: Scenario,
                                  "reason": "no-op"}})
         if write_failed:
             break
+
+    # #2702: R1 FP-control verdict for a benign-control episode (bct-*).
+    # The control verdict is DERIVED here because the executor is the only
+    # component that knows its OWN tool channel ran: every declare-write
+    # loop iteration above either filed a surfacing (emission-loss-proof
+    # tool_event with a real product ref) or recorded why it did not
+    # (intent_unfiled). For a valid, non-excluded control episode the loop
+    # completed, so a missing surfacing is PROVABLY the arm not surfacing —
+    # never a lost emission and never a fabricated 0.0. A scenario with a
+    # planted ¬A pair (ct-*) is NEVER control-population and never gets a
+    # verdict. The probe's reader (`_control_verdict`) accepts only an
+    # explicit bool, and the expected-set gate only demands the field when
+    # this entry exists, so a verdict-less control keeps the no-data
+    # sentinel (insufficient_n).
+    if not write_failed:
+        from battery.runner.probe_scorer import episode_population
+        if episode_population(scenario) == "control":
+            events.append(control_verdict_event(
+                false_positive=control_verdict_from_events(events)))
 
     # state-terminal: decide_cycles harness-side; ep_outcome + contested
     # from the product terminal table where the arm exposes it (a4), else
@@ -756,6 +783,19 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     run_retrieval_legs: list[str] = []
     run_retrieval_degraded = False
 
+    # ── matched-recall pre-pass inputs (#3327.3) ───────────────────────
+    #    Probes are SOURCED FROM THE RUN'S SCENARIO CORPUS — never
+    #    ``default_probes()``' generic world facts (no arm's memory contains
+    #    them, so such a trigger could never legitimately fire; decision
+    #    .3). ``scenario_probes`` skips scenarios with no authored question
+    #    or no gold. Each trigger-population arm's factual F1 is captured
+    #    right after its setup — before its own episodes, and since arm
+    #    namespaces are isolated, no arm's episodes can move another arm's
+    #    reading. That is the pre-registered "measured before the battery".
+    recall_probes = scenario_probes(scenarios)
+    recall_capture: dict[str, dict[str, list[str]]] = {}
+    recall_unavailable: dict[str, str] = {}
+
     for arm_id in config.arms:
         arm_config = arm_map.get(arm_id)
         if arm_config is None:
@@ -823,6 +863,20 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 reason=f"init: {e!r}"))
             any_arm_failed = True
             continue
+
+        # ── matched-recall capture (#3327.2) ───────────────────────────
+        #    The arm's factual retrieval over the corpus probes, taken now
+        #    (setup done, no episodes yet). An ``ArmUnavailable`` arm is
+        #    recorded unavailable — NEVER coerced to an empty F1, which
+        #    would read as divergent and fire the trigger by fabrication.
+        #    a0 is not in the trigger population: its row is measured via
+        #    the no-memory stub at block-assembly time instead.
+        if recall_probes and arm_id in TRIGGER_POPULATION:
+            try:
+                recall_capture[arm_id] = capture_factual_recall(
+                    arm, recall_probes, scenarios, run_mode=run_mode)
+            except ArmUnavailable as e:
+                recall_unavailable[arm_id] = f"recall pre-pass: {e}"
 
         arm_episodes: list[EpisodeResult] = []
         arm_artifacts: list[str] = []
@@ -1013,6 +1067,17 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             any_arm_failed = True  # all-failed → exit 4 (after artifacts)
 
     exit_code = ExitCode.ARM_FAILED if any_arm_failed else ExitCode.OK
+    # ── matched-recall outcome (#3327): the pre-pass returns a RESULT
+    #    OBJECT (#1413 indicator 1 — never an exception). INCONCLUSIVE is
+    #    expressed as the persisted outcome + this exit code (3); an arm
+    #    failure (exit 4) outranks it as the more severe operational state.
+    recall_block = build_matched_recall_block(
+        recall_probes, recall_capture,
+        include_a0=("a0" in config.arms),
+        unavailable_arms=recall_unavailable)
+    if (exit_code is ExitCode.OK and recall_block
+            and recall_block.get("outcome") == "inconclusive"):
+        exit_code = ExitCode.INCONCLUSIVE
 
     # ── run-end LIVE writers (family_*.json + recall.json) — the dead
     #    aggregation path dies here: per-scored-family JSONs + the recall
@@ -1020,7 +1085,12 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     family_payloads = _family_payloads(scorer)
     if family_payloads:
         write_family_files(attempt_dir, family_payloads)
-    write_recall_file(attempt_dir, {"episodes": recall_rows})
+    write_recall_file(attempt_dir, {
+        "episodes": recall_rows,
+        # The §3.2.1 control block; {} when no corpus-sourced probe set or
+        # no trigger-population arm was measured (never a vacuous outcome).
+        "matched_recall": recall_block or {},
+    })
 
     # summary.json written LAST (the completion marker). The run-level
     # run_mode is recorded here (mock iff every arm resolved mock) so the

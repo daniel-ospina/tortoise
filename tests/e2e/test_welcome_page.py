@@ -101,7 +101,7 @@ def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
 
 # ── Mocked-session tests (welcome page v2 success state) ────────────
 # Intercept the Supabase REST calls the page makes and drive the
-# provisioning flow: auth.getSession → team_memberships poll →
+# provisioning flow: auth.getSession → org_memberships poll →
 # reveal_api_key RPC → success state with harness tabs + artifacts.
 
 
@@ -182,7 +182,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     succeed, and the intercepted navigation still proves the redirect fired.
 
     Teardown deletes the created auth user via the Admin API (best-effort;
-    the FK cascade removes the placeholder team_memberships row)."""
+    the FK cascade removes the placeholder org_memberships row)."""
     signup = {"status": None, "body": ""}
     token = {"status": None}
 

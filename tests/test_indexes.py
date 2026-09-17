@@ -19,11 +19,15 @@ import pytest  # noqa: I001
 from tortoise.projection import FalkorProjection
 
 EXPECTED_RANGE_EMBEDDED = {
-    # Embedded-only expectation: is_operator is intentionally absent on
-    # embedded — falkordblite degrades the bool type table across close/
-    # reopen, so the indexed `= false` form silently returns 0 after restart
-    # (label scans coerce correctly). The index is created on non-embedded
-    # FalkorDB (docker/server) only — see _ensure_indexes.
+    # is_operator is intentionally absent on EVERY backend (#522 embedded,
+    # #3154 docker/server). Embedded: falkordblite degrades the bool type
+    # table across close/reopen, so the indexed `= false` form silently
+    # returns 0 after restart. Docker/server: GRAPH.COPY drops the `false`
+    # postings of a copied boolean RANGE index, so a copy whose index set
+    # carries is_operator in its SDK-created position reads 0 for `= false`
+    # — and the copy destination cannot rebuild it (a fresh CREATE on a copy
+    # is corrupt too). The full label scan is correct on both. See
+    # _ensure_indexes.
     "Point": ["id", "pointKind", "content_hash"],
     "Document": ["id", "documentKind"],
     "Subject": ["id", "name"],
@@ -39,17 +43,16 @@ EXPECTED_RANGE_EMBEDDED = {
 # ── Epic #1647 T8 (D5/D6): docker sibling expectations ────────────────────
 # D5 (research-brief §2.1): the RANGE sets are IDENTICAL on both engines —
 # point_props (id, pointKind, content_hash) is not mode-split (verified
-# _ensure_indexes L1214-1224). is_operator is deliberately ABSENT from the D5
-# range set on BOTH lanes: on docker it is served by the D6 composite's
-# leftmost prefix, never a standalone D5 single index (the #522 regression
-# guard).
+# _ensure_indexes L1214-1224). #3154: is_operator is deliberately ABSENT from
+# the D5 range set on BOTH lanes — NO engine gets a boolean index (#522
+# embedded, #3154 docker/server GRAPH.COPY).
 EXPECTED_RANGE_DOCKER = {k: list(v) for k, v in EXPECTED_RANGE_EMBEDDED.items()}
 
-# D6: the docker-only composite freshness index — created on non-embedded
-# engines only (the #522-safe path; embedded gets the plain (lastDreamedAt)
-# index instead — a composite containing is_operator is #522-unsafe on
-# redislite).
-EXPECTED_POINT_COMPOSITE_DOCKER = ("is_operator", "lastDreamedAt")
+# D6: the docker freshness index is the PLAIN lastDreamedAt index. #3154
+# retired the (is_operator, lastDreamedAt) composite: GRAPH.COPY can copy a
+# boolean RANGE index without its `false` postings on docker/server (the #522
+# hazard, verified there too), and `= false` must not depend on it.
+EXPECTED_POINT_STALENESS_DOCKER = ("lastDreamedAt",)
 
 
 @pytest.fixture
@@ -395,18 +398,22 @@ def test_resolve_entity_queries_use_index_scans(proj):
         assert "Node By Index Scan" in plan, f"{label}.{prop} not index-backed: {plan}"
 
 
-# ── Task 8: embedded is_operator index regression (#522, PR #1015) ──────
+# ── Task 8: is_operator index regression (#522 embedded, #3154 docker) ──
 # falkordblite/redislite degrades the persisted bool type table across
 # close/reopen: indexed `= false` lookups silently return 0 after restart,
 # while label scans coerce correctly (TRUE lookups survive, FALSE do not).
-# The is_operator index is therefore non-embedded (docker/server)-only —
-# embedded drops any stale persisted copy on open — see _ensure_indexes.
+# #3154 extended the policy to docker/server: GRAPH.COPY can copy a boolean
+# RANGE index without its `false` postings (when the source's index set
+# carries is_operator in its SDK-created position). is_operator is therefore
+# never indexed on ANY engine — every backend drops any stale persisted copy
+# on open — see _ensure_indexes.
 
 @pytest.mark.embedded_only
-# Epic #1647 P4 (Task 10): the D7 repair path is embedded-only — the test
-# simulates a PRE-#522 stale embedded index (CREATE INDEX on is_operator),
-# which cannot exist on the docker lane (the D6 composite already indexes
-# is_operator — the CREATE would raise "already indexed"). Marked with the
+# Epic #1647 P4 (Task 10): the test drives the embedded `db_path` fixture
+# (session 1 seeds a pre-#522 stale index through the embedded store), so it
+# stays embedded_only. The purged code path itself is no longer
+# embedded-exclusive — #3154 extended the purge to docker/server (covered by
+# the D7 conformance test test_d7_boolean_index_purge). Marked with the
 # D-2=A mechanism: visible skip on docker sessions, runs embedded in
 # URI-less runs (the marker is the documented embedded-only surface).
 def test_embedded_reopen_false_equality_correct():
@@ -472,8 +479,8 @@ def _current_uri() -> str:
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE,
                     reason="FalkorDB not available")
-def test_non_embedded_is_operator_index_created():
-    """#522: non-embedded FalkorDB (docker/server) keeps is_operator indexed."""
+def test_non_embedded_is_operator_not_indexed():
+    """#3154: non-embedded FalkorDB must NOT index the boolean property."""
     from tortoise.projection import FalkorProjection
     uri = _current_uri()
     # Round-2 guard: the URI was probed at import time and may resolve to a
@@ -490,17 +497,18 @@ def test_non_embedded_is_operator_index_created():
     try:
         proj.g.query("MATCH (n) DETACH DELETE n")
         proj._ensure_indexes()
-        # Non-embedded keeps the RANGE index — bools persist correctly here.
+        # #3154: no boolean index on docker/server — `= false` rides the
+        # correct label scan (such a copied boolean index reads 0).
         idx = _range_indexes(proj)
-        assert "RANGE" in idx.get("Point", {}).get("is_operator", []), \
-            f"non-embedded must serve indexed is_operator lookups: {idx}"
+        assert "RANGE" not in idx.get("Point", {}).get("is_operator", []), \
+            f"non-embedded must NOT index the boolean property (#3154): {idx}"
         proj.g.query("CREATE (a:Point {id:'pa', content:'a', "
                      "pointKind:'statement', is_operator:false})")
         proj.g.query("CREATE (b:Point {id:'pb', content:'b', "
                      "pointKind:'statement', is_operator:false})")
         proj.g.query("CREATE (c:Point {id:'pc', content:'c', "
                      "pointKind:'statement', is_operator:true})")
-        # The #522 load-bearing form returns the full non-operator set.
+        # The #522/#3154 load-bearing form returns the full non-operator set.
         assert proj.g.query("MATCH (n:Point) WHERE n.is_operator = false "
                             "RETURN count(n)").result_set[0][0] == 2
     finally:
@@ -512,17 +520,16 @@ def test_non_embedded_is_operator_index_created():
 def test_docker_lane_index_shape():
     """Epic #1647 T8 (D5/D6): docker sibling of test_entity_key_indexes_exist.
 
-    The D5 range sets are IDENTICAL to embedded (EXPECTED_RANGE_DOCKER); the
-    D6 composite (is_operator, lastDreamedAt) is docker-only (the #522-safe
-    path — embedded gets the plain lastDreamedAt index, see
-    test_embedded_reopen_false_equality_correct). is_operator is NOT added to
-    the D5 range set (the #522 regression guard, verified _ensure_indexes
-    L1214-1224) — its RANGE presence on docker comes from the composite's
-    leftmost prefix.
+    The D5 range sets are IDENTICAL to embedded (EXPECTED_RANGE_DOCKER);
+    #3154: docker now also gets the PLAIN lastDreamedAt staleness index — the
+    (is_operator, lastDreamedAt) composite is retired on both engines (a
+    boolean RANGE index can be copied without its `false` postings by
+    GRAPH.COPY, the same #522 hazard verified on docker/server). is_operator
+    is never in the D5 range set.
     """
     from urllib.parse import urlparse
     uri = _current_uri()
-    # Round-2 guard (same as test_non_embedded_is_operator_index_created): the
+    # Round-2 guard (same as test_non_embedded_is_operator_not_indexed): the
     # probe may resolve to a LIVE non-test graph — skip rather than DETACH a
     # real DB (graph name must start with test_/tortoise_test_).
     if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
@@ -540,13 +547,17 @@ def test_docker_lane_index_shape():
                 assert "RANGE" in idx[label].get(f, []), \
                     f"{label}.{f} index missing: {idx[label]}"
         rows = proj.g.query("CALL db.indexes()").result_set
-        composite = [
-            r for r in rows if r[0] == "Point"
-            and all(p in str(r[1]) for p in EXPECTED_POINT_COMPOSITE_DOCKER)
-        ]
-        assert composite, (
-            f"docker must create the D6 composite "
-            f"{EXPECTED_POINT_COMPOSITE_DOCKER}, got {rows}")
+        point_rows = [r for r in rows if r[0] == "Point"]
+        assert point_rows, f"no Point indexes on docker: {rows}"
+        fields = " ".join(str(r[1]) for r in point_rows)
+        # #3154: the plain lastDreamedAt staleness index is present; the
+        # boolean property is NOT indexed (GRAPH.COPY can drop the `false`
+        # postings of a copied boolean index).
+        assert all(p in fields for p in EXPECTED_POINT_STALENESS_DOCKER), (
+            f"docker must keep the {EXPECTED_POINT_STALENESS_DOCKER} "
+            f"staleness index, got {fields}")
+        assert "is_operator" not in fields, (
+            f"docker must not index the boolean property (#3154): {fields}")
     finally:
         with contextlib.suppress(Exception):  # tidy (epic #1647 review P2):
             # this from_uri mint is not journaled in URI-unset sessions —

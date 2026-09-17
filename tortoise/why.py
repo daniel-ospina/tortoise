@@ -57,6 +57,7 @@ from .live import is_terminal_status  # #2490: terminal rows override has_ep
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
     _exclude_status_clause,
+    ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
     fetch_point_epistemic_state,
 )
 
@@ -319,14 +320,24 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         has_ep = bool(row[3])
         # #2490: terminal rows never surface a decayed posterior as measured
         # EP — has_ep=False + contested=False (projection-side override).
-        if len(row) > 5 and is_terminal_status(row[4], bool(row[5])):
+        terminal = len(row) > 5 and is_terminal_status(row[4], bool(row[5]))
+        if terminal:
             has_ep = False
+        # #3276: explicit measurement state — see EpBreakdown. baseline_set
+        # (index 6) marks a LIVE prior-only claim (declared #2199 baseline, no
+        # EP measurement): its confidence_mean is the PRIOR mean, not measured.
+        # A TERMINAL row is neither measured nor prior-only (its 0.5 is the
+        # #2490 decayed posterior) — the terminal gate also clears `baseline`.
+        baseline_set = bool(row[6]) if len(row) > 6 else False
+        measured = bool(has_ep)
         variance = _beta_variance(a, b)
         by_id[pid]["ep"] = {
             "confidence_mean": round(_mean(a, b), 4),
             "variance": round(variance, 6),
-            "contested": has_ep and variance > CONTESTED_VARIANCE_THRESHOLD,
-            "has_ep": has_ep,
+            "contested": measured and variance > CONTESTED_VARIANCE_THRESHOLD,
+            "has_ep": measured,
+            "measured": measured,
+            "baseline": baseline_set and not measured and not terminal,
         }
 
 
@@ -440,12 +451,17 @@ _EP_CYPHER = (
     "RETURN n.id, "
     "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
     "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
-    "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL), "
+    # #3276: has_ep == EP MEASURED (ep_measured_cypher) — a #2199 baseline
+    # prior alone is prior-only, never a measured confidence.
+    f"  {ep_measured_cypher('n')}, "
     # #2490: status/outdated ride the RETURN so _assemble_ep_rows can apply
     # the projection-side has_ep override for terminal rows (why must serve
     # terminal ids in the supersession block — the exclusion is NOT a WHERE
     # insertion here).
-    "  n.status, coalesce(n.outdated, false)"
+    "  n.status, coalesce(n.outdated, false), "
+    # #3276: baseline_set rides LAST (index 6) so the pre-#3276 6-col row
+    # shape keeps its index mapping under the len guard.
+    "  coalesce(n.baseline_set, false)"
 )
 # Tradeoffs (decision points): the point is the operator SOURCE (INPUT idx 0)
 # and the alternatives are the operator's IMPL TARGETS at idx > 0 (the
@@ -733,6 +749,11 @@ def item_to_why_entry(item: dict) -> dict | None:
             "variance": ep.get("variance", 0.0),
             "contested": bool(ep.get("contested", False)),
             "has_ep": bool(ep.get("has_ep", False)),
+            # #3276: carry the explicit measurement state through the
+            # projection (a pre-#3276 item with only has_ep stays honest:
+            # measured mirrors has_ep, baseline defaults False).
+            "measured": bool(ep.get("measured", ep.get("has_ep", False))),
+            "baseline": bool(ep.get("baseline", False)),
         }
     if "conflicts" in item:
         entry["conflicts"] = item["conflicts"]

@@ -18,9 +18,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
-    load_manifest, select, integrity, slow_file_issues,  # noqa: F401
+    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,  # noqa: F401
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
-    surface_audit, render_surface_audit,
+    surface_audit, render_surface_audit, duplicate_entries,
 )
 
 
@@ -33,9 +33,84 @@ def _tier1() -> set:
 
 
 def test_docs_only_runs_tier1():
-    r = _sel(["docs/README.md", "website/welcome.html"])
+    # A markdown-only docs change stays the pure tier-1 smoke path.
+    r = _sel(["docs/README.md"])
     assert r["full"] is False
     assert r["surfaces"] == []
+    assert set(r["test_files"]) == _tier1()
+
+
+def test_public_site_surface_change_selects_onboarding_and_skips_slow():
+    """#3332: a public *site surface* change selects `onboarding`.
+
+    Each path listed in SOURCE_PATTERNS is a file some guard test in the
+    onboarding surface reads — most importantly test_website_docs_consistency.py
+    (checks each public page against its canonical source: POINT_STATUS_VALUES in
+    tortoise/sdk.py, the EP mechanism, the ontology link) and test_website_static.py
+    (pins product.html's pricing surface). Before #3332 every `website/` path was
+    filtered out by NON_PYTHON_PREFIXES *before* SOURCE_PATTERNS was consulted, so
+    changed == [] -> tier-1 smoke: those guard tests never ran for the files
+    they guard.
+
+    The #2147/#2148 cost gates are unchanged — only the fast surface tests are
+    added; no slow leg, no carve-out leg.
+    """
+    for changed in (["website/docs.html"], ["website/faq.html"],
+                    ["website/welcome.html"], ["website/self-hosted.html"],
+                    ["website/product.html"], ["website/index.html"],
+                    ["website/signup.html"], ["website/signin.html"],
+                    ["website/privacy.html"],
+                    ["docs/README.md", "website/self-hosted.html"]):
+        r = _sel(changed)
+        assert r["surfaces"] == ["onboarding"], changed
+        assert r["full"] is False
+        assert r["slow_run"] is False
+        assert r["carve_out_run"] is False
+        assert r["slow_selected"] == []
+        assert "test_website_docs_consistency.py" in r["test_files"], changed
+
+
+def test_every_source_pattern_is_selectable():
+    """The ratchet: every SOURCE_PATTERNS entry must reach `select()`.
+
+    This is the invariant whose absence let the same bug ship twice — #1349 for
+    `tools/` (patched with the TOOL_CARVEOUTS mirror) and #3332 for `website/`
+    (where the SOURCE_PATTERNS entries for welcome.html and self-hosted.html were
+    dead on arrival, and the hand-maintained mirror that replaced them caught only
+    4 of the 10 guarded paths). A pattern that a NON_PYTHON_PREFIXES prefix would
+    filter out must be re-included by `select()`'s `_selection_relevant` rule.
+    Derived from SOURCE_PATTERNS rather than enumerated, so a future entry cannot
+    be added and silently not run — prior review (#2994) rejected an enumerated
+    guard for exactly this reason.
+
+    Direction: entry -> runs. This does NOT catch the reverse (a guarded page with
+    no SOURCE_PATTERNS entry at all) — that direction is tracked separately.
+    """
+    assert "onboarding" in load_manifest()["surfaces"]
+    dead = []
+    for surface, pats in SOURCE_PATTERNS.items():
+        if surface == "core":
+            continue
+        for pat in pats:
+            if not _sel([pat])["surfaces"]:
+                dead.append((surface, pat))
+    assert not dead, (
+        f"SOURCE_PATTERNS entries that select NO surface (dead on arrival — the "
+        f"path is filtered by NON_PYTHON_PREFIXES before SOURCE_PATTERNS is "
+        f"consulted, so no guard test for that file ever runs): {dead}"
+    )
+
+
+def test_unrelated_website_change_stays_tier1():
+    """SITE_CARVEOUTS is not a wholesale `website/` removal.
+
+    A website path that owns no guard test keeps the old docs-only behavior
+    (empty changed -> tier-1 smoke), so unrelated website edits do not drag the
+    onboarding surface in.
+    """
+    r = _sel(["website/robots.txt"])
+    assert r["surfaces"] == []
+    assert r["full"] is False
     assert set(r["test_files"]) == _tier1()
 
 
@@ -191,6 +266,22 @@ def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     assert "sdk" in r["surfaces"]
 
 
+def test_collision_preflight_tool_change_fails_closed_to_full():
+    # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
+    # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the
+    # path: `changed` came back empty, so select() took the docs-only return
+    # (surfaces=[], tier-1 smoke only) and the tool's own guard test never ran
+    # on the PR that changed the tool. The early docs-only return bypasses the
+    # `if not matched: matched.add("core")` fallback, so the pre-#3261 note
+    # claiming such a change "falls back to core" was never true.
+    # No SOURCE_PATTERNS entry matches the path, so it takes the unknown-path
+    # branch -> full matrix (fail closed), exactly like tools/ci_selection.py.
+    r = _sel(["tools/collision_preflight.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_backfill_script_only_change_selects_eval():
     # graph-scripts/backfill_embeddings.py is a SOURCE_PATTERNS["eval"]
     # path — a backfill-only PR selects the eval surface (its test,
@@ -259,13 +350,16 @@ def test_diff_gate_keys_emitted_on_every_return_path():
 
 
 def test_docs_only_skips_slow_and_carve_out():
-    """#2147/#2148: docs/website-only PRs touch no slow/carve-out surface —
+    """#2147/#2148: docs-only PRs touch no slow/carve-out surface —
     both formerly-unconditional legs (the audit's F1/F2 cost drivers) skip;
-    the tier-1 smoke still runs in the fast job."""
-    for changed in (["docs/README.md"], ["website/welcome.html"],
+    the tier-1 smoke still runs in the fast job.
+
+    #3332: a public site surface additionally selects the *fast* onboarding
+    surface (see test_public_site_surface_change_selects_onboarding_and_skips_slow),
+    but the slow and carve-out legs still skip — which is what this test pins."""
+    for changed in (["docs/README.md"],
                     ["docs/README.md", "website/self-hosted.html"]):
         r = _sel(changed)
-        assert r["surfaces"] == []
         assert r["full"] is False
         assert r["slow_run"] is False
         assert r["carve_out_run"] is False
@@ -1836,3 +1930,16 @@ def test_surface_audit_tolerates_null_surface_value(tmp_path):
     assert report["duplicates"] == {}
     # the renderer must survive it too
     assert "api" in render_surface_audit(report)
+
+
+def test_real_manifest_has_no_duplicate_entries():
+    # #3381: two files were each registered twice — one entry added by two
+    # different PRs fixing the same drift independently. A same-surface
+    # duplicate is invisible to select() (surfaces are unioned) and reported
+    # non-fatally by `--integrity` and `--surface-audit` — never as a gate
+    # failure — so pin its absence here where CI will actually see it.
+    # Call the production detector rather than reimplementing it, so this pin
+    # cannot drift from the real semantics (e.g. cross-surface dual
+    # registration is deliberate and must stay allowed).
+    dupes = duplicate_entries(load_manifest())
+    assert dupes == [], f"duplicate manifest entries: {dupes}"

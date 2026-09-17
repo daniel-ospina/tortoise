@@ -16,8 +16,11 @@ to the SHIPPED post-#2698 UI and added the owner/admin connect branch:
   - an owner/admin who lands on the connect step with no in-memory key gets an
     in-flow mint CTA (never-expiring) + a paste escape, and leaving the wizard
     must NOT pop the shared key-create modal (either exit path);
-  - members still get ONLY the paste escape (the known, separately-owned UX
-    gap — asserted here so a future fix is a deliberate change);
+  - #2865: the connect chooser is no longer owner/admin-only — a member with
+    no key reaches the key-less OAuth Claude Desktop/Web leaves (asserted in
+    `test_member_without_key_reaches_keyless_claude_connectors`); on a KEYED
+    leaf a member still gets the paste escape only (never the mint CTA, which
+    would 403 server-side);
   - the shown-once key row must not overflow at any phone width;
   - WizardPromptCard must not nest interactive elements, and a drag-select
     inside it must not overwrite the clipboard;
@@ -27,8 +30,10 @@ to the SHIPPED post-#2698 UI and added the owner/admin connect branch:
 Test-review hardening (2026-09-10): mock `role`/`mint_status`/`key_rows` cover
 the paste REFUSAL paths and the 402 mint cap (a rejected paste must never
 advance, and a capped mint must keep the paste escape), the mint-free exit is
-asserted for BOTH wizard exits, the connect step's own advance is exercised
-(harness-connected checkpoint), the drag-select check proves a selection was
+asserted for BOTH wizard exits, the connect step's own advance is exercised and
+now proves it writes NO `harness-connected` checkpoint (#3428/#2937 — the
+assertion is the opposite of the one this line used to index), the drag-select
+check proves a selection was
 actually made, the clipboard assert compares against the card's own text, the
 390px check is bracketed across widths with an over-long token and covers the
 build fork's FOURTH key row, and the catalog check is backed by a registry-only
@@ -117,38 +122,44 @@ def _seed_cookie(page: Page, user_id: str) -> None:
 def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
           role: str | None = None, key_rows: list | None = None,
           minted_key: str = MINTED_KEY, mint_status: int = 200,
-          mint_error_detail: str = "API key cap reached") -> dict:
+          mint_error_detail: str = "API key cap reached",
+          onboarding_projection: dict | None = None) -> dict:
     """Route harness: the API mocks for the wizard journey. Returns the
     capture dict ({objects, points, state_patches, org_create, checkpoint,
     mint}).
 
-    `role` mirrors the /v1/teams membership role — the connect step branches on
+    `role` mirrors the /v1/organizations membership role — the connect step branches on
     it (owner/admin → harness tabs + prompt cards; member → paste escape only).
     Omitting it (the pre-#2710 shape) is the MEMBER path.
     `key_rows` is the org's key table — durableConnectKey resolves a pasted
     plaintext against it (so a refusal case is just a differently-shaped row).
     `mint_status` fails POST /v1/team/keys (402 = the tier cap, the only
     reachable non-transport mint failure).
+    `onboarding_projection` serves `GET /v1/onboarding/state` (default: none —
+    the pre-existing 401 fall-through, so `serverHarnessConnected` stays false).
+    #3428/#2937 (lane B3, review cycle 2 P2-2): the wizard reads `st.onboarding`,
+    so this is the runtime seam that makes the Connected screen reachable — it
+    turns the capture-tense gating from source-pinned into runtime-proven.
     """
     cap = {"objects": [], "points": [], "state": [], "org_create": [],
            "checkpoint": [], "mint": [], "capabilities": 0}
     seed_objects = seed_objects or [{"id": "obj-1", "name": "Onboarding Test", "objectKind": "project", "status": "in_progress"}]
     rows = key_rows if key_rows is not None else []
 
-    team_row = {"team_id": "team_o", "name": "Onboarding Test"}
+    org_row = {"org_id": "team_o", "name": "Onboarding Test"}
     if role is not None:
-        team_row["role"] = role
+        org_row["role"] = role
 
     def handle(route):
         url = route.request.url
         method = route.request.method
-        # #1828: loadAll pins ?team_id= on overview reads — match on the
-        # query-stripped path so /v1/team/keys?team_id=… still resolves.
+        # #1828: loadAll pins ?org_id= on overview reads — match on the
+        # query-stripped path so /v1/team/keys?org_id=… still resolves.
         path = url.split("?", 1)[0]
         if "api.premiselabs.co" in url:
-            if path.endswith("/v1/teams") and method == "GET":
+            if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([team_row]))
+                              body=json.dumps([org_row]))
                 return
             if path.endswith("/v1/team/keys") and method == "POST":
                 # #2710: the wizard's mint CTA rides this endpoint. The body is
@@ -176,7 +187,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({**team_row, "tier": "free", "graph_ready": True,
+                              body=json.dumps({**org_row, "tier": "free", "graph_ready": True,
                                                "point_count": 0,
                                                "subscription_status": "active",
                                                "checkout_price_ids": {"solo": "price_solo", "pro": "price_pro", "team": "price_team"},
@@ -212,6 +223,17 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
                 cap["points"].append(body)
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"id": "point-1", "content": body.get("content", "")}))
+                return
+            if path.endswith("/v1/onboarding/state") and method == "GET":
+                # #3428/#2937 (lane B3, review cycle 2 P2-2): the runtime seam
+                # for the Connected screen. The app reads `st.onboarding`, so
+                # the projection must be WRAPPED — a bare projection would be
+                # silently ignored and the branch would stay unreachable.
+                if onboarding_projection is None:
+                    route.fulfill(status=401, content_type="application/json", body="{}")
+                    return
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": onboarding_projection}))
                 return
             if path.endswith("/v1/onboarding/state") and method == "PATCH":
                 cap["state"].append(json.loads(route.request.post_data or "{}"))
@@ -350,49 +372,62 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     empty). The done step exits WITHOUT patching onboarding_complete
     (accept-and-drop: the node's fork-aware gate owns completion).
 
-    #2710: this journey is the MEMBER row (no role) — members get the paste
-    escape ONLY (no harness tabs, no prompt cards, and NOT the owner/admin
-    mint CTA, which would 403 server-side). The owner/admin connect branch is
-    covered separately below."""
+    #2710/#2865: this journey is the MEMBER row (no role). #2865 removed the
+    owner/admin-only gate on the connect chooser, so a member now REACHES the
+    harness families; the member's key-LESS OAuth journey is asserted in
+    `test_member_without_key_reaches_keyless_claude_connectors`. This journey
+    lands on the DEFAULT leaf (Claude Code, a KEYED leaf), where a member still
+    gets the paste escape ONLY — never the owner/admin mint CTA, which would
+    403 server-side."""
     _seed_cookie(page, "u-onb")
     cap = _wire(page, key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
-    # MEMBER: no harness tabs (the known, separately-owned "members get no
-    # setup instructions" gap) — only the paste escape.
-    assert page.locator(".harness-family").count() == 0, \
-        "members must not see harness choices (owner/admin-only surface)"
+    # #2865: the chooser is no longer owner/admin-only — a member reaches the 4
+    # harness families (the OAuth leaves need no mint).
+    assert page.locator(".harness-family").count() == 4, \
+        "members must reach the harness chooser (#2865 removed the role gate)"
     # #2912 (test-review P2): the member LEDE, measured rather than inferred.
-    # "Pick which harness to connect." would be a lie here (no chooser renders),
-    # and the string the issue reported as vague must not come back.
+    # The default Claude Code leaf is KEYED, so the member paste lede stays.
+    # "Pick which harness to connect." would be a lie here, and the string the
+    # issue reported as vague must not come back.
     expect(page.locator(".welcome-lede")).to_have_text(
         "Paste an API key to connect your agent.", timeout=10_000)
     assert "Pick which harness to connect" not in page.locator(".welcome-lede").inner_text()
     assert "Connect Tortoise to your Organization" not in page.locator(".welcome-head").inner_text()
     # The mint CTA is owner/admin render-gated (POST /v1/team/keys is
-    # _require_owner_admin server-side) — a member must never see a 403 button.
+    # _require_owner_admin server-side) — a member must never see a 403 button,
+    # and on a KEYED leaf gets the paste row directly instead.
     assert page.get_by_role("button", name="Create an API key").count() == 0, \
         "members must not see the owner/admin mint CTA"
     expect(page.get_by_role("button", name="Use this key")).to_be_visible(timeout=5_000)
     page.get_by_label("Paste an API key").fill(PASTED_KEY)
     page.get_by_role("button", name="Use this key").click()
-    # The pasted durable key is accepted (row-truth match) → the wizard can
-    # advance. No prompt card renders for a member (the documented gap: the
-    # member path has no setup instructions at all).
-    expect(page.get_by_role("button", name="Continue to dashboard")).to_be_visible(timeout=5_000)
-    assert page.locator(".wizard-prompt-card").count() == 0, \
-        "a member must get NO setup prompt card (no harness instructions)"
+    # The pasted durable key is accepted (row-truth match) → the keyed leaf now
+    # renders its setup prompt (procedure step 2) and the wizard can advance.
+    expect(page.locator(".wizard-prompt-card").first).to_be_visible(timeout=5_000)
+    expect(page.get_by_role("button", name="I've set it up — Continue →")).to_be_visible(timeout=5_000)
     page.get_by_role("button", name="Skip for now").click()
-    # STEP 3: done — agent takes over; NO onboarding_complete PATCH (the
-    # node's gate owns completion; accept-and-drop).
+    # STEP 3: done — the wizard REPORTS what the server observed; NO
+    # `harness-connected` write and NO onboarding_complete PATCH (the node's
+    # gate owns completion; accept-and-drop).
     # #2912 (PR-gate UX): skipping = the PAUSED state, so the <h1> names that
     # state. It used to read "You're all set" — the opposite — directly above
-    # the "isn't connected yet" body.
+    # the not-connected body. review cycle 6 (item 2): the paused wording is the
+    # OBSERVATION phrasing on both forks — the categorical "your agent is not
+    # connected yet" is false for a captured session.
     expect(page.locator(".welcome-title")).to_have_text(
-        "Setup paused — your agent is not connected yet", timeout=10_000)
-    expect(page.locator("body")).to_contain_text("your agent isn't connected yet", timeout=10_000)
-    # the done step's exit (wizardComplete) — scoped: the header carries a
-    # same-named 'Open my dashboard →' escape.
-    page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click()
+        "Setup paused — no connection observed yet", timeout=10_000)
+    # #3428/#2937 (lane B3, review cycle 1 P1-2): the old paused body
+    # ("…your agent isn't connected yet") was deleted with the human writer;
+    # retarget the surviving copy on the VISIBLE final screen.
+    # #3428 (lane B3, review cycle 2 P0-1): scope to `div.done` — the wizard
+    # progress crumbs render `<span class="wizard-step done">` per completed
+    # step, so the bare `.done` selector is ambiguous (strict-mode violation).
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write through its Tortoise tools yet", timeout=10_000)
+    # the done step's exit (wizardComplete) — scoped: the header carries its own
+    # exit ("Open my dashboard →"). No longer a same-named twin — review cycle 1
+    # (P2-6): the done button was renamed to "Go to dashboard".
+    page.locator(".wizard-actions").get_by_role("button", name="Go to dashboard").click()
     assert not any("onboarding_complete" in p for p in cap["state"]), \
         f"done step must NOT patch onboarding_complete: {cap['state']}"
     # #2323: an org-holding journey NEVER mints a second org through the
@@ -414,7 +449,9 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
     on the dashboard after exit. Now: the shipped two-level harness chooser
     renders, the mint CTA mints a NEVER-expiring key (the connect step's own
     Never-only contract), the prompt card renders, the step's OWN advance writes
-    the harness-connected checkpoint, and the HEADER exit leaks no modal."""
+    NO harness-connected checkpoint (the human writer is deleted — #3428/#2937;
+    the step now reports the server projection), and the HEADER exit leaks no
+    modal."""
     _seed_cookie(page, "u-owner")
     cap = _wire(page, role="owner")
     _walk_to_connect(page)
@@ -472,12 +509,35 @@ def test_owner_connect_step_mints_never_expiring_key_in_flow(page: Page) -> None
 
     # Leaving the wizard via the HEADER exit must NOT surface the shared
     # key-create modal (#2710). Pre-fix this popped a 30-day-default modal.
-    # #2710's objective is COMPLETING the step in flow, so take the connect
-    # step's OWN advance (not Skip) and prove it writes the checkpoint.
+    # #3428/#2937 (lane B3, EXIT EVIDENCE — the negative control): take the
+    # connect step's OWN advance (not Skip) with NOTHING connected and assert
+    # the wizard cannot reach Connected. The deleted human writer is exactly
+    # what used to make this pass as a false positive, so this control is the
+    # direct test of the fix.
     page.get_by_role("button", name="I've set it up — Continue →").click()
-    expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
-    assert any(c.get("step") == "harness-connected" for c in cap["checkpoint"]), \
-        f"the connect step's advance must write the harness-connected checkpoint: {cap['checkpoint']}"
+    # #3428 (lane B3, review cycle 1 P1-3): scope the exit evidence to the
+    # VISIBLE final screen. review cycle 6 (item 2): "No connection observed
+    # yet" is also text inside the sr-only step announcement (clipped, not
+    # display:none), so an unscoped `body` assertion would still pass if only the
+    # `.done` body reverted to the deleted "Your agent is connected — it files
+    # your decisions and findings…" claim.
+    expect(page.locator(".welcome-title")).to_have_text("No connection observed yet", timeout=10_000)
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write through its Tortoise tools yet")
+    assert "Your agent is connected" not in page.locator("div.done").inner_text(), \
+        "#3428: the final screen rendered the connection claim with nothing connected"
+    assert not any(c.get("step") == "harness-connected" for c in cap["checkpoint"]), \
+        f"#3428: the connect step's advance must NOT write the harness-connected checkpoint: {cap['checkpoint']}"
+    # review cycle 1 (P2-5), corrected in cycle 4 (item 5): this file never
+    # reports `harness-connected` — the route serves GET /v1/onboarding/state
+    # from `onboarding_projection`, which DEFAULTS to None and so fulfils the
+    # pre-existing 401 fall-through (an explicit handler, not an unmocked call),
+    # and the checkpoint mock always answers completed_steps: []. The Connected
+    # branch is therefore unreachable here — this line can only catch the
+    # present-tense sentence leaking OUTSIDE it. The branch-gated claim is
+    # pinned structurally in wizardConnectTripwire.test.js
+    # (doneCaptureClaim === 'present').
+    assert "is capturing your agent" not in page.locator("div.done").inner_text(), \
+        "#3428: the present-tense capture sentence must not leak outside the Connected branch"
     page.locator("header").get_by_role("button", name="Open my dashboard →").click(timeout=15_000)
     _expect_left_wizard(page)
     assert page.locator("[role=dialog]").count() == 0, \
@@ -496,10 +556,11 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
     _walk_to_connect(page)
     _mint_from_connect(page)
     page.get_by_role("button", name="Skip for now").click()
-    # #2912 (PR-gate UX): skipped → paused, and the heading says so.
+    # #2912 (PR-gate UX): skipped → paused, and the heading says so (cycle 6
+    # item 2: the observation phrasing, both forks).
     expect(page.locator(".welcome-title")).to_have_text(
-        "Setup paused — your agent is not connected yet", timeout=10_000)
-    page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click(timeout=15_000)
+        "Setup paused — no connection observed yet", timeout=10_000)
+    page.locator(".wizard-actions").get_by_role("button", name="Go to dashboard").click(timeout=15_000)
     _expect_left_wizard(page)
     assert page.locator("[role=dialog]").count() == 0, \
         "#2710: the wizardComplete exit leaked the shared key-create modal"
@@ -722,18 +783,19 @@ def test_owner_connect_mint_failure_is_visible(page: Page) -> None:
     ("Claude Desktop", "Open Claude Desktop → Settings → Connectors"),
     ("Claude Web", "Open claude.ai → Settings → Connectors"),
 ])
-def test_owner_no_key_affordance_on_manual_harness_surfaces(page: Page, surface: str, sync_text: str) -> None:
-    """#2710 (code-review P1): the two MANUAL Claude surfaces must not dead-end.
+def test_manual_harness_surfaces_are_keyless_oauth(page: Page, surface: str, sync_text: str) -> None:
+    """#2865: the two MANUAL Claude surfaces are KEY-LESS OAuth, for every role.
 
-    Pre-fix they kept a `YOUR_API_KEY` placeholder in the config block plus a
-    Copy button whose handler wrote `harnessKey` — an empty string with no key —
-    so an owner/admin on those surfaces had no mint CTA, no paste escape, and a
-    Copy control that silently clobbered the clipboard.
+    This test replaces `test_owner_no_key_affordance_on_manual_harness_surfaces`,
+    whose `#2710`/`#2912` contract required the opposite: that these surfaces
+    show a visible `Create an API key` mint CTA and render ONLY the key block
+    until a key lands. #2864 made the hosted `/mcp` endpoint advertise OAuth
+    discovery (RFC 9728), so these surfaces connect by sign-in and never ask for
+    a credential — the old contract pinned the behaviour this change removes.
 
-    #2912: these are now level-2 surfaces under the Claude family, and the
-    no-key state renders ONLY step 1 (the key block) — the connector lead-in is
-    step 2 and stays absent until a key lands, which is what proves the
-    key-first order rather than a caption above an empty slot."""
+    The guarantee that replaces it: no key row, no `Bearer` recipe, no beta
+    caveat, and the Continue affordance reachable WITHOUT a key.
+    """
     _seed_cookie(page, "u-manual-" + surface.split()[-1].lower())
     _wire(page, role="owner", key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
@@ -742,24 +804,112 @@ def test_owner_no_key_affordance_on_manual_harness_surfaces(page: Page, surface:
     surface_btn = page.get_by_role("button", name=re.compile(re.escape(surface)))
     surface_btn.click()
     expect(surface_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
-    # The no-key state offers the SAME in-flow path as the agent-driven surfaces …
-    expect(page.get_by_role("button", name="Create an API key")).to_be_visible(timeout=5_000)
-    assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
+
+    body = page.locator("body").inner_text()
+    # (a) No mint CTA and no key row on a key-less surface.
+    assert page.get_by_role("button", name="Create an API key").count() == 0, \
+        f"{surface}: a key-less OAuth surface must not offer a mint CTA"
+    assert "YOUR_API_KEY" not in body, \
         f"{surface}: the placeholder key must not render"
     assert page.locator("code", has_text="…").count() == 0, \
         f"{surface}: no fake '…' key row"
-    assert page.locator(".wizard-prompt-card").count() == 0, \
-        f"{surface}: the config block must not render before a key exists"
-    assert sync_text not in page.locator("body").inner_text(), \
-        f"{surface}: the config lead-in must not dangle above the affordance"
-    # … and the paste escape lands a real key, after which step 2 renders.
-    page.get_by_role("button", name="I already have a key — paste it instead").click()
-    page.get_by_label("Paste an API key").fill(PASTED_KEY)
-    page.get_by_role("button", name="Use this key").click()
-    expect(page.locator("body")).to_contain_text(sync_text, timeout=5_000)
-    expect(page.locator("code", has_text=PASTED_KEY).first).to_be_visible(timeout=5_000)
-    assert "YOUR_API_KEY" not in page.locator("body").inner_text(), \
-        f"{surface}: the placeholder must be replaced by the real key"
+    # (b) No bearer recipe and no beta 'Request headers' caveat.
+    assert "Bearer" not in body, \
+        f"{surface}: the OAuth surface must not show an Authorization: Bearer recipe"
+    assert "Request headers" not in body or "Leave Request headers empty" in body, \
+        f"{surface}: the only 'Request headers' mention must be the OAuth 'leave it empty' step"
+    # (c) The sign-in / Authorize step is present.
+    assert "sign-in" in body or "sign in" in body, \
+        f"{surface}: the OAuth recipe must state the sign-in step"
+    assert "Authorize" in body or "Add custom connector" in body, \
+        f"{surface}: the OAuth recipe must state the connector/Authorize step"
+    # (d) Continue is reachable WITHOUT a key — the old no-dead-end guarantee.
+    continue_btn = page.get_by_role(
+        "button", name=re.compile(r"I've connected it — Continue"))
+    expect(continue_btn).to_be_visible(timeout=5_000)
+    expect(continue_btn).to_be_enabled()
+
+
+@pytest.mark.parametrize("surface,connector_lead", [
+    ("Claude Desktop", "Open Claude Desktop → Settings → Connectors"),
+    ("Claude Web", "Open claude.ai → Settings → Connectors"),
+])
+def test_member_without_key_reaches_keyless_claude_connectors(
+        page: Page, surface: str, connector_lead: str) -> None:
+    """#2865 Indicator: a NON-owner, NON-admin member HOLDING NO API KEY selects
+    Claude Desktop / Claude Web in the live wizard and is shown a sign-in /
+    Authorize path with no key row and no beta caveat, and can Continue — no
+    key, no mint.
+
+    This is the row the issue's Indicator actually names. The sibling
+    `test_manual_harness_surfaces_are_keyless_oauth` covers an OWNER/admin, so
+    on its own it proves the recipe renders but NOT that the `isOwnerAdmin`
+    gate stopped hiding these tabs from members — pre-#2865 a member was sent
+    past the harness chooser to a paste-a-key row, so an OAuth connect (which
+    needs no mint) was unreachable. `role="member"` + no `key_rows` is the
+    non-admin, key-less subject.
+    """
+    _seed_cookie(page, "u-member-" + surface.split()[-1].lower())
+    # role="member" (NOT owner/admin) AND no key rows: a member holds no key
+    # and cannot mint one (POST /v1/team/keys is _require_owner_admin).
+    cap = _wire(page, role="member")
+    _walk_to_connect(page)
+
+    # (a) The chooser itself is reachable for a member — the #2865 gate change.
+    expect(page.locator(".harness-family")).to_have_count(4, timeout=10_000)
+    expect(page.get_by_role("button", name="Claude", exact=True)).to_be_visible(timeout=5_000)
+
+    # Level 1 → level 2: Claude is already the active family; pick the surface.
+    surface_btn = page.get_by_role("button", name=re.compile(re.escape(surface)))
+    surface_btn.click()
+    expect(surface_btn).to_have_class(re.compile(r"\bactive\b"), timeout=10_000)
+    body = page.locator("body").inner_text()
+
+    # (b) NO key affordance of any kind on the key-less OAuth leaf.
+    assert page.get_by_role("button", name="Create an API key").count() == 0, \
+        f"{surface}: a member must not see the owner/admin mint CTA"
+    assert "Use this key" not in body, \
+        f"{surface}: a key-less OAuth leaf must not offer the paste escape"
+    assert "Your API key" not in body, f"{surface}: no key row on a key-less leaf"
+    # (c) No credential recipe and no beta 'Request headers' caveat survive.
+    assert "Bearer" not in body, \
+        f"{surface}: must not show an Authorization: Bearer recipe"
+    assert "rolling out in Anthropic" not in body, \
+        f"{surface}: the beta Request-headers caveat must be gone"
+    assert "use the Claude Code surface instead" not in body, \
+        f"{surface}: the divert-to-Claude-Code escape hatch must be gone"
+    # (d) The OAuth recipe: connector URL → sign-in → Authorize → org.
+    assert connector_lead in body, f"{surface}: the connector lead-in must render"
+    assert "https://api.premiselabs.co/mcp" in body, \
+        f"{surface}: the canonical connector URL must render"
+    assert "sign-in" in body or "sign in" in body, \
+        f"{surface}: the OAuth recipe must state the sign-in step"
+    assert "Authorize" in body, f"{surface}: the OAuth recipe must state the Authorize step"
+    assert "Pick the Organization" in body, \
+        f"{surface}: the OAuth recipe must state the org chooser step"
+    # (e) Continue is reachable and ENABLED without a key — the guarantee that
+    # replaces the pre-#2865 owner-only no-dead-end tripwire.
+    continue_btn = page.get_by_role(
+        "button", name=re.compile(r"I've connected it — Continue"))
+    expect(continue_btn).to_be_visible(timeout=5_000)
+    expect(continue_btn).to_be_enabled()
+    continue_btn.click()
+    # … and a key-less advance must NOT write the harness-connected checkpoint
+    # (#2937 is this same handler's KEYLESS leaf — one defect, two variants).
+    # The advance now reports the server projection, so with nothing connected
+    # it lands on the honest not-connected done step and the exit is still
+    # reachable (the user is never trapped).
+    expect(page.locator(".harness-families")).to_have_count(0, timeout=10_000)
+    # #3428 (review cycle 1 P1-3): assert the VISIBLE final screen, not the
+    # unscoped body — the step label also lives in the sr-only step
+    # announcement, so a body-wide assertion cannot falsify a `.done`-body
+    # regression. (cycle 6 item 2: the label is now "No connection observed yet".)
+    expect(page.locator(".welcome-title")).to_have_text("No connection observed yet", timeout=10_000)
+    expect(page.locator("div.done")).to_contain_text("We haven't seen your agent's first write through its Tortoise tools yet")
+    assert not any(c.get("step") == "harness-connected" for c in cap["checkpoint"]), \
+        f"#2937/#3428: a key-less advance must NOT write the checkpoint: {cap['checkpoint']}"
+    expect(page.locator(".wizard-actions").get_by_role(
+        "button", name="Go to dashboard")).to_be_visible(timeout=10_000)
 
 
 def test_codex_desktop_hides_the_key_mode_pills(page: Page) -> None:
@@ -839,7 +989,13 @@ def test_3218_multi_part_procedures_render_a_numbered_step_three(page: Page) -> 
     restart + verify) and Claude Web/Desktop's has two (add the connector,
     then hand Claude the workflows). Each part is its own numbered block — the
     second one used to be a bare caption inside block 2, so the circles said
-    (1, 2) while the user had three things to do."""
+    (1, 2) while the user had three things to do.
+
+    #2865 interaction: Claude Web/Desktop are now key-less OAuth, so their
+    KEY block is gone — the two user-visible parts are (1) add the connector
+    and (2) the workflows prompt. #3218's invariant is preserved (the prompt
+    hand-off is its own numbered block, not a caption buried in block 1); only
+    the count drops from #3218's keyed three to the key-less two."""
     _seed_cookie(page, "u-3218")
     _wire(page, role="owner")
     _walk_to_connect(page)
@@ -853,13 +1009,15 @@ def test_3218_multi_part_procedures_render_a_numbered_step_three(page: Page) -> 
     assert titles[1].endswith("Set up Pi"), titles
     assert titles[2].endswith("Restart Pi and verify"), titles
 
-    # Claude Web: 1 key → 2 Add the Claude Web connector → 3 the workflows prompt
+    # Claude Web: #2865 made this leaf key-less OAuth, so there is no key
+    # block — 1 Add the Claude Web connector → 2 the workflows prompt.
     page.get_by_role("button", name="Claude", exact=True).click()
     page.get_by_role("button", name="Claude Web").click()
     titles = page.locator(".wizard-block-title").all_inner_texts()
-    assert len(titles) == 3, f"Claude Web must render three numbered blocks, got {titles}"
-    assert titles[1].endswith("Add the Claude Web connector"), titles
-    assert titles[2].endswith("Give Claude the Tortoise workflows"), titles
+    assert len(titles) == 2, \
+        f"key-less Claude Web must render two numbered blocks, got {titles}"
+    assert titles[0].endswith("Add the Claude Web connector"), titles
+    assert titles[1].endswith("Give Claude the Tortoise workflows"), titles
 
     # Claude Code is a single-prompt flow — the circles stay (1, 2).
     page.get_by_role("button", name="Claude Code").click()
@@ -948,3 +1106,224 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     assert any(c.get("step") == "catalog-presented" for c in cap["checkpoint"]), \
         f"catalog-presented not marked: {cap['checkpoint']}"
     assert cap["org_create"] == [], f"#2323 violated: org_create fired: {cap['org_create']}"
+
+
+# ── #3428/#2937 (lane B3, review cycle 2 P2-2): runtime coverage for the ──
+# Connected branch and its derived capture tense. Before this seam the GET
+# /v1/onboarding/state call was unmocked and 401'd, so `serverHarnessConnected`
+# was always false and the whole success screen was only pinned by source text.
+def _connected_projection(*, receipt: str | None = None) -> dict:
+    """A server-observed connection for GET /v1/onboarding/state.
+
+    `completed_steps` carries `harness-connected`; `session_recording` is ON so
+    "no sentence" on a key-less leaf is a TRUTH decision (no capture install
+    path), never a missing-capability accident. `receipt` names the harness
+    whose capture receipt was observed. The projection must be WRAPPED by
+    `_wire` (`{"onboarding": …}`) — the app reads `st.onboarding`.
+
+    `fork` is deliberately ABSENT: a projection carrying it disables the fork
+    card's option buttons (set-once), so `_walk_to_connect`'s own pick would be
+    a click on a disabled control. The wizard's local fork choice does not need
+    it, and `serverHarnessConnected` reads `completed_steps` only.
+    """
+    proj = {"org_id": "team_o", "status": "active",
+            "onboarding_complete": False,
+            "completed_steps": ["team-named", "harness-connected"],
+            "session_recording": True}
+    if receipt:
+        proj[f"session_capture_receipt_{receipt}"] = True
+    return proj
+
+
+def _advance_to_done(page: Page) -> None:
+    """Land on step 3 from the connect step's skip escape (the done step's
+    body is gated on the SERVER projection, so how we advanced does not
+    matter — this keeps the capture-tense tests focused on the projection)."""
+    page.get_by_role("button", name="Skip for now").click()
+    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+
+
+def test_connected_screen_states_capture_in_present_tense_on_an_observed_receipt(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 2 P2-2a): a per-harness capture
+    RECEIPT is the only state in which the owner-approved present-tense sentence
+    is truthful. Runtime-proven here (it was source-pinned before)."""
+    _seed_cookie(page, "u-b3-receipt")
+    _wire(page, role="owner",
+          onboarding_projection=_connected_projection(receipt="claude"))
+    _walk_to_connect(page)
+    _advance_to_done(page)
+    expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
+    done = page.locator("div.done")
+    expect(done).to_contain_text("Connected", timeout=10_000)
+    expect(done).to_contain_text("Tortoise is capturing your agent's sessions.")
+    assert "will capture your agent's sessions" not in done.inner_text(), \
+        "a receipt must yield the PRESENT tense, never the future one"
+
+
+def test_connected_screen_states_capture_in_future_tense_without_a_receipt(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 2 P2-2b): `harness-connected` with
+    capture available but NO receipt must state what WILL happen and must NOT
+    print the present-tense sentence."""
+    _seed_cookie(page, "u-b3-no-receipt")
+    _wire(page, role="owner", onboarding_projection=_connected_projection())
+    _walk_to_connect(page)
+    _advance_to_done(page)
+    expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
+    done = page.locator("div.done")
+    expect(done).to_contain_text("Connected", timeout=10_000)
+    expect(done).to_contain_text("Tortoise will capture your agent's sessions.")
+    assert "Tortoise is capturing your agent's sessions." not in done.inner_text(), \
+        "no receipt means the present-tense claim is false"
+
+
+def test_keyless_no_capability_leaf_prints_no_capture_sentence(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 2 P2-2c): Claude Web has
+    `HARNESS_CAPTURE_SUPPORT === false` (no live install path), so even a
+    server-observed connection prints NO capture sentence — present or future."""
+    _seed_cookie(page, "u-b3-web")
+    _wire(page, role="member",
+          onboarding_projection=_connected_projection(receipt="claude-web"))
+    _walk_to_connect(page)
+    page.get_by_role("button", name=re.compile("Claude Web")).click()
+    page.get_by_role(
+        "button", name=re.compile(r"I've connected it — Continue")).click()
+    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    expect(page.locator(".welcome-title")).to_have_text("You're all set", timeout=10_000)
+    done = page.locator("div.done")
+    expect(done).to_contain_text("Connected", timeout=10_000)
+    text = done.inner_text()
+    # review cycle 3 (P2-1): assert the STEM shared by BOTH tenses — the
+    # present-tense sentence carries "capturing your agent's sessions" and the
+    # future-tense one "capture your agent's sessions", so a future-tense leak
+    # used to stay green under the present-only pin.
+    assert "your agent's sessions" not in text, \
+        f"#3428: a leaf with no capture install path must print no claim, present or future: {text}"
+
+
+def test_build_fork_done_step_never_claims_a_harness_or_filing(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 2 P1-2): the build fork's step 2 is
+    the SDK call (POST /v1/points), which files NO onboarding step — so the
+    self-fork body ("hasn't filed anything … head back to Claude Code") is
+    false the moment the user runs the wizard's own curl, and names a harness
+    this branch never offered. The build leaf must say neither.
+
+    (The server-side gap — a REST-first org has no server-observed completion
+    signal — is a separate defect, filed by the lane orchestrator.)"""
+    _seed_cookie(page, "u-b3-build")
+    _wire(page, role="owner")  # GET unmocked → nothing connected
+    _walk_to_fork(page)
+    page.get_by_role("button", name=re.compile("Build an application on top")).click()
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
+    _advance_to_done(page)
+    # review cycle 5 (item 5): the build fork's SKIP path must not fall through
+    # to a categorical paused arm above a body that refuses to claim it — this
+    # <h1> assertion is what keeps the ordering from silently regressing.
+    # review cycle 6 (item 2): the observation phrasing is now the ONLY paused
+    # string (the self fork prints it too), so this pins the shared wording.
+    expect(page.locator(".welcome-title")).to_have_text(
+        "Setup paused — no connection observed yet", timeout=10_000)
+    text = page.locator("div.done").inner_text()
+    assert "we can't tell it's connected yet" in text, \
+        f"the build body must state the honest not-observed case: {text!r}"
+    assert "hasn't filed anything" not in text, \
+        f"#3428 P1-2: the build fork's REST call files a point — this is false: {text!r}"
+    assert "Claude Code" not in text, \
+        f"#3428 P1-2: the build branch never offers a harness: {text!r}"
+    # review cycle 6 (item 10/T3): the `harness-connected` checkpoint assertion
+    # that used to sit here was VACUOUS — `_advance_to_done()` clicks "Skip for
+    # now", which is state-only and never POSTs a checkpoint, so it could not
+    # fail by construction. The deleted writer is covered by the real
+    # advance-path controls (the owner connect-step Continue test and the
+    # key-less member-advance test) and structurally by
+    # wizardConnectTripwire.test.js + distBundle.test.js.
+    # review cycle 3 (P1-E + P1-F): the not-connected body may not point at a
+    # REST call this branch never rendered (the curl is key-gated) nor at the
+    # fork-aware Setup guide, whose only affordance re-enters the wizard at step
+    # 0 — always the SDK branch for a build-fork org.
+    assert "/v1/points" in text, \
+        f"#3428 P1-E: the endpoint must be named, not left as a deictic: {text!r}"
+    assert "REST call above" not in text, \
+        f"#3428 P1-E: the no-key branch renders no REST call above: {text!r}"
+    assert "Setup Guide" not in text, \
+        f"#3428 P1-F/P2-10: the unreachable location claim must be gone (and the canonical spelling is 'Setup guide'): {text!r}"
+
+
+def test_unsure_fork_done_step_names_no_harness(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 3 P1-A): the 'unsure' fork answer
+    advances straight to step 3, so step 2's harness chooser NEVER renders — yet
+    `wizardHarness` keeps its untouched 'claude' default. Naming Claude there is
+    the build-fork defect ("names a harness the branch never offered")."""
+    _seed_cookie(page, "u-b3-unsure")
+    _wire(page, role="owner")  # GET unmocked → nothing connected
+    _walk_to_fork(page)
+    page.get_by_role("button", name="Not sure yet — decide later").click()
+    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    text = page.locator("div.done").inner_text()
+    # review cycle 6 (item 9): assert the REDIRECT clause, not the substring
+    # "your agent" — the static body already contains "your agent's first write
+    # through its Tortoise tools yet", so the old assertion could not fail. MUTATION: if `doneHarnessName`
+    # leaked a real harness on the no-picker fork (e.g. 'Cursor'), this clause
+    # disappears while the adjacent 'Claude' check would still pass.
+    assert "head back to your agent" in text, \
+        f"#3428 P1-A: with no picker the harness degrades to the neutral phrase: {text!r}"
+    assert "Claude" not in text, \
+        f"#3428 P1-A: the unsure fork never offered Claude: {text!r}"
+    assert "Settings → Setup guide" in text, \
+        f"#3428 P2-10: the canonical surface name is 'Setup guide': {text!r}"
+
+
+def test_member_done_step_remedy_asks_for_an_api_key(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 3 P1-D): a member cannot mint, and the
+    connect step's procedure block is key-gated — so a member on a KEYED leaf
+    sees only the paste escape. The not-connected remedy must name the one action
+    they have, not a Setup-guide command they can never see."""
+    _seed_cookie(page, "u-b3-member")
+    _wire(page, role="member")  # GET unmocked → nothing connected
+    _walk_to_connect(page)
+    _advance_to_done(page)
+    text = page.locator("div.done").inner_text()
+    assert "ask an owner or admin for an API key" in text, \
+        f"#3428 P1-D: a member is told the action they can actually take: {text!r}"
+    assert "(running it creates a fresh key)" not in text, \
+        f"#3428 P1-D: a member cannot mint, so this clause is false: {text!r}"
+
+
+def test_member_unsure_done_step_uses_the_neutral_remedy(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 4 item 12): a MEMBER who answers
+    'unsure' never establishes a harness pick (the fork stays None), so
+    `wizardHarness` keeps its untouched 'claude' default. Deriving the remedy
+    from it told the member to "ask an owner or admin for an API key" for a
+    surface this branch never offered; the neutral arm must print instead."""
+    _seed_cookie(page, "u-b3-member-unsure")
+    _wire(page, role="member")  # GET unmocked → nothing connected
+    _walk_to_fork(page)
+    page.get_by_role("button", name="Not sure yet — decide later").click()
+    expect(page.locator("div.done")).to_be_visible(timeout=10_000)
+    text = page.locator("div.done").inner_text()
+    assert "ask an owner or admin for an API key" not in text, \
+        f"#3428 item 12: no pick was established, so the member must not be sent for a key: {text!r}"
+    assert "(running it creates a fresh key)" not in text, \
+        f"#3428 item 12: no pick was established, so no fresh key may be promised: {text!r}"
+    assert "Settings → Setup guide" in text, \
+        f"#3428 item 12: the neutral arm names the surface every branch reaches: {text!r}"
+    assert "Claude" not in text, \
+        f"#3428 item 12: the unsure fork never offered Claude: {text!r}"
+
+
+def test_wizard_mint_cap_done_step_drops_the_fresh_key_clause(page: Page) -> None:
+    """#3428/#2937 (lane B3, review cycle 3 P2-7): the wizard's OWN mint 402 sets
+    `wizardDurableError`, not the Keys-tab `capNotice` — so an owner who hit the
+    cap inside the wizard must not still be told a fresh key will be created."""
+    _seed_cookie(page, "u-b3-cap")
+    _wire(page, role="owner", mint_status=402,
+          mint_error_detail="You've reached your plan's limit of 2 API keys.")
+    _walk_to_connect(page)
+    page.get_by_role("button", name="Create an API key").click()
+    expect(page.locator('[role="alert"]').first).to_be_visible(timeout=10_000)
+    _advance_to_done(page)
+    text = page.locator("div.done").inner_text()
+    assert "(running it creates a fresh key)" not in text, \
+        f"#3428 P2-7: the wizard's cap 402 means no fresh key can be created: {text!r}"
+    assert "Settings → Setup guide" in text, \
+        f"#3428 P2-7: the cap arm still names the setup guide: {text!r}"

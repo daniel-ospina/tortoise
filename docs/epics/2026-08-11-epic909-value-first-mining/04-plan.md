@@ -630,7 +630,7 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 ### 5.3 Deployment topology
 
 - **Local:** pip SDK + CLI/extension on the user's machine; BYOK provider key from user env/config; extraction never leaves the machine; the derived commit is the only network egress (plus telemetry).
-- **Hosted:** FastAPI (existing hosted_api.py) behind existing auth (tt_ keys, `get_current_team`); graph = existing FalkorDB tenant namespace; no new services. The `:CommitRecord` label is the ONLY new graph artifact (replay/adjudication state, §4.1). Hold queue = response semantics + Session counters (client-side items, PL3).
+- **Hosted:** FastAPI (existing hosted_api.py) behind existing auth (tt_ keys, `get_current_org`); graph = existing FalkorDB tenant namespace; no new services. The `:CommitRecord` label is the ONLY new graph artifact (replay/adjudication state, §4.1). Hold queue = response semantics + Session counters (client-side items, PL3).
 - **Consumers of the commit endpoint (enumerated):** SDK `commit_session` (dev machines, CI), capture extension cloud path; **self-hosted deployments** = run `hosted_api` locally (the endpoint is part of the existing selfhost surface) — there is NO local-graph-write fallback for derived commits in v1; `capture_session` remains the local-only capture for self-hosts without the endpoint (extraction is LLM-default; the regex path was removed as a product path by #822).
 - **Eval:** standalone scripts + GitHub Actions CI (Layer-1 blockers + watch-gate reports + minimum-signal assertions); gold set lives in the repo. **Drift monitor:** a small scheduled job consumes commit-endpoint telemetry (the telemetry block lands in the existing telemetry/analytics store) and runs the rolling N=20 live-floor watch → alert on <90% (R8 build order item 5; slice 8).
 
@@ -658,7 +658,7 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 
 ```text
 POST /v1/sessions/commit
-Auth: tt_ key (get_current_team) — same as POST /v1/sessions
+Auth: tt_ key (get_current_org) — same as POST /v1/sessions
 
 Request body (derived payload — NO raw conversation, NO user key):
 {

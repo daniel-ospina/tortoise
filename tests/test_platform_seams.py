@@ -679,10 +679,10 @@ class TestVolunteerTrustBoundary:
         A stored file identity (different host) must NOT win over the env
         pair for env-identity surfaces (team info reads the shared resolver)."""
         env_stub = type("EnvStub", (_RecordingStub,), {
-            "body": {"team_id": "team-e", "tier": "free", "point_count": 0},
+            "body": {"org_id": "team-e", "tier": "free", "point_count": 0},
             "hits": []})
         file_stub = type("FileStub", (_RecordingStub,), {
-            "body": {"team_id": "team-f", "tier": "free", "point_count": 0},
+            "body": {"org_id": "team-f", "tier": "free", "point_count": 0},
             "hits": []})
         with _stub_server(env_stub) as env_url, _stub_server(file_stub) as file_url:
             home = tmp_path / "home"

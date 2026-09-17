@@ -493,7 +493,7 @@ def tenant_factory(api, hosted_env):
         assert r.status == 200, f"register failed: {r.status} {r.text()}"
         body = r.json()
         tenant = {"email": email, "api_key": body["api_key"],
-                  "team_id": body["team_id"], "graph_name": body["graph_name"]}
+                  "org_id": body["org_id"], "graph_name": body["graph_name"]}
         created.append(tenant)
         if hosted_env["remote"]:
             pool.append(tenant)
@@ -525,7 +525,7 @@ def sign_stripe_event(event: dict, secret: str = WEBHOOK_SECRET) -> tuple[bytes,
     return body, f"t={ts},v1={sig}"
 
 
-def bump_team_tier(api, team_id: str, tier: str, *,
+def bump_team_tier(api, org_id: str, tier: str, *,
                    customer: str | None = None) -> str:
     """Drive the real webhook path to a tier bump (E2E-3-D semantics):
     checkout.session.completed binds team↔customer via client_reference_id
@@ -538,9 +538,9 @@ def bump_team_tier(api, team_id: str, tier: str, *,
         "id": f"evt_e2e_co_{uuid.uuid4().hex[:8]}",
         "type": "checkout.session.completed",
         "data": {"object": {
-            "client_reference_id": team_id,
+            "client_reference_id": org_id,
             "customer": cust,
-            "customer_details": {"email": f"e2e-{team_id[:8]}@e2e.premise-labs.dev"},
+            "customer_details": {"email": f"e2e-{org_id[:8]}@e2e.premise-labs.dev"},
         }},
     }
     body, sig = sign_stripe_event(checkout)

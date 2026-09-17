@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import math
 import re
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -77,9 +79,31 @@ def test_handler_makes_no_direct_query_call():
     )
 
 
-def test_both_probes_run_off_the_loop():
+def test_both_probes_are_dispatched_through_their_coordinators():
+    """#2850 x #2988 — ``health_ready`` must not run either plane probe inline.
+
+    The #2988 guard pinned ``asyncio.to_thread(_probe_db)``. #2850 replaced that
+    with dedicated single-flight coordinators on a private daemon worker, which
+    is strictly stronger: ``to_thread`` rides the SHARED default executor, so a
+    timed-out probe leaks a worker out of the pool every other request depends
+    on, and the submission queue is unbounded. The INVARIANT this pins is
+    unchanged — the handler must not perform the synchronous network I/O itself
+    — so the mechanism pin moves with the mechanism instead of being dropped.
+    """
     node = _handler("health_ready")
-    off_loop = {
+    dispatched = {
+        call.func.value.id
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "run"
+        and isinstance(call.func.value, ast.Name)
+    }
+    assert {"_READY_PROBE", "_CONTROL_PLANE_PROBE"} <= dispatched, (
+        f"probes not dispatched through their coordinators (found {sorted(dispatched)})"
+    )
+    # No to_thread fallback for the plane probes may creep back in.
+    inline = [
         arg.id
         for call in ast.walk(node)
         if isinstance(call, ast.Call)
@@ -87,108 +111,427 @@ def test_both_probes_run_off_the_loop():
         and call.func.attr == "to_thread"
         for arg in call.args
         if isinstance(arg, ast.Name)
-    }
-    assert {"_probe_db", "_probe_control_plane"} <= off_loop, (
-        f"probes not dispatched with asyncio.to_thread (found {sorted(off_loop)})"
-    )
-
-
-def test_every_off_loop_probe_is_bounded():
-    """Dispatching off the loop keeps the process alive; the bound is what makes
-    the endpoint ANSWER when a plane black-holes. Without it a hung probe still
-    leaks an executor thread per request."""
-    node = _handler("health_ready")
-    parents = _parents(node)
-    unbounded = []
-    for call in ast.walk(node):
-        if not (
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and call.func.attr == "to_thread"
-        ):
-            continue
-        walker, inside = call, False
-        while walker in parents:
-            walker = parents[walker]
-            if (
-                isinstance(walker, ast.Call)
-                and isinstance(walker.func, ast.Attribute)
-                and walker.func.attr == "wait_for"
-            ):
-                inside = True
-                break
-        if not inside:
-            unbounded.append(call.lineno)
-    assert not unbounded, (
-        f"to_thread at line(s) {unbounded} is not wrapped in asyncio.wait_for — "
-        "a black-holed probe would be waited on indefinitely (#2988)"
-    )
-    # Non-vacuity: with NO to_thread calls the check above passes trivially.
-    # (test_both_probes_run_off_the_loop catches that, but each pin should stand
-    # on its own — a vacuous guard is a guard that silently stops guarding.)
-    dispatched = [
-        call
-        for call in ast.walk(node)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr == "to_thread"
     ]
-    assert len(dispatched) >= 2, (
-        f"expected the data-plane and control-plane probes dispatched off the loop, "
-        f"found {len(dispatched)} to_thread call(s)"
+    assert "_probe_db" not in inline and "_probe_control_plane" not in inline, (
+        f"a plane probe is dispatched via the SHARED default executor ({sorted(inline)}) — "
+        "use the dedicated HealthProbe coordinators instead"
     )
 
 
-def test_wait_for_uses_the_module_bound():
-    node = _handler("health_ready")
-    uses = [
-        kw
-        for call in ast.walk(node)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr == "wait_for"
-        for kw in call.keywords
-        if kw.arg == "timeout" and isinstance(kw.value, ast.Name)
-    ]
-    assert uses, "no wait_for(...) pins the module-level probe bound"
-    assert all(kw.value.id == "_READY_PROBE_TIMEOUT_S" for kw in uses), (
-        "the probe bound must be the module constant, so it can be reasoned "
-        "about (and tested) in one place"
+# Repo-owned POLICY ceiling for /health/ready's SEQUENTIAL worst case
+# (``DB_PROBE_HARD_TIMEOUT + CONTROL_PLANE_HARD_TIMEOUT``).
+#
+# This is deliberately NOT derived from fly.toml. The historical proxy was that
+# file's 15s ``[[services.http_checks]] timeout`` — removed by #2850 (2026-09-10)
+# because the /health HTTP check flapped and de-registered the sole machine. Its
+# successor is a TCP check whose 5s timeout times a KERNEL accept and is
+# documented as "generous headroom, not a latency budget", and deploy-hosted.yml
+# curls /health/ready with no ``--max-time`` at all. So there is no longer ANY
+# external quantity this can be compared against.
+#
+# Deleting the assertion instead would have silently unbounded the sum: the
+# per-plane asserts below compare each bound to its own inner total, so doubling
+# CONTROL_PLANE_HARD_TIMEOUT would pass every remaining assertion. Keeping an
+# explicit policy constant preserves that tripwire without pretending the number
+# is deploy-derived. 15.0s is the budget the old routing check implied; revisit
+# when a real deadline exists (add ``--max-time`` to that curl — #2850 follow-up).
+READY_WORST_CASE_BUDGET_S = 15.0
+
+
+def _fly_check_budget_proxy_s() -> float | None:
+    """fly.toml's configured ``[[services.http_checks]] timeout``, in seconds.
+
+    NOTE this check targeted ``/health`` — pure in-memory — NOT ``/health/ready``.
+    It was borrowed only as a coarse, repo-owned BUDGET PROXY for the readiness
+    surface: ``deploy-hosted.yml`` curls ``/health/ready`` with no
+    ``--max-time``, so there is no real deadline for it anywhere.
+
+    Returns ``None`` ONLY when fly.toml genuinely configures no ``http_checks``
+    at all (the deliberate #2850 migration). EVERY other state that leaves the
+    budget configured-but-unusable RAISES.
+
+    Collapsing those into ``None`` would silently disarm the ceiling: the
+    caller's ``else`` branch passes whenever ``tcp_checks`` is present, so
+    "budget absent" and "budget unreadable" must never share a return value.
+    A typo like ``timeout = "15x"`` — or a non-finite ``inf``, which would make
+    ``ready_worst_case < ceiling`` trivially true — has to FAIL LOUDLY rather
+    than quietly skip the assertion this test exists to make.
+    """
+    path = REPO / "fly.toml"
+    assert path.exists(), (
+        f"fly.toml is missing at {path} — cannot read the health budget proxy"
     )
+    try:
+        services = tomllib.loads(path.read_text())["services"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AssertionError(
+            f"fly.toml has no readable services block ({exc!r}) — the "
+            "cross-endpoint ceiling cannot be evaluated"
+        ) from exc
+    # This proxy reads ``services[0]``. If fly.toml ever grows a second
+    # [[services]] block carrying the http_checks budget, services[0] would
+    # have none, the guard below would return None, and the caller's else
+    # branch (which only asks services[0] for tcp_checks) would pass — the
+    # same silent disarm, reached a different way. Pin the single-service
+    # assumption so an unexpected shape fails loudly instead.
+    assert isinstance(services, list) and len(services) == 1, (
+        "fly.toml must define exactly ONE [[services]] block for the "
+        f"cross-endpoint budget proxy to be meaningful; found {services!r}"
+    )
+    svc = services[0]
+    assert isinstance(svc, dict), (
+        f"fly.toml services[0] is not a table ({svc!r}) — the cross-endpoint "
+        "ceiling cannot be evaluated"
+    )
+    # #2850 (2026-09-10) removed [[services.http_checks]] deliberately: the
+    # /health HTTP check flapped and de-registered the sole machine, costing
+    # ~35 min of unreachability while the process was alive on loopback. It
+    # was replaced by [[services.tcp_checks]], whose ``timeout`` (5s) is
+    # documented in fly.toml as "generous headroom, not a latency budget" —
+    # it times a KERNEL accept, not an application response, so borrowing it
+    # as a /health/ready budget proxy would be a different quantity entirely
+    # (and smaller than the ready worst case, so it cannot serve as a ceiling).
+    # There is consequently NO HTTP-check budget left to compare against here.
+    # The deferred top-level ``[checks.loop_liveness]`` does NOT restore one:
+    # it is a loop-liveness check (fly.toml documents its timeout as 5s, below
+    # the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
+    # ``services[0].http_checks`` one, and this reader does not consume it. The
+    # cross-endpoint bound now lives in ``READY_WORST_CASE_BUDGET_S``, and the
+    # caller's else branch fails closed if any top-level ``[checks]`` appears.
+    if "http_checks" not in svc:
+        return None
+    try:
+        raw = svc["http_checks"][0]["timeout"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise AssertionError(
+            "fly.toml configures http_checks but its [0].timeout is unreadable "
+            f"({svc['http_checks']!r}) — the cross-endpoint ceiling is "
+            "being silently disarmed; fix the reader or the config"
+        ) from exc
+    try:
+        raw_text = str(raw).strip()
+        # Strip a SINGLE trailing unit; only an exact one is a Fly duration.
+        if raw_text.endswith("s"):
+            raw_text = raw_text[:-1]
+        # Reject anything that is not a plain decimal. The old
+        # ``float(str(raw).rstrip("s"))`` was far too lenient: ``rstrip`` strips
+        # a CHARACTER SET, so "15ss" -> "15", and ``float`` also accepts
+        # "1_000" and "1e3". Leading/trailing whitespace IS still trimmed
+        # before this check (deliberate normalization of a TOML string); the
+        # point of the regex is the numeric shape, not the padding.
+        assert re.fullmatch(r"\d+(?:\.\d+)?", raw_text), (
+            f"fly.toml http_check timeout {raw!r} is not a plain duration — the "
+            "cross-endpoint ceiling is being silently disarmed"
+        )
+        value = float(raw_text)
+    except AssertionError:
+        raise
+    except ValueError as exc:
+        raise AssertionError(
+            f"fly.toml http_check timeout {raw!r} is not a duration ({exc!r}) — "
+            "the cross-endpoint ceiling is being silently disarmed"
+        ) from exc
+    # A non-finite budget is WORSE than a malformed one: ``ready_worst_case <
+    # inf`` is trivially true, so the ceiling would pass while bounding nothing.
+    # ``nan`` happens to fail loudly on the comparison, but reject both rather
+    # than depend on which side of the operator it lands.
+    assert math.isfinite(value), (
+        f"fly.toml http_check timeout {raw!r} parses to a non-finite value "
+        f"({value!r}) — the cross-endpoint ceiling would be silently disarmed"
+    )
+    return value
 
 
-def test_probe_bound_is_strictly_above_the_client_timeout():
-    """The bound is a SAFETY NET, not the mechanism.
+def test_every_plane_probe_is_hard_bounded_and_fail_closed():
+    """The bound is what makes the endpoint ANSWER when a plane black-holes.
 
-    ``asyncio.wait_for`` cancels the await, not the worker thread. If the outer
-    bound can win the race against the probe client's own timeout, every
-    timed-out request leaves a thread in its socket read (measured: 16
-    concurrent timeouts starve the shared executor). Keeping the outer bound
-    strictly above the inner one makes the client timeout fire first, so the
-    thread returns by itself.
-
-    The earlier version of this test asserted the bound was below Fly's 15s
-    /health timeout — a constraint that does not exist, because Fly checks
-    /health, never /health/ready. It guarded nothing.
+    The bound now lives on each ``HealthProbe`` rather than in a per-handler
+    ``wait_for``, so pin BOTH the single-source-of-truth equality (the signature
+    default IS the shared module constant) AND the ordering property (it clears
+    the DB probes' loose outer-alignment bound — ``PROBE_DB_TOTAL_TIMEOUT`` is
+    deliberately an OVER-ESTIMATE of the probes' real total, NOT that total —
+    plus the nominal SDK-acquisition budget), plus each plane's fail-closed flag
+    and the liveness refresher's alignment. ``_READY_PROBE_TIMEOUT_S`` is gone
+    with the mechanism it bounded; a reintroduced per-handler literal would be
+    an unreasoned second source of truth.
     """
     import inspect
 
     import tortoise.hosted_api as mod
-    from tortoise.monitoring import PROBE_TIMEOUT
-    from tortoise.supabase_control import SupabaseControlPlane
-
-    bound = float(re.search(r"_READY_PROBE_TIMEOUT_S = ([\d.]+)", HOSTED_API.read_text()).group(1))
-    assert bound == mod._READY_PROBE_TIMEOUT_S
-
-    client_timeout = inspect.signature(SupabaseControlPlane.__init__).parameters["timeout"].default
-    assert bound > client_timeout, (
-        f"_READY_PROBE_TIMEOUT_S ({bound}) must be strictly above the control-plane "
-        f"client timeout ({client_timeout}) or the outer bound wins the race and "
-        "leaks an executor worker per timed-out request (#2988)"
+    from tortoise.monitoring import (
+        PROBE_DB_TOTAL_TIMEOUT,
+        PROBE_HARD_TIMEOUT,
+        PROBE_SDK_ACQUISITION_BUDGET,
     )
-    assert bound > PROBE_TIMEOUT, (
-        f"_READY_PROBE_TIMEOUT_S ({bound}) must be above probe_db's own bound "
-        f"({PROBE_TIMEOUT}) for the same reason"
+
+    default = inspect.signature(mod.HealthProbe.__init__).parameters["timeout"].default
+    # (1) SINGLE-SOURCE-OF-TRUTH PIN. The signature default must BE the shared
+    # module constant, not a hand-typed literal: a safe-LOOKING literal (a
+    # reviewer proved ``6.0``) satisfies the ordering property below while
+    # silently diverging from the constant the module derives and documents.
+    assert default == PROBE_HARD_TIMEOUT, (
+        "HealthProbe's default wall bound must be the shared module constant "
+        f"PROBE_HARD_TIMEOUT ({PROBE_HARD_TIMEOUT}s), not a hand-typed literal "
+        f"(got {default}s)"
+    )
+    # (2) ORDERING PROPERTY. The default must clear the DB probes' loose
+    # outer-alignment bound (``PROBE_DB_TOTAL_TIMEOUT`` — deliberately an
+    # OVER-ESTIMATE of probe_db's real total, NOT the exact inner total — plus
+    # the nominal SDK-acquisition budget). Necessary but NOT sufficient: the
+    # embedded acquisition prefix is unbounded, so this is a best-effort
+    # alignment, not a proven invariant (see monitoring.PROBE_MAX_SUPERSEDES).
+    inner_total = PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
+    assert default > inner_total, (
+        f"HealthProbe's default wall bound ({default}s) does not clear the DB "
+        f"probes' loose outer-alignment bound ({inner_total}s — an OVER-ESTIMATE, "
+        "not the exact total) — an omitted timeout "
+        "strands a worker thread on every timeout (#2988)"
+    )
+    assert "_READY_PROBE_TIMEOUT_S" not in HOSTED_API.read_text(), (
+        "the superseded per-handler readiness bound is back — the bound belongs "
+        "to HealthProbe (one reasoned place)"
+    )
+    for name in ("_READY_PROBE", "_CONTROL_PLANE_PROBE"):
+        probe = getattr(mod, name)
+        assert probe._timeout > 0, f"{name} has no usable bound"
+        assert probe._fresh_only is True, (
+            f"{name} must be fresh_only=True — readiness is a FAIL-CLOSED gate and "
+            "must never answer 200 from a verdict older than its read budget (#1384/#2850)"
+        )
+    # ``_HEALTH_PROBE`` is the NON-fresh refresher that feeds /health
+    # (``fresh_only`` is False BY DESIGN), so it cannot join the loop above —
+    # assert its ordering SEPARATELY, and pin the identity too. The ordering
+    # check alone is satisfied by the class DEFAULT, so it cannot catch an
+    # accidental drop of ``timeout=DB_PROBE_HARD_TIMEOUT`` from the
+    # construction. Only _READY_PROBE used to be pinned at all.
+    assert mod._HEALTH_PROBE._timeout == mod.DB_PROBE_HARD_TIMEOUT, (
+        "the /health refresher must pass the explicit DB_PROBE_HARD_TIMEOUT — "
+        "the ordering assertion below is satisfied by the class default too, "
+        "so it cannot catch a dropped timeout= on its own"
+    )
+    assert mod._HEALTH_PROBE._timeout > inner_total, (
+        f"/health's refresher bound ({mod._HEALTH_PROBE._timeout}s) must clear "
+        f"_probe_db's loose outer-alignment bound ({inner_total}s = the "
+        f"over-estimate PROBE_DB_TOTAL_TIMEOUT {PROBE_DB_TOTAL_TIMEOUT}s + the "
+        f"{PROBE_SDK_ACQUISITION_BUDGET}s nominal SDK-acquisition budget), or it "
+        "abandons a live worker on every timeout (#2988). This is alignment, "
+        "not proof: the embedded acquisition prefix is unbounded."
+    )
+
+
+def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
+    """The #2988 layered-timeout ALIGNMENT, expressed PER PLANE.
+
+    Abandoning a probe does not stop its thread — ``wait_for`` cancels the
+    awaitable, not the worker (CPython #87185), so the worker stays parked in
+    its socket read. The defence is ordering: keep the outer bound ABOVE the
+    probe's loose inner figure (``PROBE_DB_TOTAL_TIMEOUT`` — deliberately an
+    OVER-ESTIMATE, not the exact inner total), so the inner bound normally fires
+    first and the thread returns by itself. This is a best-effort ALIGNMENT
+    that reduces stranding, NOT a proven invariant — the inner worst case is
+    unbounded (httpx's ``read`` is per-read; the embedded acquisition prefix
+    runs real queries bounded by the redis read timeout).
+
+    #2850 initially INVERTED this (2s outer vs a 5s inner on the control plane)
+    and leaned on ``PROBE_MAX_SUPERSEDES`` instead. That rationale was
+    overstated: the supersede counter RESETS on any live completion, so it caps
+    a single wedge episode rather than the process lifetime. Both properties
+    are now asserted at once — each bound is above its own loose inner figure
+    (an OVER-ESTIMATE of the inner total, not the exact one) — AND the probe
+    still runs on a dedicated coordinator rather than the shared default pool.
+
+    This test is THE canonical per-plane tripwire (the structural test above
+    deliberately does not duplicate these predicates): raise a PHASE in
+    ``CONTROL_PLANE_PROBE_PHASES`` above its plane's bound and it fails. (It
+    does NOT cover the client-level ``SupabaseControlPlane(timeout=...)``
+    default — that is per-phase too, which is why the probe overrides it
+    per-request rather than relying on it.)
+
+    2026-09-13 (#3458): the cross-endpoint ceiling is asserted in TWO parts.
+    (1) UNCONDITIONALLY, ``ready_worst_case < READY_WORST_CASE_BUDGET_S`` — a
+    repo-owned POLICY constant (15.0s, the budget fly.toml's old routing check
+    implied). This is the part that keeps the SUM bounded: the per-plane
+    asserts above each compare a bound to its own inner total, so without it a
+    change doubling ``CONTROL_PLANE_HARD_TIMEOUT`` would pass everything.
+    (2) Additionally, ``ready_worst_case < fly.toml's http_check timeout`` WHEN
+    fly.toml exposes one. #2850 removed ``[[services.http_checks]]`` (the
+    /health HTTP check flapped and de-registered the sole machine), so today
+    the only external bound is the TCP replacement — whose 5s timeout is
+    documented as headroom, not a latency budget, and cannot serve as a
+    ceiling. When no http_check budget exists the test asserts instead that the
+    documented replacement (``[[services.tcp_checks]]``) IS present and that no
+    top-level ``[checks]`` table has appeared — so removing or altering the
+    checks block reds here rather than silently passing.
+    """
+    import httpx
+
+    import tortoise.hosted_api as mod
+    import tortoise.supabase_control as sc
+    from tortoise.monitoring import PROBE_DB_TOTAL_TIMEOUT, PROBE_TIMEOUT
+
+    # Data plane: since #3143 probe_db's PLATFORM shape (no explicit
+    # allowance) has ONE caller deadline of PROBE_TIMEOUT — the #1565 retry
+    # rides the REMAINDER instead of taking a second bound — so its real total
+    # is ~PROBE_TIMEOUT. PROBE_DB_TOTAL_TIMEOUT (2 x PROBE_TIMEOUT + the retry
+    # delay) is now deliberately a LOOSE OVER-ESTIMATE kept as the
+    # outer-alignment figure a coordinator is sized ABOVE, NOT the exact inner
+    # total. The assertion still targets that loose figure on purpose: it is
+    # the STRICTER check (the readiness bound must clear the over-estimate
+    # too), so it cannot pass while the real ~1.5s total is unguarded. Bounding
+    # against the bare per-attempt figure instead is what produced the
+    # historical inversion (2.0 > 1.5 while the then-real total was ~3.1s,
+    # before #3143 made the retry ride the remainder).
+    assert mod._READY_PROBE._timeout > PROBE_DB_TOTAL_TIMEOUT, (
+        f"the FalkorDB readiness bound ({mod._READY_PROBE._timeout}s) must exceed "
+        f"probe_db's loose outer-alignment bound ({PROBE_DB_TOTAL_TIMEOUT}s = 2 x "
+        f"{PROBE_TIMEOUT}s + the retry delay) or the outer bound wins the race and "
+        "strands a worker thread per timeout (#2988)"
+    )
+
+    # Control plane: the probe request carries its OWN composed per-request
+    # timeout whose phases SUM to CONTROL_PLANE_PROBE_TOTAL_S. Assert against
+    # that composed TOTAL — NOT SupabaseControlPlane's 5.0s constructor default,
+    # which httpx applies PER PHASE (connect/read/write/pool) and is therefore
+    # not a deadline at all: a multi-phase stall could run ~15-20s and outrun
+    # the outer bound.
+    assert mod.CONTROL_PLANE_HARD_TIMEOUT > mod.CONTROL_PLANE_PROBE_TOTAL_S, (
+        f"the control-plane bound ({mod.CONTROL_PLANE_HARD_TIMEOUT}s) must exceed the "
+        f"probe request's composed total ({mod.CONTROL_PLANE_PROBE_TOTAL_S}s) or the "
+        "outer bound wins the race and strands a worker thread (#2988)"
+    )
+    assert sum(mod.CONTROL_PLANE_PROBE_PHASES.values()) == mod.CONTROL_PLANE_PROBE_TOTAL_S, (
+        "DRIFT GUARD (NOT a bound): CONTROL_PLANE_PROBE_TOTAL_S must remain the "
+        "sum of the request's per-phase timeouts"
+    )
+    assert mod._CONTROL_PLANE_PROBE._timeout == mod.CONTROL_PLANE_HARD_TIMEOUT, (
+        "the control-plane coordinator must use the derived bound"
+    )
+
+    # Behavioural half: the composed timeout must actually reach the request.
+    # A constant nothing passes is dead code, and the client would silently keep
+    # its per-phase default.
+    seen: dict = {}
+
+    class _CapturingControlPlane:
+        def query(self, table, *, select=None, filters=None, method="GET",
+                  json_body=None, order=None, limit=None, timeout=None):
+            seen["timeout"] = timeout
+            seen["table"] = table
+            return []
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CapturingControlPlane())
+    assert mod._probe_control_plane()["ok"] is True
+    passed = seen["timeout"]
+    assert isinstance(passed, httpx.Timeout), (
+        f"the control-plane probe passed {passed!r} — it must pass a composed "
+        "httpx.Timeout, or the per-phase default stays in force"
+    )
+    assert (passed.connect + passed.read + passed.write + passed.pool) \
+        == mod.CONTROL_PLANE_PROBE_TOTAL_S, (
+        "the probe request's phases must sum to CONTROL_PLANE_PROBE_TOTAL_S"
+    )
+
+    # /health/ready runs the two planes SEQUENTIALLY, so its worst case is the
+    # sum of the two bounds. That sum is bounded UNCONDITIONALLY against the
+    # repo-owned policy ceiling below — the per-plane asserts above bound each
+    # phase against its own inner total, which does NOT bound the sum (doubling
+    # CONTROL_PLANE_HARD_TIMEOUT would pass all of them).
+    #
+    # Historically the sum was compared to fly.toml's 15s http_check timeout.
+    # #2850 (2026-09-10) removed that check, so the external proxy is gone and
+    # READY_WORST_CASE_BUDGET_S re-homes the same bound as an explicit policy
+    # constant rather than deleting the assertion. When fly.toml DOES expose an
+    # http_check budget it is checked too, as a stricter additional bound.
+    ready_worst_case = mod.DB_PROBE_HARD_TIMEOUT + mod.CONTROL_PLANE_HARD_TIMEOUT
+    assert ready_worst_case < READY_WORST_CASE_BUDGET_S, (
+        f"/health/ready's sequential worst case ({ready_worst_case}s) must stay "
+        f"under the repo-owned policy ceiling ({READY_WORST_CASE_BUDGET_S}s). "
+        "This is a POLICY constant, not deploy-derived: /health/ready is curled "
+        "by deploy-hosted.yml with no --max-time, and fly.toml's 15s http_check "
+        "was removed by #2850. Raise the constant deliberately if the bound "
+        "genuinely needs to grow; do not delete the assertion."
+    )
+    ceiling = _fly_check_budget_proxy_s()
+    if ceiling is not None:
+        # Stricter, when fly.toml happens to configure an HTTP check budget.
+        assert ready_worst_case < ceiling, (
+            f"/health/ready's sequential worst case ({ready_worst_case}s) must stay "
+            f"under fly.toml's http_check timeout ({ceiling}s), borrowed ONLY as a "
+            "coarse budget proxy for /health/ready (that check actually targets "
+            "/health, and deploy-hosted.yml curls /health/ready with no --max-time)"
+        )
+    else:
+        # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a
+        # positive assertion rather than a silent skip: it may only mean the
+        # documented HTTP->TCP migration, so the replacement must be present, and
+        # deleting the whole checks block still reds here.
+        #
+        # FAIL CLOSED on a top-level [checks] table. The deferred
+        # [checks.loop_liveness] follow-up is NOT a readiness budget (fly.toml
+        # documents its timeout as 5s — below the sum — and it times loop
+        # liveness, not a request), so it can never restore this ceiling, and
+        # nothing here reads it. If it (or any other top-level check) lands, this
+        # reds so whoever adds it must wire a real deadline in deliberately
+        # instead of silently leaving the sum unbounded.
+        _cfg = tomllib.loads((REPO / "fly.toml").read_text())
+        assert _cfg["services"][0].get("tcp_checks"), (
+            "fly.toml exposes NEITHER an http_check budget proxy NOR the "
+            "tcp_checks that replaced it (#2850) — the services checks block "
+            "was removed or altered without the documented migration"
+        )
+        assert "checks" not in _cfg, (
+            "fly.toml now defines a top-level [checks] table. The deferred "
+            "[checks.loop_liveness] is a loop-liveness check, NOT a readiness "
+            "budget, so it does not restore the cross-endpoint ceiling and this "
+            "reader does not consume it. Wire its deadline into "
+            "READY_WORST_CASE_BUDGET_S (or assert it here) rather than letting "
+            f"the sum ({ready_worst_case}s) go unbounded."
+        )
+
+
+def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
+    """The DB probes' bound is aligned above the whole worker as far as the
+    acquisition cost can be computed, not just ``probe_db``.
+
+    ``_probe_db`` is ``_probe_sdk()`` THEN ``probe_db(sdk)``. In URI mode
+    (the hosted steady state) the acquisition prefix is ~free — the SDK's
+    projection is LAZY and the connect happens inside ``probe_db``'s own
+    per-attempt bound. On the EMBEDDED path (cold ``_probe_sdk`` cache /
+    ``_probe_sdk_reset()``) the anchor path connects EAGERLY and runs real
+    queries bounded by the redis READ timeout, which the budget does NOT
+    cover. The bound is DERIVED as ``PROBE_DB_TOTAL_TIMEOUT`` +
+    ``PROBE_SDK_ACQUISITION_BUDGET`` (best-effort) — pin both the budget's
+    source (so it cannot drift from projection) and the derivation (so a
+    ``PROBE_TIMEOUT`` change propagates instead of leaving a stale hand-typed
+    literal).
+    """
+    import tortoise.hosted_api as mod
+    from tortoise.monitoring import (
+        PROBE_DB_TOTAL_TIMEOUT,
+        PROBE_HARD_TIMEOUT,
+        PROBE_SDK_ACQUISITION_BUDGET,
+    )
+    from tortoise.projection import _DB_CONNECT_TIMEOUT_DEFAULT
+
+    assert PROBE_SDK_ACQUISITION_BUDGET == _DB_CONNECT_TIMEOUT_DEFAULT, (
+        "the SDK-acquisition budget must track the redis client's default "
+        "socket_connect_timeout (projection._DB_CONNECT_TIMEOUT_DEFAULT) — a "
+        "drift makes the DB probe's bound dishonest"
+    )
+    # The bound is the SINGLE shared derived constant (hosted_api aliases it),
+    # so a PROBE_TIMEOUT change propagates instead of leaving a stale literal.
+    assert mod.DB_PROBE_HARD_TIMEOUT == PROBE_HARD_TIMEOUT, (
+        "DB_PROBE_HARD_TIMEOUT must be the shared derived bound, not a second "
+        "hand-typed literal"
+    )
+    # STRICTLY above the LOOSE outer-alignment figure (``PROBE_DB_TOTAL_TIMEOUT``
+    # — deliberately an OVER-ESTIMATE of probe_db's real total, NOT the exact
+    # inner total — PLUS the nominal acquisition budget) — equality would still
+    # be a race. This does NOT cover the embedded acquisition prefix.
+    assert mod.DB_PROBE_HARD_TIMEOUT > \
+        PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET, (
+        "DB_PROBE_HARD_TIMEOUT must sit strictly above PROBE_DB_TOTAL_TIMEOUT + "
+        "the SDK-acquisition budget, or the outer bound can win the race"
     )
 
 
@@ -317,7 +660,8 @@ def test_hung_data_plane_returns_503_within_the_bound(monkeypatch):
     import tortoise.hosted_api as mod
 
     release = threading.Event()
-    monkeypatch.setattr(mod, "_READY_PROBE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(mod._READY_PROBE, "_timeout", 0.2)
+    mod._READY_PROBE.reset()
     monkeypatch.setattr(mod, "_probe_db", lambda: release.wait(30))
 
     async def scenario():
@@ -343,7 +687,8 @@ def test_hung_control_plane_returns_503_within_the_bound(monkeypatch):
     import tortoise.supabase_control as sc
 
     release = threading.Event()
-    monkeypatch.setattr(mod, "_READY_PROBE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(mod._CONTROL_PLANE_PROBE, "_timeout", 0.2)
+    mod._CONTROL_PLANE_PROBE.reset()
     monkeypatch.setattr(mod, "_probe_db", lambda: {"ok": True, "latency_ms": 1.0, "error": None})
     monkeypatch.setattr(mod, "_probe_control_plane", lambda: release.wait(30))
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
@@ -370,7 +715,17 @@ def test_ready_when_both_planes_answer(monkeypatch):
 
     monkeypatch.setattr(mod, "_probe_db", lambda: {"ok": True, "latency_ms": 2.0, "error": None})
     called = []
-    monkeypatch.setattr(mod, "_probe_control_plane", lambda: called.append(1))
+
+    def _fake_control():
+        # #2850: the control-plane probe now RETURNS its verdict (the
+        # coordinator reads `{"ok": ...}`); under #2988 success was implied by
+        # not raising, so this stub used to return None.
+        called.append(1)
+        return {"ok": True, "latency_ms": 1.0, "error": None}
+
+    mod._CONTROL_PLANE_PROBE.reset()
+    mod._READY_PROBE.reset()
+    monkeypatch.setattr(mod, "_probe_control_plane", _fake_control)
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
 
     assert _run(mod.health_ready()) == {

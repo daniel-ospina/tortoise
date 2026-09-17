@@ -69,7 +69,7 @@ def _ok_mint(body=None):
     resp = mock.MagicMock()
     resp.read.return_value = _j.dumps(body or {
         "key": "tt_mint_000000000000000000000000000000000000000000",
-        "team_id": "team-mint-1", "team_name": "agent-mint", "graph_name": "team_team-mint-1",
+        "org_id": "team-mint-1", "org_name": "agent-mint", "graph_name": "team_team-mint-1",
         "identity": "anon-mint", "tier": "free"}).encode()
     resp.__enter__.return_value = resp
     return resp
@@ -154,7 +154,7 @@ class TestGlobalWrite:
         monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
         orphan_token = "st_" + "de" * 32
         body = {"key": "tt_orphan_000000000000000000000000000000000000000000",
-                "team_id": "team-orphan", "team_name": "agent-orphan",
+                "org_id": "team-orphan", "org_name": "agent-orphan",
                 "graph_name": "team_team-orphan", "identity": "anon-orphan",
                 "tier": "free", "signup_token": orphan_token}
         with mock.patch("urllib.request.urlopen", return_value=_ok_mint(body)), \
@@ -220,7 +220,7 @@ class TestGlobalWrite:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
         resp = mock.MagicMock()
-        resp.read.return_value = json.dumps({"team_id": "team-x"}).encode()
+        resp.read.return_value = json.dumps({"org_id": "team-x"}).encode()
         resp.__enter__.return_value = resp
         with mock.patch("urllib.request.urlopen", return_value=resp):
             rc = main._cmd_signup(mock.Mock())
@@ -294,7 +294,7 @@ class TestReuse:
         import json as _j
         resp = mock.MagicMock()
         resp.read.return_value = _j.dumps(
-            {"team_id": "team-g", "tier": "free"}).encode()
+            {"org_id": "team-g", "tier": "free"}).encode()
         resp.__enter__.return_value = resp
         return resp
 
@@ -303,7 +303,7 @@ class TestReuse:
         d.mkdir(parents=True, exist_ok=True)
         d.chmod(0o700)
         cfg = {"api_key": "tt_valid", "api_url": "https://api.premiselabs.co",
-               "team_id": "team-g", **extra}
+               "org_id": "team-g", **extra}
         (d / "credentials.json").write_text(json.dumps(cfg))
 
     def test_reuse_global_config_skips_mint(self, monkeypatch, tmp_path, capsys):
@@ -379,7 +379,7 @@ class TestReuse:
         (tmp_path / "proj").mkdir()
         monkeypatch.chdir(tmp_path / "proj")
         (tmp_path / "proj" / ".tortoise").write_text(json.dumps(
-            {"api_key": "tt_old", "api_url": "https://api.premiselabs.co", "team_id": "team-old"}))
+            {"api_key": "tt_old", "api_url": "https://api.premiselabs.co", "org_id": "team-old"}))
         side_effects = [HTTPError("https://api.premiselabs.co/v1/team", 401, "u", {},
                                   io.BytesIO(b'{}')),
                         _ok_mint()]
@@ -734,9 +734,9 @@ class TestReuse:
         err = capsys.readouterr().err
         assert "TORTOISE_API_KEY" in err and "shadow" in err.lower()
 
-def _mint_body(team_id="team-cli-1709", key="tt_cli_1709_key_0000000000000000000000000000"):
-    return {"key": key, "team_id": team_id, "team_name": "agent-cli-1709",
-            "graph_name": f"team_{team_id}", "identity": "anon-cli-1709",
+def _mint_body(org_id="team-cli-1709", key="tt_cli_1709_key_0000000000000000000000000000"):
+    return {"key": key, "org_id": org_id, "org_name": "agent-cli-1709",
+            "graph_name": f"org_{org_id}", "identity": "anon-cli-1709",
             "tier": "free", "signup_token": "st_" + "ab" * 32}
 
 
@@ -785,7 +785,7 @@ class TestSignupTokenPersistence:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-1", "team_name": "agent-1",
+            "org_id": "team-1", "org_name": "agent-1",
             "signup_token": "st_" + "cd" * 32}))
         requests = []
         with mock.patch("urllib.request.urlopen",
@@ -809,7 +809,7 @@ class TestSignupTokenPersistence:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-1", "team_name": "agent-1",
+            "org_id": "team-1", "org_name": "agent-1",
             "signup_token": "st_" + "cd" * 32}))
         stored = "st_" + "cd" * 32
         # recovery response: NO signup_token field (server does not re-issue)
@@ -818,7 +818,7 @@ class TestSignupTokenPersistence:
                         _recovery_flow(requests,
                                        lambda req, timeout=None: _ok_json({
                                            "key": "tt_recovered_0000000000000000000000000000000000000000",
-                                           "team_id": "team-1", "team_name": "agent-1",
+                                           "org_id": "team-1", "org_name": "agent-1",
                                            "graph_name": "team_team-1", "tier": "free"}))):
             rc = main._cmd_signup(mock.Mock(force=False))
         assert rc == 0
@@ -840,7 +840,7 @@ class TestSignupTokenPersistence:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
         body = {"key": "tt_notok_000000000000000000000000000000000000000000",
-                "team_id": "team-notok", "team_name": "agent-notok",
+                "org_id": "team-notok", "org_name": "agent-notok",
                 "graph_name": "team_team-notok", "identity": "anon-notok",
                 "tier": "free"}  # NO signup_token field
         with mock.patch("urllib.request.urlopen", return_value=_ok_mint(body)):
@@ -868,7 +868,7 @@ class TestSignupTokenPersistence:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-1", "team_name": "agent-1",
+            "org_id": "team-1", "org_name": "agent-1",
             "signup_token": "st_" + "cd" * 32}))
         stored = "st_" + "cd" * 32
         # recovery response carries a DIFFERENT signup_token (proxy-injected
@@ -878,7 +878,7 @@ class TestSignupTokenPersistence:
                         _recovery_flow(requests,
                                        lambda req, timeout=None: _ok_json({
                                            "key": "tt_recovered_0000000000000000000000000000000000000000",
-                                           "team_id": "team-1", "team_name": "agent-1",
+                                           "org_id": "team-1", "org_name": "agent-1",
                                            "graph_name": "team_team-1", "tier": "free",
                                            "signup_token": "st_" + "ff" * 32}))):
             rc = main._cmd_signup(mock.Mock(force=False))
@@ -898,7 +898,7 @@ class TestSignupTokenPersistence:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-1", "team_name": "agent-1",
+            "org_id": "team-1", "org_name": "agent-1",
             "signup_token": "st_" + "cd" * 32}))
         requests = []
         with mock.patch("urllib.request.urlopen", _capture_urlopen(requests)):
@@ -925,7 +925,7 @@ class TestSignup422OrphanGuard:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-1", "team_name": "agent-1",
+            "org_id": "team-1", "org_name": "agent-1",
             "signup_token": "st_" + "cd" * 32}))
         with mock.patch("sys.stdin.isatty", return_value=False):  # noqa: SIM117
             with mock.patch("urllib.request.urlopen",
@@ -946,12 +946,12 @@ class TestSignup422OrphanGuard:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-1", "team_name": "agent-1",
+            "org_id": "team-1", "org_name": "agent-1",
             "signup_token": "st_" + "cd" * 32}))
         requests = []
         calls = [
             _http_error(422, json.dumps({"detail": {"error_code": "invalid_signup_token"}})),
-            _ok_json(_mint_body(team_id="team-fresh-1709")),
+            _ok_json(_mint_body(org_id="team-fresh-1709")),
         ]
         with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
             with mock.patch("builtins.input", return_value="YES"):
@@ -974,7 +974,7 @@ class TestSignup422OrphanGuard:
         body = json.loads(requests[2].data)
         assert "signup_token" not in body
         cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
-        assert cfg["team_id"] == "team-fresh-1709"
+        assert cfg["org_id"] == "team-fresh-1709"
 
     def test_422_confirm_no_aborts(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
@@ -984,7 +984,7 @@ class TestSignup422OrphanGuard:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-1", "team_name": "agent-1",
+            "org_id": "team-1", "org_name": "agent-1",
             "signup_token": "st_" + "cd" * 32}))
         with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
             with mock.patch("builtins.input", return_value="no"):
@@ -1008,7 +1008,7 @@ class TestSignup403Suspended:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-1", "team_name": "agent-1",
+            "org_id": "team-1", "org_name": "agent-1",
             "signup_token": "st_" + "cd" * 32}))
         with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
             with mock.patch("urllib.request.urlopen",
@@ -1100,7 +1100,7 @@ class TestSignupRecoverHint:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_good_global", "api_url": "https://api.premiselabs.co",
-            "team_id": "t-global", "signup_token": "st_" + "ee" * 32}))
+            "org_id": "t-global", "signup_token": "st_" + "ee" * 32}))
         with mock.patch("urllib.request.urlopen") as urlopen:
             rc = main._cmd_signup(mock.Mock(force=False))
         assert rc == 1
@@ -1121,13 +1121,13 @@ class TestCmdRecover:
         with mock.patch("urllib.request.urlopen",
                         lambda req, timeout=None: _ok_json({
                             "key": "tt_rec_000000000000000000000000000000000000000000",
-                            "team_id": "team-9", "team_name": "agent-9",
+                            "org_id": "team-9", "org_name": "agent-9",
                             "graph_name": "team_team-9", "tier": "free"})):
             rc = main._cmd_recover(mock.Mock(token=token))
         assert rc == 0
         cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
         assert cfg["api_key"].startswith("tt_rec")
-        assert cfg["team_id"] == "team-9"
+        assert cfg["org_id"] == "team-9"
         assert cfg["signup_token"] == token  # ⛔ persisted
         out = capsys.readouterr().out
         assert "Key recovered on team agent-9" in out
@@ -1147,7 +1147,7 @@ class TestCmdRecover:
         assert "invalid signup token" in capsys.readouterr().err
 
     def test_recover_malformed_200_no_traceback(self, monkeypatch, tmp_path, capsys):
-        """#1709 fixer P2.2: a 200 with valid JSON but no key/team_id
+        """#1709 fixer P2.2: a 200 with valid JSON but no key/org_id
         (proxy garbage) must warn + exit 1 — never a KeyError traceback on
         the unguarded derefs."""
         monkeypatch.chdir(tmp_path)
@@ -1171,11 +1171,11 @@ class TestCmdRecover:
         d.mkdir(parents=True, exist_ok=True)
         (d / "credentials.json").write_text(json.dumps({
             "api_key": "tt_team_d", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-d", "signup_token": token}))
+            "org_id": "team-d", "signup_token": token}))
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_mint({
                             "key": "tt_rec_dd0000000000000000000000000000000000000000",
-                            "team_id": "team-d", "team_name": "agent-d",
+                            "org_id": "team-d", "org_name": "agent-d",
                             "graph_name": "team_team-d", "tier": "free"})) as urlopen:
             rc = main._cmd_recover(mock.Mock(token=None))
         assert rc == 0
@@ -1197,11 +1197,11 @@ class TestCmdRecover:
         d.mkdir(parents=True, exist_ok=True)
         (d / "credentials.json").write_text(json.dumps({
             "api_key": "tt_team_b", "api_url": "https://api.premiselabs.co",
-            "team_id": "team-b", "signup_token": token_b}))
+            "org_id": "team-b", "signup_token": token_b}))
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_mint({
                             "key": "tt_rec_bb0000000000000000000000000000000000000000",
-                            "team_id": "team-b", "team_name": "agent-b",
+                            "org_id": "team-b", "org_name": "agent-b",
                             "graph_name": "team_team-b", "tier": "free"})) as urlopen:
             rc = main._cmd_recover(mock.Mock(token=None))
         assert rc == 0
@@ -1233,7 +1233,7 @@ class TestCmdRecover:
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_mint({
                             "key": "tt_rec_ee0000000000000000000000000000000000000000",
-                            "team_id": "team-b", "team_name": "agent-b",
+                            "org_id": "team-b", "org_name": "agent-b",
                             "graph_name": "team_team-b", "tier": "free"})) as urlopen:
             rc = main._cmd_recover(mock.Mock(token=None))
         assert rc == 0
@@ -1255,11 +1255,11 @@ class TestCmdRecover:
         gdir.mkdir(parents=True, exist_ok=True)
         (gdir / "credentials.json").write_text(json.dumps({
             "api_key": "tt_key", "api_url": "http://localhost:8010",
-            "team_id": "team-9", "signup_token": "st_" + "ef" * 32}))
+            "org_id": "team-9", "signup_token": "st_" + "ef" * 32}))
         with mock.patch("urllib.request.urlopen") as urlopen:
             urlopen.side_effect = lambda req, timeout=None: _ok_json({
                 "key": "tt_rec_000000000000000000000000000000000000000000",
-                "team_id": "team-9", "team_name": "agent-9"})
+                "org_id": "team-9", "org_name": "agent-9"})
             rc = main._cmd_recover(mock.Mock(token=None))
         assert rc == 0
         req = urlopen.call_args.args[0]
@@ -1279,7 +1279,7 @@ class TestCmdRecover:
         with mock.patch("urllib.request.urlopen") as urlopen:
             urlopen.side_effect = lambda req, timeout=None: _ok_json({
                 "key": "tt_rec_000000000000000000000000000000000000000000",
-                "team_id": "team-9", "team_name": "agent-9"})
+                "org_id": "team-9", "org_name": "agent-9"})
             rc = main._cmd_recover(mock.Mock(token=None))
         assert rc == 0
         req = urlopen.call_args.args[0]
@@ -1293,7 +1293,7 @@ class TestCmdRecover:
         with mock.patch("urllib.request.urlopen") as urlopen:
             urlopen.side_effect = lambda req, timeout=None: _ok_json({
                 "key": "tt_rec_000000000000000000000000000000000000000000",
-                "team_id": "team-9", "team_name": "agent-9"})
+                "org_id": "team-9", "org_name": "agent-9"})
             rc = main._cmd_recover(mock.Mock(token="st_" + "ef" * 32))
         assert rc == 0
         req = urlopen.call_args.args[0]
