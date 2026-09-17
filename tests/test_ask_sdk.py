@@ -333,7 +333,7 @@ def test_ask_record_path_uses_strong_rates(monkeypatch):
 
     captured = {}
 
-    def _capture(team_id, *, tokens_in=0, tokens_out=0, cost_usd=0.0, **_):
+    def _capture(org_id, *, tokens_in=0, tokens_out=0, cost_usd=0.0, **_):
         captured.update(tokens_in=tokens_in, tokens_out=tokens_out,
                         cost_usd=cost_usd)
         return None
@@ -349,8 +349,8 @@ def test_ask_record_path_uses_strong_rates(monkeypatch):
     sdk = _new_sdk()
     fake = _StrongReader()
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
-    sdk.ask("q", team_id="team-x")
-    assert captured, "the record path must have run (explicit team_id)"
+    sdk.ask("q", org_id="team-x")
+    assert captured, "the record path must have run (explicit org_id)"
     expected = estimate_ask_cost_usd(
         captured["tokens_in"], captured["tokens_out"],
         rates=ASK_METER_RATES_STRONG)
@@ -748,7 +748,7 @@ def test_collapse_metering_counts_both_billed_calls(monkeypatch):
 
     captured = {}
 
-    def _capture(team_id, *, tokens_in=0, tokens_out=0, cost_usd=0.0, **_):
+    def _capture(org_id, *, tokens_in=0, tokens_out=0, cost_usd=0.0, **_):
         captured.update(tokens_out=tokens_out, cost_usd=cost_usd)
         return None
 
@@ -760,8 +760,8 @@ def test_collapse_metering_counts_both_billed_calls(monkeypatch):
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
                         lambda: fake)
     monkeypatch.setenv("TORTOISE_ASK_ESCALATION_TOKENS", "2000")
-    sdk.ask("q", team_id="team-x")
-    assert captured, "the record path must have run (explicit team_id)"
+    sdk.ask("q", org_id="team-x")
+    assert captured, "the record path must have run (explicit org_id)"
     assert captured["tokens_out"] == 520  # 500 (collapsed) + 20 (escalated)
 
 

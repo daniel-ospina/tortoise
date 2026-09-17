@@ -83,7 +83,7 @@ def _cell_key(session_id: str, fixture: dict, gold: dict) -> str:
     """
     team = fixture.get("team")
     if team:
-        return f"team_{team}"
+        return f"org_{team}"
     if fixture.get("suite") == "continuity" or gold.get("suite") == "continuity":
         spec = (gold.get("continuity") or {})
         writer = spec.get("writer_session") or session_id
@@ -654,9 +654,9 @@ def run_benchmark(
         })
         graded_teams: set[str] = set()
         for key in sorted(cells):
-            if not key.startswith("team_"):
+            if not key.startswith("org_"):
                 continue
-            team = key[len("team_"):]
+            team = key[len("org_"):]
             if team not in iso_teams:
                 continue
             sid = iso_sids_for(ordered, root, team)

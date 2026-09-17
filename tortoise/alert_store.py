@@ -9,7 +9,7 @@ with the R2 create-once object as the dedup LINEARIZATION POINT:
   (winner died between create and backfill), the adopter becomes the filer via
   the GH-search fallback. The create-then-die window can never leave an
   incident permanently silent.
-- Stable key per (kind, team): ``ops/alerts/{KIND}/{team-or-underscore}.json``
+- Stable key per (kind, org): ``ops/alerts/{KIND}/{org-or-underscore}.json``
   — while the incident is open, repeats reuse it (one issue + one Telegram);
   recovery DELETES it (delete-to-resolve ⇒ a later recurrence is a new
   incident with a new issue number).
@@ -41,7 +41,7 @@ _SUPPRESSION_KEY = "ops/suppression.json"
 
 FileIssue = Callable[[str, str], int]      # (title, body) -> issue number
 CloseIssue = Callable[[int, str | None], None]
-SearchOpen = Callable[[str, str], list[int]]  # (kind, team_id) -> open issue numbers
+SearchOpen = Callable[[str, str], list[int]]  # (kind, org_id) -> open issue numbers
 PushTelegram = Callable[[str], None]
 
 
@@ -87,8 +87,8 @@ class AlertStore:
         return self._now() if callable(self._now) else self._now
 
     # ── helpers ─────────────────────────────────────────────────────────────
-    def _key(self, kind: str, team_id: str) -> str:
-        safe = team_id or "_"
+    def _key(self, kind: str, org_id: str) -> str:
+        safe = org_id or "_"
         return f"{DEDUP_PREFIX}{kind}/{safe}.json"
 
     def _suppressed(self, kind: str) -> bool:
@@ -101,34 +101,34 @@ class AlertStore:
         except ValueError:
             return False
 
-    def _title(self, kind: str, team_id: str, detail: dict) -> str:
-        team = f" — {team_id}" if team_id else ""
+    def _title(self, kind: str, org_id: str, detail: dict) -> str:
+        org = f" — {org_id}" if org_id else ""
         age = detail.get("age") or detail.get("age_minutes") or ""
-        return f"[DR] {kind}{team}" + (f" — last backup {age}" if age else "")
+        return f"[DR] {kind}{org}" + (f" — last backup {age}" if age else "")
 
-    def _body(self, kind: str, team_id: str, detail: dict) -> str:
+    def _body(self, kind: str, org_id: str, detail: dict) -> str:
         return (
             f"**Incident kind:** {kind}\n"
-            f"**Team:** {team_id or '(platform)'}\n"
+            f"**Team:** {org_id or '(platform)'}\n"
             f"**Detail:** ```{json.dumps(detail, indent=2)}```\n\n"
             f"Runbook: `docs/ops/registry-backup-dr.md` — triage table by kind."
         )
 
-    def _telegram_text(self, kind: str, team_id: str, detail: dict, issue_number: int | None) -> str:
-        team = f" ({team_id})" if team_id else ""
+    def _telegram_text(self, kind: str, org_id: str, detail: dict, issue_number: int | None) -> str:
+        org = f" ({org_id})" if org_id else ""
         issue = f" — issue #{issue_number}" if issue_number else ""
-        return f"🚨 DR alert: {kind}{team}{issue}"
+        return f"🚨 DR alert: {kind}{org}{issue}"
 
     # ── incident lifecycle ──────────────────────────────────────────────────
-    def open_incident(self, kind: str, team_id: str = "", detail: dict | None = None) -> bool:
+    def open_incident(self, kind: str, org_id: str = "", detail: dict | None = None) -> bool:
         """Open (or re-use) an incident. True if this call is the filer."""
         detail = detail or {}
         if self._suppressed(kind):
             return False
-        key = self._key(kind, team_id)
+        key = self._key(kind, org_id)
         placeholder = {
             "kind": kind,
-            "team_id": team_id,
+            "org_id": org_id,
             "detail": detail,
             "filed_at": self._clock().isoformat(),
             "issue_number": None,
@@ -136,24 +136,24 @@ class AlertStore:
         }
         created = self._storage.create_if_not_exists(key, json.dumps(placeholder).encode())
         if created:
-            return self._become_filer(kind, team_id, detail, key, placeholder)
+            return self._become_filer(kind, org_id, detail, key, placeholder)
         # 412 — adopt the winner's object; never double-file.
         existing = _read_json(self._storage, key)
         if existing.get("issue_number"):
             return False  # already filed — nothing to do
         # Placeholder (winner died mid-filing): become the filer via GH-search
         # fallback to avoid duplicates.
-        return self._become_filer(kind, team_id, detail, key, existing)
+        return self._become_filer(kind, org_id, detail, key, existing)
 
-    def _become_filer(self, kind, team_id, detail, key, state) -> bool:
+    def _become_filer(self, kind, org_id, detail, key, state) -> bool:
         issue_number = None
         try:
             # Subject-scoped search (#2313 Task 4): the query must match the
-            # incident's OWN title (kind + team/graph subject). A kind-only
+            # incident's OWN title (kind + org/graph subject). A kind-only
             # search lets a same-kind incident of a DIFFERENT subject adopt
             # this one's issue number — and recovery would then close the
             # other subject's issue (silent-loss cross-talk).
-            hits = self._search(kind, team_id)  # GH-search fallback dedup
+            hits = self._search(kind, org_id)  # GH-search fallback dedup
             if hits:
                 issue_number = hits[0]
         except Exception as e:
@@ -161,7 +161,7 @@ class AlertStore:
         if issue_number is None:
             try:
                 issue_number = self._file(
-                    self._title(kind, team_id, detail), self._body(kind, team_id, detail)
+                    self._title(kind, org_id, detail), self._body(kind, org_id, detail)
                 )
             except Exception as e:
                 logger.warning("incident filing failed for %s: %s — will adopt on next poll", kind, e)
@@ -169,14 +169,14 @@ class AlertStore:
         state["detail"] = detail
         _write_json(self._storage, key, state)
         if issue_number is not None:
-            self._push_with_pending(key, self._telegram_text(kind, team_id, detail, issue_number))
+            self._push_with_pending(key, self._telegram_text(kind, org_id, detail, issue_number))
             state["telegram_pushed"] = True
             _write_json(self._storage, key, state)
         return True
 
-    def resolve_incident(self, kind: str, team_id: str = "") -> bool:
+    def resolve_incident(self, kind: str, org_id: str = "") -> bool:
         """Close + delete-to-resolve. True if an incident was open."""
-        key = self._key(kind, team_id)
+        key = self._key(kind, org_id)
         state = _read_json(self._storage, key)
         if not state:
             return False
@@ -187,7 +187,7 @@ class AlertStore:
             except Exception as e:
                 logger.warning("issue close failed for %s #%s: %s", kind, number, e)
             self._push_with_pending(
-                key, f"✅ DR resolved: {kind}" + (f" ({team_id})" if team_id else "") + f" — issue #{number}"
+                key, f"✅ DR resolved: {kind}" + (f" ({org_id})" if org_id else "") + f" — issue #{number}"
             )
         self._storage.delete(key)
         return True

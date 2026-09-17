@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Tenancy rename — the tenant is an organization, not a "team" (#3543)
+
+The tenant identifier is now `org` across the surfaces this slice owns. Renamed
+**in place; no data migration** — there are no customers before 2026-09-17.
+
+- **Vocabulary** (pinned across the sibling slices): `teams` → `organizations`,
+  `team_memberships` → `org_memberships`, `team_id` → `org_id`, `team_name` →
+  `org_name`; RPC parameters `p_team_id`/`p_team_name` → `p_org_id`/`p_org_name`;
+  the tenant GUC `app.current_team_id` → `app.current_org_id`; the graph
+  namespace `team_<id>` → `org_<id>`.
+- **`supabase/functions/tenant-provision/index.ts`**: calls `provision_team`
+  with `p_org_id`/`p_org_name` and a `org_<org_id>` graph name, and sends
+  `org_id`/`org_name` on its 201 body and on the `/internal/starter-seed` +
+  `/internal/onboarding-email` request bodies. RPC **function names are
+  unchanged** (`provision_team`, `provision_team_with_token`,
+  `recover_team_key`, `revoke_signup_token`) — that is the wire contract.
+- **`supabase/tests/**`**: every assertion suite now speaks the org vocabulary.
+- **`supabase/tests/pglite/validate.mjs`**: the migration list is now
+  **enumerated from `supabase/migrations/`** rather than hand-pinned. The pinned
+  array had drifted to 31 of the 38 migrations on disk, silently leaving
+  `20260817000001`, `20260829000001`, `20260830000001`, `20260907000001` and the
+  three `2026090900000*` migrations unapplied — and any migration added later
+  would have been uncovered again. Enumerating the directory makes full
+  coverage structural.
+- **`apps/graph-viz/server/main.py`**: the legacy `/api/provision` endpoint now
+  takes `org_name` and returns `org_id`/`org_name`, calling `sdk.org_create`.
+- **`entrypoint.sh`**: the GitHub-docs staging-path note uses `{org_id}`.
+- Deliberately unchanged: `api_keys.scopes` values (`team:manage`) and the
+  `chk_minted_key_no_escalation` CHECK (renaming those needs a row UPDATE — the
+  forbidden data migration); the website pricing tier **"Team"**
+  (`Free/Solo/Pro/Team`); and Linear/GitHub team references
+  (`config/connector_manifest.yaml` `linear.team_id` is a Linear team).
+
 ### Reaper discover/reap production semantics (#1383)
 
 The embedded reaper's discover/reap contract is now honest: every
@@ -119,7 +152,10 @@ run it, connect your tools over MCP.
 - **License**: Business Source License 1.1 — free self-hosted production use
   under $5M annual revenue; MPL 2.0 conversion after 4 years; hosted =
   commercial with free tier. See `docs/license-notes.md` (clause → precedent).
-- **`.mcp.json`**: tortoise entry points at the daemon (`http://localhost:8000/mcp`).
+- **`.mcp.json`**: tortoise entry points at the hosted endpoint
+  (`https://api.premiselabs.co/mcp/`) with an env-indirect
+  `Bearer ${TORTOISE_API_KEY}` (#3601); a self-hoster points the entry's `url`
+  at their own daemon (`http://localhost:8000/mcp`).
 
 ### Fixed — EP NAND under-propagation (#855)
 

@@ -8,7 +8,7 @@ website/dpa.html). They are NOT gated by the web consent banner: the
 banner (website/consent.js) gates CLIENT-side tracking (posthog-js);
 server telemetry is operational, consistent with the existing audit-event
 logger, and cannot be opted out client-side (a server that records who
-provisioned a team must keep that record).
+provisioned an org must keep that record).
 
 Fail-safe by design (R19 — telemetry never degrades the API):
   * Disabled when POSTHOG_API_KEY is empty or starts with "__" (the same
@@ -20,7 +20,7 @@ Fail-safe by design (R19 — telemetry never degrades the API):
 
 Identity: distinct_id is the Supabase user UUID wherever it is resolvable
 (created_by on provision, key creator on first_api_call), falling back to
-the team id — this joins the web funnel (user_signed_up with
+the org id — this joins the web funnel (user_signed_up with
 distinct_id = user UUID) to server events.
 """
 from __future__ import annotations
@@ -39,11 +39,11 @@ posthog.host = POSTHOG_HOST
 # convention consent.js uses to detect a non-wired key).
 posthog.disabled = not POSTHOG_API_KEY or POSTHOG_API_KEY.startswith("__")
 
-# In-process dedup for first_api_call (activation): one event per team per
+# In-process dedup for first_api_call (activation): one event per org per
 # process. Thread-safe via the lock (capture may be called from multiple
 # asyncio.to_thread workers concurrently).
 # NOTE: single-worker caveat — under multiple Fly replicas each worker
-# dedups independently, so a team's first call could in theory be recorded
+# dedups independently, so an org's first call could in theory be recorded
 # once per worker. Acceptable for funnel activation; a cross-worker store
 # (Redis / FalkorDB) is the follow-up if exact-once is ever required.
 _first_api_call_seen: set[str] = set()
@@ -75,53 +75,53 @@ def capture(event: str, distinct_id: str, properties: dict | None = None) -> Non
 
 
 def tenant_provisioned(
-    distinct_id: str, team_id: str, team_name: str, tier: str, graph_name: str
+    distinct_id: str, org_id: str, org_name: str, tier: str, graph_name: str
 ) -> None:
-    """Team provisioned (server, on /internal/provision success)."""
+    """Org provisioned (server, on /internal/provision success)."""
     capture(
         "tenant_provisioned",
         distinct_id,
-        {"team_id": team_id, "team_name": team_name, "tier": tier,
+        {"org_id": org_id, "org_name": org_name, "tier": tier,
          "graph_name": graph_name},
     )
 
 
 def api_key_created(
-    distinct_id: str, team_id: str, key_prefix: str, key_id: str, source: str
+    distinct_id: str, org_id: str, key_prefix: str, key_id: str, source: str
 ) -> None:
-    """API key created (source='provision' or 'team_keys')."""
+    """API key created (source='provision' or 'org_keys')."""
     capture(
         "api_key_created",
         distinct_id,
-        {"team_id": team_id, "key_prefix": key_prefix, "key_id": key_id,
+        {"org_id": org_id, "key_prefix": key_prefix, "key_id": key_id,
          "source": source},
     )
 
 
-def first_api_call_pending(team_id: str) -> bool:
-    """Cheap thread-safe peek: True only before the team's activation event
+def first_api_call_pending(org_id: str) -> bool:
+    """Cheap thread-safe peek: True only before the org's activation event
     has been claimed in this process. Guards against spawning a worker
-    thread for every authenticated request once the team has fired."""
+    thread for every authenticated request once the org has fired."""
     if posthog.disabled:
         return False
     with _first_api_call_lock:
-        return team_id not in _first_api_call_seen
+        return org_id not in _first_api_call_seen
 
 
 def first_api_call(
-    distinct_id: str, team_id: str, endpoint: str, method: str
+    distinct_id: str, org_id: str, endpoint: str, method: str
 ) -> None:
-    """Activation event — deduped per team (in-process set, thread-safe).
+    """Activation event — deduped per org (in-process set, thread-safe).
 
     The dedup claim is authoritative here even when the caller also peeked
     via first_api_call_pending (idempotent — safe for direct callers too).
     """
     with _first_api_call_lock:
-        if team_id in _first_api_call_seen:
+        if org_id in _first_api_call_seen:
             return
-        _first_api_call_seen.add(team_id)
+        _first_api_call_seen.add(org_id)
     capture(
         "first_api_call",
         distinct_id,
-        {"team_id": team_id, "endpoint": endpoint, "method": method},
+        {"org_id": org_id, "endpoint": endpoint, "method": method},
     )

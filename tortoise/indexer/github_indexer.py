@@ -137,7 +137,7 @@ class GitHubIndexer:
     async def current_login(self) -> str | None:
         """The authenticated user's GitHub login (``GET /user``) — None on
         failure. Used at connect time (#1845) to store the REAL org/login
-        instead of the internal team_id, and by the self-heal paths."""
+        instead of the internal org_id, and by the self-heal paths."""
         client = await self._get_client()
         r = await self._get(client, f"{_GITHUB_API}/user")
         if r.status_code == 200:
@@ -153,7 +153,7 @@ class GitHubIndexer:
         A non-200 from BOTH (org not found / no access) falls back to the
         authenticated token's OWN repos (``/user/repos``) — the selector
         (#1845) must list what the token can actually see even when the
-        stored org is a legacy team_id UUID (the pre-#1845 connect bug) or
+        stored org is a legacy org_id UUID (the pre-#1845 connect bug) or
         the org lookup 404s. GitHub returns 200 for a valid-but-empty org,
         so a 404 genuinely means 'unknown/no access'.
 

@@ -34,12 +34,12 @@ class _FakeChannels:
         if comment:
             self.comments.append((number, comment))
 
-    def search_open(self, kind, team_id=""):
-        self.search_calls.append((kind, team_id))
+    def search_open(self, kind, org_id=""):
+        self.search_calls.append((kind, org_id))
         return [
             n for n, t in self.issues.items()
             if f"[DR] {kind}" in t
-            and (team_id == "" or t.endswith(f" — {team_id}"))
+            and (org_id == "" or t.endswith(f" — {org_id}"))
             and n not in self.closed
         ]
 
@@ -350,7 +350,7 @@ def test_search_fallback_is_subject_scoped():
     # as an issue_number-less placeholder (the exact create-then-die window).
     storage.upload(
         "ops/alerts/STALE/team_b.json",
-        json.dumps({"kind": "STALE", "team_id": "team_b", "detail": {},
+        json.dumps({"kind": "STALE", "org_id": "team_b", "detail": {},
                     "filed_at": "2026-08-08T00:00:00+00:00",
                     "issue_number": None, "telegram_pushed": False}).encode(),
     )

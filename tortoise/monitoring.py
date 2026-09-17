@@ -111,6 +111,13 @@ PROBE_STALE_AFTER = 30.0
 PROBE_MAX_SUPERSEDES = 4
 PROBE_POLL_INTERVAL = 0.02
 
+#: Name of the single bounded daemon thread a ``HealthProbe`` starts for its
+#: probe (``_start_locked``). Defined once so callers/tests that must tell the
+#: background refresher's own worker apart from a request-path invocation can
+#: compare a symbol instead of re-typing the literal — if the literal drifts,
+#: such a check silently misclassifies the refresher.
+HEALTH_PROBE_THREAD_NAME = "tortoise-health-probe"
+
 # #1565: ONE bounded retry on a TRANSIENT connect failure only (an embedded
 # redislite server momentarily starting / momentarily unreachable under
 # parallel-suite load). The 100ms delay covers a server mid-startup; a REAL
@@ -206,7 +213,7 @@ def event_retention_interval() -> int:
     Round-4 review P2 (PRE-EXISTING, fixed here): a bare ``int()`` in both
     call sites accepted ``0``/``-1``. In the hosted retention loop
     ``asyncio.sleep(0)``/``sleep(-1)`` return immediately, hammering
-    ``_sweep_events``/``_purge_deleted_teams`` with no delay; in the SDK lazy
+    ``_sweep_events``/``_purge_deleted_orgs`` with no delay; in the SDK lazy
     purge the gate ``now - _EVENT_PURGE_LAST < interval`` is always false, so
     every ``events_poll`` issued a DELETE. A non-numeric value also raised out
     of the SDK poll. Anything that is not a positive whole number of seconds
@@ -601,7 +608,7 @@ class HealthProbe:
         self._started_at = time.monotonic()
         self._worker = threading.Thread(
             target=self._run, args=(seq,),
-            name="tortoise-health-probe", daemon=True,
+            name=HEALTH_PROBE_THREAD_NAME, daemon=True,
         )
         self._worker.start()
 

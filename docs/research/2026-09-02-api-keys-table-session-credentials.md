@@ -138,5 +138,5 @@ Two workstreams:
 - **2026-09-03T23:26:53** [precedent] ## Errata — 2026-09-04 (post-#2167-scoping verification)
 1. Producer-table correction: the dashboard has FOUR bootstrap-mint callers, not one (login mount L2679, switchTeam L3486 + L3505 401-re-mint, revokeKey re-mint L4103). The 'dashboard caller: mintSessionKey in main.jsx' line is incomplete.
 2. 'GET /v1/sessions/{id} (fetchSessionDetail) is dead code' is WRONG as of #2002-W6 — it is a LIVE Settings transcript view (onViewSession L5569) and session-authed client-side (main.jsx L4236) against a dual-auth endpoint (hosted_api.py L6960). Indicator 3 of #2167 is satisfied at baseline.
-3. loadBackups (/backups, main.jsx L3761) is team-scoped by the KEY header, not ?team_id= — auth-dual but team-scoping-single. In the #2167 zero-key default state it must pin ?team_id= in session mode (multi-membership correctness).
+3. loadBackups (/backups, main.jsx L3761) is team-scoped by the KEY header, not ?org_id= — auth-dual but team-scoping-single. In the #2167 zero-key default state it must pin ?org_id= in session mode (multi-membership correctness).
 4. Line numbers in this doc predate 2026-09-04 main (now 19a50ace) — do not trust them for future sessions; re-verify.

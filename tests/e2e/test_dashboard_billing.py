@@ -68,7 +68,7 @@ BILLING_ROW = {
 
 def _open_billing(page: Page) -> None:
     _wire_prod_domains(page, exchange_body=_session_json(),
-                       team_row=BILLING_ROW, billing_routes=True)
+                       org_row=BILLING_ROW, billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
     expect(page).to_have_url(re.compile("^" + re.escape(DASHBOARD_URL)), timeout=20_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
@@ -114,7 +114,7 @@ def test_active_subscriber_manage_subscription_posts_portal(page: Page) -> None:
     /v1/billing/portal (plan changes route through the Stripe portal — the
     checkout endpoint 409s on active subscriptions by design)."""
     _wire_prod_domains(page, exchange_body=_session_json(),
-                       team_row={**BILLING_ROW, "subscription_status": "active",
+                       org_row={**BILLING_ROW, "subscription_status": "active",
                                  "tier": "pro"},
                        billing_routes=True)
     _submit_api_key(page, "tt_loop_key_abcdef0123456789")
@@ -165,14 +165,14 @@ def _wire_welcome_flow(page: Page) -> None:
             if "/functions/v1/tenant-provision" in url and route.request.method == "POST":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"api_key": WELCOME_KEY,
-                                                "team_name": "Welcome Team",
+                                                "org_name": "Welcome Team",
                                                 "graph_name": "main"}))
                 return
-            if "/rest/v1/team_memberships" in url:
+            if "/rest/v1/org_memberships" in url:
                 # maybeSingle() → PostgREST returns the single object.
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_welcome",
-                                                "team_name": "Welcome Team",
+                              body=json.dumps({"org_id": "team_welcome",
+                                                "org_name": "Welcome Team",
                                                 "graph_name": "main",
                                                 "status": "active"}))
                 return
@@ -184,7 +184,7 @@ def _wire_welcome_flow(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(API_HOST):
-            if url.endswith("/v1/teams"):
+            if url.endswith("/v1/organizations"):
                 # First-timer: NO teams → the welcome card + wizard render
                 # (no auto-provision at mount — #2323 Option B).
                 route.fulfill(status=200, content_type="application/json",

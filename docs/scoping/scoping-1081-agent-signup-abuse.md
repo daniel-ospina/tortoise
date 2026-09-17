@@ -30,7 +30,7 @@ Two independent, precedented mechanisms, deliberately NOT coupled:
 
 ## Rejected Alternatives
 1. R8 on audit_events DB count — better when multi-instance/ops-dashboard live
-2. abuse_events piggyback — team_id NOT NULL structurally wrong for IP rules
+2. abuse_events piggyback — org_id NOT NULL structurally wrong for IP rules
 3. Per-device/device-ID fallback — #741 dead (client IDs ignored)
 4. Global register-bucket tightening — breaks register/email contracts
 5. Reduced anon ceiling in #1081 — one-way lockout without #1082 claim path

@@ -1,7 +1,7 @@
 """HTTP-layer tests for invites + RBAC — E3/E4/E8 (#748).
 
 Issue #748 (P1): test_invites.py covers SDK primitives only; the actual
-endpoints (/v1/invites, /v1/invites/accept, /v1/teams/{id}/members
+endpoints (/v1/invites, /v1/invites/accept, /v1/organizations/{id}/members
 GET/DELETE/PATCH) were untested. Revenue gates (402/409) and the member-role
 invite path (#743) could ship broken with green CI.
 
@@ -41,7 +41,7 @@ from tortoise.auth import verify_api_key
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
 # api_keys.created_by stays TEXT and remains non-UUID.
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
@@ -113,35 +113,35 @@ def _as_user(user_id: str, email: str):
     }
 
 
-def _seed_team(reg, team_id: str, tier: str = "team"):
+def _seed_team(reg, org_id: str, tier: str = "team"):
     reg.query(
         "CREATE (t:Team {id:$id, name:$id, tier:$tier})",
-        params={"id": team_id, "tier": tier},
+        params={"id": org_id, "tier": tier},
     )
 
 
-def _seed_membership(reg, team_id: str, user_id: str, role: str,
+def _seed_membership(reg, org_id: str, user_id: str, role: str,
                      status: str = "active"):
     reg.query(
-        "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:$role, "
+        "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:$role, "
         "status:$status, created_at:'2026-08-01T00:00:00+00:00'})",
-        params={"uid": user_id, "tid": team_id, "role": role, "status": status},
+        params={"uid": user_id, "tid": org_id, "role": role, "status": status},
     )
 
 
-def _active_roles(reg, team_id: str) -> dict:
+def _active_roles(reg, org_id: str) -> dict:
     rows = reg.query(
-        "MATCH (m:Membership {team_id:$tid}) WHERE m.status = 'active' "
+        "MATCH (m:Membership {org_id:$tid}) WHERE m.status = 'active' "
         "RETURN m.user_id, m.role",
-        params={"tid": team_id},
+        params={"tid": org_id},
     ).result_set
     return {uid: role for uid, role in rows}
 
 
-def _seed_team_with_owner(reg, team_id: str, tier: str = "team",
+def _seed_team_with_owner(reg, org_id: str, tier: str = "team",
                           owner: str = _U1):
-    _seed_team(reg, team_id, tier=tier)
-    _seed_membership(reg, team_id, owner, "owner")
+    _seed_team(reg, org_id, tier=tier)
+    _seed_membership(reg, org_id, owner, "owner")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -154,7 +154,7 @@ class TestInviteCreate:
         """Revenue gate: invites require the Pro or Team tier (#1875)."""
         _seed_team_with_owner(reg, "team-free", tier="free")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-free", "email": "bob@example.com"})
+                        json={"org_id": "team-free", "email": "bob@example.com"})
         assert r.status_code == 402
         assert "Pro or Team tier" in r.json()["detail"]
 
@@ -162,7 +162,7 @@ class TestInviteCreate:
         """#1875: Solo (1 user) is also upgrade-gated."""
         _seed_team_with_owner(reg, "team-solo", tier="solo")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-solo", "email": "bob@example.com"})
+                        json={"org_id": "team-solo", "email": "bob@example.com"})
         assert r.status_code == 402
         assert "Pro or Team tier" in r.json()["detail"]
 
@@ -171,10 +171,10 @@ class TestInviteCreate:
         pending invite hits the capacity gate (active + pending >= 2)."""
         _seed_team_with_owner(reg, "team-pro", tier="pro")
         r1 = client.post("/v1/invites",
-                         json={"team_id": "team-pro", "email": "bob@example.com"})
+                         json={"org_id": "team-pro", "email": "bob@example.com"})
         assert r1.status_code == 200, r1.text
         r2 = client.post("/v1/invites",
-                         json={"team_id": "team-pro", "email": "carol@example.com"})
+                         json={"org_id": "team-pro", "email": "carol@example.com"})
         assert r2.status_code == 402
         assert "member limit" in r2.json()["detail"].lower()
 
@@ -183,21 +183,21 @@ class TestInviteCreate:
         accepted/revoked invite no longer occupies the seat."""
         _seed_team_with_owner(reg, "team-pro2", tier="pro")
         r1 = client.post("/v1/invites",
-                         json={"team_id": "team-pro2", "email": "bob@example.com"})
+                         json={"org_id": "team-pro2", "email": "bob@example.com"})
         assert r1.status_code == 200, r1.text
         iid = r1.json()["invite_id"]
         # owner rescinds → the seat frees → a new invite fits
-        r = client.delete(f"/v1/invites/{iid}?team_id=team-pro2")
+        r = client.delete(f"/v1/invites/{iid}?org_id=team-pro2")
         assert r.status_code == 200, r.text
         r2 = client.post("/v1/invites",
-                         json={"team_id": "team-pro2", "email": "carol@example.com"})
+                         json={"org_id": "team-pro2", "email": "carol@example.com"})
         assert r2.status_code == 200, r2.text
 
     def test_pro_capacity_excludes_expired_pending(self, client, reg):
         """#1875: an EXPIRED pending invite does not occupy the seat."""
         _seed_team_with_owner(reg, "team-pro3", tier="pro")
         r1 = client.post("/v1/invites",
-                         json={"team_id": "team-pro3", "email": "bob@example.com"})
+                         json={"org_id": "team-pro3", "email": "bob@example.com"})
         assert r1.status_code == 200, r1.text
         iid = r1.json()["invite_id"]
         reg.query(
@@ -205,7 +205,7 @@ class TestInviteCreate:
             params={"id": iid},
         )
         r2 = client.post("/v1/invites",
-                         json={"team_id": "team-pro3", "email": "carol@example.com"})
+                         json={"org_id": "team-pro3", "email": "carol@example.com"})
         assert r2.status_code == 200, r2.text
 
     def test_pro_capacity_concurrent_invites_only_allowed_minted(self, client, reg):
@@ -224,7 +224,7 @@ class TestInviteCreate:
             async with httpx.AsyncClient(transport=transport,
                                          base_url="http://test") as ac:
                 return await asyncio.gather(*(
-                    ac.post("/v1/invites", json={"team_id": "team-pro-race",
+                    ac.post("/v1/invites", json={"org_id": "team-pro-race",
                                                   "email": email})
                     for email in ("bob@example.com", "carol@example.com",
                                   "dave@example.com")
@@ -238,13 +238,13 @@ class TestInviteCreate:
         # exactly one Invitation node was minted — pending + active == 2
         # (owner + 1 invite), never 3.
         rows = reg.query(
-            "MATCH (i:Invitation {team_id:'team-pro-race'}) "
+            "MATCH (i:Invitation {org_id:'team-pro-race'}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
             "RETURN count(i)",
         ).result_set[0][0]
         assert rows == 1, f"expected 1 minted invite, got {rows}"
         active = reg.query(
-            "MATCH (m:Membership {team_id:'team-pro-race', status:'active'}) RETURN count(m)",
+            "MATCH (m:Membership {org_id:'team-pro-race', status:'active'}) RETURN count(m)",
         ).result_set[0][0]
         assert active + rows <= 2
 
@@ -253,7 +253,7 @@ class TestInviteCreate:
         _seed_team_with_owner(reg, "team-t")
         for i in range(3):
             r = client.post("/v1/invites",
-                            json={"team_id": "team-t",
+                            json={"org_id": "team-t",
                                   "email": f"member{i}@example.com"})
             assert r.status_code == 200, r.text
 
@@ -261,7 +261,7 @@ class TestInviteCreate:
         """Token is returned in the create response and stored hash-only."""
         _seed_team_with_owner(reg, "team-t")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com",
+                        json={"org_id": "team-t", "email": "bob@example.com",
                               "role": "admin"})
         assert r.status_code == 200, r.text
         body = r.json()
@@ -271,7 +271,7 @@ class TestInviteCreate:
         assert body["expires_at"]
         # Registry: Invitation node holds the hash (verify, never plaintext)
         rows = reg.query(
-            "MATCH (i:Invitation {team_id:'team-t'}) RETURN i.email, i.role, "
+            "MATCH (i:Invitation {org_id:'team-t'}) RETURN i.email, i.role, "
             "i.token_hash, i.status",
         ).result_set
         assert len(rows) == 1
@@ -285,17 +285,17 @@ class TestInviteCreate:
     def test_default_role_is_member(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com"})
+                        json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         assert r.json()["role"] == "member"
 
     def test_duplicate_pending_invitation_409(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         first = client.post("/v1/invites",
-                            json={"team_id": "team-t", "email": "bob@example.com"})
+                            json={"org_id": "team-t", "email": "bob@example.com"})
         assert first.status_code == 200
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com"})
+                        json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 409
         assert "already exists" in r.json()["detail"]
 
@@ -305,7 +305,7 @@ class TestInviteCreate:
         _seed_membership(reg, "team-t", _U2, "member")
         _as_user(_U2, "member@example.com")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com"})
+                        json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 403
         assert "owner or admin" in r.json()["detail"]
 
@@ -314,19 +314,19 @@ class TestInviteCreate:
         _seed_membership(reg, "team-t", _U2, "admin")
         _as_user(_U2, "admin@example.com")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com"})
+                        json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
 
     def test_invalid_email_422(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "not-an-email"})
+                        json={"org_id": "team-t", "email": "not-an-email"})
         assert r.status_code == 422
 
     def test_invalid_role_422(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com",
+                        json={"org_id": "team-t", "email": "bob@example.com",
                               "role": "superuser"})
         assert r.status_code == 422
 
@@ -335,17 +335,22 @@ class TestInviteCreate:
         (active membership whose Team node is gone)."""
         _seed_membership(reg, "team-ghost", _U1, "owner")  # no Team node
         r = client.post("/v1/invites",
-                        json={"team_id": "team-ghost", "email": "bob@example.com"})
+                        json={"org_id": "team-ghost", "email": "bob@example.com"})
         assert r.status_code == 404
-        assert "Unknown team" in r.json()["detail"]
+        # #3543: the 404 detail now carries the renamed vocabulary (the route
+        # is /v1/organizations/...). The earlier #2391 sweep had classified
+        # these detail strings as programmatic keeps; #3543 renames them so no
+        # user-visible surface mixes `team` and `org`. This assertion is the
+        # co-move, not an incidental edit.
+        assert "Unknown organization" in r.json()["detail"]
 
     def test_email_is_lowercased(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "Bob@Example.COM"})
+                        json={"org_id": "team-t", "email": "Bob@Example.COM"})
         assert r.status_code == 200, r.text
         rows = reg.query(
-            "MATCH (i:Invitation {team_id:'team-t'}) RETURN i.email",
+            "MATCH (i:Invitation {org_id:'team-t'}) RETURN i.email",
         ).result_set
         assert rows[0][0] == "bob@example.com"
 
@@ -356,11 +361,11 @@ class TestInviteCreate:
 
 
 class TestInviteAccept:
-    def _invite(self, client, reg, team_id="team-t", email="bob@example.com",
+    def _invite(self, client, reg, org_id="team-t", email="bob@example.com",
                 role="member"):
-        _seed_team_with_owner(reg, team_id)
+        _seed_team_with_owner(reg, org_id)
         r = client.post("/v1/invites",
-                        json={"team_id": team_id, "email": email, "role": role})
+                        json={"org_id": org_id, "email": email, "role": role})
         assert r.status_code == 200, r.text
         return r.json()["token"]
 
@@ -371,7 +376,7 @@ class TestInviteAccept:
         _as_user(_U_BOB, "bob@example.com")
         r = client.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 200, r.text
-        assert r.json() == {"team_id": "team-t", "role": "admin"}
+        assert r.json() == {"org_id": "team-t", "role": "admin"}
         assert _active_roles(reg, "team-t")[_U_BOB] == "admin"
 
     def test_member_role_preserved(self, client, reg):
@@ -425,7 +430,7 @@ class TestInviteAccept:
         _seed_team_with_owner(reg, "team-t")
         token = "expired-token-123"
         reg.query(
-            "CREATE (i:Invitation {id:'inv-exp', team_id:'team-t', "
+            "CREATE (i:Invitation {id:'inv-exp', org_id:'team-t', "
             "email:'bob@example.com', role:'member', token_hash:$th, "
             "created_by:'user-1', created_at:$ca, "
             "expires_at:'2020-01-01T00:00:00+00:00', accepted_at:null, "
@@ -461,7 +466,7 @@ class TestInviteAccept:
             "tier:'pro', max_users:2})",
         )
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:'team-race-accept', "
+            "CREATE (m:Membership {user_id:$uid, org_id:'team-race-accept', "
             "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
             params={"uid": _U1},
         )
@@ -472,7 +477,7 @@ class TestInviteAccept:
             ("inv-race-b", "carol@example.com", "carol-token-race"),
         ):
             reg.query(
-                "CREATE (i:Invitation {id:$id, team_id:'team-race-accept', "
+                "CREATE (i:Invitation {id:$id, org_id:'team-race-accept', "
                 "email:$email, role:'member', token_hash:$th, "
                 "created_by:'user-1', created_at:$ca, expires_at:$exp, "
                 "accepted_at:null, status:'pending'})",
@@ -518,7 +523,7 @@ class TestInviteAccept:
 
         # exactly 2 active members (owner + winner) — never 3
         active = reg.query(
-            "MATCH (m:Membership {team_id:'team-race-accept', status:'active'}) RETURN count(m)",
+            "MATCH (m:Membership {org_id:'team-race-accept', status:'active'}) RETURN count(m)",
         ).result_set[0][0]
         assert active == 2
         # the losing accept did NOT consume its invite (accepted_at NULL)
@@ -538,7 +543,7 @@ class TestInviteAccept:
         # membership) and the loser's invite accepts cleanly.
         winner_uid = _U_CAROL if loser_uid == _U_BOB else _U_BOB
         reg.query(
-            "MATCH (m:Membership {team_id:'team-race-accept', user_id:$uid, "
+            "MATCH (m:Membership {org_id:'team-race-accept', user_id:$uid, "
             "status:'active'}) DELETE m",
             params={"uid": winner_uid},
         )
@@ -651,7 +656,7 @@ class TestInviteAcceptRateLimit:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# E8 — GET/DELETE/PATCH /v1/teams/{team_id}/members
+# E8 — GET/DELETE/PATCH /v1/organizations/{org_id}/members
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -678,7 +683,7 @@ class TestInviteAcceptRateLimit:
         _seed_team_with_owner(reg, "team-t")
         _as_user(_U1, "owner@example.com")  # owner creates invites
         r1 = client.post("/v1/invites",
-                         json={"team_id": "team-t", "email": "bob@example.com",
+                         json={"org_id": "team-t", "email": "bob@example.com",
                                "role": "member"})
         assert r1.status_code == 200, r1.text
         _as_user(_U_BOB, "bob@example.com")
@@ -689,7 +694,7 @@ class TestInviteAcceptRateLimit:
         _seed_team_with_owner(reg, "team-u")
         _as_user(_U1, "owner@example.com")
         r2 = client.post("/v1/invites",
-                         json={"team_id": "team-u", "email": "bob@example.com",
+                         json={"org_id": "team-u", "email": "bob@example.com",
                                "role": "member"})
         assert r2.status_code == 200, r2.text
         _as_user(_U_BOB, "bob@example.com")
@@ -705,7 +710,7 @@ class TestMembersRbac:
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
         _as_user(_U2, "member@example.com")
-        r = client.get("/v1/teams/team-t/members")
+        r = client.get("/v1/organizations/team-t/members")
         assert r.status_code == 403
         assert "owner or admin" in r.json()["detail"]
 
@@ -713,9 +718,9 @@ class TestMembersRbac:
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
         inv = client.post("/v1/invites",
-                          json={"team_id": "team-t", "email": "bob@example.com"})
+                          json={"org_id": "team-t", "email": "bob@example.com"})
         assert inv.status_code == 200
-        r = client.get("/v1/teams/team-t/members")
+        r = client.get("/v1/organizations/team-t/members")
         assert r.status_code == 200, r.text
         by_user = {m["user_id"]: m for m in r.json()}
         assert by_user[_U1]["role"] == "owner"
@@ -727,8 +732,8 @@ class TestMembersRbac:
         assert len(invited) == 1
         assert invited[0]["email"] == "bob@example.com"
 
-    def _ghost_rows(self, client, team_id="team-t"):
-        r = client.get(f"/v1/teams/{team_id}/members")
+    def _ghost_rows(self, client, org_id="team-t"):
+        r = client.get(f"/v1/organizations/{org_id}/members")
         assert r.status_code == 200, r.text
         return [m for m in r.json() if m["user_id"].startswith("invite-")]
 
@@ -737,7 +742,7 @@ class TestMembersRbac:
         — no ghost 'invited' member with the invitee's email."""
         _seed_team_with_owner(reg, "team-t")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com"})
+                        json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         token = r.json()["token"]
         assert len(self._ghost_rows(client)) == 1  # pending placeholder pre-accept
@@ -762,12 +767,12 @@ class TestMembersRbac:
             "max_users:2})",
         )
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:'team-full', "
+            "CREATE (m:Membership {user_id:$uid, org_id:'team-full', "
             "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
             params={"uid": _U1},
         )
         r = client.post("/v1/invites",
-                        json={"team_id": "team-full", "email": "bob@example.com"})
+                        json={"org_id": "team-full", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         token = r.json()["token"]
         assert len(self._ghost_rows(client, "team-full")) == 1
@@ -779,7 +784,7 @@ class TestMembersRbac:
         # non-consuming: the invite is NOT burned (accepted_at NULL) and no
         # membership was minted — the pending placeholder row is legitimate.
         rows = reg.query(
-            "MATCH (i:Invitation {team_id:'team-full', email:'bob@example.com'}) "
+            "MATCH (i:Invitation {org_id:'team-full', email:'bob@example.com'}) "
             "RETURN i.accepted_at, i.status",
         ).result_set
         assert rows and rows[0][0] is None, f"invite consumed on 402: {rows}"
@@ -791,7 +796,7 @@ class TestMembersRbac:
         # retryable: free a seat (remove the extra member) → the SAME invite
         # accepts cleanly and the ghost row is cleaned (#1880).
         reg.query(
-            "MATCH (m:Membership {team_id:'team-full', user_id:$uid, "
+            "MATCH (m:Membership {org_id:'team-full', user_id:$uid, "
             "status:'active'}) DELETE m",
             params={"uid": _U2},
         )
@@ -813,12 +818,12 @@ class TestMembersRbac:
             "tier:'pro', max_users:2})",
         )
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:'team-byid-full', "
+            "CREATE (m:Membership {user_id:$uid, org_id:'team-byid-full', "
             "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
             params={"uid": _U1},
         )
         r = client.post("/v1/invites",
-                        json={"team_id": "team-byid-full", "email": "bob@example.com"})
+                        json={"org_id": "team-byid-full", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         iid = r.json()["invite_id"]
         # fill the team → by-id accept hits the max_users gate
@@ -834,7 +839,7 @@ class TestMembersRbac:
         assert _U_BOB not in _active_roles(reg, "team-byid-full")
         # retryable after a seat frees
         reg.query(
-            "MATCH (m:Membership {team_id:'team-byid-full', user_id:$uid, "
+            "MATCH (m:Membership {org_id:'team-byid-full', user_id:$uid, "
             "status:'active'}) DELETE m",
             params={"uid": _U2},
         )
@@ -847,11 +852,11 @@ class TestMembersRbac:
         """#1880: owner revoking an invite deletes the fake row."""
         _seed_team_with_owner(reg, "team-t")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com"})
+                        json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         iid = r.json()["invite_id"]
         assert len(self._ghost_rows(client)) == 1
-        r = client.delete(f"/v1/invites/{iid}?team_id=team-t")
+        r = client.delete(f"/v1/invites/{iid}?org_id=team-t")
         assert r.status_code == 200, r.text
         assert self._ghost_rows(client) == [], "ghost invite row survives rescind"
 
@@ -859,19 +864,19 @@ class TestMembersRbac:
         """Owner protection: the owner cannot be removed."""
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.delete(f"/v1/teams/team-t/members/{_U1}")
+        r = client.delete(f"/v1/organizations/team-t/members/{_U1}")
         assert r.status_code == 409
         assert "Owner cannot be removed" in r.json()["detail"]
 
     def test_remove_member_404(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
-        r = client.delete(f"/v1/teams/team-t/members/{_U_GHOST}")
+        r = client.delete(f"/v1/organizations/team-t/members/{_U_GHOST}")
         assert r.status_code == 404
 
     def test_remove_member_sets_status_removed(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.delete(f"/v1/teams/team-t/members/{_U2}")
+        r = client.delete(f"/v1/organizations/team-t/members/{_U2}")
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "removed"
         assert _U2 not in _active_roles(reg, "team-t")
@@ -881,13 +886,13 @@ class TestMembersRbac:
         _seed_membership(reg, "team-t", _U2, "member")
         _seed_membership(reg, "team-t", _U3, "member")
         _as_user(_U3, "member3@example.com")
-        r = client.delete(f"/v1/teams/team-t/members/{_U2}")
+        r = client.delete(f"/v1/organizations/team-t/members/{_U2}")
         assert r.status_code == 403
 
     def test_change_role_owner_409(self, client, reg):
         """Owner protection: the owner role cannot be changed."""
         _seed_team_with_owner(reg, "team-t")
-        r = client.patch(f"/v1/teams/team-t/members/{_U1}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U1}",
                          json={"role": "member"})
         assert r.status_code == 409
         assert "Owner role cannot be changed" in r.json()["detail"]
@@ -895,14 +900,14 @@ class TestMembersRbac:
     def test_change_role_invalid_role_422(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.patch(f"/v1/teams/team-t/members/{_U2}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U2}",
                          json={"role": "superuser"})
         assert r.status_code == 422
 
     def test_change_role_member_to_admin(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "member")
-        r = client.patch(f"/v1/teams/team-t/members/{_U2}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U2}",
                          json={"role": "admin"})
         assert r.status_code == 200, r.text
         assert _active_roles(reg, "team-t")[_U2] == "admin"
@@ -910,7 +915,7 @@ class TestMembersRbac:
     def test_change_role_admin_to_member(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
         _seed_membership(reg, "team-t", _U2, "admin")
-        r = client.patch(f"/v1/teams/team-t/members/{_U2}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U2}",
                          json={"role": "member"})
         assert r.status_code == 200, r.text
         assert _active_roles(reg, "team-t")[_U2] == "member"
@@ -920,13 +925,13 @@ class TestMembersRbac:
         _seed_membership(reg, "team-t", _U2, "admin")
         _seed_membership(reg, "team-t", _U3, "member")
         _as_user(_U3, "member3@example.com")
-        r = client.patch(f"/v1/teams/team-t/members/{_U2}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U2}",
                          json={"role": "member"})
         assert r.status_code == 403
 
     def test_change_role_unknown_member_404(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
-        r = client.patch(f"/v1/teams/team-t/members/{_U_GHOST}",
+        r = client.patch(f"/v1/organizations/team-t/members/{_U_GHOST}",
                          json={"role": "member"})
         assert r.status_code == 404
 
@@ -936,28 +941,28 @@ class TestMembersRbac:
 
 
 class TestPendingInvites:
-    def _invite(self, client, reg, team_id="team-t", email="bob@example.com"):
-        _seed_team_with_owner(reg, team_id)
+    def _invite(self, client, reg, org_id="team-t", email="bob@example.com"):
+        _seed_team_with_owner(reg, org_id)
         r = client.post("/v1/invites",
-                        json={"team_id": team_id, "email": email})
+                        json={"org_id": org_id, "email": email})
         assert r.status_code == 200, r.text
         return r.json()
 
     def test_pending_list_own_invites_only(self, client, reg):
         """#1875: GET /v1/invites/pending returns the session user's pending
         invites with team name + inviter; others' invites excluded."""
-        self._invite(client, reg, team_id="team-t", email="bob@example.com")
+        self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
         r = client.get("/v1/invites/pending")
         assert r.status_code == 200, r.text
         invites = r.json()["invites"]
         assert len(invites) == 1
-        assert invites[0]["team_id"] == "team-t"
-        assert invites[0]["team_name"] == "team-t"
+        assert invites[0]["org_id"] == "team-t"
+        assert invites[0]["org_name"] == "team-t"
         assert invites[0]["invitation_id"]
 
     def test_pending_list_excludes_expired(self, client, reg):
-        self._invite(client, reg, team_id="team-t", email="bob@example.com")
+        self._invite(client, reg, org_id="team-t", email="bob@example.com")
         reg.query(
             "MATCH (i:Invitation {email:'bob@example.com'}) "
             "SET i.expires_at = '2020-01-01T00:00:00+00:00'")
@@ -968,20 +973,20 @@ class TestPendingInvites:
     def test_by_id_accept_tokenless(self, client, reg):
         """#1875: POST /v1/invites/pending/{id}/accept (token-less,
         email-match) lands the membership + cleans the ghost row."""
-        inv = self._invite(client, reg, team_id="team-t", email="bob@example.com")
+        inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
         r = client.post(f"/v1/invites/pending/{inv['invite_id']}/accept")
         assert r.status_code == 200, r.text
-        assert r.json() == {"team_id": "team-t", "role": "member"}
+        assert r.json() == {"org_id": "team-t", "role": "member"}
         assert _active_roles(reg, "team-t")[_U_BOB] == "member"
         # ghost row gone (#1880) — members list is owner/admin-only
         _as_user(_U1, "owner@example.com")
-        ghost = [m for m in client.get("/v1/teams/team-t/members").json()
+        ghost = [m for m in client.get("/v1/organizations/team-t/members").json()
                  if m["user_id"].startswith("invite-")]
         assert ghost == []
 
     def test_by_id_accept_consumed_error(self, client, reg):
-        inv = self._invite(client, reg, team_id="team-t", email="bob@example.com")
+        inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
         r1 = client.post(f"/v1/invites/pending/{inv['invite_id']}/accept")
         assert r1.status_code == 200, r1.text
@@ -989,7 +994,7 @@ class TestPendingInvites:
         assert r2.status_code in (400, 409)  # consumed / already a member
 
     def test_by_id_accept_email_mismatch_404(self, client, reg):
-        inv = self._invite(client, reg, team_id="team-t", email="bob@example.com")
+        inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U2, "other@example.com")  # different email → not found
         r = client.post(f"/v1/invites/pending/{inv['invite_id']}/accept")
         assert r.status_code == 404
@@ -997,21 +1002,21 @@ class TestPendingInvites:
     def test_decline_removes_and_ghost_cleaned(self, client, reg):
         """#1875: DELETE /v1/invites/pending/{id} (email-match) revokes the
         invite AND deletes the fake invite-{iid} membership row (#1880)."""
-        inv = self._invite(client, reg, team_id="team-t", email="bob@example.com")
+        inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
         r = client.delete(f"/v1/invites/pending/{inv['invite_id']}")
         assert r.status_code == 200, r.text
         assert r.json()["revoked"] is True
         # ghost cleaned (#1880) — members list is owner/admin-only
         _as_user(_U1, "owner@example.com")
-        ghost = [m for m in client.get("/v1/teams/team-t/members").json()
+        ghost = [m for m in client.get("/v1/organizations/team-t/members").json()
                  if m["user_id"].startswith("invite-")]
         assert ghost == [], "decline must clean the ghost membership row"
 
     def test_decline_then_accept_409(self, client, reg):
         """#1875 P1 cycle-2: a declined invite must NOT be re-acceptable
         (the by-id accept reads status/accepted_at now)."""
-        inv = self._invite(client, reg, team_id="team-t", email="bob@example.com")
+        inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
         r = client.delete(f"/v1/invites/pending/{inv['invite_id']}")
         assert r.status_code == 200, r.text
@@ -1026,7 +1031,7 @@ class TestPendingInvites:
         _seed_team_with_owner(reg, "team-own-free", tier="free", owner=_U_BOB)
         _seed_team_with_owner(reg, "team-t")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com"})
+                        json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         token = r.json()["token"]
         reg.query("MATCH (t:Team {id:'team-t'}) SET t.tier='free'")
@@ -1036,7 +1041,7 @@ class TestPendingInvites:
         assert "free team" in r2.json()["detail"]
 
     def test_decline_idempotent(self, client, reg):
-        inv = self._invite(client, reg, team_id="team-t", email="bob@example.com")
+        inv = self._invite(client, reg, org_id="team-t", email="bob@example.com")
         _as_user(_U_BOB, "bob@example.com")
         r1 = client.delete(f"/v1/invites/pending/{inv['invite_id']}")
         assert r1.status_code == 200
@@ -1053,7 +1058,7 @@ class TestAcceptFreeCap:
         _seed_team_with_owner(reg, "team-own-free", tier="free", owner=_U_BOB)
         _seed_team_with_owner(reg, "team-t")  # mint on a paid-tier team...
         r = client.post("/v1/invites",
-                        json={"team_id": "team-t", "email": "bob@example.com"})
+                        json={"org_id": "team-t", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         iid = r.json()["invite_id"]
         # ...then the team downgrades to free before the invitee accepts
@@ -1069,7 +1074,7 @@ class TestAcceptFreeCap:
         _seed_team_with_owner(reg, "team-own-free", tier="free", owner=_U_BOB)
         _seed_team_with_owner(reg, "team-pro", tier="pro")
         r = client.post("/v1/invites",
-                        json={"team_id": "team-pro", "email": "bob@example.com"})
+                        json={"org_id": "team-pro", "email": "bob@example.com"})
         assert r.status_code == 200, r.text
         iid = r.json()["invite_id"]
         _as_user(_U_BOB, "bob@example.com")
@@ -1088,15 +1093,15 @@ class TestExpiredInviteGhostCleanup:
     the cleanup_expired_invitations sweep, and the one-time backfill sweep
     for pre-#1880 ghosts (idempotent, dry-run safe)."""
 
-    def _ghost_rows(self, client, team_id="team-t"):
-        r = client.get(f"/v1/teams/{team_id}/members")
+    def _ghost_rows(self, client, org_id="team-t"):
+        r = client.get(f"/v1/organizations/{org_id}/members")
         assert r.status_code == 200, r.text
         return [m for m in r.json() if m["user_id"].startswith("invite-")]
 
-    def _mint(self, client, reg, team_id="team-t", email="bob@example.com"):
-        _seed_team_with_owner(reg, team_id)
+    def _mint(self, client, reg, org_id="team-t", email="bob@example.com"):
+        _seed_team_with_owner(reg, org_id)
         r = client.post("/v1/invites",
-                        json={"team_id": team_id, "email": email})
+                        json={"org_id": org_id, "email": email})
         assert r.status_code == 200, r.text
         return r.json()
 
@@ -1162,7 +1167,7 @@ class TestExpiredInviteGhostCleanup:
         inv_props are extra Invitation properties (e.g. accepted_at/status)."""
         props = ", ".join(f"{k}:'{v}'" for k, v in inv_props.items())
         reg.query(
-            f"CREATE (i:Invitation {{id:'{iid}', team_id:'team-t', "
+            f"CREATE (i:Invitation {{id:'{iid}', org_id:'team-t', "
             f"email:'{email}', role:'member', "
             f"expires_at:'2099-01-01T00:00:00+00:00'"
             + (f", {props}" if props else "") + "})",
@@ -1182,7 +1187,7 @@ class TestExpiredInviteGhostCleanup:
             reg, "inv-consumed", "a@example.com", accepted_at="2020-01-01T00:00:00+00:00")
         # expired (expires_at past, still pending)
         reg.query(
-            "CREATE (i:Invitation {id:'inv-expired', team_id:'team-t', "
+            "CREATE (i:Invitation {id:'inv-expired', org_id:'team-t', "
             "email:'b@example.com', role:'member', accepted_at:null, "
             "status:'pending', expires_at:'2020-01-01T00:00:00+00:00'})",
         )

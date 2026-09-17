@@ -185,7 +185,7 @@ _MULTI_SESSION_FRAGMENT = (
 # GENERIC baseline — the ask lane's detector returned None on 20/21, no
 # type fragment engaged, and the reader treated 'no category matched' as
 # 'abstain' even when the asked value WAS in context (d6233ab6 wrote 'It
-# mentions nostalgic high school experiences (debate team, AP economics),
+# mentions nostalgic high school experiences (debate org, AP economics),
 # but...' THEN abstained; gpt4_8279ba02 quoted the smoker-purchase session
 # yet abstained instead of computing the days). #2027 applies the #1775
 # two-phase design to the generic path: PHASE 1 now fires on PRESENT
