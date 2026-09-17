@@ -30,6 +30,12 @@ surfaces:
   - test_graph_write_loop_responsiveness.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
+  # #3670/#3671/#3681: the onboarding truth-surface tests. Dual-registered
+  # under `api` as well as `core` for the same reason as the boot/health guards
+  # above: the file they pin (tortoise/hosted_api.py) selects the `api`
+  # surface, and `core` is only matched when nothing else matched — so `api`
+  # is what makes these run on an api-only change to the file they guard.
+  - test_onboarding_truth_surface.py
   - test_sentry.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
@@ -318,6 +324,7 @@ surfaces:
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
+  - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
