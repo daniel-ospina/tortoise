@@ -191,6 +191,16 @@ def parse_rates(lines: str) -> RatesResult:
         if not _NODEID_RE.match(nodeid) or runs <= 0 or failures > runs:
             rejected.append(line)
             continue
+        if nodeid in rates:
+            # Duplicate rows (latent finding 2): "A 8 8" then "A 0 8" yielded
+            # Rate(0,8) while the REVERSED order yielded Rate(8,8) — row order
+            # decided whether the PR blocked, an order-dependence inside the
+            # verdict-stability class. Reject rather than pick a winner: a table
+            # that contradicts itself is not evidence, and fail-closed means the id
+            # then has no rate at all (not exempt).
+            rejected.append(line)
+            rates.pop(nodeid, None)
+            continue
         rates[nodeid] = Rate(failures=failures, runs=runs)
     return RatesResult(rates=rates, rejected=rejected)
 
@@ -284,27 +294,31 @@ def decide(
     decision = Decision()
     sig_main = main_signatures or {}
 
-    # NOTE (informational only): a thin TABLE gets a note. It is deliberately NOT
-    # the gate — the gate is PER-ID below (review cycle 2, survivor). Deriving the
-    # floor from `max(runs)` over the whole table let a row with `runs=1` be exempted
-    # whenever ANY OTHER row in the table had >= min_runs runs, with NO note, because
-    # the global looked healthy. "One observation cannot establish a rate" is a claim
-    # about THIS id's evidence, so the comparison must be against THIS id's runs.
-    main_k = (
-        k_main if k_main is not None
-        else max((r.runs for r in main_rates.values()), default=0)
-    )
-    if main_k < min_runs:
-        decision.notes.append(
-            f"insufficient evidence: no main row reaches min_runs={min_runs} "
-            f"(widest k_main={main_k})"
-        )
+    # The floor is PER-ID and has NO table-wide form (review cycle 2). A table-max
+    # derivation has no legitimate use: the question is always "does THIS id's row
+    # rest on enough runs?", and when the id has no row at all `mr` is None and the
+    # decision already BLOCKS. Keeping it per-id makes the bug class — a healthy
+    # NEIGHBOUR licensing a thin row's exemption — impossible to express at all,
+    # rather than merely un-triggered by the current call sites.
     if k_pr is not None and k_pr < 1:
         decision.notes.append("pr sample empty — treating every failure as PR-side")
 
     for nodeid in sorted(pr_failures):
         pr = pr_failures[nodeid]
         mr = main_rates.get(nodeid)
+
+        # PR-side validity (latent finding 1). `Failure(rate=Rate(3, 0))` has
+        # `.rate == 0.0`, so it slipped past the comparison into EXEMPT while the
+        # code emitted "pr sample empty — treating every failure as PR-side", which
+        # claims the opposite. The runs>0 guard covered only the main-side parser.
+        if pr.rate.runs <= 0:
+            decision.notes.append(
+                f"PR sample for {nodeid} is empty ({pr.rate}) — a PR failure with no "
+                "measured sample cannot be exempted")
+            decision.blocked.append(Verdict(
+                nodeid, True,
+                f"PR rate is unmeasurable ({pr.rate}) — NOT exempt"))
+            continue
 
         if mr is None:
             decision.blocked.append(Verdict(
@@ -320,6 +334,14 @@ def decide(
             continue
 
         if mr.runs < min_runs:
+            # The NOTE is emitted alongside the block (review cycle 2): the reviewer's
+            # required observation is `BLOCK, with the note`, and a per-id block that
+            # left `notes` empty would report the refusal without the reason.
+            decision.notes.append(
+                f"insufficient evidence for {nodeid}: main {mr} rests on "
+                f"{mr.runs} run(s) < min_runs={min_runs} — one observation cannot "
+                "establish a rate"
+            )
             decision.blocked.append(Verdict(
                 nodeid, True,
                 f"insufficient evidence (main {mr}, {mr.runs} run(s) < "
@@ -345,7 +367,7 @@ def decide(
 
         decision.exempt.append(Verdict(
             nodeid, False,
-            f"main {mr} vs PR {pr.rate} — rates equivalent at declared "
-            f"k_main={main_k}, k_pr={k_pr}"))
+            f"main {mr} vs PR {pr.rate} — rates equivalent, main measured over "
+            f"{mr.runs} run(s) (min_runs={min_runs}), k_pr={k_pr}"))
 
     return decision

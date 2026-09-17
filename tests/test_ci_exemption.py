@@ -192,7 +192,8 @@ def test_E4_an_exemption_is_recorded_with_both_rates():
     assert len(lines) == 1, "an exemption must be recorded, never silent"
     assert lines[0].startswith("EXEMPT:")
     assert "4/8" in lines[0], "the exemption must carry the measured rates"
-    assert "k_main=8" in lines[0] and "k_pr=8" in lines[0]
+    assert "8 run(s)" in lines[0], "the exemption must carry the main SAMPLE SIZE"
+    assert "k_pr=8" in lines[0], "the exemption must carry the PR sample size"
     assert lines[0] in decision.report()
 
 
@@ -254,10 +255,17 @@ def test_verdict_stability_across_a_wider_sample():
     pr = {ID: _f(8, 8, "sg")}
     sigs = {ID: frozenset({"sg"})}
 
-    narrow = decide(pr, {ID: Rate(1, 8)}, main_signatures=sigs, k_main=8, k_pr=8)
-    wide = decide(pr, {ID: Rate(1, 8)}, main_signatures=sigs, k_main=8, k_pr=8)
+    # GENUINELY wider: the same RATE (0.125) measured over 8 runs vs 32. The two
+    # calls must differ in their SAMPLE and agree in their VERDICT — otherwise this
+    # test cannot fail and proves nothing.
+    narrow = decide(pr, {ID: Rate(1, 8)}, main_signatures=sigs, k_pr=8)
+    wide = decide(pr, {ID: Rate(4, 32)}, main_signatures=sigs, k_pr=8)
 
-    assert narrow.any_blocked == wide.any_blocked
+    assert narrow.any_blocked == wide.any_blocked, (
+        "more evidence must change the measurement, never the rule")
+    assert narrow.report() != wide.report(), (
+        "the reports MUST differ — otherwise the two calls are the same input and "
+        "this test is tautological")
 
 
 # ── substrate-misfire · the fix must be correct when the substrate lies ───
@@ -449,6 +457,10 @@ def test_min_runs_floor_is_PER_ID_not_table_wide():
     assert not d.visible_exemptions(), (
         "a healthy OTHER row must not license THIS id's exemption")
     assert [v.nodeid for v in d.blocked] == ["tests/test_a.py::test_a11"]
+    # The reviewer's required observation is `BLOCK, with the note`: a per-id block
+    # that left `notes` empty would report the refusal without its reason. Asserted
+    # here because the table-wide derivation must not be able to satisfy it.
+    assert any("one observation cannot establish a rate" in n for n in d.notes), d.notes
 
 
 def test_the_per_id_floor_still_exempts_a_genuinely_well_measured_row():
@@ -460,3 +472,34 @@ def test_the_per_id_floor_still_exempts_a_genuinely_well_measured_row():
     d = decide(pr, main.rates,
                main_signatures={"tests/test_a.py::test_a11": frozenset({"sg"})})
     assert d.visible_exemptions(), "a well-measured row at an equivalent rate IS exempt"
+
+
+def test_a_duplicate_row_is_rejected_not_resolved_by_order():
+    """Latent 2: row order decided the verdict.
+
+    `"A 8 8" then "A 0 8"` yielded `Rate(0,8)` (→ no block) while the REVERSED order
+    yielded `Rate(8,8)` (→ block). An order-dependence inside the verdict-stability
+    class. A self-contradicting table is not evidence; the id gets NO rate, and no
+    rate means not exempt.
+    """
+    a = parse_rates("tests/test_a.py::test_a11\t8\t8\ntests/test_a.py::test_a11\t0\t8\n")
+    b = parse_rates("tests/test_a.py::test_a11\t0\t8\ntests/test_a.py::test_a11\t8\t8\n")
+    assert a.rates == {} and b.rates == {}
+    assert len(a.rejected) == 1 and len(b.rejected) == 1, (
+        "the duplicate is the rejected row — the first is accepted, then withdrawn")
+    assert a.rates == b.rates, "order must not decide the verdict"
+
+    pr = {"tests/test_a.py::test_a11": Failure(rate=Rate(1, 8), signatures=frozenset({"sg"}))}
+    d = decide(pr, a.rates, main_signatures={"tests/test_a.py::test_a11": frozenset({"sg"})})
+    assert not d.visible_exemptions(), "no rate -> not exempt"
+
+
+def test_a_pr_failure_with_an_empty_sample_is_not_exempt():
+    """Latent 1: `Rate(3, 0)` has `.rate == 0.0` and slipped into EXEMPT while the
+    note claimed 'pr sample empty — treating every failure as PR-side', the opposite.
+    """
+    main = parse_rates("tests/test_a.py::test_a11\t4\t8\n")
+    pr = {"tests/test_a.py::test_a11": Failure(rate=Rate(3, 0), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates, main_signatures={"tests/test_a.py::test_a11": frozenset({"sg"})})
+    assert not d.visible_exemptions(), "an unmeasurable PR rate is not an exemption"
+    assert [v.nodeid for v in d.blocked] == ["tests/test_a.py::test_a11"]
