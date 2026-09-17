@@ -1233,3 +1233,384 @@ def test_shared_server_keeps_co_tenant_owner_record(tmp_path):
             if proj is not None:
                 with contextlib.suppress(Exception):
                     proj.close()
+
+
+def test_close_must_not_delete_a_live_cotenants_socket_dir(tmp_path):
+    """#3653: closing ONE client of a SHARED embedded server must never delete
+    the server's socket dir (or shut the live server down) while a co-tenant
+    still holds it.
+
+    redislite's ``RedisMixin._cleanup()`` rmtrees the socket dir whenever its
+    own ``_connection_count() <= 1`` — and that count is **0** the moment
+    ``_is_redis_running()`` is False, i.e. once the shared ``.settings``
+    registry file is gone (a previous close removes it; ``_cleanup`` does
+    ``os.remove(self.settingregistryfile)``). Zero is then read as "last
+    client", so the close SHUTDOWNs the live server and deletes its socket
+    dir out from under every live co-tenant. On CI that is the observed
+    ``Error 2 connecting to /tmp/tmpXXXX/redis.socket. No such file or
+    directory`` / ``FATAL CONFIG FILE ERROR ... 'dir '/tmp/tmpXXXX''`` —
+    seeded state vanishing mid-test.
+
+    The registry-removed state is set up explicitly here because that is the
+    exact precondition observed; the fix must decide co-tenancy from a
+    registry-INDEPENDENT signal (owner records + a raw socket probe), not
+    from the stale registry.
+    """
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "cotenant_registry_gone.db")
+    a = FalkorProjection(db_path, graph_name="test")
+    b = None
+    try:
+        b = FalkorProjection(db_path, graph_name="test")
+        cli_a = getattr(a.db, "client", a.db)
+        cli_b = getattr(b.db, "client", b.db)
+        sock = cli_a.socket_file
+        assert sock and cli_b.socket_file == sock, "must share one server"
+        pid = cli_a.pid
+        assert _pid_alive(pid)
+
+        # The CI precondition: the shared registry file is already gone, so
+        # redislite's liveness check reads False and _connection_count() 0.
+        registry = getattr(cli_a, "settingregistryfile", None)
+        assert registry and os.path.exists(registry)
+        os.remove(registry)
+        assert cli_a._is_redis_running() is False
+
+        a.close()
+
+        assert os.path.exists(sock), (
+            "#3653: the co-tenant's live socket was deleted by a.close() — a "
+            "live embedded instance must never be torn down")
+        cli_b.ping()  # the co-tenant is still served
+        assert _pid_alive(pid), "#3653: shared server was killed by a.close()"
+
+        b.close()
+        assert _wait_server_dead(pid), (
+            "the LAST client's close must still shut the server down")
+    finally:
+        for proj in (b, a):
+            if proj is not None:
+                with contextlib.suppress(Exception):
+                    proj.close()
+
+
+# ── #3653: the four adversarial findings (F1-F4) ──────────────────────────
+#
+# The guard in `test_close_must_not_delete_a_live_cotenants_socket_dir`
+# covers exactly ONE teardown seam (FalkorDB.close). These tests cover the
+# seams and defects the prior adversarial review proved by execution:
+#   F1 redislite's own atexit `_cleanup` + `__del__` still run on the shared
+#      path and tear the live co-tenant down once the registry file is gone;
+#   F2 the CI-default `atexit_fast_close` (TORTOISE_FAST_ATEXIT=1) bypassed
+#      the guard entirely and sent SHUTDOWN NOSAVE to a live peer's server;
+#   F3 the fast path stranded the ephemeral socket dir forever (redislite
+#      only rmtrees inside `if self.pid:`).
+#   F4 the age-based `_active_client_count` probe missed a fresh, unnamed
+#      live peer, letting the teardown proceed anyway.
+
+
+def test_cotenant_close_neutralizes_redislites_own_teardown(tmp_path):
+    """#3653 F1: the explicit close() guard is not enough — redislite's OWN
+    atexit-registered ``RedisMixin._cleanup`` (and ``__del__``) still run at
+    process exit. With the shared registry file gone they read
+    ``_connection_count() == 0`` and stop the live server / rmtree its socket
+    dir out from under the co-tenant. ``a.close()`` must neutralize them.
+
+    RED mutation: remove the ``_neutralize_redislite_cleanup(inner)`` call
+    from ``FalkorDB.close``'s shared branch. The explicit ``ia._cleanup()``
+    below is byte-for-byte what redislite's atexit handler and ``__del__``
+    call, and it then kills the co-tenant (pid dead, ``ib.ping()`` raises).
+    """
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "f1_neutralize.db")
+    a = FalkorProjection(db_path, graph_name="test")
+    b = None
+    ia = getattr(a.db, "client", a.db)
+    try:
+        b = FalkorProjection(db_path, graph_name="test")
+        ib = getattr(b.db, "client", b.db)
+        sock, pid = ia.socket_file, ia.pid
+        assert sock and ib.socket_file == sock and _pid_alive(pid)
+
+        # The observed precondition: the shared registry file is already gone.
+        os.remove(ia.settingregistryfile)
+        assert ia._is_redis_running() is False
+
+        a.close()
+
+        # Exactly what redislite's atexit `_cleanup` / `__del__` run.
+        ia._cleanup()
+
+        assert os.path.exists(sock), (
+            "#3653 F1: redislite's own teardown deleted the live co-tenant's "
+            "socket dir")
+        ib.ping()
+        assert _pid_alive(pid), (
+            "#3653 F1: redislite's own teardown killed the live co-tenant")
+
+        b.close()
+        assert _wait_server_dead(pid), (
+            "the LAST client must still be able to shut the server down")
+    finally:
+        for proj in (b, a):
+            if proj is not None:
+                with contextlib.suppress(Exception):
+                    proj.close()
+
+
+def test_fast_atexit_never_shuts_down_a_live_cotenant(tmp_path, monkeypatch):
+    """#3653 F2: ``TORTOISE_FAST_ATEXIT=1`` is armed at CI workflow level, so
+    ``atexit_fast_close`` is the DEFAULT teardown in CI. It must not SHUTDOWN
+    a server a live co-tenant holds — the old ``_connection_count() > 1``
+    guard is registry-based and reads 0 once the shared registry file is gone.
+
+    RED mutation: restore ``client._connection_count() > 1`` in
+    ``atexit_fast_close`` — the co-tenant is then killed by SHUTDOWN NOSAVE.
+    """
+    from tortoise.projection import FalkorProjection
+
+    monkeypatch.setenv("TORTOISE_FAST_ATEXIT", "1")
+    db_path = str(tmp_path / "f2_fast_atexit.db")
+    a = FalkorProjection(db_path, graph_name="test")
+    b = None
+    ia = getattr(a.db, "client", a.db)
+    try:
+        b = FalkorProjection(db_path, graph_name="test")
+        ib = getattr(b.db, "client", b.db)
+        sock, pid = ia.socket_file, ia.pid
+        assert sock and ib.socket_file == sock and _pid_alive(pid)
+
+        os.remove(ia.settingregistryfile)
+        assert ia._is_redis_running() is False
+
+        # The real CI-default seam (also releases a's owner record).
+        a.db._atexit_close()
+
+        assert os.path.exists(sock), (
+            "#3653 F2: the fast atexit path deleted the live co-tenant's "
+            "socket dir")
+        ib.ping()
+        assert _pid_alive(pid), (
+            "#3653 F2: the fast atexit path SHUTDOWN a live co-tenant")
+
+        b.close()
+        assert _wait_server_dead(pid), (
+            "the last client must still shut the server down")
+    finally:
+        for proj in (b, a):
+            if proj is not None:
+                with contextlib.suppress(Exception):
+                    proj.close()
+
+
+def test_fast_close_reclaims_the_ephemeral_socket_dir(tmp_path, monkeypatch):
+    """#3653 F3: the CI-default fast-close path must not strand the server's
+    ephemeral socket dir. redislite's ``_cleanup`` only rmtrees inside
+    ``if self.pid:`` — and ``self.pid`` is 0 once the server is dead — so a
+    NOSAVEd server's dir leaked forever (measured: 10,711 orphaned dirs vs
+    123 live). The fast path must reclaim it.
+
+    RED mutation: drop the ``_remove_ephemeral_socket_dir`` call from the
+    fast path's SHUTDOWN-NOSAVE branch — the dir survives the close.
+    """
+    from tortoise.projection import FalkorProjection
+
+    monkeypatch.setenv("TORTOISE_FAST_ATEXIT", "1")
+    db_path = str(tmp_path / "f3_reclaim.db")
+    proj = FalkorProjection(db_path, graph_name="test")
+    inner = getattr(proj.db, "client", proj.db)
+    try:
+        rdir = inner.redis_dir
+        pid = inner.pid
+        assert rdir and os.path.isdir(rdir), "server owns an ephemeral dir"
+        assert _pid_alive(pid)
+
+        proj.db._atexit_close()  # the CI-default fast path + owner release
+
+        assert _wait_server_dead(pid)
+        assert not os.path.isdir(rdir), (
+            "#3653 F3: the fast-close path stranded the ephemeral socket dir")
+    finally:
+        with contextlib.suppress(Exception):
+            proj.db._t_release_owner()
+        with contextlib.suppress(Exception):
+            proj.close()
+
+
+def test_cotenant_probe_is_age_independent(tmp_path):
+    """#3653 F4: a FRESH, unnamed live peer must still count as a co-tenant.
+
+    ``embedded_reaper._active_client_count`` deliberately excludes
+    connections younger than 2s (and unnamed ones) — that SKIPME heuristic
+    is right for the reaper but wrong here: a peer that attached moments ago
+    was MISSED, the guard returned False, and the teardown proceeded against
+    a live server. The peer here is deliberately UNINSTRUMENTED (a raw
+    redislite client that writes no owner record), so the owner-record
+    signal cannot mask the age miss.
+
+    RED mutation: restore ``_active_client_count(key) > 1`` in
+    ``cotenant_holds_server`` — the precondition asserts below prove the peer
+    is invisible to the age heuristic while ``_client_list`` sees it.
+    """
+    from redislite.falkordb_client import FalkorDB as _RawFalkorDB
+
+    from tortoise.embedded_lifecycle import cotenant_holds_server
+    from tortoise.embedded_reaper import _active_client_count, _client_list
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "f4_age.db")
+    a = FalkorProjection(db_path, graph_name="test")
+    peer = None
+    ia = getattr(a.db, "client", a.db)
+    try:
+        # Uninstrumented peer: shares the server, writes NO owner record.
+        peer = _RawFalkorDB(db_path)
+        ip = getattr(peer, "client", peer)
+        sock = ia.socket_file
+        assert ip.socket_file == sock, "the raw peer must share the server"
+        ip.ping()
+
+        # Precondition (the F4 bug): the age-based heuristic misses the fresh
+        # unnamed peer while a raw CLIENT LIST proves a second client exists.
+        assert _active_client_count(sock) is not None
+        assert _active_client_count(sock) <= 1, (
+            "test precondition: the peer must be young/unnamed so the age "
+            "heuristic misses it")
+        assert len(_client_list(sock) or []) >= 2, (
+            "test precondition: the raw list must see the live peer")
+
+        assert cotenant_holds_server(ia) is True, (
+            "#3653 F4: a fresh, unnamed live peer was judged absent — the "
+            "teardown would then kill it")
+    finally:
+        with contextlib.suppress(Exception):
+            a.close()
+        if peer is not None:
+            with contextlib.suppress(Exception):
+                peer.close()
+
+
+def test_peer_completes_a_run_while_a_cotenant_exits_cross_process(tmp_path):
+    """#3653 ACCEPTANCE — cross-process, the property the issue asks for.
+
+    With the CI-default ``TORTOISE_FAST_ATEXIT=1`` and the exact observed
+    precondition (the shared registry file is gone), a PEER process must
+    complete a run while its co-tenant EXITS mid-session. The child's exit
+    runs BOTH teardown seams — our ``_atexit_close``/``atexit_fast_close``
+    (F2) and redislite's own atexit ``_cleanup`` + ``__del__`` (F1) — each of
+    which, pre-fix, saw ``_connection_count() == 0`` and killed the live
+    server + deleted its socket dir. Process B (this test) must still write
+    and read afterwards.
+
+    RED mutation: remove the ``cotenant_holds_server`` guard from
+    ``atexit_fast_close`` (fall back to ``_connection_count``) or the
+    ``_neutralize_redislite_cleanup`` call on its shared path. The assertion
+    that B's post-exit query succeeds then fails with
+    ``redis.socket. No such file or directory``.
+    """
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "cross_process_cotenant.db")
+    proj = FalkorProjection(db_path, graph_name="test")
+    inner = getattr(proj.db, "client", proj.db)
+    pid, sock = inner.pid, inner.socket_file
+    assert sock and _pid_alive(pid)
+
+    script = (  # noqa: UP031 - child-script %-template (matches siblings)
+        "import sys, os\n"
+        "sys.path.insert(0, %r)\n"
+        "os.environ['TORTOISE_FAST_ATEXIT'] = '1'\n"
+        "from tortoise.projection import FalkorProjection\n"
+        "p = FalkorProjection(sys.argv[1], graph_name='test')\n"
+        "cli = getattr(p.db, 'client', p.db)\n"
+        "print('READY pid=%%s sock=%%s' %% (cli.pid, cli.socket_file), flush=True)\n"
+        "sys.stdin.readline()\n"  # parent closes stdin -> normal exit
+    ) % _REPO_ROOT
+    env = _child_env()
+    env["TORTOISE_FAST_ATEXIT"] = "1"
+    proc = _subprocess.Popen(
+        [sys.executable, "-c", script, db_path],
+        stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+        stderr=_subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        ready = _read_child_line(proc, "READY ")
+        kv = dict(part.split("=", 1) for part in ready.split()[1:])
+        assert int(kv["pid"]) == pid, "the child must share B's server"
+        assert kv["sock"] == sock
+
+        # The exact observed precondition: the shared registry file is gone.
+        assert inner.settingregistryfile and os.path.exists(
+            inner.settingregistryfile)
+        os.remove(inner.settingregistryfile)
+        assert inner._is_redis_running() is False
+
+        # Let the co-tenant exit mid-session (normal exit -> atexit runs).
+        proc.stdin.close()
+        proc.wait(timeout=90)
+
+        # The peer completes its run.
+        assert os.path.exists(sock), (
+            "#3653: a co-tenant's exit deleted the live peer's socket dir")
+        assert _pid_alive(pid), "#3653: a co-tenant's exit killed the peer"
+        proj.g.query("CREATE (n:Point {id:'cotenant-survived'})")
+        rows = proj.g.query(
+            "MATCH (n:Point {id:'cotenant-survived'}) RETURN count(n)"
+        ).result_set
+        assert rows and rows[0][0] >= 1, (
+            "#3653: the peer could not complete its run after the co-tenant "
+            "exited")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        with contextlib.suppress(Exception):
+            proj.close()
+
+
+def test_partial_init_cleanup_reclaims_the_orphaned_server(tmp_path):
+    """#3653 regression: a redislite client whose ``__init__`` aborted AFTER
+    the embedded server started has a live pidfile but NO ``connection_pool``.
+
+    redislite's ``_start_redis()`` runs before the redis-py ``ConnectionPool``
+    is built, so a failure in that window (a ``<db>.settings`` parent that
+    vanished under the tempdir race, a registry read that lost its file)
+    leaves the object half-built. Its own atexit-registered ``_cleanup`` and
+    ``__del__`` then abort at ``self.shutdown(...)`` with
+    ``AttributeError: 'Redis' object has no attribute 'connection_pool'``,
+    leaking one embedded server per aborted ``__del__`` (CI measured 43).
+
+    These objects never pass through a ``tortoise.FalkorDB`` close seam (the
+    wrapper registers only after ``super().__init__()`` returns), so the
+    guarded ``_cleanup`` must reclaim the orphan itself: stop the server over
+    the raw socket and neutralize the client.
+
+    RED mutation: restore the unguarded ``RedisMixin._cleanup`` (drop
+    ``_install_partial_init_cleanup_guard``). ``ia._cleanup()`` then raises
+    ``AttributeError`` and the server survives.
+    """
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "partial_init.db")
+    proj = FalkorProjection(db_path, graph_name="test")
+    inner = getattr(proj.db, "client", proj.db)
+    pid, sock = inner.pid, inner.socket_file
+    assert sock and _pid_alive(pid), "server owns a live socket"
+
+    # The exact half-built shape: a live pidfile, no connection pool.
+    del inner.connection_pool
+    assert not hasattr(inner, "connection_pool")
+    assert _pid_alive(pid)
+
+    # Byte-for-byte what redislite's atexit handler and ``__del__`` call.
+    inner._cleanup()
+
+    assert _wait_server_dead(pid), (
+        "#3653: a partial-init client's _cleanup leaked its orphaned server")
+    assert getattr(inner, "pidfile", "MISSING") is None, (
+        "#3653: _cleanup must leave the client neutralized")
+
+    with contextlib.suppress(Exception):
+        proj.db._t_close()
