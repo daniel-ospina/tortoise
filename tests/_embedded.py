@@ -1101,8 +1101,16 @@ def fresh_embedded_proj(db_dir, *, graph_name: str | None = None, **kwargs):
     The raw construction lives HERE, at the seam — which is precisely the
     rationale ``RAW_EMBEDDED_ALLOWLIST`` records for allowlisting
     ``_embedded.py`` ("seam/helper — raw constructions ARE the
-    embedded-under-test input"). A consumer test therefore never needs an
-    allowlist entry of its own (#3769).
+    embedded-under-test input"). A consumer test therefore needs no
+    ``RAW_EMBEDDED_ALLOWLIST`` entry of its own.
+
+    It DOES, however, need a SECOND carve-out: the caller's test module stem
+    must be listed in ``TEST_NO_REDIRECT_STEMS``. Under a URI lane
+    (``TORTOISE_DB_URI`` + ``TORTOISE_TEST_MODE=1``) a stem that is not exempt
+    gets redirected — ``path`` is discarded and the construction connects to a
+    server — so there is no fresh embedded server and no on-disk artifact to
+    inspect. This seam therefore FAILS CLOSED on that case rather than yielding
+    a projection that would make an ``expect_aof=False`` assertion vacuous.
 
     Teardown never masks the caller's assertion.
     """
@@ -1112,6 +1120,16 @@ def fresh_embedded_proj(db_dir, *, graph_name: str | None = None, **kwargs):
     if graph_name is not None:
         kwargs["graph_name"] = graph_name
     proj = FalkorProjection(path=db_path, **kwargs)
+    if not getattr(proj, "_is_embedded", False):
+        with contextlib.suppress(Exception):
+            proj.close()
+        raise RuntimeError(
+            "fresh_embedded_proj is embedded-only: the caller's test module "
+            "must be listed in TEST_NO_REDIRECT_STEMS (tests/_embedded.py). "
+            "Otherwise the URI redirect flips this construction to a server, "
+            "`path` is discarded, and no on-disk artifact exists — which would "
+            "make an expect_absent assertion vacuous (#3769)"
+        )
     try:
         yield proj
     finally:

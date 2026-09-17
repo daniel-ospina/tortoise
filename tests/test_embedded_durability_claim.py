@@ -41,7 +41,10 @@ def _aof_artifact_written(tmp: Path, *, enabled: bool, monkeypatch) -> bool:
     # server would freeze it at the first case and this helper would then
     # report the same verdict for `default-off` and `opt-in-on`.
     with fresh_embedded_proj(tmp) as proj:
-        # A write makes the journaling decision observable, not just the config.
+        # The `*-appendonlydir` is a CONSTRUCTION-time artifact: redis-server
+        # starts with `appendonly yes` when the flag is set, so the dir exists
+        # BEFORE this write. The write makes journal CONTENT observable — it is
+        # not what produces the artifact (measured, #3769 review P2-2).
         proj._upsert({"id": "durability-probe", "content": "x", "context": "y"})
     return any(p.name.endswith("-appendonlydir") for p in tmp.iterdir())
 
