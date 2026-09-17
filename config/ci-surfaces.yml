@@ -347,6 +347,11 @@ surfaces:
   - test_e2e9_point_in_time.py
   - test_e2e_journey.py
   - test_embedded_concurrency.py
+  # #2879: embedded AOF durability drift pin — measures an on-disk
+  # `<db>-appendonlydir`, so it belongs in the URI-unset carve-out lane
+  # (under the docker redirect it constructs against the server and the
+  # opt-in half reds). Registered in `core` (the projection surface).
+  - test_embedded_durability_claim.py
   - test_embedded_lifecycle.py
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
@@ -474,6 +479,7 @@ surfaces:
   - test_projection.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
+  - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
   - test_projection_version_gate.py
   - test_query_suggestions.py
   - test_reaper.py
@@ -860,6 +866,7 @@ carve_out:
 - test_backup_e2e.py
 - test_config.py
 - test_embedded_concurrency.py
+- test_embedded_durability_claim.py  # #2879: embedded AOF durability drift pin (on-disk appendonlydir measurement)
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py
 - test_flip_gate.py

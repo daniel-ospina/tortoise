@@ -412,6 +412,9 @@ def test_no_redirect_stems_registry_exact():
         "test_backup_e2e",
         "test_config",
         "test_embedded_concurrency",
+        # #2879: embedded AOF durability drift pin (carve-out — the docker
+        # redirect hides the on-disk appendonlydir it measures).
+        "test_embedded_durability_claim",
         "test_embedded_lifecycle",
         "test_embedded_lifecycle_fast_close",
         "test_flip_gate",
