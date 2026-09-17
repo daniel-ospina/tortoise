@@ -79,7 +79,11 @@ def _assert_no_activation_claim(payload: dict) -> None:
 
 
 def _assert_https(api_base: str) -> None:
-    """Refuse anything that is not a bare ``https://host[:port]`` base.
+    """Refuse anything that is not an ``https://host[:port][/path]`` base.
+
+    A PATH is allowed (a reverse-proxy prefix stays on the operator's own
+    origin, still under TLS) — but no query, no fragment, no credentials, and
+    a real host.
 
     The per-org keys are full tenant credentials, so a plain-http base puts
     them on the wire in cleartext. Parsing (rather than a prefix test) also

@@ -74,14 +74,17 @@ answered "nothing to measure" rolls up to `not_measurable`; it never becomes
 `value_confirmed` is `not_measurable` for every org, so this is the normal path,
 not an edge case.
 
-The analytics leg's interval is **exclusive at both ends** (`created_at gt
-since` / `lt until` — `SupabaseControlPlane.query` exposes no `gte`), while the
-graph legs are `[since, until)`. An event landing exactly on a boundary can
-therefore be counted by one leg and not the other.
+The analytics leg's interval is **`[since, until)` — the same as the graph
+legs.** This is a guarantee, not a coincidence: it is asserted by a test,
+because the two legs are separate queries and nothing else stops them from
+drifting. It DID drift once — the analytics leg used `gt`, so a tool call
+landing exactly on `since` was dropped while a session created at that same
+instant was counted, letting the funnel disagree with itself on the boundary
+instant. If you change one leg's bounds, the other must move with it.
 
 **`recall_attempted` is an ATTEMPT, not an answer.** `mcp_tool_call.status ==
 "ok"` means only that the tool did not raise. `result_count` / `abstained` are
-not in the analytics props allowlist (`hosted_api.py:19404`), so "answered from
+not in the analytics props allowlist (`hosted_api.py:19418`), so "answered from
 memory" is currently unknowable. No `activated` field and no activation rate is
 emitted anywhere, and `tools/activation_cohort.py` fails loudly if a payload
 ever grows one.

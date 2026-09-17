@@ -87,11 +87,13 @@ JSONL file on ephemeral disk. Two consequences the caller must not hide:
   ``measured 0``. Reconcile a zero against the deploy time before citing it (see
   ``LIMITATIONS``). Equally, a *configured* writer is not a *working* one: a
   failure that rejects the WRITE while letting this READ succeed reports
-  ``measured 0`` (a revoked key would fail both, and surfaces as
-  ``unavailable`` — see ``LIMITATIONS``).
-* Stage 4 is observed only where the telemetry is emitted: a client talking to
-  the HOSTED MCP dispatch point. A locally-hosted (stdio) MCP server, and the
-  REST recall surface, emit no per-call event.
+  ``measured 0`` (a revoked key fails BOTH and surfaces as ``unavailable``;
+  the full list of false-zero routes is in ``LIMITATIONS``).
+* Stage 4 is org-scoped, so it sees only events the HOSTED MCP dispatch point
+  emits for this org. A locally-hosted (stdio) MCP server DOES emit the event
+  (the telemetry wrapper is installed at import), but with no request context
+  its `org_id` is empty, so this org-filtered read cannot match it. The REST
+  recall surface emits no per-call event at all.
 
 WHAT THIS MODULE DOES NOT TOUCH
 -------------------------------
@@ -603,9 +605,10 @@ LIMITATIONS: tuple[str, ...] = (
     "Stages 1-3 cover the org DEFAULT graph only (the endpoint is an org-level "
     "surface). Stage 4 is org-wide. For a multi-graph org the two denominators "
     "differ; the graph_scope field states this in the payload.",
-    "recall_attempted is observed only where telemetry is emitted: the HOSTED "
-    "MCP dispatch point. A locally-hosted (stdio) MCP server and the REST "
-    "recall surface emit no per-call event, so their recall is invisible here.",
+    "recall_attempted is org-scoped, so it counts only events carrying this "
+    "org's id. A locally-hosted (stdio) MCP server emits the event but with an "
+    "empty org_id (no request context), and the REST recall surface emits no "
+    "per-call event at all — both are invisible to this read.",
     "Analytics history before the write-path repair is unrecoverable "
     "(forward-only) — the events were written to an ephemeral VM and lost. "
     "This surface cannot detect a window that predates the repair, so such a "
@@ -615,16 +618,18 @@ LIMITATIONS: tuple[str, ...] = (
     "the failure direction is narrower than it looks. This read and the "
     "telemetry WRITE use the SAME credential in the SAME process, so a "
     "rotated/revoked key fails the read too and surfaces honestly as "
-    "`unavailable` (`analytics_store_unreachable`), not as a false zero. A "
-    "false `measured 0` needs a failure that rejects the WRITE while letting "
-    "the READ succeed (an INSERT-only RLS denial, a partial/limited role, a "
-    "silent PostgREST drop). Detectability is tracked in #3677.",
+    "`unavailable` (`analytics_store_unreachable`), not as a false zero. There "
+    "are exactly two known routes to a false `measured 0`: (1) a window that "
+    "predates the repair, above; (2) a failure that rejects the WRITE while "
+    "letting this READ succeed (an INSERT-only RLS denial, a partial/limited "
+    "role, a silent PostgREST drop). Detectability of (2) is tracked in "
+    "#3677.",
     "Extraction outcome (capture_ok / capture_extractor) is recorded on the "
     "Session but exposed by no read surface (owned by #3520).",
-    "The analytics leg's interval is EXCLUSIVE at both ends (created_at gt "
-    "since / lt until — the control-plane query exposes no gte), while the "
-    "graph legs are [since, until). An event exactly on a boundary can be "
-    "counted by one leg and not the other.",
+    "The analytics leg's interval is [since, until) — the same as the graph "
+    "legs — so a boundary instant is treated identically by both. This is the "
+    "GUARANTEE, not a limitation: it is asserted by a test, because the two "
+    "legs are separate queries and could drift.",
     "Self-hosted orgs are not covered: the analytics store is hosted-lane only.",
     "The analytics read assumes the store's page limit is RECALL_PAGE_CAP. A "
     "LOWER server-side cap (PostgREST db-max-rows, a proxy limit) would return "

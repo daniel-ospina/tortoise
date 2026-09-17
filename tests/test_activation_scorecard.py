@@ -96,6 +96,48 @@ def _seed_memory_without_created_at(sid: str) -> None:
         params={"i": sid, "p": pid})
 
 
+def _stub_graph(monkeypatch, *, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1, sessions=1) -> None:
+    """Bind the endpoint's graph leg to EXPLICIT rows, bypassing the graph.
+
+    The recall/stage-4 tests are about the ANALYTICS leg; they only need the
+    graph leg to report memory so stage 4 runs at all. Seeding the shared
+    embedded DB for that made them inherit the #1497/#1950/#2090 redislite
+    keepalive-anchor flake (non-green roughly one run in four under load,
+    failing as `not_measurable / no_memory_produced_in_lifetime`). The tests
+    that exercise the real Cypher still seed — this is only for the ones whose
+    subject is elsewhere.
+
+    ``first_memory_at`` tracks ``extracted``: no memory means the lifetime
+    query returns nothing, which is a distinct (and load-bearing) state.
+    """
+    import tortoise.hosted_api as ha
+    from tortoise.activation_scorecard import FUNNEL_QUERY as _FUNNEL
+
+    rows = [(f"s{i}", created_at, turn_points, extracted)
+            for i in range(sessions)]
+    # `created_at=None` models the distinct shape the lifetime query returns
+    # for a Session that HAS memory but no timestamp: (NULL, positive count) —
+    # must be `unavailable`/`first_memory_at_missing`, not "never produced".
+    life = [(created_at, sessions)] if extracted >= 1 else []
+
+    class _Res:
+        def __init__(self, r):
+            self.result_set = r
+
+    class _G:
+        def query(self, q, params=None):
+            return _Res(rows if q is _FUNNEL else life)
+
+    class _SDK:
+        def _get_proj(self):
+            class _Proj:
+                g = _G()
+            return _Proj()
+
+    monkeypatch.setattr(ha, "_data_sdk", lambda org: _SDK())
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """Authed TestClient over a temp embedded graph, with the analytics store
@@ -269,7 +311,7 @@ def test_recall_is_conditioned_on_lifetime_memory(client, monkeypatch):
     unconditioned count stays visible as ``recall_attempted_any``."""
     import tortoise.supabase_control as sc
     from tortoise.sdk import TortoiseSDK  # noqa: F401  (namespace check)
-    _seed("s1", "2026-09-16T12:00:00+00:00", 1, 1)  # first memory at 12:00
+    _stub_graph(monkeypatch, created_at="2026-09-16T12:00:00+00:00", turn_points=1, extracted=1)  # first memory at 12:00
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -300,7 +342,7 @@ def test_recall_measured_zero_is_reported_as_zero(client, monkeypatch):
     all prior tests, so a regression that treated a real zero as unmeasurable
     (hiding the actual finding) would have shipped."""
     import tortoise.supabase_control as sc
-    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 1)  # memory produced
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=1)  # memory produced
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -317,6 +359,68 @@ def test_recall_measured_zero_is_reported_as_zero(client, monkeypatch):
     assert stage["state"] == "measured", stage
     assert stage["value"] == 0, stage
     assert stage["reason"] is None, stage
+
+
+def test_analytics_leg_interval_matches_the_graph_legs(client, monkeypatch):
+    """The graph legs and the analytics leg are SEPARATE queries, so their
+    windows can drift. Both must be [since, until): a boundary instant has to
+    be treated identically by each, or the funnel disagrees with itself. This
+    regressed once — the analytics leg used `gt`, so a tool call landing
+    exactly ON `since` was dropped while a session created at that same instant
+    was counted (review cycle 5).
+
+    The graph is STUBBED rather than seeded: the subject here is the analytics
+    query's bounds, and the graph leg is what makes the analytics leg run at
+    all. Seeding it made the test depend on the shared embedded-DB fixture and
+    it flaked (~2/9 under load, the #1497/#1950/#2090 anchor class).
+    """
+    import tortoise.hosted_api as ha
+    import tortoise.supabase_control as sc
+    from tortoise.activation_scorecard import FUNNEL_QUERY as _FUNNEL
+
+    class _Res:
+        def __init__(self, rows):
+            self.result_set = rows
+
+    class _G:
+        def query(self, q, params=None):
+            if q is _FUNNEL:
+                return _Res([("s1", "2026-09-16T01:00:00+00:00", 2, 1)])
+            # LIFETIME_MEMORY_QUERY: (first_memory_at, sessions_with_memory)
+            return _Res([("2026-09-16T01:00:00+00:00", 1)])
+
+    class _SDK:
+        def _get_proj(self):
+            class _Proj:
+                g = _G()
+            return _Proj()
+
+    monkeypatch.setattr(ha, "_data_sdk", lambda org: _SDK())
+
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+    # Collect EVERY call's filters rather than "last call wins": the read path
+    # issues more than one query (narrow + wide allowlist), so a single
+    # overwritten dict made the assertion depend on call ORDER and could fail
+    # with `conds == []` (caught by a VGATE run, cycle 6).
+    calls: list[dict] = []
+
+    class _CP:
+        def query(self, table, **kw):
+            calls.append(kw)
+            return []
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    assert calls, "the analytics leg was never queried"
+    windows = {
+        tuple((op, v) for col, op, v in c["filters"] if col == "created_at")
+        for c in calls
+    }
+    # Every analytics query must carry exactly one half-open [since, until).
+    assert windows == {(("gte", body["window"]["since"]),
+                        ("lt", body["window"]["until"]))}, windows
+    assert body["stages"]["recall_attempted"]["state"] == "measured", body
 
 
 def test_first_memory_at_unparseable_is_unavailable():
@@ -349,7 +453,7 @@ def test_properties_as_a_json_string_is_counted(client, monkeypatch):
     """PostgREST can hand `properties` back as a JSON-encoded string. The
     `isinstance(props, str)` branch was never exercised."""
     import tortoise.supabase_control as sc
-    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 1)
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=1)
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -373,7 +477,7 @@ def test_unparseable_analytics_timestamp_refuses_the_recall_count(client, monkey
     ``measured`` is the same class of bug as counting an unverifiable row in
     the window guard, and is refused for the same reason."""
     import tortoise.supabase_control as sc
-    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 1)  # memory produced
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=1)  # memory produced
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -404,7 +508,7 @@ def test_unclassifiable_analytic_row_refuses_the_recall_count(client, monkeypatc
     cannot rule OUT of the retrieval set. Dropping it silently would make the
     count a lower bound that looks exact."""
     import tortoise.supabase_control as sc
-    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 1)  # memory produced
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=1)  # memory produced
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -436,7 +540,7 @@ def test_wide_leg_exclusions_are_tracked_too(client, monkeypatch):
     import tortoise.supabase_control as sc
     from tortoise.activation_scorecard import RETRIEVAL_TOOL_ALLOWLIST_WIDE
     assert "tortoise_query" in RETRIEVAL_TOOL_ALLOWLIST_WIDE
-    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 1)
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=1)
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -606,7 +710,7 @@ def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypat
     A lower bound is not a count."""
     import tortoise.supabase_control as sc
     from tortoise.activation_scorecard import RECALL_PAGE_CAP
-    _seed("s1", "2026-09-16T01:00:00+00:00", 1, 1)
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=1, extracted=1)
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -629,7 +733,9 @@ def test_memory_without_a_timestamp_is_unavailable_not_no_memory(client, monkeyp
     question — so a positive memory-Session count with a NULL timestamp is a
     data gap (``unavailable``), not an absence."""
     import tortoise.supabase_control as sc
-    _seed_memory_without_created_at("s1")
+    # `created_at=None` gives the lifetime row (NULL, 1) — memory EXISTS, only
+    # its timestamp is missing.
+    _stub_graph(monkeypatch, created_at=None, turn_points=2, extracted=1)
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -648,7 +754,7 @@ def test_memory_without_a_timestamp_is_unavailable_not_no_memory(client, monkeyp
 
 def test_no_memory_in_lifetime_means_recall_is_unmeasurable(client, monkeypatch):
     import tortoise.supabase_control as sc
-    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 0)  # stored, no memory
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=0)  # stored, no memory
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -697,7 +803,7 @@ def test_only_value_confirmed_and_no_lifetime_memory_are_not_measurable(client, 
             return []
 
     monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
-    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 0)
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00", turn_points=2, extracted=0)
     body = client.get("/v1/activation/scorecard", params=WINDOW).json()
     states = {name: cell["state"] for name, cell in body["stages"].items()}
     assert states["captured"] == "measured", states
@@ -1146,4 +1252,19 @@ class TestCohortGuards:
         assert report["cohort_definition"]["orgs"] == ["a", "a"]
         assert report["cohort_definition"]["size"] == 2
         # The tool MUST NOT invent a rate; a duplicate stays visible as size=2.
-        assert not any("activat" in k.lower() for k in report)
+        keys = []
+        def walk(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    keys.append(str(k))
+                    walk(v)
+            elif isinstance(node, list):
+                for v in node:
+                    walk(v)
+        walk(report)
+        assert not [k for k in keys if "activat" in k.lower()], keys
+        # A bare `rate`/`ratio` key would be the same defect wearing a
+        # different name — cycle 5 noted the old assertion walked only for
+        # "activat" and would have missed it.
+        assert not [k for k in keys if k.lower() in ("rate", "ratio",
+                                                    "conversion")], keys

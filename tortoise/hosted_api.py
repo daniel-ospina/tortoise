@@ -10172,7 +10172,12 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
             select=["event_name", "properties", "created_at"],
             filters=[("org_id", "eq", org["org_id"]),
                      ("event_name", "eq", event),
-                     ("created_at", "gt", since),
+                     # `gte` (not `gt`) so this leg is [since, until) — the
+                     # SAME interval as the graph legs. With `gt`, a tool call
+                     # landing exactly ON `since` was excluded while a session
+                     # created at that same instant was included, so the funnel
+                     # could disagree with itself on the boundary instant.
+                     ("created_at", "gte", since),
                      ("created_at", "lt", until)],
             order="created_at.desc",
             limit=cap,
