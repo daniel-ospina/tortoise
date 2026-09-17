@@ -617,13 +617,18 @@ async function runDashboardScenario(kind) {
     // NB: for the sign-out scenarios the dashboard has ALREADY cleared the
     // cookie before it bounces (that is the product flow) — only the legacy key
     // survives, and clearing THAT is the whole point of ?signout=1.
-    if (kind !== 'no_session' && kind !== 'signout' && kind !== 'signout_forged') {
+    // EXCEPT: `signout_forged` (a forged link must not destroy anything, so the
+    // cookie is seeded to prove it survives) and `signout_slow` (the dashboard's
+    // bridge never loaded, or the 120s marker TTL elapsed — the cookie the
+    // dashboard could not clear is still there and /auth must clear it).
+    const keepsCookie = kind === 'signout_forged' || kind === 'signout_slow';
+    if (kind !== 'no_session' && (keepsCookie || kind !== 'signout')) {
       opts.preseed = oldCookie(expiresAt);
     }
     // #3503 (review P2, round 6): the dashboard cannot clear THIS origin's
     // legacy localStorage session, and readValidSession() falls back to it.
     // `?signout=1` is how the refusal card asks this page to clear its own.
-    if (kind === 'signout' || kind === 'signout_forged') {
+    if (kind === 'signout' || kind === 'signout_forged' || kind === 'signout_slow') {
       opts.search = '?next=%2Fadmin%2F&signout=1';
       opts.hash = '';
       opts.legacyLocalStorage = {};
@@ -631,7 +636,7 @@ async function runDashboardScenario(kind) {
         decodeURIComponent(oldCookie(expiresAt));
       // The origin-proven marker: only the dashboard origin can set a cookie on
       // .premiselabs.co, so its presence is the authorisation for the clear.
-      if (kind === 'signout') opts.extraCookies = { tt_signout: '1' };
+      if (kind !== 'signout_forged') opts.extraCookies = { tt_signout: '1' };
     }
     const env = makeEnv(opts);
     // signup.html's /admin round-trip (__ADMIN_RETURN_TO): the destination the
@@ -641,6 +646,7 @@ async function runDashboardScenario(kind) {
     env.sandbox.__DASHBOARD_BASE_URL = 'https://app.premiselabs.co';
     const legacyAtLoad = !!env.sandbox.localStorage.getItem(
       'sb-ybetwichurajbfswfeqa-auth-token');
+    const cookieAtLoad = env.jar.has(COOKIE_NAME);
     vm.runInContext(src, env.sandbox, { filename: bridgePath });
     const hashAfterBridge = env.sandbox.window.location.hash;
 
@@ -680,8 +686,10 @@ async function runDashboardScenario(kind) {
                                    { filename: 'signup.html#asyncBounce' });
     // `signout` models the product flow: the dashboard already cleared the
     // cookie, so getSession() resolves nothing.
-    const asyncSession = (kind === 'no_session' || kind === 'signout' ||
-      kind === 'signout_forged') ? null : {
+    // A completed sign-out leaves nothing for getSession() to resolve — the
+    // real flow, since the gate cleared the cookie above.
+    const asyncSession = ['no_session', 'signout', 'signout_forged',
+      'signout_slow'].includes(kind) ? null : {
       access_token: 'OLD-ACCESS-TOKEN', refresh_token: 'old-refresh',
       expires_at: expiresAt, expires_in: 3600, token_type: 'bearer',
     };
@@ -700,6 +708,8 @@ async function runDashboardScenario(kind) {
         legacy_key_at_load: legacyAtLoad,
         legacy_key_present: !!env.sandbox.localStorage.getItem(
           'sb-ybetwichurajbfswfeqa-auth-token'),
+        cookie_at_load: cookieAtLoad,
+        cookie_present: env.jar.has(COOKIE_NAME),
         errors: env.logs.filter((l) => l.level === 'error').map((l) => l.text),
       },
     });
@@ -794,6 +804,8 @@ async function runE2EIngestScenario(kind) {
     out.auth_page_signout = await safeAsync(() => runAuthPageScenario('signout'));
     out.auth_page_signout_forged =
       await safeAsync(() => runAuthPageScenario('signout_forged'));
+    out.auth_page_signout_slow =
+      await safeAsync(() => runAuthPageScenario('signout_slow'));
   } else if (mode === 'consent_page') {
     out.consent_page_oversized = await safeAsync(() => runConsentPageScenario('oversized'));
     out.consent_page_small = await safeAsync(() => runConsentPageScenario('small'));
@@ -1486,11 +1498,14 @@ def test_auth_page_gate_predicate_matches_the_dashboard() -> None:
     assert signout < html.index("var s = (typeof window.readValidSession"), (
         "the sign-out must clear the legacy session BEFORE readValidSession reads it"
     )
-    # Round 7 supersedes the round-6 mechanism: the clear is now origin-proven
-    # (marker cookie) and scoped to THIS origin's legacy key — a forgeable
-    # ?signout=1 must not clear the parent-domain cookie the dashboard shares.
-    assert "clearLegacySessions" in html[signout:signout + 900], (
-        "the sign-out path must clear THIS origin's legacy session"
+    # Round 7-8: the clear is origin-proven (the `tt_signout` marker cookie) so a
+    # forgeable `?signout=1` cannot log the visitor out; behind that proof it is
+    # the full clear, so a sign-out still completes when the dashboard's own
+    # clear did not run. See
+    # test_signout_is_origin_proven_and_clears_only_behind_the_marker for the
+    # structural pin.
+    assert "tt_signout=1" in html[signout:signout + 1200], (
+        "the sign-out path must require the origin-proven marker"
     )
 
 
@@ -1610,9 +1625,15 @@ def test_auth_page_ignores_a_forged_signout_request(auth_page_report: dict) -> N
     touches only /auth's own legacy localStorage session."""
     forged = _scenario(auth_page_report, "auth_page_signout_forged")
     assert forged["legacy_key_at_load"] is True, "harness precondition"
+    assert forged["cookie_at_load"] is True, "harness precondition"
     assert forged["legacy_key_present"] is True, (
         "a forged /auth?signout=1 link cleared the visitor's session — the "
         "origin-proven marker is not being required (#3503 review P2)"
+    )
+    assert forged["cookie_present"] is True, (
+        "a forged /auth?signout=1 link cleared the SHARED parent-domain cookie "
+        "— that logs the visitor out of the dashboard too, from a single "
+        "third-party link"
     )
     # The forged link does nothing at all: it must not be the reason a signed-in
     # visitor is sent (or kept) anywhere. `readValidSession()` still sees the
@@ -1622,36 +1643,65 @@ def test_auth_page_ignores_a_forged_signout_request(auth_page_report: dict) -> N
     real = _scenario(auth_page_report, "auth_page_signout")
     assert real["legacy_key_at_load"] is True
     assert real["legacy_key_present"] is False
+    # ...including when the dashboard's own clear never ran (bridge unavailable,
+    # or the marker TTL elapsed mid-navigation) and the cookie it could not clear
+    # is still present: /auth, behind the marker, clears BOTH copies, so the gate
+    # cannot then forward the visitor back as the OLD account (#3503 P3, round 8).
+    slow = _scenario(auth_page_report, "auth_page_signout_slow")
+    assert slow["cookie_at_load"] is True, "harness precondition"
+    assert slow["legacy_key_present"] is False, (
+        "a marker-authorised sign-out must clear this origin's legacy session"
+    )
+    assert slow["cookie_present"] is False, (
+        "a marker-authorised sign-out must also clear the shared cookie when the "
+        "dashboard could not — otherwise readValidSession() forwards the OLD "
+        "account (the exact #3503 symptom)"
+    )
+    assert slow["navigated"] is False, (
+        "and it must not then bounce the visitor back to the app"
+    )
 
 
-def test_signout_is_origin_proven_and_never_clears_the_shared_cookie() -> None:
+def test_signout_is_origin_proven_and_clears_only_behind_the_marker() -> None:
     """Static pin for the policy: /auth's sign-out branch must require the
-    marker AND call `clearLegacySessions()` (legacy localStorage only) — never
-    `clearStoredSession()`, which also deletes the parent-domain cookie every
-    product surface shares."""
+    origin-proven marker BEFORE it clears anything, and must clear nothing at
+    all outside that check.
+
+    Two rounds of this loop pulled in opposite directions and both pins matter:
+    a forgeable `?signout=1` must not be able to log the visitor out (round 7),
+    and yet the sign-out must still be complete when the dashboard's own clear
+    did not run — its bridge failed to load, or the marker TTL elapsed mid-
+    navigation (round 8). The marker reconciles them: it is unforgeable from any
+    other origin, so the full clear is safe behind it."""
     html = SIGNUP.read_text(encoding="utf-8")
     signout = html.index('p.get("signout") === "1"')
-    branch = html[signout:signout + 900]
-    assert "tt_signout=1" in branch, (
-        "the sign-out must be authorised by the origin-proven marker cookie"
+    branch = html[signout:signout + 1200]
+    marker = branch.index("tt_signout=1")
+    assert branch.count("clearStoredSession") == 1, (
+        "the sign-out branch must clear the session exactly once"
     )
-    assert "clearLegacySessions" in branch, (
-        "the sign-out must clear only /auth's own legacy localStorage session"
+    assert branch.index("clearStoredSession") > marker, (
+        "the clear must sit BEHIND the origin-proven marker check — a clear "
+        "reachable without it is the one-link forced logout (#3503 review P2)"
     )
-    assert "clearStoredSession" not in branch, (
-        "clearStoredSession() deletes the SHARED parent-domain cookie — a "
-        "forgeable ?signout=1 must never be able to log the visitor out of the "
-        "dashboard (#3503 review P2)"
+    assert "window.location" not in branch[:marker], (
+        "nor may anything run before the marker check"
     )
     dash = DASHBOARD.read_text(encoding="utf-8")
     assert "setSignOutMarker()" in dash, (
         "the dashboard must set the marker before bouncing, or its own sign-out "
         "would be ignored"
     )
+    # The marker must outlive a full navigation — 30s expired mid-redirect.
+    assert "120 * 1000" in dash, (
+        "the marker TTL must survive a slow navigation (#3503 review P3, round 8)"
+    )
 
 
 def test_bridge_exposes_a_legacy_only_clear() -> None:
-    """The helper the /auth gate needs: removes LEGACY_KEYS and nothing else."""
+    """`clearLegacySessions()` removes LEGACY_KEYS and nothing else — the seam
+    `clearStoredSession()` delegates to, and the blast radius a future caller
+    that must not touch the shared cookie would need."""
     for label, path in (("website/assets/supabase-session.js", SHARED),
                         ("website/apps/dashboard/public/assets/supabase-session.js",
                          REPO_ROOT / "website" / "apps" / "dashboard" / "public"

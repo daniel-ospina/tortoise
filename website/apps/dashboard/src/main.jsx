@@ -689,9 +689,12 @@ function clearClaimPendingMarker() {
 const SIGN_OUT_MARKER = 'tt_signout'
 function setSignOutMarker() {
   try {
-    // 30s: long enough for the redirect, short enough that a stale marker cannot
-    // authorize a later forged link.
-    const expires = new Date(Date.now() + 30 * 1000).toUTCString()
+    // 120s: the marker's clock starts at the click, and /auth's gate reads it
+    // after a full page load — 30s was short enough that a slow navigation
+    // expired the marker and the sign-out silently degraded (review P3, round
+    // 8). Still short: a stale marker left by a cancelled sign-out only widens
+    // the replay window, and it is consumed the moment /auth sees it.
+    const expires = new Date(Date.now() + 120 * 1000).toUTCString()
     document.cookie = `${SIGN_OUT_MARKER}=1${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
   } catch { /* best-effort */ }
 }

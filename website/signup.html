@@ -93,15 +93,21 @@
         // for). Without this the visitor is forwarded straight back to the app as
         // the OLD account, or into an /auth ↔ dashboard replace loop.
         if (p.get("signout") === "1") {
-          // #3503 (review P2, round 7): ORIGIN-PROVEN sign-out only. A bare
-          // ?signout=1 is forgeable — a third-party link would force-log-out the
-          // visitor, and clearing the SHARED parent-domain cookie would take the
-          // dashboard with it (exactly the one-link forced logout the ?stale=1
-          // branch below refuses). Only the dashboard can set a cookie on
-          // .premiselabs.co, so require that marker, and then clear ONLY this
-          // origin's legacy localStorage session — never the shared cookie.
+          // #3503 (review P2 round 7, P3 round 8): ORIGIN-PROVEN sign-out only.
+          // A bare ?signout=1 is forgeable — a third-party link would force-log-
+          // out the visitor, and clearing the SHARED parent-domain cookie would
+          // take the dashboard with it (exactly the one-link forced logout the
+          // ?stale=1 branch below refuses). Only the dashboard can set a cookie
+          // on .premiselabs.co, so require that marker; the clear it authorises
+          // is then the same full clear the dashboard itself performs.
           if (/(?:^|; )tt_signout=1(?:;|$)/.test(document.cookie)) {
-            if (typeof window.clearLegacySessions === "function") window.clearLegacySessions();
+            // The marker proves the request came from the dashboard, so the FULL
+            // clear is safe here — and necessary: the dashboard skips its own
+            // clear whenever its bridge failed to load, and /auth must not then
+            // forward the visitor back to the app as the OLD account (the
+            // #3503 symptom). Without a bridge there is no readValidSession()
+            // either, so the gate cannot forward a session at all.
+            if (typeof window.clearStoredSession === "function") window.clearStoredSession();
             // Consume the marker. Both attribute forms are attempted: the
             // dashboard omits Domain on localhost/preview origins.
             document.cookie = "tt_signout=; Domain=.premiselabs.co; Path=/; Max-Age=0";
