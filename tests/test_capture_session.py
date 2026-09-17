@@ -279,6 +279,37 @@ def test_capture_dedup_hit_reports_stored_values_over_payload(
         "ORIGINAL quote", "2020-01-01", "original keys", "turn-0"]
 
 
+def test_capture_create_path_omits_empty_search_keys_from_response(
+        sdk, monkeypatch):
+    """#2949 (re-review P2): the CREATE path must not advertise a passthrough
+    field the node does not hold either. The v2 extractor emits ``search_keys``
+    unconditionally (``_clean_search_keys(None) -> []``), and create_point's
+    ``_flatten_search_keys_prop`` POPS an empty/blank list — so the node holds
+    no ``search_keys``. The response must mirror that presence (a non-empty
+    list still rides as the payload LIST; only the empty form is dropped).
+    ``source_turn_id`` is emitted unconditionally too and is left verbatim."""
+    content = "the auth dead-end is the top issue"
+    payload = _passthrough_payload(content)
+    payload["points"][0]["search_keys"] = []
+
+    _install_fake_extract(monkeypatch, payload)
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    pid = res["points"][0]["id"]
+    # The NODE holds no search_keys (popped by _flatten_search_keys_prop)...
+    assert _read_passthrough_props(sdk, pid)[2] is None, res["points"]
+    # ...so the response must not advertise one.
+    assert "search_keys" not in res["points"][0]["props"], \
+        res["points"][0]["props"]
+    # The other three fields did land on the node and stay advertised.
+    assert res["points"][0]["props"] == {
+        "quote": "We decided to ship serve --http first.",
+        "when": "2026-08-01",
+        "source_turn_id": "turn-2813",
+    }, res["points"][0]["props"]
+
+
 def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
     """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP-on-ingest is
     USER-VISIBLE — the pre-ingestion (uncalibrated, has_ep False) state

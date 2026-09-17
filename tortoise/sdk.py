@@ -495,10 +495,12 @@ class _InMemoryEventLog:
 # #1529 P1 (E3 owner note): whitelist of point properties that pass through
 # the capture response's `props` superset — E3 writes source_turn_id /
 # search_keys / when / quote via the v2 payload point dict / the M2 folded
-# statement dict; capture must never silently drop or overwrite them on a
-# WRITE. #2949: on a dedup HIT the seam writes nothing, so the response
-# reports the canonical's STORED props instead (a field the node does not
-# hold is omitted, never echoed from the payload). Deliberately a
+# statement dict; a WRITE must never silently drop a value they carry (the
+# one normalization — an empty/blank `search_keys` list — is popped by
+# _flatten_search_keys_prop and mirrored out of the response, so presence
+# still agrees). #2949: on a dedup HIT the seam writes nothing, so the
+# response reports the canonical's STORED props instead — a field the node
+# does not hold is omitted, never echoed from the payload. Deliberately a
 # WHITELIST (not a blacklist): folded statement dicts carry internal
 # projection state (provenance run_id/source, status, createdAt, operator,
 # speaker) that must never leak into the public capture response. E3 (#1535)
@@ -4060,6 +4062,18 @@ class TortoiseSDK:
                 # writer was forked).
                 props = {k: v for k, v in pt.items()
                          if k in _CAPTURE_PASSTHROUGH_PROPS}
+                # #2949 (re-review P2): normalize PRESENCE to what the write
+                # will actually store. create_point's `_flatten_search_keys_prop`
+                # POPS an empty/blank `search_keys` list (the node holds no
+                # such property), so echoing the payload's `[]` in the
+                # response would advertise a field the node does not hold —
+                # the exact divergence class this PR fixes. Only the empty
+                # form is dropped; a non-empty list still rides as the
+                # payload LIST below.
+                _sk = props.get("search_keys")
+                if isinstance(_sk, (list, tuple)) and not any(
+                        str(_s).strip() for _s in _sk):
+                    props.pop("search_keys", None)
                 # #2949 (review P2): only the create branch below writes these
                 # props. A dedup hit (in-capture fold or graph-level
                 # resolution) writes NOTHING, so the response must fall back to
@@ -4136,21 +4150,26 @@ class TortoiseSDK:
                         "MATCH (n:Point {id:$pid}) RETURN n.quote, n.when, "
                         "n.search_keys, n.source_turn_id",
                         params={"pid": pid}).result_set
-                    if _rows:
-                        props = {k: v for k, v in
-                                 zip(_CAPTURE_PASSTHROUGH_READ_ORDER, _rows[0],
-                                     strict=True)
-                                 if v is not None}
+                    # Fail CLOSED: an empty result (the resolved node vanished
+                    # between resolution and read-back) reports NO stored
+                    # props — never the payload echo this block exists to
+                    # prevent.
+                    props = ({k: v for k, v in
+                              zip(_CAPTURE_PASSTHROUGH_READ_ORDER, _rows[0],
+                                  strict=True)
+                              if v is not None} if _rows else {})
                 # P1 #1529 (D8/E3): E3's source_turn_id / search_keys / when /
                 # quote (arriving on the payload point dict) must never be
                 # silently dropped or rebuilt into a reduced {id, kind, text}
                 # shape. #2813/#2949: the response never advertises a
-                # passthrough prop the resolved node does not hold. A create
-                # rides the payload's raw values (search_keys stays the
-                # payload LIST while create_point stores the flattened string
-                # via _flatten_search_keys_prop — presence agrees, the list /
-                # flat-string representation deliberately does not); a dedup
-                # hit reports the canonical's STORED props read back above.
+                # passthrough FIELD the resolved node does not hold. A create
+                # rides the payload's values with presence normalized to the
+                # write (an empty/blank search_keys is dropped above, exactly
+                # as _flatten_search_keys_prop drops it from the node); the
+                # non-empty form deliberately differs in REPRESENTATION — the
+                # response keeps the payload LIST, the node stores the
+                # flattened string. A dedup hit reports the canonical's
+                # STORED props read back above (absent fields omitted).
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
                     "props": props, "dedup": dedup})
