@@ -753,3 +753,192 @@ def test_shared_live_uri_reason_stays_in_the_exempt_family():
         f"{LIVE_URI_SKIP_REASON!r} — tools/skip-guard.py exempts by prefix "
         f"{_skip_guard._EXEMPT_REASON_PREFIXES}; update BOTH together"
     )
+
+
+# ── #2573: the embedder-unavailable reason class ──────────────────────────
+# The dense-retrieval leg degrades silently to keyword-only when the embedding
+# model cannot be loaded, and the suite reports green while asserting a
+# different meaning (semantic recall changes under TF-IDF). These reasons
+# mention neither FalkorDB nor a manifest, so they could not trip the guard at
+# all before this class existed. The reasons below are VERBATIM from the tree
+# (file:line in each id) — if a reason string changes, the guard silently stops
+# matching it, so the assertion is written against the real text.
+
+# (nodeid, verbatim reason) — the -v progress form is built from these.
+EMBEDDER_UNAVAILABLE_REASONS = [
+    ("tests/test_cross_lens.py::test_real_embedder_smoke",
+     "bge-small-en-v1.5 not cached locally — skipping real-embedder test"),  # :455
+    ("tests/test_cross_lens.py::test_real_embedder_smoke",
+     "bge-small-en-v1.5 unavailable — model load timed out"),  # :457
+    ("tests/test_search_engine.py::test_dense_leg",
+     "sentence-transformers / all-MiniLM-L6-v2 cache not available — "
+     "dense-leg assertion skipped"),  # :198
+    ("tests/test_extractor.py::test_multi_source_embedding",
+     "sentence-transformers / bge-small cache not available — multi-source "
+     "embedding test skipped (embedder-less CI)"),  # :417
+    ("tests/test_assembly_pure.py::test_shipped_config",
+     "embedder unavailable — the shipped hybrid leg cannot be exercised in "
+     "this lane (see #3223)"),  # :694
+    ("tests/test_hosted_api.py::test_thread_safety",
+     "bge-small-en-v1.5 not cached — skipping thread-safety test"),  # :5721
+]
+
+# Reasons that must NOT trip the embedder class. Each is a REAL reason from the
+# tree or a minimal probe of a boundary: generic "cache"/"model" words, an
+# embedder-context word with no availability claim, and the deliberately
+# EXCLUDED collection-time offline-precondition family (a non-shipped alternate
+# model with `local_files_only=True`, which fires by design in CI).
+NON_EMBEDDER_REASONS = [
+    "requires network access",
+    "sklearn not installed",
+    "frozen LongMemEval-S dataset not cached (CI)",   # "not cached", no model ctx
+    "result cache not available for this run",        # availability, no model ctx
+    "model checkpoint download disabled",             # the word "model" only
+    "no embedder AND no sklearn — probe cannot run",  # context, no availability
+    "embedder present — degraded-absence path not exercised",  # context only
+    "all-MiniLM-L6-v2 not in HF cache (HF_HUB_OFFLINE in CI)",  # out of class
+]
+
+
+def _v_line(nodeid: str, reason: str) -> str:
+    """Real pytest -v progress shape: '<nodeid> SKIPPED (<reason>) [ 25%]'."""
+    return f"{nodeid} SKIPPED ({reason}) [ 25%]\n"
+
+
+class TestGuardFailsOnEmbedderUnavailableSkip:
+    def test_real_reasons_all_red_in_v_format(self):
+        for nodeid, reason in EMBEDDER_UNAVAILABLE_REASONS:
+            proc = run_guard(_v_line(nodeid, reason))
+            assert proc.returncode == 1, f"embedder skip not caught: {reason!r}"
+            assert nodeid in proc.stdout
+            assert "embedder-unavailable" in proc.stdout
+
+    def test_rs_summary_format_red(self):
+        # -r fEs summary is the authoritative never-truncated reason source.
+        proc = run_guard(
+            "SKIPPED [2] tests/test_search_engine.py:198: sentence-transformers "
+            "/ all-MiniLM-L6-v2 cache not available — dense-leg assertion "
+            "skipped\n"
+        )
+        assert proc.returncode == 1
+        assert "test_search_engine.py" in proc.stdout
+
+    def test_non_embedder_reasons_do_not_trip(self):
+        for reason in NON_EMBEDDER_REASONS:
+            proc = run_guard(_v_line("tests/test_x.py::test_y", reason))
+            assert proc.returncode == 0, (
+                f"FALSE TRIP on a non-embedder reason: {reason!r}\n"
+                f"stdout={proc.stdout!r}"
+            )
+
+    def test_legacy_line_matcher_wires_the_embedder_class(self):
+        # Half a / P1 CI uses find_violations directly (no junitxml) — the
+        # embedder class must red there too, or the two paths disagree.
+        find_violations = _skip_guard.find_violations
+        for nodeid, reason in EMBEDDER_UNAVAILABLE_REASONS:
+            assert find_violations(_v_line(nodeid, reason)) == [nodeid], (
+                f"legacy matcher missed the embedder class: {reason!r}"
+            )
+        for reason in NON_EMBEDDER_REASONS:
+            assert find_violations(_v_line("tests/test_x.py::test_y", reason)) == [], (
+                f"legacy matcher false-tripped on: {reason!r}"
+            )
+
+    def test_junitxml_matcher_wires_the_embedder_class(self, tmp_path):
+        # The junitxml path (the AUTHORITATIVE reason source) must agree with
+        # the legacy line matcher — a reason-level skip reds with no manifest.
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable",
+            "bge-small-en-v1.5 not cached locally — skipping real-embedder test"))
+        proc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=junit)
+        assert proc == 1
+
+    def test_junitxml_non_embedder_reason_stays_green(self, tmp_path):
+        # Same path, non-embedder reason → observed skip, no reason violation.
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable",
+            "result cache not available for this run"))
+        rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=junit)
+        assert rc == 0
+
+    def test_manifest_mode_embedder_skip_reds_despite_nodeid_observed(
+            self, tmp_path):
+        # Coverage ≠ healthy: the nodeid IS observed (satisfies the manifest)
+        # but the reason is an embedder-availability regression → red, exactly
+        # like the FalkorDB availability-REGRESSION family.
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable",
+            "sentence-transformers / all-MiniLM-L6-v2 cache not available — "
+            "dense-leg assertion skipped"))
+        manifest = _write(
+            tmp_path, "manifest.txt",
+            "tests/test_embedded_lifecycle_fast_close.py::test_ephemeral_nosave\n")
+        rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), manifest,
+                                     junit=junit)
+        assert rc == 1
+
+    def test_both_classes_are_independent(self):
+        # Regression guard for the two families: each predicate is blind to the
+        # other's reasons, so neither can shadow the other.
+        falkor_only = "Live FalkorDB (Docker) not available"
+        embedder_only = "bge-small-en-v1.5 not cached locally"
+        assert _skip_guard.is_falkor_reason_violation(falkor_only)
+        assert not _skip_guard.is_embedder_reason_violation(falkor_only)
+        assert _skip_guard.is_embedder_reason_violation(embedder_only)
+        assert not _skip_guard.is_falkor_reason_violation(embedder_only)
+
+    def test_existing_falkordb_exemptions_still_live(self):
+        # The embedder class must not have disturbed the FalkorDB reason-family
+        # exemptions (regression guard, mirroring
+        # test_legacy_matcher_exempts_same_families).
+        for exempt in ("requires TORTOISE_DB_URI (live FalkorDB sidecar)",
+                       "Live FalkorDB server on localhost:6399 not available",
+                       "embedded FalkorDBLite unavailable",
+                       "redislite falkordb unavailable"):
+            assert not _skip_guard.is_falkor_reason_violation(exempt), exempt
+            assert not _skip_guard.is_embedder_reason_violation(exempt), exempt
+        assert _skip_guard.find_violations(
+            "SKIPPED [1] tests/test_falkordb_compat.py:367: "
+            "Live FalkorDB server on localhost:6399 not available\n") == []
+
+    def test_embedder_reasons_are_verbatim_in_the_tree(self):
+        # Anti-drift: the reasons asserted above must still exist verbatim as
+        # skip reasons in tests/ — a reworded skip would silently stop being
+        # caught, and the guard's own tests would keep passing. Reasons are
+        # collected with `ast` so the source's implicit string concatenation is
+        # already folded (`ast.Constant` holds the joined value).
+        real = _all_skip_reasons()
+        assert real, "walker found no skip reasons — scan is broken"
+        for _nodeid, reason in EMBEDDER_UNAVAILABLE_REASONS:
+            assert reason in real, (
+                f"embedder skip reason no longer present in tests/ — the guard "
+                f"would silently stop matching it: {reason!r}"
+            )
+
+
+def _all_skip_reasons() -> set[str]:
+    """Every literal skip/xfail reason under tests/ (ast, concatenation-folded)."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    found: set[str] = set()
+    for path in sorted((root / "tests").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, SyntaxError):  # pragma: no cover
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name not in ("skipif", "skip", "xfail"):
+                continue
+            reason: object = None
+            for kw in node.keywords:
+                if kw.arg == "reason" and isinstance(kw.value, ast.Constant):
+                    reason = kw.value.value
+            if reason is None and node.args and isinstance(node.args[0], ast.Constant):
+                reason = node.args[0].value
+            if isinstance(reason, str):
+                found.add(reason)
+    return found
