@@ -176,6 +176,47 @@ def _hermetic_no_hosted_api():
             os.environ["TORTOISE_API_URL"] = saved
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_retrieval_leg(force_sparse_tfidf):
+    """#3663 (CI carve-out RED): pin the retrieval leg to the degraded lane.
+
+    The ask surface is queried with the OTHER tenant's marker — a rare token
+    with no lexical overlap with the caller's own captured turns. The absence
+    half is the leak check; the presence half (own marker PRESENT) is the
+    anti-vacuity guard and is only satisfied by the embedded lane's DEGRADED
+    fallback: ``tortoise_fts_query`` then returns no hits, retrieval drops to
+    the in-memory ``fallback_snapshot`` lane (``retrieval_degraded: True``),
+    and that lane scores the WHOLE graph corpus — including both raw turn
+    Points, whose content carries the caller's marker, at similarity 0.0,
+    which ``search_snapshot``'s ``threshold=0.0`` still admits.
+
+    That degraded lane is entered ONLY when ``raw_results`` is empty, and that
+    is the environment-dependent part. In the embedded lane the FTS and
+    structural legs fail, but the VECTOR leg does not need lexical overlap: it
+    always returns its nearest neighbours. Sentence-transformers is installed
+    in CI's ``[test,embeddings]`` extra (and in any dev env that has it), so
+    the vector strategy is submitted — and the ONLY Point with a write-time
+    embedding is the extractor's generic point (the per-turn Points are
+    written by the capture turn loop's direct ``MERGE``, which bypasses the
+    embedding write path). The vector leg therefore returns exactly that one
+    marker-less point, ``raw_results`` is non-empty, the degraded all-corpus
+    lane is SKIPPED, and ``ask.evidence`` carries only the extractor's generic
+    point — the caller's marker-bearing turn Points never surface, so the
+    presence assertion REDs for a reason unrelated to tenancy isolation.
+    With the embedder absent (or pinned off) every leg fails on a no-overlap
+    query, the degraded lane runs, and the corpus-based evidence is
+    deterministic.
+
+    ``force_sparse_tfidf`` (tests/conftest.py, the #2573/#2772 pattern) pins
+    the leg so the test no longer depends on whether the embedder happens to
+    be importable/loaded in the process — alone or after other carve-out files
+    have warmed the ``EmbeddingModel`` singleton. Assertions are unchanged:
+    the own-marker-present / other-marker-absent contract is still enforced,
+    and the negative controls still drive the same seam.
+    """
+    return force_sparse_tfidf
+
+
 @pytest.fixture(scope="module")
 def ask_reader():
     """Install a deterministic offline reader (the test_ask_api seam).
