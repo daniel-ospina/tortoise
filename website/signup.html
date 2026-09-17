@@ -85,6 +85,22 @@
         // bounces a signed-in visitor past the banner that explains it.
         var h = new URLSearchParams(window.location.hash.replace(/^#/, ""));
         if (p.get("error") || p.get("error_code") || h.get("error") || h.get("error_code")) return;
+        // #3503 (review P2, round 6): an explicit sign-out requested by the
+        // dashboard's refused-fragment card (?signout=1). The dashboard cannot
+        // clear THIS origin's legacy localStorage session, and readValidSession()
+        // below falls back to exactly that key — migrateLegacySession() keeps it
+        // when the cookie copy is refused (the over-cap case this card exists
+        // for). Without this the visitor is forwarded straight back to the app as
+        // the OLD account, or into an /auth ↔ dashboard replace loop.
+        if (p.get("signout") === "1") {
+          if (typeof window.clearStoredSession === "function") window.clearStoredSession();
+          p.delete("signout");
+          var qs = p.toString();
+          try {
+            window.history.replaceState(null, "",
+              window.location.pathname + (qs ? "?" + qs : "") + window.location.hash);
+          } catch (e) { /* the sign-out itself already happened */ }
+        }
         // #3080: the /admin gate bounced us with the LOCAL session intact but
         // server-refused (expired/revoked token, or Supabase unreachable — the
         // gate fails closed). Trusting the local cookie here would replace

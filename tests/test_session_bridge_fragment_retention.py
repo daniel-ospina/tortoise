@@ -159,7 +159,8 @@ function makeEnv(opts) {
   const jar = new Map();
   if (opts && opts.preseed) jar.set(COOKIE_NAME, opts.preseed);
 
-  const url = new URL('https://tortoise.premiselabs.co/auth?next=%2Fadmin%2F');
+  const url = new URL('https://tortoise.premiselabs.co/auth' +
+    ((opts && opts.search) || '?next=%2Fadmin%2F'));
   if (opts && opts.hash) url.hash = opts.hash;
 
   const historyCalls = [];
@@ -247,6 +248,11 @@ function makeEnv(opts) {
     },
     pushState(state, title, u) { if (u != null) url.hash = new URL(u, url).hash; },
   };
+  if (opts && opts.legacyLocalStorage) {
+    for (const k of Object.keys(opts.legacyLocalStorage)) {
+      store[k] = opts.legacyLocalStorage[k];
+    }
+  }
   const localStorage = {
     getItem(k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
     setItem(k, v) { store[k] = String(v); },
@@ -532,7 +538,9 @@ async function runDashboardScenario(kind) {
     const opts = { hash: kind === 'small' ? fragment(200, expiresAt) : fragment(4000, expiresAt) };
     // #3503 (review P1, round 5): a still-valid PREVIOUS cookie makes
     // getSession() non-null, so a restore gated on `!session` never fires.
-    if (kind === 'preseeded_old_cookie') opts.preseed = oldCookie(expiresAt);
+    if (kind === 'preseeded_old_cookie' || kind === 'resignin') {
+      opts.preseed = oldCookie(expiresAt);
+    }
     const env = makeEnv(opts);
     vm.runInContext(fs.readFileSync(bundlePath, 'utf8'), env.sandbox,
                     { filename: bundlePath });
@@ -548,10 +556,47 @@ async function runDashboardScenario(kind) {
                     { filename: 'consent.html#script' });
     // The page's own runConsentFlow() is async; let it settle.
     await new Promise((r) => setTimeout(r, 200));
+    const refusedOnce = String(
+      (env.sandbox.document.__elements['error'] || {}).textContent || '')
+      .indexOf('could not save the session') !== -1;
+    // #3503 (review P1, round 6): the visitor signs in AGAIN (email/password)
+    // after the refusal — a NEW session that this time IS stored. The frozen
+    // snapshot must not keep refusing, or the consent view can never render and
+    // the message above becomes false.
+    if (kind === 'resignin') {
+      const newSession = JSON.stringify({
+        access_token: 'NEW-ACCESS-TOKEN', refresh_token: 'new-refresh',
+        expires_at: 9999999999, expires_in: 3600, token_type: 'bearer',
+        user: { id: 'u2', aud: 'authenticated', email: 'new@example.com' },
+      });
+      // Runs INSIDE the sandbox (the cookie jar is the shim's). Written the way
+      // the page's own adapter writes it; the name/shape are inlined because a
+      // top-level `const` of an earlier vm script is not visible to a later one.
+      env.sandbox.__resign = vm.runInContext(
+        "(function () { try { document.cookie = 'sb-tortoise-auth-token=' + " +
+        "encodeURIComponent(" + JSON.stringify(newSession) + ") + " +
+        "'; Path=/; SameSite=Lax'; } catch (e) { return 'write failed: ' + e.message; } " +
+        "return 'stored'; })()",
+        env.sandbox, { filename: 'consent.html#resign' });
+      var errorElAfter = env.sandbox.document.__elements['error'];
+      if (errorElAfter) errorElAfter.textContent = '';
+      await env.sandbox.runConsentFlow();
+      await new Promise((r) => setTimeout(r, 200));
+    }
     const errorEl = env.sandbox.document.__elements['error'];
+    const consentView = env.sandbox.document.__elements['view-consent'];
     return report(env, {
       hash: env.sandbox.window.location.hash,
       fields: {
+        refused_once: refusedOnce,
+        resign_result: env.sandbox.__resign || null,
+        cookie_token_after: (function () {
+          const raw = env.jar.has(COOKIE_NAME) ? env.jar.get(COOKIE_NAME) : null;
+          try { return raw ? JSON.parse(decodeURIComponent(raw)).access_token : null; }
+          catch (e) { return null; }
+        })(),
+        consent_view_visible: !!(consentView && consentView.style
+          && consentView.style.display === 'block'),
         fragment_survived_consent: /access_token=/.test(env.sandbox.window.location.hash),
         // #3503 P1-5: the identity the page went on to authorize as. `fetch` is
         // called by fetchPreview/doPost with `Authorization: Bearer <token>`
@@ -566,13 +611,28 @@ async function runDashboardScenario(kind) {
   async function runAuthPageScenario(kind) {
     const expiresAt = Math.floor(Date.now() / 1000) + 3600;
     const opts = { hash: kind === 'no_fragment' ? '' : fragment(4000, expiresAt) };
-    if (kind !== 'no_session') opts.preseed = oldCookie(expiresAt);
+    // NB: for `signout` the dashboard has ALREADY cleared the cookie before it
+    // bounces (that is the product flow) — only the legacy key survives, and
+    // clearing THAT is the whole point of ?signout=1.
+    if (kind !== 'no_session' && kind !== 'signout') opts.preseed = oldCookie(expiresAt);
+    // #3503 (review P2, round 6): the dashboard cannot clear THIS origin's
+    // legacy localStorage session, and readValidSession() falls back to it.
+    // `?signout=1` is how the refusal card asks this page to clear its own.
+    if (kind === 'signout') {
+      opts.search = '?next=%2Fadmin%2F&signout=1';
+      opts.hash = '';
+      opts.legacyLocalStorage = {};
+      opts.legacyLocalStorage['sb-ybetwichurajbfswfeqa-auth-token'] =
+        decodeURIComponent(oldCookie(expiresAt));
+    }
     const env = makeEnv(opts);
     // signup.html's /admin round-trip (__ADMIN_RETURN_TO): the destination the
     // gate picks when the return-to param is present, and what makes the
     // navigation observable in the report.
     env.sandbox.__ADMIN_RETURN_TO = '/admin/';
     env.sandbox.__DASHBOARD_BASE_URL = 'https://app.premiselabs.co';
+    const legacyAtLoad = !!env.sandbox.localStorage.getItem(
+      'sb-ybetwichurajbfswfeqa-auth-token');
     vm.runInContext(src, env.sandbox, { filename: bridgePath });
     const hashAfterBridge = env.sandbox.window.location.hash;
 
@@ -610,14 +670,13 @@ async function runDashboardScenario(kind) {
     env.sandbox.oauthErrorParams = function () { return { error: '', code: '' }; };
     const bounce = vm.runInContext('(function (r) ' + asyncBody + ')', env.sandbox,
                                    { filename: 'signup.html#asyncBounce' });
-    bounce({
-      data: {
-        session: kind === 'no_session' ? null : {
-          access_token: 'OLD-ACCESS-TOKEN', refresh_token: 'old-refresh',
-          expires_at: expiresAt, expires_in: 3600, token_type: 'bearer',
-        },
-      },
-    });
+    // `signout` models the product flow: the dashboard already cleared the
+    // cookie, so getSession() resolves nothing.
+    const asyncSession = (kind === 'no_session' || kind === 'signout') ? null : {
+      access_token: 'OLD-ACCESS-TOKEN', refresh_token: 'old-refresh',
+      expires_at: expiresAt, expires_in: 3600, token_type: 'bearer',
+    };
+    bounce({ data: { session: asyncSession } });
     await new Promise((r) => setTimeout(r, 50));
 
     const finalHash = env.sandbox.window.location.hash;
@@ -629,6 +688,9 @@ async function runDashboardScenario(kind) {
         navigated: env.navCalls.length > 0,
         replace_target: env.navCalls[env.navCalls.length - 1] || null,
         fragment_refused: env.sandbox.window.__FRAGMENT_REFUSED === true,
+        legacy_key_at_load: legacyAtLoad,
+        legacy_key_present: !!env.sandbox.localStorage.getItem(
+          'sb-ybetwichurajbfswfeqa-auth-token'),
         errors: env.logs.filter((l) => l.level === 'error').map((l) => l.text),
       },
     });
@@ -720,11 +782,13 @@ async function runE2EIngestScenario(kind) {
     out.auth_page_oversized = await safeAsync(() => runAuthPageScenario('oversized'));
     out.auth_page_no_session = await safeAsync(() => runAuthPageScenario('no_session'));
     out.auth_page_no_fragment = await safeAsync(() => runAuthPageScenario('no_fragment'));
+    out.auth_page_signout = await safeAsync(() => runAuthPageScenario('signout'));
   } else if (mode === 'consent_page') {
     out.consent_page_oversized = await safeAsync(() => runConsentPageScenario('oversized'));
     out.consent_page_small = await safeAsync(() => runConsentPageScenario('small'));
     out.consent_page_preseeded_old_cookie =
       await safeAsync(() => runConsentPageScenario('preseeded_old_cookie'));
+    out.consent_page_resignin = await safeAsync(() => runConsentPageScenario('resignin'));
   } else {
     out.e2e_small = await safeAsync(() => runE2EIngestScenario('small'));
     out.e2e_oversized = await safeAsync(() => runE2EIngestScenario('oversized'));
@@ -1242,9 +1306,17 @@ def test_dashboard_mount_gate_never_navigates_over_a_live_token_fragment() -> No
         "nothing renders off `fragmentRefused` — the flag would be dead state "
         "and the user would be left with only a retry that cannot succeed"
     )
-    assert "window.bounceToAuth(window.location.search, '')" in dash, (
+    assert "window.bounceToAuth(signOutSearch, '')" in dash, (
         "the error card needs an explicit route to /auth that deliberately "
-        "discards the fragment (a user-chosen discard, never the silent #3503 one)"
+        "discards the fragment (a user-chosen discard, never the silent #3503 "
+        "one)"
+    )
+    # #3503 (review P2, round 6): the marker is what makes /auth clear ITS OWN
+    # origin's legacy localStorage session — the key readValidSession() falls
+    # back to, which main.jsx cannot reach across origins.
+    assert dash.count("q.set('signout', '1')") >= 2, (
+        "both forward routes (the error card and the claim screen) must carry "
+        "?signout=1, or /auth hands the visitor back to the OLD account"
     )
 
 
@@ -1395,6 +1467,17 @@ def test_auth_page_gate_predicate_matches_the_dashboard() -> None:
     assert "__FRAGMENT_REFUSED" in html, (
         "nothing surfaces the refusal to the visitor on /auth"
     )
+    # #3503 (review P2, round 6): the dashboard's sign-out must clear THIS
+    # origin's legacy session, or readValidSession() forwards the visitor back to
+    # the app as the OLD account.
+    signout = html.find('p.get("signout") === "1"')
+    assert signout != -1, "the head gate ignores the ?signout=1 sign-out request"
+    assert signout < html.index("var s = (typeof window.readValidSession"), (
+        "the sign-out must clear the legacy session BEFORE readValidSession reads it"
+    )
+    assert "window.clearStoredSession()" in html[signout:signout + 400], (
+        "the sign-out path must call the shared clearStoredSession()"
+    )
 
 
 def test_consent_page_restores_a_refused_fragment(consent_page_report: dict) -> None:
@@ -1460,7 +1543,48 @@ def test_dashboard_refusal_card_is_reachable_with_claim_intent() -> None:
         "the claim screen's only forward route must discard the session it "
         "leaves behind, or /auth forwards the OLD cookie straight back here"
     )
-    assert "window.bounceToAuth(window.location.search, '')" in segment
+    assert "window.bounceToAuth(signOutSearch, '')" in segment
+
+
+def test_consent_page_recovers_after_a_fresh_signin(consent_page_report: dict) -> None:
+    """#3503 (review P1, round 6). The snapshot is frozen at page load, so the
+    refusal used to be STICKY: after the visitor signed in again with
+    email/password and that session IS stored, the page still refused — the
+    consent view could never render and the message claimed a write failed that
+    had succeeded. Only a full provider round-trip escaped."""
+    r = _scenario(consent_page_report, "consent_page_resignin")
+    assert r["refused_once"] is True, "harness precondition: the refusal fired first"
+    assert r["resign_result"] == "stored", r["resign_result"]
+    assert r["cookie_token_after"] == "NEW-ACCESS-TOKEN", "harness precondition"
+    assert "could not save the session" not in r["error_text"], (
+        f"the refusal is sticky after a fresh sign-in: {r['error_text']!r}"
+    )
+    assert r["consent_view_visible"] is True, (
+        "the consent view never rendered — the user is locked out of the flow "
+        "they just authenticated for (#3503 P1)"
+    )
+
+
+def test_auth_page_signout_clears_its_own_legacy_session(auth_page_report: dict) -> None:
+    """#3503 (review P2, round 6). `clearStoredSession()` only clears the cookie
+    and the CURRENT origin's legacy keys, but /auth's `readValidSession()` falls
+    back to the TORTOISE origin's `sb-…-auth-token` localStorage copy —
+    which `migrateLegacySession` deliberately keeps when the cookie write was
+    refused, i.e. exactly the case the card exists for. Without `?signout=1` the
+    button handed the visitor straight back to the OLD account (or into an
+    /auth ↔ dashboard replace loop)."""
+    r = _scenario(auth_page_report, "auth_page_signout")
+    assert r["legacy_key_at_load"] is True, (
+        "harness precondition: /auth's origin held the legacy session"
+    )
+    assert r["legacy_key_present"] is False, (
+        "the legacy localStorage session survived the sign-out — readValidSession "
+        "falls back to it and forwards the visitor as the OLD account (#3503 P2)"
+    )
+    assert r["navigated"] is False, (
+        f"the page forwarded to {r['replace_target']!r} instead of showing the "
+        "sign-in card"
+    )
 
 
 def test_consent_page_success_path_is_unchanged(consent_page_report: dict) -> None:

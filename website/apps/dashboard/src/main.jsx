@@ -5902,9 +5902,21 @@ function claimIntentInFlight() {
                         // immediately forwards back to the app root — the user
                         // would land on the OLD account again, which is the
                         // opposite of what "Sign in again" promises.
+                        // `signout=1` additionally makes /auth clear ITS OWN
+                        // origin's legacy localStorage session (main.jsx cannot
+                        // reach another origin's storage) — round 6: that key is
+                        // what readValidSession() falls back to when the cookie
+                        // copy was refused, so without it this button still hands
+                        // the user back to the OLD account.
                         if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-                        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, '')
-                        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
+                        const signOutSearch = (() => {
+                          const q = new URLSearchParams(window.location.search)
+                          q.set('signout', '1')
+                          const s = q.toString()
+                          return s ? '?' + s : ''
+                        })()
+                        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(signOutSearch, '')
+                        else window.location.replace('https://tortoise.premiselabs.co/auth' + signOutSearch)
                       }}>
                       Sign in again
                     </button>
@@ -6011,8 +6023,14 @@ function claimIntentInFlight() {
                          textDecoration: 'underline', cursor: 'pointer' }}
                 onClick={() => {
                   if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-                  if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, '')
-                  else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
+                  const signOutSearch = (() => {
+                    const q = new URLSearchParams(window.location.search)
+                    q.set('signout', '1')
+                    const s = q.toString()
+                    return s ? '?' + s : ''
+                  })()
+                  if (typeof window.bounceToAuth === 'function') window.bounceToAuth(signOutSearch, '')
+                  else window.location.replace('https://tortoise.premiselabs.co/auth' + signOutSearch)
                 }}>
                 ← Back to sign in
               </button>

@@ -1358,6 +1358,25 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       return new URLSearchParams(FRAGMENT_SNAPSHOT.replace(/^#/, "")).get("access_token") || null;
     } catch (e) { return null; }
   })();
+  // #3503 (review P1, round 6): the session that was ALREADY stored at load.
+  // The snapshot above is frozen for the life of the page, so a visitor who
+  // replaces the refused credential with a fresh email/password sign-in would be
+  // refused forever (the consent view could never render, and the message would
+  // claim a write failed that actually succeeded). Comparing the CURRENT session
+  // against this one tells the two apart: a different session means the refused
+  // credential has been superseded and the stale fragment must go.
+  const INITIAL_ACCESS_TOKEN = (function () {
+    try {
+      const m = document.cookie.match(new RegExp("(?:^|; )" + COOKIE_NAME + "=([^;]*)"));
+      return m ? (JSON.parse(decodeURIComponent(m[1])).access_token || null) : null;
+    } catch (e) { return null; }
+  })();
+  function clearStaleFragment() {
+    try {
+      window.history.replaceState(null, "",
+        window.location.pathname + window.location.search);
+    } catch (e) { try { window.location.hash = ""; } catch (e2) {} }
+  }
   // #1704: parent-domain cookie storage — a faithful port of the
   // dashboard's supabaseStorage (website/assets/supabase-session.js):
   // getItem reads an existing dashboard session (no second login),
@@ -1526,7 +1545,7 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
 
   async function showConsentOnce() {
     const { data } = await supabaseClient.auth.getSession();
-    // #3503 (review P1, rounds 4+5): a live token fragment was present at load
+    // #3503 (review P1, rounds 4-6): a live token fragment was present at load
     // and the URL no longer has it — supabase-js ingested it, its `_saveSession`
     // write was REFUSED (over-cap cookie), and it cleared the hash before
     // failing. The fragment is the only surviving copy of the credential.
@@ -1535,14 +1554,24 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
     // session, and the page would then authorize (binding the MCP client to)
     // the OLD account while the NEW credential was destroyed — the #3503 mix-up
     // class, already fixed on the dashboard and /auth.
-    if (HAD_LIVE_TOKEN_FRAGMENT &&
-        (!data.session || SNAPSHOT_ACCESS_TOKEN !== data.session.access_token)) {
-      if (!/[?&#](?:access_token|refresh_token|code)=/.test(window.location.hash)) {
-        window.location.hash = FRAGMENT_SNAPSHOT;
+    const sessionToken = data.session ? data.session.access_token : null;
+    // A session that differs from the one stored at LOAD is a fresh sign-in:
+    // the visitor has replaced the refused credential, so the refusal (and the
+    // now-false "could not save" message) must stand down.
+    const superseded = !!(sessionToken &&
+                          sessionToken !== SNAPSHOT_ACCESS_TOKEN &&
+                          sessionToken !== INITIAL_ACCESS_TOKEN);
+    if (HAD_LIVE_TOKEN_FRAGMENT && SNAPSHOT_ACCESS_TOKEN !== sessionToken) {
+      if (superseded) {
+        clearStaleFragment();
+      } else {
+        if (!/[?&#](?:access_token|refresh_token|code)=/.test(window.location.hash)) {
+          window.location.hash = FRAGMENT_SNAPSHOT;
+        }
+        showSignin();
+        showError("Signed in, but this browser could not save the session — the sign-in cookie was rejected (it can exceed the browser's cookie limit, or cookies may be blocked). Nothing was discarded: reload the page to retry, or sign in again below.");
+        return "refused";
       }
-      showSignin();
-      showError("Signed in, but this browser could not save the session — the sign-in cookie was rejected (it can exceed the browser's cookie limit, or cookies may be blocked). Nothing was discarded: reload the page to retry, or sign in again below.");
-      return "refused";
     }
     if (!data.session) { showSignin(); return "nosession"; }
     document.getElementById("view-consent").style.display = "block";
