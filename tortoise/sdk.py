@@ -495,14 +495,17 @@ class _InMemoryEventLog:
 # #1529 P1 (E3 owner note): whitelist of point properties that pass through
 # the capture response's `props` superset — E3 writes source_turn_id /
 # search_keys / when / quote via the v2 payload point dict / the M2 folded
-# statement dict; a WRITE must never silently drop a value they carry (the
-# two presence normalizations — a None value, which the graph does not store,
-# and an empty/blank `search_keys` list/tuple, popped by
+# statement dict. On the v2 INGEST SEAM a create must never silently drop a
+# value they carry (the two presence normalizations — a None value, which the
+# graph does not store, and an empty/blank `search_keys` list/tuple, popped by
 # _flatten_search_keys_prop — are mirrored out of the response, so presence
-# still agrees). #2949: on a dedup HIT the seam writes NONE of these props
-# (the session CONTAINS edge is still MERGEd), so the
-# response reports the canonical's STORED props instead — a field the node
-# does not hold is omitted, never echoed from the payload. Deliberately a
+# still agrees), and a v2 dedup HIT writes NONE of these props (the session
+# CONTAINS edge is still MERGEd), so its response reports the canonical's
+# STORED props — a field the node does not hold is omitted, never echoed from
+# the payload. NOTE: the above is v2-only; the env-gated M2 lane reports these
+# keys from the folded statement dict with no read-back (no in-tree M2 caller
+# emits them today — tracked, with the residual "M2 folded statement dict"
+# claim below, in #3778). Deliberately a
 # WHITELIST (not a blacklist): folded statement dicts carry internal
 # projection state (provenance run_id/source, status, createdAt, operator,
 # speaker) that must never leak into the public capture response. E3 (#1535)
