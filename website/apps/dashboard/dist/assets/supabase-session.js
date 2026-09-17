@@ -33,12 +33,20 @@
   var COOKIE_PATH = '/';
   var EXPIRY_MS = 7 * 24 * 3600 * 1000; // 7 days — #572 parity
   var SIZE_GUARD = 3800; // encoded bytes; strip provider tokens above this
-  // The browser's per-cookie limit is 4096 bytes and an over-limit write is
-  // dropped SILENTLY (no exception, any previous value kept) — the observed
-  // drop boundary is ~4077 encoded bytes. Refusing above it is the honest
-  // signal: storeSession() re-reads and returns false, so the caller keeps the
-  // fragment instead of destroying the only copy of the credential (#3503).
-  var SIZE_CAP = 4077;
+  // Hard cap. Chromium limits a cookie's NAME + VALUE
+  // (net/cookies/parsed_cookie.h kMaxCookieNamePlusValueSize = 4096, enforced
+  // as `name.size() + value.size() > 4096` in parsed_cookie.cc — the '='
+  // separator and the attributes are NOT counted). An over-budget Set-Cookie is
+  // dropped SILENTLY — no exception, any previous value kept. So the largest
+  // VALUE the browser keeps is `4096 - COOKIE_NAME.length`, and the code must
+  // refuse ABOVE exactly that: a larger literal leaves a dead band where the
+  // code writes and the browser silently drops with no diagnostic (the previous
+  // literal 4077 sat 3 bytes past the real boundary, with no derivation).
+  // Refusing here is the honest signal: storeSession()'s read-back returns
+  // false and the caller keeps the fragment instead of destroying the only copy
+  // of the credential (#3503).
+  var COOKIE_BYTE_LIMIT = 4096;
+  var SIZE_CAP = COOKIE_BYTE_LIMIT - COOKIE_NAME.length; // 4074
 
   var isLocal = function () {
     var h = window.location.hostname;
@@ -117,7 +125,7 @@
           // Do NOT write past the browser's limit: the write is a silent no-op
           // there, so the caller would believe the session was stored. Refuse
           // and report — storeSession()'s read-back then returns false (#3503).
-          console.error('sb-tortoise-auth-token session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write; the session was NOT stored');
+          console.error(COOKIE_NAME + ' session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write; the session was NOT stored');
           return;
         }
       }
@@ -191,7 +199,18 @@
           storageKey: COOKIE_NAME, // cookie name = storage key (dashboard parity)
           persistSession: true,
           autoRefreshToken: true,
-          detectSessionInUrl: true,
+          // #3503 review P1: this page loads the bridge, and the bridge is
+          // ALREADY a fragment consumer — its synchronous IIFE above reads the
+          // same #access_token hash and writes the same supabaseStorage key.
+          // supabase-js's own ingestion is therefore fully redundant AND
+          // destructive: _getSessionFromURL() assigns `window.location.hash = ''`
+          // BEFORE awaiting _saveSession(), which calls this same setItem and
+          // hits the same cap. With detectSessionInUrl:true the fragment was
+          // destroyed by the second consumer (cookie absent + hash erased)
+          // even though the bridge correctly retained it. Exactly ONE fragment
+          // consumer per page: the bridge. Do NOT flip this back on without
+          // removing the IIFE above.
+          detectSessionInUrl: false,
         },
       });
     } catch (err) {
@@ -205,6 +224,10 @@
     COOKIE_NAME: COOKIE_NAME,
     COOKIE_DOMAIN: COOKIE_DOMAIN,
     EXPIRY_MS: EXPIRY_MS,
+    // Exposed so the regression harness can assert the refusal boundary IS the
+    // modelled browser limit (name + value <= COOKIE_BYTE_LIMIT).
+    COOKIE_BYTE_LIMIT: COOKIE_BYTE_LIMIT,
+    SIZE_CAP: SIZE_CAP,
   };
 
   // ── #1511 shared auth-gate helpers ────────────────────────────────────────
@@ -311,7 +334,20 @@
     if (!session || !session.access_token || !session.refresh_token) return false;
     try {
       supabaseStorage.setItem(COOKIE_NAME, JSON.stringify(session));
-      return readValidSession() !== null;
+      // Prove the value that is actually in the jar is the one just written.
+      // A bare `readValidSession() !== null` reads WHATEVER valid session the
+      // jar holds: with a still-valid PREVIOUS cookie present, a REFUSED write
+      // reported success, and the fragment gate then stripped the NEW
+      // credential while the user stayed authenticated as the OLD account
+      // (#3503 review P2-1). Compare the access_token — the value the write
+      // just carried and the only field the size guard never strips (the
+      // migrateLegacySession read-back above already follows this precedent).
+      var stored = readCookie(COOKIE_NAME);
+      if (!stored) return false;
+      var back = JSON.parse(stored);
+      if (!back || back.access_token !== session.access_token) return false;
+      if (!back.expires_at || back.expires_at * 1000 <= Date.now()) return false;
+      return true;
     } catch (e) { return false; }
   };
 

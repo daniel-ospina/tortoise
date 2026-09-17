@@ -422,6 +422,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
+      # #3503: this matrix runs a test that shells out to node
+      # (test_session_bridge_fragment_retention.py — the fragment-retention gate
+      # loads the real bridge + the vendored supabase-js bundle). That gate
+      # FAILS rather than skips when node is absent (a skipped gate is
+      # indistinguishable from a passing one, and this one guards credential
+      # destruction). Provision node explicitly instead of relying on the
+      # runner image, so the fail-hard gate can never go red for a missing
+      # toolchain rather than a defect.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Install package + test extras
         # embeddings extra required at COLLECTION time: test_gmm_proofs.py,
         # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import

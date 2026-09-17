@@ -1326,8 +1326,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // custom storage when persistSession is false, review P0) and
   // setItem/removeItem are REAL writes — getSession() always re-reads
   // storage, so an ingested OAuth/email session must persist to the cookie
-  // or the sign-in fallback loops. detectSessionInUrl stays true so the
-  // provider redirect back with #access_token is ingested.
+  // or the sign-in fallback loops. detectSessionInUrl stays TRUE here, and
+  // that is a SCOPING decision, not an oversight (#3503 review P1): this page
+  // is server-rendered by oauth_authorize_page() and does NOT load
+  // /assets/supabase-session.js, so there is NO bridge to ingest the
+  // #access_token fragment. This client is the ONLY fragment consumer, and it
+  // must keep ingesting or the provider redirect back breaks silently. On the
+  // pages that DO load the bridge (signup.html / signin.html / the dashboard)
+  // the bridge is the single consumer and the client is created with
+  // detectSessionInUrl: false — two consumers both destroy the fragment when
+  // the shared storage write is refused.
   const COOKIE_NAME = "sb-tortoise-auth-token";
   // #1704: parent-domain cookie storage — a faithful port of the
   // dashboard's supabaseStorage (website/assets/supabase-session.js):
@@ -1340,6 +1348,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   const COOKIE_PATH = "/";
   const COOKIE_DOMAIN = ".premiselabs.co";
   const SIZE_GUARD = 3800;
+  // #3503 review P2-2/P3-1: the hard refusal boundary, mirrored from the
+  // shared bridge (website/assets/supabase-session.js) so the three adapter
+  // copies stay behaviorally in sync. Chromium limits a cookie's NAME + VALUE
+  // (`net/cookies/parsed_cookie.h kMaxCookieNamePlusValueSize = 4096`, checked
+  // as name.size() + value.size() > 4096 — the '=' and the attributes are not
+  // counted) and drops an over-budget write SILENTLY; refusing and reporting is
+  // the only honest signal. Derived from the cookie name so the boundary cannot
+  // drift between copies: SIZE_CAP == COOKIE_BYTE_LIMIT - COOKIE_NAME.length.
+  const COOKIE_BYTE_LIMIT = 4096;
+  const SIZE_CAP = COOKIE_BYTE_LIMIT - COOKIE_NAME.length;
   const isLocal = () => {
     const h = window.location.hostname;
     if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
@@ -1369,15 +1387,37 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
       // Size guard (#1225): a GitHub OAuth session (user_metadata +
       // identities + provider_token) can exceed the 4096-byte cookie
       // cap. provider tokens are only needed by the initiating flow.
+      // #3503 review P3: strip the same metadata bloat as the shared bridge /
+      // dashboard adapter — without this the consent page REFUSES a session the
+      // other two shrink to fit, breaking the sign-in fallback it exists to
+      // serve (the parity claim was otherwise only string-deep).
       if (encoded.length > SIZE_GUARD) {
         try {
           const obj = JSON.parse(value);
           delete obj.provider_token;
           delete obj.provider_refresh_token;
+          if (obj.user) {
+            delete obj.user.identities;
+            if (obj.user.user_metadata) {
+              // Keep only what the dashboard reads (display_name, avatar_url)
+              const keep = {};
+              if (obj.user.user_metadata.display_name) keep.display_name = obj.user.user_metadata.display_name;
+              if (obj.user.user_metadata.avatar_url) keep.avatar_url = obj.user.user_metadata.avatar_url;
+              if (obj.user.user_metadata.full_name) keep.full_name = obj.user.user_metadata.full_name;
+              if (obj.user.user_metadata.name) keep.name = obj.user.user_metadata.name;
+              obj.user.user_metadata = keep;
+            }
+          }
           encoded = encodeURIComponent(JSON.stringify(obj));
         } catch (e) { /* not JSON — leave as-is */ }
         if (encoded.length > SIZE_GUARD + 100) {
           console.warn('sb-tortoise-auth-token session exceeds cookie size cap (' + encoded.length + ' bytes) — session may not bridge subdomains');
+        }
+        if (encoded.length > SIZE_CAP) {
+          // Do NOT write past the browser's limit (silent no-op + previous
+          // value kept) — report instead of pretending the session persisted.
+          console.error('sb-tortoise-auth-token session exceeds the browser cookie cap (' + encoded.length + ' bytes encoded) — refusing the write; the session was NOT stored');
+          return;
         }
       }
       const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString();

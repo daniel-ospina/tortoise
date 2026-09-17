@@ -58,6 +58,10 @@ import {
 } from './sourceScope.js'
 // #1765: identity surface — pure predicates + presentational components
 import { bannerShow, shouldRefetchOnFocus } from './identity.js'
+// #3503: the mount gate must not navigate while a live OAuth token fragment is
+// in the URL — the navigation itself destroys the only surviving copy of the
+// credential when the bridge's cookie write was refused.
+import { hasLiveTokenFragment } from './sessionBounce.js'
 import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
 // #2392: minimal a11y focus management for the dialog family — capture the
 // opening trigger, restore focus to it on close (pure, node --test
@@ -690,6 +694,18 @@ const COOKIE_DOMAIN = '.premiselabs.co'
 // loop was never hit because its provider token is shorter). Mirrors
 // website/assets/supabase-session.js SIZE_GUARD exactly.
 const SIZE_GUARD = 3800
+// #3503 review P2-2/P3-1: the hard refusal boundary, mirrored from the shared
+// bridge (website/assets/supabase-session.js). Chromium limits a cookie's
+// NAME + VALUE (`net/cookies/parsed_cookie.h kMaxCookieNamePlusValueSize =
+// 4096`, checked as name.size() + value.size() > 4096 — the '=' and the
+// attributes are not counted) and drops an over-budget write SILENTLY. Every
+// adapter must refuse-and-report rather than write into the void, and the
+// boundary must be derived so it cannot drift:
+// SIZE_CAP == COOKIE_BYTE_LIMIT - COOKIE_NAME.length.
+// (The bridge previously carried a literal 4077 with no reproducible
+// derivation — 3 bytes past the real, derivable boundary.)
+const COOKIE_BYTE_LIMIT = 4096
+const SIZE_CAP = COOKIE_BYTE_LIMIT - COOKIE_NAME.length
 // #1857: host-conditional cookie attributes (RFC 6265). A hardcoded
 // `Domain=.premiselabs.co; Secure` is REJECTED by the browser on localhost,
 // 127.0.0.1, and *.pages.dev preview origins (non-matching Domain → cookie
@@ -758,6 +774,12 @@ const supabaseStorage = {
       if (encoded.length > SIZE_GUARD + 100) {
         console.warn(`${COOKIE_NAME} session exceeds cookie size cap (${encoded.length} bytes) — session may not bridge subdomains`)
       }
+      if (encoded.length > SIZE_CAP) {
+        // Do NOT write past the browser's limit (silent no-op + previous value
+        // kept) — the caller must be able to tell the write did not take.
+        console.error(`${COOKIE_NAME} session exceeds the browser cookie cap (${encoded.length} bytes encoded) — refusing the write; the session was NOT stored`)
+        return
+      }
     }
     const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString()
     document.cookie = `${key}=${encoded}${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
@@ -805,7 +827,17 @@ try {
       storageKey: COOKIE_NAME,
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: true,
+      // #3503 review P1: the dashboard loads the shared bridge FIRST
+      // (index.html -> /assets/supabase-session.js), and the bridge's
+      // synchronous IIFE is already a fragment consumer — it reads the same
+      // #access_token hash and writes the same supabaseStorage key. supabase-js
+      // ingesting the fragment too is redundant AND destructive:
+      // _getSessionFromURL() assigns `window.location.hash = ''` BEFORE awaiting
+      // _saveSession(), which calls this same setItem and hits the same cap. The
+      // second consumer destroyed the fragment even when the bridge correctly
+      // retained it. Exactly ONE fragment consumer per bridge page: the bridge.
+      // Do NOT flip this back on without removing the bridge's IIFE.
+      detectSessionInUrl: false,
     },
   })
 } catch (e) {
@@ -3334,6 +3366,23 @@ function claimIntentInFlight() {
           // on /auth, not a dashboard credential.
           const claimIntent = claimIntentInFlight()
           if (!claimIntent) {
+            // #3503 (review P1, round 2): a LIVE token fragment still in the
+            // URL here means the shared bridge could not store the session
+            // (storeSession() refused an over-cap cookie write) and therefore
+            // KEPT the fragment as the only surviving copy of the credential.
+            // Navigating would destroy it: oauthErrorHash() returns '' for a
+            // live token fragment by design (#1566 — the destination must not
+            // re-ingest it), so the bounce silently drops the credential and
+            // reproduces exactly #3503 one navigation later. Render the
+            // explicit failure instead and leave the URL — and the retry
+            // (window.location.reload(), which re-runs the bridge against the
+            // same fragment) — intact.
+            if (hasLiveTokenFragment(window.location.hash)) {
+              setChecking(false)
+              setAuthUnavailable(
+                'Signed in, but this browser refused to save the session — the session cookie was rejected (too large for the cookie limit, or cookies are blocked). Nothing was discarded: your sign-in is still in the address bar. Enable cookies for premiselabs.co and try again.')
+              return
+            }
             // #1224/#1566: OAuth state-expiry errors land as ?error=… (or,
             // #1909, as #error=… in the fragment) on the app origin now —
             // preserve the SEARCH and any ERROR fragment so /auth renders the

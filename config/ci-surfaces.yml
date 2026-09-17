@@ -653,8 +653,13 @@ surfaces:
   - test_no_legacy_token_path.py
   # #3503: the fragment-retention regression gate for the legacy cross-subdomain
   # bridge (a failed session-cookie write must not destroy the only copy of the
-  # credential). Pure Node-harness + cookie-jar shim, no browser/network, so it
-  # runs in the python-ci matrix. Moves to the deletion test when #3559 lands.
+  # credential). Hermetic (no browser, no network): a cookie-jar shim runs the
+  # real bridge plus the REAL vendored supabase-js bundle under node. It
+  # therefore REQUIRES node — a missing toolchain is a FAILURE, not a skip
+  # (tests/e2e/auth/bff_test_helpers.require_toolchain precedent; a skipped gate
+  # is indistinguishable from a passing one). python-ci's `test` job installs
+  # node explicitly for this reason (actions/setup-node). Moves to the deletion
+  # test when #3559 lands.
   - test_session_bridge_fragment_retention.py
   - test_waitlist_form.py
   - test_w7_publish.py

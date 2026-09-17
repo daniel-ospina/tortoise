@@ -316,6 +316,15 @@ jobs:
         if: needs.dedup-check.outputs.skip != 'true'
         with:
           python-version: '3.12'  # pyproject requires-python >= 3.12 (mirrors python-ci.yml)
+      # #3503: tests/test_session_bridge_fragment_retention.py runs the real
+      # session bridge + the real vendored supabase-js bundle under node, and
+      # FAILS (does not skip) without it — a skipped gate is indistinguishable
+      # from a passing one. This job runs the full `pytest tests/`, so it needs
+      # the toolchain exactly like python-ci.yml's 'test' matrix job.
+      - uses: actions/setup-node@v4
+        if: needs.dedup-check.outputs.skip != 'true'
+        with:
+          node-version: '22'
       - name: Install
         if: needs.dedup-check.outputs.skip != 'true'
         run: |
