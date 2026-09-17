@@ -33,8 +33,20 @@ producer):
 
 Semantics:
   - Log missing/unreadable  -> exit 0 (no evidence, nothing to fail on)
-  - No SKIPPED lines whose reason mentions "FalkorDB" -> exit 0 (clean)
+  - No SKIPPED line matching a guarded reason family -> exit 0 (clean)
   - Any such line -> print the skipped set (nodeids) + count, exit 1
+
+Two guarded reason families (both fail-closed):
+  1. live-FalkorDB availability regressions (#1436) — reason mentions
+     "FalkorDB" and is not in an exempt availability-class family.
+  2. embedder-unavailable (#2573) — the dense-retrieval leg silently degrades
+     to FTS-only ("keyword-only") when the embedding model cannot be loaded,
+     and the suite reports green while asserting a different meaning. The
+     real skip reasons for this class mention neither FalkorDB nor a manifest
+     (tests/test_cross_lens.py, tests/test_search_engine.py, ...), so before
+     this class existed they could not trip the guard at all. An embedder
+     skip is an ANOMALY: CI provisions the model, so the expected state is
+     that these tests RUN.
 
 Matches BOTH pytest output formats:
   -v progress:  "tests/test_ep_directional.py::TestX::test_y SKIPPED (Live FalkorDB (Docker) not available)"
@@ -117,9 +129,34 @@ _MANIFEST_MARKER_DEFAULT = "not track_b"
 _COLLECT_NODEID_RE = re.compile(r"^[^\s:]+::")
 
 
-# A skip line: "SKIPPED" + a reason mentioning FalkorDB (both formats above).
+# A skip line: "SKIPPED" + a reason (both formats above).
 _SKIPPED_MARK = "SKIPPED"
 _FALKORDB_RE = re.compile(r"FalkorDB", re.IGNORECASE)
+
+# ── Embedder-unavailable reason class (#2573) ────────────────────────────
+# The dense-retrieval leg degrades silently to keyword-only when the embedding
+# model cannot be loaded, so an embedder skip must be as loud as a FalkorDB
+# one. A reason belongs to this class when it is BOTH about the embedding model
+# (_EMBEDDER_CONTEXT_RE — the ship-config model names bge-small / all-MiniLM /
+# sentence-transformers, or the general phrases) AND availability-shaped
+# (_EMBEDDER_UNAVAILABLE_RE).
+#
+# Deliberately NOT matched: "all-MiniLM-L6-v2 not in HF cache (HF_HUB_OFFLINE
+# in CI)" (tests/test_embedder_probe.py, test_calibrate_thresholds.py,
+# tests/eval/retrieval/test_run.py). That is a collection-time offline
+# PRECONDITION on a non-shipped alternate model (`local_files_only=True`), not
+# a ship-config dense-leg degrade, and it fires by design in CI. The phrase
+# "not in HF cache" is absent from the availability set on purpose — the trip
+# class is "the model we require could not be loaded", not "some optional
+# fixture is unprovisioned".
+_EMBEDDER_CONTEXT_RE = re.compile(
+    r"bge-small|all-MiniLM|sentence-transformers|embedding model|embedder",
+    re.IGNORECASE,
+)
+_EMBEDDER_UNAVAILABLE_RE = re.compile(
+    r"unavailable|not available|not cached|cache not available|cache unavailable",
+    re.IGNORECASE,
+)
 
 # Intentional availability-class reason families, exempt from the FalkorDB
 # trip. Prefix match on the raw reason (case-sensitive for these two).
@@ -167,6 +204,22 @@ def _extract_reason(line: str) -> str | None:
     return None
 
 
+def is_embedder_reason_violation(reason: str) -> bool:
+    """True when a skip reason reports the EMBEDDING MODEL being unavailable.
+
+    Both halves are required: a model/embedder context and an
+    availability-shaped phrase. That keeps the class narrow — a generic reason
+    merely containing "cache" or "model" (a LongMemEval dataset miss, a
+    fixture download) never trips it (tests/test_skip_guard.py pins this).
+
+    See the _EMBEDDER_CONTEXT_RE / _EMBEDDER_UNAVAILABLE_RE block above for
+    the deliberately-excluded offline-precondition family.
+    """
+    if not _EMBEDDER_CONTEXT_RE.search(reason):
+        return False
+    return bool(_EMBEDDER_UNAVAILABLE_RE.search(reason))
+
+
 def is_falkor_reason_violation(reason: str) -> bool:
     """True when a FalkorDB-mentioning skip reason is a REAL violation.
 
@@ -199,14 +252,15 @@ def find_violations(log_text: str) -> list[str]:
     The same reason-family exemptions as the junitxml matcher apply (epic #1647
     Task 3, cycle-7 P2-4): a tier-2 PR can route test_falkordb_compat to half a,
     where its 6399 class skip must not red the legacy matcher either.
+
+    #2573: the embedder-unavailable class is matched here too, so the legacy
+    line matcher and the junitxml matcher agree on both families (half a / P1
+    CI sees only this path). The ``_live_utils.py`` exclusion stays
+    FalkorDB-only — it exists for the live-URI gate reason family.
     """
     violations = []
     for line in log_text.splitlines():
-        if _SKIPPED_MARK not in line or not _FALKORDB_RE.search(line):
-            continue
-        if "_live_utils.py" in line:
-            # Legacy location-based exclusion (kept for back-compat; the
-            # canonical exclusion is the reason-family prefix below).
+        if _SKIPPED_MARK not in line:
             continue
         reason = _extract_reason(line)
         if reason is None:
@@ -218,9 +272,14 @@ def find_violations(log_text: str) -> list[str]:
             # (never truncated) is the authoritative reason source; a real
             # regression skip always appears there with its reason intact.
             continue
-        if not is_falkor_reason_violation(reason):
-            continue
-        violations.append(extract_nodeid(line))
+        if is_falkor_reason_violation(reason):
+            if "_live_utils.py" in line:
+                # Legacy location-based exclusion (kept for back-compat; the
+                # canonical exclusion is the reason-family prefix above).
+                continue
+            violations.append(extract_nodeid(line))
+        elif is_embedder_reason_violation(reason):
+            violations.append(extract_nodeid(line))
     return violations
 
 
@@ -285,20 +344,21 @@ def _read_manifest(path: str) -> tuple[set[str], list[str]] | None:
     return expected, invalid
 
 
-def _read_junitxml(path: str) -> tuple[set[str], list[str], str | None]:
-    """Parse a junitxml (xunit1) into observed nodeids + falkor violations.
+def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], str | None]:
+    """Parse a junitxml (xunit1) into observed nodeids + reason violations.
 
-    Returns (observed, falkor_violations, contract_error). Raises
-    OSError/ET.ParseError when the file is missing or malformed.
+    Returns (observed, falkor_violations, embedder_violations, contract_error).
+    Raises OSError/ET.ParseError when the file is missing or malformed.
 
     contract_error is set (non-None) when any <testcase> lacks the file/name
     attributes nodeid reconstruction requires — i.e. the junitxml was NOT
     written with -o junit_family=xunit1. Reason extraction (<skipped
-    message>) is independent of those attrs, so falkor_violations are still
-    complete and meaningful; only the nodeid set is unusable.
+    message>) is independent of those attrs, so the reason violations are
+    still complete and meaningful; only the nodeid set is unusable.
     """
     observed: set[str] = set()
     falkor_violations: list[str] = []
+    embedder_violations: list[str] = []
     contract_error: str | None = None
     tree = ET.parse(path)
     for tc in tree.iter("testcase"):
@@ -308,14 +368,19 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], str | None]:
         skipped = tc.find("skipped")
         if skipped is not None:
             reason = (skipped.get("message") or "").strip()
-            if is_falkor_reason_violation(reason):
+            falkor = is_falkor_reason_violation(reason)
+            embedder = is_embedder_reason_violation(reason)
+            if falkor or embedder:
                 # Reason-level violation: report best-effort nodeid — under
                 # xunit2 there is no file attr, so fall back to class::name.
                 if file and name:
                     nodeid = reconstruct_nodeid(file, classname, name)
                 else:
                     nodeid = f"{classname}::{name}".strip(":") or "<unknown>"
-                falkor_violations.append(nodeid)
+                if falkor:
+                    falkor_violations.append(nodeid)
+                if embedder:
+                    embedder_violations.append(nodeid)
         if not file or not name:
             # junit_family=xunit2 (pytest's default) emits no file/line attrs —
             # nodeid reconstruction is impossible, and a silently-mangled nodeid
@@ -327,7 +392,7 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], str | None]:
             )
             continue
         observed.add(reconstruct_nodeid(file, classname, name))
-    return observed, falkor_violations, contract_error
+    return observed, falkor_violations, embedder_violations, contract_error
 
 
 def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
@@ -370,8 +435,9 @@ def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
     return log_path, manifest_path, junit_path
 
 
-def _report(violations: list[str], falkor_violations: list[str]) -> int:
-    if not violations and not falkor_violations:
+def _report(violations: list[str], falkor_violations: list[str],
+            embedder_violations: list[str]) -> int:
+    if not violations and not falkor_violations and not embedder_violations:
         return 0
 
     if violations:
@@ -392,6 +458,14 @@ def _report(violations: list[str], falkor_violations: list[str]) -> int:
             print(f"   - {nodeid}")
         print(f"{len(falkor_violations)} skip line(s) matching the live-FalkorDB "
               "reason family.")
+    if embedder_violations:
+        print("❌ embedder-unavailable tests SKIPPED in this run — the suite "
+              "would silently run keyword-only (TF-IDF-degraded) and report "
+              "green (issue #2573):")
+        for nodeid in sorted(set(embedder_violations)):
+            print(f"   - {nodeid}")
+        print(f"{len(embedder_violations)} skip line(s) matching the "
+              "embedder-unavailable reason family.")
     return 1
 
 
@@ -564,12 +638,12 @@ def main(argv: list[str]) -> int:
             return 1
         observed: set[str] = set()
         falkor_violations: list[str] = []
+        embedder_violations: list[str] = []
         contract_error: str | None = None
         if junit_path is not None:
             try:
-                observed, falkor_violations, contract_error = _read_junitxml(
-                    junit_path
-                )
+                (observed, falkor_violations, embedder_violations,
+                 contract_error) = _read_junitxml(junit_path)
             except (OSError, ET.ParseError) as exc:
                 print(f"❌ junitxml {junit_path!r} missing or unreadable "
                       f"({exc}) — no observed testcases, so every one of the "
@@ -581,22 +655,24 @@ def main(argv: list[str]) -> int:
                 print(f"❌ {contract_error}", file=sys.stderr)
                 observed = set()  # reconstruction impossible → all absent
         missing = sorted(expected - observed)
-        return _report(missing, falkor_violations)
+        return _report(missing, falkor_violations, embedder_violations)
 
     if junit_path is not None:
         # ── junitxml mode without a manifest: reason matcher only ────────
         try:
-            _, falkor_violations, contract_error = _read_junitxml(junit_path)
+            _, falkor_violations, embedder_violations, contract_error = (
+                _read_junitxml(junit_path))
         except (OSError, ET.ParseError):
             falkor_violations = []
+            embedder_violations = []
             contract_error = None
         if contract_error:
             # Reason extraction (<skipped message>) works without file/name
-            # attrs, so a real FalkorDB skip under a non-xunit1 junitxml must
-            # still red — never swallow it (fail-open). The diagnostic names
-            # the root cause alongside any violations.
+            # attrs, so a real FalkorDB or embedder skip under a non-xunit1
+            # junitxml must still red — never swallow it (fail-open). The
+            # diagnostic names the root cause alongside any violations.
             print(f"❌ {contract_error}", file=sys.stderr)
-        return _report([], falkor_violations)
+        return _report([], falkor_violations, embedder_violations)
 
     # ── Legacy line-matcher mode (back-compat) ───────────────────────────
     try:
@@ -609,11 +685,12 @@ def main(argv: list[str]) -> int:
     if not violations:
         return 0
 
-    print("❌ live-FalkorDB tests SKIPPED in this run — CI would be green "
-          "while testing nothing (issue #1436):")
+    print("❌ guarded availability-class tests SKIPPED in this run — CI would "
+          "be green while testing nothing (live-FalkorDB #1436 / "
+          "embedder-unavailable #2573):")
     for nodeid in sorted(set(violations)):
         print(f"   - {nodeid}")
-    print(f"{len(violations)} skip line(s) matching the live-FalkorDB reason family.")
+    print(f"{len(violations)} skip line(s) matching a guarded reason family.")
     return 1
 
 
