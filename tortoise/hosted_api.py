@@ -1584,13 +1584,17 @@ _DREAM_QUEUE_TTL_S = 600
 #
 # The queue is deliberately UNBOUNDED, unlike the capture pool's (whose queue
 # holds a ~MB transcript per waiting request — the #3060 OOM path). Here a
-# waiting request holds its own response plus the per-request SDK that
-# `_data_sdk` already opened BEFORE the off-load — the same live-connection
-# count the pre-off-load shape held, when those SDKs sat open behind a frozen
-# loop — so queueing is a latency cost for the dream surface, not an OOM path.
-# This endpoint is documented as background maintenance ("Fast-path queries
-# never block on this"), so "your dream waits behind other dreams" is the
-# correct behaviour rather than a new failure mode.
+# waiting item holds no live connection: `_data_sdk` returns a fresh
+# `TortoiseSDK` whose projection opens LAZILY on first `_get_proj()` (sdk.py),
+# and on this path that first call now happens INSIDE the pool worker — so a
+# queued dream costs a Future and a dict, not a socket. (The pre-off-load shape
+# never held a set of open SDKs "behind a frozen loop" either: the handler ran
+# `_data_sdk` → `sdk.dream` with no intervening await, so the single loop could
+# not dispatch a second request into that window.) Queueing is therefore a
+# latency cost for the dream surface, not an OOM path. This endpoint is
+# documented as background maintenance ("Fast-path queries never block on
+# this"), so "your dream waits behind other dreams" is the correct behaviour
+# rather than a new failure mode.
 #
 # Built at IMPORT time, so a malformed/zero knob must degrade to the default —
 # not raise and make `import tortoise.hosted_api` fail (the `_CAPTURE_EXECUTOR`
