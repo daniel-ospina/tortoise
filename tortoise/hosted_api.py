@@ -784,6 +784,128 @@ def _health_probe_interval() -> float:
     return v
 
 
+async def _first_contact_prewarm() -> None:
+    """#3284 Move A — pre-pay the process's first contacts, behind the listener.
+
+    Two calls, both already-bounded seams, in ONE background task:
+
+    * the JWKS fetch the first session-authenticated request used to pay
+      inline (``session_auth.prefetch_jwks`` — ``_keys is None`` on a fresh
+      process, so a cold/slow/retried fetch was charged to a user-facing
+      call: a slow 401 the client reads as a hang);
+    * the Supabase control-plane client's first TLS handshake + PostgREST
+      round trip (``_CONTROL_PLANE_PROBE.run``), whose only other caller is
+      ``/health/ready`` — so it too is cold on a fresh process.
+
+    The FalkorDB data plane needs nothing: ``_health_probe_loop`` below already
+    pre-pays it on its first iteration.
+
+    ⛔ This MUST be a task, never awaited before ``yield``: uvicorn binds the
+    listening socket only after ``lifespan.startup()`` returns, so awaiting a
+    warm-up here means the machine accepts NOTHING until it finishes (#2953).
+    It is CREATED before the embedding pre-warm thread — but creating a task
+    does not START it, and there is no ``await`` between the two, so this is
+    NOT a wall-clock ordering guarantee: the torch thread may begin first. The
+    property it does guarantee is the load-bearing one — the warm-up runs
+    behind the listener, off the request path.
+
+    Both halves are gated on Supabase mode (the same predicate
+    ``/health/ready`` uses for its control-plane probe): registry/self-host
+    deployments have no Supabase session JWTs to verify and no control plane,
+    so there is nothing to warm — and no network I/O at boot. It never raises
+    (a warm-up must never break boot) and every skip/failure reason is logged
+    with its own line (#2922: no silently-dead subsystem).
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+        supabase_mode = is_supabase_enabled()
+    except Exception as exc:  # pragma: no cover — import/env edge
+        _logger.warning("first-contact pre-warm skipped (mode undeterminable): %s", exc)
+        return
+    if not supabase_mode:
+        _logger.info(
+            "first-contact pre-warm skipped: registry mode (no Supabase session "
+            "JWTs or control plane to warm)"
+        )
+        return
+
+    try:
+        from tortoise.session_auth import prefetch_jwks
+
+        report = await prefetch_jwks()
+        outcome = report.get("outcome")
+        if outcome == "ready":
+            _logger.info(
+                "auth: JWKS pre-warm ready in %.0fms (%d keys)",
+                report["elapsed_ms"],
+                report["keys"],
+            )
+        elif outcome == "empty":
+            _logger.warning(
+                "auth: JWKS pre-warm got an EMPTY key set in %.0fms (%s) — "
+                "an upstream 200 with zero usable keys (bad rotation / empty "
+                "body), NOT a transport outage. The first session-"
+                "authenticated request will re-attempt the fetch and, if the "
+                "upstream is still empty, answer 401 'Unknown signing key' — "
+                "not a 503.",
+                report["elapsed_ms"],
+                report["error"],
+            )
+        elif outcome == "stale":
+            _logger.warning(
+                "auth: JWKS pre-warm did NOT refresh in %.0fms (%s) — serving "
+                "%d last-good cached key(s). The first session-authenticated "
+                "request is served from that set; a kid miss triggers its "
+                "own bounded refetch UNLESS the failure/miss cooldown is "
+                "still armed (a cooldown an earlier lifespan armed also "
+                "blocks the request path) — either way the answer is 401 "
+                "'Unknown signing key' from the stale set, never a 503 "
+                "(last-good keys exist) and never an unbounded wait.",
+                report["elapsed_ms"],
+                report["error"],
+                report["keys"],
+            )
+        else:
+            # ``keys == 0`` with no successful parse covers TWO distinct cache
+            # states: COLD (``_keys is None`` — the request path answers a
+            # bounded 503) and EMPTY (``_keys == {}`` from a prior 200 — the
+            # request path answers 401 "Unknown signing key", never 503, since
+            # a keyless set is not a transport failure). The report does not
+            # distinguish them, so naming only 503 here was the #2922 misreport
+            # class for the empty case.
+            #
+            # A THIRD axis cuts across both: an already-armed failure/miss
+            # cooldown (``_last_failure_at`` is a module global that survives
+            # across lifespans, so a fresh boot can inherit one) short-circuits
+            # the request path at ZERO fetches, so the sentence must not
+            # promise a fetch attempt unconditionally. Every ``transport_error``
+            # report sets ``error`` — it is never ``None`` here.
+            _logger.warning(
+                "auth: JWKS pre-warm failed in %.0fms (%s) — the first "
+                "session-authenticated request makes its own bounded fetch "
+                "attempt UNLESS the request-path failure/miss cooldown is "
+                "already armed (the warm-up itself does not arm it, but it is "
+                "a module global that survives across lifespans), in which "
+                "case it is answered from the cooldown with NO fetch. If the "
+                "upstream is still unreachable (or still answering with zero "
+                "usable keys), that request answers a bounded 503 + "
+                "Retry-After when no key set has ever been cached, or 401 "
+                "'Unknown signing key' from an empty cached set",
+                report["elapsed_ms"],
+                report["error"],
+            )
+    except Exception as exc:  # a warm-up must never break boot
+        _logger.warning("auth: JWKS pre-warm not run: %s", exc)
+
+    try:
+        report = await _CONTROL_PLANE_PROBE.run()
+        _logger.info("control plane: pre-warm %s in %sms",
+                     "ready" if report.get("ok") else "not ready",
+                     report.get("latency_ms"))
+    except Exception as exc:  # a warm-up must never break boot
+        _logger.warning("control plane: pre-warm not run: %s", exc)
+
+
 async def _health_probe_loop() -> None:
     """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
 
@@ -891,6 +1013,7 @@ _LIVENESS_TASK_ATTRS = (
     "_health_probe_task",
     "_boot_sweep_task",
     "_event_retention_task",
+    "_first_contact_task",
 )
 
 
@@ -1005,6 +1128,22 @@ async def _lifespan(app):
         pass
 
     async with mcp_http_app.lifespan(mcp_http_app):
+        # ── #3284 Move A: pre-pay the first contacts, behind the listener.
+        # Two bounded calls (JWKS + control plane) in one background task, so
+        # the FIRST session-authenticated request after a (re)start does not
+        # pay for them. The task is created here, before the embedding pre-warm
+        # thread below — but creating a task does NOT start it and nothing
+        # awaits in between, so this is NOT a wall-clock ordering guarantee
+        # (torch may start first). Not awaited — uvicorn binds only after this
+        # half returns (#2953). Inert in registry mode (no Supabase session
+        # auth).
+        try:
+            app.state._first_contact_task = asyncio.get_event_loop().create_task(
+                _first_contact_prewarm()
+            )
+        except Exception as exc:
+            _logger.warning("first-contact pre-warm not scheduled: %s", exc)
+
         try:
 
             def _probe_loaded_model_id(model) -> str | None:
@@ -1293,6 +1432,12 @@ app.add_middleware(
     allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    # ``Retry-After`` is NOT a CORS-safelisted response header, so without this
+    # the dashboard JS on app.premiselabs.co cannot read the value the
+    # session-auth 503 carries (#3284) — the "retryable, not an outage" signal
+    # would exist only for non-browser clients. Starlette emits
+    # ``Access-Control-Expose-Headers`` only for listed names.
+    expose_headers=["Retry-After"],
 )
 
 
@@ -8568,6 +8713,33 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt.
         _record_write_op(org)
+        # #3359: one capture_cost row per capture ATTEMPT that ran an
+        # extraction (successful or errored — a failed extraction that made
+        # provider calls has real spend, and the deadline/deadline_aborts
+        # disclosure depends on that row existing). Replay/M2 captures carry
+        # no extractor telemetry and emit nothing. Idempotent for free: this
+        # sits behind the SAME replay guard the write-op meter uses, so a
+        # zero-node re-POST writes no second row; a genuine retry (#2335
+        # WI-2b) does write a second row, which is why the report aggregates
+        # by session_id before percentiling. Best-effort — analytics must
+        # never block a committed capture.
+        try:
+            _cost_props = _capture_cost_props(session_id, meta)
+            if _cost_props is not None:
+                # Off the event loop: `_track_analytics_event` POSTs
+                # synchronously (`httpx.Client`), and this API runs a single
+                # uvicorn worker — calling it inline stalls EVERY concurrent
+                # request for the duration of a Supabase round-trip (the
+                # #2988 / #3498 class of sync-HTTP-on-the-loop bug). This is
+                # the first call site on the highest-frequency path, so it is
+                # routed through `asyncio.to_thread` (the house style).
+                await asyncio.to_thread(
+                    _track_analytics_event,
+                    org["org_id"], "capture_cost", _cost_props)
+        except Exception:  # noqa: BLE001, RUF100 — never block capture
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture_cost analytics emit failed (non-fatal)")
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -19241,6 +19413,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     "questions", "step", "error_type",
     # #889: MCP tool-call telemetry (friction evidence for epic #888)
     "tool_name", "status", "latency_ms", "error_kind",
+    # #3359: capture_cost — the per-session cost driver (calibration data
+    # only; never on the billing path). All measured fields must survive
+    # the PII filter or the measurement is silently lost.
+    "calls", "retries", "prompt_tokens", "completion_tokens",
+    "cost_usd", "calls_without_cost", "calls_without_usage",
+    "deadline_aborts", "by_stage",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -19290,6 +19468,45 @@ def _track_analytics_event(org_id: str, event_name: str,
             f.write(_json.dumps(event) + "\n")
     except Exception:
         pass
+
+
+def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
+    """#3359: the per-session cost driver as an analytics ``properties`` dict.
+
+    Reads the extractor telemetry (``meta["stats"]["llm"]``) that
+    ``_rollup_llm`` now accumulates: provider calls, prompt/completion
+    tokens, the provider's own reported USD charge, the
+    ``calls_without_cost`` disclosure counter, and the per-stage/
+    per-route ``by_stage`` envelope (repricable at report time).
+
+    Returns ``None`` when the extractor produced no LLM roll-up (a
+    replayed / M2 capture: ``meta["stats"]`` is ``{}``) — no measurement
+    exists, so no row is written. A capture whose extraction ERRORED does
+    carry a roll-up (and therefore a row): the provider calls were made and
+    their spend is real.
+    """
+    llm = ((meta.get("stats") or {}).get("llm") or {})
+    if not llm:
+        return None
+    return {
+        "session_id": session_id,
+        "calls": int(llm.get("calls", 0) or 0),
+        "retries": int(llm.get("retries", 0) or 0),
+        "prompt_tokens": int(llm.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(llm.get("completion_tokens", 0) or 0),
+        "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
+        "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
+        # #3359: a call that returned NO usage block at all (no tokens, no
+        # charge) is a distinct disclosure from one that returned tokens but
+        # no charge — both ride the row, so neither is silently a clean $0.
+        "calls_without_usage": int(llm.get("calls_without_usage", 0) or 0),
+        # #3359: deadline-killed generations are BILLED upstream but produce
+        # no tokens, so they are spend this measurement cannot price. Carried
+        # on the row so the report can disclose it instead of reading the
+        # session as a clean $0 (#1787 P2-L is the counter's origin).
+        "deadline_aborts": int(llm.get("deadline_aborts", 0) or 0),
+        "by_stage": llm.get("by_stage") or {},
+    }
 
 
 def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
