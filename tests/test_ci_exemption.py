@@ -28,6 +28,7 @@ from tools.ci_exemption import (
     Failure,
     Rate,
     decide,
+    detect_rotating_identity,
     parse_failed_ids,
     parse_rates,
 )
@@ -501,3 +502,58 @@ def test_a_pr_failure_with_an_empty_sample_is_not_exempt():
     d = decide(pr, main.rates, main_signatures={"tests/test_a.py::test_a11": frozenset({"sg"})})
     assert not d.visible_exemptions(), "an unmeasurable PR rate is not an exemption"
     assert [v.nodeid for v in d.blocked] == ["tests/test_a.py::test_a11"]
+
+
+# --------------------------------------------------------------------------
+# REQUIRED CLASS E5 — ROTATING IDENTITY (a changing identity is not novel)
+# --------------------------------------------------------------------------
+
+_CLS = "tests/test_dr_endpoints.py::TestDrDrillScheduled"
+_A = f"{_CLS}::test_rto_breach_opens_incident"
+_B = f"{_CLS}::test_manual_drill_records_measured_time"
+_C = f"{_CLS}::test_status_surfaces_last_drill"
+
+
+def test_E5_a_rotating_id_is_unattributable_neither_blocked_nor_exempt():
+    """The measured refusal (B6 on #3577): one class, red in 3 runs, 3 different ids.
+
+    Run 1 failed {A, B}; runs 2-3 failed {C}. The CLASS stayed red; the IDENTITY moved.
+    Neither attribution is supported: it is not "unique to this PR" (false-block) and it
+    is not exempt (false-PASS) — the verdict must be UNATTRIBUTABLE.
+    """
+    rotating = detect_rotating_identity([
+        frozenset({_A, _B}), frozenset({_C}), frozenset({_C}),
+    ])
+    assert set(rotating) == {_CLS}
+    assert rotating[_CLS] == frozenset({_A, _B, _C})
+
+    main = parse_rates(f"{_C}\t1\t8\n")   # main happens to have seen C — must still not exempt
+    pr = {_A: Failure(rate=Rate(1, 1), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates, main_signatures={_A: frozenset({"sg"})}, rotating=rotating)
+
+    assert [v.nodeid for v in d.unattributable] == [_A]
+    assert not d.visible_exemptions(), "a rotating id must NEVER be exempt"
+    # it must not be reported as a PR-unique failure
+    assert all(v.nodeid != _A for v in d.blocked), (
+        "a rotating id must not be attributed to the PR")
+
+
+def test_E5_a_STABLE_id_is_still_ordinary():
+    """The legitimate form: a class red with the SAME id across runs is not rotating,
+    so the normal rules apply and a genuine main-side match can still be exempt."""
+    rotating = detect_rotating_identity([
+        frozenset({_A}), frozenset({_A}), frozenset({_A}),
+    ])
+    assert rotating == {}, "a stable id is not a rotating identity"
+
+    main = parse_rates(f"{_A}\t4\t8\n")
+    pr = {_A: Failure(rate=Rate(4, 8), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates, main_signatures={_A: frozenset({"sg"})}, rotating=rotating)
+    assert d.visible_exemptions(), "a stable, well-measured match is still exempt"
+    assert not d.unattributable
+
+
+def test_E5_a_single_run_cannot_establish_rotation():
+    """One sample cannot distinguish 'moved' from 'not yet moved' — fail closed to the
+    ordinary rules rather than inventing rotation."""
+    assert detect_rotating_identity([frozenset({_A, _B})]) == {}

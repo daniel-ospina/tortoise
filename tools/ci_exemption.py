@@ -230,6 +230,7 @@ class Verdict:
 @dataclass
 class Decision:
     blocked: list[Verdict] = field(default_factory=list)
+    unattributable: list[Verdict] = field(default_factory=list)
     exempt: list[Verdict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -245,6 +246,47 @@ class Decision:
         out = [v.line for v in self.blocked] + self.visible_exemptions()
         out.extend(f"NOTE  : {n}" for n in self.notes)
         return "\n".join(out)
+
+
+
+def class_key(nodeid: str) -> str:
+    """The FILE/CLASS prefix — the unit that stays red while the IDENTITY moves."""
+    parts = nodeid.split("::")
+    return "::".join(parts[:2]) if len(parts) >= 2 else parts[0]
+
+
+def detect_rotating_identity(runs: list[frozenset[str]]) -> dict[str, frozenset[str]]:
+    """Keys whose failing IDENTITY changed between runs (required class E5).
+
+    **An identity that changes across runs is NOT novel.** The baseline observed the
+    CLASS; the id provably will not be the same next run. Measured on a real refusal
+    (B6 on #3577): the rail reported ONE unique failure in a class that was red in
+    three runs with THREE DIFFERENT ids inside it — run 1 two ids, runs 2-3 another.
+    The class stayed red; the identity moved.
+
+    The old re-run heuristic assumes a flake **passes** on retry and has no
+    representation for "the failure moved", so the verdict became a function of which
+    run you happened to sample. Both directions are in-surface:
+
+    * **false-block** — a changed id is labelled "a NEW failure this PR introduces";
+    * **false-PASS** — PR-minus-main compares SETS OF IDS from different samples, so an
+      order-dependent flake can move OUT of the PR's set and INTO main's between runs
+      and be exempted silently.
+
+    Returns ``{class_key: union of ids seen red in that key}`` for every key that was
+    red in >= 2 runs with a NON-CONSTANT id set. A class red in a single run is not
+    reported (one sample cannot distinguish "moved" from "not yet moved").
+    """
+    per_key: dict[str, list[frozenset[str]]] = {}
+    for r in runs:
+        keys = {class_key(n) for n in r}
+        for k in keys:
+            per_key.setdefault(k, []).append(frozenset(n for n in r if class_key(n) == k))
+    out: dict[str, frozenset[str]] = {}
+    for k, sets in per_key.items():
+        if len(sets) >= 2 and len({frozenset(x) for x in sets}) > 1:
+            out[k] = frozenset().union(*sets)
+    return out
 
 
 def _signatures_overlap(pr: frozenset[str], main: frozenset[str]) -> bool:
@@ -268,6 +310,7 @@ def decide(
     main_rates: dict[str, Rate],
     *,
     main_signatures: dict[str, frozenset[str]] | None = None,
+    rotating: dict[str, frozenset[str]] | None = None,
     k_pr: int | None = None,
     rate_tolerance: float = 1.5,
     min_runs: int = 3,
@@ -320,6 +363,19 @@ def decide(
             decision.blocked.append(Verdict(
                 nodeid, True,
                 f"PR rate is unmeasurable ({pr.rate}) — NOT exempt"))
+            continue
+
+        # Required class E5 — ROTATING IDENTITY, checked FIRST. An id whose class was
+        # red across runs with a MOVING id is UNATTRIBUTABLE: never "unique to this
+        # PR", never exempt-and-silent. This must precede every other rule because
+        # both of the other outcomes are attributions, and the evidence here supports
+        # neither.
+        if rotating and nodeid in rotating.get(class_key(nodeid), frozenset()):
+            decision.unattributable.append(Verdict(
+                nodeid, True,
+                f"UNATTRIBUTABLE: {class_key(nodeid)} was red across runs with a "
+                "DIFFERENT failing id each run — a changing identity is not novel "
+                "and cannot be attributed to this PR"))
             continue
 
         if mr is None:
