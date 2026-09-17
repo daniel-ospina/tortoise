@@ -13,9 +13,11 @@ Node is older or absent.
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -117,20 +119,44 @@ def _node_supports_ts(node: str) -> bool:
     return major > 22 or (major == 22 and minor >= 6)
 
 
+def _scrubbed_env(tmpdir: str) -> dict[str, str]:
+    """The environment the suite runs in: NO ambient capture credential.
+
+    #3721: the extension resolves its key from `TORTOISE_API_KEY` or
+    ``~/.pi/agent/tortoise-config.json``. On a developer machine that has
+    either, the suite passed while asserting the MACHINE — and on a clean CI
+    runner the empty key short-circuited the POST before the injected fetch
+    was called (`0 !== 1`). Scrubbing HOME + the TORTOISE credentials makes a
+    local run reproduce CI, so that coupling cannot silently return: if the
+    suite ever depends on the machine again, this test REDs locally too.
+    """
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("TORTOISE_API_KEY", "TORTOISE_API_URL")
+    }
+    env["HOME"] = tmpdir  # no `~/.pi/agent/tortoise-config.json`
+    env["USERPROFILE"] = tmpdir  # node's os.homedir() on Windows
+    return env
+
+
 def test_extension_behavioral_suite():
     """Run `node --test tortoise/pi-hooks/tortoise-capture.test.ts` (probe
-    payload, turn extraction, capture payload, reload skip). Skipped only when
-    the local Node cannot run TypeScript — the source pins above still run."""
+    payload, turn extraction, capture payload, reload skip) in a SCRUBBED
+    environment — see `_scrubbed_env`. Skipped only when the local Node cannot
+    run TypeScript — the source pins above still run."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("node not available — extension source pins above still ran")
     if not _node_supports_ts(node):
         pytest.skip("node < 22.6 cannot strip TypeScript types — source pins still ran")
-    proc = subprocess.run(
-        [node, "--test", str(EXTENSION_TEST)],
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-        timeout=120,
-    )
+    with tempfile.TemporaryDirectory() as fake_home:
+        proc = subprocess.run(
+            [node, "--test", str(EXTENSION_TEST)],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            timeout=120,
+            env=_scrubbed_env(fake_home),
+        )
     assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"

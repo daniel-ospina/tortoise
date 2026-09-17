@@ -79,6 +79,26 @@ function mockFetch(responses: Array<{ ok: boolean; status?: number }>): {
   return { fetchImpl: fetchImpl as never, calls };
 }
 
+// A HERMETIC dependency set for every `tortoiseCapture(...)` under test.
+// The extension resolves its credential through the REAL `resolveConfig`
+// chain (env → `~/.pi/agent/tortoise-config.json`). That is ambient state: a
+// machine with a key made these tests pass while asserting the machine — and
+// on a clean CI runner, where neither source exists, `post()` short-circuited
+// BEFORE the injected fetch was ever called, so `calls.length` read 0 and the
+// "no capture happened" assertions passed VACUOUSLY (#3721). Inject the
+// resolver's two INPUTS, never a stubbed config: the shipped co-source chain
+// stays in the tested path (its own unit tests above pin its semantics).
+const TEST_ENV = { TORTOISE_API_KEY: "tt_test", TORTOISE_API_URL: "https://h" };
+const NO_CONFIG_PATH = "/nonexistent/tortoise-config.json";
+
+function hermeticDeps(fetchImpl: unknown) {
+  return {
+    fetchImpl: fetchImpl as never,
+    env: TEST_ENV,
+    configPath: NO_CONFIG_PATH,
+  };
+}
+
 const PI_ENTRIES = [
   { type: "session", id: "h" },
   {
@@ -239,7 +259,7 @@ test("modelLabel renders provider/model and caps the server bound", () => {
 test("session_start fires the install-probe with NO conversation content", async () => {
   const pi = mockPi();
   const { fetchImpl, calls } = mockFetch([{ ok: true }]);
-  tortoiseCapture(pi as never, { fetchImpl: fetchImpl as never });
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl));
   await pi.handlers.session_start();
   // Fire-and-forget: the fetch is dispatched synchronously, so it is already
   // recorded by the time the handler returns; its .then() settles next tick.
@@ -259,11 +279,13 @@ test("session_start resolves WITHOUT awaiting the probe (Pi awaits the handler a
   const gate = new Promise<void>((resolve) => {
     release = () => resolve();
   });
+  let dispatched = false;
   const fetchImpl = async () => {
+    dispatched = true;
     await gate;
     return { ok: true, status: 200, json: async () => ({}) };
   };
-  tortoiseCapture(pi as never, { fetchImpl: fetchImpl as never });
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl));
 
   const outcome = await Promise.race([
     Promise.resolve(pi.handlers.session_start()).then(() => "RESOLVED"),
@@ -271,6 +293,14 @@ test("session_start resolves WITHOUT awaiting the probe (Pi awaits the handler a
   ]);
   assert.equal(outcome, "RESOLVED",
     "session_start must not await the probe fetch — a blackholed endpoint would block Pi");
+  // #3721: the probe must have been DISPATCHED. Without this, the assertion
+  // above also holds when the probe never fires at all — a no-credential
+  // `postInstallProbe` resolves instantly, so the race passes vacuously and
+  // the test could not RED. Dispatch is synchronous (post() awaits the fetch
+  // it has already invoked), so it is observable by the time the handler
+  // returns.
+  assert.equal(dispatched, true,
+    "the probe fetch must be dispatched (then NOT awaited) — an unfired probe passes the race vacuously");
   release();
   await new Promise((resolve) => setImmediate(resolve));
 });
@@ -278,7 +308,7 @@ test("session_start resolves WITHOUT awaiting the probe (Pi awaits the handler a
 test("session_shutdown files the session's turns with harness=pi", async () => {
   const pi = mockPi();
   const { fetchImpl, calls } = mockFetch([{ ok: true }]);
-  tortoiseCapture(pi as never, { fetchImpl: fetchImpl as never });
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl));
   await pi.handlers.session_shutdown({ reason: "quit" }, mockCtx({ entries: PI_ENTRIES }));
 
   assert.equal(calls.length, 1);
@@ -295,7 +325,7 @@ test("session_shutdown files the session's turns with harness=pi", async () => {
 test("session_shutdown on /reload does not capture (the session is still alive)", async () => {
   const pi = mockPi();
   const { fetchImpl, calls } = mockFetch([{ ok: true }]);
-  tortoiseCapture(pi as never, { fetchImpl: fetchImpl as never });
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl));
   await pi.handlers.session_shutdown({ reason: "reload" }, mockCtx({ entries: PI_ENTRIES }));
   assert.equal(calls.length, 0);
 });
@@ -303,7 +333,7 @@ test("session_shutdown on /reload does not capture (the session is still alive)"
 test("an empty session is never posted", async () => {
   const pi = mockPi();
   const { fetchImpl, calls } = mockFetch([{ ok: true }]);
-  tortoiseCapture(pi as never, { fetchImpl: fetchImpl as never });
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl));
   await pi.handlers.session_shutdown({ reason: "quit" }, mockCtx({ entries: [] }));
   assert.equal(calls.length, 0);
 });

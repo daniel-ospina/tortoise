@@ -77,7 +77,7 @@ export interface PostResult {
   detail?: string;
 }
 
-type Env = Record<string, string | undefined>;
+export type Env = Record<string, string | undefined>;
 export type FetchLike = (
   input: string,
   init?: Record<string, unknown>,
@@ -288,6 +288,22 @@ export function postCapture(
 
 export interface CaptureDeps {
   fetchImpl?: FetchLike;
+  /**
+   * Test seam for `resolveConfig`, mirroring `fetchImpl`: the environment and
+   * the config path the resolver reads. Omitted in production (the installer
+   * passes no deps), where `undefined` triggers `resolveConfig`'s own
+   * defaults — `process.env` and `CONFIG_PATH`.
+   *
+   * The behavioral suite MUST inject both (#3721): the extension resolves its
+   * credential from the ambient env / `~/.pi/agent/tortoise-config.json`, so
+   * a developer machine that has either made the suite pass while asserting
+   * the MACHINE, not the extension — and fail on a clean CI runner, where the
+   * empty key short-circuits `post()` before the injected fetch is ever
+   * called. Injecting the resolver's two INPUTS (never a stubbed config) keeps
+   * the real co-source chain in the tested path.
+   */
+  env?: Env;
+  configPath?: string;
 }
 
 function log(message: string): void {
@@ -300,7 +316,7 @@ function warn(message: string): void {
 }
 
 export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}): void {
-  const cfg = resolveConfig();
+  const cfg = resolveConfig(deps.env, deps.configPath ?? CONFIG_PATH);
   const doFetch: FetchLike = deps.fetchImpl ?? (fetch as unknown as FetchLike);
 
   if (!cfg.apiKey) {
