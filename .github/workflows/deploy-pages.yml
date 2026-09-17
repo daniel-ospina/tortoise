@@ -7,6 +7,12 @@ on:
     paths:
       - 'website/**'
       - 'tortoise/onboarding/**'
+      # #3775: product/pricing.json is bundled into the DASHBOARD at build time
+      # (website/apps/dashboard/src/pricing.js imports it), so a pricing-only
+      # change changes the served app.premiselabs.co bundle. Before #3775 the
+      # committed dist carried that signal under website/**; the artifact is
+      # untracked now, so the input is named explicitly.
+      - 'product/pricing.json'
       # #1118: workflow changes must self-deploy — the #1113 merge (which
       # added the dashboard job) did NOT trigger this workflow because the
       # workflow file wasn't in its own paths filter; it required manual
@@ -212,10 +218,11 @@ jobs:
 
   # ── Dashboard (app.premiselabs.co → tortoise-dashboard Pages) ──────────
   # #1112: wire the dashboard into CI — closes #1086 + #1109 (two
-  # stale-bundle incidents caused by the manual-only deploy.sh). The
-  # dashboard's dist/ IS committed (merges carry it); this job rebuilds +
-  # redeploys it on every website/** change. Same wrangler auth pattern as
-  # the premise-labs job above (no new secrets).
+  # stale-bundle incidents caused by the manual-only deploy.sh). Since #3775
+  # dist/ is a build artifact (untracked) and this job is its only producer
+  # for the deploy — it rebuilds + redeploys on a website/** or
+  # product/pricing.json change. Same wrangler auth pattern as the
+  # premise-labs job above (no new secrets).
   deploy-dashboard:
     runs-on: ubuntu-latest
     steps:
@@ -271,8 +278,9 @@ jobs:
       - name: Post-deploy poll (app.premiselabs.co serves the new bundle hash)
         # The failure mode of both #1086 and #1109: nothing verified the
         # dashboard deploy. Poll until the served index.html references the
-        # bundle hash we JUST BUILT (build step runs before this — the
-        # committed dist hash is stale by definition).
+        # bundle hash we JUST BUILT (the "Build dashboard (vite)" step above
+        # runs before this and is the ONLY source of dist/ — since #3775 the
+        # bundle is untracked, so there is no committed hash to go stale).
         #
         # #2688 fix: added retry + diagnostics for the local file read edge
         # case (CI filesystem timing) and better mismatch logging showing
