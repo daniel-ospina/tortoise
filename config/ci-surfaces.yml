@@ -724,6 +724,7 @@ surfaces:
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
+  - test_d3_session_identity.py   # D3/#3800: retrieved-session identity — ask `retrieved_session_ids` + `[session <id>]` evidence tag + wire `sessionId`
   - test_eval_ingest_cache.py  # #2080 ingest-cache seam (docker-lane leg — the retriever/namespace surface, mirrors test_retrieval.py)
   - test_operator_dedup_parity.py
   - test_postmerge_dedup.py
