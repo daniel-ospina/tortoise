@@ -69,8 +69,13 @@ is this list's length):
     DEFAULT (#3712): a ``.pyc`` is executable code that CPython runs in
     preference to the ``.py`` beside it, and a forged byte-cache's header
     matches its source *by construction*, so no header/stat validation can
-    separate it from a legitimate one. A sourceless ``pkg/__init__.pyc`` (no
-    ``.py`` beside it) is refused the same way — ``python -B`` /
+    separate it from a legitimate one. This holds for EVERY byte-cache git can
+    see under the surface — untracked, staged/index-tracked, added after
+    ``<rev>``, or present at ``<rev>`` — because git's bookkeeping says nothing
+    about what CPython executes (the cycle-13 review reproduced an
+    INDEX-tracked forged ``.pyc`` reported as "added after ``<rev>``" with the
+    guard still exiting 0). A sourceless ``pkg/__init__.pyc`` (no ``.py``
+    beside it) is refused the same way — ``python -B`` /
     ``PYTHONDONTWRITEBYTECODE=1`` stop bytecode being WRITTEN, not READ, so
     refusing every byte-cache is what closes the READ case too.
 
@@ -357,6 +362,11 @@ class Scan(NamedTuple):
     added: list[str]
     #: cache/editor droppings excused from the untracked refusal
     noise: list[str]
+    #: byte-caches under the surface — tracked, staged, present at ``rev`` or
+    #: untracked alike (non-empty only under the explicit opt-out, since the
+    #: default refuses). Named separately so the opt-out's disclosure counts
+    #: every executable byte-cache, not just the untracked ones.
+    byte_caches: list[str]
 
 
 def guard(
@@ -432,18 +442,35 @@ def guard(
     ]
 
     noise = [f for f in untracked if _is_noise(f)]
-    if not allow_bytecode:
-        pyc = [f for f in noise if f.endswith((".pyc", ".pyo"))]
-        if pyc:
-            raise GuardRefused(
-                f"guard: {len(pyc)} byte-cache file(s) under the surface "
-                f"(e.g. {pyc[:3]}) — a .pyc is executable code that this "
-                "content compare does not verify, and a forged byte-cache's "
-                "header matches its source by construction; re-run the "
-                "measurement byte-code-free (python -B / "
-                "PYTHONDONTWRITEBYTECODE=1), or pass --allow-bytecode to "
-                "accept the weaker attestation explicitly"
-            )
+    # Byte-caches are executable code however git happens to classify them:
+    # untracked (the class-19 allowlist would excuse one), index-tracked
+    # (staged / intent-to-add / committed — the class-18 rule would report it
+    # as "added after <rev>", i.e. not what ran, and PASS), or present at
+    # ``<rev>`` itself. CPython runs a ``.pyc`` in preference to the ``.py``
+    # beside it, and a forged header matches its source by construction, so
+    # the byte-code-free requirement is enforced over the WHOLE surface — all
+    # three sets — not just the untracked/excused one. (#3712's first fix
+    # scanned only ``noise``; the cycle-13 review reproduced an INDEX-tracked
+    # forged ``.pyc`` being reported as "added after <rev>" while the guard
+    # still printed OK.)
+    byte_caches = sorted(
+        {
+            f
+            for f in (*at_rev, *tracked, *untracked)
+            if f.endswith((".pyc", ".pyo"))
+        }
+    )
+    if byte_caches and not allow_bytecode:
+        raise GuardRefused(
+            f"guard: {len(byte_caches)} byte-cache file(s) under the surface "
+            f"(e.g. {byte_caches[:3]}) — a .pyc is executable code that this "
+            "content compare does not verify, and a forged byte-cache's "
+            "header matches its source by construction; whether git calls it "
+            "untracked, tracked or added-after-the-revision does not change "
+            "what CPython executes. Re-run the measurement byte-code-free "
+            "(python -B / PYTHONDONTWRITEBYTECODE=1), or pass "
+            "--allow-bytecode to accept the weaker attestation explicitly"
+        )
     hidden = [f for f in untracked if not _is_noise(f)]
     for base in paths:
         start_dir = root / (base.rstrip("/") or ".")
@@ -497,7 +524,7 @@ def guard(
             f"guard: {rel} exists at {rev} but is no longer tracked "
             "(deleted) — re-measure rather than re-label"
         )
-    return Scan(checked, comment_only, added, noise)
+    return Scan(checked, comment_only, added, noise, byte_caches)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -554,16 +581,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  added after that revision (cannot have been executed): {scan.added or '(none)'}")
     # Byte-caches are the expected noise and would drown the signal; anything
     # else excused by the allowlist is worth naming.
-    bc = [f for f in scan.noise if f.endswith((".pyc", ".pyo"))]
     odd = [f for f in scan.noise if not f.endswith((".pyc", ".pyo"))]
     print(f"  cache/editor noise excused: {len(scan.noise)} file(s)"
           + (f" — unusual: {odd}" if odd else ""))
-    if bc:
-        # Declaration 21: an opt-out run must not read like a full attestation.
+    if scan.byte_caches:
+        # Declaration 21: an opt-out run must not read like a full attestation,
+        # and it must count TRACKED byte-caches too (the class-16 hole).
         print(
             f"  \u26a0 BYTECODE EXCUSED under the explicit --allow-bytecode "
-            f"opt-out: {len(bc)} file(s) — this attestation does NOT cover "
-            "executable bytecode"
+            f"opt-out: {len(scan.byte_caches)} file(s) — this attestation does "
+            "NOT cover executable bytecode"
         )
     return 0
 

@@ -144,7 +144,7 @@ def _prove_the_forgery_executes(repo: Repo, module: str) -> None:
     assert cp.stdout.strip() == "PWNED", f"forgery did not execute: {cp.stderr}"
 
 
-def _guard_cli(repo: Repo, *extra: str) -> subprocess.CompletedProcess:
+def _guard_cli(repo: Repo, *extra: str, rev: str | None = None) -> subprocess.CompletedProcess:
     """Execute the guard as the CLI and return the process.
 
     The refusal is asserted on the process's EXIT CODE and OUTPUT — never on
@@ -152,7 +152,7 @@ def _guard_cli(repo: Repo, *extra: str) -> subprocess.CompletedProcess:
     """
     return subprocess.run(
         [sys.executable, "-m", "tools.longmem_eval.guard_measured_revision",
-         "--rev", repo.rev, "--worktree", str(repo.root), *extra],
+         "--rev", rev or repo.rev, "--worktree", str(repo.root), *extra],
         capture_output=True,
         text=True,
         cwd=str(REPO_PARENT),
@@ -400,16 +400,61 @@ def test_clean_surface_without_bytecode_passes(repo: Repo) -> None:
     assert _scan(repo).noise == []
 
 
+def test_staged_bytecode_refuses_by_default(repo: Repo) -> None:
+    """#3712 (cycle-13 review): ``git add -f`` moves the forged ``.pyc`` out of
+    the untracked scan into ``tracked``, where the class-18 rule reported it as
+    "added after <rev>" (not what ran) and the guard exited 0. Byte-code-ness
+    is a property of the FILE, not of git's bookkeeping.
+    """
+    forged = _forge_shadowed_bytecode(repo, "a", 'PWNED = "PWNED"\n')
+    _git(repo.root, "add", "-f", str(forged.relative_to(repo.root)))
+    assert _git(repo.root, "ls-files", "--", "tortoise/").count("a.cpython") == 1
+    cp = _guard_cli(repo)
+    assert cp.returncode == 1, cp.stdout
+    assert "byte-cache" in cp.stderr
+
+
+def test_committed_bytecode_refuses_by_default(repo: Repo) -> None:
+    """A committed byte-cache is ``tracked`` and absent from ``<rev>``: the
+    same class-18 "added" disposition, and the same refusal."""
+    _forge_shadowed_bytecode(repo, "a", 'PWNED = "PWNED"\n')
+    new_rev = repo.commit("commit the forged byte-cache")
+    assert _git(repo.root, "ls-tree", "-r", "--name-only", new_rev, "--",
+                "tortoise/").count("a.cpython") == 1
+    cp = _guard_cli(repo)
+    assert cp.returncode == 1, cp.stdout
+    assert "byte-cache" in cp.stderr
+
+
+def test_bytecode_present_at_rev_refuses_by_default(repo: Repo) -> None:
+    """A ``.pyc`` that has been in the tree since ``<rev>`` is not a drift —
+    but the surface was not byte-code-free when the measurement ran, so the
+    attestation's premise fails and it refuses too."""
+    _forge_shadowed_bytecode(repo, "a", 'PWNED = "PWNED"\n')
+    new_rev = repo.commit("measured WITH a byte-cache")
+    cp = _guard_cli(repo, rev=new_rev)
+    assert cp.returncode == 1, cp.stdout
+    assert "byte-cache" in cp.stderr
+
+
 def test_allow_bytecode_is_an_explicit_loud_opt_out(repo: Repo) -> None:
     """Declaration 21: the opt-out is the ONLY way a byte-cache is excused, and
-    a run that takes it states that its attestation does not cover bytecode."""
+    a run that takes it states that its attestation does not cover bytecode —
+    tracked byte-caches included."""
     forged = _forge_shadowed_bytecode(repo, "a", 'PWNED = "PWNED"\n')
+    rel = str(forged.relative_to(repo.root))
     cp = _guard_cli(repo, "--allow-bytecode")
     assert cp.returncode == 0, cp.stderr
     assert "guard OK" in cp.stdout
     assert "BYTECODE EXCUSED" in cp.stdout and "does NOT cover" in cp.stdout
-    scan = guard(repo.root, repo.rev, SURFACE, allow_bytecode=True)
-    assert scan.noise == [str(forged.relative_to(repo.root))]
+    assert guard(repo.root, repo.rev, SURFACE, allow_bytecode=True).byte_caches == [rel]
+    # …and staging it must not slip the disclosure: the opt-out counts every
+    # byte-cache under the surface, tracked or not.
+    _git(repo.root, "add", "-f", rel)
+    staged = _guard_cli(repo, "--allow-bytecode")
+    assert staged.returncode == 0, staged.stderr
+    assert "BYTECODE EXCUSED" in staged.stdout
+    assert guard(repo.root, repo.rev, SURFACE, allow_bytecode=True).byte_caches == [rel]
 
 
 def test_strict_bytecode_flag_is_a_no_op_and_conflicts_with_the_opt_out(
@@ -672,10 +717,9 @@ def test_unparseable_surface_file_refuses_with_a_reason(repo: Repo) -> None:
 # ── declared-but-untested residuals (recorded, not chased) ────────────────
 #
 # closed (#3712): a `.pyc` whose forged header matches its source executes in
-# preference to the `.py` beside it. The guard now REFUSES any byte-cache by
-# default; `test_forged_bytecode_refuses_by_default` proves the artifact really
-# executes differently and that the guard refuses it, and `--allow-bytecode` is
-# the loud opt-out.
+# preference to the `.py` beside it. The guard REFUSES any byte-cache under the
+# surface by default — untracked, staged, committed, or present since `<rev>` —
+# each pinned by its own test, and `--allow-bytecode` is the loud opt-out.
 #
 # known_residual: the declared surface is `tortoise/` + `tools/`; the measured
 # command also imports `tests/model_adapters.py` for a non-default ingest mode,
