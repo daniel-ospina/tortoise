@@ -94,7 +94,7 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
     route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
 
 
-# ── #2731/#2744: drive the LOCAL committed-dist preview, never prod ──
+# ── #2731/#2744: drive the LOCAL built-dist preview, never prod ──
 # The dashboard specs used to navigate the DOCUMENT to the prod origins and
 # rely on the ``page.route`` proxy to serve local content under them. When the
 # proxy path failed, the request fell through to production and every
@@ -174,7 +174,9 @@ def _preflight_local_servers() -> None:
         pytest.exit(
             "dashboard e2e: local preview server(s) unreachable — this suite "
             "drives the LOCAL wrangler previews, never production (#2731). "
-            "Start BOTH before running:\n"
+            "Start BOTH before running (dist/ is a build artifact since "
+            "#3775 — build it first or :8790 serves a missing/stale bundle):\n"
+            "  cd website/apps/dashboard && npm ci && npm run build\n"
             "  cd website/apps/dashboard && npx wrangler@4 pages dev dist --port 8790\n"
             "  cd website && npx wrangler@4 pages dev . --port 8788\n"
             "Unreachable:\n"
@@ -217,7 +219,7 @@ def _seed_local_session_cookie(page: Page, user_id: str,
 
 
 def _goto_local_dashboard(page: Page) -> None:
-    """Load the app DOCUMENT from the local committed-dist preview (#2731)."""
+    """Load the app DOCUMENT from the local built-dist preview (#2731)."""
     page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30_000)
     # #2744: positive evidence in the run log that the DOCUMENT came from the
     # local preview. Print the TARGET (not page.url — a gate redirect can land
@@ -335,7 +337,6 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
 
 
 def _open_auth(page: Page) -> None:
-    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     # #2744: the /auth DOCUMENT is loaded from the local site preview, never
     # the prod auth origin.
     _goto_local_auth(page)
