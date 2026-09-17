@@ -90,8 +90,10 @@ jobs:
       # (availability-watchdog.sh DEFAULT_PROBE_URL). Duplicating the production
       # URL here would mean that changing one copy silently turns every
       # production run into a drill — no restarts, [DRILL]-titled incidents —
-      # and the string comparison against DEFAULT_PROBE_URL is the ONLY thing
-      # distinguishing a drill from production.
+      # and SET MEMBERSHIP in the script's PROD_PROBE_URLS set is the ONLY thing
+      # distinguishing a drill from production. (This replaced the old
+      # single-literal `PROBE_URL == DEFAULT_PROBE_URL` comparison; an
+      # unrecognised URL stays a DRILL, fail closed.)
       PROBE_URL: ${{ inputs.probe_url }}
       # Fly app. FLY_API_TOKEN is the established name (deploy-hosted.yml) and
       # is passed at STEP level (see the probe step) — NOT here: a job-level

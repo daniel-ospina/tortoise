@@ -1780,6 +1780,16 @@ export STUB_PROBE_HEADERS=$'HTTP/2 302\r\nlocation: https://github.com/login/oau
 run_watchdog
 assert_eq "$RC" "1" "auth: 302 WITHOUT the PKCE header → exit 1 (up but not signing anyone in)"
 assert_contains "$(patched_body)" "required response header NOT found" "auth: the incident body names the missing required header"
+# The body an operator reads FIRST is the verdict row and the heal note — not
+# the raw evidence. A header failure must DIAGNOSE as a header failure, not as
+# a status mismatch (the status was 302, the healthy code), and the self-healing
+# note must point at the PKCE flow rather than the route/deploy surface. The
+# runbook tells operators this body is the primary diagnostic, so a
+# self-contradictory body sends them to the wrong place (review P2).
+assert_contains "$(patched_body)" "the required response header was missing" "auth: the verdict row names the missing header (not a status mismatch)"
+assert_not_contains "$(patched_body)" "an unexpected HTTP status" "auth: the verdict row does NOT claim the status was unexpected (it was 302)"
+assert_contains "$(patched_body)" "PKCE" "auth: the heal note points at the PKCE flow (the right surface)"
+assert_not_contains "$(patched_body)" "check the deployed revision and the route" "auth: the heal note does NOT send the operator to the route/deploy surface"
 assert_contains "$(created_json)" "PROD DEGRADED" "auth: answered-but-wrong → PROD DEGRADED (an ANSWER, not an outage)"
 assert_eq "$(count_calls 'FLYCTL')" "0" "auth: answered-but-wrong → no restart attempt"
 assert_eq "$(cat "$STUB_TMP/probe.count")" "1" "auth: the header check is deterministic → no retry budget burned"

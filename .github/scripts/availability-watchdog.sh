@@ -155,10 +155,11 @@
 #     that separate identity a typo'd drill host files a MISLABELLED production
 #     incident (and the next production run would then "recover" it).
 #   * A PRODUCTION URL with no Fly machine behind it (the Pages auth surface) is
-#     ALWAYS restart-disarmed (`disarmed:no_machine`): a 503 there means a
-#     missing binding, and restarting the API app would restart an unrelated
-#     service. This is a property of the URL SET, not of the failure class, so
-#     no per-run misconfiguration can arm it.
+#     ALWAYS restart-disarmed (`disarmed:no_machine` on a DOWN verdict,
+#     `disarmed:unexpected` on a DEGRADED one — the DEGRADED disarm is set
+#     first): a 503 there means a missing binding, and restarting the API app
+#     would restart an unrelated service. This is a property of the URL SET,
+#     not of the failure class, so no per-run misconfiguration can arm it.
 #   * A failed issue SEARCH refuses to file (never duplicate) and fails the
 #     run; a non-numeric issue id is refused the same way. The monitor cannot
 #     go silently deaf in the alerting direction.
@@ -702,6 +703,18 @@ failure_label() { # <class>
 }
 
 # ── probe ───────────────────────────────────────────────────────────────────
+# Which DEGRADED flavour the last probe observed (internal state, read by
+# render_body() and the heal note so the incident body diagnoses the REAL
+# failure mode):
+#   status — the app answered with an unexpected HTTP status
+#   header — the app answered with an ALLOWED status but a required response
+#            header was missing (the route answered while the flow did not
+#            initialise). Without this distinction the body's verdict row said
+#            "an unexpected HTTP status" while the evidence two lines down
+#            showed http_code=302, and the heal note pointed at the
+#            route/deploy surface instead of the PKCE flow (review P2).
+PROBE_DEGRADED_REASON="status"
+
 # Sets: PROBE_VERDICT, PROBE_CODE, PROBE_FAILURE_CLASS, PROBE_EVIDENCE
 # (multi-line). PROBE_FAILURE_CLASS is the curl-level failure layer from
 # classify_failure() and is what decides whether a restart is even on the table.
@@ -712,6 +725,7 @@ probe() {
   PROBE_EVIDENCE=""
   PROBE_CODE="000"
   PROBE_FAILURE_CLASS="none"
+  PROBE_DEGRADED_REASON="status"
 
   attempt=1
   while [ "$attempt" -le "$PROBE_ATTEMPTS" ]; do
@@ -752,6 +766,7 @@ probe() {
     # burning the retry budget.
     if [ "$v" = "UP" ] && [ -n "$PROBE_REQUIRE_HEADER" ]; then
       if ! header_satisfied "$hdr_file" "$PROBE_REQUIRE_HEADER"; then
+        PROBE_DEGRADED_REASON="header"
         PROBE_EVIDENCE="${PROBE_EVIDENCE}required response header NOT found: \"$(scrub_output "$PROBE_REQUIRE_HEADER" 120)\" (HTTP ${code}) — the route answered, so this is not the outage class, but the flow did not initialise"$'\n'
         v="UNEXPECTED"
       fi
@@ -1271,7 +1286,15 @@ render_body() { # <kind> <kindlabel> <selfheal-note>
     what="no answer (timeout / connection error / 5xx) after ${PROBE_ATTEMPTS} attempts"
   else
     summary="🟠 **${PROBE_HOST_LABEL} answered unexpectedly** — the probe reached the app, but not with an expected response."
-    what="an unexpected HTTP status (not $(probe_up_contract), not 5xx)"
+    # The verdict row is what an operator reads FIRST; it must name the ACTUAL
+    # failure mode. A missing required header is not a status mismatch — the
+    # status was the healthy one — and saying otherwise contradicts the raw
+    # evidence two lines below the row.
+    if [ "$PROBE_DEGRADED_REASON" = "header" ]; then
+      what="the required response header was missing — the route ANSWERED (HTTP ${PROBE_CODE}) but the flow did not initialise"
+    else
+      what="an unexpected HTTP status (not $(probe_up_contract), not 5xx)"
+    fi
   fi
   # The assertion paragraph is per-target: the API probe's contract and the
   # Pages auth probe's contract are different, and an incident body that
@@ -1580,7 +1603,12 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
     # #3628: a PRODUCTION surface with no Fly machine behind it (the Pages
     # auth route). A restart of the API app cannot repair a missing binding
     # and would restart an unrelated service — hard disarm, not a judgement
-    # call, so it does not depend on the failure class.
+    # call. Unlike the failure-class guard below, this branch disarms whatever
+    # the DOWN layer was. It is reachable ONLY for a DOWN verdict: a DEGRADED
+    # verdict was already disarmed as `disarmed:unexpected` above, so the auth
+    # target logs `no_machine` on a 503/timeout and `unexpected` on a
+    # 302-with-missing-header (review P3 — the runbook used to claim this
+    # target always logs `no_machine`).
     restart_mode="disarmed:no_machine"
     log "probe target is a production surface with no Fly machine — NOT restartable; the incident will be reported without a restart"
   elif ! restartable_failure "$PROBE_FAILURE_CLASS"; then
@@ -1900,7 +1928,11 @@ A restart is a **symptom fix** — if this recurs, the root cause is still live 
         transition_kind="disarmed"
         ;;
       disarmed:unexpected)
-        heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`404\`/\`3xx\` on an authenticated API route usually means a bad deploy or a moved route, not a wedged process: check the deployed revision and the route."
+        if [ "$PROBE_DEGRADED_REASON" = "header" ]; then
+          heal_note="⛔ **No restart attempted** — the app ANSWERED, so a process restart is not the remediation. The failure is in the **PKCE flow**, not a wedged process: the redirect came back with an allowed status but without the required \`$(scrub_output "$PROBE_REQUIRE_HEADER" 120)\` header, which is the proof the flow row was written. Check the PKCE state written to D1/KV behind the auth route — the \`code_challenge\`/\`code_challenge_method\` pair, the D1 binding, and the last deploy of the auth function — NOT the route table or the deployed revision of the API app. Runbook § *Out-of-band availability watchdog*."
+        else
+          heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`404\`/\`3xx\` on an authenticated API route usually means a bad deploy or a moved route, not a wedged process: check the deployed revision and the route."
+        fi
         transition_kind="disarmed"
         ;;
       disarmed:unfixable)
