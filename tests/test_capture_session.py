@@ -217,8 +217,9 @@ def _read_passthrough_props(sdk, pid: str) -> list:
 
 def test_capture_dedup_hit_reports_stored_props_not_payload(sdk, monkeypatch):
     """#2949 (review P2): the v2 seam's dedup step-2 pre-resolves the canonical
-    BEFORE calling create_point, so a dedup hit writes NOTHING — yet the
-    response used to append the payload's ``props`` dict. The response thus
+    BEFORE calling create_point, so a dedup hit writes none of the four
+    passthrough props — yet the response used to append the payload's ``props``
+    dict. The response thus
     advertised quote/when/search_keys/source_turn_id that were ABSENT from the
     resolved node: the exact #2813 symptom ("the reply looked correct while the
     node stored nothing") persisting on the dedup path. A canonical written

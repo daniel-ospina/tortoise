@@ -499,7 +499,8 @@ class _InMemoryEventLog:
 # two presence normalizations — a None value, which the graph does not store,
 # and an empty/blank `search_keys` list/tuple, popped by
 # _flatten_search_keys_prop — are mirrored out of the response, so presence
-# still agrees). #2949: on a dedup HIT the seam writes nothing, so the
+# still agrees). #2949: on a dedup HIT the seam writes NONE of these props
+# (the session CONTAINS edge is still MERGEd), so the
 # response reports the canonical's STORED props instead — a field the node
 # does not hold is omitted, never echoed from the payload. Deliberately a
 # WHITELIST (not a blacklist): folded statement dicts carry internal
@@ -4087,9 +4088,9 @@ class TortoiseSDK:
                     props.pop("search_keys", None)
                 # #2949 (review P2): only the create branch below writes these
                 # props. A dedup hit (in-capture fold or graph-level
-                # resolution) writes NOTHING, so the response must fall back to
-                # the canonical's STORED props — see the read-back after the
-                # CONTAINS wiring.
+                # resolution) writes NONE OF THEM, so the response must fall
+                # back to the canonical's STORED props — see the read-back
+                # after the CONTAINS wiring.
                 created_here = False
                 if resolved is None:
                     # 2) graph-level content-hash resolution — the SAME
@@ -4141,9 +4142,12 @@ class TortoiseSDK:
                     "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid})
                 if not created_here:
-                    # #2949 (review P2): a dedup hit wrote NOTHING in this
-                    # call, so the response must report the canonical's
-                    # STORED passthrough props — never the payload's. Echoing
+                    # #2949 (review P2): a dedup hit wrote NONE of these props
+                    # in this call (the session CONTAINS edge above is still
+                    # MERGEd; a folded-only capture may also promote/calibrate
+                    # the canonical), so the response must report the
+                    # canonical's STORED passthrough props — never the
+                    # payload's. Echoing
                     # the payload here re-mints the exact #2813 symptom ("the
                     # reply looked correct while the node stored nothing"):
                     # the resolved node may have been written BEFORE this fix,
