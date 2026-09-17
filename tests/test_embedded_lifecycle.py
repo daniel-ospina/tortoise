@@ -80,6 +80,7 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_index_cli.py",  # embedded-file-contract (CI-fix PR #1684): E2E-15 is a two-process embedded choreography (hook child owns the local db, parent reopens fresh after) — the redirect would split child-write vs parent-read; module-scoped autouse fixture pops TORTOISE_DB_URI
     "test_import_endpoint.py",  # embedded-file-contract (P4 divergence): the harness patches TortoiseSDK onto one local file (the hosted app's store) — the redirect would split seed vs app across stores; module-scoped autouse fixture pops TORTOISE_DB_URI
     "e2e/hosted/test_12_selfhost_migration.py",  # embedded by design (Task 10 Step 2 carve-out decision): the parity journey's source graph is a LOCAL file the `tortoise export` CLI subprocess reads — a redirect would silently flip it to the server and void the parity assertions; runs only in the URI-less hosted-e2e lane
+    "test_embedded_durability_claim.py",  # #2879: the test MEASURES the real on-disk AOF artifact (`*-appendonlydir`) — an explicit `path=` construction is the under-test input; a redirected construction writes no local AOF dir to observe, so the assertion would be vacuous
     "test_embedded_lifecycle_fast_close.py",  # #1371 lifecycle-seam tests
     "test_flip_gate.py",
     "test_guard.py",
