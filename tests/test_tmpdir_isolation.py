@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -322,34 +323,118 @@ def test_socket_walk_orders_nested_roots_before_the_tempdir(tmp_path):
 
 
 def test_socket_walk_reserves_budget_for_the_global_pass(tmp_path, monkeypatch):
-    """#3752 review cycle 2: nested session roots are walked FIRST, so N of them
-    could consume the single shared deadline and silently skip the GLOBAL
-    (tempdir) pass — the only pass that reaches non-session dirs. Each nested
-    root's timeout is therefore capped at `remaining - GLOBAL_WALK_RESERVE_S`,
-    which makes the reserve unspendable by construction."""
+    """#3752 review cycle 2/3: nested session roots are walked FIRST, so N of
+    them could consume the single shared deadline and silently skip the GLOBAL
+    (tempdir) pass — the only pass that reaches non-session dirs.
+
+    Behavioural, not arithmetic: the nested roots' `find` is made to spend its
+    WHOLE timeout, and the test asserts the global root is still invoked with
+    a POSITIVE timeout. With the reserve disabled the first nested root spends
+    the entire budget and the global root is never invoked — which this test
+    proves by running that case too (so it does not merely mirror the
+    constant), and it is independent of GLOBAL_WALK_RESERVE_S' value.
+    """
     from tortoise import embedded_reaper as reaper
 
-    roots = [str(tmp_path / "tt_aaaaaaaa"), str(tmp_path / "tt_bbbbbbbb"),
-             str(tmp_path)]
-    for r in roots[:2]:
+    nested = [str(tmp_path / "tt_aaaaaaaa"), str(tmp_path / "tt_bbbbbbbb")]
+    for r in nested:
         os.makedirs(r, exist_ok=True)
-    monkeypatch.setattr(reaper, "_socket_walk_roots", lambda _tmpdir: list(roots))
-    seen: list[tuple[str, float]] = []
-    real_run = subprocess.run
+    global_root = str(tmp_path)
+    monkeypatch.setattr(reaper, "_socket_walk_roots",
+                        lambda _tmpdir: [*nested, global_root])
+    monkeypatch.setattr(reaper, "SOCKET_WALK_TIMEOUT", 0.5)
+    monkeypatch.setattr(reaper, "GLOBAL_WALK_RESERVE_S", 0.25)
+    called: list[tuple[str, float]] = []
+
+    def slow_nested_run(cmd, *a, **kw):
+        root, timeout = str(cmd[1]), float(kw.get("timeout", -1))
+        called.append((root, timeout))
+        if root != global_root:
+            time.sleep(max(timeout, 0.0) + 0.05)  # spend the whole cap
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(reaper.subprocess, "run", slow_nested_run)
+    reaper._find_socket_dirs(str(tmp_path))
+    assert called and called[-1][0] == global_root, \
+        f"the reserved global root was never walked: {called!r}"
+    assert called[-1][1] > 0, f"the global pass got no budget: {called!r}"
+
+    # And the counter-case: with the reserve disabled the nested root eats the
+    # budget and the global pass IS starved — so the assertion above is
+    # load-bearing rather than an artefact of the cap.
+    monkeypatch.setattr(reaper, "GLOBAL_WALK_RESERVE_S", 0.0)
+    starved: list[str] = []
+
+    def starving_run(cmd, *a, **kw):
+        root, timeout = str(cmd[1]), float(kw.get("timeout", -1))
+        starved.append(root)
+        if root != global_root:
+            time.sleep(max(timeout, 0.0) + 0.05)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(reaper.subprocess, "run", starving_run)
+    reaper._find_socket_dirs(str(tmp_path))
+    assert global_root not in starved, (
+        "without the reserve the global pass should have been starved — the "
+        "behavioural test no longer pins anything"
+    )
+
+
+def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
+    """#3752 review cycle 3: `_socket_walk_roots` does real I/O (a scandir plus
+    a stat per `tt_*` child). Charging it to the walk budget let a slow
+    discovery issue ZERO `find` calls — the pollution-disables-cleanup failure
+    the nested pass exists to prevent."""
+    from tortoise import embedded_reaper as reaper
+
+    real_roots = reaper._socket_walk_roots
+
+    def slow_roots(_tmpdir):
+        time.sleep(reaper.SOCKET_WALK_TIMEOUT + 0.2)
+        return real_roots(_tmpdir)
+
+    seen: list[str] = []
 
     def recording_run(cmd, *a, **kw):
-        seen.append((str(cmd[1]), float(kw.get("timeout", -1))))
-        return real_run(cmd, *a, **kw)
+        seen.append(str(cmd[1]))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
 
+    monkeypatch.setattr(reaper, "_socket_walk_roots", slow_roots)
     monkeypatch.setattr(reaper.subprocess, "run", recording_run)
     reaper._find_socket_dirs(str(tmp_path))
-    assert [r for r, _ in seen] == roots, \
-        "the global root must still be walked after the nested roots"
-    nested_max = reaper.SOCKET_WALK_TIMEOUT - reaper.GLOBAL_WALK_RESERVE_S
-    for root, timeout in seen[:-1]:
-        assert timeout <= nested_max + 1.0, \
-            f"nested root {root} could spend the global reserve ({timeout}s)"
-    assert seen[-1][1] > 0, "the global pass was starved by the nested roots"
+    assert seen == [str(tmp_path)], \
+        f"discovery time was charged to the walk budget: {seen!r}"
+
+
+def test_probe_socket_falls_back_to_tmp_for_a_link_that_cannot_fit(
+        tmp_path, monkeypatch):
+    """#3752 review cycle 3: the over-long-socket fallback must pick a link
+    directory whose FULL path fits in sun_path — the private session root can
+    eat most of that budget, and a failed symlink would make every probe
+    'undetermined' (quarantines never converge). Also pins that the link is
+    unlinked again."""
+    from tortoise import embedded_reaper as reaper
+
+    long_dir = tmp_path / ("d" * 60)
+    long_dir.mkdir()
+    sock = str(long_dir / "redis.socket")
+    assert len(sock.encode()) > 100, "fixture must exercise the long-path branch"
+    monkeypatch.setattr(reaper, "_real_gettempdir", lambda: str(long_dir))
+    linked: list[str] = []
+    unlinked: list[str] = []
+
+    monkeypatch.setattr(reaper.os, "symlink",
+                        lambda src, dst: (linked.append(dst), None)[1])
+    monkeypatch.setattr(reaper.os, "unlink", lambda p: unlinked.append(p))
+    monkeypatch.setattr(reaper, "_probe_socket", lambda p, timeout=None: "dead")
+
+    assert reaper._probe_socket_any(sock) == "dead"
+    assert linked, "no link was created at all"
+    assert linked[0].startswith("/tmp" + os.sep), \
+        f"the fallback did not leave the too-deep temp dir: {linked[0]!r}"
+    assert len(linked[0].encode()) <= 100, \
+        f"the fallback link itself would not fit: {linked[0]!r}"
+    assert unlinked == linked, "the fallback link was not unlinked"
 
 
 def test_quarantine_walk_reaches_nested_session_roots(tmp_path, monkeypatch):
@@ -504,6 +589,7 @@ def test_marker_write_failure_fails_closed(tmp_path, monkeypatch):
 
     real_root, real_host = iso._SESSION_TMPDIR, iso.HOST_TMPDIR
     real_env_tmpdir = os.environ.get("TMPDIR")
+    real_env_host = os.environ.get("TORTOISE_HOST_TMPDIR")
     iso._SESSION_TMPDIR = None
     iso.HOST_TMPDIR = str(tmp_path)
 
@@ -521,12 +607,16 @@ def test_marker_write_failure_fails_closed(tmp_path, monkeypatch):
         leftovers = [e.name for e in iso.host_tempdir_entries()]
         assert not any(n.startswith("tt_") for n in leftovers), \
             f"a root survived the fail-closed abort: {leftovers}"
+        assert os.environ.get("TORTOISE_HOST_TMPDIR") != str(tmp_path), \
+            "the aborted install left a stale TORTOISE_HOST_TMPDIR behind"
     finally:
         monkeypatch.undo()
         iso._SESSION_TMPDIR = real_root
         iso.HOST_TMPDIR = real_host
         if real_env_tmpdir is not None:
             os.environ["TMPDIR"] = real_env_tmpdir
+        if real_env_host is not None:
+            os.environ["TORTOISE_HOST_TMPDIR"] = real_env_host
         tempfile.tempdir = real_root
     assert tempfile.gettempdir() == real_root, \
         "the session redirect was not restored after the abort"
@@ -578,14 +668,20 @@ def test_guard_blocks_fd_scandir_of_the_shared_temp_dir():
 def test_guard_blocks_shelling_out_to_the_shared_temp_dir():
     """The in-process patch cannot see a subprocess, and the shell-out is the
     exact shape of the original #3752 defect (`find <shared T> -maxdepth 2`).
-    The subprocess audit hook must reject it while still allowing the private
-    root — a DESCENDANT of the shared temp dir — as an argv token."""
+    The audit hook must reject the argv form, the `shell=True`/string form and
+    `os.system` — a one-line shell-out is otherwise a total bypass — while
+    still allowing the private root (a DESCENDANT) as an argv token."""
     allowed = subprocess.run(["find", scan_root(), "-maxdepth", "1"],
                              capture_output=True, check=False)
     assert allowed.returncode == 0
     with pytest.raises(SharedTmpdirScanError):
         subprocess.run(["find", HOST_TMPDIR, "-maxdepth", "2"],
                        capture_output=True, check=False)
+    with pytest.raises(SharedTmpdirScanError):
+        subprocess.run(f"find {HOST_TMPDIR} -maxdepth 2", shell=True,
+                       capture_output=True, check=False)
+    with pytest.raises(SharedTmpdirScanError):
+        os.system(f"ls {HOST_TMPDIR}")
 
 
 # ── static guard: the idiom cannot come back unnoticed ───────────────────
@@ -600,6 +696,17 @@ _SHARED_SCAN_IDIOMS = (
     "scandir(_real_gettempdir())",
     "walk(_real_gettempdir())",
     "listdir(_real_gettempdir())",
+    # The shell-out forms (#3752 review cycles 2-3): the original defect was a
+    # `find <shared T>` subprocess, which the in-process patch cannot see, so
+    # the static layer must name the shell-out shapes as well. The runtime
+    # audit hook is the real defence; this is the cheap grep-time companion.
+    '"find", tempfile.gettempdir()',
+    '"find", os.path.realpath(tempfile.gettempdir())',
+    '"find", HOST_TMPDIR',
+    "f\"find {tempfile.gettempdir()",
+    "f\"find {HOST_TMPDIR",
+    "subprocess.run([\"find",
+    "os.system(f\"find",
 )
 
 

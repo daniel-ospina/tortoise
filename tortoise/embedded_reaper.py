@@ -1214,10 +1214,21 @@ def _find_socket_dirs(tmpdir: str) -> list[str]:
 
     Two pass roots, both at maxdepth 2 (see NESTED_SCRATCH_PREFIXES for why
     the second exists and why a single deeper walk is NOT the fix).
+
+    #3752: the deadline starts AFTER root discovery. Root discovery does real
+    I/O (a scandir plus a stat per `tt_*` child), so charging it to the walk
+    budget let a slow discovery issue ZERO `find` calls — the same
+    pollution-disables-cleanup failure (#1449) the nested pass exists to
+    prevent. The last root is the tempdir by construction (see
+    _socket_walk_roots), which the reserve below relies on.
     """
-    deadline = time.monotonic() + SOCKET_WALK_TIMEOUT
     dirs: set[str] = set()
     roots = _socket_walk_roots(tmpdir)
+    if roots[-1] != tmpdir:
+        raise AssertionError(
+            f"_socket_walk_roots must end with the tempdir root, got {roots!r}"
+        )  # the reserve's `idx < len(roots) - 1` invariant
+    deadline = time.monotonic() + SOCKET_WALK_TIMEOUT
     for idx, root in enumerate(roots):
         remaining = deadline - time.monotonic()
         if idx < len(roots) - 1:  # a nested session root; last root is tmpdir
@@ -2126,11 +2137,19 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
     ``T/tt_<8-char>/<dir>.reaper-stale-<ns>``, which a `-maxdepth 1` walk of
     the tempdir root alone can never see — silently voiding this pass's
     convergence promise for every root the nested walk reaches.
+
+    #3752: the deadline starts AFTER root discovery (discovery does real I/O
+    and must not be able to leave the walk with zero budget), and the last
+    root is the tempdir by construction, which the reserve relies on.
     """
     tmpdir = _real_gettempdir()
-    deadline = time.monotonic() + SOCKET_WALK_TIMEOUT
     found: list[str] = []
     roots = _socket_walk_roots(tmpdir)
+    if roots[-1] != tmpdir:
+        raise AssertionError(
+            f"_socket_walk_roots must end with the tempdir root, got {roots!r}"
+        )  # the reserve's `idx < len(roots) - 1` invariant
+    deadline = time.monotonic() + SOCKET_WALK_TIMEOUT  # after root discovery
     for idx, root in enumerate(roots):
         remaining = deadline - time.monotonic()
         if idx < len(roots) - 1:  # a nested session root; last root is tmpdir

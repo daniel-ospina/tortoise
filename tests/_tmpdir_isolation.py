@@ -45,6 +45,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -76,6 +77,9 @@ _START_TOLERANCE_S = 2.0
 _ROOT_PREFIX = "tt_"
 
 _SESSION_TMPDIR: str | None = None
+# Value of $TORTOISE_HOST_TMPDIR before the install (usually unset), restored on
+# teardown so the fail-closed abort leaves no stale host path behind.
+_PREV_HOST_TMPDIR_ENV: str | None = None
 _GUARD_INSTALLED = False
 _AUDIT_HOOK_ADDED = False
 _ORIGINALS: dict[str, object] = {}
@@ -122,6 +126,12 @@ def _write_marker(root: str) -> None:
     without one. A root that exists but has no marker is therefore invisible
     to both — permanently polluting the temp dir after a SIGKILL — so a
     failure to write it is escalated by the caller, never swallowed.
+
+    The probe imports ``tortoise.embedded_reaper`` (stdlib-only itself, but it
+    loads the ``tortoise`` package initializer, i.e. redislite and
+    embedded_lifecycle). That is harmless ONLY because
+    ``install_session_tmpdir`` installs the redirect first — the import-time
+    constants resolve against the private root.
     """
     start = _process_start_time(os.getpid())
     with open(os.path.join(root, _PID_MARKER), "w") as fh:
@@ -158,6 +168,8 @@ def install_session_tmpdir() -> str:
     # root (#1658 / #3752), so the import has to happen after the redirect.
     # ACTIVE_SUITES_DIR resolves via TORTOISE_HOST_TMPDIR, set here too.
     _SESSION_TMPDIR = root
+    global _PREV_HOST_TMPDIR_ENV
+    _PREV_HOST_TMPDIR_ENV = os.environ.get("TORTOISE_HOST_TMPDIR")
     os.environ["TORTOISE_HOST_TMPDIR"] = HOST_TMPDIR
     os.environ["TMPDIR"] = root
     tempfile.tempdir = root
@@ -185,16 +197,22 @@ def teardown_session_tmpdir() -> None:
     """Remove the private root (one rmtree) and drop the redirect.
 
     Never raises: teardown must not convert a green suite red. Restores the
-    process temp resolution so a second ``pytest.main()`` in the same
-    interpreter starts clean.
+    process temp resolution AND the exported `TORTOISE_HOST_TMPDIR` so a
+    second ``pytest.main()`` in the same interpreter — or the fail-closed
+    abort in ``install_session_tmpdir`` — starts clean.
     """
-    global _SESSION_TMPDIR
+    global _SESSION_TMPDIR, _PREV_HOST_TMPDIR_ENV
     root = _SESSION_TMPDIR
     _SESSION_TMPDIR = None
     try:
         if os.environ.get("TMPDIR") == root:
             os.environ["TMPDIR"] = HOST_TMPDIR
         tempfile.tempdir = None
+        if _PREV_HOST_TMPDIR_ENV is None:
+            os.environ.pop("TORTOISE_HOST_TMPDIR", None)
+        else:
+            os.environ["TORTOISE_HOST_TMPDIR"] = _PREV_HOST_TMPDIR_ENV
+        _PREV_HOST_TMPDIR_ENV = None
     except Exception:
         pass
     if not root:
@@ -456,25 +474,82 @@ def _subprocess_touches_host_tempdir(args) -> str | None:
     return None
 
 
+def _command_touches_host_tempdir(command) -> str | None:
+    """Return the offending token when a COMMAND LINE names the shared temp
+    dir, else None.
+
+    For the opaque-string forms of a shell-out (``subprocess.Popen("find …",
+    shell=True)``, ``os.system``, the ``os.exec*`` family), whose arguments
+    arrive as one string — and for the ``shell=True`` case, where CPython hands
+    the hook ``['/bin/sh', '-c', '<the whole command>']``. The string is
+    shlex-split and each resulting token is judged as a path, so a descendant
+    (the private session root, or ``find <session root>`` — the reaper's own
+    legitimate walk) still passes while ``find <host T>`` does not.
+
+    Over-approximating is safe by construction: a false positive is a loud
+    SharedTmpdirScanError naming the command, never a silent pass.
+    """
+    if isinstance(command, bytes):
+        command = os.fsdecode(command)
+    if isinstance(command, os.PathLike):
+        command = os.fspath(command)
+    if not isinstance(command, str):
+        return None
+    if HOST_TMPDIR not in command:
+        return None  # fast path: cannot mention it
+    try:
+        parts = shlex.split(command)
+    except ValueError:  # unbalanced quotes — split crudely rather than skip
+        parts = command.split()
+    return _subprocess_touches_host_tempdir(parts)
+
+
+def _argv_embeds_host_tempdir(argv) -> str | None:
+    """A str argv token that EMBEDS a command line naming the shared temp dir
+    (the ``shell=True`` shape: ``['/bin/sh', '-c', 'find <T> …']``)."""
+    if not argv:
+        return None
+    for token in argv:
+        if isinstance(token, (str, bytes, os.PathLike)):
+            hit = _command_touches_host_tempdir(token)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _audit_hook(event: str, args: tuple) -> None:
     """Process-wide audit hook: refuse to SHELL OUT at the shared temp dir.
 
     Installed via ``sys.addaudithook`` (cannot be removed, so
     ``uninstall_scan_guard`` flips ``_GUARD_INSTALLED`` and this no-ops
-    instead). Never raises from an unrelated event: only the
-    ``subprocess.Popen`` audit event is inspected, and only its argv.
+    instead). Covers the argv form (``subprocess.Popen``, ``os.posix_spawn``,
+    ``os.exec``) AND the opaque-string form (``os.system``, ``shell=True``) —
+    a one-line shell-out is otherwise a complete bypass of an in-process
+    patch. Never raises from an unrelated event: only these four events are
+    inspected.
     """
-    if event != "subprocess.Popen" or not _GUARD_INSTALLED:
+    if not _GUARD_INSTALLED:
+        return
+    if event == "os.system":
+        cmd = args[0] if args else None
+        if _command_touches_host_tempdir(cmd) is not None:
+            raise SharedTmpdirScanError(
+                f"os.system({cmd!r}) targets the SHARED temp dir — "
+                f"{_guard_reason()}")
+        return
+    if event not in ("subprocess.Popen", "os.exec", "os.posix_spawn"):
         return
     argv = args[1] if len(args) > 1 else None
     if argv is None and args and isinstance(args[0], (list, tuple)):
         argv = args[0]
     if isinstance(argv, (str, bytes)):
-        return  # shell string form: not inspectable without false positives
-    token = _subprocess_touches_host_tempdir(argv)
+        token = _command_touches_host_tempdir(argv)
+    else:
+        token = _subprocess_touches_host_tempdir(argv) \
+            or _argv_embeds_host_tempdir(argv)
     if token is not None:
         raise SharedTmpdirScanError(
-            f"subprocess argv {list(argv)!r} targets the SHARED temp dir "
+            f"{event} argv {argv!r} targets the SHARED temp dir "
             f"({token!r}) — {_guard_reason()}")
 
 
