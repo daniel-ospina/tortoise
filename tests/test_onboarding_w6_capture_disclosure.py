@@ -81,11 +81,11 @@ def _registered_client():
     r = tc.post("/v1/register", json={"email": email, "password": "password123"})
     assert r.status_code == 200, r.text
     tc.headers.update({"Authorization": f"Bearer {r.json()['api_key']}"})
-    return tc, r.json()["team_id"]
+    return tc, r.json()["org_id"]
 
 
-def _proj(team_id):
-    return _make_sdk(namespace=team_id)._get_proj()
+def _proj(org_id):
+    return _make_sdk(namespace=org_id)._get_proj()
 
 
 def _count(proj, query, params=None):
@@ -102,16 +102,16 @@ def _capture(tc, session_id, harness=None):
     return r.json()
 
 
-def _disclosed_edges(team_id):
+def _disclosed_edges(org_id):
     """Count of capture-disclosed COMPLETED_STEP edges for the org (FWW
     writers never duplicate the edge — the disclosure fires exactly once)."""
     return _count(
-        _proj(team_id),
+        _proj(org_id),
         f"MATCH (n:{onboarding_state.ONBOARDING_NODE_LABEL} {{org_id: $tid}})"
         f"-[:{onboarding_state.COMPLETED_STEP_EDGE}]->"
         f"(s:{onboarding_state.ONBOARDING_STEP_LABEL} "
         "{step_id: 'capture-disclosed'}) RETURN count(*)",
-        {"tid": team_id},
+        {"tid": org_id},
     )
 
 
@@ -121,13 +121,13 @@ class TestFirstCaptureDisclosure:
         checkpoint + answers first_capture=true (the MCP/agent caller fires
         its in-conversation one-liner on that flag — SKILL.md §6 contract:
         W6 implements the TRIGGER, the agent owns the line)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             resp = _capture(tc, f"s1-{uuid.uuid4().hex[:8]}")
             assert resp["first_capture"] is True
-            steps = onboarding_state.completed_steps(_proj(team_id), team_id)
+            steps = onboarding_state.completed_steps(_proj(org_id), org_id)
             assert "capture-disclosed" in steps
-            assert _disclosed_edges(team_id) == 1
+            assert _disclosed_edges(org_id) == 1
         finally:
             tc.__exit__(None, None, None)
 
@@ -135,25 +135,25 @@ class TestFirstCaptureDisclosure:
         """A later capture answers first_capture=false and cannot duplicate
         the checkpoint edge (FWW writer) — the announcement fires exactly
         once per org, even across re-captures of deleted session ids."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             assert _capture(tc, f"a-{uuid.uuid4().hex[:8]}")["first_capture"] is True
             assert _capture(tc, f"b-{uuid.uuid4().hex[:8]}")["first_capture"] is False
-            assert _disclosed_edges(team_id) == 1
+            assert _disclosed_edges(org_id) == 1
         finally:
             tc.__exit__(None, None, None)
 
     def test_legacy_no_harness_capture_triggers_disclosure(self):
         """A legacy no-harness hook (bare receipt key) is still a capture:
         first_capture fires and the bare session_capture_receipt lands."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             resp = _capture(tc, f"l-{uuid.uuid4().hex[:8]}")
             assert resp["first_capture"] is True
-            raw = _get_onboarding_state(team_id)
+            raw = _get_onboarding_state(org_id)
             assert raw.get("session_capture_receipt"), "bare legacy receipt must land"
             assert "capture-disclosed" in onboarding_state.completed_steps(
-                _proj(team_id), team_id)
+                _proj(org_id), org_id)
         finally:
             tc.__exit__(None, None, None)
 
@@ -163,22 +163,22 @@ class TestFirstCaptureDisclosure:
         capture-disclosed checkpoint (no disclosure for a capture that never
         happened; the flag stays untouched so a later on-flag capture still
         announces once)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             r = tc.patch("/v1/onboarding/state", json={"session_recording": False})
             assert r.status_code == 200, r.text
             r = tc.post("/v1/sessions", json={"conversation": CONV,
                                               "session_id": f"q-{uuid.uuid4().hex[:8]}"})
             assert r.status_code == 409, r.text
-            assert _disclosed_edges(team_id) == 0
+            assert _disclosed_edges(org_id) == 0
             assert "capture-disclosed" not in onboarding_state.completed_steps(
-                _proj(team_id), team_id)
+                _proj(org_id), org_id)
             # back ON: the (first real) capture announces exactly once
             r = tc.patch("/v1/onboarding/state", json={"session_recording": True})
             assert r.status_code == 200, r.text
             resp = _capture(tc, f"r-{uuid.uuid4().hex[:8]}")
             assert resp["first_capture"] is True
-            assert _disclosed_edges(team_id) == 1
+            assert _disclosed_edges(org_id) == 1
         finally:
             tc.__exit__(None, None, None)
 
@@ -188,7 +188,7 @@ class TestSessionView:
         """GET /v1/sessions/{id} (dual-auth) returns the transcript the
         Settings panel renders: turn_points (episodic events) + extracted
         points + the list-row counts."""
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             sid = f"v-{uuid.uuid4().hex[:8]}"
             cap = _capture(tc, sid)
@@ -203,7 +203,7 @@ class TestSessionView:
             tc.__exit__(None, None, None)
 
     def test_view_missing_session_404(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             r = tc.get("/v1/sessions/does-not-exist-xyz")
             assert r.status_code == 404
@@ -212,11 +212,11 @@ class TestSessionView:
 
 
 class TestSessionDelete:
-    def _delete_asserts(self, tc, team_id, sid, cleanup_checks):
+    def _delete_asserts(self, tc, org_id, sid, cleanup_checks):
         """Run DELETE /v1/sessions/{sid}, assert the full graph census went
         to zero (Session + its owned turns/extracted/Source) + the re-delete
         404s, then hand the cleaned_receipts payload to cleanup_checks."""
-        proj = _proj(team_id)
+        proj = _proj(org_id)
 
         def owned():
             return {
@@ -263,20 +263,20 @@ class TestSessionDelete:
         """DELETE removes the Session + its OWNED nodes (turns, extracted
         points, the agentSession Source) and leaves a same-harness sibling
         Session + its receipt intact (bucket not empty → no cleanup)."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             sid_a = f"d1-{uuid.uuid4().hex[:8]}"
             sid_b = f"d2-{uuid.uuid4().hex[:8]}"
             _capture(tc, sid_a, harness="pi")
             _capture(tc, sid_b, harness="pi")
-            assert _get_onboarding_state(team_id).get("session_capture_receipt_pi")
+            assert _get_onboarding_state(org_id).get("session_capture_receipt_pi")
 
             def check(cleaned):
                 assert cleaned == []
-                assert _get_onboarding_state(team_id).get(
+                assert _get_onboarding_state(org_id).get(
                     "session_capture_receipt_pi"), \
                     "receipt survives while a pi Session remains"
-                proj = _proj(team_id)
+                proj = _proj(org_id)
                 assert _count(proj, "MATCH (s:Session {id:$sid}) RETURN count(s)",
                               {"sid": sid_b}) == 1
                 # the sibling's OWN turn points survive untouched
@@ -284,7 +284,7 @@ class TestSessionDelete:
                     "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) "
                     "RETURN count(p)", {"sid": sid_b}) >= 3
 
-            self._delete_asserts(tc, team_id, sid_a, check)
+            self._delete_asserts(tc, org_id, sid_a, check)
         finally:
             tc.__exit__(None, None, None)
 
@@ -292,18 +292,18 @@ class TestSessionDelete:
         """Receipt cleanup by recompute: deleting the bucket's LAST session
         clears the per-harness receipt (jsonb) — T1-P12 receipt↔Session
         convergence; nothing orphans."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             sid = f"e-{uuid.uuid4().hex[:8]}"
             _capture(tc, sid, harness="pi")
-            assert _get_onboarding_state(team_id).get("session_capture_receipt_pi")
+            assert _get_onboarding_state(org_id).get("session_capture_receipt_pi")
 
             def check(cleaned):
                 assert "session_capture_receipt_pi" in cleaned
-                raw = _get_onboarding_state(team_id)
+                raw = _get_onboarding_state(org_id)
                 assert not raw.get("session_capture_receipt_pi")
 
-            self._delete_asserts(tc, team_id, sid, check)
+            self._delete_asserts(tc, org_id, sid, check)
         finally:
             tc.__exit__(None, None, None)
 
@@ -311,28 +311,28 @@ class TestSessionDelete:
         """Receipts are per-harness — deleting the LAST pi session clears
         only session_capture_receipt_pi; a sibling cursor session keeps its
         own receipt."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         try:
             sid_pi = f"f1-{uuid.uuid4().hex[:8]}"
             sid_cur = f"f2-{uuid.uuid4().hex[:8]}"
             _capture(tc, sid_pi, harness="pi")
             _capture(tc, sid_cur, harness="cursor")
-            assert _get_onboarding_state(team_id).get("session_capture_receipt_pi")
-            assert _get_onboarding_state(team_id).get("session_capture_receipt_cursor")
+            assert _get_onboarding_state(org_id).get("session_capture_receipt_pi")
+            assert _get_onboarding_state(org_id).get("session_capture_receipt_cursor")
 
             def check(cleaned):
                 assert cleaned == ["session_capture_receipt_pi"]
-                raw = _get_onboarding_state(team_id)
+                raw = _get_onboarding_state(org_id)
                 assert not raw.get("session_capture_receipt_pi")
                 assert raw.get("session_capture_receipt_cursor"), \
                     "cursor bucket untouched"
 
-            self._delete_asserts(tc, team_id, sid_pi, check)
+            self._delete_asserts(tc, org_id, sid_pi, check)
         finally:
             tc.__exit__(None, None, None)
 
     def test_delete_unknown_session_404(self):
-        tc, _team_id = _registered_client()
+        tc, _org_id = _registered_client()
         try:
             assert tc.delete("/v1/sessions/never-existed-abc").status_code == 404
         finally:
@@ -346,8 +346,8 @@ class TestDeleteDuringCapture:
         flight must never leave an orphaned receipt. Invariant under EVERY
         interleaving (capture pre-check/post-compensation + delete recompute):
         a pi receipt may exist only while a pi Session survives."""
-        tc, team_id = _registered_client()
-        proj = _proj(team_id)
+        tc, org_id = _registered_client()
+        proj = _proj(org_id)
         try:
             sid = f"race-{uuid.uuid4().hex[:8]}"
             statuses: list = []
@@ -377,7 +377,7 @@ class TestDeleteDuringCapture:
                 "the capture itself still 200s (it was valid)"
             sess = _count(proj, "MATCH (s:Session {id:$sid}) RETURN count(s)",
                           {"sid": sid})
-            receipt = bool(_get_onboarding_state(team_id).get(
+            receipt = bool(_get_onboarding_state(org_id).get(
                 "session_capture_receipt_pi"))
             assert not (receipt and sess == 0), \
                 "orphaned receipt: capture receipt with no surviving Session"
@@ -394,9 +394,9 @@ class TestDeleteDuringCapture:
         Session vanishes between the turn-loop MERGE and the receipt write,
         the receipt is skipped — the response still 200s and carries the
         additive warning, and NO orphan receipt lands."""
-        tc, team_id = _registered_client()
+        tc, org_id = _registered_client()
         real_make_sdk = _ha._make_sdk
-        real_sdk = real_make_sdk(namespace=team_id)
+        real_sdk = real_make_sdk(namespace=org_id)
         real_proj = real_sdk._get_proj()
         real_query = real_proj.g.query
         sweep_hits: list[str] = []
@@ -445,7 +445,7 @@ class TestDeleteDuringCapture:
             # team-scoped calls (the capture pipeline) hit the guard proxy;
             # anything else (registry auth resolution mid-request) delegates
             # so the request authenticates normally
-            if namespace == team_id:
+            if namespace == org_id:
                 return _GuardSdk()
             return real_make_sdk(namespace=namespace, **kw)
 
@@ -454,7 +454,7 @@ class TestDeleteDuringCapture:
         assert resp["first_capture"] is True  # the capture itself was valid
         assert any("deleted during capture" in w for w in resp["warnings"]), \
             "the skip must be visible (additive warning)"
-        assert not _get_onboarding_state(team_id).get(
+        assert not _get_onboarding_state(org_id).get(
             "session_capture_receipt_pi"), "orphan receipt must never land"
         # and the dead-session sweep fired: the writes this capture landed
         # after the (simulated) removal were cleaned by exact-id point/Event/
@@ -465,5 +465,5 @@ class TestDeleteDuringCapture:
             "dead-session sweep must remove the agentSession Source"
         # and the disclosure checkpoint DID land (a valid capture discloses)
         assert "capture-disclosed" in onboarding_state.completed_steps(
-            _proj(team_id), team_id)
+            _proj(org_id), org_id)
         tc.__exit__(None, None, None)

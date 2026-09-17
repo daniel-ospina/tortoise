@@ -15,7 +15,7 @@ from typing import Any
 #: canonical entity labels + Session: nodes are matched by their property id
 #: (Event.id == eventId, so the eventId branch is equivalent; Source nodes
 #: carry id except url-only ingestion stubs, which the legacy query also
-#: never matched). Team/APIKey roots are intentionally out of scope (they
+#: never matched). Org/APIKey roots are intentionally out of scope (they
 #: carry id but live in the registry graph / control plane).
 _ROOT_BRANCHES = (
     ("Point", "id"), ("Subject", "id"), ("Object", "id"),

@@ -11,7 +11,7 @@ import os
 import shutil
 import socket
 import subprocess
-import sys  # noqa: F401
+import sys
 import tempfile
 import threading
 import time
@@ -2715,3 +2715,681 @@ def test_cross_home_sweepers_share_one_lock():
     # After release, the second can acquire.
     assert lock_b.acquire(), "second sweeper acquires after release"
     lock_b.release()
+
+
+# ── #3599: per-server owner records (the fleet-deadlock fix) ──────────────
+# The bug: orphan confirmation was gated on a GLOBAL condition
+# (`not suites_active`) that a host running many concurrent sessions never
+# satisfies, so the only_safe cron and the conftest end-sweep were permanent
+# no-ops and every SIGKILLed lane leaked its servers (527 orphans, load 98
+# on 10 CPUs). The fix makes orphanhood a PER-SERVER question answered from
+# the owner records tortoise.FalkorDB writes into each server's socket dir.
+
+def _owner_dir(base, name=None):
+    from tortoise.embedded_reaper import OWNERS_DIRNAME
+    d = Path(base) / (name or OWNERS_DIRNAME)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _write_owner(d, pid, start):
+    (Path(d) / f"{pid}-{start}").write_text("")
+
+
+def _dead_pid() -> int:
+    """A PID that is provably dead at the moment it is returned (#3599
+    review: `wait()` releases the pid to the OS, so it can in principle be
+    recycled — the previous version claimed otherwise and did not check).
+
+    Callers that need deadness guaranteed for the duration of the test
+    should additionally force it through `_pid_alive_except_dead`.
+    """
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    from tortoise.embedded_reaper import _pid_alive
+    assert not _pid_alive(p.pid), (
+        f"reaped pid {p.pid} still reads alive — the test's deadness "
+        f"premise does not hold")
+    return p.pid
+
+
+def _own_start() -> int:
+    """This process's start time as an int, asserted present.
+
+    `_process_start_time` returns None when `ps` times out — the exact
+    loaded-host condition #3599 is written around — and `int(None)` would
+    ERROR the fixture instead of testing the behaviour. Fail with a clear
+    diagnostic instead (#3599 review).
+    """
+    from tortoise.embedded_reaper import _process_start_time
+    start = _process_start_time(os.getpid())
+    assert start is not None, (
+        "`ps` could not report this process's start time — the test host is "
+        "too loaded for this fixture to be meaningful")
+    return int(start)
+
+
+def _pid_alive_except_dead(monkeypatch, dead_pids) -> None:
+    """Install a `_pid_alive` that is True for every pid except `dead_pids`.
+
+    #3599: owner deadness is decided by `_pid_alive` — a start time that
+    merely cannot be READ is not evidence of death (see the fail-closed
+    rule in `_owner_records`), so a test that wants a dead owner must say
+    so through `_pid_alive` rather than withholding a start time. The
+    blanket `lambda p: True` used for the *server* pid would otherwise make
+    every deliberately-dead owner look live.
+    """
+    dead = set(dead_pids)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive",
+                        lambda p: p not in dead)
+
+
+def _live_foreign_suite_marker(monkeypatch, tmp_path):
+    """A LIVE suite marker owned by another process (this test).
+
+    This is the exact fleet condition under which the pre-#3599 reaper could
+    never confirm anything: `suites_active` is True forever, so every live
+    orphan stayed protected.
+    """
+    from tortoise.embedded_reaper import _process_start_time  # noqa: F401
+    marker_dir = tmp_path / "active-suites"
+    marker_dir.mkdir(exist_ok=True)
+    (marker_dir / "other-suite").write_text(
+        f"pid={os.getpid()}\nstart={_own_start()}\n")
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+    from tortoise.embedded_reaper import active_suite_tokens
+    assert active_suite_tokens(), "fixture must produce a LIVE marker"
+
+
+def _sock_dir_with_owners(tmp_path, name="sock"):
+    d = tmp_path / name
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def test_owner_records_parsing(tmp_path):
+    """_owner_records: None without records (fail closed), counts live vs
+    dead owners, ignores foreign files, treats an unverifiable start as
+    LIVE, and never counts a malformed entry as dead."""
+    from tortoise.embedded_reaper import _owner_records
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    # No owners dir at all -> None (uninstrumented spawn).
+    assert _owner_records(sp) is None
+    # An EMPTY owners dir is no evidence either -> None.
+    _owner_dir(sock)
+    assert _owner_records(sp) is None
+
+    mine = _own_start()
+    _write_owner(_owner_dir(sock), os.getpid(), mine)
+    assert _owner_records(sp) == (1, 1)
+    _write_owner(_owner_dir(sock), _dead_pid(), 1234567890)
+    assert _owner_records(sp) == (1, 2), "dead owner must not count live"
+    # An 'unknown' START is unverifiable — but the PID is not. A dead pid
+    # with an unknown start is still a STALE record, not a live owner: if it
+    # counted live, nothing would ever prune it (nothing ages owner files)
+    # and the server could never be orphan-confirmed again. 99999999 is
+    # beyond this platform's pid space, so it is provably dead.
+    _write_owner(_owner_dir(sock), 99999999, "unknown")
+    assert _owner_records(sp) == (1, 3), (
+        "a dead pid is dead even with an unreadable start — otherwise the "
+        "record is immortal and its server is never reaped")
+    # Foreign non-record files are ignored entirely.
+    (_owner_dir(sock) / "README").write_text("not an owner record")
+    (_owner_dir(sock) / ".hidden").write_text("")
+    assert _owner_records(sp) == (1, 3)
+    # #3599 review cycle 3: a pid prefix that `isdigit()` accepts but
+    # `int()` rejects (non-decimal Unicode digits) must not RAISE —
+    # `_owner_records` is called unguarded from `_mark_orphan_confirmation`
+    # ("never raises"), so an unguarded `int()` here killed the whole sweep
+    # and silently disabled orphan reclamation.
+    (_owner_dir(sock) / "\u00b2-unknown").write_text("")
+    (_owner_dir(sock) / "\u2460-123").write_text("")
+    assert _owner_records(sp) == (1, 3)
+
+
+def test_owner_records_live_pid_with_unknown_start_stays_live(tmp_path):
+    """#3599 review-cycle-2 regression: a LIVE owner whose start stamp is
+    `unknown` (the writer's `ps`-unavailable fallback) must still count
+    LIVE — that is the fail-closed direction. Only a provably DEAD pid may
+    be dropped from the live count."""
+    from tortoise.embedded_reaper import _owner_records
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    _write_owner(_owner_dir(sock), os.getpid(), "unknown")
+    assert _owner_records(sp) == (1, 1), (
+        "an alive owner with an unknown start is LIVE (fail closed)")
+
+
+def test_owner_records_live_pid_with_unreadable_start_stays_live(
+        monkeypatch, tmp_path):
+    """#3599 P0 REGRESSION: an ALIVE owner pid whose start time cannot be
+    read (a `ps` timeout — this host's loaded condition) must count LIVE.
+
+    `_pid_identity_matches` returns False for BOTH "recycled pid" and
+    "alive but start unreadable"; using it here made `_owner_records`
+    report (0, 1) for a server with a live owner, `_mark_orphan_
+    confirmation` set `_orphan_confirmed`, and the reaper killed a live
+    suite's server at its next 0-client moment (#1005/#1557)."""
+    from tortoise.embedded_reaper import _owner_records, _process_start_time
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    _write_owner(_owner_dir(sock), os.getpid(), _process_start_time(os.getpid()))
+    assert _owner_records(sp) == (1, 1)
+    # ps cannot report this pid's start -> must fail CLOSED (still LIVE).
+    monkeypatch.setattr("tortoise.embedded_reaper._process_start_time",
+                        lambda p: None)
+    assert _owner_records(sp) == (1, 1), (
+        "a live pid with an unreadable start time is LIVE — counting it "
+        "dead orphan-confirms a running server (#3599 P0)")
+
+
+def test_owner_records_nonfinite_start_is_never_a_dead_owner(tmp_path):
+    """#3599 review FAIL-OPEN REGRESSION: `float()` accepts 'nan'/'inf'/
+    '1e400', and `abs(current - nan) < 2.0` is False, so a non-finite start
+    used to take the RECYCLED-PID path and count a LIVE owner as dead — a
+    false orphan verdict, i.e. the reaper killing a live suite's server.
+    A non-finite stamp is UNVERIFIABLE, not a mismatch."""
+    from tortoise.embedded_reaper import _owner_records
+    for i, bad in enumerate(("nan", "inf", "-inf", "1e400", "-1e400")):
+        sock = _sock_dir_with_owners(tmp_path, name=f"sock-{i}")
+        sp = str(sock / "redis.socket")
+        _write_owner(_owner_dir(sock), os.getpid(), bad)
+        assert _owner_records(sp) == (1, 1), (
+            f"a live owner with start={bad!r} must count LIVE, not dead — "
+            f"counting it dead orphan-confirms a running server")
+
+
+def test_owner_records_malformed_start_dead_pid_is_stale(tmp_path):
+    """#3599 review (fail-closed, P2): an unparsable start must not make a
+    DEAD owner's record immortal. Nothing prunes owner files, so
+    `live += 1` without a liveness check would pin `owners[0] > 0` forever
+    and that server could never be reaped again — the per-server #3599
+    deadlock."""
+    from tortoise.embedded_reaper import _owner_records
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    _write_owner(_owner_dir(sock), 99999999, "abc")  # dead pid + bad start
+    assert _owner_records(sp) == (0, 1), (
+        "a dead pid with an unparsable start is a STALE record")
+    # And the same unparsable start on a LIVE pid stays fail-closed.
+    _write_owner(_owner_dir(sock), os.getpid(), "abc")
+    assert _owner_records(sp) == (1, 2)
+
+
+def test_owner_records_pid_zero_is_not_an_owner(tmp_path):
+    """#3599 review: `os.kill(0, 0)` targets the caller's own process group
+    and SUCCEEDS, so a file named `0` read as a LIVE owner forever and
+    permanently disabled reaping for that server. A real owner pid is
+    always >= 1."""
+    from tortoise.embedded_reaper import _owner_records
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    _write_owner(_owner_dir(sock), 0, "unknown")
+    _write_owner(_owner_dir(sock), 0, 1234567890)
+    assert _owner_records(sp) is None, (
+        "pid 0 is not a valid owner record -> no evidence at all")
+
+
+def test_owner_pid_alive_treats_permission_as_live(monkeypatch):
+    """#3599 review: `_pid_alive` returns False on EPERM because for its
+    original callers that is the SAFE direction. For an owner record it is
+    the DANGEROUS one (False => 'owner dead' => orphan => kill), so a pid we
+    merely cannot signal must count LIVE."""
+    from tortoise.embedded_reaper import _owner_pid_alive
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive",
+                        lambda p: False)
+
+    def _eperm(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr("tortoise.embedded_reaper.os.kill", _eperm)
+    assert _owner_pid_alive(1234) is True, (
+        "a pid that exists but is not signalable by us must count LIVE")
+
+    def _esrch(pid, sig):
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr("tortoise.embedded_reaper.os.kill", _esrch)
+    assert _owner_pid_alive(1234) is False
+
+
+def test_owner_records_connected_client_is_never_confirmed(
+        monkeypatch, tmp_path):
+    """#3599 review (coverage): a server with CONNECTED CLIENTS is never
+    orphan-confirmed, even when every owner record is dead. This pins the
+    `cc > 0` guard that must stay ABOVE the new per-server arm — if the
+    owner check moved first, a served server could be confirmed (and then
+    killed at its next 0-client probe)."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)
+    dead = _dead_pid()
+    _pid_alive_except_dead(monkeypatch, [dead])
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), dead, 1234567890)
+    rec = _zero_client_candidate(str(sock / "redis.socket"), os.getpid())
+    rec["path_based"] = False
+    rec["client_count"] = 2
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True, (
+        "a server with connected clients must never be confirmed")
+
+
+def _load_embedded_orphans():
+    """Import tools/embedded_orphans.py by path (it is a CLI, not a module)."""
+    import importlib.util
+    path = (Path(__file__).resolve().parent.parent
+            / "tools" / "embedded_orphans.py")
+    spec = importlib.util.spec_from_file_location("embedded_orphans", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_embedded_orphans_census_fails_closed_when_enumeration_fails(
+        monkeypatch):
+    """#3599 declared threat class 4: the census must exit 2 when it cannot
+    RUN, never 0.
+
+    `_pgrep_redis_servers` swallows a missing OR TIMING-OUT pgrep and returns
+    `[]`, which is indistinguishable from "no servers" — so the census would
+    print `orphans: 0`, `within_budget: true` and exit 0 on a host where
+    orphans may be accumulating (precisely the load level #3599 documents).
+    That is the exact fail-open the tool exists to catch.
+    """
+    mod = _load_embedded_orphans()
+    # (a) pgrep absent entirely.
+    monkeypatch.setattr(mod.shutil, "which", lambda _n: None)
+    with pytest.raises(RuntimeError):
+        mod.census()
+    # (b) pgrep PRESENT but timing out — the case a `which()` check misses.
+    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/usr/bin/pgrep")
+
+    def _timeout(*_a, **_k):
+        raise mod.subprocess.TimeoutExpired("pgrep", 5)
+
+    monkeypatch.setattr(mod.subprocess, "run", _timeout)
+    with pytest.raises(RuntimeError):
+        mod.census()
+    # (c) an unexpected non-zero/one exit code is not an answer either.
+    class _Bad:
+        returncode = 2
+        stdout = ""
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Bad())
+    with pytest.raises(RuntimeError):
+        mod.census()
+    # (d) and main() must map that to exit 2, not a traceback and not 0.
+    def _boom(**_kw):
+        raise RuntimeError("cannot enumerate")
+
+    monkeypatch.setattr(mod, "census", _boom)
+    assert mod.main([]) == 2
+
+
+def test_embedded_orphans_inconclusive_is_not_clean(monkeypatch, capsys):
+    """#3599: a census whose EVERY server failed classification learned
+    nothing about the invariant — it must not report it satisfied."""
+    mod = _load_embedded_orphans()
+    monkeypatch.setattr(mod, "census", lambda **kw: {
+        "live_servers": 3, "orphans": 0, "orphan_details": [],
+        "protected": 0, "unclassified": 3, "stale_socket_dirs": 0,
+        "stale_socket_dir_sample": []})
+    assert mod.main([]) == 2
+    assert "INCONCLUSIVE" in capsys.readouterr().err
+
+
+def test_embedded_orphans_never_uses_the_swallowing_enumerator(monkeypatch):
+    """#3599 adversarial review (fail-open): the census must not probe with
+    one pgrep and enumerate with another. `_pgrep_redis_servers` swallows a
+    timeout/OSError as `[]`, so a guard probe that ANSWERS followed by a real
+    call that TIMES OUT would report `live_servers: 0`, `orphans: 0` and exit
+    0. The census now enumerates with its own strict call and must never
+    consult the swallowing one."""
+    mod = _load_embedded_orphans()
+    import tortoise.embedded_reaper as _R
+
+    def _boom():
+        raise AssertionError(
+            "census must enumerate STRICTLY, never via "
+            "_pgrep_redis_servers (which swallows a timeout as an empty "
+            "list — the fail-open this guards)")
+
+    monkeypatch.setattr(_R, "_pgrep_redis_servers", _boom)
+    monkeypatch.setattr(mod.shutil, "which", lambda _n: "/usr/bin/pgrep")
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Ok())
+    res = mod.census()  # must not reach _pgrep_redis_servers at all
+    assert res["live_servers"] == 0
+
+
+def test_reap_refuses_when_an_owner_attached_after_confirmation(
+        monkeypatch, tmp_path):
+    """#3599 adversarial review (fail-open): `_orphan_confirmed` is set during
+    the sweep, but a co-tenant can attach before the kill. `reap()` must
+    re-read the owner records at kill time — `_active_client_count` ignores
+    connections younger than its age floor, and the socketless path skips
+    both probes, so the CLIENT LIST double-check alone cannot see it."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    monkeypatch.setattr("tortoise.embedded_reaper._is_detached",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    # A LIVE owner that appeared after the sweep confirmed an orphan.
+    _write_owner(_owner_dir(sock), os.getpid(), _own_start())
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": str(sock / "redis.socket"), "pid": os.getpid(),
+           "path_based": False, "client_count": 0,
+           "_orphan_confirmed": True}
+    acted = reap([rec], dry_run=False, only_safe=True)
+    assert killed == [], (
+        "a live owner record present at kill time must block the kill")
+    assert not acted
+
+
+def test_reap_still_kills_when_owners_are_all_dead(monkeypatch, tmp_path):
+    """The other half: re-reading the owner records must not stop the reap
+    the per-server signal authorises."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    monkeypatch.setattr("tortoise.embedded_reaper._is_detached",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), _dead_pid(), 1234567890)
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": str(sock / "redis.socket"), "pid": os.getpid(),
+           "path_based": False, "client_count": 0,
+           "_orphan_confirmed": True}
+    acted = reap([rec], dry_run=False, only_safe=True)
+    assert killed == [os.getpid()]
+    assert acted
+
+
+def test_owner_records_recycled_pid_is_dead(monkeypatch, tmp_path):
+    """#3599: the fail-closed start check must still let a RECYCLED pid
+    (a different process now using the dead owner's pid) be counted dead —
+    otherwise owner records would be immortal on a busy PID-reusing host."""
+    from tortoise.embedded_reaper import _owner_records
+    sock = _sock_dir_with_owners(tmp_path)
+    sp = str(sock / "redis.socket")
+    _write_owner(_owner_dir(sock), os.getpid(), 1000000.0)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._process_start_time",
+                        lambda p: 2000000.0)
+    assert _owner_records(sp) == (0, 1), (
+        "a pid whose recorded start differs from the live process's start "
+        "is a recycled pid -> dead owner")
+
+
+def test_owner_records_dead_owner_confirms_despite_live_suite_marker(
+        monkeypatch, tmp_path):
+    """#3599 THE REGRESSION TEST: a server whose only owner is provably dead
+    is orphan-confirmed on the FIRST sweep even while another suite is live.
+
+    Pre-fix this returned not-confirmed (the global `suites_active` gate),
+    which is precisely why the only_safe reaper never reaped anything on a
+    fleet host."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    _live_foreign_suite_marker(monkeypatch, tmp_path)
+    dead = _dead_pid()
+    _pid_alive_except_dead(monkeypatch, [dead])
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), dead, 1234567890)
+    rec = _zero_client_candidate(str(sock / "redis.socket"), os.getpid())
+    rec["path_based"] = False
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True, (
+        "a dead-owner server must be confirmed even with a live suite "
+        "marker — otherwise the fleet deadlock returns (#3599)")
+
+
+def test_owner_records_live_owner_is_never_confirmed(monkeypatch, tmp_path):
+    """The over-kill guard: a server with ANY live owner is not an orphan,
+    even with no suite markers and after the whole confirmation window."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _process_start_time
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), os.getpid(),
+                 int(_process_start_time(os.getpid())))
+    for _ in range(2):
+        rec = _zero_client_candidate(str(sock / "redis.socket"), os.getpid())
+        rec["path_based"] = False
+        _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True
+
+
+def test_owner_records_shared_server_co_tenant_keeps_it_protected(
+        monkeypatch, tmp_path):
+    """#3599 P0 GUARD (shared server): owner A died, owner B is live and
+    attached after A — the server must NOT be confirmed. A creator-only
+    record would orphan-confirm it and kill a live co-tenant's server
+    (the #1557 hazard).
+
+    #3599 review (P1): this runs MARKERLESS with the confirmation window
+    poked to 0 and TWO sweeps, so the pre-fix/global-gate path WOULD confirm
+    on the second sweep. With a live foreign marker present instead, the
+    suite gate alone would suppress confirmation and the test could not
+    fail — it would be a guard with no discriminating power. Deleting the
+    `owners[0] > 0` early return must break this test.
+    """
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)
+    dead = _dead_pid()
+    _pid_alive_except_dead(monkeypatch, [dead])
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), dead, 1234567890)   # creator, dead
+    _write_owner(_owner_dir(sock), os.getpid(), _own_start())  # live co-tenant
+    for _ in range(2):
+        rec = _zero_client_candidate(str(sock / "redis.socket"), os.getpid())
+        rec["path_based"] = False
+        _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True, (
+        "a live co-tenant's server must never be confirmed as an orphan, "
+        "even markerless with the window elapsed")
+
+
+def test_owner_records_no_live_suite_still_protects_socket_dir_missing(
+        monkeypatch, tmp_path):
+    """#3599 review (restored pre-existing guard, P1): a MISSING socket dir
+    is not instant proof of orphanhood.
+
+    A live server whose socket dir was unlinked still serves clients over
+    already-established unix connections, and a path-based CLIENT LIST probe
+    cannot see them. Confirm only through the pre-existing window path
+    (which needs no live suite markers) — the immediate-confirm arm the
+    first cut of #3599 added would have killed such a server, which is the
+    #1557 test-tempdir lifecycle race a prior review rated P1 (PR #1558).
+    """
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    _live_foreign_suite_marker(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    gone = tmp_path / "gone-dir" / "redis.socket"  # parent never created
+    for _ in range(3):  # even after the persisted window would have elapsed
+        rec = _zero_client_candidate(str(gone), os.getpid())
+        rec["client_count"] = None
+        rec["path_based"] = False
+        _mark_orphan_confirmation([rec])
+        assert rec.get("_orphan_confirmed") is not True, (
+            "a missing socket dir must not confirm while a suite is live")
+
+
+def test_owner_records_path_based_socket_dir_missing_not_confirmed(
+        monkeypatch, tmp_path):
+    """#3599 review (restored guard): `path_based` is the blast-radius
+    boundary, so a USER-DATA server whose socket dir vanished must not be
+    confirmed either — the immediate arm was not `path_based`-gated."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    _live_foreign_suite_marker(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    gone = tmp_path / "gone-pb" / "redis.socket"
+    rec = _zero_client_candidate(str(gone), os.getpid())
+    rec["client_count"] = None
+    rec["path_based"] = True
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True
+
+
+def test_owner_records_uninstrumented_spawn_falls_back_to_global_gate(
+        monkeypatch, tmp_path):
+    """No owner records -> the #1642 global gate still governs (fail
+    closed). A raw-redislite spawn must not become reapable just because the
+    new signal is absent."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    _live_foreign_suite_marker(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)  # no owners dir
+    for _ in range(2):
+        rec = _zero_client_candidate(str(sock / "redis.socket"), os.getpid())
+        rec["path_based"] = False
+        _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True
+
+
+def test_owner_records_path_based_server_keeps_conservative_gate(
+        monkeypatch, tmp_path):
+    """A USER-DATA (path_based) server with a dead owner is NOT auto-
+    confirmed: its db outlives the test tree, so it keeps the #1642
+    window+no-live-suite gate. This is the blast-radius boundary for the
+    #3599 fix."""
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    _live_foreign_suite_marker(monkeypatch, tmp_path)
+    dead = _dead_pid()
+    _pid_alive_except_dead(monkeypatch, [dead])
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), dead, 1234567890)
+    rec = _zero_client_candidate(str(sock / "redis.socket"), os.getpid())
+    rec["path_based"] = True
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True
+
+
+def test_socket_dir_missing_confirms_only_without_live_suite(
+        monkeypatch, tmp_path):
+    """#3599 second signal, CONSERVATIVE (restored pre-existing semantics):
+    with NO live suite markers the socket-dir-missing server does confirm
+    through the window path, which is exactly the pre-#3599 contract.
+
+    This is the other half of
+    `test_owner_records_no_live_suite_still_protects_socket_dir_missing`:
+    the signal still works, it just is not immediate.
+    """
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    gone = tmp_path / "gone-ok" / "redis.socket"  # parent never created
+    for _ in range(2):
+        rec = _zero_client_candidate(str(gone), os.getpid())
+        rec["client_count"] = None
+        rec["path_based"] = False
+        _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True, (
+        "with no live suite markers the window path must still confirm a "
+        "socketless server")
+
+
+def test_reap_only_safe_kills_owner_confirmed_orphan_with_live_suite(
+        monkeypatch, tmp_path):
+    """#3599 end-to-end gate trace: the two-stage path that was dead pre-fix.
+
+    Stage 1: `_mark_orphan_confirmation` confirms a server whose only owner
+    is provably dead — WHILE a live foreign suite marker exists. Pre-fix the
+    global `suites_active` gate left `_orphan_confirmed` unset, so stage 2
+    was unreachable.
+    Stage 2: the real `reap(only_safe=True)` then kills that record even
+    though the live suite marker is still there. `_is_detached` is forced
+    FALSE (the `ps`-timeout case on a loaded host) so the record can only be
+    admitted by the `_orphan_confirmed` term of the only_safe guard — with
+    it forced True the assertion would pass even if that new term were
+    deleted (#3599 review).
+    """
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, reap
+    _live_foreign_suite_marker(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)
+    dead = _dead_pid()
+    _pid_alive_except_dead(monkeypatch, [dead])
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock = _sock_dir_with_owners(tmp_path)
+    _write_owner(_owner_dir(sock), dead, 1234567890)
+    rec = _zero_client_candidate(str(sock / "redis.socket"), os.getpid())
+    rec["path_based"] = False
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True, (
+        "stage 1: pre-fix the live suite marker blocked confirmation")
+
+    killed = []
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    monkeypatch.setattr("tortoise.embedded_reaper._is_detached",
+                        lambda p: False)
+    rec["client_count"] = 0
+    acted = reap([rec], dry_run=False, only_safe=True)
+    assert killed == [os.getpid()], (
+        "stage 2: a confirmed dead-owner orphan must be killed under "
+        "only_safe even while another suite is live and detachment cannot "
+        "be determined")
+    assert acted
+
+
+def test_reap_only_safe_refuses_unconfirmed_live_candidate(monkeypatch):
+    """#3599 review: the refusal direction of the same gate — an
+    UNCONFIRMED live candidate is never killed under only_safe when
+    detachment cannot be determined."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    monkeypatch.setattr("tortoise.embedded_reaper._is_detached",
+                        lambda p: False)
+    rec = {"classification": "candidate", "socket_path": "/tmp/s-unconf",
+           "pid": os.getpid(), "path_based": False, "client_count": 0}
+    acted = reap([rec], dry_run=False, only_safe=True)
+    assert killed == [], "an unconfirmed live candidate must not be killed"
+    assert not acted

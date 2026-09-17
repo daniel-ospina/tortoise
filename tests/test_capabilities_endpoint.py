@@ -42,12 +42,12 @@ def client():
 
 
 def _registered(tc) -> tuple[str, str]:
-    """A freshly registered team (registry lane) → (team_id, email)."""
+    """A freshly registered team (registry lane) → (org_id, email)."""
     email = f"w8c-{uuid.uuid4().hex[:10]}@example.com"
     r = tc.post("/v1/register", json={"email": email, "password": "password123"})
     assert r.status_code == 200, r.text
     tc.headers.update({"Authorization": f"Bearer {r.json()['api_key']}"})
-    return r.json()["team_id"], email
+    return r.json()["org_id"], email
 
 
 def _checkpoint(tc, **body) -> dict:
@@ -56,8 +56,8 @@ def _checkpoint(tc, **body) -> dict:
     return r.json()
 
 
-def _completed(team_id: str) -> set[str]:
-    return set(onboarding_state.completed_steps(_make_sdk(namespace=team_id)._get_proj(), team_id))
+def _completed(org_id: str) -> set[str]:
+    return set(onboarding_state.completed_steps(_make_sdk(namespace=org_id)._get_proj(), org_id))
 
 
 class TestCapabilitiesEndpoint:
@@ -105,20 +105,20 @@ class TestBuildForkGate:
     W1/W5 mechanism; the endpoint swap is source-only)."""
 
     def _build_fork_active_org(self, client) -> tuple[str, str]:
-        team_id, _email = _registered(client)
+        org_id, _email = _registered(client)
         _checkpoint(client, fork="build")
         _checkpoint(client, step="harness-connected")
         _checkpoint(client, step="first-points-filed")
-        return team_id, _email
+        return org_id, _email
 
     def test_catalog_presented_completes_build_fork_without_decide(self, client):
         """build = harness-connected + first-points-filed + catalog-presented
         → status complete; decide-completed alone can NEVER complete it."""
-        team_id, _ = self._build_fork_active_org(client)
+        org_id, _ = self._build_fork_active_org(client)
         # decide-completed alone: still active (decide is NOT the build gate)
         r = _checkpoint(client, step="decide-completed")
         assert r["onboarding"]["status"] == "active"
-        assert "catalog-presented" not in _completed(team_id)
+        assert "catalog-presented" not in _completed(org_id)
         # catalog-presented (checkpoint agent path) → complete
         r2 = _checkpoint(client, step="catalog-presented")
         assert r2["onboarding"]["status"] == "complete", r2
@@ -128,7 +128,7 @@ class TestBuildForkGate:
         """Re-presenting the catalog after completion → 200 idempotent
         no-op (keyed-MERGE — the once-per-org catalog-presented edge never
         regresses or double-fires)."""
-        _team_id, _ = self._build_fork_active_org(client)
+        _org_id, _ = self._build_fork_active_org(client)
         first = _checkpoint(client, step="catalog-presented")
         assert first["onboarding"]["status"] == "complete"
         replay = _checkpoint(client, step="catalog-presented")
@@ -138,7 +138,7 @@ class TestBuildForkGate:
     def test_dashboard_patch_catalog_presented_completes_gate(self, client):
         """The dashboard write surface (PATCH catalog_presented: true) marks
         the SAME step edge → the build gate completes for the browser path."""
-        _team_id, _ = self._build_fork_active_org(client)
+        _org_id, _ = self._build_fork_active_org(client)
         r = client.patch("/v1/onboarding/state", json={"catalog_presented": True})
         assert r.status_code == 200, r.text
         assert r.json()["onboarding"]["status"] == "complete", r.text

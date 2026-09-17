@@ -46,7 +46,7 @@ _CONV = [{"role": "user", "content": "we decided to ship the memory capture"},
 
 def _spine_env(tmp_path):
     """Seed a registry (temp embedded store) + pro team + default graph +
-    one custom graph (g, namespace team_{tid}_{gid}) + one point in the
+    one custom graph (g, namespace org_{tid}_{gid}) + one point in the
     DEFAULT graph (the cross-graph probe)."""
     import tortoise.hosted_api as ha_mod
 
@@ -57,7 +57,7 @@ def _spine_env(tmp_path):
     sdk._get_registry().query(
         "CREATE (t:Team {id:$id, tier:'pro', max_graphs:5, "
         "max_api_keys:20, graph_name: $gn})",
-        params={"id": tid, "gn": f"team_{tid}"},
+        params={"id": tid, "gn": f"org_{tid}"},
     )
     sdk._graph_create(tid, "default", kind="default")
     g = sdk._graph_create(tid, "deliv-g", kind="custom")
@@ -83,13 +83,13 @@ def spine_env(tmp_path):
         os.environ.pop("TORTOISE_DB_PATH", None)
 
 
-def _mint_key(sdk, team_id, *, scopes, graph_id=None, deleg=None):
+def _mint_key(sdk, org_id, *, scopes, graph_id=None, deleg=None):
     token = "tk_" + uuid.uuid4().hex
     sdk._get_registry().query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+        "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
         "key_prefix:$kp, created_by:'spine', graph_id:$gid, "
         "scopes:$scopes, delegation_depth:$dd})",
-        params={"id": f"k-{uuid.uuid4().hex[:8]}", "tid": team_id,
+        params={"id": f"k-{uuid.uuid4().hex[:8]}", "tid": org_id,
                 "kh": hash_api_key(token), "kp": token[:10],
                 "gid": graph_id, "scopes": scopes, "dd": deleg},
     )
@@ -99,7 +99,7 @@ def _mint_key(sdk, team_id, *, scopes, graph_id=None, deleg=None):
 def _node_recording(sdk, tid, gid) -> bool | None:
     """Read the registry Graph node's recording prop (None when absent)."""
     rows = sdk._get_registry().query(
-        "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.recording",
+        "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.recording",
         params={"gid": gid, "tid": tid},
     ).result_set
     return rows[0][0] if rows else None
@@ -107,7 +107,7 @@ def _node_recording(sdk, tid, gid) -> bool | None:
 
 def _default_node_id(sdk, tid) -> str:
     rows = sdk._get_registry().query(
-        "MATCH (g:Graph {team_id:$tid, kind:'default'}) RETURN g.id",
+        "MATCH (g:Graph {org_id:$tid, kind:'default'}) RETURN g.id",
         params={"tid": tid},
     ).result_set
     return rows[0][0]
@@ -134,16 +134,16 @@ def test_patch_recording_set_clear_custom_graph(spine_env):
     sdk, tid, g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["team:manage"])
     h = {"Authorization": f"Bearer {token}"}
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": False}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json() == {"graph_id": g["graph_id"], "recording": False}
     assert _node_recording(sdk, tid, g["graph_id"]) is False
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True}, headers=h)
     assert r.status_code == 200, r.text
     assert _node_recording(sdk, tid, g["graph_id"]) is True
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": None}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json() == {"graph_id": g["graph_id"], "recording": None}
@@ -156,7 +156,7 @@ def test_patch_recording_default_graph_settable(spine_env):
     sdk, tid, _g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["team:manage"])
     h = {"Authorization": f"Bearer {token}"}
-    r = tc.patch(f"/v1/graphs/default?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/default?org_id={tid}",
                  json={"recording": False}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json() == {"graph_id": "default", "recording": False}
@@ -169,20 +169,20 @@ def test_patch_recording_auth_matrix(spine_env):
     sdk, tid, g, tc, _def_pt = spine_env
     # graphs:read (no team:manage) → 403
     ro = _mint_key(sdk, tid, scopes=["graphs:read"])
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True},
                  headers={"Authorization": f"Bearer {ro}"})
     assert r.status_code == 403, r.text
     # deleg=0 minted (even with team:manage — the C2/C3 child policy never
-    # stamps it, and get_current_team_session rejects deleg=0) → 403
+    # stamps it, and get_current_org_session rejects deleg=0) → 403
     minted = _mint_key(sdk, tid, scopes=["team:manage"], deleg=0)
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True},
                  headers={"Authorization": f"Bearer {minted}"})
     assert r.status_code == 403, r.text
     # Legacy full-access (deleg NULL, scopes []) → 200
     legacy = _mint_key(sdk, tid, scopes=[])
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True},
                  headers={"Authorization": f"Bearer {legacy}"})
     assert r.status_code == 200, r.text
@@ -192,13 +192,13 @@ def test_patch_recording_unknown_graph_404_and_bad_body(spine_env):
     sdk, tid, _g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["team:manage"])
     h = {"Authorization": f"Bearer {token}"}
-    r = tc.patch(f"/v1/graphs/g_doesnotexist?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/g_doesnotexist?org_id={tid}",
                  json={"recording": True}, headers=h)
     assert r.status_code == 404, r.text
-    r = tc.patch(f"/v1/graphs/g_doesnotexist?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/g_doesnotexist?org_id={tid}",
                  json={}, headers=h)
     assert r.status_code == 422, r.text  # missing required field
-    r = tc.patch(f"/v1/graphs/g_doesnotexist?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/g_doesnotexist?org_id={tid}",
                  json={"recording": "yes"}, headers=h)
     assert r.status_code == 422, r.text  # no truthy string coercion
 
@@ -208,10 +208,10 @@ def test_patch_recording_session_non_owner_403(spine_env):
     _sdk, tid, g, tc, _def_pt = spine_env
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import TEST_TEAM
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
-        lambda: dict(TEST_TEAM, team_id=tid, key_id=None,
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
+        lambda: dict(TEST_TEAM, org_id=tid, key_id=None,
                      session_user_id="not-owner", role="member")
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True})
     assert r.status_code == 403, r.text
 
@@ -235,7 +235,7 @@ def test_recording_false_graph_stores_no_session(spine_env, monkeypatch):
     key = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"],
                     graph_id=g["graph_id"])
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": False},
                  headers={"Authorization": f"Bearer {mgr}"})
     assert r.status_code == 200, r.text
@@ -252,7 +252,7 @@ def test_recording_true_graph_stores_session(spine_env, monkeypatch):
     key = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"],
                     graph_id=g["graph_id"])
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True},
                  headers={"Authorization": f"Bearer {mgr}"})
     assert r.status_code == 200, r.text
@@ -262,8 +262,8 @@ def test_recording_true_graph_stores_session(spine_env, monkeypatch):
     }, headers={"Authorization": f"Bearer {key}"})
     assert r.status_code == 200, r.text
     assert _session_count(g["namespace"], tid) == 1
-    # Default graph (team_{tid}) got nothing — cross-graph bleed probe.
-    assert _session_count(f"team_{tid}", tid) == 0
+    # Default graph (org_{tid}) got nothing — cross-graph bleed probe.
+    assert _session_count(f"org_{tid}", tid) == 0
 
 
 def test_recording_null_inherits_team_default(spine_env, monkeypatch):
@@ -274,7 +274,7 @@ def test_recording_null_inherits_team_default(spine_env, monkeypatch):
                     graph_id=g["graph_id"])
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
     # Explicit NULL override (inherit) — team state untouched (ON) → 200.
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": None},
                  headers={"Authorization": f"Bearer {mgr}"})
     assert r.status_code == 200, r.text
@@ -304,7 +304,7 @@ def test_team_off_master_kill_beats_graph_override(spine_env, monkeypatch):
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
     from tortoise.hosted_api import _update_onboarding_state
     _update_onboarding_state(tid, session_recording=False)
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True},
                  headers={"Authorization": f"Bearer {mgr}"})
     assert r.status_code == 200, r.text
@@ -323,7 +323,7 @@ def test_default_graph_override_true_team_off_409(spine_env, monkeypatch):
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
     from tortoise.hosted_api import _update_onboarding_state
     _update_onboarding_state(tid, session_recording=False)
-    r = tc.patch(f"/v1/graphs/default?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/default?org_id={tid}",
                  json={"recording": True},
                  headers={"Authorization": f"Bearer {mgr}"})
     assert r.status_code == 200, r.text
@@ -342,7 +342,7 @@ def test_tombstoned_graph_patch_404_and_capture_403(spine_env, monkeypatch):
     # Registry lane tombstone via graph_delete.
     sdk.graph_delete(tid, g["graph_id"])
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"recording": True},
                  headers={"Authorization": f"Bearer {mgr}"})
     assert r.status_code == 404, r.text
@@ -410,7 +410,7 @@ def test_sessions_land_in_key_graph(spine_env, monkeypatch):
     }, headers={"Authorization": f"Bearer {key}"})
     assert r.status_code == 200, r.text
     assert _session_count(g["namespace"], tid) == 1
-    assert _session_count(f"team_{tid}", tid) == 0
+    assert _session_count(f"org_{tid}", tid) == 0
 
 
 # ── 4. MCP capture graph carry (C5 residual close) ───────────────────────
@@ -439,7 +439,7 @@ def _run_mcp_graph_capture(tmp_path, db):
     reg._get_registry().query(
         "CREATE (t:Team {id:$id, tier:'pro', max_graphs:5, "
         "max_api_keys:20, graph_name: $gn})",
-        params={"id": tid, "gn": f"team_{tid}"},
+        params={"id": tid, "gn": f"org_{tid}"},
     )
     reg._graph_create(tid, "default", kind="default")
     g = reg._graph_create(tid, "mcp-g", kind="custom")
@@ -447,20 +447,20 @@ def _run_mcp_graph_capture(tmp_path, db):
         _current_graph_id,
         _current_graph_namespace,
         _current_legacy_full_access,
+        _current_org_id,
+        _current_org_limits,
         _current_scopes,
-        _current_team_id,
-        _current_team_limits,
     )
     from tortoise.mcp_server import tortoise_session_capture
     toks = [
-        _current_team_id.set(tid),
-        _current_team_limits.set({"tier": "pro", "max_points": 100000}),
+        _current_org_id.set(tid),
+        _current_org_limits.set({"tier": "pro", "max_points": 100000}),
         _current_graph_id.set(g["graph_id"]),
         _current_graph_namespace.set(g["namespace"]),
         _current_scopes.set(["graphs:read", "graphs:write"]),
         _current_legacy_full_access.set(False),
     ]
-    _ctx_vars = [_current_team_id, _current_team_limits,
+    _ctx_vars = [_current_org_id, _current_org_limits,
                  _current_graph_id, _current_graph_namespace,
                  _current_scopes, _current_legacy_full_access]
     try:
@@ -471,7 +471,7 @@ def _run_mcp_graph_capture(tmp_path, db):
             var.reset(tok)
     assert not res.get("error"), res
     assert _session_count(g["namespace"], tid) == 1
-    assert _session_count(f"team_{tid}", tid) == 0
+    assert _session_count(f"org_{tid}", tid) == 0
 
 
 # ── 5. Supabase seam unit (FakeControlPlane) ─────────────────────────────
@@ -483,9 +483,9 @@ def test_supabase_set_graph_recording_custom_and_default():
     from tests.fake_control_plane import FakeControlPlane
     from tortoise.supabase_control import graph_metadata, set_graph_recording
     cp = FakeControlPlane()
-    cp.seed("teams", [{"id": "t1", "graph_name": "team_t1"}])
+    cp.seed("organizations", [{"id": "t1", "graph_name": "team_t1"}])
     cp.seed("graphs", [{
-        "id": "g1", "team_id": "t1", "name": "acme", "kind": "custom",
+        "id": "g1", "org_id": "t1", "name": "acme", "kind": "custom",
         "namespace": "team_t1_g1", "status": "active", "recording": None,
     }])
     # Custom set → PATCH
@@ -504,7 +504,7 @@ def test_supabase_set_graph_recording_custom_and_default():
     assert set_graph_recording(cp, "t1", "default", None) is True
     assert set_graph_recording(cp, "t1", "default", False) is True
     rows = cp.query("graphs", select=["recording", "kind"],
-                    filters=[("team_id", "eq", "t1"),
+                    filters=[("org_id", "eq", "t1"),
                              ("kind", "eq", "default")])
     assert len(rows) == 1 and rows[0]["recording"] is False
     # graph_metadata's derived default carries the override
@@ -516,7 +516,7 @@ def test_supabase_set_graph_recording_custom_and_default():
     # would 500 the real PostgREST INSERT; the fake doesn't enforce NOT
     # NULL so assert the payload explicitly).
     drow = cp.query("graphs", select=["namespace"],
-                    filters=[("team_id", "eq", "t1"),
+                    filters=[("org_id", "eq", "t1"),
                              ("kind", "eq", "default")])
     assert drow and drow[0]["namespace"] == "team_t1", drow
     # Clearing restores inherit (None)
@@ -537,17 +537,17 @@ def _run_with_mcp_ctx(tid, fn, *, scopes, legacy=False, graph=None,
         _current_graph_id,
         _current_graph_namespace,
         _current_legacy_full_access,
+        _current_org_id,
+        _current_org_limits,
         _current_scopes,
-        _current_team_id,
-        _current_team_limits,
     )
     toks = []
 
     def _push(var, val):
         toks.append((var, var.set(val)))
 
-    _push(_current_team_id, tid)
-    _push(_current_team_limits, {"tier": "pro", "max_points": max_points})
+    _push(_current_org_id, tid)
+    _push(_current_org_limits, {"tier": "pro", "max_points": max_points})
     if graph is not None:
         _push(_current_graph_id, graph["graph_id"])
         _push(_current_graph_namespace, graph["namespace"])
@@ -579,7 +579,7 @@ def test_mcp_graph_set_recording_sets_clears_and_defaults(spine_env):
     assert _node_recording(sdk, tid, g["graph_id"]) is False
     # REST PATCH leg (same key class) writes the SAME node — drift check
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
-    rc = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    rc = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                   json={"recording": True},
                   headers={"Authorization": f"Bearer {mgr}"})
     assert rc.status_code == 200, rc.text
@@ -669,7 +669,7 @@ def test_capture_409_graph_layer_names_real_surfaces(spine_env, monkeypatch):
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     sdk, tid, g, tc, _def_pt = spine_env
     mgr = _mint_key(sdk, tid, scopes=["team:manage"])
-    rc = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    rc = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                   json={"recording": False},
                   headers={"Authorization": f"Bearer {mgr}"})
     assert rc.status_code == 200, rc.text
@@ -704,7 +704,7 @@ def test_capture_409_graph_layer_names_real_surfaces(spine_env, monkeypatch):
 def _node_name(sdk, tid, gid) -> str | None:
     """Read a registry Graph node's name prop (None when absent/unknown)."""
     rows = sdk._get_registry().query(
-        "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.name",
+        "MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.name",
         params={"gid": gid, "tid": tid},
     ).result_set
     return rows[0][0] if rows else None
@@ -716,7 +716,7 @@ def test_patch_rename_custom_graph(spine_env):
     sdk, tid, g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["team:manage"])
     h = {"Authorization": f"Bearer {token}"}
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "  renamed-bot  "}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json() == {"graph_id": g["graph_id"], "name": "renamed-bot"}
@@ -736,7 +736,7 @@ def test_patch_rename_default_graph_via_literal(spine_env):
     h = {"Authorization": f"Bearer {token}"}
     node_id = _default_node_id(sdk, tid)
     ns_before = {x["graph_id"]: x for x in sdk.graph_list(tid)}[node_id]["namespace"]
-    r = tc.patch(f"/v1/graphs/default?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/default?org_id={tid}",
                  json={"name": "My Memory"}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json() == {"graph_id": "default", "name": "My Memory"}
@@ -759,17 +759,17 @@ def test_patch_rename_conflict_409_and_idempotent_same_name(spine_env):
     token = _mint_key(sdk, tid, scopes=["team:manage"])
     h = {"Authorization": f"Bearer {token}"}
     # g → g2's live name → 409
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "second-g"}, headers=h)
     assert r.status_code == 409, r.text
     assert r.json()["detail"] == "Graph name already exists"
     # default → the custom's live name → 409 too (the seam compares across
     # kinds — the default display name is part of the team's name space)
-    r = tc.patch(f"/v1/graphs/default?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/default?org_id={tid}",
                  json={"name": "second-g"}, headers=h)
     assert r.status_code == 409, r.text
     # Same-name rename of g2 (unchanged) → 200 no-op
-    r = tc.patch(f"/v1/graphs/{g2['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g2['graph_id']}?org_id={tid}",
                  json={"name": "second-g"}, headers=h)
     assert r.status_code == 200, r.text
 
@@ -779,16 +779,16 @@ def test_patch_rename_auth_matrix(spine_env):
     key OK (mirror the recording PATCH auth class)."""
     sdk, tid, g, tc, _def_pt = spine_env
     ro = _mint_key(sdk, tid, scopes=["graphs:read"])
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "nope"}, headers={"Authorization": f"Bearer {ro}"})
     assert r.status_code == 403, r.text
     minted = _mint_key(sdk, tid, scopes=["team:manage"], deleg=0)
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "nope"},
                  headers={"Authorization": f"Bearer {minted}"})
     assert r.status_code == 403, r.text
     legacy = _mint_key(sdk, tid, scopes=[])
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "legacy-ok"},
                  headers={"Authorization": f"Bearer {legacy}"})
     assert r.status_code == 200, r.text
@@ -800,26 +800,26 @@ def test_patch_rename_unknown_404_and_bad_body_422(spine_env):
     sdk, tid, _g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["team:manage"])
     h = {"Authorization": f"Bearer {token}"}
-    r = tc.patch(f"/v1/graphs/g_doesnotexist?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/g_doesnotexist?org_id={tid}",
                  json={"name": "x"}, headers=h)
     assert r.status_code == 404, r.text
-    r = tc.patch(f"/v1/graphs/g_doesnotexist?team_id={tid}", json={}, headers=h)
+    r = tc.patch(f"/v1/graphs/g_doesnotexist?org_id={tid}", json={}, headers=h)
     assert r.status_code == 422, r.text  # at least one field required
-    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?org_id={tid}",
                  json={"name": ""}, headers=h)
     assert r.status_code == 422, r.text
-    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?org_id={tid}",
                  json={"name": "   "}, headers=h)
     assert r.status_code == 422, r.text
-    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?org_id={tid}",
                  json={"name": 42}, headers=h)
     assert r.status_code == 422, r.text
     # An explicitly-null name has no meaning (recording null = clear, name
     # null = nothing to do) — 422, never a silent 200 no-op.
-    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?org_id={tid}",
                  json={"name": None}, headers=h)
     assert r.status_code == 422, r.text
-    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{_g['graph_id']}?org_id={tid}",
                  json={"recording": "yes"}, headers=h)
     assert r.status_code == 422, r.text  # strict-bool preserved
 
@@ -834,19 +834,19 @@ def test_patch_rename_session_owner_ok_member_403(spine_env):
     reg = sdk._get_registry()
     for uid, role in (("owner-1", "owner"), ("member-1", "member")):
         reg.query(
-            "CREATE (m:Membership {user_id:$u, team_id:$tid,"
+            "CREATE (m:Membership {user_id:$u, org_id:$tid,"
             " status:'active', role:$r})",
             params={"u": uid, "tid": tid, "r": role},
         )
-    base = dict(TEST_TEAM, team_id=tid, key_id=None)
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+    base = dict(TEST_TEAM, org_id=tid, key_id=None)
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
         lambda: dict(base, session_user_id="owner-1", role="owner")
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "owner-renamed"})
     assert r.status_code == 200, r.text
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
         lambda: dict(base, session_user_id="member-1", role="member")
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "member-nope"})
     assert r.status_code == 403, r.text
 
@@ -857,7 +857,7 @@ def test_patch_rename_and_recording_one_call(spine_env):
     sdk, tid, g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["team:manage"])
     h = {"Authorization": f"Bearer {token}"}
-    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?org_id={tid}",
                  json={"name": "dual", "recording": False}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json() == {"graph_id": g["graph_id"], "name": "dual",
@@ -878,9 +878,9 @@ def test_supabase_set_graph_name_custom_and_default():
         set_graph_recording,
     )
     cp = FakeControlPlane()
-    cp.seed("teams", [{"id": "t1", "graph_name": "team_t1"}])
+    cp.seed("organizations", [{"id": "t1", "graph_name": "team_t1"}])
     cp.seed("graphs", [{
-        "id": "g1", "team_id": "t1", "name": "acme", "kind": "custom",
+        "id": "g1", "org_id": "t1", "name": "acme", "kind": "custom",
         "namespace": "team_t1_g1", "status": "active", "recording": None,
     }])
     # Custom rename → PATCH
@@ -893,7 +893,7 @@ def test_supabase_set_graph_name_custom_and_default():
     # the new name + the TEAM graph name as namespace.
     assert set_graph_name(cp, "t1", "default", "My Memory") is True
     drow = cp.query("graphs", select=["name", "namespace", "kind"],
-                    filters=[("team_id", "eq", "t1"),
+                    filters=[("org_id", "eq", "t1"),
                              ("kind", "eq", "default")])
     assert len(drow) == 1, drow
     assert drow[0]["name"] == "My Memory"
@@ -906,7 +906,7 @@ def test_supabase_set_graph_name_custom_and_default():
     # keeps the renamed row — one kind='default' row, both fields live.
     assert set_graph_recording(cp, "t1", "default", False) is True
     drow = cp.query("graphs", select=["name", "recording"],
-                    filters=[("team_id", "eq", "t1"),
+                    filters=[("org_id", "eq", "t1"),
                              ("kind", "eq", "default")])
     assert len(drow) == 1
     assert drow[0]["name"] == "My Memory"
@@ -918,12 +918,12 @@ def test_supabase_set_graph_name_custom_and_default():
     # Re-rename of the existing default row → PATCH (row count stays 1)
     assert set_graph_name(cp, "t1", "default", "Renamed Again") is True
     drow = cp.query("graphs", select=["name"],
-                    filters=[("team_id", "eq", "t1"),
+                    filters=[("org_id", "eq", "t1"),
                              ("kind", "eq", "default")])
     assert len(drow) == 1 and drow[0]["name"] == "Renamed Again"
     # No display row yet → graph_metadata falls back to the literal 'default'
     cp2 = FakeControlPlane()
-    cp2.seed("teams", [{"id": "t2", "graph_name": "team_t2"}])
+    cp2.seed("organizations", [{"id": "t2", "graph_name": "team_t2"}])
     meta = graph_metadata(cp2, "t2")
     default = next(m for m in meta if m["kind"] == "default")
     assert default["name"] == "default"
@@ -942,17 +942,17 @@ _SB_OWNER = "9f2c1a40-0000-4a00-8000-000000000270"
 
 
 def _sb_seed(fake):
-    fake.seed("teams", [{
-        "id": _SB_TEAM, "graph_name": f"team_{_SB_TEAM}", "tier": "pro",
+    fake.seed("organizations", [{
+        "id": _SB_TEAM, "graph_name": f"org_{_SB_TEAM}", "tier": "pro",
         "max_graphs": 5, "name": "Org", "status": "active",
     }])
-    fake.seed("team_memberships", [{
-        "id": "m-rn-1", "team_id": _SB_TEAM, "user_id": _SB_OWNER,
+    fake.seed("org_memberships", [{
+        "id": "m-rn-1", "org_id": _SB_TEAM, "user_id": _SB_OWNER,
         "role": "owner", "status": "active",
     }])
     fake.seed("graphs", [{
-        "id": "g-rn-custom1", "team_id": _SB_TEAM, "name": "acme",
-        "kind": "custom", "namespace": f"team_{_SB_TEAM}_g-rn-custom1",
+        "id": "g-rn-custom1", "org_id": _SB_TEAM, "name": "acme",
+        "kind": "custom", "namespace": f"org_{_SB_TEAM}_g-rn-custom1",
         "status": "active", "recording": None,
     }])
 
@@ -965,7 +965,7 @@ def _sb_env(monkeypatch, fake_cls=None):
     from tests.fake_control_plane import FakeControlPlane
     from tests.test_export_delete import _enable_supabase
     fake = (fake_cls or FakeControlPlane)(
-        {"teams": [], "api_keys": [], "team_memberships": [],
+        {"organizations": [], "api_keys": [], "org_memberships": [],
          "invitations": [], "graphs": []})
     _sb_seed(fake)
     _enable_supabase(monkeypatch, fake)
@@ -974,8 +974,8 @@ def _sb_env(monkeypatch, fake_cls=None):
     patched.__enter__()
     tc = TestClient(ha_mod.app)
     tc.__enter__()
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team_session] = \
-        lambda: {"team_id": _SB_TEAM, "key_id": None,
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org_session] = \
+        lambda: {"org_id": _SB_TEAM, "key_id": None,
                  "session_user_id": _SB_OWNER, "role": "owner"}
     return tc, fake, (patched, ha_mod)
 
@@ -994,7 +994,7 @@ def _sb_teardown(tc, handles):
 def test_patch_rename_supabase_custom_row(monkeypatch):
     tc, fake, handles = _sb_env(monkeypatch)
     try:
-        r = tc.patch(f"/v1/graphs/g-rn-custom1?team_id={_SB_TEAM}",
+        r = tc.patch(f"/v1/graphs/g-rn-custom1?org_id={_SB_TEAM}",
                      json={"name": "acme-renamed"})
         assert r.status_code == 200, r.text
         assert r.json() == {"graph_id": "g-rn-custom1", "name": "acme-renamed"}
@@ -1010,27 +1010,27 @@ def test_patch_rename_supabase_default_display_row_and_conflicts(monkeypatch):
     try:
         # Rename the derived default graph → a kind='default' display row
         # carrying the new name + the TEAM namespace.
-        r = tc.patch(f"/v1/graphs/default?team_id={_SB_TEAM}",
+        r = tc.patch(f"/v1/graphs/default?org_id={_SB_TEAM}",
                      json={"name": "My Memory"})
         assert r.status_code == 200, r.text
         drow = fake.query("graphs", select=["name", "namespace", "kind"],
-                          filters=[("team_id", "eq", _SB_TEAM),
+                          filters=[("org_id", "eq", _SB_TEAM),
                                    ("kind", "eq", "default")])
         assert len(drow) == 1, drow
         assert drow[0]["name"] == "My Memory"
-        assert drow[0]["namespace"] == f"team_{_SB_TEAM}", drow
+        assert drow[0]["namespace"] == f"org_{_SB_TEAM}", drow
         # A live-name conflict 409s (self-exclusion must treat the default
         # display row as graph_id 'default' — renaming it to its OWN name is
         # an idempotent 200, not a self-conflict).
-        r = tc.patch(f"/v1/graphs/g-rn-custom1?team_id={_SB_TEAM}",
+        r = tc.patch(f"/v1/graphs/g-rn-custom1?org_id={_SB_TEAM}",
                      json={"name": "My Memory"})
         assert r.status_code == 409, r.text
         assert r.json()["detail"] == "Graph name already exists"
-        r = tc.patch(f"/v1/graphs/default?team_id={_SB_TEAM}",
+        r = tc.patch(f"/v1/graphs/default?org_id={_SB_TEAM}",
                      json={"name": "My Memory"})
         assert r.status_code == 200, r.text
         # Unknown graph → 404.
-        r = tc.patch(f"/v1/graphs/g_unknown?team_id={_SB_TEAM}",
+        r = tc.patch(f"/v1/graphs/g_unknown?org_id={_SB_TEAM}",
                      json={"name": "x"})
         assert r.status_code == 404, r.text
     finally:
@@ -1051,7 +1051,7 @@ def test_patch_rename_supabase_unique_violation_maps_409_not_500(monkeypatch):
 
     tc, _fake, handles = _sb_env(monkeypatch, fake_cls=_Flat409)
     try:
-        r = tc.patch(f"/v1/graphs/g-rn-custom1?team_id={_SB_TEAM}",
+        r = tc.patch(f"/v1/graphs/g-rn-custom1?org_id={_SB_TEAM}",
                      json={"name": "raced"})
         assert r.status_code == 409, r.text
         assert r.json()["detail"] == "Graph name already exists"

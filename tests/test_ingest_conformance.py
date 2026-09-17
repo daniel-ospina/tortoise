@@ -106,13 +106,13 @@ def test_mcp_success_response_key_set_equal(sdk, monkeypatch):
     """A12 indicator 1 (MCP surface): tortoise_ingest returns the SAME key
     set through the handler layer."""
     import tortoise.mcp_server as mcp_mod  # noqa: I001
-    from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+    from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                    _transport_mode)
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
-    orig = mcp_mod._get_team_sdk
-    mcp_mod._get_team_sdk = lambda: sdk
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
+    orig = mcp_mod._get_org_sdk
+    mcp_mod._get_org_sdk = lambda: sdk
     try:
         res = mcp_mod.tortoise_ingest(bundle=_bundle())
         assert set(res.keys()) == TOP_LEVEL, sorted(res.keys())
@@ -121,9 +121,9 @@ def test_mcp_success_response_key_set_equal(sdk, monkeypatch):
         assert set(res["ids"].keys()) == IDS_KEYS
     finally:
         _transport_mode.set(None)
-        _current_team_id.set(None)
-        _current_team_limits.set(None)
-        mcp_mod._get_team_sdk = orig
+        _current_org_id.set(None)
+        _current_org_limits.set(None)
+        mcp_mod._get_org_sdk = orig
 
 
 def test_failure_response_shape_no_results_key(sdk, monkeypatch):
@@ -145,13 +145,13 @@ def test_failure_response_shape_no_results_key(sdk, monkeypatch):
         sdk.ingest(bad, granularity="granular")
     # MCP surface: structured {error, code: ERR_BUNDLE_INVALID, violations}
     import tortoise.mcp_server as mcp_mod  # noqa: I001
-    from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+    from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                    _transport_mode)
     _transport_mode.set("stdio")
-    _current_team_id.set(None)
-    _current_team_limits.set(None)
-    orig = mcp_mod._get_team_sdk
-    mcp_mod._get_team_sdk = lambda: sdk
+    _current_org_id.set(None)
+    _current_org_limits.set(None)
+    orig = mcp_mod._get_org_sdk
+    mcp_mod._get_org_sdk = lambda: sdk
     try:
         res = mcp_mod.tortoise_ingest(bundle=bad, granularity="granular")
         assert "error" in res, "failure response must carry the error key"
@@ -160,9 +160,9 @@ def test_failure_response_shape_no_results_key(sdk, monkeypatch):
         assert "results" not in res, "failure shape must have no results key"
     finally:
         _transport_mode.set(None)
-        _current_team_id.set(None)
-        _current_team_limits.set(None)
-        mcp_mod._get_team_sdk = orig
+        _current_org_id.set(None)
+        _current_org_limits.set(None)
+        mcp_mod._get_org_sdk = orig
 
 
 # ── indicator 3: tool description markers ────────────────────────────

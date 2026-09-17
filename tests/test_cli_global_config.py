@@ -24,7 +24,7 @@ from tortoise.__main__ import main
 
 GLOBAL_CFG = {
     "api_key": "tt_global", "api_url": "https://api.premiselabs.co",
-    "team_id": "team-g", "team_name": "Global", "device_id": "anon-g",
+    "org_id": "team-g", "org_name": "Global", "device_id": "anon-g",
 }
 
 
@@ -60,7 +60,7 @@ class TestGlobalConfigCommands:
     def test_team_info_from_global(self, tmp_path, monkeypatch, capsys):
         _seed_global(tmp_path)
         with mock.patch("urllib.request.urlopen", return_value=_ok(
-                {"team_id": "team-g", "tier": "free", "point_count": 0})) as urlopen:
+                {"org_id": "team-g", "tier": "free", "point_count": 0})) as urlopen:
             rc = main(["team", "info"])
         assert rc == 0
         req = urlopen.call_args.args[0]

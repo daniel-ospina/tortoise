@@ -78,10 +78,10 @@ class TestNamespaceInURIMode:
             sdk.close()
 
     def test_team_namespace_maps_to_team_graph(self, uri_mode):
-        """Production team namespaces map to team_<id> (matches provision)."""
+        """Production org namespaces map to org_<id> (matches provision)."""
         sdk = TortoiseSDK(namespace="team-abc123")
         try:
-            assert _graph_name(sdk) == "team_team-abc123"
+            assert _graph_name(sdk) == "org_team-abc123"
         finally:
             sdk.close()
 

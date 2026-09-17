@@ -82,10 +82,10 @@ class TestMintIssuesToken:
         data = _mint(client)
         sdk = ha_mod._make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
-            "MATCH (s:SignupToken {team_id:$tid}) RETURN s.token_hash, properties(s)",
-            params={"tid": data["team_id"]},
+            "MATCH (s:SignupToken {org_id:$tid}) RETURN s.token_hash, properties(s)",
+            params={"tid": data["org_id"]},
         ).result_set
-        assert rows, f"no SignupToken node for {data['team_id']}"
+        assert rows, f"no SignupToken node for {data['org_id']}"
         assert rows[0][0] != data["signup_token"]  # hash-only at rest
         assert rows[0][0]  # a hash is stored
 
@@ -95,9 +95,9 @@ class TestMintIssuesToken:
         data = _mint(client)
         sdk = ha_mod._make_sdk(namespace="registry")
         row = sdk._get_registry().query(
-            "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+            "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
             "RETURN k.created_via, k.expires_at",
-            params={"tid": data["team_id"]},
+            params={"tid": data["org_id"]},
         ).result_set[0]
         assert row[0] == "provisioned"
         assert row[1] is None
@@ -108,7 +108,7 @@ class TestSequentialIdempotency:
 
     def test_resignup_with_token_same_team_new_key(self, client):
         first = _mint(client)
-        team_id, token = first["team_id"], first["signup_token"]
+        org_id, token = first["org_id"], first["signup_token"]
 
         r = client.post("/v1/agent/signup",
                         json={"signup_token": token})
@@ -116,7 +116,7 @@ class TestSequentialIdempotency:
         second = r.json()
 
         # same team, NEW key, no identity echo (recovery is not a mint)
-        assert second["team_id"] == team_id
+        assert second["org_id"] == org_id
         assert second["key"] != first["key"]
         assert second["key"].startswith("tt_")
         assert "identity" not in second
@@ -125,30 +125,30 @@ class TestSequentialIdempotency:
         # the recovered key authenticates on the same team
         r2 = client.get("/v1/team", headers={"Authorization": f"Bearer {second['key']}"})
         assert r2.status_code == 200, r2.text
-        assert r2.json()["team_id"] == team_id
+        assert r2.json()["org_id"] == org_id
 
-        # exactly 1 team for that team_id
+        # exactly 1 team for that org_id
         sdk = ha_mod._make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
-            "MATCH (t:Team {id:$id}) RETURN count(t)", params={"id": team_id}
+            "MATCH (t:Team {id:$id}) RETURN count(t)", params={"id": org_id}
         ).result_set
         assert rows[0][0] == 1
 
     def test_recover_endpoint_happy_path(self, client):
         """POST /v1/agent/recover: config-lost-with-token → new key, same team."""
         first = _mint(client)
-        team_id, token = first["team_id"], first["signup_token"]
+        org_id, token = first["org_id"], first["signup_token"]
         r = client.post("/v1/agent/recover", json={"signup_token": token})
         assert r.status_code == 200, r.text
         data = r.json()
-        assert data["team_id"] == team_id
+        assert data["org_id"] == org_id
         assert data["key"].startswith("tt_")
         assert data["key"] != first["key"]
-        assert data["team_name"] and data["graph_name"] and data["tier"] == "free"
+        assert data["org_name"] and data["graph_name"] and data["tier"] == "free"
         # key authenticates
         r2 = client.get("/v1/team", headers={"Authorization": f"Bearer {data['key']}"})
         assert r2.status_code == 200
-        assert r2.json()["team_id"] == team_id
+        assert r2.json()["org_id"] == org_id
 
     def test_recover_missing_token_422(self, client):
         r = client.post("/v1/agent/recover", json={})
@@ -159,18 +159,18 @@ class TestSequentialIdempotency:
         """Post-claim re-signup with token → recovery on the SAME (claimed)
         team — no second team (scope E2E-6)."""
         first = _mint(client)
-        team_id, token = first["team_id"], first["signup_token"]
+        org_id, token = first["org_id"], first["signup_token"]
         # claim emulation: attach a user to the membership
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
-            f"MATCH (m:Membership {{team_id:$tid}}) SET m.user_id = '{_U1}'",
-            params={"tid": team_id},
+            f"MATCH (m:Membership {{org_id:$tid}}) SET m.user_id = '{_U1}'",
+            params={"tid": org_id},
         )
         r = client.post("/v1/agent/signup", json={"signup_token": token})
         assert r.status_code == 200, r.text
-        assert r.json()["team_id"] == team_id
+        assert r.json()["org_id"] == org_id
         rows = sdk._get_registry().query(
-            "MATCH (t:Team {id:$id}) RETURN count(t)", params={"id": team_id}
+            "MATCH (t:Team {id:$id}) RETURN count(t)", params={"id": org_id}
         ).result_set
         assert rows[0][0] == 1
 
@@ -192,8 +192,8 @@ class TestUniform422:
         data = _mint(client)
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
-            "MATCH (s:SignupToken {team_id:$tid}) SET s.revoked_at = '2026-01-01T00:00:00Z'",
-            params={"tid": data["team_id"]},
+            "MATCH (s:SignupToken {org_id:$tid}) SET s.revoked_at = '2026-01-01T00:00:00Z'",
+            params={"tid": data["org_id"]},
         )
         revoked = client.post("/v1/agent/signup",
                               json={"signup_token": data["signup_token"]})
@@ -202,7 +202,7 @@ class TestUniform422:
         data2 = _mint(client)
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.deleted_at = '2026-01-01T00:00:00Z'",
-            params={"id": data2["team_id"]},
+            params={"id": data2["org_id"]},
         )
         deleted = client.post("/v1/agent/signup",
                               json={"signup_token": data2["signup_token"]})
@@ -238,7 +238,7 @@ class TestSuspendedTeam:
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.suspended_at = '2026-01-01T00:00:00Z'",
-            params={"id": data["team_id"]},
+            params={"id": data["org_id"]},
         )
         r = client.post("/v1/agent/signup",
                         json={"signup_token": data["signup_token"]})
@@ -266,7 +266,7 @@ class TestRecoveryRateLimiting:
         r2 = client.post("/v1/agent/signup",
                          json={"signup_token": first["signup_token"]})
         assert r2.status_code == 200, r2.text
-        assert r2.json()["team_id"] == first["team_id"]
+        assert r2.json()["org_id"] == first["org_id"]
 
     def test_token_present_bound_by_recovery_ip_limiter(self, client, monkeypatch):
         """Compensating control: an IP over the recovery per-IP cap is 429'd
@@ -307,9 +307,9 @@ class TestRecoveryRateLimiting:
         record_signup — ops metrics must not conflate recoveries with mints)."""
         recovered, minted = [], []
         monkeypatch.setattr("tortoise.abuse.record_recovery",
-                            lambda ip, team_id=None, now=None: recovered.append(team_id))
+                            lambda ip, org_id=None, now=None: recovered.append(org_id))
         monkeypatch.setattr("tortoise.abuse.record_signup",
-                            lambda ip, team_id=None, now=None: minted.append(team_id))
+                            lambda ip, org_id=None, now=None: minted.append(org_id))
         data = _mint(client)
         # The mint fires record_signup via asyncio.to_thread on the
         # TestClient loop — its append can land AFTER this clear, which
@@ -321,8 +321,8 @@ class TestRecoveryRateLimiting:
                         json={"signup_token": data["signup_token"]})
         assert r.status_code == 200
         _wait_for(lambda: len(recovered) >= 1)
-        assert data["team_id"] in recovered
-        assert data["team_id"] not in minted  # recovery ≠ mint
+        assert data["org_id"] in recovered
+        assert data["org_id"] not in minted  # recovery ≠ mint
 
 
 class TestConcurrencyE2E:
@@ -352,7 +352,7 @@ class TestConcurrencyE2E:
 
         # mint first (sequential) to get the token
         data = _mint(client)
-        token, team_id = data["signup_token"], data["team_id"]
+        token, org_id = data["signup_token"], data["org_id"]
 
         async def _run():
             transport = httpx.ASGITransport(app=app)
@@ -365,20 +365,20 @@ class TestConcurrencyE2E:
         assert all(r.status_code == 200 for r in results), [r.text for r in results]
         bodies = [r.json() for r in results]
         # all responses resolve to the SAME team (recovery never creates a team)
-        assert all(b["team_id"] == team_id for b in bodies)
+        assert all(b["org_id"] == org_id for b in bodies)
         # exactly 1 team node
         sdk = ha_mod._make_sdk(namespace="registry")
         teams = sdk._get_registry().query(
-            "MATCH (t:Team {id:$id}) RETURN count(t)", params={"id": team_id}
+            "MATCH (t:Team {id:$id}) RETURN count(t)", params={"id": org_id}
         ).result_set
         assert teams[0][0] == 1
         # active non-bootstrap keys ≤ max_api_keys (2 on free) — the recovery
         # mint is serialized (Supabase FOR UPDATE / registry process lock)
         keys = sdk._get_registry().query(
-            "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+            "MATCH (k:APIKey {org_id:$tid}) WHERE k.revoked_at IS NULL "
             "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
             "RETURN count(k)",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set[0][0]
         assert keys <= 2, f"non-bootstrap active keys overshot cap: {keys}"
         # recovery keys are REAL (persisted, minted through the api_keys
@@ -406,8 +406,8 @@ class TestConcurrencyE2E:
 
         results = asyncio.run(_run())
         assert all(r.status_code == 200 for r in results)
-        team_ids = {r.json()["team_id"] for r in results}
-        assert len(team_ids) == 3  # N teams — no server-side dedupe pre-mint
+        org_ids = {r.json()["org_id"] for r in results}
+        assert len(org_ids) == 3  # N teams — no server-side dedupe pre-mint
 
 
 class TestRegistryLegacyNode:
@@ -421,26 +421,26 @@ class TestRegistryLegacyNode:
 
         sdk = sdk_mod.TortoiseSDK(namespace="test_registry_legacy_test")
         reg = sdk._get_registry()
-        team_id = f"legacy-team-{uuid.uuid4().hex[:10]}"
+        org_id = f"legacy-team-{uuid.uuid4().hex[:10]}"
         api_key = f"tt_{uuid.uuid4().hex}"
         reg.query(
             "CREATE (t:Team {id:$id, name:'legacy', tier:'free'})",
-            params={"id": team_id},
+            params={"id": org_id},
         )
         reg.query(
             # NO created_via / expires_at props — the pre-#1709 shape
-            "CREATE (k:APIKey {id:'legacy-k', team_id:$tid, key_hash:$kh, "
+            "CREATE (k:APIKey {id:'legacy-k', org_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:'anon-legacy'})",
-            params={"tid": team_id, "kh": hash_api_key(api_key),
+            params={"tid": org_id, "kh": hash_api_key(api_key),
                     "kp": api_key[:10]},
         )
         out = sdk.apikey_verify(api_key)
         # C2 (#2111): apikey_verify now returns delegation_depth + scopes
         # (the MCP TeamResolutionMiddleware deleg gate reads them off the
-        # same dict) — additive to the pre-C2 {team_id, key_id} contract;
+        # same dict) — additive to the pre-C2 {org_id, key_id} contract;
         # a pre-#1709 legacy node resolves deleg NULL + scopes [] (the
         # full-access legacy class).
-        assert out["team_id"] == team_id
+        assert out["org_id"] == org_id
         assert out["key_id"] == "legacy-k"
         assert out.get("delegation_depth") is None
         assert out.get("scopes") == []
@@ -477,16 +477,16 @@ class TestSupabaseLane:
         # plain provision_team is untouched for other callers
         assert not any(c[0] == "provision_team" for c in self.fake.rpc_calls)
         rows = [t for t in self.fake.tables.get("agent_signup_tokens", [])
-                if t["team_id"] == data["team_id"]]
+                if t["org_id"] == data["org_id"]]
         assert len(rows) == 1 and rows[0]["token_hash"] == _lookup_hash(tok)
 
     def test_resignup_recovers_same_team_new_key(self, client):
         first = _mint(client)
-        team_id, token = first["team_id"], first["signup_token"]
+        org_id, token = first["org_id"], first["signup_token"]
         r = client.post("/v1/agent/signup", json={"signup_token": token})
         assert r.status_code == 200, r.text
         second = r.json()
-        assert second["team_id"] == team_id
+        assert second["org_id"] == org_id
         assert second["key"] != first["key"]
         # resolve + recover RPCs were used (no second mint)
         fns = [c[0] for c in self.fake.rpc_calls]
@@ -494,18 +494,18 @@ class TestSupabaseLane:
         assert "recover_team_key" in fns
         assert fns.count("provision_team_with_token") == 1
         # exactly one team row
-        teams = [t for t in self.fake.tables["teams"] if t["id"] == team_id]
+        teams = [t for t in self.fake.tables["organizations"] if t["id"] == org_id]
         assert len(teams) == 1
         # the recovered key resolves via api_keys.lookup_hash
         r2 = client.get("/v1/team", headers={"Authorization": f"Bearer {second['key']}"})
-        assert r2.status_code == 200 and r2.json()["team_id"] == team_id
+        assert r2.status_code == 200 and r2.json()["org_id"] == org_id
 
     def test_recover_endpoint_and_uniform_422(self, client):
         data = _mint(client)
         token = data["signup_token"]
         r = client.post("/v1/agent/recover", json={"signup_token": token})
         assert r.status_code == 200
-        assert r.json()["team_id"] == data["team_id"]
+        assert r.json()["org_id"] == data["org_id"]
         # unknown token → uniform 422
         r = client.post("/v1/agent/recover", json={"signup_token": _st_token()})
         assert r.status_code == 422
@@ -530,8 +530,8 @@ class TestSupabaseLane:
 
         # deleted team → uniform 422
         data2 = _mint(client)
-        team = next(t for t in self.fake.tables["teams"]
-                    if t["id"] == data2["team_id"])
+        team = next(t for t in self.fake.tables["organizations"]
+                    if t["id"] == data2["org_id"])
         team["deleted_at"] = "2026-01-01T00:00:00Z"
         r = client.post("/v1/agent/signup",
                         json={"signup_token": data2["signup_token"]})
@@ -540,8 +540,8 @@ class TestSupabaseLane:
 
     def test_suspended_team_403(self, client):
         data = _mint(client)
-        team = next(t for t in self.fake.tables["teams"]
-                    if t["id"] == data["team_id"])
+        team = next(t for t in self.fake.tables["organizations"]
+                    if t["id"] == data["org_id"])
         team["suspended_at"] = "2026-01-01T00:00:00Z"
         r = client.post("/v1/agent/signup",
                         json={"signup_token": data["signup_token"]})
@@ -557,7 +557,7 @@ class TestSupabaseLane:
         import httpx
 
         data = _mint(client)
-        token, team_id = data["signup_token"], data["team_id"]
+        token, org_id = data["signup_token"], data["org_id"]
 
         async def _run():
             transport = httpx.ASGITransport(app=app)
@@ -571,9 +571,9 @@ class TestSupabaseLane:
 
         results = asyncio.run(_run())
         assert all(r.status_code == 200 for r in results)
-        assert all(r.json()["team_id"] == team_id for r in results)
+        assert all(r.json()["org_id"] == org_id for r in results)
         keys = [k for k in self.fake.tables.get("api_keys", [])
-                if k["team_id"] == team_id and k.get("revoked_at") is None
+                if k["org_id"] == org_id and k.get("revoked_at") is None
                 and k.get("created_via") != "bootstrap"]
         assert len(keys) <= 2, f"cap overshot: {len(keys)} active non-bootstrap keys"
 
@@ -584,8 +584,8 @@ class TestSupabaseLane:
     # transport (rpc commits server-side, echoes nothing) and assert the
     # wrapper still resolves.
 
-    def _token_row(self, th: str, team_id: str) -> dict:
-        return {"token_hash": th, "team_id": team_id, "created_at": None,
+    def _token_row(self, th: str, org_id: str) -> dict:
+        return {"token_hash": th, "org_id": org_id, "created_at": None,
                 "last_used_at": None, "revoked_at": None}
 
     def test_resolve_wrapper_reads_back_when_rpc_echoes_nothing(self):
@@ -620,15 +620,15 @@ class TestSupabaseLane:
         lookup = "lu1709transport0000"
         fake.seed("agent_signup_tokens",
                   [self._token_row(th, "team-1709-t1")])
-        fake.seed("teams", [{"id": "team-1709-t1", "name": "T1"}])
+        fake.seed("organizations", [{"id": "team-1709-t1", "name": "T1"}])
         # the RPC committed server-side (mint landed) but echoed nothing
         fake.seed("api_keys", [{
-            "id": "key_team-1709-t1_lu1709transp", "team_id": "team-1709-t1",
+            "id": "key_team-1709-t1_lu1709transp", "org_id": "team-1709-t1",
             "lookup_hash": lookup, "key_prefix": "tt_1709",
             "created_via": "recovery", "created_by": "st_" + th[:12],
             "created_at": None, "expires_at": None, "revoked_at": None}])
         fake.rpc = lambda fn, body=None: None  # type: ignore[method-assign]
-        out = sc.recover_team_key(fake, token_hash=th, team_id="team-1709-t1",
+        out = sc.recover_org_key(fake, token_hash=th, org_id="team-1709-t1",
                                   lookup_hash=lookup, key_prefix="tt_1709",
                                   max_api_keys=2)
         assert out == "team-1709-t1"
@@ -642,8 +642,8 @@ class TestSupabaseLane:
 
         fake = FakeControlPlane()
         fake.rpc = lambda fn, body=None: None  # type: ignore[method-assign]
-        with pytest.raises(RuntimeError, match="no team_id"):
-            sc.recover_team_key(fake, token_hash="th", team_id="team-1709-t1",
+        with pytest.raises(RuntimeError, match="no org_id"):
+            sc.recover_org_key(fake, token_hash="th", org_id="team-1709-t1",
                                 lookup_hash="lu-absent", key_prefix="tt_",
                                 max_api_keys=2)
 
@@ -666,7 +666,7 @@ class TestSupabaseLane:
 
         fake.rpc = _prod_rpc  # type: ignore[method-assign]
         with pytest.raises(sc.SignupTokenRecoveryError) as ei:
-            sc.recover_team_key(fake, token_hash="th", team_id="team-1",
+            sc.recover_org_key(fake, token_hash="th", org_id="team-1",
                                 lookup_hash="lu", key_prefix="tt_",
                                 max_api_keys=2)
         assert ei.value.status == 422
@@ -678,6 +678,6 @@ class TestSupabaseLane:
 
         fake.rpc = _prod_5xx  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="HTTP 500"):
-            sc.recover_team_key(fake, token_hash="th", team_id="team-1",
+            sc.recover_org_key(fake, token_hash="th", org_id="team-1",
                                 lookup_hash="lu", key_prefix="tt_",
                                 max_api_keys=2)
