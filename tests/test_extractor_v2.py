@@ -907,6 +907,32 @@ class TestS3:
         types = {t for _, t in sdk.calls}
         assert "object" in types and "event" in types
 
+    def test_turn_echo_is_never_an_s3_prior(self, monkeypatch):
+        """#2552: the capture's own episodic turn echo (``{sid}_t{i}``) is
+        transcript, not memory — S3 must not return it as a link-before-create
+        prior, or the extracted claim NOOP-folds onto the echo and its
+        operators resolve to a turn id (invisible to the memory layer)."""
+        monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+
+        class MockSDK:
+            def tortoise_fts_query(self, query, *, entity_type, limit=3):
+                if entity_type != "point":
+                    return []
+                return [
+                    {"id": "s1_t3", "content": "[user] the lease makes that "
+                     "impossible no matter how we roll out",
+                     "kind": "event"},
+                    {"id": "pt_real", "content": "a real claim",
+                     "kind": "statement"},
+                ]
+
+        res = v2.search_graph(MockSDK(), S2_FIXTURE, "STORY")
+        ids = [p["id"] for p in res["points"]]
+        assert "s1_t3" not in ids
+        assert "pt_real" in ids
+        assert v2._is_turn_echo_id("wp06_quarry_rollout_t8")
+        assert not v2._is_turn_echo_id("pt_e3f831d86cf073e2af58d9b542c5ca7be19ec7c114d307f675fce08b1672a8")
+
     def test_degrades_on_backend_error(self, monkeypatch):
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
