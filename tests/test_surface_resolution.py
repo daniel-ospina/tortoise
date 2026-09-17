@@ -36,6 +36,12 @@ in BOTH directions:
 * **repairing** one of the five turns its case into XPASS, and ``strict=True``
   **reds the build** — no expected-failure marker outlives the defect it records.
 
+The case set is guarded in two layers: the collection gate below runs at IMPORT
+time (during collection, before pytest applies ``-k``/``-m``/node-id selection, so
+no invocation can hide a shrunken or orphaned case set), and
+``test_resolution_exercises_every_registry_entry`` adds the run receipt — the
+declared cases must actually EXECUTE, not merely be declared or collected.
+
 So this file is red evidence by construction: it is green only while the dead set
 is exactly the five recorded in ``_DEAD_LINKS_AWAITING_3863``. Do NOT add a name
 to that ledger to silence a failure, and do NOT remove a name to accommodate a
@@ -101,9 +107,13 @@ def _marks(entry):
 
 
 # Resolved once for parametrization: the decorator consumes this list, and the
-# coverage assertion pins the cases pytest was actually GIVEN (the decorator's
+# import-time gate below pins the cases pytest was actually GIVEN (the decorator's
 # argvalues) rather than this declared list.
 _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
+
+# Cases that actually EXECUTED, recorded by the scoreboard as each case runs. The
+# import-time gate proves the case set was declared; only this proves it RAN.
+_EXECUTED: set[str] = set()
 
 
 @pytest.mark.parametrize(
@@ -119,6 +129,7 @@ def test_every_registered_entry_resolves_to_a_live_method(entry, target, where):
     are the first red cases — carried as ``xfail(strict=True)``, so repairing one
     reds the build and a sixth dead entry fails it.
     """
+    _EXECUTED.add(entry.name)
     assert callable(target), (
         f"{entry.name} does not resolve: the registry names {where!r}, which is "
         f"{'absent' if target is None else type(target).__name__!r}. The dead thing is the "
@@ -139,8 +150,7 @@ def _parametrized_cases():
     ``_TARGETS``, so a decorator-only mutation (``_TARGETS[:5]``) shrinks the
     collection while ``_TARGETS`` itself stays full: an assertion on ``_TARGETS``
     is tautological in exactly the case that matters. Reading the marks also keeps
-    the count correct when the run deselects items, which would empty
-    ``session.items`` of those cases.
+    the count correct when the run deselects items.
     """
     for mark in test_every_registered_entry_resolves_to_a_live_method.pytestmark:
         if mark.name == "parametrize":
@@ -148,56 +158,49 @@ def _parametrized_cases():
     return []
 
 
-def _collected_entry_names(session):
-    """Names of the registry entries pytest actually COLLECTED a case for."""
-    names = []
-    for item in session.items:
-        if item.function is not test_every_registered_entry_resolves_to_a_live_method:
-            continue
-        entry = item.callspec.params.get("entry")
-        if entry is not None:
-            names.append(entry.name)
-    return names
+# --- collection gate: fail-closed and NON-DESELECTABLE ----------------------
+# Validated at IMPORT time, i.e. during collection and BEFORE pytest applies
+# `-k`, `-m` or node-id selection. A shrunken or orphaned case set therefore
+# cannot be hidden by deselecting the test that reports it — collection errors
+# out instead, whatever the invocation selects. This is the declaration half of
+# the guard; ``test_resolution_exercises_every_registry_entry`` adds the run
+# receipt (the declared cases must EXECUTE, not merely be declared).
+_CASES = [param.values[0].name for param in _parametrized_cases()]
+assert _CASES, "empty scoreboard — no registry entries to resolve (fail-closed)"
+assert [e.name for e in TOOL_REGISTRY] == _CASES, (
+    f"the scoreboard PARAMETRISED {len(_CASES)} cases for {len(TOOL_REGISTRY)} registry "
+    f"entries — a sample (or a truncated decorator list) is not a scoreboard"
+)
+_ORPHANS = sorted(_DEAD_LINKS_AWAITING_3863 - set(_CASES))
+assert not _ORPHANS, (
+    f"orphaned ledger entries — recorded dead in _DEAD_LINKS_AWAITING_3863 but "
+    f"consumed by no case: {_ORPHANS}"
+)
 
 
-def test_resolution_exercises_every_registry_entry(request):
-    """The scoreboard must cover ALL entries — a sample (or a truncated list) is
-    a false PASS.
+def test_resolution_exercises_every_registry_entry():
+    """The scoreboard must EXECUTE every entry — a declared sample is a false PASS.
 
-    The case set is pinned on what pytest was actually GIVEN — the ``parametrize``
-    argvalues the decorator was handed — never on ``_TARGETS`` alone: the
-    decorator-only mutation ``_TARGETS[:5]`` leaves ``_TARGETS`` full while the
-    parametrised collection drops to 5, so a check against ``_TARGETS`` stays
-    green. The collected cross-check is UNCONDITIONAL (fail-closed): a run that
-    did not collect every case is not evidence of coverage, whether that is
-    because a decorator shrank the set or because the invocation deselected
-    cases. Running this file with ``-k`` on a subset therefore REDs by design.
+    The declared case set is pinned by the import-time gate above, which no
+    invocation can deselect. This test adds the run receipt: the declared cases
+    must actually have RUN. A ``skip`` marker, a subset selection or a shrunken
+    collection leaves ``_EXECUTED`` short of ``_CASES`` and FAILS, where an
+    assertion on the collected/declared set alone would stay green.
 
-    Mutations that RED this assertion:
-    * truncate the decorator's parametrize list (``for e, t, w in _TARGETS[:5]``)
-      — the parametrised case set no longer covers the registry; or
-    * delete a registry entry (the delete arm of #3863) while its name stays in
-      ``_DEAD_LINKS_AWAITING_3863`` — the ledger entry is then consumed by no
-      case.
+    ``_EXECUTED`` is populated by the scoreboard cases as they execute, so this
+    depends on them running first (definition order in this module). That
+    dependency is fail-closed: if they did not run, ``_EXECUTED`` is empty and
+    this test FAILS — it can cause a false RED, never a false GREEN.
+
+    Residual, stated rather than hidden: pytest collects no hooks from test
+    modules, so an invocation that deselects THIS test (``-k``/``-m``/node-id)
+    does not execute the run receipt. The declaration is still validated at import
+    then, and CI runs the module whole.
     """
-    assert TOOL_REGISTRY, "empty registry — nothing to resolve (fail-closed)"
-    names = [param.values[0].name for param in _parametrized_cases()]
-    assert len(names) == len(TOOL_REGISTRY), (
-        f"the scoreboard PARAMETRISED {len(names)} cases for {len(TOOL_REGISTRY)} "
-        f"registry entries — a sample (or a truncated decorator list) is not a scoreboard"
-    )
-    assert names == [e.name for e in TOOL_REGISTRY], (
-        "parametrised case ids do not cover the registry in order — a sample is not a scoreboard"
-    )
-    collected = _collected_entry_names(request.session)
-    assert collected == names, (
-        f"the run COLLECTED {len(collected)} cases but the decorator parametrised "
-        f"{len(names)} — a run that did not collect the scoreboard is not coverage"
-    )
-    orphans = sorted(_DEAD_LINKS_AWAITING_3863 - set(names))
-    assert not orphans, (
-        f"orphaned ledger entries — recorded dead in _DEAD_LINKS_AWAITING_3863 but "
-        f"consumed by no collected case: {orphans}"
+    not_executed = sorted(set(_CASES) - _EXECUTED)
+    assert not not_executed, (
+        f"the scoreboard EXECUTED {len(_EXECUTED)} of {len(_CASES)} declared cases — "
+        f"collected or declared is not coverage. Never executed: {not_executed}"
     )
 
 
@@ -212,11 +215,9 @@ def test_live_mcp_surface_registers_every_entry():
     tools = asyncio.run(mcp_server.mcp._list_tools())
     registered = {t.name for t in tools}
     expected = {e.name for e in TOOL_REGISTRY}
-    assert not (expected - registered), (
-        f"registry entries absent from the live MCP surface: {sorted(expected - registered)}"
-    )
     assert registered == expected, (
-        f"live MCP surface drift — extra: {sorted(registered - expected)}"
+        f"live MCP surface drift — absent: {sorted(expected - registered)}, "
+        f"extra: {sorted(registered - expected)}"
     )
 
 
