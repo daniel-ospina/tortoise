@@ -1765,6 +1765,26 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
     return queries
 
 
+# #2552: the capture's own episodic turn echo is TRANSCRIPT, not memory.
+# capture_session writes the turn Points (deterministic ids ``{session_id}_t{i}``,
+# is_episodic=true) BEFORE extraction runs — the SAME distinction the graded
+# memory layer encodes (snapshot_session's ``_turn_id_pattern`` / grading's
+# is_turn_echo). On a fresh capture those echoes are the ONLY content in the
+# graph, so S3 returned them as the link-before-create prior set; the newly
+# extracted claim then NOOP-folded onto its own transcript echo
+# (classify_consolidation), never became a memory Point, and every operator
+# referencing it resolved (via execute_embed's point_ids) to the turn id —
+# an endpoint invisible to the memory layer, so the planted-operator audit
+# graded it from_content_missing / to_content_missing / edge_missing. S3 must
+# never dedup the extraction against the transcript it is extracting.
+_TURN_ECHO_ID_RE = re.compile(r"_t\d+$")
+
+
+def _is_turn_echo_id(point_id) -> bool:
+    """True for a capture turn-echo Point id (``{session_id}_t{i}``)."""
+    return bool(point_id) and bool(_TURN_ECHO_ID_RE.search(str(point_id)))
+
+
 def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3) -> list[dict]:
     rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit)
     out = []
@@ -1772,6 +1792,9 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3) -> list[dict]:
         if entity_type in ("object", "subject"):
             out.append({"id": r.get("id", ""), "name": r.get("content", ""),
                         "kind": r.get("kind", "")})
+        elif entity_type == "point" and _is_turn_echo_id(r.get("id")):
+            # #2552: transcript echo — never a memory prior.
+            continue
         else:
             out.append({"id": r.get("id", ""), "content": r.get("content", ""),
                         "kind": r.get("kind", "")})
