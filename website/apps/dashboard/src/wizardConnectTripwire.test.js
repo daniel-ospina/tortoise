@@ -4,7 +4,8 @@
 // has no React runtime harness, so — mirroring graphRenameDeleteTripwire
 // (#2701) and the other main.jsx tripwires — regressions that can be expressed
 // as source structure are pinned HERE. The RUNTIME outcomes are measured in
-// tests/e2e/test_dashboard_onboarding.py (Playwright over the committed dist);
+// tests/e2e/test_dashboard_onboarding.py (Playwright over the built dist —
+// `npm run build` first; dist/ is a build artifact since #3775);
 // these assertions are the cheap regression net for refactors.
 //
 // Test-review hardening (2026-09-10): every slice is marker-guarded (a lost
@@ -445,8 +446,9 @@ test('#2912: the step announcement re-renders when the paused state is resolved'
 // ── #3428 / #2937 (lane B3): the wizard cannot falsely claim connected ────
 // The lane's exit evidence is negative: a completed wizard must be UNABLE to
 // claim `harness-connected` without a server-observed connection. The runtime
-// proof lives in tests/e2e/test_dashboard_onboarding.py (over the committed
-// dist); these are the cheap structural net for refactors.
+// proof lives in tests/e2e/test_dashboard_onboarding.py (over the built dist
+// — `npm run build` first, #3775); these are the cheap structural net for
+// refactors.
 
 test('#3428: the connect-step advance no longer writes the harness-connected checkpoint', () => {
   // The human writer is DELETED. Pinning its absence matters because re-adding
