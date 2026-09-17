@@ -254,6 +254,29 @@ class _GuardedGraph:
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS  # noqa: E402, I001
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
+
+# #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
+# `noeviction` REFUSES WRITES while the graph is perfectly intact. The reply
+# text is the only signal that separates "full" from "corrupt", so it is
+# matched case-insensitively against the server's own wording. Reported as
+# corruption, it sends an operator to `rebuild` — i.e. toward destroying
+# healthy data — which is strictly worse than a vague error would be.
+_WRITE_REFUSAL_MARKERS = (
+    "used memory >",            # redis: "... used memory > 'maxmemory'"
+    "oom command not allowed",  # redis 7 wording
+    "out of memory",            # generic engine wording
+)
+
+
+def _fmt_bytes(n: int) -> str:
+    """Human byte size for an operator-facing message."""
+    step = 1024.0
+    val = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if val < step or unit == "TiB":
+            return f"{val:.0f} B" if unit == "B" else f"{val:.1f} {unit}"
+        val /= step
+    return f"{val:.1f} TiB"
 from tortoise.embedded_lifecycle import (  # noqa: E402
     atexit_fast_close,  # #1371: registers the batch flush
     register_atexit_close,
@@ -575,6 +598,8 @@ from tortoise.projection.entities import _EntityHandlers  # noqa: E402, I001
 from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
 from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
 from tortoise.projection.propagation import _PropagationMixin  # noqa: E402
+# #2795: cycle-free derived-hash helper for the PointRevised replay writer.
+from tortoise.ids import content_hash as _content_hash  # noqa: E402
 
 # #244: Event FTS index migration (subject-only → subject+name) is tracked by a
 # persisted DB marker (Meta node 'event_fts_v2'), not a process-local flag — a
@@ -630,6 +655,46 @@ def _norm(ev: dict) -> dict:
     if isinstance(ev.get("point"), dict):
         return {**ev, **ev["point"]}
     return ev
+
+
+# Recognized journal record types the projection folds NOWHERE — audit-only
+# markers plus the JSONL-only durability records replayed by a dedicated pass
+# or deliberately deferred. The ``else`` warning in ``apply``/``rebuild_all``
+# is reserved for a type OUTSIDE this set: a genuinely unknown record the fold
+# cannot interpret (#3299 arose from exactly that — an unknown mutation
+# vanishing silently under wipe+replay). Listing a type here is a claim that
+# it is recognized-and-intentionally-not-folded; never add a type that has a
+# real fold branch below (the branch would win anyway, but the set would then
+# mislead the next reader about what is unknown).
+_NO_PROJECTION_FOLD = frozenset({
+    "ConfidenceChanged",    # audit-only, no graph effect (pre-existing no-op)
+    "IngestStarted",        # audit-only, no graph effect (pre-existing no-op)
+    "BatchIdStamped",       # JSONL-only; replayed from the batch snapshot
+                            # (rebuild_all pass-2b), not via this dispatcher
+    "DirectEdgeCreated",    # JSONL-only; deliberately deferred (A10 #1048)
+    "CalibrationRecorded",  # :Meta milestone marker (audit)
+    "DedupeRecorded",       # #784 content-dedup audit
+    "DedupeRejected",       # #784 content-dedup audit
+})
+
+# ``_apply_one`` is the POINT-ONLY in-memory fold (a ``{id: point}`` dict), so
+# every recognized non-point record is a no-op there as well: the non-point
+# entities and the flat edge descriptor have no representation in that index.
+# Union with ``_NO_PROJECTION_FOLD`` so this dispatcher's warning, like the
+# Falkor ones, fires only for a type outside the projection vocabulary.
+# NOTE: the point-lifecycle types folded by ``apply``/``rebuild_all``
+# (PointPromoted / OperatorPromoted / PointSuperseded / PointInvalidated) are
+# deliberately NOT listed — this index has no fold for them, so the warning is
+# a true signal of the pre-existing in-memory-scope gap, not noise.
+_NO_POINT_FOLD = _NO_PROJECTION_FOLD | frozenset({
+    "EventRecorded",
+    "SubjectAdded",
+    "ObjectRegistered",
+    "ObjectSuperseded",
+    "DocumentCreated",
+    "SourceCreated",
+    "DirectEdgeRepoint",
+})
 
 
 def _apply_one(points: dict[str, dict], ev: dict) -> None:
@@ -689,7 +754,25 @@ def _apply_one(points: dict[str, dict], ev: dict) -> None:
             # #331 (review r4): str-only — dict.pop(unhashable) raises.
             if isinstance(mid, str):
                 points.pop(mid, None)
-    # IngestStarted: no graph effect
+    elif t == "EntityMutated":
+        # #3299: the write-surface mutation record. In-memory points are keyed
+        # by id, so `op=delete` drops the point; other ops (rename/restatus)
+        # are no-ops on this pure-point index until a sibling extends them.
+        if ev.get("op") == "delete":
+            rid = ev.get("id")
+            if isinstance(rid, str):
+                points.pop(rid, None)
+    elif t in _NO_POINT_FOLD:
+        # Recognized, intentionally NOT folded by this point-only index:
+        # audit markers, the JSONL-only records replayed by a dedicated pass,
+        # and the non-point/edge records with no ``{id: point}`` entry. This
+        # warning is reserved for a type OUTSIDE the vocabulary (see the
+        # ``_NO_PROJECTION_FOLD`` / ``_NO_POINT_FOLD`` rationale above).
+        pass
+    else:
+        # P2-1 (#3299): a record type outside the recognized vocabulary must
+        # not vanish silently.
+        logger.warning("unrecognized event type %r — skipped", t)
 
 
 def fold(events: list[dict]) -> dict[str, dict]:
@@ -1075,6 +1158,7 @@ class FalkorProjection(
             raise ValueError("Either path or host must be provided")
 
         self.g = _GuardedGraph(self.db.select_graph(graph_name), self)
+        self._probe_error: BaseException | None = None
         self.graph_name = graph_name
         self._graph_name = graph_name
         self._skip_guard = False
@@ -1142,12 +1226,76 @@ class FalkorProjection(
     # ── Ops safety (#428): health check + transparent recovery ────────────
 
     def _probe_ok(self) -> bool:
-        """Cheap connectivity probe — does the graph answer queries?"""
+        """Cheap connectivity probe — does the graph answer queries?
+
+        The failure REASON is retained on ``self._probe_error``. A
+        full-but-healthy server refuses writes with an ``OOM``/``maxmemory``
+        reply, and that reply must not be reported as corruption (#2981) —
+        which requires keeping it rather than collapsing it to a bool.
+        """
+        self._probe_error = None
         try:
             self.g.query("MATCH (n) RETURN count(n) LIMIT 1")
             return True
-        except Exception:
+        except Exception as exc:
+            self._probe_error = exc
             return False
+
+    def _memory_pressure(self) -> tuple[int, int] | None:
+        """``(used_memory, maxmemory)`` in bytes, or ``None`` if unreadable.
+
+        Best-effort and fully guarded: the falkordb client exposes ``.info()``
+        only on some versions and the raw redis connection only on others, so
+        both paths are tried. An unreadable value must never change the error
+        CLASS — only how rich its message is.
+        """
+        info = None
+        try:
+            conn = getattr(self.db, "connection", None)
+            if conn is not None:
+                info = conn.info("memory")
+            elif hasattr(self.db, "info"):
+                info = self.db.info()
+        except Exception:
+            return None
+        if not isinstance(info, dict):
+            return None
+        try:
+            used = int(info.get("used_memory", 0) or 0)
+            cap = int(info.get("maxmemory", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return (used, cap) if cap > 0 else None
+
+    def _write_refusal_message(self, exc: BaseException | None) -> str | None:
+        """The DISTINCT error for a ``maxmemory`` write-refusal, else ``None``.
+
+        Returns ``None`` when the probe failed for any other reason — real
+        corruption included — so the rebuild advice still applies there. That
+        second direction is what keeps this branch honest: it NARROWS the
+        remedy, it does not remove it.
+        """
+        if exc is None:
+            return None
+        text = str(exc).lower()
+        if not any(marker in text for marker in _WRITE_REFUSAL_MARKERS):
+            return None
+        pressure = self._memory_pressure()
+        if pressure is None:
+            detail = ("server reports a maxmemory write-refusal "
+                      "(used_memory/maxmemory unreadable)")
+        else:
+            used, cap = pressure
+            detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
+                      f"{_fmt_bytes(cap)}")
+        return (
+            "DB refused writes on open: the graph is INTACT but the server "
+            f"has reached its memory ceiling ({detail}). This is NOT "
+            "corruption — do NOT rebuild. Free memory first: delete "
+            "ephemeral test graphs (GRAPH.LIST, then GRAPH.DELETE test_*), "
+            "or raise / relieve the container's --maxmemory. See #2981 for "
+            "the shared-lane form of this."
+        )
 
     def _find_local_jsonl_dir(self) -> str | None:
         """Adjacent JSONL event-log dir (same directory as the embedded DB).
@@ -1187,6 +1335,11 @@ class FalkorProjection(
         is_prod = bool(os.environ.get("FLY_APP_NAME"))
 
         if not self._probe_ok():
+            # Full-but-healthy is NOT corrupt: a maxmemory write-refusal gets
+            # its own error and must never be sent down the rebuild path.
+            refusal = self._write_refusal_message(self._probe_error)
+            if refusal is not None:
+                raise RuntimeError(refusal)
             if is_prod or not self._is_embedded:
                 raise RuntimeError(
                     "DB health check failed on open (server/production mode). "
@@ -1370,6 +1523,12 @@ class FalkorProjection(
                 # #331 (review r4): str-only ids.
                 if isinstance(mid, str):
                     self._delete(mid)
+        elif t == "EntityMutated":
+            # #3299: replay the write-surface mutation record. Chronological
+            # dispatch (rebuild()/backup/consistency) — journal order is the
+            # correctness contract (a later creation event must win over an
+            # earlier delete), so fold INLINE, never deferred.
+            return self._fold_entity_mutation(ev)
         elif t == "EventRecorded":
             return self._upsert_event(ev)
         elif t == "SubjectAdded":
@@ -1392,6 +1551,21 @@ class FalkorProjection(
             # popped here so it never reaches _persist_extra_props.
             return self._upsert_source(
                 ev, merge_run_id=ev.pop("_merge_run_id", None))
+        elif t in _NO_PROJECTION_FOLD:
+            # Recognized, intentionally folded elsewhere or not at all: the
+            # audit-only markers, the JSONL-only batch snapshot replayed in
+            # rebuild_all pass-2b, and the deliberately-deferred
+            # DirectEdgeCreated (A10 #1048). The warning below is reserved
+            # for a type OUTSIDE this vocabulary — #3299 arose from exactly
+            # that (an unknown mutation vanishing under wipe+replay).
+            pass
+        else:
+            # P2-1 (#3299): a record type outside the recognized vocabulary
+            # must not be dropped silently. A type that IS recognized but has
+            # no branch HERE — e.g. PointSuperseded / PointInvalidated /
+            # DirectEdgeRepoint, folded only by rebuild_all's deferred pass —
+            # still warns: that is a genuine rebuild-parity gap, not noise.
+            logger.warning("unrecognized event type %r — skipped", t)
 
     def rebuild(self, log) -> None:
         self.g.query("MATCH (n) DETACH DELETE n")
@@ -1424,6 +1598,11 @@ class FalkorProjection(
         """
         import os  # noqa: I001
         from tortoise.log import EventLog
+
+        # #2958 review: reset the once-per-key deny-drop warning set for this
+        # rebuild pass (see `_upsert_point_props`) so the report is emitted once
+        # per key per pass instead of once per graph-only point.
+        self._deny_drop_warned = set()
 
         # ── #548: snapshot existing graph BEFORE wiping ──────────────
         # SDK-created points written via Cypher may have no corresponding
@@ -1567,15 +1746,17 @@ class FalkorProjection(
                         "rebuild: skipping %s with missing point id "
                         "(event_id=%s)", t, ev.get("event_id"))
                     continue
-                # #2488: record the id's LAST PointAdded journal seq — the
-                # sweep's cross-family survivor anchor (a re-created id's
+                # #2488/#3299: record the id's LAST hoisted-creation journal
+                # seq — the cross-family survivor anchor (a re-created id's
                 # pre-recreation terminalizing folds died with the deleted
-                # node). PointAdded ONLY — PointPromoted is NOT a drop
-                # boundary (promote is same-node draft→live; it never clears
-                # outdated/CORRECTS, so seeding from it would silently drop a
-                # pre-promote invalidate fold). OperatorAdded rows are not
-                # recorded (operators are not invalidatable/supersedable).
-                if t == "PointAdded":
+                # node). PointAdded is the original #2488 anchor; #3299 adds
+                # OperatorAdded because an EntityMutated delete is entity-wide
+                # (an operator IS a Point node), so a delete→recreate operator
+                # journal needs the identical survivor rule. PointPromoted is
+                # NOT a drop boundary (promote is same-node draft→live; it
+                # never clears outdated/CORRECTS, so seeding from it would
+                # silently drop a pre-promote invalidate fold).
+                if t in ("PointAdded", "OperatorAdded"):
                     last_recreate_seq[p["id"]] = seq
                 # Phase 1 stop-writes: strip context from v2+ events (#49)
                 # (identical to apply() — parity between rebuild and apply)
@@ -1659,6 +1840,70 @@ class FalkorProjection(
                     # #331 (review r4): str-only ids.
                     if isinstance(mid, str):
                         self._delete(mid)
+            elif t == "EntityMutated":
+                # #3299 pass-1b rebuild parity: apply() folds the
+                # write-surface mutation record; the rebuild chain needs the
+                # SAME branch or a journaled delete silently falls through
+                # and the entity's creation event (pass 1a PointAdded /
+                # OperatorAdded, or the pass-1b Subject/Object/Event/
+                # Document/Source upsert) resurrects it.
+                #
+                # Inline ordering holds WITHIN pass-1b: for non-hoisted
+                # labels the creation and the delete live in this same loop,
+                # so a delete→recreate journal ends with the node present and
+                # replaying the hard delete is idempotent.
+                #
+                # Hoisted Point/Operator creations do NOT: pass-1a applies
+                # EVERY PointAdded/OperatorAdded before this loop runs, so a
+                # naive inline fold would delete a re-created incarnation
+                # (delete ALWAYS executes after every create, regardless of
+                # journal order). Apply the #2488 survivor rule inverted — a
+                # delete whose seq precedes the id's last hoisted creation
+                # was already superseded live by that re-creation, so it must
+                # not be folded (same anchor variable and comparison shape as
+                # the point_re_stamp_folds sweep below).
+                # RESIDUAL (P2-1, tracked separately — B5): this survivor
+                # anchor is ID-KEYED and LABEL-BLIND. ``last_recreate_seq`` is
+                # seeded from PointAdded/OperatorAdded by bare id, while the
+                # EntityMutated fold below (and the live delete it mirrors) is
+                # id-wide across all six labels. A cross-label id collision —
+                # a raw producer that reuses a non-namespaced id across, say,
+                # Point and Subject — can therefore OVER-SUPPRESS a legitimate
+                # delete: replay skips it and the other label's entity is
+                # resurrected, diverging from live. PRECONDITION: cross-label
+                # id collision via a non-namespaced raw producer; public id
+                # schemes are namespaced (pt_/sub-/obj-/doc-/ULID), so the SDK
+                # surface cannot reach it. Documented here, NOT fixed — do not
+                # mistake this anchor for label-correct.
+                rid = ev.get("id")
+                anchor = (
+                    last_recreate_seq.get(rid)
+                    if isinstance(rid, str) else None)
+                if anchor is not None and seq <= anchor:
+                    continue
+                matched = self._fold_entity_mutation(ev)
+                if matched == 0 and ev.get("op") == "delete":
+                    # P2-2 fold-miss signal (the journal claims a delete whose
+                    # entity never re-existed on this replay — mirrors the
+                    # ObjectSuperseded / PointSuperseded / PointInvalidated
+                    # 0-row warnings).
+                    # RESIDUAL (P2-2, tracked separately — B5): the SDK emits
+                    # ONE EntityMutated record per matched LABEL (sdk.py
+                    # ``_delete_entity``), but this fold is ID-WIDE across all
+                    # six labels — so a successful multi-label delete's SECOND
+                    # record matches 0 and trips this warning even though the
+                    # delete succeeded. PRECONDITION: a cross-label id
+                    # collision via a raw, non-namespaced producer; public ids
+                    # are namespaced, so the SDK surface cannot reach it. Kept
+                    # audible deliberately; see also the label-blind survivor
+                    # anchor above.
+                    logger.warning(
+                        "rebuild: EntityMutated delete fold matched no "
+                        "entity (event_id=%s id=%r label=%r) — deleted "
+                        "entity not re-created by any journaled event "
+                        "(unjournaled creation, legacy journal, or delete "
+                        "race)",
+                        ev.get("event_id"), rid, ev.get("label"))
             elif t == "PointRevised":
                 # Phase 1: discard new_context for v2+ events (#49)
                 if ev.get("projection_version", 0) >= 2:
@@ -1750,7 +1995,17 @@ class FalkorProjection(
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
-            # ConfidenceChanged: no graph effect (audit-only event)
+            elif t in _NO_PROJECTION_FOLD:
+                # Recognized, intentionally not folded here — the audit-only
+                # markers, the JSONL-only batch snapshot (replayed in pass
+                # 2b) and the deliberately-deferred DirectEdgeCreated (A10
+                # #1048). The warning below is reserved for a type outside
+                # this vocabulary — see FalkorProjection.apply.
+                pass
+            else:
+                # P2-1 (#3299): a record type outside the recognized
+                # vocabulary must not be dropped silently.
+                logger.warning("unrecognized event type %r — skipped", t)
 
         # Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
         # creation events (see the branch above). Warn on 0-row folds — a
@@ -2956,6 +3211,22 @@ class FalkorProjection(
                 params["embedding"] = None  # wipe stale embedding on failure (#19)
 
         set_clauses = ["n.content = coalesce($c, n.content)"]
+        if new_content is not None:
+            # #2795: content_hash is derived from content — mirror the live
+            # update_point #1904 recompute so a replayed PointRevised cannot
+            # leave a STALE indexed dedup key behind (the writer now sets a
+            # hash on PointAdded, so a missed recompute here would be worse
+            # than the prior NULL). #2958 review: `is not None` is not a type
+            # gate — a non-str new_content from a corrupt/hand-edited JSONL
+            # line would raise inside sha256(text.encode) and kill the rebuild
+            # pass (the recovery path). NULL degrades to create_point's
+            # content-equality fallback; a stale present-but-wrong hash does
+            # not — so NULL is the correct failure value.
+            set_clauses.append("n.content_hash = $content_hash")
+            try:
+                params["content_hash"] = _content_hash(new_content)
+            except Exception:
+                params["content_hash"] = None
         # Phase 2 #49: context removed — new_context no longer written
         if "embedding" in params:
             set_clauses.append("n.embedding = $embedding")
@@ -2967,6 +3238,62 @@ class FalkorProjection(
             f"MATCH (n:Point {{id:$id}}) SET {', '.join(set_clauses)}",
             params=params,
         )
+
+    def _delete_entity_by_id(self, id_val: str) -> int:
+        """Hard-delete a canonical entity by id across all six labels.
+
+        The replay counterpart of the SDK's live ``_delete_entity`` (#3299):
+        the SAME six-label loop, so replay removes exactly what live removed.
+        The id predicate is the identity as written (``id`` for
+        Point/Subject/Object/Document/Source, ``eventId`` for Event) — never
+        re-derived from a live node (the node is already gone). Returns the
+        node count deleted (0 = a fold-miss: the entity was already absent).
+        """
+        total = 0
+        for label, prop in (("Point", "id"), ("Subject", "id"),
+                            ("Object", "id"), ("Document", "id"),
+                            ("Source", "id"), ("Event", "eventId")):
+            r = self.g.query(
+                f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n "
+                f"RETURN count(n)",
+                params={"id": id_val},
+            )
+            if r.result_set:
+                total += r.result_set[0][0] or 0
+        return total
+
+    def _fold_entity_mutation(self, ev: dict) -> int:
+        """Replay an ``EntityMutated`` write-surface record (#3299).
+
+        ONE record type, dispatching on the ``op`` discriminator so replay
+        reproduces the exact live end-state (the design chose this over one
+        event type per label×operation). ``op="delete"`` hard-deletes the
+        canonical entity by id, mirroring the live ``_delete_entity`` —
+        the ontology §5 contract: delete hard-deletes, retract tombstones.
+        The sibling lanes (#3300 MCP Point delete, #3312 unjournaled update,
+        #3377 unjournaled rename) extend this dispatch rather than adding
+        record types.
+
+        Returns the affected node count (0 for an unknown op or an
+        already-absent entity) — the fold-miss signal, so a rebuild can warn
+        when the journal claims a delete whose entity never re-existed.
+        """
+        if ev.get("op") != "delete":
+            # Future ops (retract/revise/rename/restatus) replay here; an
+            # unknown op is a no-op rather than a crash so a newer journal
+            # record cannot break an older rebuild.
+            return 0
+        rid = ev.get("id")
+        if not isinstance(rid, str):
+            # #331 parity: malformed id → skip, never crash the fold.
+            return 0
+        # P2-3: the fold is INTENTIONALLY id-wide (all six labels) because
+        # the live ``_delete_entity`` it mirrors is id-wide too — there is no
+        # divergence today. The record carries ``label`` (the identity as
+        # written) but this op does not read it. Any FUTURE per-label op
+        # (retract / rename — #3312, #3377) MUST begin resolving
+        # ``ev["label"]`` here, or replay stops matching the live write.
+        return self._delete_entity_by_id(rid)
 
     def list_graphs(self) -> list[str]:
         """List all graph names in the database."""

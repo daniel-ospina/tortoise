@@ -1,23 +1,32 @@
 """#2971 — `_find_terminal_dedup_hit` must keep matching on a hash-less
 (rebuilt) graph.
 
-After ``rebuild_all`` the JSONL replay leaves every Point with
-``content_hash = NULL`` (``_upsert_point_props``'s fixed SET list omits it and
-``_emit_event`` strips it from the journal), so the content-hash MATCH in
-``_find_terminal_dedup_hit`` misses for EVERY point. That helper is the
-Phase-1 mechanism behind the cycle-17/18 "bundle-local refs resolving to
-terminal points" ingest guard — on a rebuilt graph an ingest bundle could
-therefore wire a direct edge to a superseded/retracted Point and the guard
-would silently pass.
+``_find_terminal_dedup_hit`` is the Phase-1 mechanism behind the cycle-17/18
+"bundle-local refs resolving to terminal points" ingest guard. #2971 was the
+bug where ``rebuild_all`` left every Point with ``content_hash = NULL``
+(``_upsert_point_props``'s fixed SET list omitted it and ``_emit_event``
+stripped it from the journal), so the helper's content-hash MATCH missed for
+EVERY point and an ingest bundle could wire a direct edge to a
+superseded/retracted Point with the guard silently passing.
 
-These tests pin the A10 hash-less ``content+kind`` fallback (the #2892
-sibling) on the helper:
+The root cause is fixed: ``_upsert_point_props`` now RE-DERIVES
+``content_hash`` from the replayed content (#2795), so a rebuilt graph keeps
+its hashes and the primary hash MATCH fires exactly as it does on the
+incrementally-applied graph. The A10 hash-less ``content+kind`` fallback
+(the #2892 sibling) remains as defence for points that are genuinely
+hash-less — a crash between the node CREATE and the props SET, a hand-edited
+journal, or a graph rebuilt before the fix landed.
+
+These tests pin BOTH paths of that helper:
 
   (a) terminal + NULL hash      -> found via the fallback,
   (b) terminal + hash present   -> found exactly as before (unchanged path),
   (c) non-terminal + NULL hash  -> NOT returned (terminal scoping preserved),
   (d) end-to-end: after ``rebuild_all`` the ingest guard still rejects a
-      bundle-local ref that resolves to a terminal point (issue Indicator 2).
+      bundle-local ref that resolves to a terminal point, via the PRIMARY
+      hash path (the rebuild re-derives the hash — issue Indicator 2),
+  (e) end-to-end: the same guard still rejects a DELIBERATELY hash-less
+      terminal point, proving the fallback path (issue Indicator 2).
 
 Runnable embedded (with the carve-out opt-in):
 
@@ -119,11 +128,35 @@ class TestFindTerminalDedupHitFallback:
 
 
 class TestIngestGuardAfterRebuild:
+    @staticmethod
+    def _assert_bundle_local_ref_rejected(sdk: TortoiseSDK, content: str) -> None:
+        """Ingest a bundle whose ``pTerm`` local ref resolves to an existing
+        TERMINAL point holding ``content``, and assert the Phase-1 guard
+        rejects it.
+
+        Phase-1 (``BundleValidationError``): if the dedup guard misses, the
+        failure surfaces later as a Phase-2 error instead — so the exception
+        TYPE is the assertion, not merely "some error"."""
+        bundle = {
+            "points": [
+                {"ref": "pTerm", "kind": "statement", "content": content},
+                {"ref": "pB", "kind": "statement", "content": "a live claim"},
+            ],
+            "connections": [
+                {"from": "pTerm", "to": "pB", "operator": "IMPL"},
+            ],
+        }
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest(bundle)
+
     def test_bundle_local_ref_to_rebuilt_terminal_point_rejected(self, tmp_path):
-        """(d) Indicator 2: create a terminal point, rebuild the graph (hash
-        becomes NULL in the graph), then assert a bundle whose local ref
-        resolves to that point is still rejected at Phase-1 (the cycle-17/18
-        dedup-hit guard)."""
+        """(d) Indicator 2, PRIMARY path: create a terminal point, rebuild the
+        graph, then assert a bundle whose local ref resolves to that point is
+        rejected at Phase-1 (the cycle-17/18 dedup-hit guard).
+
+        ``rebuild_all`` now re-derives ``content_hash`` (#2795), so this
+        exercises the helper's primary content-hash MATCH — the path the guard
+        took before the #2971 regression."""
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "rebuilt.db"),
@@ -139,26 +172,49 @@ class TestIngestGuardAfterRebuild:
 
             sdk._get_proj().rebuild_all(str(events))
 
-            # Premise: the rebuild dropped the hash (the #2971 trigger) while
-            # preserving the terminal status.
+            # Premise (fixed by the #2795 re-derivation): the rebuild
+            # PRESERVES the hash while preserving the terminal status, so the
+            # guard's primary content-hash MATCH is the path under test.
             row = g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.status",
                 params={"id": pid}).result_set[0]
-            assert row[0] is None, "rebuild_all must leave content_hash NULL"
+            assert row[0] is not None, (
+                "rebuild_all must re-derive content_hash (#2795)")
             assert row[1] == "retracted"
 
-            bundle = {
-                "points": [
-                    {"ref": "pTerm", "kind": "statement", "content": content},
-                    {"ref": "pB", "kind": "statement", "content": "a live claim"},
-                ],
-                "connections": [
-                    {"from": "pTerm", "to": "pB", "operator": "IMPL"},
-                ],
-            }
-            # Phase-1 (BundleValidationError) — without the fallback the guard
-            # misses and the failure surfaces later as a Phase-2 error.
-            with pytest.raises(BundleValidationError, match="dedup hit"):
-                sdk.ingest(bundle)
+            self._assert_bundle_local_ref_rejected(sdk, content)
+        finally:
+            sdk.close()
+
+    def test_bundle_local_ref_to_hashless_terminal_point_rejected(self, tmp_path):
+        """(e) Indicator 2, FALLBACK path: the #2971 hash-less fallback is
+        still exercised end-to-end. After the rebuild, ``content_hash`` is
+        nulled DIRECTLY — the deliberate stand-in for a crash between the node
+        CREATE and the props SET (or a graph rebuilt before the fix) — and the
+        guard must still reject the bundle-local ref via the content+kind
+        fallback scan."""
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "hashless.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            content = "the hash-less retracted claim"
+            pid = sdk.create_point("statement", content)["id"]
+            sdk.retract_point(pid)
+
+            sdk._get_proj().rebuild_all(str(events))
+
+            # Deliberately construct the NULL-hash condition the fallback
+            # exists for — the rebuild itself no longer produces it (#2795).
+            g = sdk._get_proj().g
+            g.query("MATCH (n:Point {id:$id}) SET n.content_hash = NULL",
+                    params={"id": pid})
+            row = g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content_hash, n.status",
+                params={"id": pid}).result_set[0]
+            assert row[0] is None, "the deliberate null-hash seed must apply"
+            assert row[1] == "retracted"
+
+            self._assert_bundle_local_ref_rejected(sdk, content)
         finally:
             sdk.close()
