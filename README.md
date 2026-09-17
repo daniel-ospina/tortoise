@@ -20,9 +20,7 @@ superseded — and confidence) + points (the logic: claims connected to the
 state, the arguments that move confidence) + events (what happened, including
 the decision moment as an Event node, so the decision dimension stays
 queryable as a timeline). The graph says "this state is based on these
-reasons" — never "this decision was made because of these reasons". The
-narrative lives in the graph's content **and** its metadata; agents are the
-computational layer that reads and maintains it; semantic summaries are
+reasons". The narrative lives in the graph's content, structure, **and** its metadata; agents are the computational layer that reads and maintains it; semantic summaries are
 derived projections, never the record. Evidence stays authoritative: every
 Point keeps its quoted source span, and the graph is an auditable index over
 unrewritten evidence.
