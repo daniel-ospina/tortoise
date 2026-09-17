@@ -1337,6 +1337,16 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // detectSessionInUrl: false — two consumers both destroy the fragment when
   // the shared storage write is refused.
   const COOKIE_NAME = "sb-tortoise-auth-token";
+  // #3503 (review P1, round 4): supabase-js's own ingestion clears
+  // `window.location.hash` BEFORE awaiting its `_saveSession()` — and that save
+  // is the adapter write refused below when the session is over the cookie cap.
+  // Because this page has no bridge to parse the fragment itself, the refusal
+  // alone CANNOT preserve the credential: by the time it fires the hash is
+  // already gone. Snapshot it here (before createClient) so the recovery in
+  // showConsentOnce() can put the only copy back.
+  const FRAGMENT_SNAPSHOT = window.location.hash || "";
+  const HAD_LIVE_TOKEN_FRAGMENT =
+    /[?&#](?:access_token|refresh_token|code)=/.test(FRAGMENT_SNAPSHOT);
   // #1704: parent-domain cookie storage — a faithful port of the
   // dashboard's supabaseStorage (website/assets/supabase-session.js):
   // getItem reads an existing dashboard session (no second login),
@@ -1505,7 +1515,22 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
 
   async function showConsentOnce() {
     const { data } = await supabaseClient.auth.getSession();
-    if (!data.session) { showSignin(); return "nosession"; }
+    if (!data.session) {
+      // #3503 (review P1, round 4): a live token fragment was present at load
+      // and is gone now — supabase-js ingested it, its `_saveSession` write was
+      // REFUSED (over-cap cookie), and it cleared the hash before failing. The
+      // fragment is the only surviving copy of the credential: restore it and
+      // say why, instead of silently dropping to the sign-in view (where a
+      // fresh OAuth would return the same over-cap fragment and loop).
+      if (HAD_LIVE_TOKEN_FRAGMENT &&
+          !/[?&#](?:access_token|refresh_token|code)=/.test(window.location.hash)) {
+        window.location.hash = FRAGMENT_SNAPSHOT;
+        showSignin();
+        showError("Signed in, but this browser could not save the session — the sign-in cookie was rejected (it can exceed the browser's cookie limit, or cookies may be blocked). Nothing was discarded: reload the page to retry, or sign in again below.");
+        return "refused";
+      }
+      showSignin(); return "nosession";
+    }
     document.getElementById("view-consent").style.display = "block";
     document.getElementById("view-signin").style.display = "none";
     hideError();

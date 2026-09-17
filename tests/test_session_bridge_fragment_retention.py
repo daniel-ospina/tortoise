@@ -142,8 +142,9 @@ const vm = require('vm');
 const bridgePath = process.argv[2];
 const mode = process.argv[3] || 'bridge';
 const bundlePath = process.argv[4] || '';
-const dashboardPath = process.argv[5] || '';
-const authPagePath = process.argv[5] || '';
+const pagePath = process.argv[5] || '';
+const dashboardPath = pagePath;
+const authPagePath = pagePath;
 const src = fs.readFileSync(bridgePath, 'utf8');
 
 // Chrome limits a cookie's NAME + VALUE (net/cookies/parsed_cookie.h
@@ -194,6 +195,30 @@ function makeEnv(opts) {
   document.visibilityState = 'visible';
   document.addEventListener = function () {};
   document.removeEventListener = function () {};
+  // Minimal DOM for the server-rendered surfaces (oauth.py's consent page wires
+  // itself to elements at parse time and writes messages into #error).
+  const elements = {};
+  const makeEl = function (id) {
+    return {
+      id: id, style: {}, textContent: '', value: '', disabled: false,
+      onclick: null, onchange: null, checked: false,
+      classList: { add() {}, remove() {}, contains() { return false; } },
+      addEventListener() {}, removeEventListener() {}, appendChild() {},
+      setAttribute() {}, removeAttribute() {}, focus() {}, select() {},
+      querySelector() { return null; }, querySelectorAll() { return []; },
+      children: [], dataset: {},
+    };
+  };
+  document.getElementById = function (id) {
+    if (!elements[id]) elements[id] = makeEl(id);
+    return elements[id];
+  };
+  document.querySelector = function () { return null; };
+  document.querySelectorAll = function () { return []; };
+  document.createElement = function () { return makeEl('created'); };
+  document.body = makeEl('body');
+  document.readyState = 'complete';
+  document.__elements = elements;
 
   const location = {
     get href() { return url.toString(); },
@@ -308,7 +333,9 @@ function report(env, extra) {
 function runBridgeScenario(kind) {
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
   const opts = { hash: kind === 'small' ? fragment(200, expiresAt) : fragment(4000, expiresAt) };
-  if (kind === 'preseeded_old_cookie') opts.preseed = oldCookie(expiresAt);
+  if (kind === 'preseeded_old_cookie' || kind === 'claim_intent') {
+    opts.preseed = oldCookie(expiresAt);
+  }
   const env = makeEnv(opts);
   vm.runInContext(src, env.sandbox, { filename: bridgePath });
   const bridge = env.sandbox.window.__tortoiseSessionBridge;
@@ -393,9 +420,15 @@ async function runDashboardScenario(kind) {
   // The P2-1 precondition: a still-valid PREVIOUS cookie. `getSession()` then
   // answers with the OLD session — the case where a guard nested inside the
   // "no session" branch never runs.
-  if (kind === 'preseeded_old_cookie') opts.preseed = oldCookie(expiresAt);
+  if (kind === 'preseeded_old_cookie' || kind === 'claim_intent') {
+    opts.preseed = oldCookie(expiresAt);
+  }
   const env = makeEnv(opts);
-  env.sandbox.claimIntentInFlight = function () { return false; };
+  // claim_intent: `?claim=1` is present. The guard must NOT be exempted by it —
+  // the claim block rewrites the URL (history.replaceState → pathname only),
+  // which destroys a retained fragment, and would claim with the OLD token.
+  const isClaimIntent = kind === 'claim_intent';
+  env.sandbox.claimIntentInFlight = function () { return isClaimIntent; };
   vm.runInContext(src, env.sandbox, { filename: bridgePath });
   const hashAfterBridge = env.sandbox.window.location.hash;
 
@@ -435,7 +468,7 @@ async function runDashboardScenario(kind) {
   // session-validity branch: brace-balanced in every revision (the round-2 tree
   // nested the guard inside that branch, the round-3 tree hoists it above).
   const branch = dash.slice(branchStart, branchEnd);
-  const session = kind === 'preseeded_old_cookie'
+  const session = kind === 'preseeded_old_cookie' || kind === 'claim_intent'
     ? { access_token: 'OLD-ACCESS-TOKEN', refresh_token: 'old-refresh',
         expires_at: expiresAt, expires_in: 3600, token_type: 'bearer' }
     : null;
@@ -478,6 +511,43 @@ async function runDashboardScenario(kind) {
   // plain JS in signup.html (no bundler), executed here verbatim against the
   // REAL bridge — the round-4 P1 was that both navigated over a live refused
   // fragment whenever a still-valid OLD cookie was present.
+  // ── oauth.py's server-rendered consent page (review P1, round 4) ────────
+  //
+  // The third surface that ingests a fragment. It has NO bridge, so supabase-js
+  // is the only consumer — and supabase-js clears `window.location.hash` BEFORE
+  // awaiting the save that the adapter refuses above the cookie cap. The refusal
+  // alone therefore cannot preserve the credential here: the snapshot +
+  // restore in showConsentOnce() is what does. Runs the REAL rendered page's
+  // script, from consent_page_html(), against the REAL supabase-js bundle.
+  async function runConsentPageScenario(kind) {
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    const opts = { hash: kind === 'small' ? fragment(200, expiresAt) : fragment(4000, expiresAt) };
+    const env = makeEnv(opts);
+    vm.runInContext(fs.readFileSync(bundlePath, 'utf8'), env.sandbox,
+                    { filename: bundlePath });
+    const html = fs.readFileSync(pagePath, 'utf8');
+    const pAnchor = html.indexOf('const PARAMS = ');
+    const sTag = html.lastIndexOf('<script', pAnchor);
+    const sOpen = html.indexOf('>', sTag);
+    const sClose = html.indexOf('</script>', pAnchor);
+    if (pAnchor < 0 || sTag < 0 || sClose < 0) {
+      throw new Error('consent page: script anchors not found');
+    }
+    vm.runInContext(html.slice(sOpen + 1, sClose), env.sandbox,
+                    { filename: 'consent.html#script' });
+    // The page's own runConsentFlow() is async; let it settle.
+    await new Promise((r) => setTimeout(r, 200));
+    const errorEl = env.sandbox.document.__elements['error'];
+    return report(env, {
+      hash: env.sandbox.window.location.hash,
+      fields: {
+        fragment_survived_consent: /access_token=/.test(env.sandbox.window.location.hash),
+        error_text: errorEl ? String(errorEl.textContent || '') : '',
+        errors: env.logs.filter((l) => l.level === 'error').map((l) => l.text),
+      },
+    });
+  }
+
   async function runAuthPageScenario(kind) {
     const expiresAt = Math.floor(Date.now() / 1000) + 3600;
     const opts = { hash: kind === 'no_fragment' ? '' : fragment(4000, expiresAt) };
@@ -630,10 +700,14 @@ async function runE2EIngestScenario(kind) {
     out.dashboard_preseeded_old_cookie =
       await safeAsync(() => runDashboardScenario('preseeded_old_cookie'));
     out.dashboard_code_fragment = await safeAsync(() => runDashboardScenario('code_fragment'));
+    out.dashboard_claim_intent = await safeAsync(() => runDashboardScenario('claim_intent'));
   } else if (mode === 'auth_page') {
     out.auth_page_oversized = await safeAsync(() => runAuthPageScenario('oversized'));
     out.auth_page_no_session = await safeAsync(() => runAuthPageScenario('no_session'));
     out.auth_page_no_fragment = await safeAsync(() => runAuthPageScenario('no_fragment'));
+  } else if (mode === 'consent_page') {
+    out.consent_page_oversized = await safeAsync(() => runConsentPageScenario('oversized'));
+    out.consent_page_small = await safeAsync(() => runConsentPageScenario('small'));
   } else {
     out.e2e_small = await safeAsync(() => runE2EIngestScenario('small'));
     out.e2e_oversized = await safeAsync(() => runE2EIngestScenario('oversized'));
@@ -702,6 +776,38 @@ def dashboard_report() -> dict:
     assert VENDORED_SUPABASE.exists(), f"missing vendored bundle: {VENDORED_SUPABASE}"
     assert DASHBOARD.exists(), f"missing dashboard source: {DASHBOARD}"
     return _run_harness("dashboard", VENDORED_SUPABASE, DASHBOARD)
+
+
+def _render_consent_page(tmp_path_factory=None) -> Path:
+    """Render oauth.py's REAL consent page and return the written HTML file.
+
+    The JS is extracted from the RENDERED output, not from the Python source, so
+    the placeholders (PARAMS / SUPABASE_URL / anon key / nonce) are resolved
+    exactly as production resolves them.
+    """
+    from tortoise import oauth as oauth_mod
+
+    html, _nonce = oauth_mod.consent_page_html(
+        client_name="Test Client",
+        scope="mcp",
+        params={"client_id": "cid", "redirect_uri": "https://client.example/cb",
+                "response_type": "code", "state": "st", "scope": "mcp"},
+        supabase_url="https://ybetwichurajbfswfeqa.supabase.co",
+        supabase_anon_key="anon-key",
+    )
+    path = Path(tempfile.mkdtemp(prefix="consent-")) / "consent.html"
+    path.write_text(html, encoding="utf-8")
+    return path
+
+
+@pytest.fixture(scope="module")
+def consent_page_report() -> dict:
+    """oauth.py's consent page: the real rendered script + the real vendored
+    supabase-js bundle. This page has NO bridge, so supabase-js is the only
+    fragment consumer and clears the hash before its (refused) save."""
+    assert VENDORED_SUPABASE.exists(), f"missing vendored bundle: {VENDORED_SUPABASE}"
+    page = _render_consent_page()
+    return _run_harness("consent_page", VENDORED_SUPABASE, page)
 
 
 @pytest.fixture(scope="module")
@@ -1272,6 +1378,58 @@ def test_auth_page_gate_predicate_matches_the_dashboard() -> None:
     assert "__FRAGMENT_REFUSED" in html, (
         "nothing surfaces the refusal to the visitor on /auth"
     )
+
+
+def test_consent_page_restores_a_refused_fragment(consent_page_report: dict) -> None:
+    """#3503 (review P1, round 4). The consent page has no bridge, so supabase-js
+    ingests the fragment itself — and `_getSessionFromURL` clears
+    `window.location.hash` BEFORE awaiting the `_saveSession` write that the
+    adapter now REFUSES above the cookie cap. The refusal alone therefore cannot
+    preserve the credential here: by the time it fires the hash is already gone,
+    and the page falls back to the sign-in view (re-OAuth → the same over-cap
+    fragment, forever). The snapshot/restore in showConsentOnce() is what keeps
+    the only surviving copy."""
+    r = _scenario(consent_page_report, "consent_page_oversized")
+    assert r["cookie_present"] is False, "harness precondition: the write was refused"
+    assert r["fragment_survived_consent"] is True, (
+        "the consent page destroyed the only copy of the credential: the hash "
+        "was cleared by supabase-js's ingestion, its save was refused, and "
+        "nothing restored the fragment (#3503 review P1)"
+    )
+    assert "could not save the session" in r["error_text"], (
+        f"the refusal must be visible on the page, got: {r['error_text']!r}"
+    )
+
+
+def test_consent_page_success_path_is_unchanged(consent_page_report: dict) -> None:
+    """A session that fits is still stored and the fragment is still cleared by
+    supabase-js (that is the success signal) — the restore must not fire."""
+    r = _scenario(consent_page_report, "consent_page_small")
+    assert r["cookie_present"] is True, "a small session must be stored"
+    assert r["fragment_survived_consent"] is False, (
+        "on success supabase-js consumes the fragment; the restore must be gated "
+        "on a present-then-gone fragment AND no session"
+    )
+    assert "could not save the session" not in r["error_text"]
+
+
+def test_dashboard_claim_intent_does_not_exempt_the_guard(dashboard_report: dict) -> None:
+    """#3503 (review P3, round 4). `?claim=1` made the guard skip entirely, and
+    the claim block unconditionally rewrites the URL with
+    `history.replaceState({}, '', window.location.pathname)` — dropping a
+    retained fragment and, with a stashed claim key, claiming with the OLD
+    session token. The exemption was unnecessary anyway: when the fragment IS
+    the resolved session, the token comparison already lets the normal path
+    through."""
+    r = _scenario(dashboard_report, "dashboard_claim_intent")
+    assert r["cookie_token"] == "OLD-ACCESS-TOKEN", "harness precondition"
+    assert r["hash_after_bridge_has_token"] is True, "harness precondition"
+    assert r["fragment_refused"] is True, (
+        "claim intent must not exempt the guard — the claim path then rewrites "
+        "the URL and destroys the retained credential (#3503 P3)"
+    )
+    assert r["navigated"] is False
+    assert r["hash_after_final_raw"] and "access_token=" in r["hash_after_final_raw"]
 
 
 def test_cross_adapter_size_cap_parity() -> None:

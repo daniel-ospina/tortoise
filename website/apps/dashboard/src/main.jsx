@@ -3388,8 +3388,7 @@ function claimIntentInFlight() {
             // fragment carrying no access_token (`#code=…`, `#refresh_token=…`)
             // and let the bounce destroy it (review P3, round 3).
             (!session ||
-             fragmentAccessToken(window.location.hash) !== session.access_token) &&
-            !claimIntent) {
+             fragmentAccessToken(window.location.hash) !== session.access_token)) {
           setChecking(false)
           setFragmentRefused(true)
           setAuthUnavailable(
@@ -5892,6 +5891,13 @@ function claimIntentInFlight() {
                         // page). Passing an empty hash is the point: this is an
                         // explicit user discard of a credential the browser
                         // would not store, never the silent drop of #3503.
+                        // #3503 (review P2, round 4): the stored session MUST go
+                        // first. With a still-valid PREVIOUS cookie, /auth's head
+                        // gate sees a valid session and no fragment and
+                        // immediately forwards back to the app root — the user
+                        // would land on the OLD account again, which is the
+                        // opposite of what "Sign in again" promises.
+                        if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
                         if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, '')
                         else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
                       }}>
