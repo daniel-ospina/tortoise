@@ -83,8 +83,18 @@ test('DE2E-2 copy sweep: new Overview/Settings copy says Organization, never wor
   assert.ok(src.includes('Connect GitHub to bring issues and repo docs into your Organization as memory sources.'), 'GitHub home copy')
   assert.ok(src.includes('Issues and docs index to this Organization'), 'GitHub connected copy')
   assert.ok(src.includes('filed to this Organization as memory'), 'capture home copy')
-  assert.ok(src.includes("Your agent is connected — it files your decisions and findings to this Organization"), 'wizard done copy')
-  assert.ok(src.includes('Open Settings → Setup guide to follow what happens next.'), 'wizard done copy points at Settings')
+  // #3428/#2937 (lane B3): the done step's copy is DERIVED from the
+  // server-observed connection — the owner-approved success screen when a
+  // connection was observed, an honest not-observed body otherwise.
+  // The old single sentence ("Your agent is connected — it files your
+  // decisions and findings…") is gone: it was the claim the deleted human
+  // writer used to manufacture from a click.
+  assert.ok(src.includes("You can ask your agent to query it, use it to make decisions, and embed it in your workflows."), 'wizard done copy (connected screen)')
+  // review cycle 5 (item 6): the not-connected body states only the MISSING
+  // OBSERVATION (a captured session can already have written points to the
+  // graph while `harness-connected` is absent), never the graph fact.
+  assert.ok(src.includes("We haven't seen your agent's first write through its Tortoise tools yet"), 'wizard done copy (not-connected screen)')
+  assert.ok(src.includes('Settings → Setup guide'), 'wizard done copy points at Settings')
   assert.ok(src.includes('Your Organization is live — connect your agent below'), 'overview graph-missing copy')
   // no workspace in the SettingsTab component or the populated-Overview
   // branch (user-facing surfaces only; code comments elsewhere are out of
