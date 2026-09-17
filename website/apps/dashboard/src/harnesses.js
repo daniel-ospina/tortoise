@@ -180,7 +180,10 @@ cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/sessi
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
 chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 # then merge into .claude/settings.json:
-# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh" }] }] } }`,
+# #3754: the explicit timeout is load-bearing — Claude Code cancels a SessionEnd
+# hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
+# is the documented ceiling). session-end.sh measured 9.26s on a real run.
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
   // #2827: these constants are NOT wired to any live surface — they are only
   // reachable from the archived LEGACY_WIZARD_ARCHIVED render in main.jsx and
   // from harnesses.test.js. A remote HTTP MCP server must NOT be documented as
@@ -282,7 +285,10 @@ cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/sessi
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
 chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 # then merge into .claude/settings.json:
-# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh" }] }] } }`,
+# #3754: the explicit timeout is load-bearing — Claude Code cancels a SessionEnd
+# hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
+# is the documented ceiling). session-end.sh measured 9.26s on a real run.
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
   pi: `5. Session capture (#1727 T1): enable session capture in the Pi extension
 settings. The extension fires an install-probe on load (harness + timestamp
 only, no content) and files sessions to Tortoise Cloud when capture is
