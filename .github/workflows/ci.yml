@@ -400,7 +400,7 @@ jobs:
     # machine-local (broken on the runner) and there is no
     # scripts/check-skill-lint.mjs (un-bootstrapped) — the stack gates live
     # in python-ci.yml.
-    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@v0.1.2
+    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@fix/1128-node-ci-lint-working-directory
     with:
       node-version: '22'
       working-directory: website/apps/dashboard
