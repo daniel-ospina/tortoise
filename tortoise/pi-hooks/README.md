@@ -19,6 +19,12 @@ Pi's global extension directory:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions
+# #3713 collision guard (see below): disable a pre-existing tortoise-capture/
+if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
+  rm ~/.pi/agent/extensions/tortoise-capture
+elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
+  mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
+fi
 cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts \
    ~/.pi/agent/extensions/tortoise-capture.ts
 ```
@@ -29,6 +35,33 @@ server refuses the capture POST with a 409 while the organization has agent
 sessions switched off (Memory sources > Agent sessions). There is no
 `autoCapture`-style default-false flag: installing the extension *is* the
 opt-in.
+
+## Migration: the install must not leave two capture producers (#3713)
+
+Pi's extension loader (`collectAutoExtensionEntries`) enumerates directory
+entries and does **no basename dedupe**: a top-level `tortoise-capture.ts` and
+a `tortoise-capture/index.ts` are **two** independent extensions. On a host
+that already has the legacy agent-infra extension at
+`~/.pi/agent/extensions/tortoise-capture/` (a symlink to
+`agent-infra/extensions/tortoise-capture/`, which registers its own
+`agent_end` capture gated on `autoCapture`), installing this seam **alongside**
+it makes both producers POST `/v1/sessions` for the same `session_id` —
+doubled work, and the server's in-flight dedup hands the loser a 409.
+
+The install step therefore disables the legacy entry before copying this one:
+
+- a **symlink** is unlinked (`rm`, no `-r`) — the agent-infra checkout it
+  points at is untouched;
+- a **real directory** is moved to `~/.pi/agent/extensions/.tortoise-capture.disabled`
+  — a dot-prefixed name the loader skips (`entry.name.startsWith(".")`), so
+  its files are preserved but it no longer registers.
+
+It never runs `rm -rf`. If you deliberately keep **both** producers, the
+collision is the runtime problem tracked by **#3713** — the artifact-side
+hardening (treat the server's `409 already in flight` as a benign "another
+producer has this session_id" rather than `was NOT filed`, and/or a
+server-side producer/idempotency key) belongs to that issue, **not** to this
+install guard.
 
 ## Configuration
 

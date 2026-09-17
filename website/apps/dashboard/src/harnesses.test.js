@@ -323,3 +323,26 @@ test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () =
   assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
   assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
 })
+
+// #3713 P2-3 (review of #3721): Pi loads a top-level `tortoise-capture.ts` AND
+// a `tortoise-capture/index.ts` as TWO extensions (no basename dedupe), so a
+// pre-existing agent-infra `tortoise-capture/` double-POSTs every session_id
+// alongside the seam. The install step must disable the legacy entry, and it
+// must do so non-destructively. Structure-only: this pins the guard text, not
+// the shell's behaviour (the guard is a copy-paste snippet, not an executed
+// unit). Removing any leg REDs this test.
+test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double-register)', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  // the colliding legacy path is named...
+  assert.match(pi, /~\/\.pi\/agent\/extensions\/tortoise-capture\b/,
+    'the guard must name the legacy entry Pi loads as a second extension')
+  // ...a symlink (the usual agent-infra bootstrap shape) is unlinked...
+  assert.match(pi, /\[ -L ~\/\.pi\/agent\/extensions\/tortoise-capture \]/,
+    'the symlink leg must be guarded by -L (unlink the link, never the target)')
+  // ...and a real directory is renamed to a name the loader SKIPS (dotfile).
+  assert.match(pi, /\.tortoise-capture\.disabled/,
+    'a real directory must be renamed to a dot-prefixed name `collectAutoExtensionEntries` skips')
+  // non-negotiable: never recursively delete user files from the install snippet.
+  assert.doesNotMatch(pi, /rm\s+-/,
+    'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
+})

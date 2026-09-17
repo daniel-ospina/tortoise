@@ -165,6 +165,10 @@ test("buildCapturePayload carries harness + session_id (the idempotency key)", (
   assert.equal(payload.source, "2026-01-01_abc");
   assert.equal(payload.machine_id, "deadbeef");
   assert.deepEqual(payload.conversation, [{ role: "user", content: "hi" }]);
+  // #3721 P2-2: the model arg must reach the payload. The #2599 client-claimed
+  // Session property is what the dashboard renders; dropping this line shipped
+  // silently because no assertion read it (mutation: delete it — suite green).
+  assert.equal(payload.model, "deepseek/deepseek-v4-flash");
 });
 
 test("sourceName is a basename only (never a full path)", () => {
@@ -254,6 +258,14 @@ test("modelLabel renders provider/model and caps the server bound", () => {
   assert.equal(modelLabel({ provider: "deepseek", id: "deepseek-v4-flash" }),
     "deepseek/deepseek-v4-flash");
   assert.equal(modelLabel(undefined), undefined);
+  // #3721 P2-1: the server's `SessionRequest.model` is `max_length=128`
+  // (hosted_api.py), so an UNCAPPED label 422s the live capture — silently,
+  // because only the hosted leg sees it. Exercise the cap itself: a
+  // >128-char provider/id must return EXACTLY 128 chars. (Mutation: drop the
+  // `.slice(0, 128)` — before this case the 19-test suite stayed green.)
+  const long = modelLabel({ provider: "p".repeat(200), id: "i".repeat(200) });
+  assert.equal(long?.length, 128,
+    "a >128-char model label must be capped to the server's max_length=128");
 });
 
 test("session_start fires the install-probe with NO conversation content", async () => {
@@ -309,13 +321,21 @@ test("session_shutdown files the session's turns with harness=pi", async () => {
   const pi = mockPi();
   const { fetchImpl, calls } = mockFetch([{ ok: true }]);
   tortoiseCapture(pi as never, hermeticDeps(fetchImpl));
-  await pi.handlers.session_shutdown({ reason: "quit" }, mockCtx({ entries: PI_ENTRIES }));
+  // #3721 P2-2: the ctx model must be wired INTO the payload through the real
+  // `modelLabel(ctx.model)` → `buildCapturePayload({ model })` path, not just
+  // accepted by the builder in isolation.
+  await pi.handlers.session_shutdown(
+    { reason: "quit" },
+    mockCtx({ entries: PI_ENTRIES, model: { provider: "deepseek", id: "deepseek-v4-flash" } }),
+  );
 
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /\/v1\/sessions$/);
   assert.equal(calls[0].body.harness, "pi");
   assert.equal(calls[0].body.session_id, "sess-1");
   assert.equal(calls[0].body.source, "2026-01-01_abc");
+  assert.equal(calls[0].body.model, "deepseek/deepseek-v4-flash",
+    "the active model must be attributed on the capture (#2599)");
   assert.deepEqual(calls[0].body.conversation, [
     { role: "user", content: "Ship the capture seam." },
     { role: "assistant", content: "On it." },

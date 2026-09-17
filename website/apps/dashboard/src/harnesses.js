@@ -203,6 +203,19 @@ export const PI_CAPTURE_INSTALL = `# Session capture for Pi (#1727 T1, #3575): i
 # each session on exit. Install from your Tortoise checkout
 # (github.com/daniel-ospina/tortoise):
 mkdir -p ~/.pi/agent/extensions
+# #3713 collision guard: Pi's loader treats a top-level tortoise-capture.ts
+# AND a tortoise-capture/index.ts as TWO extensions (no basename dedupe).
+# A pre-existing agent-infra tortoise-capture/ registers its own agent_end
+# capture, so both POST the same session_id — doubled work, and the loser can
+# 409. Disable the legacy entry before installing this one. NON-DESTRUCTIVE:
+# unlink a symlink (the agent-infra checkout is untouched), or move a real
+# directory to a dot-prefixed name Pi's loader SKIPS (it ignores dotfiles) —
+# never a recursive delete.
+if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
+  rm ~/.pi/agent/extensions/tortoise-capture
+elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
+  mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
+fi
 cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts ~/.pi/agent/extensions/tortoise-capture.ts
 # Backfill past Pi sessions with:
 tortoise sessions import --harness pi --file <session.jsonl>`
