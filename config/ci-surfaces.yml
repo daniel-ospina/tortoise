@@ -289,6 +289,7 @@ surfaces:
   - test_battery_write_channel.py
   core:
   - test_capture_cost_measurement.py
+  - test_eval_reinjection_cap_resume.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -492,6 +493,10 @@ surfaces:
   - test_render.py
   - test_coverage_loop.py  # #2567: evidence-completeness loop E2E (C3-1, docker-lane)
   - test_coverage_loop_rules.py  # #2567: evidence-completeness loop hermetic rules
+  - test_session_reinjection_rules.py  # #2517: source-session re-injection hermetic rules (C4)
+  - test_build_cohorts_2517.py  # #2517: cohort-builder selectors + digest refusal + provenance sidecar (hermetic)
+  - test_guard_measured_revision.py  # #2517: measured-revision guard — one test per declared bypass class (hermetic)
+  - test_session_reinjection.py  # #2517: source-session re-injection E2E (C4, docker-lane)
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_evidence_assembly.py      # #2683: Slice-A evidence-package assembly hermetic rules
   - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
@@ -704,6 +709,10 @@ surfaces:
   - test_reader_abstention_calibration.py
   - test_coverage_loop.py  # #2567 (docker-lane leg, mirrors test_retrieval.py)
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
+  - test_session_reinjection_rules.py  # #2517 (hermetic rules leg, mirrors test_retrieval.py)
+  - test_build_cohorts_2517.py  # #2517 (hermetic cohort-builder leg, mirrors test_retrieval.py)
+  - test_guard_measured_revision.py  # #2517 (hermetic guard leg: the declared bypass surface on synthetic fixtures, mirrors the eval lane)
+  - test_session_reinjection.py  # #2517 (docker-lane leg, mirrors test_retrieval.py)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
@@ -774,6 +783,14 @@ surfaces:
   - test_cross_lens.py
   - test_embeddings.py
   - test_embeddings_filters.py
+  # #2517 (C4): the source-session re-injection rules + E2E — dual-registered
+  # because a change to tools/longmem_eval/ selects `eval`, and the arm is
+  # wired there (the hermetic rules leg also passes in the eval lane).
+  - test_session_reinjection_rules.py
+  - test_session_reinjection.py
+  - test_eval_reinjection_cap_resume.py  # #2513 (C4 cap/resume): pins the run.py fingerprint cap threading — eval-owned source, so dual-registered like test_eval_extraction_health.py
+  - test_build_cohorts_2517.py
+  - test_guard_measured_revision.py
   - test_embedder_probe.py
   - test_eval_extraction_health.py
   - test_labeled_pairs_schema.py
