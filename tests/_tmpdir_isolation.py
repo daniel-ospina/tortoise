@@ -54,7 +54,20 @@ import tempfile
 # Ordering matters: this is read at import, and the redirect below caches a
 # different value into tempfile.tempdir. Everything that must keep referring
 # to the real shared temp dir uses HOST_TMPDIR, never tempfile.gettempdir().
+#
+# _TMPDIR_SPELLINGS additionally carries the $TMPDIR spelling captured at
+# import, because on macOS $TMPDIR is /var/folders/... while its realpath is
+# /private/var/folders/... — matching only the realpath in a command STRING
+# made the audit hook fail open on the canonical spelling (#3752 review
+# cycle 4). The decision is always the realpath comparison; these are only the
+# cheap substring pre-filter's needles.
+_ENV_TMPDIR_AT_IMPORT = (os.environ.get("TMPDIR") or "").rstrip(os.sep)
 HOST_TMPDIR = os.path.realpath(tempfile.gettempdir())
+_TMPDIR_SPELLINGS = tuple(dict.fromkeys(
+    s for s in (HOST_TMPDIR, _ENV_TMPDIR_AT_IMPORT,
+                os.path.realpath(_ENV_TMPDIR_AT_IMPORT)
+                if _ENV_TMPDIR_AT_IMPORT else "") if s
+))
 
 # Marker file written inside the root so a SIGKILLed run's root is
 # attributable and reclaimable by the next run (sweep_stale_session_roots),
@@ -200,10 +213,17 @@ def teardown_session_tmpdir() -> None:
     process temp resolution AND the exported `TORTOISE_HOST_TMPDIR` so a
     second ``pytest.main()`` in the same interpreter — or the fail-closed
     abort in ``install_session_tmpdir`` — starts clean.
+
+    Everything is inside the ``if root`` guard: a teardown that consumed no
+    install (the extra ``atexit`` registration left by the fail-closed abort,
+    or a test that tears down twice) must not touch the environment at all, or
+    it would destroy an operator-supplied ``TORTOISE_HOST_TMPDIR``.
     """
     global _SESSION_TMPDIR, _PREV_HOST_TMPDIR_ENV
     root = _SESSION_TMPDIR
     _SESSION_TMPDIR = None
+    if not root:
+        return
     try:
         if os.environ.get("TMPDIR") == root:
             os.environ["TMPDIR"] = HOST_TMPDIR
@@ -212,11 +232,9 @@ def teardown_session_tmpdir() -> None:
             os.environ.pop("TORTOISE_HOST_TMPDIR", None)
         else:
             os.environ["TORTOISE_HOST_TMPDIR"] = _PREV_HOST_TMPDIR_ENV
-        _PREV_HOST_TMPDIR_ENV = None
     except Exception:
         pass
-    if not root:
-        return
+    _PREV_HOST_TMPDIR_ENV = None
     with contextlib.suppress(Exception):  # teardown never fails the suite
         shutil.rmtree(root, ignore_errors=True)
     _prune_host_coordination_dir()
@@ -482,12 +500,21 @@ def _command_touches_host_tempdir(command) -> str | None:
     shell=True)``, ``os.system``, the ``os.exec*`` family), whose arguments
     arrive as one string — and for the ``shell=True`` case, where CPython hands
     the hook ``['/bin/sh', '-c', '<the whole command>']``. The string is
-    shlex-split and each resulting token is judged as a path, so a descendant
-    (the private session root, or ``find <session root>`` — the reaper's own
-    legitimate walk) still passes while ``find <host T>`` does not.
+    shlex-split and each resulting token is judged by the SAME realpath-based
+    scope test the argv path uses, so a descendant (the private session root,
+    or ``find <session root>`` — the reaper's own legitimate walk) still passes
+    while ``find <host T>`` does not.
 
-    Over-approximating is safe by construction: a false positive is a loud
-    SharedTmpdirScanError naming the command, never a silent pass.
+    The fast-path substring test uses EVERY spelling of the temp dir captured
+    at import (the realpath AND the $TMPDIR spelling — on macOS ``$TMPDIR`` is
+    ``/var/folders/...`` while the realpath is ``/private/var/folders/...``, so
+    testing only the realpath made the shell form fail OPEN on the canonical
+    spelling), and it is only a short-circuit: the decision is always the
+    realpath comparison.
+
+    ``$VAR`` indirection (``sh -c 'find "$TT"'``) remains a bypass of any
+    static-content heuristic — the argv/`os.exec` layers are the ones that see
+    the resolved path.
     """
     if isinstance(command, bytes):
         command = os.fsdecode(command)
@@ -495,8 +522,8 @@ def _command_touches_host_tempdir(command) -> str | None:
         command = os.fspath(command)
     if not isinstance(command, str):
         return None
-    if HOST_TMPDIR not in command:
-        return None  # fast path: cannot mention it
+    if not any(spelling in command for spelling in _TMPDIR_SPELLINGS):
+        return None  # fast path: cannot be naming it in any known spelling
     try:
         parts = shlex.split(command)
     except ValueError:  # unbalanced quotes — split crudely rather than skip

@@ -221,13 +221,39 @@ def _kill_pid(pid: int) -> None:
         pass
 
 
+# AF_UNIX sun_path cap: the kernel REFUSES >= 104 bytes on macOS (redislite
+# reports "unix socket path too long (108), must be under 104"); Linux allows
+# ~108. Redislite nests its autogen dir under the child's TMPDIR, so the bind
+# path is TMPDIR + this tail.
+_AF_UNIX_SOCKET_BUDGET = 104
+_REDISLITE_SOCKET_TAIL = len("/tmpsXXXXXXXX/redis.socket")
+
+
 def _make_flat_tmpdir() -> str:
     """Short flat dir under the tempdir root for child TMPDIR containment.
 
-    AF_UNIX socket paths cap at ~108 bytes on Linux — the child's autogen
-    redislite dir nests under TMPDIR, so a short shallow path is required.
+    AF_UNIX socket paths are capped (the kernel needs < 104 bytes on macOS)
+    and the child's autogen redislite dir nests under TMPDIR
+    (`<TMPDIR>/tmpsXXXX/redis.socket`), so the child TMPDIR must stay short.
+
+    #3752: the private per-session temp root adds 12 bytes to every scratch
+    path. The historical `tchaos`-prefixed name (TMPDIR 83 on this host) put
+    the bind path at 108 bytes and the child could no longer start its
+    server (`orphan spawn failed: ''`); on origin/main the same child TMPDIR
+    was 83-12 = 71 and the path 96. The name is therefore the shortest
+    ``mkdtemp`` can produce, and the budget is ASSERTED here so a longer
+    host tempdir fails by name instead of surfacing as an empty spawn error.
     """
-    return tempfile.mkdtemp(prefix="tchaos", dir=tempfile.gettempdir())
+    root = tempfile.mkdtemp(prefix="", dir=tempfile.gettempdir())
+    bind_path = os.path.join(root, "tmpsXXXXXXXX", "redis.socket")
+    assert len(bind_path) < _AF_UNIX_SOCKET_BUDGET, (
+        f"child TMPDIR {root!r} leaves no room for the redislite socket path "
+        f"({len(bind_path)} bytes >= {_AF_UNIX_SOCKET_BUDGET}): the #3752 "
+        f"private session temp root ({len(tempfile.gettempdir())} bytes) "
+        f"plus {_REDISLITE_SOCKET_TAIL} bytes of redislite tail must stay "
+        f"under the AF_UNIX cap — make HOST_TMPDIR shorter"
+    )
+    return root
 
 
 def _spawn_orphan_pid(tmpdir: str | None = None) -> tuple[int, str]:

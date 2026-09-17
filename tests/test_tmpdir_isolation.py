@@ -63,14 +63,33 @@ def test_session_temp_root_prefix_stays_reaper_recognised():
 
 
 def test_session_temp_root_is_short_enough_for_af_unix():
-    """redislite nests <TMPDIR>/redislite_<rand>/redis.socket; the macOS
-    AF_UNIX cap is 104 bytes. Guard the arithmetic rather than discovering
-    it as a flaky 'socket path too long' at test time."""
+    """The REAL worst case, not a one-level approximation (#3752 review
+    cycle 4 — the approximation is why an AF_UNIX regression shipped): the
+    suite's scratch nests two levels, `<root>/<scratch>/<redislite autogen>/
+    redis.socket`, and the redislite autogen dir is `tmpsXXXXXXXX`. The kernel
+    needs the bind path to stay UNDER 104 bytes on macOS, and a child process
+    that sets its OWN TMPDIR (tests/test_embedded_concurrency.py) gets one
+    more level of the same shape. Guard the arithmetic here rather than
+    discovering it as a flaky 'socket path too long' at test time.
+    """
     root = scan_root()
-    worst_case = os.path.join(root, "redislite_" + "x" * 10, "redis.socket")
-    assert len(worst_case) <= 104, (
-        f"private temp root makes socket paths too long: {worst_case!r} "
-        f"({len(worst_case)} > 104)")
+    # The deepest path the suite itself creates: a test scratch dir inside the
+    # root, then redislite's autogen dir, then the socket.
+    deepest = os.path.join(root, "" + "x" * 8, "tmps" + "x" * 8,
+                           "redis.socket")
+    assert len(deepest) < 104, (
+        f"private temp root makes socket paths too long: {deepest!r} "
+        f"({len(deepest)} >= 104)")
+    # A child that inherits a TMPDIR nested one level under the root
+    # (test_embedded_concurrency._make_flat_tmpdir) must still fit.
+    child_tmpdir = os.path.join(root, "" + "x" * 8)
+    child_bind = os.path.join(child_tmpdir, "tmps" + "x" * 8, "redis.socket")
+    assert len(child_bind) < 104, (
+        f"child TMPDIR under the private root leaves no AF_UNIX room: "
+        f"{child_bind!r} ({len(child_bind)} >= 104)")
+    assert len(child_tmpdir) <= 78, (
+        f"child TMPDIR budget is {len(child_tmpdir)} bytes > 78 — a longer "
+        f"HOST_TMPDIR would break the spawned-server tests")
 
 
 def test_install_is_idempotent():
@@ -381,17 +400,22 @@ def test_socket_walk_reserves_budget_for_the_global_pass(tmp_path, monkeypatch):
 
 
 def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
-    """#3752 review cycle 3: `_socket_walk_roots` does real I/O (a scandir plus
-    a stat per `tt_*` child). Charging it to the walk budget let a slow
+    """#3752 review cycle 3/4: `_socket_walk_roots` does real I/O (a scandir
+    plus a stat per `tt_*` child). Charging it to the walk budget let a slow
     discovery issue ZERO `find` calls — the pollution-disables-cleanup failure
-    the nested pass exists to prevent."""
+    the nested pass exists to prevent. Covered for BOTH walk call sites.
+
+    The 20 s constant is monkeypatched: the ordering being asserted is
+    scale-invariant, so sleeping the real budget would burn 20 s of wall clock
+    for nothing.
+    """
     from tortoise import embedded_reaper as reaper
 
-    real_roots = reaper._socket_walk_roots
+    monkeypatch.setattr(reaper, "SOCKET_WALK_TIMEOUT", 0.5)
 
-    def slow_roots(_tmpdir):
-        time.sleep(reaper.SOCKET_WALK_TIMEOUT + 0.2)
-        return real_roots(_tmpdir)
+    def slow_roots(tmpdir):
+        time.sleep(0.5 + 0.2)  # longer than the (patched) budget
+        return [str(tmpdir)]
 
     seen: list[str] = []
 
@@ -400,10 +424,16 @@ def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(reaper, "_socket_walk_roots", slow_roots)
+    monkeypatch.setattr(reaper, "_real_gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(reaper.subprocess, "run", recording_run)
     reaper._find_socket_dirs(str(tmp_path))
-    assert seen == [str(tmp_path)], \
-        f"discovery time was charged to the walk budget: {seen!r}"
+    assert str(tmp_path) in seen, \
+        f"_find_socket_dirs: discovery time was charged to the walk {seen!r}"
+
+    seen.clear()
+    reaper._sweep_quarantine_dirs(dry_run=True)
+    assert str(tmp_path) in seen, \
+        f"_sweep_quarantine_dirs: discovery charged to the walk {seen!r}"
 
 
 def test_probe_socket_falls_back_to_tmp_for_a_link_that_cannot_fit(
@@ -698,15 +728,14 @@ _SHARED_SCAN_IDIOMS = (
     "listdir(_real_gettempdir())",
     # The shell-out forms (#3752 review cycles 2-3): the original defect was a
     # `find <shared T>` subprocess, which the in-process patch cannot see, so
-    # the static layer must name the shell-out shapes as well. The runtime
-    # audit hook is the real defence; this is the cheap grep-time companion.
+    # the static layer names the shape too — but ANCHORED to the shared-dir
+    # token, so a correctly scoped `find <tmp_path>`/`find <scan_root()>` is
+    # not reported as a shared-tempdir scan (cycle-4 review).
+    '"find", HOST_TMPDIR',
     '"find", tempfile.gettempdir()',
     '"find", os.path.realpath(tempfile.gettempdir())',
-    '"find", HOST_TMPDIR',
-    "f\"find {tempfile.gettempdir()",
     "f\"find {HOST_TMPDIR",
-    "subprocess.run([\"find",
-    "os.system(f\"find",
+    "f\"find {tempfile.gettempdir()",
 )
 
 
