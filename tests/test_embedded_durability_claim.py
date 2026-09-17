@@ -19,7 +19,7 @@ The fix corrected the claim and documented the flag. This test pins the
 """
 from __future__ import annotations
 
-import os
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -45,10 +45,9 @@ def _aof_artifact_written(tmp: Path, *, enabled: bool, monkeypatch) -> bool:
         # A write makes the journaling decision observable, not just the config.
         proj._upsert({"id": "durability-probe", "content": "x", "context": "y"})
     finally:
-        try:
+        with contextlib.suppress(Exception):
+            # pragma: no cover - teardown must never mask the assertion
             proj.close()
-        except Exception:  # pragma: no cover - teardown must never mask the assertion
-            pass
     return any(p.name.endswith("-appendonlydir") for p in tmp.iterdir())
 
 
