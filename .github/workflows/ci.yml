@@ -400,7 +400,7 @@ jobs:
     # machine-local (broken on the runner) and there is no
     # scripts/check-skill-lint.mjs (un-bootstrapped) — the stack gates live
     # in python-ci.yml.
-    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@v0.1.2
+    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@v0.1.3
     with:
       node-version: '22'
       working-directory: website/apps/dashboard
@@ -1086,7 +1086,7 @@ jobs:
     #                           top-level dir with __init__.py, sorted) — not
     #                           the engine. `mypy tortoise/` is what the
     #                           baseline was measured against.
-    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.2
+    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.3
     with:
       python-version: '3.12'
       test-command: ''
