@@ -237,9 +237,12 @@ def fork_slot_is_wedged(db, *, min_age_s: float = 5.0) -> bool:
     """Evidence-based wedge test: a module-fork child of our daemon is lingering.
 
     A healthy ``GRAPH.COPY`` child encodes and exits in well under this age; a
-    child that outlives it is the wedge fingerprint. Independent of which
-    exception the client saw (refusal OR read timeout), so a timed-out copy
-    whose server-side child is still parked is also detected.
+    child that outlives it is the wedge fingerprint. The test does NOT inspect
+    the exception — it only asks whether one of our module-fork children is
+    still lingering. Its callers do the exception reading: the restore path
+    re-raises its own ``RestoreCopyTimeoutError`` before ever consulting this
+    function (#3813), so a restore timeout is never classified here; the
+    ``copy is None`` path still reaches it for any failure shape (#3924).
     """
     return bool(find_hung_module_fork_children(db, min_age_s=min_age_s))
 

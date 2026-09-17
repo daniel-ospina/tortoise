@@ -20,9 +20,17 @@ Pipeline (per org graph):
                   audit (#3154 — GRAPH.COPY can drop the `false` postings of a
                   copied boolean index)
                   → cleanup.
+                  Both GRAPH.COPY copies run over the restore's OWN read bound
+                  (#3813) — an ordinary request's socket_timeout forbids a copy
+                  longer than 60s at any legal configuration.
                   Any verification failure leaves the live graph untouched; a swap
                   failure leaves the verified temp + pre-restore copies recoverable.
   prune_backups:  keep N daily + M weekly (newest-first).
+
+Env (restore):
+- TORTOISE_RESTORE_SWAP_TIMEOUT_S — explicit read bound (seconds) for the
+  restore's GRAPH.COPY copies. Default 120, clamped to [60, 3600]. See
+  _restore_swap_timeout_s.
 
 Env:
 - TORTOISE_BACKUP_KEY — base64 32-byte ACTIVE key for AES-256-GCM (encrypt
@@ -40,6 +48,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -1181,6 +1190,7 @@ def _graph_copy_or_diagnose(
     *,
     db,
     site: str,
+    copy: Callable[[], None] | None = None,
 ) -> ForkSlotRecovery | None:
     """``graph.copy(dst_name)``, recovering a wedged module-fork slot (#3845).
 
@@ -1194,10 +1204,11 @@ def _graph_copy_or_diagnose(
 
     * a copy that raises the engine's fork-refusal response (``could not
       fork``) is a wedge by construction; and
-    * a copy that failed for ANY other reason (a read timeout is the usual
-      one) is *also* a wedge when our own daemon is still carrying a
-      module-fork child that has outlived :data:`_FORK_CHILD_HUNG_AGE_S` — a
-      child that old for a graph this small is parked, not working.
+    * a copy that failed for ANY other reason (the restore's OWN bound
+      excepted — see below) is *also* a wedge when our own daemon is still
+      carrying a module-fork child that has outlived
+      :data:`_FORK_CHILD_HUNG_AGE_S` — a child that old for a graph this
+      small is parked, not working.
 
     On either signal the hung child(ren) of OUR socket are reaped (which is
     what actually releases the slot — Redis's ``checkChildrenDone`` calls
@@ -1207,15 +1218,44 @@ def _graph_copy_or_diagnose(
     :class:`ForkSlotWedgedError` rather than an endless loop. Returns the
     recovery when a wedge was handled, ``None`` on the clean path. Any other
     copy failure is re-raised unchanged.
+
+    ``copy`` (#3813): the copy STEP to retry. Defaults to ``graph.copy(dst_name)``
+    — the wedge recovery here is otherwise orthogonal to *how* the copy is
+    issued. The restore sites pass ``_graph_copy_with_restore_bound`` so the
+    copy runs over the restore's own generous read bound while STILL getting
+    this detect→reap→retry recovery. On the restore path a CLIENT READ TIMEOUT
+    is never treated as a wedge: the server may still be copying, and reaping a
+    fork child to retry would issue a SECOND server-side fork while the first
+    may still be running (#3813) — as well as misreporting a timeout as a wedge
+    (#3845). Only the restore's own bound raises ``RestoreCopyTimeoutError``,
+    so the documented default ``copy is None`` path is untouched and keeps
+    #3924's ``is_fork_refusal(...) or fork_slot_is_wedged(...)``
+    classification (a plain read timeout there is still a wedge candidate).
     """
     last_recovery: ForkSlotRecovery | None = None
     last_exc: BaseException | None = None
     for attempt in range(1, _FORK_COPY_ATTEMPTS + 1):
         try:
-            graph.copy(dst_name)
+            if copy is None:
+                graph.copy(dst_name)
+            else:
+                copy()
             return last_recovery
         except Exception as exc:
             last_exc = exc
+            # #3813 x #3845: on the RESTORE path the copy runs over its own
+            # generous bound, and only that bound raises
+            # ``RestoreCopyTimeoutError`` (chaining the real client timeout as
+            # ``__cause__``). A client read timeout there is NEVER a wedge: the
+            # server may still be copying, so reaping the fork child and
+            # re-issuing would start a SECOND server-side fork while the first
+            # may still be running, and would misreport a timeout as a wedge.
+            # The check is deliberately the restore's OWN exception TYPE, not
+            # ``_is_client_read_timeout``: the documented ``copy is None``
+            # default path (#3924) must keep its ``is_fork_refusal(...) or
+            # fork_slot_is_wedged(...)`` classification unchanged.
+            if isinstance(exc, RestoreCopyTimeoutError):
+                raise
             wedged = is_fork_refusal(exc) or fork_slot_is_wedged(
                 db, min_age_s=_FORK_CHILD_HUNG_AGE_S)
             if not wedged:
@@ -1312,6 +1352,196 @@ _FORK_CHILD_HUNG_AGE_S = 2.0
 _FORK_COPY_ATTEMPTS = 3
 
 
+# ── #3813: the restore's GRAPH.COPY must not inherit an ordinary request's
+#    read bound ────────────────────────────────────────────────────────────
+#
+# ``GRAPH.COPY`` is a LONG-RUNNING, SERVER-SIDE operation. FalkorDB forks a
+# child that encodes the source graph to a temp file, the parent decodes it
+# and installs the destination key, and the CLIENT is blocked for the whole
+# copy (FalkorDB ``cmd_copy.c``: ``_Graph_Copy`` → ``RedisModule_Fork``, then
+# ``LoadGraphFromFile`` → ``RedisModule_ReplyWithCString(ctx, "OK")``).
+#
+# On the ordinary client that read is governed by ``socket_timeout``, which
+# #2850 deliberately bounds at ``_DB_TIMEOUT_MAX_S`` = 60s: right for an
+# ordinary request (a stalled call must not park a thread — or, on the paths
+# that call the client synchronously from the event loop, the loop), WRONG for
+# a copy that legitimately outlives it. A restore of a large enough graph
+# therefore fails at ANY legal configuration — and it fails *misleadingly*:
+# when the read bound expires, redis-py tears the connection down mid-parse and
+# the originating ``redis.exceptions.TimeoutError: Timeout reading from
+# socket`` surfaces as ``ValueError: I/O operation on closed file``. That is a
+# CLIENT timeout reported as a dead connection, which the swap then reports as
+# a failed copy.
+#
+# The swap (and the pre-restore safety copy — the same class of operation) run
+# on a client whose read bound belongs to the operation: EXPLICIT, generous,
+# and still FINITE — ``None``/infinite is redis-py's "block forever", the
+# #2850 failure mode this module must not reintroduce.
+_RESTORE_SWAP_TIMEOUT_DEFAULT_S = 120.0
+#: Floor: must NOT be BELOW ``projection._DB_TIMEOUT_MAX_S`` (60s) — the
+#: largest read bound a *legal* ordinary configuration can reach. Equality at
+#: 60 is deliberate: an operator who sets exactly the ordinary ceiling gets no
+#: restore headroom, by choice. The DEFAULT (120s) is what supplies the
+#: headroom the swap exists for.
+_RESTORE_SWAP_TIMEOUT_MIN_S = 60.0
+#: Ceiling: keeps a wedged copy bounded, and sits inside the scheduled drill's
+#: committed ≤15 min RTO.
+_RESTORE_SWAP_TIMEOUT_MAX_S = 3600.0
+
+
+def _restore_swap_timeout_s() -> float:
+    """Resolve the restore swap's own GRAPH.COPY read bound, in seconds.
+
+    ``TORTOISE_RESTORE_SWAP_TIMEOUT_S`` (default
+    ``_RESTORE_SWAP_TIMEOUT_DEFAULT_S``), clamped to
+    ``[_RESTORE_SWAP_TIMEOUT_MIN_S, _RESTORE_SWAP_TIMEOUT_MAX_S]``.
+
+    A non-numeric or non-finite value falls back to the default rather than
+    disabling the bound: ``float("inf")`` reaching redis-py's
+    ``sock.settimeout`` raises ``OverflowError`` (NOT caught by its
+    ``except OSError``), so an unbounded swap would brick the restore instead
+    of merely slowing it.
+    """
+    raw = os.environ.get("TORTOISE_RESTORE_SWAP_TIMEOUT_S")
+    if raw is None or not str(raw).strip():
+        return _RESTORE_SWAP_TIMEOUT_DEFAULT_S
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("TORTOISE_RESTORE_SWAP_TIMEOUT_S=%r is not a number — "
+                       "using %ss", raw, _RESTORE_SWAP_TIMEOUT_DEFAULT_S)
+        return _RESTORE_SWAP_TIMEOUT_DEFAULT_S
+    if not math.isfinite(v) or v <= 0:
+        logger.warning("TORTOISE_RESTORE_SWAP_TIMEOUT_S=%r is not a finite "
+                       "positive bound — using %ss (a non-finite socket "
+                       "timeout means 'block forever')",
+                       raw, _RESTORE_SWAP_TIMEOUT_DEFAULT_S)
+        return _RESTORE_SWAP_TIMEOUT_DEFAULT_S
+    if v < _RESTORE_SWAP_TIMEOUT_MIN_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_TIMEOUT_S=%r is below the %.0fs "
+                       "floor — a legal ordinary bound already reaches that "
+                       "(projection._DB_TIMEOUT_MAX_S); clamping",
+                       raw, _RESTORE_SWAP_TIMEOUT_MIN_S)
+        return _RESTORE_SWAP_TIMEOUT_MIN_S
+    if v > _RESTORE_SWAP_TIMEOUT_MAX_S:
+        logger.warning("TORTOISE_RESTORE_SWAP_TIMEOUT_S=%r exceeds the %.0fs "
+                       "ceiling — clamping", raw, _RESTORE_SWAP_TIMEOUT_MAX_S)
+        return _RESTORE_SWAP_TIMEOUT_MAX_S
+    return v
+
+
+class RestoreCopyTimeoutError(RuntimeError):
+    """A restore GRAPH.COPY outlived its own (generous) read bound (#3813).
+
+    Deliberately its OWN type, with its own wording. A CLIENT read timeout is
+    neither a dead connection nor a failed copy — the server may still be
+    copying. The message states a TIMEOUT, names the graph that is left intact
+    and identifiable, and states that the destination was NOT restored, so a
+    timeout can never be read as a successful (or merely failed) swap.
+    """
+
+    def __init__(self, *, role: str, timeout_s: float, intact_name: str,
+                 dst_name: str) -> None:
+        self.role = role
+        self.timeout_s = timeout_s
+        self.intact_name = intact_name
+        self.dst_name = dst_name
+        super().__init__(
+            f"{role} timed out after {timeout_s:.0f}s — the server-side "
+            f"GRAPH.COPY may still be running; {intact_name} intact, "
+            f"{dst_name} NOT restored"
+        )
+
+
+def _restore_copy_client(db):
+    """A DB client whose READ BOUND belongs to the restore, not a request.
+
+    Derived from ``db``'s OWN connection — same server, same unix socket /
+    host+port, same credentials, same db index (the pool's
+    ``connection_class`` is preserved, so a unix-domain embedded client stays
+    one) — with an explicit generous ``socket_timeout`` (#3813) and NO retry.
+
+    No retry is deliberate on both counts: retrying multiplies the wait, and
+    it re-issues the copy (a second server-side fork) while the first may
+    still be running.
+    """
+    import redis as _redis
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry as _Retry
+
+    base = getattr(db, "connection", None) or getattr(db, "client", None)
+    pool = getattr(base, "connection_pool", None)
+    if pool is None:
+        raise RuntimeError(
+            "restore copy needs a redis connection pool to derive its own "
+            f"read bound from; {type(db).__name__} exposes none"
+        )
+    kwargs = dict(pool.connection_kwargs)
+    # #3813: the one line that decouples the restore's copy from an ordinary
+    # request's read bound. Dropping it puts the copy back on the ordinary
+    # client (see tests/test_dr_endpoints.py::TestRestoreSwapReadBound).
+    kwargs["socket_timeout"] = _restore_swap_timeout_s()
+    kwargs["retry"] = _Retry(NoBackoff(), 0)
+    return _redis.Redis(connection_pool=_redis.ConnectionPool(
+        connection_class=pool.connection_class, **kwargs))
+
+
+def _issue_graph_copy(client, src_name: str, dst_name: str) -> None:
+    """``GRAPH.COPY src → dst`` over ``client`` (the swap's single seam).
+
+    Split out so where the bound applies is testable: the bound belongs to the
+    CLIENT the command is issued over, not to the command string.
+    """
+    client.execute_command("GRAPH.COPY", src_name, dst_name)
+
+
+def _is_client_read_timeout(exc: BaseException) -> bool:
+    """True when ``exc`` IS — or MASKS — a redis CLIENT read timeout (#3813).
+
+    redis-py's RESP parser closes the socket when a read times out and then
+    seeks in the now-closed buffer, so the originating
+    ``redis.exceptions.TimeoutError: Timeout reading from socket`` arrives
+    chained behind ``ValueError: I/O operation on closed file`` — the exact
+    shape the embedded lane produced. Walk ``__cause__``/``__context__`` so
+    the classification never depends on which layer's exception surfaced, and
+    never on message text.
+    """
+    import redis as _redis
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if isinstance(e, (TimeoutError, _redis.exceptions.TimeoutError)):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
+def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
+                                   role: str, intact_name: str) -> None:
+    """Run a long GRAPH.COPY for the restore over its own read bound (#3813).
+
+    Raises ``RestoreCopyTimeoutError`` when that bound expires, keeping the
+    originating timeout as ``__cause__``, so callers report a TIMEOUT rather
+    than a dead connection or a failed copy.
+    """
+    client = _restore_copy_client(db)
+    try:
+        _issue_graph_copy(client, src_name, dst_name)
+    except Exception as e:
+        if _is_client_read_timeout(e):
+            raise RestoreCopyTimeoutError(
+                role=role, timeout_s=_restore_swap_timeout_s(),
+                intact_name=intact_name, dst_name=dst_name,
+            ) from e
+        raise
+    finally:
+        try:  # noqa: SIM105
+            client.close()
+        except Exception:
+            pass
+
+
 def _restore_into_temp_verify_swap(
     db,
     payload: dict,
@@ -1341,7 +1571,9 @@ def _restore_into_temp_verify_swap(
     live graph → delete live → GRAPH.COPY temp → live → cleanup staging and
     pre-restore copies. Any failure before the swap leaves the live graph
     untouched; a swap failure leaves the verified temp + pre-restore copies
-    recoverable.
+    recoverable. Both GRAPH.COPY copies run over the restore's OWN generous,
+    explicit read bound (#3813) — never an ordinary request's, which forbids a
+    copy longer than 60s at any legal configuration.
     """
     if expected_nodes is None:
         # #1625: derive the expected count from the AUTHENTICATED dump content
@@ -1474,9 +1706,16 @@ def _restore_into_temp_verify_swap(
             # #3845: a wedged module-fork slot refuses this copy too. The copy
             # is best-effort, but the RECOVERY is not — releasing the slot here
             # is what lets the swap below use a fork at all instead of the
-            # fork-free fallback.
+            # fork-free fallback. #3813: a long server-side copy, so the copy
+            # STEP runs over the restore's own read bound rather than an
+            # ordinary request's socket_timeout.
             recovery = _graph_copy_or_diagnose(
-                live_g, pre_name, db=db, site="pre-restore safety copy")
+                live_g, pre_name, db=db, site="pre-restore safety copy",
+                copy=lambda: _graph_copy_with_restore_bound(
+                    db, live_name, pre_name,
+                    role="Pre-restore safety copy", intact_name=live_name,
+                ),
+            )
             if recovery is not None:
                 fork_slot = recovery
             pre_g = db.select_graph(pre_name)
@@ -1507,10 +1746,32 @@ def _restore_into_temp_verify_swap(
     except Exception as e:
         logger.warning("live graph delete failed (proceeding to copy): %s", e)
     try:
+        # #3845: the swap's copy gets the detect→reap→retry wedge recovery;
+        # #3813: and it runs over the restore's OWN generous read bound, so a
+        # copy that outlives an ordinary request's socket_timeout still
+        # completes instead of being torn down.
         recovery = _graph_copy_or_diagnose(
-            temp_g, live_name, db=db, site="restore swap")
+            temp_g, live_name, db=db, site="restore swap",
+            copy=lambda: _graph_copy_with_restore_bound(
+                db, temp_name, live_name,
+                role="Restore swap",
+                intact_name=f"verified temp graph {temp_name}",
+            ),
+        )
         if recovery is not None:
             fork_slot = recovery
+    except RestoreCopyTimeoutError as e:
+        # A CLIENT read timeout is NOT a dead connection and NOT a failed copy:
+        # the server may still be copying. Say *timeout*, leave the verified
+        # temp graph intact and identifiable, and never imply the live graph
+        # was restored. Handled BEFORE ForkSlotWedgedError so a timeout is
+        # never reinterpreted as a wedge (#3813).
+        logger.error(
+            "%s — the server-side copy may still be running; verified temp "
+            "graph %s intact, live graph %s NOT restored",
+            e, temp_name, live_name,
+        )
+        raise
     except ForkSlotWedgedError as e:
         # The module-fork slot is wedged and could not be released. Do NOT fail
         # the restore on a fork primitive: promote the already-VERIFIED,
