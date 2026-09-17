@@ -437,6 +437,38 @@ def test_reinjection_total_cap_resolves_once_before_the_loop(monkeypatch):
         True) == DEFAULT_REINJECTION_TOTAL_ITEMS
 
 
+def test_reinjection_total_cap_explicit_is_clamped_like_the_env(monkeypatch):
+    """#2513 (delta-review P2): the EXPLICIT value goes through the SAME
+    clamp as the env value.
+
+    The pre-fix shape returned it verbatim: ``explicit 0`` resolved 0, so
+    the arm ran ON with zero injection and reported
+    ``{'ok': True, 'total': 0, 'total_cap_hit': False}`` — no error, no
+    signal — while ``'15'`` reached ``int``-typed arithmetic and raised a
+    ``TypeError`` swallowed by the fail-open handler. Here explicit 0 / -3
+    / '15' are asserted to resolve IDENTICALLY to their env twins.
+    """
+    from tools.longmem_eval import run as _run
+
+    default = DEFAULT_REINJECTION_TOTAL_ITEMS
+    # the env twins: 0 and -3 (out of range) fall back; '15' is honoured
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "0")
+    assert _run._resolve_reinjection_total_cap(True) == default
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "-3")
+    assert _run._resolve_reinjection_total_cap(True) == default
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "15")
+    assert _run._resolve_reinjection_total_cap(True) == 15
+    # ... and the explicit value resolves identically
+    assert _run._resolve_reinjection_total_cap(True, 0) == default
+    assert _run._resolve_reinjection_total_cap(True, -3) == default
+    assert _run._resolve_reinjection_total_cap(True, "15") == 15
+    assert _run._resolve_reinjection_total_cap(True, "garbage") == default
+    # a legitimate explicit value is untouched, and an arm-OFF run still
+    # resolves None (the clamp never fires off-path)
+    assert _run._resolve_reinjection_total_cap(True, 7) == 7
+    assert _run._resolve_reinjection_total_cap(False, 0) is None
+
+
 def test_fingerprint_and_resume_refuse_a_total_cap_change(tmp_path):
     """#2513 (delta-review P1, false-PASS class): the resolved injection
     total budget gates the checkpoint — a cap-10 checkpoint is REFUSED by a
@@ -464,9 +496,9 @@ def test_fingerprint_and_resume_refuse_a_total_cap_change(tmp_path):
     # not on an incidental KeyError.
     with pytest.raises(_run.CheckpointStaleError) as ei:
         _run._load_checkpoint(str(cp), fp15)
-    assert "reinjection_total_cap" in str(ei.value)
-    assert fp10["reinjection_total_cap"] == 10
-    assert fp15["reinjection_total_cap"] == 15
+    assert "session_reinjection_total_cap" in str(ei.value)
+    assert fp10["session_reinjection_total_cap"] == 10
+    assert fp15["session_reinjection_total_cap"] == 15
 
     # the LEGITIMATE form stays GREEN: the same cap resumes the checkpoint
     done, failures = _run._load_checkpoint(str(cp), fp10)
@@ -475,17 +507,17 @@ def test_fingerprint_and_resume_refuse_a_total_cap_change(tmp_path):
     # an arm-OFF fingerprint carries NO cap key at all (the knob is inert —
     # a pre-knob arm-OFF checkpoint keeps resuming byte-identically)
     off = _run._build_fingerprint(**dict(base, session_reinjection=False))
-    assert "reinjection_total_cap" not in off
+    assert "session_reinjection_total_cap" not in off
 
     # an arm-ON run at the product default stamps it explicitly, and BOTH
     # directions of the cross refuse (the key-union compares values)
     on_default = _run._build_fingerprint(
         **base, reinjection_total_cap=DEFAULT_REINJECTION_TOTAL_ITEMS)
-    assert on_default["reinjection_total_cap"] == \
+    assert on_default["session_reinjection_total_cap"] == \
         DEFAULT_REINJECTION_TOTAL_ITEMS
-    assert "reinjection_total_cap" in _run._fingerprint_diffs(
+    assert "session_reinjection_total_cap" in _run._fingerprint_diffs(
         on_default, fp15)
-    assert "reinjection_total_cap" in _run._fingerprint_diffs({}, fp10)
+    assert "session_reinjection_total_cap" in _run._fingerprint_diffs({}, fp10)
 
 
 def test_merge_with_no_new_ids_returns_the_base_pool_unchanged():

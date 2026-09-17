@@ -101,6 +101,7 @@ from .report import (
 from .rerank import (
     _TRUTHY,
     RERANK_MODEL_DEFAULT,
+    _clamp_int,
     _env_float,
     _env_int,
     rerank_enabled,
@@ -456,15 +457,18 @@ def _resolve_reinjection_total_cap(arm_on: bool,
     run resolves ``None`` — it never reads the env, never records a stray
     env value, and never stamps an inert knob on the fingerprint (an OFF
     run stays byte-identical to a pre-knob OFF checkpoint). Arm-ON
-    resolution is explicit > env > product constant, through the SAME
-    ``rerank._env_int`` clamp the direct-caller fallback uses (garbage / <1
+    resolution is explicit > env > product constant, and BOTH sides go
+    through the SAME ``rerank._clamp_int`` (garbage / non-integer / <1
     falls back to ``DEFAULT_REINJECTION_TOTAL_ITEMS``) — so the run path
-    and a direct caller can never resolve the knob differently.
+    and a direct caller can never resolve the knob differently. #2513
+    (delta-review P2): the explicit value used to bypass the clamp
+    entirely (explicit 0 resolved to 0 and served a silent zero-injection
+    arm; '15' raised a TypeError swallowed by the fail-open handler).
     """
     if not arm_on:
         return None
     if explicit is not None:
-        return explicit
+        return _clamp_int(explicit, DEFAULT_REINJECTION_TOTAL_ITEMS)
     return _env_int("TORTOISE_LME_REINJECTION_TOTAL_CAP",
                     DEFAULT_REINJECTION_TOTAL_ITEMS)
 
@@ -1453,7 +1457,14 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             # always stamped, so a cap change (10 vs 15 vs the product
             # default) refuses the resume in either direction via the
             # key-union in ``_fingerprint_diffs``.
-            ("reinjection_total_cap", reinjection_total_cap),
+            # #2513 (delta-review P2): the key name is IDENTICAL to the
+            # methodology record's (``session_reinjection_total_cap``) — a
+            # key-for-key cross-check of the checkpoint fingerprint against
+            # the report must find the same name, because that hand
+            # cross-check is how this class of defect gets verified (the
+            # two names diverging means the cross-check silently finds
+            # nothing).
+            ("session_reinjection_total_cap", reinjection_total_cap),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — conditional presence like the C2 knob (a flagged checkpoint
             # resumed without the arm is refused by the fingerprint gate).

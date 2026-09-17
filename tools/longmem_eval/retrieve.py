@@ -1731,9 +1731,16 @@ def retrieve_for_question(
         # resumed by a cap-15 run (two injection volumes blended into one
         # artifact that declares one config), because the env is not part
         # of any fingerprint.
-        from .rerank import _env_int
+        #
+        # #2513 (delta-review P2): the explicit branch is clamped through the
+        # SAME ``_clamp_int`` as the env fallback — a direct caller passing
+        # 0 / -3 / '15' resolves identically to the env cases, so the claim
+        # above ("the run path and a direct caller can never resolve the
+        # knob differently") is true by construction, not by convention.
+        from .rerank import _clamp_int, _env_int
         _sr_total_cap = (
-            session_reinjection_total_cap
+            _clamp_int(session_reinjection_total_cap,
+                       DEFAULT_REINJECTION_TOTAL_ITEMS)
             if session_reinjection_total_cap is not None
             else _env_int("TORTOISE_LME_REINJECTION_TOTAL_CAP",
                           DEFAULT_REINJECTION_TOTAL_ITEMS))

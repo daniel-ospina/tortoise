@@ -561,6 +561,21 @@ def test_total_cap_run_resolved_value_wins_over_env(seeded_sdk, monkeypatch):
                           session_reinjection_total_cap=10)
     assert seen == [10]  # explicit run-resolved value, never the stray env
 
+    # #2513 (delta-review P2): a direct caller's EXPLICIT value is clamped
+    # through the SAME ``_clamp_int`` as the env fallback — the pre-fix
+    # shape forwarded it verbatim, so 0 served a silent zero-injection arm
+    # (arm ON, nothing injected, no error) and '15' raised a TypeError into
+    # the fail-open handler. Both must now resolve exactly as the env case.
+    from tortoise.session_reinjection import DEFAULT_REINJECTION_TOTAL_ITEMS
+    for raw, expected in ((0, DEFAULT_REINJECTION_TOTAL_ITEMS),
+                          (-3, DEFAULT_REINJECTION_TOTAL_ITEMS),
+                          ("15", 15)):
+        seen.clear()
+        retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                              pool_size=60, session_reinjection=True,
+                              session_reinjection_total_cap=raw)
+        assert seen == [expected], raw
+
 
 # ── (i) the PRODUCT turn shape: no ``session_id`` on the point ───────────
 
