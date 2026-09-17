@@ -273,8 +273,9 @@ class SupabaseControlPlane:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
-        (value None → ``col=is.null``), ``gt``, ``lt``. Raises RuntimeError
-        on any failure.
+        (value None → ``col=is.null``), ``gt``, ``lt``, ``lte``, ``in``
+        (value is a list/tuple/set → ``col=in.(a,b)``, #3665). Raises
+        RuntimeError on any failure.
 
         ``timeout`` (#2850/#2988): an optional PER-REQUEST override for the
         httpx call. ``None`` (the default) keeps the client-level timeout —
@@ -307,6 +308,15 @@ class SupabaseControlPlane:
             elif op == "lte":
                 # ISO-8601 cutoff for the post-grace purge sweep (#302).
                 params[col] = f"lte.{value}"
+            elif op == "in":
+                # #3665: PostgREST set membership (`col=in.(a,b,c)`). Needed by
+                # the cohort-spend reader, which must read ONLY the cohort's
+                # ledger rows — an eq-per-org loop would be N round-trips, and
+                # an unfiltered period read would be O(all orgs).
+                vals = value if isinstance(value, (list, tuple, set)) \
+                    else [value]
+                quoted = ",".join(str(v) for v in vals)
+                params[col] = f"in.({quoted})"
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if order:
@@ -3041,6 +3051,71 @@ def metering_increment_ask(cp, org_id: str, period: str, *, calls: int = 1,
          "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
          "p_cost_usd": cost_usd},
     )
+
+
+def metering_increment_capture_cost(cp, org_id: str, period: str, *,
+                                    calls: int = 0,
+                                    cost_usd: float = 0.0) -> None:
+    """Increment the org's MEASURED capture-extraction cost for the period
+    (#3665) via the ``metering_increment_capture_cost`` SQL RPC
+    (20260917000001) — the capture-side mirror of ``metering_increment_ask``
+    (atomic under Postgres row locking; best-effort by contract — the caller
+    swallows exceptions)."""
+    cp.rpc(
+        "metering_increment_capture_cost",
+        {"p_org_id": org_id, "p_period": period, "p_calls": calls,
+         "p_cost_usd": cost_usd},
+    )
+
+
+def metering_cohort_spend(cp, org_ids: list[str], period: str) -> float:
+    """Measured LLM spend for a COHORT over one billing period (#3665).
+
+    Reads ``metering_records`` for the period (PK (org_id, period) — one row
+    per org) FILTERED to the cohort's org ids, and sums the two measured cost
+    columns.
+
+    One row per ORG, never one per capture: the read is bounded by the size of
+    the cohort, not by capture volume — which is why the cap can afford to
+    read it on every admission (#3665 trade-off 2, decided: no cache, no
+    weakened bound).
+
+    TRUNCATION IS FAIL-CLOSED. PostgREST silently caps a response at the
+    project's ``db-max-rows`` (platform default 1000), and a silently-short
+    read would UNDERSTATE spend — exactly the fail-open a spend ceiling cannot
+    have. The caller therefore bounds the cohort to
+    ``cohort_cost._MAX_COHORT_ORGS`` (500, well under that default) and this
+    read passes ``limit = cohort+1``; a result at that limit cannot happen for
+    a unique (org_id, period) key, so it is treated as truncation and raises
+    rather than returning a partial sum. ASSUMPTION: the deployed
+    ``db-max-rows`` exceeds the cohort bound — the guard compares against the
+    cohort SIZE, so a project configuring ``db-max-rows`` below the cohort size
+    would short-read past it. Re-check both together.
+
+    FAIL-CLOSED: a raised ``RuntimeError`` propagates to the caller
+    (``metering.get_cohort_spend_usd``), which maps it to a 500. Never degrade
+    a spend-ceiling read to a zero view — that is fail-open.
+    """
+    wanted = {str(i) for i in (org_ids or []) if i}
+    if not wanted:
+        return 0.0
+    rows = cp.query(
+        "metering_records",
+        select=["org_id", "ask_cost_usd", "capture_cost_usd"],
+        filters=[("org_id", "in", sorted(wanted)),
+                 ("period", "eq", period)],
+        limit=len(wanted) + 1,
+    )
+    if len(rows) > len(wanted):
+        raise RuntimeError(
+            "metering_records cohort read returned more rows than the cohort "
+            f"has orgs ({len(rows)} > {len(wanted)}) — refusing to price the "
+            "cohort from an untrustworthy read (fail-closed)")
+    total = 0.0
+    for row in rows:
+        total += float(row.get("ask_cost_usd") or 0.0)
+        total += float(row.get("capture_cost_usd") or 0.0)
+    return total
 
 
 # ── #1875: invitee-side pending/accept/decline (by-id, email-scoped) ────────

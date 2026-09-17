@@ -705,6 +705,12 @@ class FakeControlPlane:
             elif op == "lte":
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) <= value]
+            elif op == "in":
+                # #3665: PostgREST set membership, mirroring the real client.
+                vals = value if isinstance(value, (list, tuple, set)) \
+                    else [value]
+                vals = list(vals)
+                rows = [r for r in rows if r.get(col) in vals]
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if method == "GET":
