@@ -248,7 +248,9 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
     The bound now lives on each ``HealthProbe`` rather than in a per-handler
     ``wait_for``, so pin BOTH the single-source-of-truth equality (the signature
     default IS the shared module constant) AND the ordering property (it clears
-    the DB probes' statically-known total), plus each plane's fail-closed flag
+    the DB probes' loose outer-alignment bound — ``PROBE_DB_TOTAL_TIMEOUT`` is
+    deliberately an OVER-ESTIMATE of the probes' real total, NOT that total —
+    plus the nominal SDK-acquisition budget), plus each plane's fail-closed flag
     and the liveness refresher's alignment. ``_READY_PROBE_TIMEOUT_S`` is gone
     with the mechanism it bounded; a reintroduced per-handler literal would be
     an unreasoned second source of truth.
@@ -272,15 +274,17 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
         f"PROBE_HARD_TIMEOUT ({PROBE_HARD_TIMEOUT}s), not a hand-typed literal "
         f"(got {default}s)"
     )
-    # (2) ORDERING PROPERTY. The default must clear the DB probes'
-    # statically-known total (probe_db's two-attempt ceiling PLUS the nominal
-    # SDK-acquisition budget). Necessary but NOT sufficient: the embedded
-    # acquisition prefix is unbounded, so this is a best-effort alignment, not
-    # a proven invariant (see monitoring.PROBE_MAX_SUPERSEDES).
+    # (2) ORDERING PROPERTY. The default must clear the DB probes' loose
+    # outer-alignment bound (``PROBE_DB_TOTAL_TIMEOUT`` — deliberately an
+    # OVER-ESTIMATE of probe_db's real total, NOT the exact inner total — plus
+    # the nominal SDK-acquisition budget). Necessary but NOT sufficient: the
+    # embedded acquisition prefix is unbounded, so this is a best-effort
+    # alignment, not a proven invariant (see monitoring.PROBE_MAX_SUPERSEDES).
     inner_total = PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
     assert default > inner_total, (
         f"HealthProbe's default wall bound ({default}s) does not clear the DB "
-        f"probes' statically-known total ({inner_total}s) — an omitted timeout "
+        f"probes' loose outer-alignment bound ({inner_total}s — an OVER-ESTIMATE, "
+        "not the exact total) — an omitted timeout "
         "strands a worker thread on every timeout (#2988)"
     )
     assert "_READY_PROBE_TIMEOUT_S" not in HOSTED_API.read_text(), (
@@ -307,11 +311,11 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
     )
     assert mod._HEALTH_PROBE._timeout > inner_total, (
         f"/health's refresher bound ({mod._HEALTH_PROBE._timeout}s) must clear "
-        f"_probe_db's statically-known total ({inner_total}s = probe_db's "
-        f"{PROBE_DB_TOTAL_TIMEOUT}s + the {PROBE_SDK_ACQUISITION_BUDGET}s "
-        "nominal SDK-acquisition budget), or it abandons a live worker on every "
-        "timeout (#2988). This is alignment, not proof: the embedded "
-        "acquisition prefix is unbounded."
+        f"_probe_db's loose outer-alignment bound ({inner_total}s = the "
+        f"over-estimate PROBE_DB_TOTAL_TIMEOUT {PROBE_DB_TOTAL_TIMEOUT}s + the "
+        f"{PROBE_SDK_ACQUISITION_BUDGET}s nominal SDK-acquisition budget), or it "
+        "abandons a live worker on every timeout (#2988). This is alignment, "
+        "not proof: the embedded acquisition prefix is unbounded."
     )
 
 
@@ -321,7 +325,8 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     Abandoning a probe does not stop its thread — ``wait_for`` cancels the
     awaitable, not the worker (CPython #87185), so the worker stays parked in
     its socket read. The defence is ordering: keep the outer bound ABOVE the
-    probe's statically-known inner bound, so the inner bound normally fires
+    probe's loose inner figure (``PROBE_DB_TOTAL_TIMEOUT`` — deliberately an
+    OVER-ESTIMATE, not the exact inner total), so the inner bound normally fires
     first and the thread returns by itself. This is a best-effort ALIGNMENT
     that reduces stranding, NOT a proven invariant — the inner worst case is
     unbounded (httpx's ``read`` is per-read; the embedded acquisition prefix
@@ -331,9 +336,9 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     and leaned on ``PROBE_MAX_SUPERSEDES`` instead. That rationale was
     overstated: the supersede counter RESETS on any live completion, so it caps
     a single wedge episode rather than the process lifetime. Both properties
-    are now asserted at once — each bound is above its own statically-known
-    inner total — AND the probe still runs on a dedicated coordinator rather
-    than the shared default pool.
+    are now asserted at once — each bound is above its own loose inner figure
+    (an OVER-ESTIMATE of the inner total, not the exact one) — AND the probe
+    still runs on a dedicated coordinator rather than the shared default pool.
 
     This test is THE canonical per-plane tripwire (the structural test above
     deliberately does not duplicate these predicates): raise a PHASE in
@@ -364,16 +369,23 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     import tortoise.supabase_control as sc
     from tortoise.monitoring import PROBE_DB_TOTAL_TIMEOUT, PROBE_TIMEOUT
 
-    # Data plane: ``probe_db`` retries one TRANSIENT connect failure, so its
-    # real ceiling is PROBE_DB_TOTAL_TIMEOUT (2 x PROBE_TIMEOUT + the retry
-    # delay), NOT the bare PROBE_TIMEOUT. Bounding against the per-attempt
-    # figure looked correct (2.0 > 1.5) while actually sitting BELOW the true
-    # 3.1s inner bound — the exact inversion this test exists to prevent.
+    # Data plane: since #3143 probe_db's PLATFORM shape (no explicit
+    # allowance) has ONE caller deadline of PROBE_TIMEOUT — the #1565 retry
+    # rides the REMAINDER instead of taking a second bound — so its real total
+    # is ~PROBE_TIMEOUT. PROBE_DB_TOTAL_TIMEOUT (2 x PROBE_TIMEOUT + the retry
+    # delay) is now deliberately a LOOSE OVER-ESTIMATE kept as the
+    # outer-alignment figure a coordinator is sized ABOVE, NOT the exact inner
+    # total. The assertion still targets that loose figure on purpose: it is
+    # the STRICTER check (the readiness bound must clear the over-estimate
+    # too), so it cannot pass while the real ~1.5s total is unguarded. Bounding
+    # against the bare per-attempt figure instead is what produced the
+    # historical inversion (2.0 > 1.5 while the then-real total was ~3.1s,
+    # before #3143 made the retry ride the remainder).
     assert mod._READY_PROBE._timeout > PROBE_DB_TOTAL_TIMEOUT, (
         f"the FalkorDB readiness bound ({mod._READY_PROBE._timeout}s) must exceed "
-        f"probe_db's TOTAL bound ({PROBE_DB_TOTAL_TIMEOUT}s = 2 x {PROBE_TIMEOUT}s "
-        "+ the retry delay) or the outer bound wins the race and strands a worker "
-        "thread per timeout (#2988)"
+        f"probe_db's loose outer-alignment bound ({PROBE_DB_TOTAL_TIMEOUT}s = 2 x "
+        f"{PROBE_TIMEOUT}s + the retry delay) or the outer bound wins the race and "
+        "strands a worker thread per timeout (#2988)"
     )
 
     # Control plane: the probe request carries its OWN composed per-request
@@ -512,9 +524,10 @@ def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
         "DB_PROBE_HARD_TIMEOUT must be the shared derived bound, not a second "
         "hand-typed literal"
     )
-    # STRICTLY above the statically-known total (probe_db's two-attempt total
-    # PLUS the nominal acquisition budget) — equality would still be a race.
-    # This does NOT cover the embedded acquisition prefix.
+    # STRICTLY above the LOOSE outer-alignment figure (``PROBE_DB_TOTAL_TIMEOUT``
+    # — deliberately an OVER-ESTIMATE of probe_db's real total, NOT the exact
+    # inner total — PLUS the nominal acquisition budget) — equality would still
+    # be a race. This does NOT cover the embedded acquisition prefix.
     assert mod.DB_PROBE_HARD_TIMEOUT > \
         PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET, (
         "DB_PROBE_HARD_TIMEOUT must sit strictly above PROBE_DB_TOTAL_TIMEOUT + "

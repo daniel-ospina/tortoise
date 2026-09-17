@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import threading
 import warnings
 from datetime import datetime, timedelta, timezone
 
@@ -30,7 +29,6 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import tortoise.hosted_api as ha_mod  # noqa: I001
 from tortoise.hosted_api import app, get_current_user
-from tortoise.projection import FalkorProjection
 from tortoise.sdk import TortoiseSDK
 
 from tests._http_fixtures import patched_tortoise_sdk
@@ -241,47 +239,25 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
 # property of opening the app, not of the control-plane mode.
 # ═══════════════════════════════════════════════════════════════════════
 
-# #3505: one embedded server per db_path — serialize construction.
+# #3505/#3546: the embedded construction serialization this file needs lives
+# ONCE for the whole session — `tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`,
+# installed by `tests/conftest._serialize_embedded_construction`. It was a
+# module-scoped copy here (#3511); that copy could not serialize against the
+# one in `tests/test_import_endpoint.py` or cover any other file, which is the
+# defect #3546 names. Do NOT re-add a per-file copy.
 #
-# redislite starts a NEW redis-server daemon whenever `<db>.settings` is
-# absent (or its pid is dead). Two constructions that interleave BEFORE
-# either has written `.settings` therefore BOTH take the fresh-start branch,
-# each spawning its own daemon in its own tempdir, and the later
-# `_save_setting_registry()` silently owns the registry — the loser's writes
-# are then invisible to every later opener. Mirror of the proven Group B fix
-# in tests/test_import_endpoint.py (`_EMBEDDED_CONSTRUCTION_LOCK`) — that
-# copy carries the full "Scope of the guarantee" / "Blast radius" note; the
-# two caveats that matter to THIS file are repeated here.
-#
-# LANE SCOPE — this lock is a NO-OP on the docker lane. With a supported
-# `TORTOISE_DB_URI` set, every construction from this module REDIRECTS to
-# that server (`tortoise/projection/__init__.py`, the #1647 D-1=A test
-# redirect: `path` is nulled, so `_is_embedded` is False), no redislite
-# daemon is started, and no double-start can occur. `test_export_delete` is
-# NOT in `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects
-# that branch. What protects THIS file on the docker lane is the BOOT-SWEEP
-# quiesce (`_quiesce_testclient_background_work`), not this lock. The
-# serialization is live on the embedded tier-2 / carve-out lane only. See
-# the LANE SCOPE note in `_quiesce_testclient_background_work`.
-#
-# Serializing the construction makes the first starter the single owner, so
-# later openers (seeder, `_registry_count`, health probe, request handler)
-# normally resolve through `.settings` to that one server. This is NOT a
-# global single-writer guarantee: the lock serializes only IN-PROCESS
-# `FalkorProjection.__init__` calls, and two paths stay outside it, each able
-# to add or remove a registry entry anyway — (1) a construction that raises
-# inside redislite's `_start_redis()` after its daemon spawned but before
-# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
-# redislite's `_cleanup()` last-client branch removing `<db>.settings` from
-# `__del__`/atexit on any thread.
-#
-# The critical section also spans redislite's BLOCKING server start, so a
-# wedged embedded start stalls every other constructor in the module, where
-# it previously stalled only its own thread. That wait is bounded by
-# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
-# `redis-server` binary — accepted deliberately: a hung start is a louder
-# failure than a silent second daemon.
-_EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
+# LANE SCOPE — the serialization is INERT on the lane CI runs this file on.
+# Under a supported `TORTOISE_DB_URI` (the docker lane, this file's default)
+# every construction from this module REDIRECTS to that server
+# (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect: `path` is
+# nulled, so `_is_embedded` is False), no redislite daemon is started, and no
+# double-start can occur. `test_export_delete` is NOT in
+# `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that branch.
+# What protects THIS file on the docker lane is the BOOT-SWEEP quiesce
+# (`_quiesce_testclient_background_work`), not the serialization. The lock is
+# live only on the embedded tier-2 / carve-out lane (no URI), where
+# constructions stay local-file and real daemons are spawned; it is kept for
+# correctness there, not because the docker lane depends on it.
 
 
 async def _quiet_boot_sweeps() -> None:
@@ -341,12 +317,14 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
        that constructor, so the embedded double-start race would stay live.
        Rather than quiesce a third background caller one caller at a time
        (whack-a-mole — `_lifespan` already grew the probe loop after
-       #2850), the CONSTRUCTION is serialized instead: the invariant
-       redislite actually needs is that the first construction on a given
-       db_path writes `<db>.settings` before any other opener evaluates the
-       fresh-start branch, and serializing holds it for EVERY in-process
-       construction in this file — no matter which background caller
-       `_lifespan` arms next.
+       #2850), the CONSTRUCTION is serialized: the invariant redislite
+       actually needs is that the first construction on a given db_path
+       writes `<db>.settings` before any other opener evaluates the
+       fresh-start branch. #3546 moved that serialization to ONE
+       process-wide lock for the whole session
+       (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by
+       `tests/conftest._serialize_embedded_construction`) — this file no
+       longer installs its own.
 
        LANE SCOPE — the serialization is INERT on the lane CI runs this file
        on. Under a supported `TORTOISE_DB_URI` (the docker lane, this file's
@@ -357,7 +335,7 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
        `tests._embedded.TEST_NO_REDIRECT_STEMS`, which is what selects that
        branch. On that lane the protection this file actually gets is item 1
        — the BOOT-SWEEP quiesce, which removes the second caller of
-       `_purge_deleted_teams` — and NOT this serialization. The lock is live
+       `_purge_deleted_teams` — and NOT the serialization. The lock is live
        only on the embedded tier-2 / carve-out lane (no URI), where
        constructions stay local-file and real daemons are spawned; it is
        kept for correctness there, not because the docker lane depends on
@@ -368,20 +346,6 @@ def _quiesce_testclient_background_work(monkeypatch) -> None:
     monkeypatch.setattr(ha_mod, "_run_boot_sweeps", _quiet_boot_sweeps)
     monkeypatch.setattr(ha_mod, "event_retention_interval",
                         lambda *args, **kwargs: 86400.0)
-    # (2) serialize embedded projection construction on the pinned db file.
-    # NO-OP on a URI lane (docker): every construction redirects to the
-    # server, `_is_embedded` is False, no daemon is started — see the LANE
-    # SCOPE note in this fixture's docstring. Live on the embedded lane.
-    _orig_proj_init = FalkorProjection.__init__
-
-    def _serialized_proj_init(self, *args, **kwargs):
-        # `return` forwarded deliberately: `__init__` must return None, so it
-        # is inert today, but it stays correct if this wrapper is ever reused
-        # for a factory or `__new__` (where dropping the result is a bug).
-        with _EMBEDDED_CONSTRUCTION_LOCK:
-            return _orig_proj_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(FalkorProjection, "__init__", _serialized_proj_init)
 
 
 @pytest.fixture
