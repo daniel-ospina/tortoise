@@ -269,7 +269,6 @@ def decide(
     *,
     main_signatures: dict[str, frozenset[str]] | None = None,
     k_pr: int | None = None,
-    k_main: int | None = None,
     rate_tolerance: float = 1.5,
     min_runs: int = 3,
 ) -> Decision:
@@ -280,8 +279,11 @@ def decide(
     * id unknown to main's measurement -> **BLOCK** (no evidence of pre-existence).
     * signature disjoint from main's -> **BLOCK** (a DIFFERENT failure inside an id
       main also failed; same id is not same failure).
-    * ``k_main`` below ``min_runs`` -> **BLOCK** (insufficient evidence; one
-      observation cannot establish a rate).
+    * THIS id's main row measured over fewer than ``min_runs`` runs -> **BLOCK**
+      (insufficient evidence; one observation cannot establish a rate). The floor is
+      PER-ID and has no table-wide or caller-declared form: a ``k_main`` knob was
+      removed because it was accepted and never read, which is the shape that
+      produced this whole family of defects.
     * PR rate materially above main's -> **BLOCK** (the PR made it worse).
     * otherwise -> **EXEMPT**, recorded with both rates.
 

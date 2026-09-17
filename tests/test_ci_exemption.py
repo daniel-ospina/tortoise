@@ -22,6 +22,8 @@ bypass — it is fixed here, but it is not part of the exemption surface.
 
 from __future__ import annotations
 
+import pytest
+
 from tools.ci_exemption import (
     Failure,
     Rate,
@@ -82,7 +84,7 @@ def test_stray_line_cannot_buy_an_exemption():
 
     decision = decide({ID: _f(4, 4, "AssertionError: x")}, main_rates,
                       main_signatures={ID: frozenset({"AssertionError: x"})},
-                      k_main=4, k_pr=4)
+                      k_pr=4)
 
     assert decision.any_blocked, "a junk union must not exempt anything"
     assert main_rates == {}, "the stray token bought no entry"
@@ -101,7 +103,6 @@ def test_E1_a_single_main_flake_does_not_grant_immunity():
         {ID: _f(8, 8, "AssertionError: boom")},
         {ID: Rate(1, 8)},
         main_signatures={ID: frozenset({"AssertionError: boom"})},
-        k_main=8,
         k_pr=8,
     )
 
@@ -123,7 +124,6 @@ def test_E2_same_id_different_failure_is_not_exempt():
         {ID: _f(4, 8, "AssertionError: the PR's new failure")},
         {ID: Rate(4, 8)},
         main_signatures={ID: frozenset({"ConnectionError: socket gone"})},
-        k_main=8,
         k_pr=8,
     )
 
@@ -137,7 +137,6 @@ def test_E2_matching_signature_at_the_same_rate_is_exempt():
         {ID: _f(4, 8, "ConnectionError: socket gone")},
         {ID: Rate(4, 8)},
         main_signatures={ID: frozenset({"ConnectionError: socket gone"})},
-        k_main=8,
         k_pr=8,
     )
 
@@ -152,7 +151,7 @@ def test_E3_main_1_of_8_vs_pr_8_of_8_blocks():
     """The canonical counterexample, asserted directly."""
     decision = decide(
         {ID: _f(8, 8, "sg")}, {ID: Rate(1, 8)},
-        main_signatures={ID: frozenset({"sg"})}, k_main=8, k_pr=8,
+        main_signatures={ID: frozenset({"sg"})}, k_pr=8,
     )
 
     assert decision.any_blocked, "an 8x deterministic regression must not ship"
@@ -161,7 +160,7 @@ def test_E3_main_1_of_8_vs_pr_8_of_8_blocks():
 def test_E3_equivalent_rates_are_exempt():
     decision = decide(
         {ID: _f(3, 8, "sg")}, {ID: Rate(4, 8)},
-        main_signatures={ID: frozenset({"sg"})}, k_main=8, k_pr=8,
+        main_signatures={ID: frozenset({"sg"})}, k_pr=8,
     )
 
     assert not decision.any_blocked
@@ -171,7 +170,7 @@ def test_E3_small_k_cannot_excuse():
     """One main observation cannot establish a rate — fail closed."""
     decision = decide(
         {ID: _f(8, 8, "sg")}, {ID: Rate(1, 1)},
-        main_signatures={ID: frozenset({"sg"})}, k_main=1, k_pr=8, min_runs=3,
+        main_signatures={ID: frozenset({"sg"})}, k_pr=8, min_runs=3,
     )
 
     assert decision.any_blocked
@@ -185,7 +184,7 @@ def test_E4_an_exemption_is_recorded_with_both_rates():
     """A green with no exemption line FAILS this test, not passes it."""
     decision = decide(
         {ID: _f(4, 8, "sg")}, {ID: Rate(4, 8)},
-        main_signatures={ID: frozenset({"sg"})}, k_main=8, k_pr=8,
+        main_signatures={ID: frozenset({"sg"})}, k_pr=8,
     )
 
     lines = decision.visible_exemptions()
@@ -210,7 +209,7 @@ def test_window_boundary_is_no_longer_a_distinction():
     """
     decision = decide(
         {ID: _f(4, 10, "sg")}, {ID: Rate(4, 10)},
-        main_signatures={ID: frozenset({"sg"})}, k_main=10, k_pr=10,
+        main_signatures={ID: frozenset({"sg"})}, k_pr=10,
     )
 
     assert not decision.any_blocked, "no window exists to be outside of"
@@ -219,7 +218,7 @@ def test_window_boundary_is_no_longer_a_distinction():
 
 def test_an_id_main_never_failed_is_always_pr_unique():
     decision = decide(
-        {ID: _f(1, 10, "sg")}, {}, k_main=10, k_pr=10,
+        {ID: _f(1, 10, "sg")}, {}, k_pr=10,
     )
 
     assert decision.any_blocked
@@ -243,8 +242,8 @@ def test_verdict_stability_same_input_twice_same_verdict():
     main = {ID: Rate(1, 8), "tests/test_other.py::test_b": Rate(4, 8)}
     sigs = {ID: frozenset({"sg"}), "tests/test_other.py::test_b": frozenset({"sg2"})}
 
-    first = decide(pr, main, main_signatures=sigs, k_main=8, k_pr=8)
-    second = decide(pr, main, main_signatures=sigs, k_main=8, k_pr=8)
+    first = decide(pr, main, main_signatures=sigs, k_pr=8)
+    second = decide(pr, main, main_signatures=sigs, k_pr=8)
 
     assert first.report() == second.report(), "the verdict must not depend on the draw"
     assert [v.nodeid for v in first.blocked] == [v.nodeid for v in second.blocked]
@@ -279,7 +278,7 @@ def test_substrate_misfire_does_not_launder_a_pr_caused_failure():
     """
     decision = decide(
         {ID: _f(10, 10, "sg")}, {ID: Rate(2, 10)},
-        main_signatures={ID: frozenset({"sg"})}, k_main=10, k_pr=10,
+        main_signatures={ID: frozenset({"sg"})}, k_pr=10,
     )
 
     assert decision.any_blocked
@@ -337,7 +336,7 @@ def test_E3_via_the_real_wire_format_blocks_a_deterministic_regression():
     decision = decide(
         pr, main.rates,
         main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
-        k_main=main.runs, k_pr=8, rate_tolerance=1.5,
+        k_pr=8, rate_tolerance=1.5,
     )
     assert [v.nodeid for v in decision.blocked] == ["tests/a.py::T::t1"]
     assert decision.visible_exemptions() == []
@@ -357,12 +356,12 @@ def test_the_gate_does_not_loosen_as_the_substrate_degrades():
     main = parse_rates("tests/a.py::T::t1\t3\t8\n")
     innocent = {"tests/a.py::T::t1": Failure(rate=Rate(3, 8), signatures=frozenset({"sg"}))}
     d_ok = decide(innocent, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
-                  k_main=8, k_pr=8)
+                  k_pr=8)
     assert d_ok.visible_exemptions(), "the innocent PR must be exempt, visibly"
 
     worse = {"tests/a.py::T::t1": Failure(rate=Rate(8, 8), signatures=frozenset({"sg"}))}
     d_no = decide(worse, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
-                  k_main=8, k_pr=8)
+                  k_pr=8)
     assert not d_no.visible_exemptions(), "a PR worse than a broken main is still a regression"
 
 
@@ -381,7 +380,7 @@ def test_E3_zero_main_rate_does_not_buy_the_strongest_exemption():
     main = parse_rates("tests/a.py::T::t1\t0\t8\n")
     pr = {"tests/a.py::T::t1": Failure(rate=Rate(8, 8), signatures=frozenset({"sg"}))}
     d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
-               k_main=8, k_pr=8)
+               k_pr=8)
     assert not d.visible_exemptions(), "0% vs 100% is not 'equivalent'"
     assert [v.nodeid for v in d.blocked] == ["tests/a.py::T::t1"]
 
@@ -389,7 +388,7 @@ def test_E3_zero_main_rate_does_not_buy_the_strongest_exemption():
 def test_E3_the_default_call_still_applies_the_min_runs_floor():
     """Bypass 1b: the DEFAULT call had no floor and emitted no note.
 
-    `k_main` defaults to None; the note was gated on `is not None` and the block on
+    the floor used to be gated on a caller-declared `k_main`, and the block on
     truthiness, so a single-sample main row exempted silently. The declared K must
     come from the table itself when the caller does not state it.
     """
@@ -411,7 +410,7 @@ def test_E2_a_new_signature_alongside_mains_is_not_exempt():
     pr = {"tests/a.py::T::t1": Failure(
         rate=Rate(5, 8), signatures=frozenset({"sg", "a-brand-new-assertion"}))}
     d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
-               k_main=8, k_pr=8)
+               k_pr=8)
     assert not d.visible_exemptions(), "a NEW assertion failure is not exempt"
 
 
@@ -420,24 +419,23 @@ def test_the_subset_rule_still_exempts_a_genuine_subset():
     main = parse_rates("tests/a.py::T::t1\t4\t8\n")
     pr = {"tests/a.py::T::t1": Failure(rate=Rate(4, 8), signatures=frozenset({"sg"}))}
     d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
-               k_main=8, k_pr=8)
+               k_pr=8)
     assert d.visible_exemptions(), "a genuine subset at an equivalent rate IS exempt"
 
 
-def test_E3_an_explicit_k_main_of_zero_does_not_remove_the_floor():
-    """F3: `k_main=0` must not read as "no floor". Zero is the WEAKEST evidence.
+def test_the_k_main_knob_is_gone_not_silently_ignored():
+    """A knob that is accepted but never read must not exist at all.
 
-    The old guard gated the block on `main_k and ...`, so an explicit 0 was falsy and
-    the floor vanished — while `k_main=1` (what the original test passed) was truthy
-    and blocked. The most degenerate input was the one input that removed the rule.
+    `k_main` was a parameter of `decide()` that the body never consulted, while the
+    docstring advertised "k_main below min_runs -> BLOCK". An accepted-but-ignored
+    knob is the exact shape that produced this family of defects: the caller believes
+    they set a floor and the verdict ignores it. The floor is per-id, so there is no
+    caller-declared form; passing one must fail LOUDLY rather than be dropped.
     """
-    main = parse_rates("tests/a.py::T::t1\t1\t1\n")
-    pr = {"tests/a.py::T::t1": Failure(rate=Rate(1, 1), signatures=frozenset({"sg"}))}
-    d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
-               k_main=0, k_pr=1)
-    assert not d.visible_exemptions(), "k_main=0 is insufficient evidence, not unlimited evidence"
-
-
+    main = parse_rates("tests/test_a.py::test_a11\t4\t8\n")
+    pr = {"tests/test_a.py::test_a11": Failure(rate=Rate(4, 8), signatures=frozenset({"sg"}))}
+    with pytest.raises(TypeError):
+        decide(pr, main.rates, k_main=8)  # type: ignore[call-arg]
 def test_min_runs_floor_is_PER_ID_not_table_wide():
     """Cycle-2 SURVIVOR: the floor was `max(runs)` over the WHOLE table.
 
