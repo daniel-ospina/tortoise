@@ -8568,6 +8568,33 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #2335 WI-2b: a retry writes new extracted points (not a zero-node
         # replay) — metering + abuse records fire for the re-attempt.
         _record_write_op(org)
+        # #3359: one capture_cost row per capture ATTEMPT that ran an
+        # extraction (successful or errored — a failed extraction that made
+        # provider calls has real spend, and the deadline/deadline_aborts
+        # disclosure depends on that row existing). Replay/M2 captures carry
+        # no extractor telemetry and emit nothing. Idempotent for free: this
+        # sits behind the SAME replay guard the write-op meter uses, so a
+        # zero-node re-POST writes no second row; a genuine retry (#2335
+        # WI-2b) does write a second row, which is why the report aggregates
+        # by session_id before percentiling. Best-effort — analytics must
+        # never block a committed capture.
+        try:
+            _cost_props = _capture_cost_props(session_id, meta)
+            if _cost_props is not None:
+                # Off the event loop: `_track_analytics_event` POSTs
+                # synchronously (`httpx.Client`), and this API runs a single
+                # uvicorn worker — calling it inline stalls EVERY concurrent
+                # request for the duration of a Supabase round-trip (the
+                # #2988 / #3498 class of sync-HTTP-on-the-loop bug). This is
+                # the first call site on the highest-frequency path, so it is
+                # routed through `asyncio.to_thread` (the house style).
+                await asyncio.to_thread(
+                    _track_analytics_event,
+                    org["org_id"], "capture_cost", _cost_props)
+        except Exception:  # noqa: BLE001, RUF100 — never block capture
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture_cost analytics emit failed (non-fatal)")
         # #308 (R1, delta 8): capture_session creates one Point per turn plus
         # the extracted decision/statement Points — weight by the actual
         # count. Conservative over-count when turns dedupe is accepted (the
@@ -19241,6 +19268,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     "questions", "step", "error_type",
     # #889: MCP tool-call telemetry (friction evidence for epic #888)
     "tool_name", "status", "latency_ms", "error_kind",
+    # #3359: capture_cost — the per-session cost driver (calibration data
+    # only; never on the billing path). All measured fields must survive
+    # the PII filter or the measurement is silently lost.
+    "calls", "retries", "prompt_tokens", "completion_tokens",
+    "cost_usd", "calls_without_cost", "calls_without_usage",
+    "deadline_aborts", "by_stage",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -19290,6 +19323,45 @@ def _track_analytics_event(org_id: str, event_name: str,
             f.write(_json.dumps(event) + "\n")
     except Exception:
         pass
+
+
+def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
+    """#3359: the per-session cost driver as an analytics ``properties`` dict.
+
+    Reads the extractor telemetry (``meta["stats"]["llm"]``) that
+    ``_rollup_llm`` now accumulates: provider calls, prompt/completion
+    tokens, the provider's own reported USD charge, the
+    ``calls_without_cost`` disclosure counter, and the per-stage/
+    per-route ``by_stage`` envelope (repricable at report time).
+
+    Returns ``None`` when the extractor produced no LLM roll-up (a
+    replayed / M2 capture: ``meta["stats"]`` is ``{}``) — no measurement
+    exists, so no row is written. A capture whose extraction ERRORED does
+    carry a roll-up (and therefore a row): the provider calls were made and
+    their spend is real.
+    """
+    llm = ((meta.get("stats") or {}).get("llm") or {})
+    if not llm:
+        return None
+    return {
+        "session_id": session_id,
+        "calls": int(llm.get("calls", 0) or 0),
+        "retries": int(llm.get("retries", 0) or 0),
+        "prompt_tokens": int(llm.get("prompt_tokens", 0) or 0),
+        "completion_tokens": int(llm.get("completion_tokens", 0) or 0),
+        "cost_usd": round(float(llm.get("cost_usd", 0.0) or 0.0), 6),
+        "calls_without_cost": int(llm.get("calls_without_cost", 0) or 0),
+        # #3359: a call that returned NO usage block at all (no tokens, no
+        # charge) is a distinct disclosure from one that returned tokens but
+        # no charge — both ride the row, so neither is silently a clean $0.
+        "calls_without_usage": int(llm.get("calls_without_usage", 0) or 0),
+        # #3359: deadline-killed generations are BILLED upstream but produce
+        # no tokens, so they are spend this measurement cannot price. Carried
+        # on the row so the report can disclose it instead of reading the
+        # session as a clean $0 (#1787 P2-L is the counter's origin).
+        "deadline_aborts": int(llm.get("deadline_aborts", 0) or 0),
+        "by_stage": llm.get("by_stage") or {},
+    }
 
 
 def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
@@ -23427,8 +23499,17 @@ async def oauth_authorize(request: Request):
         # `_redirect_uri_matches` also refuses parse-differential input: this is
         # the one place the raw request param is echoed into a Location header,
         # so relaxing the match without that guard would BE the open redirect.
-        from tortoise.oauth import _redirect_uri_matches, get_client
-        client = get_client(cp, params["client_id"]) if params["client_id"] else None
+        from tortoise.oauth import _redirect_uri_matches, resolve_client
+        client = None
+        if params["client_id"]:
+            try:
+                # #2847: the resolver, not `get_client`, so a CIMD client's
+                # in-document redirect_uri is honoured on this path too.
+                # Best-effort: a refused fetch must not turn an OAuth error
+                # response into a 5xx, so this stays non-fatal.
+                client = resolve_client(cp, params["client_id"])
+            except Exception:
+                client = None
         registered_uris = (client.get("redirect_uris") or []) if client else []
         if not isinstance(registered_uris, (list, tuple)):
             registered_uris = [registered_uris]
