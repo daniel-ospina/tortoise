@@ -16,7 +16,7 @@ import os
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 import tempfile  # noqa: F401
-import time  # noqa: F401
+import time
 
 import pytest
 
@@ -240,6 +240,179 @@ class TestAuthPreLeak:
             r = tc2.post("/mcp", headers=headers,
                          json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
             assert r.status_code == 401
+
+
+# ── #3144 / #3812: the auth-plane 503's Retry-After contract, EXECUTED ──────
+
+class TestAuthRetryAfterContract:
+    """#3144 / #3812 — the idle → first-request path, executed end to end.
+
+    #3144's reported symptom is the **MCP startup connect**: a client connects
+    eagerly at session start (Pi's ``mcp-client``: a 15s connect budget and NO
+    retry), a single ``503`` during org resolution is logged, and the whole
+    session runs with **zero** Tortoise tools. The app-side lever is therefore
+    the response CONTRACT on the auth-plane 503: a retryable failure a client
+    can act on, not a bodyless rejection it cannot distinguish from an outage.
+
+    #3812's acceptance is that the contract is asserted by EXECUTING the path:
+    a header assertion pinned to source text cannot fail and is not evidence.
+    These tests drive the real mounted MCP ASGI app through the real sequence
+    (warm resolution → idle past the 60s cache TTL → cold re-resolve → retry),
+    so removing the ``Retry-After`` header makes them red.
+    """
+
+    @pytest.fixture
+    def idle_mcp_client(self, tmp_path, monkeypatch):
+        """Mounted MCP app plus a handle on its OrgResolutionMiddleware.
+
+        The middleware instance owns the per-token 60s resolution cache, so
+        holding a reference to it is how the test reaches the
+        idle → first-request path deterministically (no real 60s sleep).
+        """
+        import tortoise.mcp_auth as ma
+        from tortoise.mcp_server import create_http_app
+
+        db_path = str(tmp_path / "retry.db")
+        reg_sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg_sdk.org_create("retry-team")
+        key = reg_sdk.apikey_create(team["id"], "retry")["api_key"]
+
+        made: list = []
+        orig_init = ma.OrgResolutionMiddleware.__init__
+
+        def _capture(self, *a, **kw):
+            orig_init(self, *a, **kw)
+            made.append(self)
+
+        monkeypatch.setattr(ma.OrgResolutionMiddleware, "__init__", _capture)
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg_sdk)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            yield tc, key, made, reg_sdk
+
+    def test_idle_first_request_503_is_retryable_and_the_retry_resolves(
+            self, idle_mcp_client, monkeypatch):
+        import tortoise.mcp_auth as ma
+
+        tc, key, made, reg_sdk = idle_mcp_client
+
+        # 1) A warm request resolves and caches the token → org mapping.
+        #    (The middleware is instantiated lazily here — the first request
+        #    builds the app's middleware stack, as in production.)
+        warm, _ = _mcp_post(tc, {"jsonrpc": "2.0", "method": "tools/list",
+                                 "id": 1})
+        assert warm.status_code == 200, warm.text
+        assert made, "OrgResolutionMiddleware was never instantiated"
+        middleware = made[0]
+        assert key in middleware._cache, "the warm request did not cache"
+
+        # 2) Idle: age the cached resolution past the middleware's 60s TTL.
+        #    This is the state the process is in when the first request after
+        #    an idle period arrives, and it forces a fresh control-plane
+        #    resolution — the cold path #3144 reports.
+        ts, org, limits = middleware._cache[key]
+        middleware._cache[key] = (ts - 61.0, org, limits)
+
+        # 3) The control plane / registry is cold or unreachable on the
+        #    re-resolve (twice: it recovers for the retry leg).
+        calls = {"n": 0}
+        real_verify = reg_sdk.apikey_verify
+
+        def _cold_then_healthy(token):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise ConnectionError("control plane cold / connection refused")
+            return real_verify(token)
+
+        monkeypatch.setattr(reg_sdk, "apikey_verify", _cold_then_healthy)
+
+        # 4) The contract: a parseable Retry-After in a sane range, pinned to
+        #    the CONFIGURED value. Removing the header makes this RED (#3812's
+        #    acceptance). The value is read back off the wire and slept below
+        #    — the test honours what the SERVER advertised, not a number it
+        #    chose itself.
+        def _first_503_after_idle(rid: int, configured: str):
+            """Drive the idle→first-request path once; return (response, delay).
+
+            Re-armed for each call: the failed resolution does NOT write the
+            cache, so the seeded stale entry is still stale and every request
+            here takes the cold re-resolve path.
+            """
+            monkeypatch.setenv("TORTOISE_MCP_AUTH_RETRY_AFTER", configured)
+            resp, body = _mcp_post(
+                tc, {"jsonrpc": "2.0", "method": "tools/list", "id": rid})
+            assert resp.status_code == 503, resp.text
+            # A real HTTP response with a JSON-RPC body — the zero-byte shape
+            # in #3144's field report is proxy-generated, never app-side
+            # (#3709).
+            assert resp.content, "zero-byte 503 body"
+            assert body is not None and body["error"]["code"] == ma.ERR_REGISTRY, body
+            raw = resp.headers.get("Retry-After")
+            assert raw is not None, (
+                "the auth-plane 503 carries no Retry-After — an MCP client "
+                "has no instruction to back off and gives up on the startup "
+                "connect")
+            # int() raises on an HTTP-date or garbage → not parseable.
+            seconds = int(raw)
+            assert 1 <= seconds <= 3600, f"Retry-After out of sane range: {seconds}"
+            return seconds
+
+        first = _first_503_after_idle(2, "3")
+        # PIN the advertised value. A range check alone would let a hardcoded
+        # in-range literal pass — and a value at the 3600s ceiling would hang
+        # the `time.sleep` below for an hour.
+        assert first == 3, (
+            f"the 503 advertised {first}s, not the configured "
+            "TORTOISE_MCP_AUTH_RETRY_AFTER=3 — the knob is not wired to the wire")
+        assert calls["n"] == 1, (
+            "the stale cache entry was served — this is not the idle path")
+
+        # A SECOND configured value: together with the first this pins the
+        # knob→wire wiring against ANY hardcoded literal (no single literal can
+        # satisfy both 3 and 2), which a one-value pin cannot.
+        advertised = _first_503_after_idle(3, "2")
+        assert advertised == 2, (
+            f"the 503 advertised {advertised}s, not the configured "
+            "TORTOISE_MCP_AUTH_RETRY_AFTER=2 — the value is not read at CALL time")
+        assert calls["n"] == 2, "the second request did not re-resolve"
+
+        # 5) The retry leg, after EXACTLY the advertised delay: the dependency
+        #    has recovered, and the request must RESOLVE — not be served a
+        #    mocked back-off acknowledgement, and not be answered from a
+        #    refreshed stale cache without re-consulting the dependency.
+        time.sleep(advertised)
+        retry, retry_body = _mcp_post(
+            tc, {"jsonrpc": "2.0", "method": "tools/list", "id": 4})
+        assert retry.status_code == 200, retry.text
+        assert retry_body is not None and "result" in retry_body, retry_body
+        assert retry_body["result"]["tools"], "tools/list resolved empty"
+        assert calls["n"] == 3, (
+            "the retry did not re-consult the recovered dependency — it was "
+            "served from cache, so this proves no resolution")
+
+    @pytest.mark.parametrize("raw,expected", [
+        (None, 5),        # unset → default
+        ("1", 1),        # floor is allowed (a 1s back-off is honest)
+        ("45", 45),
+        ("0", 1),         # never advertise 0 (a busy-retry hammer)
+        ("-9", 1),
+        ("99999", 3600),  # never advertise an absurd window
+        ("nonsense", 5),  # unparseable → default
+    ])
+    def test_auth_retry_after_resolver_clamps_to_a_sane_range(
+            self, monkeypatch, raw, expected):
+        import tortoise.mcp_auth as ma
+        if raw is None:
+            monkeypatch.delenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raising=False)
+        else:
+            monkeypatch.setenv("TORTOISE_MCP_AUTH_RETRY_AFTER", raw)
+        assert ma._resolve_auth_retry_after_s() == expected
 
 
 # ── #2202: tortoise_health truth on the hosted surface ────────────────
