@@ -94,6 +94,12 @@ _logger = logging.getLogger(__name__)
 import threading as _threading  # noqa: E402
 from weakref import WeakValueDictionary as _WeakValueDictionary  # noqa: E402
 
+# #3665: the cohort spend reader drives a spend CEILING, so its failures must
+# carry the quota classification (#686) rather than surfacing as an
+# unclassified 500. ``tortoise.quota`` is stdlib-only at module level (safe to
+# import eagerly — same reason the REST adapter imports it at the top).
+from tortoise.quota import QuotaCheckError  # noqa: E402
+
 #: Per-org increment-serialization lock registry — BOUNDED by construction:
 #: a WeakValueDictionary keeps each lock alive only while some thread holds
 #: it (a released lock with no holder is GC'd), so a fresh org id never leaks
@@ -599,7 +605,21 @@ def get_cohort_spend_usd(org_ids: list[str],
         from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, metering_cohort_spend,
         )
-        return metering_cohort_spend(get_control_plane(), ids, period)
+        try:
+            return metering_cohort_spend(get_control_plane(), ids, period)
+        except QuotaCheckError:
+            raise
+        except Exception as e:
+            # #686's fail-closed quota contract: a counting failure is a
+            # QuotaCheckError (→ 500 carrying the quota classification),
+            # never an unclassified 500 and never a silent pass. The
+            # control-plane read raises RuntimeError; classifying it here is
+            # what makes the gate's own ``except QuotaCheckError`` clause (and
+            # MCP's ERR_QUOTA_SERVER) actually fire. code-review cycle 1, P2.
+            raise QuotaCheckError(
+                f"cohort spend read failed for {len(ids)} org(s), period "
+                f"{period}: {e}"
+            ) from e
     sdk = _reg_sdk()
     rows = sdk._get_registry().query(
         "MATCH (m:MeteringRecord) "

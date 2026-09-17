@@ -106,7 +106,8 @@ class FakeControlPlane:
             if k.get("org_id") == org_id and (cb.startswith("anon-") or cb.startswith("reg-")):
                 k["created_by"] = str(user_id)
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         """Simulate provision_team (migration 0010) over the in-memory rows.
 
         Mirrors the real SECURITY DEFINER function's observable effects:
@@ -165,6 +166,49 @@ class FakeControlPlane:
                              "period": p.get("p_period"),
                              "write_ops": n})
             return None  # PostgREST minimal — no echo
+        if fn == "metering_increment_capture_cost":
+            # #3665: migration 20260917000001 — additive upsert mirroring
+            # metering_increment_capture_cost (the capture lane's twin).
+            p = body or {}
+            rows = self.tables.setdefault("metering_records", [])
+            row = next((r for r in rows if r["org_id"] == p.get("p_org_id")
+                        and r["period"] == p.get("p_period")), None)
+            calls = int(p.get("p_calls") or 0)
+            cost = float(p.get("p_cost_usd") or 0.0)
+            if row:
+                row["capture_calls"] = row.get("capture_calls", 0) + calls
+                row["capture_cost_usd"] = (
+                    float(row.get("capture_cost_usd") or 0.0) + cost)
+            else:
+                rows.append({"org_id": p.get("p_org_id"),
+                             "period": p.get("p_period"),
+                             "capture_calls": calls,
+                             "capture_cost_usd": cost})
+            return None
+        if fn == "metering_cohort_spend":
+            # #3665: the SQL aggregate — one scalar, so no row cap can
+            # truncate it (the reason it is an RPC and not a filtered read).
+            p = body or {}
+            wanted = {str(i) for i in (p.get("p_org_ids") or [])}
+            total = 0.0
+            for r in self.tables.get("metering_records", []):
+                if (str(r.get("org_id")) in wanted
+                        and r.get("period") == p.get("p_period")):
+                    total += float(r.get("ask_cost_usd") or 0.0)
+                    total += float(r.get("capture_cost_usd") or 0.0)
+            return total
+        if fn == "cohort_org_ids_since":
+            # #3665: array_agg over a bounded subquery — one row/one array,
+            # so a row cap cannot truncate the org set. Mirror the SQL's
+            # ``ORDER BY created_at, id LIMIT p_limit + 1``.
+            p = body or {}
+            since = str(p.get("p_since") or "")
+            limit = int(p.get("p_limit") or 0)
+            rows = [t for t in self.tables.get("organizations", [])
+                    if t.get("id") and str(t.get("created_at") or "") > since]
+            rows.sort(key=lambda t: (str(t.get("created_at") or ""),
+                                     str(t["id"])))
+            return [str(t["id"]) for t in rows[:limit + 1]]
         if fn == "claim_membership":
             # Emulate migration 20260813000004's SQL semantics over the
             # in-memory rows (mirrors the real SECURITY DEFINER function):
@@ -705,12 +749,6 @@ class FakeControlPlane:
             elif op == "lte":
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) <= value]
-            elif op == "in":
-                # #3665: PostgREST set membership, mirroring the real client.
-                vals = value if isinstance(value, (list, tuple, set)) \
-                    else [value]
-                vals = list(vals)
-                rows = [r for r in rows if r.get(col) in vals]
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if method == "GET":
@@ -755,6 +793,14 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
         if op == "lte" and (row.get(col) is None or row.get(col) > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
+        if op not in ("eq", "neq", "is", "gt", "lt", "lte"):
+            # #3665 review: an op this helper does not implement must RAISE,
+            # not silently no-op. Silently ignoring an op makes PATCH/DELETE
+            # match on the remaining filters — i.e. the fake mutates MORE rows
+            # than the real client would, and a test can pass against
+            # behaviour production does not have. The GET path above already
+            # raises for an unsupported op; this mirrors it.
+            raise ValueError(f"unsupported filter op {op!r}")
     return True
 
 
@@ -773,5 +819,6 @@ class ErrorControlPlane(FakeControlPlane):
     def query(self, table: str, *args: Any, **kwargs: Any) -> list[dict]:
         raise self._exc
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         raise self._exc

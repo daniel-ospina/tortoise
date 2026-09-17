@@ -206,7 +206,14 @@ def test_over_cap_cohort_capture_refused_402_no_extraction_no_write(
     assert r.status_code == 402, r.text
     detail = r.json()["detail"]
     assert "Cohort LLM spend cap reached" in detail, detail
-    assert f"{CAP_USD + 1.0:.4f}" in detail, detail  # the measured figure
+    # The TENANT-VISIBLE body must NOT carry the cohort-wide aggregate: it is
+    # the SUM across every org in the cohort, so publishing it would disclose
+    # the other tenants' COGS (and, against a tenant's own observable
+    # run-rate, theirs by subtraction). The figure belongs to the internal
+    # sinks — the AlertStore incident and the server-side log. REDs on:
+    # interpolating ``spent``/``len(ids)`` back into the message.
+    assert f"{CAP_USD + 1.0:.4f}" not in detail, detail
+    assert "$" not in detail, detail
     assert capture_env.extraction_calls == [], (
         "the cap must refuse BEFORE any extraction is dispatched")
     assert _session_count(COHORT_ORG) == 0, "nothing may be written"
@@ -218,9 +225,9 @@ def test_over_cap_refusal_is_observable_as_an_alert_incident(
     the acceptance evidence is the incident, not a log line.
 
     REDs on: dropping the ``file_cohort_cost_incident`` call (no issue is
-    filed); dropping the ``asyncio.to_thread`` dispatch alone REDs too, because
-    a blocking call inside ``to_thread`` is never reached... (it is reached —
-    the mutation that REDs is removing the call, or passing no detail).
+    filed), or dropping the ``detail`` argument (the incident body would lose
+    the measured spend). Removing the ``asyncio.to_thread`` dispatch alone is
+    NOT caught here — the call is still reached synchronously.
 
     GREEN legitimate form: incident filed once, titled for the cohort kind and
     the tripping org, carrying the measured spend."""
@@ -401,50 +408,75 @@ def test_capture_ledger_write_is_what_the_cohort_spend_reader_reads(
 
 
 class _StubPlane:
-    """A control-plane double that HONOURS the filter ops and limit it is
-    given — so a test failing to request a filter cannot pass by accident, and
-    the sum the reader computes is the sum the plane would really return."""
+    """A control-plane double with NO network, mirroring the two SQL
+    aggregates the cap uses (20260917000001).
 
-    def __init__(self, rows=None):
-        self.rows = rows or []
+    It is deliberately a SCALAR double: ``metering_cohort_spend`` and
+    ``cohort_org_ids_since`` are reached through ``rpc_value``, so a reader
+    that falls back to a filtered ROW read shows up as a recorded ``query`` —
+    which is exactly the ``db-max-rows`` truncation fail-open the RPCs exist
+    to make impossible. The reader tests therefore assert ``queries == []``.
+    """
+
+    def __init__(self, ledger=None, orgs=None):
+        self.ledger = ledger or []
+        self.orgs = orgs or []
         self.queries: list[dict] = []
         self.rpcs: list[tuple[str, dict]] = []
 
     def query(self, table, *, select=None, filters=None, limit=None):
         self.queries.append({"table": table, "select": select,
                              "filters": filters, "limit": limit})
-        rows = [dict(r) for r in self.rows]
+        rows = [dict(r) for r in self.ledger]
         for col, op, value in filters or []:
             if op == "eq":
                 rows = [r for r in rows if r.get(col) == value]
             elif op == "gt":
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) > value]
-            elif op == "in":
-                vals = list(value) if isinstance(value, (list, tuple, set)) \
-                    else [value]
-                rows = [r for r in rows if r.get(col) in vals]
-            else:  # pragma: no cover - the reader uses only eq/gt/in
+            else:  # pragma: no cover - the readers use no other op
                 raise AssertionError(f"_StubPlane got an unhandled op {op!r}")
         return rows[:limit] if limit is not None else rows
 
-    def rpc(self, fn, body=None):
+    def rpc(self, fn, body=None, *, representation=False):
         self.rpcs.append((fn, dict(body or {})))
         return None
 
+    def rpc_value(self, fn, body=None):
+        self.rpcs.append((fn, dict(body or {})))
+        p = body or {}
+        if fn == "metering_cohort_spend":
+            wanted = {str(i) for i in (p.get("p_org_ids") or [])}
+            return sum(
+                float(r.get("ask_cost_usd") or 0.0)
+                + float(r.get("capture_cost_usd") or 0.0)
+                for r in self.ledger
+                if str(r.get("org_id")) in wanted
+                and r.get("period") == p.get("p_period"))
+        if fn == "cohort_org_ids_since":
+            since = str(p.get("p_since") or "")
+            limit = int(p.get("p_limit") or 0)
+            ids = [str(o["id"]) for o in self.orgs
+                   if o.get("id") and str(o.get("created_at") or "") > since]
+            ids.sort()
+            return ids[:limit + 1]
+        raise AssertionError(f"_StubPlane got an unhandled rpc {fn!r}")
 
-def test_supabase_cohort_reader_filters_to_the_cohort_and_sums_both_lanes():
-    """The control-plane reader sums ``ask_cost_usd + capture_cost_usd`` over
-    the COHORT only, in one bounded read.
 
-    REDs on: dropping the ``org_id in (...)`` filter (a non-cohort org's spend
-    would be added — 0.25 becomes 1.0); summing only one lane (0.10 or 0.15);
-    and dropping the ``limit`` bound (no ``limit`` key in the recorded query).
+def test_supabase_cohort_reader_sums_both_lanes_over_the_cohort_via_rpc():
+    """The control-plane reader aggregates the COHORT's two cost lanes
+    server-side, in ONE scalar RPC call.
 
-    GREEN legitimate form: the stub returns one cohort row and one outsider."""
+    REDs on: passing the wrong org set (a non-cohort org's spend would be
+    added — 0.25 becomes 1.0); summing only one lane (0.10 or 0.15); and on
+    reverting to a filtered ROW read, which a PostgREST ``db-max-rows`` cap
+    can silently truncate into an UNDERSTATED spend (``plane.queries`` would
+    be non-empty) — the fail-open this RPC designs out.
+
+    GREEN legitimate form: one cohort row and one outsider on the ledger."""
     from tortoise.supabase_control import metering_cohort_spend
 
-    plane = _StubPlane([
+    plane = _StubPlane(ledger=[
         {"org_id": "cohort-a", "period": "2026-09", "ask_cost_usd": 0.10,
          "capture_cost_usd": 0.15},
         {"org_id": "not-in-cohort", "period": "2026-09",
@@ -454,33 +486,49 @@ def test_supabase_cohort_reader_filters_to_the_cohort_and_sums_both_lanes():
     total = metering_cohort_spend(plane, ["cohort-a"], "2026-09")
 
     assert total == pytest.approx(0.25), total
-    q = plane.queries[-1]
-    assert q["table"] == "metering_records"
-    assert ("org_id", "in", ["cohort-a"]) in q["filters"], q["filters"]
-    assert ("period", "eq", "2026-09") in q["filters"], q["filters"]
-    assert q["limit"] == 2, q["limit"]
+    assert plane.rpcs == [("metering_cohort_spend", {
+        "p_org_ids": ["cohort-a"], "p_period": "2026-09"})], plane.rpcs
+    assert plane.queries == [], (
+        "a filtered row read can be silently truncated by db-max-rows and "
+        "read as a cheaper cohort — the total must come from the aggregate")
 
 
-def test_supabase_cohort_reader_fails_closed_on_a_truncated_read():
-    """A read returning more rows than the cohort has orgs is a garbage read —
-    it must RAISE, never be summed. Summing it would price the cohort from an
-    untrustworthy aggregate; a spend ceiling must fail closed instead.
+def test_supabase_cohort_reader_fails_closed_when_the_aggregate_is_unreachable():
+    """A spend-ceiling read that FAILS must raise, never read as a cheap
+    cohort — a zero view is the fail-open the cap could never recover from
+    (#686's discipline; the earlier revision's row-count guard was dead code
+    that validated the opposite).
 
-    REDs on: deleting the ``len(rows) > len(wanted)`` guard (the call would
-    return a garbage total instead of raising).
+    REDs on: swallowing the control-plane failure and returning 0.0 (the call
+    would return instead of raising).
 
-    GREEN legitimate form: the stub returns two rows for a one-org cohort."""
+    GREEN legitimate form: an RPC that raises (unreachable plane)."""
     from tortoise.supabase_control import metering_cohort_spend
 
-    plane = _StubPlane([
-        {"org_id": "cohort-a", "period": "2026-09", "ask_cost_usd": 1.0,
-         "capture_cost_usd": 0.0},
-        {"org_id": "cohort-a", "period": "2026-09", "ask_cost_usd": 1.0,
-         "capture_cost_usd": 0.0},
-    ])
+    class _Broken(_StubPlane):
+        def rpc_value(self, fn, body=None):
+            raise RuntimeError("Supabase unreachable (simulated)")
 
-    with pytest.raises(RuntimeError, match="more rows than the cohort"):
-        metering_cohort_spend(plane, ["cohort-a"], "2026-09")
+    with pytest.raises(RuntimeError, match="unreachable"):
+        metering_cohort_spend(_Broken(), ["cohort-a"], "2026-09")
+
+
+def test_supabase_cohort_reader_rejects_a_non_finite_aggregate():
+    """A non-finite aggregate is refused: ``spent >= cap`` against ``nan`` is
+    permanently False — a silently disarmed ceiling.
+
+    REDs on: dropping the ``math.isfinite`` guard in the reader (the call
+    would return ``inf``/``nan`` instead of raising).
+
+    GREEN legitimate form: the aggregate comes back as ``inf``."""
+    from tortoise.supabase_control import metering_cohort_spend
+
+    class _Poisoned(_StubPlane):
+        def rpc_value(self, fn, body=None):
+            return float("inf")
+
+    with pytest.raises(RuntimeError, match="not finite"):
+        metering_cohort_spend(_Poisoned(), ["cohort-a"], "2026-09")
 
 
 def test_supabase_capture_increment_calls_the_atomic_rpc_with_the_measurement():
@@ -505,21 +553,21 @@ def test_supabase_capture_increment_calls_the_atomic_rpc_with_the_measurement():
 
 
 def test_cohort_larger_than_the_priced_bound_fails_closed(monkeypatch):
-    """A cohort bigger than the bound this cap can price from ONE bounded read
-    is refused (fail-closed), never partially summed — a truncated org set
-    would both understate spend AND drop orgs out of the membership test.
+    """A cohort bigger than the bound this cap will gate is refused
+    (fail-closed), never partially gated — a dropped org reads as "outside the
+    cohort" and disarms the cap for exactly that org.
 
     REDs on: deleting the ``len(ids) > _MAX_COHORT_ORGS`` guard (the resolution
-    would return a truncated-looking org list instead of raising).
+    would return a truncated org list instead of raising).
 
-    GREEN legitimate form: a control plane whose organizations read returns one
-    org over the bound."""
+    GREEN legitimate form: a cohort RPC returning one org over the bound."""
     import tortoise.supabase_control as sc
     from tortoise.quota import QuotaCheckError
 
     over = _cc._MAX_COHORT_ORGS + 1
-    plane = _StubPlane([{"id": f"o{i}", "created_at": IN_COHORT_CREATED_AT}
-                        for i in range(over)])
+    plane = _StubPlane(orgs=[{"id": f"o{i:05d}",
+                              "created_at": IN_COHORT_CREATED_AT}
+                             for i in range(over)])
     monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
     monkeypatch.setattr(sc, "get_control_plane", lambda: plane)
 
@@ -527,7 +575,7 @@ def test_cohort_larger_than_the_priced_bound_fails_closed(monkeypatch):
         _cc.cohort_org_ids(COHORT_SINCE)
 
     # and the bound is exactly where it says it is: one fewer org resolves
-    plane.rows = plane.rows[:_cc._MAX_COHORT_ORGS]
+    plane.orgs = plane.orgs[:_cc._MAX_COHORT_ORGS]
     assert len(_cc.cohort_org_ids(COHORT_SINCE)) == _cc._MAX_COHORT_ORGS
 
 
@@ -565,6 +613,25 @@ def test_present_but_degenerate_cap_fails_closed_never_disarms(monkeypatch):
     # a missing SINCE is likewise fail-closed (an unscoped cap would hit all)
     with pytest.raises(QuotaCheckError, match=re.escape(_cc.SINCE_ENV)):
         _cc.resolve_cohort_cost_cap({_cc.CAP_ENV: "5.0"})
+
+    # ...and so is a SINCE that is not an unambiguous ISO-8601 instant. In the
+    # registry lane ``created_at > since`` is a STRING comparison, so an
+    # unparseable value orders lexicographically, selects an EMPTY cohort, and
+    # disarms the cap with no error — the same "configured but not enforced"
+    # false PASS the cap check above exists to prevent. "2026-08-01" and the
+    # offset-less form parse as NAIVE datetimes and are rejected too (an
+    # ambiguous instant must not silently mean UTC).
+    for bad_since in ("yesterday", "2026-08-01", "2026-08-01T00:00:00",
+                      "2026-13-45T00:00:00+00:00", "not-a-date"):
+        with pytest.raises(QuotaCheckError, match=re.escape(_cc.SINCE_ENV)):
+            _cc.resolve_cohort_cost_cap(
+                {_cc.CAP_ENV: "5.0", _cc.SINCE_ENV: bad_since})
+
+    # a non-UTC offset is legitimate and normalises to UTC
+    normalised = _cc.resolve_cohort_cost_cap(
+        {_cc.CAP_ENV: "5.0", _cc.SINCE_ENV: "2026-08-01T05:00:00+05:00"})
+    assert normalised == _cc.CohortCostCap(
+        cap_usd=5.0, since="2026-08-01T00:00:00+00:00")
 
 
 def test_selfhost_transport_exemption_survives_the_to_thread_dispatch(

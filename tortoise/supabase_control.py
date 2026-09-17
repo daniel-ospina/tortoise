@@ -59,6 +59,7 @@ and production.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import uuid as _uuid
 from datetime import UTC, datetime, timezone
@@ -202,7 +203,8 @@ class SupabaseControlPlane:
         import httpx
         self._http = httpx.Client(timeout=self._timeout)
 
-    def rpc(self, fn: str, body: dict | None = None) -> dict | None:
+    def rpc(self, fn: str, body: dict | None = None, *,
+            representation: bool = False) -> object | None:
         """Call a Postgres function via PostgREST RPC (#765 plan Task 8).
 
         ``POST {url}/rest/v1/rpc/{fn}`` with the service key and JSON body.
@@ -210,6 +212,12 @@ class SupabaseControlPlane:
         orgs + org_memberships + api_keys upsert, migration 0010) — the
         agent-signup / register / org-create writers must NOT hand-roll
         three table writes when the RPC is one transaction.
+
+        ``representation`` (#3665): the write lane wants ``return=minimal``
+        (the default — no echo), but a SCALAR-returning read function has its
+        body suppressed by that same header. ``representation=True`` sends
+        ``Prefer: return=representation`` and returns the decoded JSON value
+        (see :meth:`rpc_value`).
 
         Fail-closed contract (same as ``query``): non-2xx responses and
         transport errors raise RuntimeError. Uses the same persistent httpx
@@ -221,7 +229,8 @@ class SupabaseControlPlane:
             "apikey": self._key,
             "Authorization": f"Bearer {self._key}",
             "Content-Type": "application/json",
-            "Prefer": "return=minimal",
+            "Prefer": ("return=representation" if representation
+                       else "return=minimal"),
         }
         try:
             import httpx  # noqa: F401
@@ -263,7 +272,26 @@ class SupabaseControlPlane:
             raise RuntimeError(
                 f"Supabase control-plane bad RPC response ({fn}): {e}"
             ) from e
-        return data if isinstance(data, dict) else None
+        # #3665: a scalar/array-returning RPC decodes to a bare JSON value
+        # (a float, a text[] as a JSON array), NOT a dict. The value is
+        # returned verbatim rather than coerced to None — coercion is what
+        # made a scalar read indistinguishable from an empty one.
+        return data
+
+    def rpc_value(self, fn: str, body: dict | None = None):
+        """Call a scalar-returning RPC and return its decoded value (#3665).
+
+        The read counterpart of :meth:`rpc`. PostgREST returns a scalar /
+        array-returning function's result as the bare JSON body (e.g. a
+        number for ``double precision``, ``["a", "b"]`` for ``text[]``), so
+        the decoded value IS the result — no unwrapping is applied here
+        (guessing a wrapper shape would corrupt an array result).
+
+        FAIL-CLOSED: transport/HTTP failures raise ``RuntimeError`` (from
+        :meth:`rpc`); a body that cannot be decoded raises rather than
+        reading as an empty result.
+        """
+        return self.rpc(fn, body, representation=True)
 
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
@@ -273,8 +301,7 @@ class SupabaseControlPlane:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
-        (value None → ``col=is.null``), ``gt``, ``lt``, ``lte``, ``in``
-        (value is a list/tuple/set → ``col=in.(a,b)``, #3665). Raises
+        (value None → ``col=is.null``), ``gt``, ``lt``, ``lte``. Raises
         RuntimeError on any failure.
 
         ``timeout`` (#2850/#2988): an optional PER-REQUEST override for the
@@ -308,15 +335,6 @@ class SupabaseControlPlane:
             elif op == "lte":
                 # ISO-8601 cutoff for the post-grace purge sweep (#302).
                 params[col] = f"lte.{value}"
-            elif op == "in":
-                # #3665: PostgREST set membership (`col=in.(a,b,c)`). Needed by
-                # the cohort-spend reader, which must read ONLY the cohort's
-                # ledger rows — an eq-per-org loop would be N round-trips, and
-                # an unfiltered period read would be O(all orgs).
-                vals = value if isinstance(value, (list, tuple, set)) \
-                    else [value]
-                quoted = ",".join(str(v) for v in vals)
-                params[col] = f"in.({quoted})"
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if order:
@@ -3071,51 +3089,65 @@ def metering_increment_capture_cost(cp, org_id: str, period: str, *,
 def metering_cohort_spend(cp, org_ids: list[str], period: str) -> float:
     """Measured LLM spend for a COHORT over one billing period (#3665).
 
-    Reads ``metering_records`` for the period (PK (org_id, period) — one row
-    per org) FILTERED to the cohort's org ids, and sums the two measured cost
-    columns.
+    Aggregates ``SUM(ask_cost_usd + capture_cost_usd)`` over the cohort's
+    ``metering_records`` rows for the period **server-side**, in the
+    ``metering_cohort_spend`` SQL function (20260917000001).
 
-    One row per ORG, never one per capture: the read is bounded by the size of
-    the cohort, not by capture volume — which is why the cap can afford to
-    read it on every admission (#3665 trade-off 2, decided: no cache, no
+    WHY AN RPC RATHER THAN A FILTERED ROW READ (code-review cycle 1, P1):
+    PostgREST silently caps a row LIST at the project's ``db-max-rows``, and a
+    silently short read UNDERSTATES spend — a fail-open on a spend ceiling.
+    The row count cannot detect it (a short read returns FEWER rows; the
+    (org_id, period) PK makes an over-return impossible, so the earlier
+    "more rows than the cohort has orgs" guard was unreachable dead code).
+    The function returns ONE scalar, so no row cap can apply.
+
+    One row per ORG, never one per capture: the aggregate is bounded by the
+    cohort size, not by capture volume — which is why the cap can afford this
+    read on every admission (#3665 trade-off 2, decided: no cache, no
     weakened bound).
 
-    TRUNCATION IS FAIL-CLOSED. PostgREST silently caps a response at the
-    project's ``db-max-rows`` (platform default 1000), and a silently-short
-    read would UNDERSTATE spend — exactly the fail-open a spend ceiling cannot
-    have. The caller therefore bounds the cohort to
-    ``cohort_cost._MAX_COHORT_ORGS`` (500, well under that default) and this
-    read passes ``limit = cohort+1``; a result at that limit cannot happen for
-    a unique (org_id, period) key, so it is treated as truncation and raises
-    rather than returning a partial sum. ASSUMPTION: the deployed
-    ``db-max-rows`` exceeds the cohort bound — the guard compares against the
-    cohort SIZE, so a project configuring ``db-max-rows`` below the cohort size
-    would short-read past it. Re-check both together.
-
-    FAIL-CLOSED: a raised ``RuntimeError`` propagates to the caller
-    (``metering.get_cohort_spend_usd``), which maps it to a 500. Never degrade
-    a spend-ceiling read to a zero view — that is fail-open.
+    FAIL-CLOSED: a failure raises (``RuntimeError`` from ``rpc``), never a
+    partial or zero sum. A non-finite aggregate raises too — a poisoned SUM
+    must not price as a cheap cohort.
     """
-    wanted = {str(i) for i in (org_ids or []) if i}
+    wanted = sorted({str(i) for i in (org_ids or []) if i})
     if not wanted:
         return 0.0
-    rows = cp.query(
-        "metering_records",
-        select=["org_id", "ask_cost_usd", "capture_cost_usd"],
-        filters=[("org_id", "in", sorted(wanted)),
-                 ("period", "eq", period)],
-        limit=len(wanted) + 1,
-    )
-    if len(rows) > len(wanted):
+    value = cp.rpc_value("metering_cohort_spend",
+                         {"p_org_ids": wanted, "p_period": period})
+    total = float(value or 0.0)
+    if not math.isfinite(total):
         raise RuntimeError(
-            "metering_records cohort read returned more rows than the cohort "
-            f"has orgs ({len(rows)} > {len(wanted)}) — refusing to price the "
-            "cohort from an untrustworthy read (fail-closed)")
-    total = 0.0
-    for row in rows:
-        total += float(row.get("ask_cost_usd") or 0.0)
-        total += float(row.get("capture_cost_usd") or 0.0)
+            f"metering_records cohort aggregate is not finite ({value!r}) — "
+            "refusing to price the cohort from it (fail-closed)")
     return total
+
+
+def cohort_org_ids_since(cp, since: str, limit: int) -> list[str]:
+    """Org ids created after *since*, at most ``limit + 1`` of them (#3665).
+
+    Server-side ``array_agg`` (RPC ``cohort_org_ids_since``,
+    20260917000001) — ONE row, one column, so ``db-max-rows`` cannot
+    truncate the cohort the way it could truncate a filtered row list. A
+    truncated cohort is worse than an understated sum: every dropped org
+    reads as "outside the cohort" and the cap is silently DISARMED for it.
+
+    The comparison is ``timestamptz`` in SQL, so the value's format cannot
+    change its meaning (an unvalidated string would compare lexicographically
+    in the registry lane — ``cohort_cost.resolve_cohort_cost_cap`` validates
+    and normalises the value before it reaches either lane).
+
+    Returns up to ``limit + 1`` ids so the caller can detect an over-bound
+    cohort and fail closed rather than pricing a partial set.
+
+    FAIL-CLOSED: a failure raises (``RuntimeError`` from ``rpc``).
+    """
+    value = cp.rpc_value("cohort_org_ids_since",
+                         {"p_since": since, "p_limit": limit})
+    if value is None:
+        return []
+    ids = value if isinstance(value, (list, tuple)) else [value]
+    return [str(i) for i in ids if i]
 
 
 # ── #1875: invitee-side pending/accept/decline (by-id, email-scoped) ────────

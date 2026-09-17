@@ -63,12 +63,26 @@ cost at admission, reconcile on completion) — the ledger and its atomic
 increment RPC are the substrate for that. Stated here so it is never read as
 a hard dollar bound.
 
+**An unmeasured capture prices as $0.00.** ``capture_cost_usd`` is the
+provider's *reported* charge (the #3359 measurement). When the provider
+reports none — the analytics row's ``calls_without_cost`` disclosure — or a
+generation is deadline-killed before it can be priced (``deadline_aborts``),
+the recorded cost is 0.0, so the ceiling UNDER-reads by exactly those calls
+and can fire later than a perfect measurement would. The disclosure counters
+are on the analytics row, not on this ledger; carrying them onto the ledger
+(and surfacing unpriced calls in the trip detail) is the follow-up that would
+close it. Stated here so a cohort whose measurement failed is never read as a
+cheap cohort.
+
 **It is not armed by default.** ``TORTOISE_COHORT_COST_CAP_USD`` unset means
 the gate is a no-op; the machinery ships enabled-off so arming is an explicit
-ops decision. ARM ORDER MATTERS: apply migration 20260917000001 (the
-``capture_cost_usd`` column and its increment RPC) BEFORE setting the cap —
-an armed gate reading a column that does not exist fails CLOSED (500), which
-is the intended direction of failure but still an outage.
+ops decision. ARM ORDER MATTERS — and BOTH levers are required: apply migration
+20260917000001 (the ``capture_cost_usd`` column and its increment RPC) BEFORE
+setting the cap, and set ``TORTOISE_COHORT_COST_SINCE`` WITH it. The cap alone
+is a fail-closed configuration error (an unscoped cap would apply to every
+org; a malformed ``since`` would select an empty cohort and disarm the cap),
+so setting one without the other 500s the admission block rather than arming
+something that bounds nothing.
 """
 from __future__ import annotations
 
@@ -76,7 +90,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 from tortoise.quota import QuotaCheckError, QuotaExceededError
 
@@ -91,19 +105,17 @@ SINCE_ENV = "TORTOISE_COHORT_COST_SINCE"
 # a cohort that keeps tripping opens ONE incident, not one per capture.
 INCIDENT_KIND = "COHORT_COST_CAP"
 
-# Bounds on the cohort we are willing to PRICE, chosen so both control-plane
-# reads (``organizations`` and ``metering_records``) stay under PostgREST's
-# ``db-max-rows`` response cap. A silently truncated read would UNDERSTATE
-# spend — a fail-open on a spend ceiling — so an oversize cohort is refused
-# (QuotaCheckError → 500), never partially summed. ~10-50 orgs is the beta
+# Bounds on the cohort we are willing to PRICE. Both control-plane reads are
+# server-side aggregates that return a SINGLE row — ``cohort_org_ids_since``
+# (``array_agg``) and ``metering_cohort_spend`` (``sum``) — so PostgREST's
+# ``db-max-rows`` response cap cannot silently truncate either one. That was
+# not true of the first revision of this lane, which read both as filtered row
+# lists and defended them with a row-count guard that a short read passes
+# (it returns FEWER rows, and the (org_id, period) PK makes an over-return
+# impossible — a dead check). The bound is now a plain policy limit on how
+# large a cohort the cap will gate, and an oversize cohort is refused
+# (QuotaCheckError → 500), never partially priced. ~10-50 orgs is the beta
 # population this cap is written for.
-#
-# ASSUMPTION THIS RESTS ON: the deployed PostgREST ``db-max-rows`` must be
-# GREATER than this bound (the platform default is 1000; this is 500). The
-# guards below compare against the COHORT SIZE, not against the row count a
-# short read would return, so a project configured with ``db-max-rows`` below
-# the cohort size would get a silently short read that satisfies both guards.
-# Re-check this bound if ``db-max-rows`` is ever lowered.
 _MAX_COHORT_ORGS = 500
 
 
@@ -172,7 +184,35 @@ def resolve_cohort_cost_cap(env: dict | None = None) -> CohortCostCap | None:
             f"{CAP_ENV} is set but {SINCE_ENV} (the cohort start, ISO-8601) "
             f"is not — an unscoped cap would apply to every org"
         )
-    return CohortCostCap(cap_usd=cap_usd, since=since)
+    return CohortCostCap(cap_usd=cap_usd, since=_normalise_since(since))
+
+
+def _normalise_since(raw: str) -> str:
+    """Validate and canonicalise the cohort start as ISO-8601 UTC.
+
+    FAIL-CLOSED on anything that is not an unambiguous instant. The registry
+    lane compares ``o.created_at > $since`` as STRINGS, so a value that is not
+    ISO-8601 orders lexicographically and can match no org at all: the cohort
+    resolves empty, every org then reads as "outside the cohort", and the cap
+    is silently disarmed with no error and no incident. (The Supabase lane
+    compares ``timestamptz`` server-side — ``cohort_org_ids_since`` — but the
+    two lanes must not disagree on the same misconfiguration.) Canonicalising
+    also makes ``Z`` vs ``+00:00`` and fractional precision compare correctly.
+    """
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise QuotaCheckError(
+            f"{SINCE_ENV} is not ISO-8601 ({raw!r}) — a cohort start that "
+            f"does not parse would select an empty cohort and silently "
+            f"disarm the cap; refusing (fail-closed)"
+        ) from None
+    if parsed.tzinfo is None:
+        raise QuotaCheckError(
+            f"{SINCE_ENV} has no UTC offset ({raw!r}) — the cohort start is "
+            f"ambiguous; refusing (fail-closed)"
+        )
+    return parsed.astimezone(UTC).isoformat()
 
 
 def current_period() -> str:
@@ -198,25 +238,23 @@ def cohort_org_ids(since: str) -> list[str]:
     (production/URI lane) or ``:Team`` (the embedded lane's label).
 
     BOUNDED: at most ``_MAX_COHORT_ORGS`` orgs are priced. A larger cohort
-    raises (fail-closed) rather than silently reading a truncated org set —
-    truncation here would both understate spend AND drop orgs out of the
-    membership test, disarming the cap for exactly those orgs. (This bound is
-    only a truncation guard while the project's ``db-max-rows`` exceeds it —
-    see ``_MAX_COHORT_ORGS``.)
+    raises (fail-closed) rather than gating on a partial org set — dropped
+    orgs would read as outside the cohort and disarm the cap for exactly
+    those orgs.
 
     FAIL-CLOSED: a resolution failure raises ``QuotaCheckError`` — an
     unresolvable cohort must not read as "this org is outside the cohort",
     which would silently disarm the cap.
     """
-    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+    from tortoise.supabase_control import (
+        cohort_org_ids_since,
+        get_control_plane,
+        is_supabase_enabled,
+    )
     try:
         if is_supabase_enabled():
-            rows = get_control_plane().query(
-                "organizations", select=["id"],
-                filters=[("created_at", "gt", since)],
-                limit=_MAX_COHORT_ORGS + 1,
-            )
-            ids = [str(r["id"]) for r in rows if r.get("id")]
+            ids = cohort_org_ids_since(
+                get_control_plane(), since, _MAX_COHORT_ORGS)
         else:
             from tortoise.metering import _reg_sdk
             rows = _reg_sdk()._get_registry().query(
@@ -234,8 +272,8 @@ def cohort_org_ids(since: str) -> list[str]:
     if len(ids) > _MAX_COHORT_ORGS:
         raise QuotaCheckError(
             f"cohort is larger than the {_MAX_COHORT_ORGS}-org bound this cap "
-            f"can price from one bounded ledger read ({len(ids)} orgs) — "
-            f"refusing to gate on a possibly-truncated aggregate (fail-closed)"
+            f"will gate ({len(ids)} orgs) — refusing to evaluate the ceiling "
+            f"over a partial cohort (fail-closed)"
         )
     return ids
 
@@ -317,14 +355,20 @@ def enforce_cohort_cost_cap(org: dict | None, *,
     period = current_period()
     spent = get_cohort_spend_usd(ids, period)
     if spent >= resolved.cap_usd:
+        # The client-visible message carries NO cohort-wide figure
+        # (code-review cycle 1, P2): ``spent`` is the SUM across every org in
+        # the cohort, so publishing it on the 402 would disclose the
+        # aggregate LLM COGS of the OTHER tenants — and, since a tenant can
+        # observe its own run-rate, their spend by subtraction. The tenant is
+        # told what it needs (the ceiling is reached, nothing was written,
+        # when to retry); the figures go to the internal sinks only — the
+        # AlertStore incident and the server-side log.
         raise CohortCostCapExceeded(
-            f"Cohort LLM spend cap reached for this billing period: "
-            f"${spent:.4f} spent across {len(ids)} organization(s) in the "
-            f"cohort against a ${resolved.cap_usd:.2f} ceiling. This request "
-            f"started no extraction and wrote no capture data — re-POST the "
-            f"same session after {next_period_start_iso()} (period {period}) "
-            f"and it will extract normally. Contact us if you need the cap "
-            f"raised.",
+            f"Cohort LLM spend cap reached for this billing period. This "
+            f"request started no extraction and wrote no capture data — "
+            f"re-POST the same session after {next_period_start_iso()} "
+            f"(period {period}) and it will extract normally. Contact us if "
+            f"you need the cap raised.",
             detail={
                 "cohort_since": resolved.since,
                 "cohort_size": len(ids),

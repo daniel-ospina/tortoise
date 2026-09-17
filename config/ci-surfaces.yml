@@ -106,6 +106,13 @@ surfaces:
   # roll-up it drives). Same #2938 dual-membership convention as
   # test_graphcopy_boolean_index_3154.py.
   - test_capture_cost_measurement.py
+  # #3665: pre-spend cohort cost cap. DUAL-REGISTERED (also under `core`): the
+  # admission gate, the ledger write, the reader and the RPC wrappers all live
+  # in tortoise/hosted_api.py, metering.py and supabase_control.py, which
+  # SELECT the `api` surface (SOURCE_PATTERNS) — and a named-surface match
+  # REPLACES the `core` fallback, so a core-only registration would never run
+  # on an api-only PR. Same #2938 dual-membership convention.
+  - test_cohort_cost_cap.py
   - test_hosted_auth.py
   - test_hosted_backup.py
   - test_import_endpoint.py
@@ -318,7 +325,7 @@ surfaces:
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
-  - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger)
+  - test_cohort_cost_cap.py  # #3665: pre-spend cohort cost cap (admission gate + ledger) — DUAL: also api
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
