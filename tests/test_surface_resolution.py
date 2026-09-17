@@ -114,26 +114,88 @@ def test_every_registered_entry_resolves_to_a_live_method(entry, target, where):
     """
     assert callable(target), (
         f"{entry.name} does not resolve: the registry names {where!r}, which is "
-        f"{'absent' if target is None else type(target).__name__!r} — an agent calling "
-        f"{entry.name} reaches a dead method (#3863). "
+        f"{'absent' if target is None else type(target).__name__!r}. The dead thing is the "
+        f"DECLARED SDK BINDING — registry drift, not a missing capability. For the #3863 "
+        f"entries the behaviour already exists one import away "
+        f"(pack_state.get_tenant_packs, pack_manifest_store.upsert_tenant_manifest, "
+        f"navigation.entityProfile, monitoring.metrics, analyze.analyze) and the MCP "
+        f"handlers already call it; what is absent is the SDK name the registry declares. "
         f"Declared sdk_method={entry.sdk_method!r}."
     )
 
 
-def test_resolution_exercises_every_registry_entry():
+def _parametrized_cases():
+    """The argvalues the scoreboard's ``parametrize`` decorator was handed.
+
+    Read from the function's own ``pytestmark`` — the case set pytest actually
+    parametrised — rather than from ``_TARGETS``. The decorator consumes
+    ``_TARGETS``, so a decorator-only mutation (``_TARGETS[:5]``) shrinks the
+    collection while ``_TARGETS`` itself stays full: an assertion on ``_TARGETS``
+    is tautological in exactly the case that matters. Reading the marks also keeps
+    the count correct under ``-k``/``--deselect``, which remove the parametrised
+    items from ``session.items``.
+    """
+    for mark in test_every_registered_entry_resolves_to_a_live_method.pytestmark:
+        if mark.name == "parametrize":
+            return list(mark.args[1])
+    return []
+
+
+def _collected_entry_names(session):
+    """Names of the registry entries pytest actually COLLECTED a case for.
+
+    Empty when the run keyword-deselects the scoreboard (``-k``/``--deselect``
+    drop those items from the session); the cross-check is skipped then, because
+    the parametrised-case assertion below already pins the case set.
+    """
+    names = []
+    for item in session.items:
+        if item.function is not test_every_registered_entry_resolves_to_a_live_method:
+            continue
+        entry = item.callspec.params.get("entry")
+        if entry is not None:
+            names.append(entry.name)
+    return names
+
+
+def test_resolution_exercises_every_registry_entry(request):
     """The scoreboard must cover ALL entries — a sample (or a truncated list) is
     a false PASS.
 
-    Mutation that REDs this assertion: truncate the parametrized set (e.g.
-    ``TOOL_REGISTRY[:5]`` in the ``_TARGETS`` comprehension) — the resolved ids
-    then stop being a 1:1 cover of the registry.
+    The case count is pinned on the cases pytest was actually GIVEN, never on
+    ``_TARGETS`` alone: the decorator-only mutation ``_TARGETS[:5]`` leaves
+    ``_TARGETS`` full while the parametrised collection drops to 5, so a check
+    against ``_TARGETS`` stays green.
+
+    Mutations that RED this assertion:
+    * truncate the decorator's parametrize list (``for e, t, w in _TARGETS[:5]``)
+      — the parametrised case set no longer covers the registry; or
+    * delete a registry entry (the delete arm of #3863) while its name stays in
+      ``_DEAD_LINKS_AWAITING_3863`` — the ledger entry is then consumed by no
+      case.
     """
     assert TOOL_REGISTRY, "empty registry — nothing to resolve (fail-closed)"
+    names = [param.values[0].name for param in _parametrized_cases()]
+    assert len(names) == len(TOOL_REGISTRY), (
+        f"the scoreboard PARAMETRISED {len(names)} cases for {len(TOOL_REGISTRY)} "
+        f"registry entries — a sample (or a truncated decorator list) is not a scoreboard"
+    )
+    assert names == [e.name for e in TOOL_REGISTRY], (
+        "parametrised case ids do not cover the registry in order — a sample is not a scoreboard"
+    )
     assert len(_TARGETS) == len(TOOL_REGISTRY), (
         f"resolution covers {len(_TARGETS)} of {len(TOOL_REGISTRY)} registry entries"
     )
-    assert [e.name for e, _t, _w in _TARGETS] == [e.name for e in TOOL_REGISTRY], (
-        "resolved entry names do not cover the registry in order — a sample is not a scoreboard"
+    collected = _collected_entry_names(request.session)
+    if collected:
+        assert collected == names, (
+            f"the run COLLECTED {len(collected)} cases but the decorator parametrised "
+            f"{len(names)} — the run is not covering what the decorator declares"
+        )
+    orphans = sorted(_DEAD_LINKS_AWAITING_3863 - set(names))
+    assert not orphans, (
+        f"orphaned ledger entries — recorded dead in _DEAD_LINKS_AWAITING_3863 but "
+        f"consumed by no collected case: {orphans}"
     )
 
 
