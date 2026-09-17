@@ -37,11 +37,12 @@ import pytest
 # #1389 / #3505: these deep import-path tests (restore → temp graph → verify →
 # swap) are the #1389 skips. Their recorded reason — the app's keepalive anchor
 # and the handler booting two embedded daemons on the same single-writer path —
-# no longer holds for this module: `_EMBEDDED_CONSTRUCTION_LOCK` (below)
-# serializes every IN-PROCESS `FalkorProjection.__init__`, so the second daemon
-# of that pair is never started and every later opener reuses the first
-# starter's server. What remains outside the lock (the residual exposure listed
-# in the lock's own note below) is (a) a construction that raises inside
+# no longer holds: the session-wide construction serialization
+# (`tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`, installed by conftest's
+# `_serialize_embedded_construction`) closes the double-start race, so the
+# second daemon of that pair is never started and every later opener reuses the
+# first starter's server. What remains outside the lock (the residual exposure
+# listed in the lock's own note) is (a) a construction that raises inside
 # `_start_redis()` after its daemon spawned but before `_save_setting_registry()`,
 # and (b) redislite's `_cleanup()` last-client branch removing `<db>.settings`
 # from `__del__`/atexit. Neither is the keepalive-anchor-vs-handler collision
@@ -85,48 +86,6 @@ from tests.test_supabase_control import (  # noqa: E402
 # Tests opt out of the IP rate limiter; rate-limit tests re-enable it.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-# #3505: one embedded server per db_path — serialize construction.
-#
-# redislite starts a NEW redis-server daemon whenever `<db>.settings` is
-# absent (or its pid is dead) — `redislite.client.RedisMixin.__init__` (the
-# `_is_redis_running()` / `_start_redis()` fork). Two constructions that
-# interleave BEFORE either has written `.settings` therefore BOTH take the
-# fresh-start branch, each spawning its own daemon in its own tempdir, and
-# the later `_save_setting_registry()` silently owns the registry. The
-# loser's writes are then invisible to every later opener.
-#
-# That is exactly this module's flake (#3505): on a failing run the seeder
-# held one daemon while the `tortoise-health-probe` thread (`hosted_api.py`
-# `_probe_db` -> `_make_sdk`) started its own on the same `import.db`;
-# `_counts` then re-opened through `.settings` and resolved to the probe's
-# EMPTY daemon — `assert [] == ['old-0']`, which reads like the import wiped
-# the graph. Serializing the construction makes the first starter the single
-# owner of the registry, so every later opener (health probe, boot sweep,
-# `_counts`, the import handler) reuses that one server.
-#
-# Scope of the guarantee (this is NOT a global single-writer guarantee): the
-# lock serializes only IN-PROCESS `FalkorProjection.__init__` calls. Two paths
-# stay outside it and can still add or remove a registry entry — (1) a
-# construction that raises inside `_start_redis()` (RedisLiteException /
-# RedisLiteServerStartError) after its daemon spawned but before
-# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
-# redislite's `_cleanup()` last-client branch, which removes `<db>.settings`
-# and shuts the daemon down from `__del__`/atexit on any thread. That residual
-# is why `_seed_live_graph` ALSO verifies visibility at seed time: if the
-# seeder's server is ever not the one a fresh opener resolves to, that check
-# raises the NAMED SeedVisibilityError instead of letting the condition
-# resurface as `assert [] == ['old-0']`.
-#
-# Blast radius of the critical section: it spans the WHOLE `__init__`,
-# including redislite's blocking `subprocess.call` server start and the
-# post-start `_auto_health_recover()` / `_ensure_indexes()` work. A wedged
-# embedded start therefore stalls every other constructor in the module,
-# where it previously stalled only its own thread. That wait is bounded by
-# redislite's socket-wait `start_timeout`, but NOT by any timeout on a hung
-# `redis-server` binary — accepted deliberately: the serialization is the
-# fix, and a hung start is a louder failure than a silent second daemon.
-_EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
-
 
 @pytest.fixture(scope="module", autouse=True)
 def _embedded_local_file_lane():
@@ -143,22 +102,14 @@ def _embedded_local_file_lane():
     plan's Task 10 "13 migrate out" list: this is an embedded-file-contract
     file, not docker-migratable — it stays in RAW_EMBEDDED_ALLOWLIST.
 
-    #3505: also serializes embedded FalkorProjection construction for the
-    module (see _EMBEDDED_CONSTRUCTION_LOCK) — the app's probe/boot-sweep
-    threads construct on the same db_path as the test's seeder."""
+    #3505/#3546: the construction serialization this file needs (the app's
+    probe/boot-sweep threads construct on the same db_path as the test's
+    seeder) is now installed ONCE for the whole session by
+    `tests/conftest._serialize_embedded_construction` — not per module, which
+    was the #3546 defect (see `tests/_embedded.EMBEDDED_CONSTRUCTION_LOCK`).
+    """
     mp = pytest.MonkeyPatch()
     mp.delenv("TORTOISE_DB_URI", raising=False)
-
-    _orig_proj_init = FalkorProjection.__init__
-
-    def _serialized_proj_init(self, *args, **kwargs):
-        # `return` forwarded deliberately: `__init__` must return None, so it is
-        # inert today, but it keeps this wrapper correct if it is ever reused for
-        # a factory or `__new__` (where dropping the result would be a real bug).
-        with _EMBEDDED_CONSTRUCTION_LOCK:
-            return _orig_proj_init(self, *args, **kwargs)
-
-    mp.setattr(FalkorProjection, "__init__", _serialized_proj_init)
     yield
     mp.undo()
 
@@ -406,7 +357,7 @@ def test_seed_visibility_guard_fails_loudly(monkeypatch, tmp_path):
 
 
 def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
-    """#3505 anti-regression: the CONSTRUCTION SERIALIZATION is pinned.
+    """#3505/#3546 anti-regression: the CONSTRUCTION SERIALIZATION is pinned.
 
     Why this test exists: the four live `_seed_live_graph` tests do not pin
     the lock. Running them against a copy with the serialization deleted is
@@ -416,7 +367,7 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     about. This test pins it DETERMINISTICALLY, with no dependence on
     redislite timing.
 
-    Mechanism: hold `_EMBEDDED_CONSTRUCTION_LOCK` from the test thread —
+    Mechanism: hold `EMBEDDED_CONSTRUCTION_LOCK` from the test thread —
     standing in for a construction that is inside the critical section — and
     assert a second construction from another thread cannot reach its BODY
     until the lock is released. The body's entry is observed by monkeypatching
@@ -434,11 +385,18 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     The join window is deliberately much larger than the probe latency (a
     microsecond-scale path) so the red arm is deterministic rather than a
     second timing lottery. Removing either half of the mechanism reds this
-    test: dropping the `with _EMBEDDED_CONSTRUCTION_LOCK` wrapper in
-    `_embedded_local_file_lane` lets the worker through; deleting the lock
-    object itself raises NameError on the holder thread.
+    test: dropping the `with EMBEDDED_CONSTRUCTION_LOCK` wrapper installed by
+    conftest's `_serialize_embedded_construction` lets the worker through;
+    deleting the lock object itself raises NameError on the holder thread.
+
+    #3546: this pins the CENTRAL lock — held against the wrapper that
+    conftest's `_serialize_embedded_construction` installs for the session, so
+    deleting that fixture reds here. A module-local lock copy (the defect the
+    issue names) could not gate a construction whose wrapper guards a
+    different lock object.
     """
     import tortoise
+    from tests._embedded import EMBEDDED_CONSTRUCTION_LOCK
 
     db_path = str(tmp_path / "serialized-construction.db")
     body_entered = threading.Event()
@@ -455,7 +413,7 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
     monkeypatch.setattr(tortoise, "FalkorDB", _probe_falkordb)
 
     def _hold_lock() -> None:
-        with _EMBEDDED_CONSTRUCTION_LOCK:
+        with EMBEDDED_CONSTRUCTION_LOCK:
             holder_ready.set()
             release_holder.wait(30.0)
 
@@ -465,12 +423,12 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
 
     # The try/finally starts BEFORE the holder_ready assertion: if that wait
     # fails (or anything between here and the worker's own try raises), the
-    # holder would otherwise keep `_EMBEDDED_CONSTRUCTION_LOCK` for its full
-    # 30s event wait, and the module-scoped autouse fixture serializes EVERY
+    # holder would otherwise keep `EMBEDDED_CONSTRUCTION_LOCK` for its full
+    # 30s event wait, and the session-scoped autouse fixture serializes EVERY
     # in-process `FalkorProjection.__init__` on that same lock — one false RED
-    # would then stall every subsequent construction in this file.
+    # would then stall every subsequent construction in the session.
     try:
-        assert holder_ready.wait(5.0), "could not take _EMBEDDED_CONSTRUCTION_LOCK"
+        assert holder_ready.wait(5.0), "could not take EMBEDDED_CONSTRUCTION_LOCK"
 
         def _construct() -> None:
             try:
@@ -483,13 +441,13 @@ def test_embedded_construction_is_serialized(monkeypatch, tmp_path):
         try:
             worker.join(1.0)
             assert not body_entered.is_set(), (
-                "#3505: FalkorProjection.__init__ reached its body while "
-                "_EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
+                "#3505/#3546: FalkorProjection.__init__ reached its body while "
+                "EMBEDDED_CONSTRUCTION_LOCK was held by another construction — "
                 "the construction serialization is missing or bypassed."
             )
             assert worker.is_alive(), (
-                "#3505: the constructor finished (or raised) while the lock was "
-                "held — the serialization did not gate it."
+                "#3505/#3546: the constructor finished (or raised) while the lock "
+                "was held — the serialization did not gate it."
             )
         finally:
             release_holder.set()
