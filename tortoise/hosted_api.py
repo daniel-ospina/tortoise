@@ -143,7 +143,7 @@ _KEEPALIVE_LOCK = threading.Lock()
 
 # ── #3060: dedicated executors for long / stallable work ───────────────────
 # `asyncio.to_thread` (the house style — see `list_packs`) submits to the
-# loop's SHARED default executor, which is where 79 other `to_thread` call
+# loop's SHARED default executor, which is where ~80 other `to_thread` call
 # sites and the auth middleware's abuse hooks (`_abuse_post_auth` et al.) run.
 # That is fine for short work. It is NOT fine for the capture extraction: on a
 # stalled provider it blocks for the token-scaled deadline (~800s at a 16K
@@ -206,8 +206,9 @@ _CAPTURE_SESSION_IN_FLIGHT_DETAIL = (
 # bounded wait; ``/health`` is now pure in-memory (it reads
 # ``_HEALTH_PROBE.snapshot()``) and does no I/O and no thread hand-off at all,
 # so the pool and the bound had no remaining caller. ``_submit_off_loop`` /
-# ``_run_off_loop`` BELOW are kept: the capture path still uses them to stay
-# off the shared default executor.
+# ``_run_off_loop`` BELOW are kept: the capture path uses both, and the #3718
+# dream pass uses ``_submit_off_loop`` alone (it needs the concurrent future) —
+# all to stay off the shared default executor.
 
 
 def _submit_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
@@ -1568,12 +1569,145 @@ _DREAM_BATCH_MAX = 200
 # per-tenant queue/task dicts don't grow unboundedly across many tenants.
 _DREAM_QUEUE_TTL_S = 600
 
+# #3718 (code review P1 — five reviewers converged on this): the incremental
+# dream pass is a SECONDS-long synchronous graph traversal, NOT the ~35ms write
+# class. `asyncio.to_thread` submits to the loop's SHARED default executor, and
+# this module's own #3060 criterion (:145-160) is explicit that the shared pool
+# "is fine for short work" and "NOT fine" for long/stallable work. The ~80
+# other `to_thread` sites on that pool include the auth middleware's abuse
+# hooks (`_abuse_post_auth`, awaited on EVERY authenticated request), so a
+# burst of dream passes would park every worker (prod is 2 vCPU →
+# `min(32, cpu+4)` = 6) and stall unrelated tenants BEFORE their handlers —
+# while `/health` stays green by design (#2850), so nothing would notice. That
+# is the #3060 starvation path relocated, not removed. Dream therefore gets its
+# OWN pool: it can only ever starve itself.
+#
+# The queue is deliberately UNBOUNDED, unlike the capture pool's (whose queue
+# holds a ~MB transcript per waiting request — the #3060 OOM path). Here a
+# waiting item holds no live connection: `_data_sdk` returns a fresh
+# `TortoiseSDK` whose projection opens LAZILY on first `_get_proj()` (sdk.py),
+# and on this path that first call now happens INSIDE the pool worker — so a
+# queued dream costs a Future and a dict, not a socket. (The pre-off-load shape
+# never held a set of open SDKs "behind a frozen loop" either: the handler ran
+# `_data_sdk` → `sdk.dream` with no intervening await, so the single loop could
+# not dispatch a second request into that window.) Queueing is therefore a
+# latency cost for the dream surface, not an OOM path. This endpoint is
+# documented as background maintenance ("Fast-path queries never block on
+# this"), so "your dream waits behind other dreams" is the correct behaviour
+# rather than a new failure mode.
+#
+# Built at IMPORT time, so a malformed/zero knob must degrade to the default —
+# not raise and make `import tortoise.hosted_api` fail (the `_CAPTURE_EXECUTOR`
+# precedent). Default 2: the pass is CPU-bound (EP propagation) and prod runs
+# 2 vCPU.
+_DREAM_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_DREAM_WORKERS", 2), 8)),
+    thread_name_prefix="dream-pass")
+
+
+async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
+    """Run one long dream pass on the dream pool; the helper owns ``sdk.close()``.
+
+    #3718 (code review): the pass AND ``sdk.close()`` are ONE worker hand-off.
+    Letting the coroutine's ``finally`` close instead runs the close on the
+    LOOP while the worker is still inside the pass whenever the request is
+    cancelled — cancelling the await stops the AWAITABLE, not the thread
+    (CPython #87185, quoted at length in this file's #2988 timeout note: the
+    worker "is never cancelled and continues running forever despite the
+    timeout error") — and the SDK owns the projection/connection that pass is
+    reading.
+
+    The close therefore travels WITH THE WORK ITEM rather than with the
+    future: the submitted closure closes ``sdk`` in its own ``finally``, so
+    whoever ends up running the pass closes the SDK exactly once — on the
+    worker thread, so a cancellation can no longer tear the SDK down mid-pass,
+    and no caller can forget it (``TortoiseSDK.close()`` is idempotent —
+    ``_t_closed``).
+
+    Why not ``add_done_callback`` on the future — the first shape of this
+    change, corrected in review: ``ThreadPoolExecutor.submit`` puts the work
+    item on the queue BEFORE ``_adjust_thread_count()`` can raise "can't start
+    new thread", so a submit ``RuntimeError`` does NOT prove the pass never
+    ran. Closing there could tear the SDK down under a pass the pool had
+    already picked up, and the never-attached callback would leak the SDK if
+    the worker re-opened the projection. Attaching the close to the ITEM makes
+    the submit outcome irrelevant; the ``except BaseException`` below covers
+    the other half (item never enqueued), and a duplicate close is a no-op, so
+    both cases are safe.
+    """
+    def _pass_and_close():
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            sdk.close()
+
+    try:
+        cfut = _submit_off_loop(_DREAM_EXECUTOR, _pass_and_close)
+    except BaseException:
+        sdk.close()
+        raise
+    return await asyncio.wrap_future(cfut)
+
 
 def _dream_key(org_id: str, graph_namespace: str | None) -> str:
     """C5 #2114 (sweep parity): the dream queue is PER GRAPH — a write on a
     custom graph must drain THAT graph, never the org default. Org-wide
     keys/session writes (graph_namespace None) keep the legacy org key."""
     return org_id if graph_namespace is None else f"{org_id}::{graph_namespace}"
+
+
+# #3718 (review P1): per-GRAPH dream serialization for the two POOLED pass
+# sites (REST /v1/dream and the write-triggered `_dream_worker` drain). The
+# contract is stated at :1556 — "Serialized per tenant (never two concurrent
+# dreams on one tenant graph)" — and repeated in the epic's test-design surface
+# map ("new modes must run inside the same serialized worker, not spawn parallel
+# dreams"). Before the off-load the single event loop made both bodies atomic
+# (no await before `sdk.dream`), so the invariant held by construction; now the
+# passes run in a pool, so the exclusion must be explicit or two same-graph
+# passes read and clear the SAME `ep_dirty` roots and interleave `warm_start`
+# writes. A reviewer reproduced max-concurrent passes for one org = 2.
+# `Dreamer._lock` cannot serve here: it is per-SDK-instance and every request
+# builds its own SDK.
+#
+# NOT covered by this lock, recorded so it is not read as process-wide: the
+# capture path's `_apply_capture_ingest_ep` (sdk.py:1232) still runs
+# `sdk.dream(mode="local", ...)` on the EVENT LOOP, from
+# `_capture_session_impl` (hosted_api.py:9166). It is on the loop, so taking a
+# `threading.Lock` there would freeze the loop for a whole pass — the very
+# thing #3718 removes; moving that pass to the pool is the capture-path
+# residual tracked by #3086, not this change.
+#
+# A `threading.Lock`, NOT an `asyncio.Lock`, is deliberate: it is acquired and
+# released INSIDE the worker thread, and asyncio primitives bind to the first
+# loop that waits on them — which breaks across the per-test loops (the
+# `_CAPTURE_IN_FLIGHT` note's rationale). It cannot deadlock: one lock per graph
+# key, a pass never takes a second key's lock, and this is never held on the
+# event loop.
+#
+# Residual, accepted and recorded here: a single tenant firing many concurrent
+# requests for ITS graph can hold both pool workers (one running, one waiting on
+# this lock), so other tenants' drains queue behind it. That is a latency
+# coupling on a background-maintenance surface only — no other surface shares
+# this pool — and the alternative (loop-side admission) needs a loop-bound
+# primitive, which is the cross-loop hazard above.
+_DREAM_LOCKS: dict[str, threading.Lock] = {}
+_DREAM_LOCKS_GUARD = threading.Lock()
+
+
+def _dream_lock(key: str) -> threading.Lock:
+    """One lock per graph key.
+
+    Deliberately NEVER evicted, unlike `_DREAM_QUEUES` (popped at idle,
+    `_DREAM_QUEUE_TTL_S`): dropping a lock an in-flight pass still holds would
+    break the exclusion it exists for. Growth is bounded by the distinct graph
+    keys the process has ever seen — tens of bytes each, the same class as
+    `_FALLBACK_KEEPALIVE` (see its TODO(#176)).
+    """
+    with _DREAM_LOCKS_GUARD:
+        lock = _DREAM_LOCKS.get(key)
+        if lock is None:
+            lock = _DREAM_LOCKS[key] = threading.Lock()
+        return lock
 
 
 def _enqueue_dream(org_id: str, dirty_roots: list[str],
@@ -1609,16 +1743,22 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
         gns = key.split("::", 1)[1] if "::" in key else None
         sdk = (_make_sdk(graph_name=gns) if gns is not None
                else _make_sdk(namespace=org_id))
-        try:
-            # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
-            sdk._mark_dirty(roots)
-            # Epic 903-C8 (#1246): explicit mode routing — a write-burst
-            # drain is LOCAL mode (W1; never silently full — the I1
-            # precedence table governs; scheduled stale-first passes call
-            # /v1/dream with mode="stale-first" explicitly).
-            sdk.dream(dirty_only=True, mode="local")
-        finally:
-            sdk.close()
+
+        def _drain() -> None:
+            # #3718: mark → dream on the DEDICATED dream pool, serialized per
+            # graph against a concurrent manual /v1/dream (see `_dream_lock`).
+            # `_run_dream_on_pool` owns the SDK's close, so a cancelled request
+            # cannot tear the connection down under a live pass.
+            with _dream_lock(key):
+                # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
+                sdk._mark_dirty(roots)
+                # Epic 903-C8 (#1246): explicit mode routing — a write-burst
+                # drain is LOCAL mode (W1; never silently full — the I1
+                # precedence table governs; scheduled stale-first passes call
+                # /v1/dream with mode="stale-first" explicitly).
+                sdk.dream(dirty_only=True, mode="local")
+
+        await _run_dream_on_pool(_drain, sdk)
     except Exception as exc:
         import logging
         _log = logging.getLogger("tortoise.api")
@@ -4679,7 +4819,15 @@ async def create_object(body: CreateObjectRequest, request: Request,
         props = {}
         if body.status:
             props["status"] = body.status
-        node = sdk.create_object(body.name, objectKind=body.objectKind, **props)
+        # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
+        # worker thread so THIS pinned call cannot freeze the single event loop
+        # while it runs. NOT a handler-level guarantee: `_check_org_limit`
+        # (a per-org count query on its own SDK) and `_data_sdk`'s connect still
+        # run on the loop before this point — a tracked residual, see the test
+        # module's SCOPE note. Same asyncio.to_thread pattern as /v1/search;
+        # response and error semantics are unchanged.
+        node = await asyncio.to_thread(
+            sdk.create_object, body.name, objectKind=body.objectKind, **props)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
@@ -4715,7 +4863,10 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     _check_org_limit(org, "points")
     sdk = _data_sdk(org)
     try:
-        node = sdk.create_subject(body.name, subjectKind=body.subjectKind)
+        # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
+        # create_object above for the pattern and rationale).
+        node = await asyncio.to_thread(
+            sdk.create_subject, body.name, subjectKind=body.subjectKind)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
@@ -4737,17 +4888,29 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     _check_org_limit(org, "points")
     sdk = _data_sdk(org)
     try:
-        result = sdk.create_point(
-            content=body.content,
-            kind=body.kind,
-            tags=body.tags,
-            dedup=body.dedup,
-        )
-        if body.about_object:
-            # #1643: ID-based edge (never the name-resolution path, which
-            # mints Subject stubs on miss — #334 class).
-            sdk._get_proj().create_about_edge(
-                result["id"], body.about_object, "aboutObject")
+        # #3718: sdk.create_point + the about edge are SYNC FalkorDB socket
+        # I/O — both run in ONE worker thread (a single hand-off keeps the
+        # write-then-edge ordering and the error semantics identical) so this
+        # pinned call cannot freeze the event loop while it runs.
+        # `_get_proj()` is inside the worker because its FIRST call opens the
+        # projection — though `_check_org_limit` above has already built its
+        # own SDK on the loop, so the handler as a whole is NOT on-loop-free
+        # (tracked residual, see the test module's SCOPE note).
+        def _write_point() -> dict:
+            out = sdk.create_point(
+                content=body.content,
+                kind=body.kind,
+                tags=body.tags,
+                dedup=body.dedup,
+            )
+            if body.about_object:
+                # #1643: ID-based edge (never the name-resolution path, which
+                # mints Subject stubs on miss — #334 class).
+                sdk._get_proj().create_about_edge(
+                    out["id"], body.about_object, "aboutObject")
+            return out
+
+        result = await asyncio.to_thread(_write_point)
     except HTTPException:
         raise
     except Exception:
@@ -4801,7 +4964,12 @@ async def events_poll(
     sdk = _data_sdk(org)
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
-        result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
+        # #3718: sync FalkorDB I/O — off-loaded off the event loop so a slow
+        # event-page read does not stall every concurrent request. The
+        # ValueError contract (410/400 mapping) is unchanged: the same
+        # exception propagates out of the worker thread.
+        result = await asyncio.to_thread(
+            sdk.events_poll, after=after, types=type_list or None, limit=limit)
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:
@@ -4940,31 +5108,61 @@ async def dream(
         bucket.append(now_ts)
 
     sdk = _data_sdk(org)
+
+    # The graph key is needed for the per-graph dream lock on EVERY branch.
+    _dk = _dream_key(org["org_id"],
+                     (org.get("graph_namespace")
+                      if org.get("graph_id") else None))
+
+    # Drain whatever is queued plus any in-memory dirty roots. LOOP-SIDE on
+    # purpose: `_DREAM_QUEUES` holds `asyncio.Queue`s, which are not
+    # thread-safe. Batch mark once (P3, #85) — one reverse-BFS pair, not N.
+    # C5 (#2114, review P2): create_point enqueues under the COMPOSITE key for
+    # graph-bound keys — read the same key or the manual drain misses the
+    # queued roots. Only the default (neither `mode=` nor `full=`) branch
+    # drains, exactly as before.
+    queued_roots: list[str] = []
+    # This block is guarded separately from the pass below: it runs on the LOOP,
+    # so it must restore the original `finally: sdk.close()` guarantee for its
+    # own region WITHOUT the await that the off-load moved off-loop (a
+    # BaseException handler around the whole `return await` would close the SDK
+    # on the loop under a pass the worker is still running — the race this
+    # off-load exists to remove). `close()` is idempotent (`_t_closed`).
+    #
+    # Accepted residual of the off-load (#3718 review): if the request is
+    # cancelled while its pass is still QUEUED, `wrap_future` cancels the item,
+    # so the roots drained above are not marked this cycle. They are not lost —
+    # `_mark_dirty` persists `ep_dirty`/`ep_dirty_at` on the graph, so the next
+    # hydrate/scheduler pass still sees them — but the IMMEDIATE mark is dropped,
+    # which the pre-change inline shape could not do (no await between dequeue
+    # and `sdk.dream`).
     try:
-        if mode is not None:
-            result = sdk.dream(mode=mode, budget=budget)
-        elif full:
-            result = sdk.dream(full=True)
-        else:
-            # Drain whatever is queued plus any in-memory dirty roots.
-            # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
-            # C5 (#2114, review P2): create_point enqueues under the
-            # COMPOSITE key for graph-bound keys — read the same key or the
-            # manual drain misses the queued roots.
-            _dk = _dream_key(org["org_id"],
-                             (org.get("graph_namespace")
-                              if org.get("graph_id") else None))
+        if mode is None and not full:
             q = _DREAM_QUEUES.get(_dk)
-            queued_roots: list[str] = []
             if q is not None and not q.empty():
                 while not q.empty():
                     queued_roots.append(q.get_nowait())
+    except BaseException:
+        sdk.close()
+        raise
+
+    def _run_dream():
+        # #3718: sdk.dream is a long, CPU-heavy SYNCHRONOUS graph pass — the
+        # worst on-loop blocker on this surface (seconds, not the ~35ms of a
+        # point write). All three branches run on the DEDICATED dream pool (see
+        # `_DREAM_EXECUTOR`), serialized per graph against the write-triggered
+        # `_dream_worker` drain (`_dream_lock`). `_run_dream_on_pool` owns the
+        # SDK's close.
+        with _dream_lock(_dk):
+            if mode is not None:
+                return sdk.dream(mode=mode, budget=budget)
+            if full:
+                return sdk.dream(full=True)
             if queued_roots:
                 sdk._mark_dirty(queued_roots)
-            result = sdk.dream(dirty_only=True)
-        return result
-    finally:
-        sdk.close()
+            return sdk.dream(dirty_only=True)
+
+    return await _run_dream_on_pool(_run_dream, sdk)
 
 
 @app.get("/v1/dream/health")

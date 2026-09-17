@@ -23,6 +23,11 @@ surfaces:
   # registration as the boot guards above, for the same reason: the file it
   # guards is tortoise/hosted_api.py, which selects the `api` surface.
   - test_health_ready_nonblocking.py
+  # #3718: the REST graph-write handlers must not run synchronous FalkorDB I/O
+  # on the event loop. Same dual registration as the two guards above and for
+  # the same reason: the file it guards is tortoise/hosted_api.py, which
+  # selects the `api` surface.
+  - test_graph_write_loop_responsiveness.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
@@ -306,6 +311,7 @@ surfaces:
   - test_boot_regressions.py
   - test_collision_preflight.py
   - test_health_ready_nonblocking.py  # #2988: /health/ready off-loop + bounded probes
+  - test_graph_write_loop_responsiveness.py  # #3718: REST graph-write off-loop (dual: api)
   - test_build_window_transcript.py
   - test_canary_classify.py
   - test_canonical.py
@@ -341,10 +347,16 @@ surfaces:
   - test_e2e9_point_in_time.py
   - test_e2e_journey.py
   - test_embedded_concurrency.py
+  # #2879: embedded AOF durability drift pin — measures an on-disk
+  # `<db>-appendonlydir`, so it belongs in the URI-unset carve-out lane
+  # (under the docker redirect it constructs against the server and the
+  # opt-in half reds). Registered in `core` (the projection surface).
+  - test_embedded_durability_claim.py
   - test_embedded_lifecycle.py
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
   - test_embeddings_filters.py
+  - test_entity_delete_rebuild.py   # #3299 journaled delete → rebuild_all survivor rule (last_recreate_seq)
   - test_entity_stage.py
   - test_enumeration_surfaces.py
   - test_epic903_fixtures.py
@@ -468,6 +480,7 @@ surfaces:
   - test_projection.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
+  - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
   - test_projection_version_gate.py
   - test_query_suggestions.py
   - test_reaper.py
@@ -867,6 +880,7 @@ carve_out:
 - test_backup_e2e.py
 - test_config.py
 - test_embedded_concurrency.py
+- test_embedded_durability_claim.py  # #2879: embedded AOF durability drift pin (on-disk appendonlydir measurement)
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py
 - test_flip_gate.py
@@ -913,6 +927,13 @@ durations:
   test_a9_direct_edge_traversal.py: 13.2
   test_backup_e2e.py: 13.1
   test_capture_session.py: 10.7
+  # #3718: 8 cases (7 parametrized endpoint cases + the enqueued dream
+  # worker), each blocking a graph call for ~2s while a 20ms ticker and a
+  # concurrent /health probe run, so the file is dominated by wall-clock stalls.
+  # HIGH-VARIANCE and load-sensitive: measured 25-84s across runs on this
+  # machine (see #3653/#3685 for the embedded-redislite flake that inflates the
+  # tail). A loose middle; re-measure rather than trusting it.
+  test_graph_write_loop_responsiveness.py: 30.0
   test_embedded_lifecycle_fast_close.py: 9.1
   test_analyze_scoped.py: 5.2
   test_projection_version_gate.py: 5.1
