@@ -80,6 +80,7 @@ from tortoise.sdk import (  # noqa: E402
     _capture_turn_window,
     _content_hash,
     _normalize_turn_role,
+    _session_llm_transcript,
 )
 
 _COMMITTED_FIXTURE = os.path.join(
@@ -102,9 +103,12 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     cannot consume:
 
       * a ``(:Session {id})`` node, id = the question's own
-        ``haystack_session_ids[i]`` when the fixture carries one (fallback
-        ``sess-{i}``), so the identity the shipping read now reports is the
-        identity the question's gold sessions are keyed by;
+        ``haystack_session_ids[i]``. A fixture with NO id list (or a blank
+        entry) falls back to the synthetic ``sess-{i}``: that value is a
+        PLACEHOLDER, not capture data — capture always has the client's own
+        id — so an identity comparison against gold ids is only meaningful
+        for fixtures that carry ``haystack_session_ids``, and a misaligned
+        (short) id list is silently padded with placeholders;
       * ONE episodic turn ``:Point`` PER windowed turn — no blank skip,
         exactly as capture — with the deterministic id ``f"{sid}_t{i}"``,
         ``pointKind='event'``, ``is_episodic=true``, ``is_operator=false``,
@@ -114,10 +118,14 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
         mechanism the shipping read resolves identity from
         (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``).
 
-    Content coercion and the 5000-char window come from the SHARED
-    ``_capture_turn_window`` — the same primitive both capture surfaces use
-    — so the stored text and ``content_hash`` match capture's by
-    construction rather than by a hand-copied transform.
+    The turn WINDOW and the whole-session blank gate come from the SHARED
+    ``_capture_turn_window`` / ``_session_llm_transcript`` pair — the same
+    two primitives both capture surfaces use — so coercion, the 5000-char
+    cap and the "a blank session writes NOTHING" gate are structural rather
+    than hand-copied. The ``[role] <content>`` framing and the node/edge
+    write below are still a THIRD copy of capture's per-turn store; the pin
+    at ``tortoise/sdk.py`` names this file, so an edit to one is an edit to
+    all three.
 
     Pre-#3910 this seeder instead made plain ``statement`` Points and wrote
     ``p.sessionId`` / ``p.eventId`` PROPS with NO edge — a graph the capture
@@ -128,10 +136,12 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     Deliberately NOT reproduced (this seeds a TURN STORE, it is not a
     capture): no ``embedding`` / ``search_keys`` on turn Points, no
     ``:Source`` materialization, no extracted claim Points. The per-session
-    ``:Event`` write is RETAINED — nothing here joins a turn Point to it,
-    because capture's turn Points carry no ``eventId`` either — so the
-    ``ev-s{i}`` nodes other consumers may look for still exist, while the ask
-    lane's ``:Event`` date annotation does not reach these turns and is NOT
+    ``:Event`` write is RETAINED for fixture compatibility (nothing in the
+    repo reads ``ev-s{i}``, and it is NOT capture's ``sessionCaptured``
+    Event — different id, different prop set): it is a date-only marker, and
+    nothing joins a turn Point to it. That last part IS faithful to capture
+    — turn Points carry no ``eventId`` there either — so the ask lane's
+    ``:Event`` date annotation does not reach these turns and is NOT
     fabricated.
     """
     proj = sdk._get_proj()
@@ -144,6 +154,14 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
         sid = (raw_sid.strip()
                if isinstance(raw_sid, str) and raw_sid.strip()
                else f"sess-{i}")
+        # #1532 D1 / #1529 D3 parity: the SAME window and the SAME
+        # whole-session blank gate capture runs BEFORE its first write — a
+        # session with no extractable line contributes NO Session, NO turn
+        # Point and NO Event (capture's gate is pre-mutation).
+        windowed = _capture_turn_window(session or [])
+        transcript, _est = _session_llm_transcript(windowed)
+        if not transcript.strip():
+            continue
         sdate = _to_iso_date(dates[i]) if i < len(dates) else "2020-01-01"
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
@@ -153,10 +171,10 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
             "MERGE (s:Session {id:$sid})",
             params={"sid": sid},
         )
-        # The SAME windowed turns capture stores (coercion + 5000-char cap
-        # via the shared primitive), and the same per-turn write — including
-        # the blank turn, which capture stores as "[role] ".
-        for t, turn in enumerate(_capture_turn_window(session or [])):
+        # The SAME windowed turns capture stores, and the same per-turn
+        # write — including the blank turn, which capture stores as
+        # "[role] ".
+        for t, turn in enumerate(windowed):
             role = _normalize_turn_role(turn.get("role"))
             turn_id = f"{sid}_t{t}"
             # `_capture_turn_window` already truncated to the cap; the

@@ -759,3 +759,29 @@ clause for the generic baseline (or the KU fragment firing — #2009
 detector), and enumeration guidance for multi-session counts. Both are
 prompt-calibration work with regression risk — tracked separately, not
 silently closed.
+
+### Comparability note — the fixture's input graph changed (#3910, 2026-10-06)
+
+**The 19/21 (0.90) and 21/21 (1.00) numbers above are NOT directly comparable
+to any spot-check run on the post-#3910 fixture.** `tools/ask_spotcheck.py::
+_seed_memory` used to seed plain `statement` Points carrying `p.sessionId` /
+`p.eventId` **props** with no edge — a graph the real capture path cannot
+produce. It now seeds the capture shape: a `(:Session {id})` node (id = the
+question's own `haystack_session_ids[i]`), one episodic `pointKind='event'`
+turn Point per turn with the deterministic `f"{sid}_t{i}"` id and **no**
+`sessionId`/`eventId` prop, plus the real
+`(:Session)-[:CONTAINS]->(:Point)` edge. The pre-#3910 number above was
+produced on a fixture that reported provenance the capture path never writes
+and omitted the edge the shipping read derives identity from.
+
+Two deterministic consequences, measured on the committed composition with
+the same read calls and no reader/LLM (old → new): turn hits carrying the
+`:Event` **`session_date`** marker 40 → **0** (capture's turn Points carry no
+`eventId`, so the annotation join never reached them in production either),
+and hits carrying the **`session_id`** key from `annotate_ask_hits`
+40 → **0** (that key is the ask lane's `dedup_pool` bucket key — attaching it
+from a forged prop re-bucketed the pool, which D3 #1540 forbids). Both move
+the fixture TOWARD production shape; the live judge-graded aggregate on the
+new graph is **UNMEASURED** (the tool fails fast without a judge provider
+key), so a future re-run must be recorded as a NEW baseline, not compared to
+0.90/1.00.

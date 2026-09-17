@@ -21,8 +21,9 @@ SEEDING PARITY (verifier-fix): ingestion mirrors ``tools/longmem_eval/
 ingest.py`` (search_keys + has_answer + embeddings + session props + the
 deterministic turn→point-id map ``lme:{qid}:s{si}:t{ti}``) — NOT
 ``ask_spotcheck._seed_memory`` (which seeds the capture shape but still
-writes no search_keys/has_answer/id map → A4/A5 would have zero material
-and gold turns would be unidentifiable).
+writes no search_keys/has_answer and no EVAL-PARITY id map — its
+deterministic ids are ``{sid}_t{i}``, not ``lme:{qid}:s{si}:t{ti}``, so this
+bench's gold-turn keys would find nothing).
 
 LANES: ``--lane embedded`` (today's degraded reality — no FTS index, TF-IDF
 fallback, vector leg absent unless ``--embedder`` injects a probe) or

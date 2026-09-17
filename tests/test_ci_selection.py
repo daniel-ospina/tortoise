@@ -290,6 +290,20 @@ def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     assert "sdk" in r["surfaces"]
 
 
+def test_ask_recall_bench_change_selects_sdk_not_tier1():
+    # #3910: tools/ask_recall_bench.py owns the `_retrieve_pipeline` mirror in
+    # tests/test_ask_retrieval_levers.py. Before its SOURCE_PATTERNS entry the
+    # flat "tools/" prefix swallowed the path, so `changed` came back empty and
+    # select() took the docs-only return — surfaces=[], tier-1 smoke only — and
+    # the guard test for that exact file never ran on the PR that changed it
+    # (the #1349/#3332 shape the ratchet exists for).
+    r = _sel(["tools/ask_recall_bench.py"])
+    assert r["full"] is False
+    assert "sdk" in r["surfaces"], r
+    assert "test_ask_retrieval_levers.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_collision_preflight_tool_change_fails_closed_to_full():
     # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
     # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the

@@ -89,8 +89,8 @@ def _clean_ask_state(monkeypatch):
 def seeded(tmp_path):
     """A seeded temp DB, closed and removed by pytest's tmp_path teardown."""
     sdk = TortoiseSDK(str(tmp_path / "t.db"))
-    _seed_memory(sdk, QUESTION)
     try:
+        _seed_memory(sdk, QUESTION)
         yield sdk
     finally:
         sdk.close()
@@ -104,25 +104,40 @@ def _install_fake_reader(monkeypatch) -> _FakeReader:
     return fake
 
 
-def _wire(sdk: TortoiseSDK, query: str) -> list[dict]:
+def _wire(sdk: TortoiseSDK, query: str, *, want: set[str],
+          attempts: int = 3) -> list[dict]:
     """The shared point fetch behind ``tortoise_fts_query`` / ``/v1/search``.
 
-    Retried past the embedded engine's collective-strategy deadline: under
-    host load the pool can come back empty (a known flake class — PR #3888
-    recorded `Strategies timed out (500ms) — collected 0/3`), which would
-    redden a correctness pin for an unrelated reason.
+    Retried until the REQUIRED ids are present — not merely until the pool is
+    non-empty: the embedded engine degrades PER STRATEGY ("one strategy down,
+    others continue"), so a partial pool is the same flake class as the empty
+    one, and PR #3888 recorded the load event as
+    `Strategies timed out (500ms) — collected 0/3`.
     """
     hits: list[dict] = []
-    for _ in range(3):
+    for _ in range(attempts):
         hits = sdk.tortoise_fts_query(query, limit=40,
                                       include_terminal=True)
-        if hits:
+        if want <= {str(h.get("id")) for h in hits}:
             return hits
     return hits
 
 
-def _ask(sdk: TortoiseSDK, query: str) -> dict:
-    return sdk.ask(query, question_date="2023-05-22")
+def _ask(sdk: TortoiseSDK, query: str, *, want_evidence: str,
+         attempts: int = 3) -> dict:
+    """``sdk.ask`` on the local lane, retried (same flake class as
+    ``_wire``) until the reader's context actually carries the seeded text.
+
+    The retry exists so an EMPTY pool fails the precondition loudly instead
+    of reading as "the identity is genuinely gone" on the mutated leg — a
+    vacuous pass — or as a false RED on the green leg.
+    """
+    result = {"evidence": "", "retrieved_session_ids": []}
+    for _ in range(attempts):
+        result = sdk.ask(query, question_date="2023-05-22")
+        if want_evidence in result.get("evidence", ""):
+            return result
+    return result
 
 
 # ── 1. The fixture WRITES the capture shape ───────────────────────────────
@@ -180,20 +195,20 @@ def test_identity_resolves_from_the_edge_and_vanishes_without_it(seeded,
     """
     _install_fake_reader(monkeypatch)
     question = "what is the gym schedule?"
+    seeded_text = "the gym schedule is Monday and Wednesday"
 
     # GREEN — the seeded shape resolves the identity on both read paths.
-    result = None
-    for _ in range(3):
-        result = _ask(seeded, question)
-        if set(result["retrieved_session_ids"]) == {SID_0, SID_1}:
-            break
+    result = _ask(seeded, question, want_evidence=seeded_text)
+    assert seeded_text in result["evidence"], (
+        "precondition: the reader's context must carry the seeded turn — "
+        f"got {result['evidence']!r}")
     assert set(result["retrieved_session_ids"]) == {SID_0, SID_1}, result.get(
         "retrieved_session_ids")
     assert f"[session {SID_0}]" in result["evidence"]
     assert f"[session {SID_1}]" in result["evidence"]
     assert "[session ?]" not in result["evidence"]
 
-    wire = _wire(seeded, question)
+    wire = _wire(seeded, question, want=set(TURNS_0))
     ours = [h for h in wire if h["id"] in TURNS_0]
     assert sorted(h["id"] for h in ours) == sorted(TURNS_0), (
         "precondition: both seeded turns must be retrievable — got "
@@ -206,17 +221,23 @@ def test_identity_resolves_from_the_edge_and_vanishes_without_it(seeded,
         "MATCH (:Session)-[r:CONTAINS]->(:Point) DELETE r",
     )
 
-    mutated = _ask(seeded, question)
+    # The turns must SURVIVE the edge delete before the identity assertion
+    # means anything (checked first, with the retry, so an empty/partial pool
+    # cannot masquerade as "the identity is gone").
+    wire_mut = _wire(seeded, question, want=set(TURNS_0))
+    still_there = [h for h in wire_mut if h["id"] in TURNS_0]
+    assert sorted(h["id"] for h in still_there) == sorted(TURNS_0), (
+        "precondition: the turns must survive the edge delete — got "
+        f"{[h.get('id') for h in wire_mut]!r}")
+    assert all(h["sessionId"] == "" for h in still_there), still_there
+
+    mutated = _ask(seeded, question, want_evidence=seeded_text)
+    assert seeded_text in mutated["evidence"], (
+        "precondition: the reader's context must still carry the seeded turn "
+        f"after the edge delete — got {mutated['evidence']!r}")
     assert mutated["retrieved_session_ids"] == [], (
         "the CONTAINS edge is gone but the ask lane still names a session — "
         f"the identity is not derived from that edge: "
         f"{mutated.get('retrieved_session_ids')!r}")
     assert f"[session {SID_0}]" not in mutated["evidence"]
     assert "[session ?]" in mutated["evidence"]
-
-    wire_mut = _wire(seeded, question)
-    still_there = [h for h in wire_mut if h["id"] in TURNS_0]
-    assert sorted(h["id"] for h in still_there) == sorted(TURNS_0), (
-        "precondition: the turns must survive the edge delete — got "
-        f"{[h.get('id') for h in wire_mut]!r}")
-    assert all(h["sessionId"] == "" for h in still_there), still_there

@@ -3332,7 +3332,13 @@ class TortoiseSDK:
         # non-strings -> str()), same `speaker` property write (delta 5).
         # Hosted additionally adds quota/auth bounds; the extraction that
         # follows the loop is shared via _extract_session_llm/_extract_session_v2
-        # (#822). Keep the two in sync when touching either.
+        # (#822). Keep the two in sync when touching either — and note the
+        # THIRD copy: tools/ask_spotcheck.py::_seed_memory mirrors this same
+        # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to
+        # seed the QA spot-check fixture. It deliberately omits
+        # embeddings/Source/extraction, but the turn write itself must stay
+        # identical, or the fixture teaches a shape capture no longer
+        # produces (#3910).
         for i, turn in enumerate(windowed):
             # #721: _normalize_turn_role is the isinstance-first pattern — an
             # `or "unknown"` fallback only fixes falsy roles, but TRUTHY
