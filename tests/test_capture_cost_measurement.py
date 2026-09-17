@@ -1371,7 +1371,10 @@ def test_hosted_capture_emits_that_session_s_measured_cost_row(
         "session_id": "sess-b7-attrib"})
     assert resp.status_code == 200, resp.text
     # the extractor really ran the three stages we are measuring
-    assert [c[0] for c in model.calls] == ["s1", "s2", "s4"]
+    # (ORDER-AGNOSTIC on purpose: stage invocation order/count is
+    # extractor_v2's chunking property, not the emission contract this test
+    # pins — expected_props already tolerates any call sequence)
+    assert sorted(c[0] for c in model.calls) == ["s1", "s2", "s4"]
     assert resp.json()["stats"]["llm"]["calls"] == 3   # telemetry present
 
     cost_rows = [r for r in _b7_rows(tmp_path)
@@ -1385,24 +1388,40 @@ def test_hosted_capture_emits_that_session_s_measured_cost_row(
     assert props == model.expected_props("sess-b7-attrib")
 
 
-def test_hosted_capture_emits_no_cost_row_when_no_extraction_ran(
+def test_hosted_capture_emits_no_cost_row_when_no_llm_rollup_exists(
         tmp_path, monkeypatch, _b7_capture_client):
-    """A capture on the M2 lane produces NO extractor LLM telemetry
-    (``meta["stats"] == {}``) — so it must emit NO ``capture_cost`` row at
-    all, never a zero-cost row that a reader could mistake for a measured
-    $0. REDs if the handler drops the ``is not None`` guard and writes a
-    phantom row."""
+    """A capture whose extractor produced NO LLM roll-up
+    (``meta["stats"] == {}``) must emit NO ``capture_cost`` row at all —
+    never a zero-cost row that a reader could mistake for a measured $0.
+    REDs if the handler drops the ``is not None`` guard and writes a phantom
+    row.
+
+    The lane used here is M2 (``TORTOISE_SESSION_EXTRACTOR=m2``). Note the
+    name says ROLL-UP, not "no extraction": the M2 lane DOES extract and
+    DOES make real provider calls — it simply discards the usage block and
+    hard-codes ``stats: {}`` (``sdk.py:3903-3910``), so it is the reachable
+    no-telemetry shape. That blind spot is filed as #3747 and is NOT
+    endorsed here; this test pins the handler's guard, nothing more."""
+    from tortoise import hosted_api as ha
+
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
 
     resp = _b7_capture_client.post("/v1/sessions", json={
         "conversation": _conv(), "harness": "pi",
         "session_id": "sess-b7-none"})
     assert resp.status_code == 200, resp.text
-    # Pin the premise, so the absence below cannot pass merely because the
-    # analytics channel was never wired: the capture really extracted
-    # (extracted > 0) and really produced NO LLM roll-up (stats == {}).
+    # Pin the premise: the capture really extracted (extracted > 0) and
+    # really produced NO LLM roll-up (stats == {}).
     assert resp.json()["extracted"] > 0
     assert resp.json()["stats"] == {}
+
+    # Positive control for the ABSENCE below: the analytics channel is live
+    # in this test's environment (a sentinel written through the REAL writer
+    # lands where _b7_rows reads), so the missing capture_cost row is the
+    # handler's guard and not a dead writer.
+    ha._track_analytics_event(_B7_TEAM["org_id"], "b7_sentinel", {})
+    assert any(r.get("event_name") == "b7_sentinel"
+               for r in _b7_rows(tmp_path))
 
     assert [r for r in _b7_rows(tmp_path)
             if r.get("event_name") == "capture_cost"] == []
@@ -1417,12 +1436,22 @@ def test_report_cli_aggregates_retries_per_session_before_percentiling(
     from tools import capture_cost_report as report
 
     def emit(session_id, cost):
+        # A row shaped like a LIVE writer's output — a real per-stage lane
+        # with the disclosure counters present — so the aggregation is
+        # exercised over a shape the boundary actually produces (not an
+        # all-unmetered miscellany).
         return {"org_id": "org-1", "event_name": "capture_cost",
                 "created_at": "2026-09-16T12:00:00+00:00",
-                "properties": {"session_id": session_id, "calls": 1,
-                               "cost_usd": cost, "calls_without_cost": 0,
-                               "calls_without_usage": 0,
-                               "deadline_aborts": 0, "by_stage": {}}}
+                "properties": {
+                    "session_id": session_id, "calls": 1,
+                    "calls_without_cost": 0, "calls_without_usage": 0,
+                    "deadline_aborts": 0, "prompt_tokens": 100,
+                    "completion_tokens": 10, "cost_usd": cost,
+                    "by_stage": {"s1": {_PROVIDER: {_MODEL: {
+                        "calls": 1, "prompt_tokens": 100,
+                        "completion_tokens": 10, "cost_usd": cost,
+                        "usage_present": True,
+                        "calls_without_usage": 0}}}}}}
 
     rows = [emit("sess-retried", 0.002), emit("sess-retried", 0.003),
             emit("sess-other", 0.010)]
@@ -1442,6 +1471,60 @@ def test_report_cli_aggregates_retries_per_session_before_percentiling(
     # the percentile itself: over SESSIONS [0.005, 0.010] p50 is 0.0075;
     # over ROWS [0.002, 0.003, 0.010] it would be 0.003.
     assert dist["p50"] == pytest.approx(0.0075, abs=1e-9)
+    assert dist["fully_priced"] is True     # no unmetered/unpriced rows
     retried = {h["session_id"]: h for h in dist["heaviest"]}["sess-retried"]
     assert retried["cost_usd"] == pytest.approx(0.005, abs=1e-9)
     assert retried["rows"] == 2
+
+
+def test_capture_cost_props_carries_the_retry_counter():
+    """``retries`` is emitted, not hardcoded: a roll-up carrying retries must
+    surface them on the row. Without this, replacing the props mapping's
+    ``retries`` with a literal ``0`` is a spelling-preserving mutation that
+    no emission test can see (the stub never triggers a retry)."""
+    from tortoise import hosted_api as ha
+
+    props = ha._capture_cost_props("sess-retries", {"stats": {"llm": {
+        "calls": 2, "retries": 2, "prompt_tokens": 0,
+        "completion_tokens": 0, "cost_usd": 0.0, "by_stage": {}}}})
+    assert props is not None
+    assert props["retries"] == 2
+
+
+def test_emission_write_is_handed_off_the_event_loop(
+        monkeypatch, _b7_capture_client):
+    """The emit must run OFF the event loop (``asyncio.to_thread``):
+    ``_track_analytics_event`` POSTs synchronously and the API runs a single
+    uvicorn worker, so an inline call stalls every concurrent request for the
+    duration of the Supabase round-trip (the #2988/#3498 class). Asserted
+    BEHAVIOURALLY — the handler thread and the writer thread must differ —
+    because inlining the call leaves every other emission test green (with
+    Supabase unset the write is a fast local append)."""
+    import threading
+
+    from tortoise import hosted_api as ha
+    from tortoise import sdk as sdk_mod
+
+    monkeypatch.setattr(sdk_mod, "_V2SessionMock",
+                        lambda: DistinctStageCostModel())
+    real_props = ha._capture_cost_props
+    seen: dict = {}
+
+    def _record_props(*args, **kwargs):
+        seen["handler_thread"] = threading.get_ident()
+        return real_props(*args, **kwargs)
+
+    def _record_emit(*args, **kwargs):
+        seen["emit_thread"] = threading.get_ident()
+
+    monkeypatch.setattr(ha, "_capture_cost_props", _record_props)
+    monkeypatch.setattr(ha, "_track_analytics_event", _record_emit)
+
+    resp = _b7_capture_client.post("/v1/sessions", json={
+        "conversation": _conv(), "harness": "pi",
+        "session_id": "sess-b7-offloop"})
+    assert resp.status_code == 200, resp.text
+    assert "emit_thread" in seen, "the emit never reached the writer"
+    assert seen["emit_thread"] != seen["handler_thread"], (
+        "the analytics write ran ON the event-loop thread — it must be "
+        "handed off via asyncio.to_thread")
