@@ -699,7 +699,7 @@ def test_build_fork_key_row_has_no_horizontal_overflow(page: Page) -> None:
     page.get_by_role("button", name=re.compile("Build an application on top")).click()
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
-    page.get_by_role("button", name=re.compile("Create an API key for")).click()
+    page.get_by_role("button", name="Create an API key", exact=True).click()
     expect(page.locator("code", has_text="tt_")).to_be_visible(timeout=10_000)
     m = _measure_key_row(page)
     assert m["scrollWidth"] == m["clientWidth"], \

@@ -1081,6 +1081,12 @@ function claimIntentInFlight() {
   const [mountError, setMountError] = React.useState('')
   const [team, setTeam] = React.useState(null)
   const [keys, setKeys] = React.useState([])
+  // #3783 (review P2): `keys` initialises to [] — indistinguishable from a
+  // loaded-but-empty org. This flag marks whether the rows payload has actually
+  // ARRIVED, so the connect gate can render a wait state instead of a mint CTA
+  // in the window where a slow/failed GET /v1/team/keys would otherwise resolve
+  // 'mint' and can burn the plan's last key slot.
+  const [keysLoaded, setKeysLoaded] = React.useState(false)
   const [sessions, setSessions] = React.useState([])
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -4223,6 +4229,7 @@ function claimIntentInFlight() {
     setTeam(null)
     setStaleFired(false) // #1858: null→null when logging out from the terminal '—' state — the reset effect won't fire, so clear the per-load latch directly; the next session's skeleton must get a fresh floor
     setKeys([])
+    setKeysLoaded(false)
     setSessions([])
     setNewKey(null)
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
@@ -4329,6 +4336,7 @@ function claimIntentInFlight() {
       ])
       if (orgIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
       setKeys(Array.isArray(k) ? k : k.keys || [])
+      setKeysLoaded(true)
       // #2246 (ADR-010): the rule-5/7 held-key classification hook is DELETED
       // — no held key exists to classify in session mode (apiKey state is ''
       // and the KEY_STORAGE slot was purged at session resolution). keys[]
@@ -4847,6 +4855,7 @@ function claimIntentInFlight() {
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
+    setKeysLoaded(false)
     setSessions([])
     clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
     setSessionDeletingId(null)
@@ -6333,7 +6342,7 @@ function claimIntentInFlight() {
   // a key the user never chose to create, while the Overview (reading this
   // same source) said an existing key was usable. Consumed by
   // `wizardKeyAffordance` below.
-  const connectGate = connectKeyGate(welcomeKey, keys)
+  const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -6493,7 +6502,9 @@ function claimIntentInFlight() {
   // no-key branch never offers a button that would 403.
   const wizardNoKeyAffordance = (
     <>
-      <p className="dim small">Create an API key to see the setup prompt.</p>
+      <p className="dim small">{isBuildFork
+        ? 'Create an API key to call the SDK from your application.'
+        : 'Create an API key to see the setup prompt.'}</p>
       <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
         <button type="button" className="btn-primary small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
           {wizardDurableBusy ? 'Creating…' : 'Create an API key'}
@@ -6565,13 +6576,24 @@ function claimIntentInFlight() {
     </>
   )
 
+  // #3783 (review P2): the 'loading' mode offers NEITHER the mint nor the
+  // paste row — the rows GET has not landed (or failed), so "no key" is not a
+  // resolved answer and a mint CTA could burn a slot while an unloaded row
+  // already exists. The gate re-renders the moment `keysLoaded` flips.
+  const wizardLoadingKeyAffordance = (
+    <p className="dim small" aria-live="polite">Checking your organization&apos;s API keys…</p>
+  )
+
   // #3783: ONE role- and source-aware derivation for every keyed leaf, so the
-  // source-aware branch cannot drift between the shared and Codex Desktop arms.
-  // Minting is offered ONLY when `connectGate.mode === 'mint'` (no usable key
-  // exists at all); 'existing' routes to the reuse path above.
-  const wizardKeyAffordance = isOwnerAdmin
-    ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
-    : wizardPasteRow
+  // source-aware branch cannot drift between the shared, Codex Desktop and
+  // build-fork arms. Minting is offered ONLY when `connectGate.mode === 'mint'`
+  // (no usable key exists at all); 'existing' routes to the reuse path above;
+  // 'loading' shows the wait state and no action at all.
+  const wizardKeyAffordance = connectGate.mode === 'loading'
+    ? wizardLoadingKeyAffordance
+    : isOwnerAdmin
+      ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
+      : wizardPasteRow
 
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
@@ -6888,20 +6910,7 @@ function claimIntentInFlight() {
                           </>
                         ) : (
                           <>
-                            {isOwnerAdmin ? (
-                              <>
-                                <p className="dim small" style={{ margin: '0 0 0.6rem' }}>
-                                  Create an API key to call the SDK from your application.
-                                </p>
-                                <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
-                                  {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
-                                </button>
-                              </>
-                            ) : (
-                              <p className="dim" style={{ margin: 0 }}>
-                                Only owners and admins can create API keys. Ask an owner or admin to create one.
-                              </p>
-                            )}
+                            {wizardKeyAffordance}
                             <div style={{ marginTop: '0.6rem' }}>
                               {/* #3218: this arm is the NO-KEY branch (no
                                   plaintext is on screen here), so the clears
@@ -6946,9 +6955,6 @@ function claimIntentInFlight() {
                         </WizardBlock>
                       )}
 
-                      {wizardDurableError && (
-                        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
-                      )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
@@ -8217,7 +8223,7 @@ function claimIntentInFlight() {
                 wizard end): members can't create keys, and a fresh owner
                 create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {snippetKey || durableConnect.source === 'rows-durable'
+              {snippetKey || connectGate.mode === 'existing'
                 ? (isOwnerAdmin
                     ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
                     : "You're in — finish the setup below to connect your agent (paste the key an owner or admin shared with you).")
@@ -8276,7 +8282,7 @@ function claimIntentInFlight() {
               // one click away for owners (their only first-party surface).
               <p className="dim">
                 {isOwnerAdmin
-                  ? (durableConnect.source === 'rows-durable'
+                  ? (connectGate.mode === 'existing'
                       ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
                       : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
                   : "Your Organization is live — connect your agent below. You'll need an API key to paste: ask an owner or admin to share one."}

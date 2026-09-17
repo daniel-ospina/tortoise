@@ -129,10 +129,21 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
 //   - front-channel plaintext held → { mode: 'embed',  key, existing: null }
 //   - usable durable row, no held plaintext → { mode: 'existing', existing: row }
 //   - no usable key anywhere → { mode: 'mint', existing: null }
-// Consumers may mint ONLY on `'mint'`; `'existing'` must route to a reuse path.
-export function connectKeyGate(welcomeKey, keyRows) {
+//   - rows not loaded yet (or the GET failed) → { mode: 'loading', existing: null }
+// Consumers may mint ONLY on `'mint'`; `'existing'` must route to a reuse path,
+// and `'loading'` must offer NEITHER — it is not a resolved answer.
+//
+// #3783 (review P2): `keysLoaded` marks whether the rows payload has actually
+// ARRIVED. Without it, `keys` initialises to `[]`, so a slow or failed `GET
+// /v1/team/keys` made the gate resolve `'mint'` for an organization that may
+// already hold a usable row — the UI offered a mint CTA that can burn the free
+// tier's last slot in exactly the window it must not. The default is `true` so
+// existing callers (and the unit tests) that pass a real rows array keep the
+// loaded meaning; `main.jsx` passes the live load state explicitly.
+export function connectKeyGate(welcomeKey, keyRows, keysLoaded = true) {
   const dc = durableConnectKey(welcomeKey, '', keyRows)
   if (dc.key) return { mode: 'embed', key: dc.key, existing: null }
+  if (!keysLoaded) return { mode: 'loading', key: '', existing: null }
   if (dc.source === 'rows-durable') {
     return { mode: 'existing', key: '', existing: usableDurableRows(keyRows)[0] || null }
   }
@@ -144,11 +155,18 @@ export function connectKeyGate(welcomeKey, keyRows) {
 // API Keys table rendered it as "—" — the user could see it (the issue's own
 // walk did) but could not ACCOUNT for it, and could not tell it apart from any
 // other unnamed row. A `'provisioned'` row with no name IS the organization's
-// setup key; name it. Returns null when there is nothing honest to show (a
-// user-named row always wins), so callers keep their own "—" fallback.
+// setup key; name it. Review P2: `'recovery'` (the owner-level keyless-mint
+// lane) and legacy rows minted before `created_via` existed are ALSO unnamed
+// real, slot-consuming keys — leaving them as an unaccountable "—" is the same
+// defect one row over, so they get a source-specific label too. The terminal
+// fallback covers any future unnamed mint source: every row the API Keys table
+// lists is a durable product key (bootstrap rows are excluded by
+// `isManagedKey`), so none should render as nothing. Returns null only when
+// there is no row at all; a user-named row always wins.
 export function keyDisplayName(k) {
   if (!k) return null
   if (k.name) return k.name
   if (k.created_via === 'provisioned') return 'Organization key'
-  return null
+  if (k.created_via === 'recovery') return 'Recovery key'
+  return 'API key'
 }

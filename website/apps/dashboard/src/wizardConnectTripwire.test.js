@@ -87,8 +87,9 @@ test('#2710/#2912: the no-key state renders the mint CTA as the KEY block’s no
   const connect = connectStep()
   assert.match(
     connect,
-    /<p className="dim small">Create an API key to see the setup prompt\.<\/p>/,
-    'the promised sentence is kept verbatim (copy is human-owned — never reworded)',
+    /<p className="dim small">\{isBuildFork\n\s*\? 'Create an API key to call the SDK from your application\.'\n\s*: 'Create an API key to see the setup prompt\.'\}<\/p>/,
+    'the self-arm sentence is kept verbatim (copy is human-owned — never reworded) while the ' +
+    'build fork keeps its own SDK sentence — the shared affordance now serves both',
   )
   // The AFFORDANCE slice: the whole connect step also holds the build-fork CTA
   // (same handler + label), so asserting over `connect` would not pin THIS
@@ -151,8 +152,9 @@ test('#2710/#2912: the no-key affordance is the KEY block branch — never a pla
   assert.match(owner, /\bwizardKeyAffordance\b/,
     'the key block renders the derived role+source affordance')
   assert.match(connectStep(),
-    /const wizardKeyAffordance = isOwnerAdmin\n\s*\? \(connectGate\.mode === 'existing' \? wizardExistingKeyAffordance : wizardNoKeyAffordance\)\n\s*: wizardPasteRow/,
-    'the derivation is role-aware AND source-aware: a usable existing key routes to the reuse path, never the mint')
+    /const wizardKeyAffordance = connectGate\.mode === 'loading'\n\s*\? wizardLoadingKeyAffordance\n\s*: isOwnerAdmin\n\s*\? \(connectGate\.mode === 'existing' \? wizardExistingKeyAffordance : wizardNoKeyAffordance\)\n\s*: wizardPasteRow/,
+    'the derivation is load-, role- AND source-aware: an unloaded rows payload shows the wait ' +
+    'state, a usable existing key routes to the reuse path, and only the mint mode mints')
   assert.doesNotMatch(owner, /YOUR_API_KEY/, 'no placeholder key may remain')
   assert.doesNotMatch(owner, /wizardKeyCodeStyle\}>\{harnessKey \|\| '…'\}/,
     'no fake key row may render before a key exists')
@@ -1356,8 +1358,8 @@ test('#2865: the two Claude tabs are no longer hidden from members', () => {
     'the connect-step gate is the cap remedy alone (capNotice is owner/admin-only)')
   // a member on a KEYED leaf keeps a paste escape, never a mint CTA that 403s
   assert.match(connectStep(),
-    /const wizardKeyAffordance = isOwnerAdmin[\s\S]{0,160}?: wizardPasteRow/,
-    'the keyed-leaf no-key branch is role-aware (members get the paste row)')
+    /const wizardKeyAffordance = connectGate\.mode === 'loading'[\s\S]{0,200}?: wizardPasteRow/,
+    'the keyed-leaf no-key branch is load- and role-aware (members get the paste row)')
   assert.match(ownerBranch(), /\bwizardKeyAffordance\b/,
     'the key block renders the derived affordance')
   // the member-only dead-end subtree must be gone, not left unreachable
@@ -1416,9 +1418,52 @@ test('#3783: the existing-key affordance routes to the key instead of minting', 
     'a fresh mint is still offered, but as an explicit secondary choice')
   assert.match(connect, /spends another of your plan&apos;s key slots/,
     'the copy names the allowance cost of the fresh mint')
+  // review P1: the BUILD fork's step-2 no-key branch rendered its OWN raw mint
+  // CTA (and its own member dead-end copy) — the arm the first fix missed, so an
+  // owner whose org already held a usable durable row still burned a second slot
+  // there. The DECISION is executed in connectKeyGate.test.js; this pins that the
+  // build arm CONSUMES that one derivation instead of re-implementing it.
+  const buildFork = slice('{wizardStep === 2 && (isBuildFork ? (', ') : (!capNotice ? (',
+                          'build fork connect arm')
+  assert.match(buildFork, /\{wizardKeyAffordance\}/,
+    'the build fork renders the shared gate-derived affordance (never a raw mint CTA)')
+  assert.doesNotMatch(buildFork, /onClick=\{wizardMintDurableKey\}/,
+    'the build fork must not own a mint CTA outside the gate — a usable existing key ' +
+    'would be bypassed and a second slot minted (#3783)')
+  // review P2: the Overview answered "is a key live" with its own
+  // `durableConnect.source === 'rows-durable'` — a second derivation that agreed
+  // today but could drift. One question, one gate.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.doesNotMatch(src, /durableConnect\.source === 'rows-durable'/,
+    'no surface may re-derive the rows-durable source outside connectKeyGate')
+  assert.match(src, /\{snippetKey \|\| connectGate\.mode === 'existing'/,
+    'the re-entry Overview routes its live-key claim through the gate')
   // BOTH keyed arms render the derived affordance (no drift between them)
-  assert.equal((stripBlockAndWholeLineComments(mainJsx).match(/\bwizardKeyAffordance\b/g) || []).length, 3,
-    'one definition + exactly two render sites (shared arm + Codex Desktop arm)')
+  assert.equal((src.match(/\bwizardKeyAffordance\b/g) || []).length, 4,
+    'one definition + exactly three render sites (build fork + shared arm + Codex Desktop arm)')
+})
+
+test('#3783 (review P2): an unloaded rows payload is a WAIT state — never a mint CTA', () => {
+  // The gate's decision is EXECUTED in connectKeyGate.test.js; this pins the
+  // main.jsx wiring: `keysLoaded` starts false, flips on a successful keys load,
+  // resets on logout/switch, is passed to the gate, and the derivation renders
+  // the wait state (no mint, no paste) while the mode is 'loading'.
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src, /const \[keysLoaded, setKeysLoaded\] = React\.useState\(false\)/,
+    'the rows-loaded flag starts unknown, not empty')
+  assert.match(src, /setKeys\(Array\.isArray\(k\) \? k : k\.keys \|\| \[\]\)\n\s*setKeysLoaded\(true\)/,
+    'a successful keys fetch marks the rows loaded')
+  assert.equal((src.match(/setKeysLoaded\(false\)/g) || []).length, 2,
+    'logout and team-switch both reset the flag (the switch then reloads)')
+  assert.match(src, /const connectGate = connectKeyGate\(welcomeKey, keys, keysLoaded\)/,
+    'the live load state is passed to the gate')
+  assert.match(connectStep(), /const wizardLoadingKeyAffordance = \(/,
+    'the wait affordance exists')
+  assert.doesNotMatch(slice('const wizardLoadingKeyAffordance = (',
+                            'const wizardKeyAffordance = connectGate.mode',
+                            'loading affordance'),
+    /wizardMintDurableKey/,
+    'the wait state must not offer the mint')
 })
 
 test('#3783: the API Keys table names the auto-provisioned key instead of rendering it as —', () => {

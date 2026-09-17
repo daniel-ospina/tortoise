@@ -21,6 +21,14 @@
 //   restored green. The legitimate refactor that MUST stay green: renaming the
 //   local `dc` binding, or reordering the `'mint'`/`'existing'` early returns
 //   (the modes are disjoint) — neither changes the resolved mode.
+//   CONNECT_GATE_ASSUMES_ROWS_LOADED — delete the
+//   `if (!keysLoaded) return { mode: 'loading', … }` branch so an unloaded
+//   payload collapses to `'mint'` (review P2: a slow/failed GET re-opened the
+//   mint CTA while a row might already exist). The `'loading'` test reds with
+//   `expected 'loading', actual 'mint'`.
+//   KEY_DISPLAY_NAME_LEAVES_OTHER_ROWS_BLANK — revert the `'recovery'`/
+//   fallback labels to `return null` (review P2: unnamed recovery/legacy rows
+//   stayed an unaccountable "—"). The identity test reds.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { connectKeyGate, keyDisplayName } from './sessionKey.js'
@@ -101,7 +109,33 @@ test('#3783: keyDisplayName gives the auto-provisioned key an identity instead o
     'the unnamed provisioned key is the organization’s setup key — name it')
   assert.equal(keyDisplayName(MINTED), MINTED.name,
     'a user/agent-named row always wins')
-  assert.equal(keyDisplayName({ name: null, created_via: 'recovery' }), null,
-    'a non-provisioned unnamed row keeps the caller’s dash fallback')
+  // review P2: recovery and legacy (created_via null) rows are real,
+  // slot-consuming keys too — an unnamed one must not stay unaccountable.
+  assert.equal(keyDisplayName({ name: null, created_via: 'recovery' }), 'Recovery key',
+    'the owner-level recovery lane is named for what it is')
+  assert.equal(keyDisplayName({ name: null, created_via: null }), 'API key',
+    'a legacy/null-source unnamed durable row is still a product key')
+  assert.equal(keyDisplayName({ name: null, created_via: 'agent_signup' }), 'API key',
+    'any future unnamed mint source keeps a terminal label, never a dash')
   assert.equal(keyDisplayName(null), null, 'no row → no name')
+})
+
+test('#3783 (review P2): rows-not-loaded is a distinct WAIT state, never "no key"', () => {
+  // A slow or failed GET /v1/team/keys leaves `keys` at its [] initialiser. The
+  // pre-fix gate resolved that to 'mint', so the connect CTA could burn the
+  // last slot while an unloaded row already existed. The gate must say
+  // 'loading' — not 'mint' and not 'existing'.
+  assert.equal(connectKeyGate('', [], false).mode, 'loading',
+    'an unloaded empty payload is unknown, not "no key exists"')
+  assert.equal(connectKeyGate('', [], false).existing, null,
+    'the wait state identifies no row')
+  // A held plaintext is still embeddable even before the rows land (it came
+  // from the org-create response and needs no row lookup).
+  assert.equal(connectKeyGate('tt_c2215b3' + 'a'.repeat(54), [], false).mode, 'embed',
+    'a held plaintext does not wait for the rows')
+  // Once loaded, the SAME empty payload is a genuine mint (no key at all).
+  assert.equal(connectKeyGate('', [], true).mode, 'mint',
+    'a loaded-empty org may mint (the gate only withholds mint while unknown)')
+  assert.equal(connectKeyGate('', [], false).mode !== 'mint', true,
+    'the unknown state must never offer the mint arm')
 })
