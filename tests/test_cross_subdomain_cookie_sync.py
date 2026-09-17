@@ -273,6 +273,11 @@ def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
             ("removeItem", "remove"),
             ("setClaimPendingMarker", "set"),
             ("clearClaimPendingMarker", "remove"),
+            # #3503 (review P2, round 7): the origin-proven sign-out marker. A
+            # parent-domain cookie write like any other — a hardcoded
+            # Domain=/Secure here is dropped on localhost/previews, which would
+            # make /auth ignore the dashboard's own sign-out.
+            ("setSignOutMarker", "set"),
         ]),
         (OAUTH, [("setItem", "set"), ("removeItem", "remove")]),
     ]

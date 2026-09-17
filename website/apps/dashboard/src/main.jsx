@@ -678,6 +678,23 @@ function clearClaimPendingMarker() {
     document.cookie = `${CLAIM_PENDING_COOKIE}=;${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Max-Age=0`
   } catch { /* best-effort */ }
 }
+
+// #3503 (review P2, round 7): a sign-out must be ORIGIN-PROVEN. A bare
+// `?signout=1` on /auth is forgeable — a third-party link would force-log-out
+// the visitor, and clearing the shared parent-domain cookie would take the
+// dashboard with it (the same one-link forced logout the /auth `?stale=1`
+// branch explicitly refuses). Only this origin can write a cookie on
+// .premiselabs.co, so the marker IS the proof; /auth clears its own origin's
+// legacy session only when it is present, and consumes it.
+const SIGN_OUT_MARKER = 'tt_signout'
+function setSignOutMarker() {
+  try {
+    // 30s: long enough for the redirect, short enough that a stale marker cannot
+    // authorize a later forged link.
+    const expires = new Date(Date.now() + 30 * 1000).toUTCString()
+    document.cookie = `${SIGN_OUT_MARKER}=1${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
+  } catch { /* best-effort */ }
+}
 const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY'
 
@@ -5909,6 +5926,7 @@ function claimIntentInFlight() {
                         // copy was refused, so without it this button still hands
                         // the user back to the OLD account.
                         if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+                        setSignOutMarker()
                         const signOutSearch = (() => {
                           const q = new URLSearchParams(window.location.search)
                           q.set('signout', '1')
@@ -6023,6 +6041,7 @@ function claimIntentInFlight() {
                          textDecoration: 'underline', cursor: 'pointer' }}
                 onClick={() => {
                   if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+                  setSignOutMarker()
                   const signOutSearch = (() => {
                     const q = new URLSearchParams(window.location.search)
                     q.set('signout', '1')

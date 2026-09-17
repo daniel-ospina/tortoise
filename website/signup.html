@@ -93,7 +93,20 @@
         // for). Without this the visitor is forwarded straight back to the app as
         // the OLD account, or into an /auth ↔ dashboard replace loop.
         if (p.get("signout") === "1") {
-          if (typeof window.clearStoredSession === "function") window.clearStoredSession();
+          // #3503 (review P2, round 7): ORIGIN-PROVEN sign-out only. A bare
+          // ?signout=1 is forgeable — a third-party link would force-log-out the
+          // visitor, and clearing the SHARED parent-domain cookie would take the
+          // dashboard with it (exactly the one-link forced logout the ?stale=1
+          // branch below refuses). Only the dashboard can set a cookie on
+          // .premiselabs.co, so require that marker, and then clear ONLY this
+          // origin's legacy localStorage session — never the shared cookie.
+          if (/(?:^|; )tt_signout=1(?:;|$)/.test(document.cookie)) {
+            if (typeof window.clearLegacySessions === "function") window.clearLegacySessions();
+            // Consume the marker. Both attribute forms are attempted: the
+            // dashboard omits Domain on localhost/preview origins.
+            document.cookie = "tt_signout=; Domain=.premiselabs.co; Path=/; Max-Age=0";
+            document.cookie = "tt_signout=; Path=/; Max-Age=0";
+          }
           p.delete("signout");
           var qs = p.toString();
           try {
