@@ -4170,13 +4170,15 @@ class TortoiseSDK:
                 # silently dropped or rebuilt into a reduced {id, kind, text}
                 # shape. #2813/#2949: the response never advertises a
                 # passthrough FIELD the resolved node does not hold — a create
-                # normalizes presence to the write above (None-valued and
-                # empty/blank-search_keys fields are dropped exactly as the
-                # graph drops them), and a non-empty search_keys differs in
-                # REPRESENTATION only (the response keeps the payload LIST,
-                # the node stores the flattened string). A dedup hit reports
-                # the canonical's STORED props read back above (absent fields
-                # omitted).
+                # normalizes presence to the write above (None-valued fields
+                # and an empty/blank `search_keys` LIST are dropped exactly as
+                # the graph drops them; a non-list `search_keys`, including a
+                # blank string, is stored verbatim by
+                # `_flatten_search_keys_prop` and stays advertised). A
+                # non-empty `search_keys` list differs in REPRESENTATION only
+                # (the response keeps the payload LIST, the node stores the
+                # flattened string). A dedup hit reports the canonical's
+                # STORED props read back above (absent fields omitted).
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
                     "props": props, "dedup": dedup})
