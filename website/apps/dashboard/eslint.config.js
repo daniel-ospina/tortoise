@@ -28,13 +28,11 @@
 // the separate #3216 / #3219 job, and a mass-red here would block the beta
 // merge queue. No stylistic rules belong in this file.
 //
-// KNOWN FALSE POSITIVES (do not "fix" by reordering code): `no-use-before-define`
-// is purely textual/scope-based — it cannot tell an eager reference (a deps
-// array, a render-body expression) from a lazy one (inside a nested closure that
-// runs after the declaration is initialised). On the current tree it reports 37
-// hits, ALL of the lazy kind. They are quantified in #3694 rather than
-// mass-edited, because reordering hook declarations in a 9k-line component is
-// itself a white-screen risk.
+// KNOWN FALSE POSITIVES — `no-use-before-define` is DEMOTED TO `warn` for this
+// reason, and the reason is recorded here, not left implicit (a demoted rule
+// with no note is indistinguishable from laziness and gets "fixed" back by the
+// next reader). See the rule site below for the full note: 37 findings, 37
+// false positives, and the one eager shape the rule still holds.
 import globals from 'globals'
 import reactHooks from 'eslint-plugin-react-hooks'
 
@@ -66,13 +64,52 @@ export default [
       globals: { ...globals.browser },
     },
     rules: {
+      // ⚠️ DEMOTED TO `warn` — RECORDED REASON (do not flip back to `error`
+      // without re-measuring): on this tree the rule reports 37 findings and
+      // ALL 37 are false positives. The rule is purely textual/scope-based, so
+      // it cannot tell an EAGER reference (a deps array, a render-body
+      // expression) from a LAZY one (inside a nested closure that runs after
+      // the declaration is initialised). Every one of the 37 is the lazy kind.
+      //
+      // WHAT THE RULE STILL HOLDS (this is why it is not deleted): the #2709
+      // shape — an effect deps array, or any render-body expression, that
+      // references a `const` declared later in the same component. A deps array
+      // is evaluated eagerly during render, so that reference is a real TDZ
+      // crash (it white-screened the dashboard for every signed-in user); it is
+      // the one thing this rule catches that a closure body does not. So the
+      // rule stays armed as a `warn` tripwire for exactly that shape across the
+      // whole file.
+      //
+      // WHERE REAL COVERAGE LIVES (the warn is NOT the gate): the #2709 class is
+      // gated today by the executed tripwire `src/tdzDepsTripwire.test.js`, which
+      // fails the suite, not merely prints a warning.
+      //
       // `variables: true` is the whole point: a `const`/`let` referenced before
-      // its declaration (same scope, including try→catch) is an error.
+      // its declaration within the SAME block scope is reported (the #2709
+      // deps-array shape). The try→catch boundary is NOT one of those cases —
+      // the catch clause is a separate scope, so the #3687 shape is
+      // `no-undef`'s, below, not this rule's (verified: this rule is silent on
+      // the exact #3687 shape).
       // `functions: false` keeps hoisted function declarations legal, so this
       // stays a bug detector rather than a hoisting style rule.
-      'no-use-before-define': ['error', { variables: true, functions: false }],
+      //
+      // REORDERING THE 37 IS DELIBERATELY NOT A WORK ITEM. No issue is filed
+      // for it and none should be created; an honest consequence of never doing
+      // it is nothing — they are false positives at runtime. Satisfying the rule
+      // would mean moving ~15 hook and derived-const declarations across a
+      // 9k-line component (three of them cannot move without dragging a whole
+      // declaration chain), which is itself a white-screen risk. REVISIT when
+      // the rule can actually GATE CI — i.e. once agent-infra#1128 (the reusable
+      // node-ci lint job ignores `working-directory` and self-skips for nested
+      // packages) is fixed so this config is enforced and a warn/error split is
+      // visible — or when this component is decomposed into modules small enough
+      // that the reorder is mechanical.
+      'no-use-before-define': ['warn', { variables: true, functions: false }],
       // Typos, missing imports, and identifiers that leaked out of scope
-      // (the #3687 try→catch shape lands here).
+      // (the #3687 try→catch shape lands here). Stays at `error`: unlike the
+      // rule above, its findings are real, and it is the rule that caught
+      // #3687 — a dead tool would be exactly the failure this config exists to
+      // remove.
       'no-undef': 'error',
     },
   },
