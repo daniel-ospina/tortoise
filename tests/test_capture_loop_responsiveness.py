@@ -164,9 +164,9 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
     """The invariant: while a capture is stalled, the API keeps answering.
 
-    Both assertions are order-independent — they compare observed timestamps
-    against the stall window recorded by the fake itself, so neither can pass
-    by accident of scheduling:
+    Every signal is order-independent — each reads observed state (tick
+    timestamps, or the fake's own entry/exit events) against the stall window
+    the fake records, so none can pass by accident of scheduling:
 
     * ``ticks_in_stall`` — the PRIMARY signal: ticks the loop completed while
       the extraction was stalled. A blocked loop yields 0, because the next
@@ -177,26 +177,45 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
       extraction is legitimately slow (seconds) on a loaded runner and would
       otherwise be misread as a freeze. A call that blocks for part of the
       stall still shows up here as one long interval.
-    * the ``/health`` request completes BEFORE the stall ends AND AFTER the
-      extraction entered it, i.e. the API answered DURING the freeze window
-      rather than queued behind it (or served before it began).
+    * the ``/health`` request is answered while the stall is still OPEN. The
+      probe is fired only after the fake signals ENTRY (a shared event, not a
+      fixed sleep, asserted at the point it matters — so a run whose probe
+      would precede the stall fails instead of proving nothing), and the
+      answer is read against the fake's EXIT event. This signal needs no
+      cross-thread clock ordering (#3581) — unlike the tick filters above,
+      which compare the worker's ``state`` timestamps with loop-sampled ticks
+      and are sound because ``time.perf_counter()`` is a process-wide
+      monotonic clock read only after the worker completed. The probe must
+      still complete inside the stall, whose ``STALL_S`` budget is orders of
+      magnitude above the in-memory /health path; a probe that merely queues
+      behind a blocking capture fails.
 
     Mutation check (must stay true): calling the extraction inline
     (`return fn(*args, **kwargs)` instead of dispatching to the pool) makes the
-    primary assertion fail (0 ticks in the window). The narrower regression of
-    moving it back to the SHARED pool via `asyncio.to_thread` still runs
-    off-loop and passes HERE — it is pinned by the pool-name assertion in
-    `test_capture_extraction_runs_off_the_event_loop`, which fails for both
-    branches (measured).
+    primary assertion fail (0 ticks in the window); with the tick guard
+    neutralized, the health-in-stall guard fails too (measured, #3581) — no
+    single signal can be satisfied by a blocking capture. The narrower
+    regression of moving it back to the SHARED pool via `asyncio.to_thread`
+    still runs off-loop and passes HERE — it is pinned by the pool-name
+    assertion in `test_capture_extraction_runs_off_the_event_loop`, which
+    fails for both branches (measured).
     """
     from tortoise.hosted_api import app
 
     state: dict[str, float] = {}
+    # Shared entry/exit flags (#3581): observed by the event loop, set by the
+    # worker thread running the fake. Used to OPEN the window deterministically
+    # and to read whether /health was answered while it was still open — never
+    # to compare two clocks sampled in different execution contexts.
+    entered_evt = threading.Event()
+    exited_evt = threading.Event()
 
     def _stalled_extract(_self, windowed, session_id, now, **kw):
         state["entered"] = time.perf_counter()
+        entered_evt.set()
         time.sleep(STALL_S)  # stand-in for a wedged provider call
         state["exited"] = time.perf_counter()
+        exited_evt.set()
         return [], {}
 
     monkeypatch.setattr(TortoiseSDK, "_extract_session_v2", _stalled_extract)
@@ -220,17 +239,40 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             await asyncio.sleep(0.05)
             capture = asyncio.create_task(
                 ac.post("/v1/sessions", json={"conversation": _CONV}))
-            await asyncio.sleep(0.05)  # let the capture reach the extraction
+            # Wait for the capture to actually ENTER the extraction (the fake's
+            # own flag) instead of sleeping a fixed guess. Under load the
+            # endpoint's setup before the extraction takes longer than any
+            # guess, and /health would then be served before the stall began —
+            # the timestamp inversion this test used to fail on (#3581).
+            for _ in range(600):  # 30s, generously clear of loaded-runner setup
+                if entered_evt.is_set():
+                    break
+                await asyncio.sleep(0.05)
+            # Asserted HERE, before the probe: on an exhausted wait the request
+            # below would be served BEFORE the stall opened and the run would
+            # pass vacuously on the exit-event read (#3581 review) — the
+            # unconditional run-validity guard the old ordering assert carried.
+            assert entered_evt.is_set(), (
+                "the capture never reached the extraction within the 30s wait "
+                "(600 x 0.05s) — the stall window never opened, so this run "
+                "proves nothing (#3060)"
+                + (
+                    " — the capture finished without entering the extraction: "
+                    f"{capture.exception() or capture.result()!r}"
+                    if capture.done()
+                    else " — the capture is still pending after 30s"
+                ))
             health = await ac.get("/health")
-            health_done = time.perf_counter()
+            # The invariant, read the moment the response is in hand: the stall
+            # must still be OPEN. No clocks compared.
+            health_served_in_stall = not exited_evt.is_set()
             cap = await capture
             stop["done"] = True
             await tick
-        return ticks, health, health_done, cap
+        return ticks, health, health_served_in_stall, cap
 
-    ticks, health, health_done, cap = asyncio.run(_run())
+    ticks, health, health_served_in_stall, cap = asyncio.run(_run())
 
-    assert "entered" in state, "the capture never reached the extraction"
     assert health.status_code == 200, health.text
 
     entered, exited = state["entered"], state["exited"]
@@ -260,13 +302,11 @@ def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
             f"unanswered, Fly drops the machine and the proxy returns nothing "
             f"at all for EVERY request (#3060)")
 
-    assert health_done < exited, (
-        "no /health response was served while the capture was stalled — the "
-        "API was mute for the whole stall (#3060)")
-    assert health_done > entered, (
-        "/health answered BEFORE the capture entered its stall, so this run "
-        "proves nothing about liveness under load (#3060) — the answer must "
-        "be served inside the stall window")
+    assert health_served_in_stall, (
+        f"the /health request did not return inside the {STALL_S:.1f}s stall "
+        f"even though the event loop kept ticking ({len(in_stall)} ticks) — "
+        "the liveness handler's own request path is blocking or queued behind "
+        "the capture, not the event loop (#3060)")
 
     assert cap.status_code == 200, cap.text
 
