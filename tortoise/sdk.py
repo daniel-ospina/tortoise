@@ -504,6 +504,12 @@ class _InMemoryEventLog:
 _CAPTURE_PASSTHROUGH_PROPS = frozenset({
     "source_turn_id", "search_keys", "when", "quote"})
 
+# #2949 (review P2): read-back order for the dedup-hit response. Must match the
+# property list in the v2 seam's RETURN clause, and must be a TUPLE — the
+# frozenset above is unordered, so zipping it would scramble keys.
+_CAPTURE_PASSTHROUGH_READ_ORDER = ("quote", "when", "search_keys",
+                                   "source_turn_id")
+
 
 def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     """Build the LLM-extraction transcript + pre-write estimate for a
@@ -4051,6 +4057,12 @@ class TortoiseSDK:
                 # writer was forked).
                 props = {k: v for k, v in pt.items()
                          if k in _CAPTURE_PASSTHROUGH_PROPS}
+                # #2949 (review P2): only the create branch below writes these
+                # props. A dedup hit (in-capture fold or graph-level
+                # resolution) writes NOTHING, so the response must fall back to
+                # the canonical's STORED props — see the read-back after the
+                # CONTAINS wiring.
+                created_here = False
                 if resolved is None:
                     # 2) graph-level content-hash resolution — the SAME
                     #    semantics create_point(dedup=True) would apply
@@ -4072,6 +4084,7 @@ class TortoiseSDK:
                         dedup = DEDUP_CONTENT_HASH_HIT
                 if resolved is None:
                     resolved = pid
+                    created_here = True
                     self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
@@ -4099,13 +4112,38 @@ class TortoiseSDK:
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid})
-                # P1 #1529 (D8/E3): the whitelisted props dict read above —
-                # E3's source_turn_id (arriving on the payload point dict) must
+                if not created_here:
+                    # #2949 (review P2): a dedup hit wrote NOTHING in this
+                    # call, so the response must report the canonical's
+                    # STORED passthrough props — never the payload's. Echoing
+                    # the payload here re-mints the exact #2813 symptom ("the
+                    # reply looked correct while the node stored nothing"):
+                    # the resolved node may have been written BEFORE this fix,
+                    # or by a lane that does not pass these fields, and the
+                    # seam's step-2 pre-resolution bypasses create_point's own
+                    # (update_point-backed) dedup branch — which would have
+                    # persisted them. Same principle as step 2's "never report
+                    # a phantom id": the response describes what the graph
+                    # HOLDS. Read back rather than assume; absent props are
+                    # omitted (never fabricated) and `search_keys` returns in
+                    # its stored flat-string form (_flatten_search_keys_prop).
+                    # Only the create branch may echo the payload's raw values
+                    # — the SAME dict passed to create_point.
+                    _rows = proj.g.query(
+                        "MATCH (n:Point {id:$pid}) RETURN n.quote, n.when, "
+                        "n.search_keys, n.source_turn_id",
+                        params={"pid": pid}).result_set
+                    if _rows:
+                        props = {k: v for k, v in
+                                 zip(_CAPTURE_PASSTHROUGH_READ_ORDER, _rows[0],
+                                     strict=True)
+                                 if v is not None}
+                # P1 #1529 (D8/E3): the whitelisted props dict — E3's
+                # source_turn_id (arriving on the payload point dict) must
                 # never be dropped or rebuilt into a reduced {id, kind, text}
-                # shape. #2813: for a NEW point this is the SAME dict that was
-                # passed to create_point, so response and node can no longer
-                # diverge; a dedup hit already carries its props from the
-                # initial write (the seam never re-stamps a canonical).
+                # shape. #2813/#2949: a create reports the SAME dict it passed
+                # to create_point; a dedup hit reports the stored props read
+                # back above — response and node never diverge.
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
                     "props": props, "dedup": dedup})

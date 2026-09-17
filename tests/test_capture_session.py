@@ -170,6 +170,112 @@ def test_capture_v2_persists_passthrough_props_on_node(sdk, monkeypatch):
     assert row[3] == "turn-2813", row
 
 
+def _passthrough_payload(content: str) -> dict:
+    """The v2 payload shape the #2813/#2949 tests drive — one point carrying
+    all four E3 passthrough fields."""
+    return {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": "pt_2949_passthrough",
+            "content": content,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": "We decided to ship serve --http first.",
+            "status": "draft",
+            "search_keys": ["auth", "dead-end"],
+            "source_turn_id": "turn-2813",
+            "when": "2026-08-01",
+        }],
+        "operators": [],
+    }
+
+
+def _install_fake_extract(monkeypatch, payload: dict) -> None:
+    import tortoise.extractor_v2 as ev2
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+
+def _read_passthrough_props(sdk, pid: str) -> list:
+    return list(sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.quote, n.when, n.search_keys, n.source_turn_id",
+        params={"id": pid},
+    ).result_set[0])
+
+
+def test_capture_dedup_hit_reports_stored_props_not_payload(sdk, monkeypatch):
+    """#2949 (review P2): the v2 seam's dedup step-2 pre-resolves the canonical
+    BEFORE calling create_point, so a dedup hit writes NOTHING — yet the
+    response used to append the payload's ``props`` dict. The response thus
+    advertised quote/when/search_keys/source_turn_id that were ABSENT from the
+    resolved node: the exact #2813 symptom ("the reply looked correct while the
+    node stored nothing") persisting on the dedup path. A canonical written
+    before #2813 — or by a lane that does not pass these fields — carries none
+    of them, so the seam must report the STORED state (the same principle as
+    step 2's "never report a phantom id").
+
+    MUTATION THAT REDS THIS TEST: make the read-back unconditional/remove it
+    (``if not created_here:`` → ``if False:``) — the response then echoes the
+    payload and advertises props the node does not have."""
+    content = "the auth dead-end is the top issue"
+    # Pre-existing canonical with NO passthrough props (pre-#2813 shape).
+    canonical = sdk.create_point("statement", content)
+    assert _read_passthrough_props(sdk, canonical["id"]) == \
+        [None, None, None, None]
+
+    _install_fake_extract(monkeypatch, _passthrough_payload(content))
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert len(res["points"]) == 1, res["points"]
+    # Resolved to the PRE-EXISTING canonical, no new node minted.
+    assert res["points"][0]["id"] == canonical["id"], res["points"]
+    assert res["points"][0]["dedup"] == "content_hash_hit", res["points"]
+
+    # THE PARITY: the response must not advertise props the node lacks.
+    assert res["points"][0]["props"] == {}, res["points"][0]["props"]
+    assert _read_passthrough_props(sdk, canonical["id"]) == \
+        [None, None, None, None]
+
+
+def test_capture_dedup_hit_reports_stored_values_over_payload(
+        sdk, monkeypatch):
+    """#2949 (review P2), second arm: when the canonical DOES carry stored
+    passthrough props, the dedup-hit response must report THOSE (read back,
+    never re-stamped) — not the payload's. Guards the vacuous alternative fix
+    of blanking ``props`` on every dedup hit: the stored state must survive.
+    ``search_keys`` is reported in its stored flat-string form
+    (``_flatten_search_keys_prop``)."""
+    content = "the auth dead-end is the top issue"
+    canonical = sdk.create_point(
+        "statement", content, quote="ORIGINAL quote", when="2020-01-01",
+        search_keys=["original", "keys"], source_turn_id="turn-0")
+
+    _install_fake_extract(monkeypatch, _passthrough_payload(content))
+    res = sdk.capture_session(CONV)
+    assert res["points"][0]["id"] == canonical["id"], res["points"]
+    assert res["points"][0]["props"] == {
+        "quote": "ORIGINAL quote",
+        "when": "2020-01-01",
+        "search_keys": "original keys",
+        "source_turn_id": "turn-0",
+    }, res["points"][0]["props"]
+    # The canonical was never re-stamped (first-writer).
+    assert _read_passthrough_props(sdk, canonical["id"]) == [
+        "ORIGINAL quote", "2020-01-01", "original keys", "turn-0"]
+
+
 def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
     """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP-on-ingest is
     USER-VISIBLE — the pre-ingestion (uncalibrated, has_ep False) state
