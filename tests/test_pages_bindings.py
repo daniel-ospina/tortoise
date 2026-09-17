@@ -274,6 +274,9 @@ WF_PATH = REPO / ".github" / "workflows" / "deploy-pages.yml"
 PREFLIGHT = "Preflight — required Pages bindings exist"
 PROBE = "Post-deploy — sign-in is actually reachable"
 DEPLOY = "Deploy to Cloudflare Pages (premise-labs project)"
+#: #3620 — the pre-upload gate that every tracked top-level entry under
+#: `website/` is classified before anything is staged/uploaded.
+UPLOAD_PREFLIGHT = "Preflight — every website/ top-level entry is classified (#3620)"
 #: #3620 — the post-deploy assertion that the staged upload root excluded the
 #: internal paths that `wrangler pages deploy .` used to serve.
 LEAK_PROBE = "Post-deploy — internal paths are not publicly served (#3620)"
@@ -836,8 +839,10 @@ def test_the_probe_harness_exercises_the_sleep_GUARD_not_just_the_string() -> No
     to `-lt 3`, the guard would be unreachable and pinned only by a source
     string — the same weakness this PR has already been caught on twice.
     """
-    step = next(s for s in _deploy_steps() if s.get("name") == PROBE)
-    run = step["run"]
+    # Read the COMMENT-STRIPPED block, not the raw `run`: this test exists to
+    # prove the guard is in the CODE, and a comment-only guard would otherwise
+    # satisfy it (the defect class already fixed at the LEAK_PROBE bound test).
+    run = _step_code(PROBE)
     assert "[ \"$attempt\" -lt 10 ] && sleep 15" in run, (
         "the shipped guard changed shape — update _probe_script and this test"
     )
@@ -1712,6 +1717,104 @@ def test_the_upload_root_preflight_runs_before_the_deploy() -> None:
     )
     assert names.index(check["name"]) < names.index(DEPLOY), (
         "the classification check must run BEFORE the upload"
+    )
+
+
+def _upload_preflight_script(tmp_path: Path) -> Path:
+    """The shipped upload-root preflight run block with ONLY the checker path
+    rewritten to a stub on `PATH` — exactly as `_preflight_script` does for the
+    sibling binding preflight. The `bash -e` semantics are left as shipped, so
+    the checker's exit code is what aborts the step."""
+    step = next(s for s in _deploy_steps() if s.get("name") == UPLOAD_PREFLIGHT)
+    rewritten = _strip_bash_comments(step["run"]).replace(
+        "python3 tools/check_pages_upload_root.py", "check_upload_stub"
+    )
+    assert "check_upload_stub" in rewritten, (
+        "the upload-root checker invocation was not substituted"
+    )
+    p = tmp_path / "upload_preflight.sh"
+    p.write_text(rewritten, encoding="utf-8")
+    return p
+
+
+def _run_upload_preflight(tmp_path: Path, exits: str) -> tuple[int, str, int]:
+    """Run the shipped upload-root preflight under `bash -e` with the checker
+    replaced by the recording stub (reuses `STUB_CHECKER`)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stem = tmp_path / "check_upload_stub_impl"
+    stem.write_text(STUB_CHECKER, encoding="utf-8")
+    stem.chmod(0o755)
+    stub = bin_dir / "check_upload_stub"
+    stub.write_text(f'#!/bin/bash\nexec "{stem}"\n', encoding="utf-8")
+    stub.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "STUB_EXITS": exits,
+    }
+    r = subprocess.run(
+        ["bash", "-e", str(_upload_preflight_script(tmp_path))],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    calls_file = tmp_path / "checker_calls"
+    calls = int(calls_file.read_text()) if calls_file.exists() else 0
+    return r.returncode, r.stdout + r.stderr, calls
+
+
+@pytest.mark.parametrize(("exits", "want_rc"), [("0", 0), ("1", 1), ("2", 2)])
+def test_the_upload_root_preflight_actually_invokes_the_checker(
+    tmp_path, exits: str, want_rc: int
+) -> None:
+    """The anti-neutering assertion for the deploy gate.
+
+    `test_the_upload_root_preflight_runs_before_the_deploy` only compares a
+    substring + step index; it never EXECUTES the step. So the whole deploy-time
+    classification gate could be turned into a no-op with the suite green:
+
+        run: python3 tools/check_pages_upload_root.py || true
+        run: echo 'python3 tools/check_pages_upload_root.py'
+        run: python3 tools/check_pages_upload_root.py || exit 0
+
+    Each leaves the substring in place. This test runs the shipped block and
+    proves (a) the checker was ACTUALLY invoked and (b) its non-zero exits
+    (1 = unclassified/stale, 2 = could-not-determine) abort the step. It is the
+    execution-based counterpart of `test_the_preflight_actually_invokes_the_checker`,
+    for the one gate this PR adds.
+    """
+    rc, out, calls = _run_upload_preflight(tmp_path, exits)
+    assert calls == 1, (
+        "the upload-root preflight never invoked the checker — replacing the "
+        "invocation with `echo` leaves every source-level string in place (#3620)"
+    )
+    assert "STUB_CHECKER_INVOKED:1" in out
+    assert rc == want_rc, f"checker exit {exits} must propagate, rc={rc} want={want_rc}\n{out}"
+
+
+def test_the_deploy_gate_and_the_tests_read_the_same_classification() -> None:
+    """One source of truth for the reviewed table.
+
+    The deploy step invokes `check_pages_upload_root.py` with NO arguments, so
+    the tool's `DEFAULT_CLASSIFICATION` IS the deploy gate's table, while the
+    ratchet above validates `UPLOAD_CLASSIFICATION_PATH`. Repointing either
+    constant at a rival table (e.g. one with `consent.js` flipped to `excluded`)
+    left the whole suite green while the deploy gate checked an UNREVIEWED set —
+    so the two must be the same file, and the step must not override it (#3620).
+    """
+    assert cpur.DEFAULT_CLASSIFICATION == UPLOAD_CLASSIFICATION_PATH, (
+        "tools/check_pages_upload_root.py's DEFAULT_CLASSIFICATION and the "
+        "ratchet's UPLOAD_CLASSIFICATION_PATH are different files — the deploy "
+        "gate would validate a table the tests never reviewed"
+    )
+    code = _step_code(UPLOAD_PREFLIGHT)
+    assert "--classification" not in code, (
+        "the deploy step overrides the classification table, so the tool's "
+        "DEFAULT_CLASSIFICATION (the file the ratchet pins) would no longer "
+        "govern what the deploy gate checks"
     )
 
 
