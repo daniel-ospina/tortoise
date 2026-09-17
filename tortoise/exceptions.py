@@ -133,8 +133,9 @@ class Phase2Error(ValueError):
         super().__init__(message)
 
 
-# ── Ask-lane typed SDK exceptions (#1987 Task 5) ───────────────────────────
-# The SDK hosted-mode ``_post_ask`` maps server statuses/body codes to these;
+# ── Ask-lane typed exceptions (#1987 Task 5) ──────────────────────────────
+# The eval-only ask lane (tortoise/ask_lane.py) maps reader/retrieval
+# failures to these;
 # each carries a ``code`` class attribute referencing the canonical vocabulary
 # constants BELOW (single home — ``tortoise/schemas.py`` re-exports them, so
 # the wire body and the SDK exception attributes share one source of truth;
@@ -199,8 +200,8 @@ class AskReaderUnavailable(RuntimeError):
     """502 ``reader_unavailable`` — the LLM reader failed with no surviving
     lane. Also used for the code-less variants that must never be
     mislabeled ``invalid_question``: a code-less 402 (SERVER-side
-    provider-billing condition, P2-3), a code-less 404 (hosted ask
-    exposure gated off — ``TORTOISE_ENABLE_ASK`` unset, #2013), and the
+    provider-billing condition, P2-3), a code-less 404 (the hosted ask
+    surface no longer exists — removed in #3849), and the
     pre-existing connection-refused ``status_code=None`` case (hosted ask
     server unreachable)."""
 

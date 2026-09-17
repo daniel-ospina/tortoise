@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import tests._assembly_graph as ag
+from tortoise.ask_lane import run_ask_lane
 from tortoise.sdk import TortoiseSDK
 
 # ── Live-FalkorDB + FTS availability ───────────────────────────────────────
@@ -133,7 +134,7 @@ def _legacy_ask(sdk, monkeypatch, question: str, *, flag_off: bool = True):
         monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY",
                            raising=False)
     _install_fake(sdk, monkeypatch)
-    return sdk.ask(question)
+    return run_ask_lane(sdk, question)
 
 
 def test_base_graph_v2_lane_faithful(sdk):

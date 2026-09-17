@@ -13,7 +13,7 @@ aboutObjects: tortoise
 
 | Area | Path |
 | --- | --- |
-| Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
+| Ask lane — **EVAL-ONLY** (`tortoise/ask_lane.py`, #1987/#3849: no REST route, no SDK method, no MCP tool) | `docs/product/answer-surface.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
 | Hosted platform **infra runbook** — provisioning, secrets rotation, rollback, health checks, machine topology + autostop policy (§6), and the out-of-band availability watchdog with self-healing + alert dedupe (§7) (#2850) | `docs/infra-runbook.md` |
 | Temporal measurement runbook + gate output (2×2 attribution + widening ablation, #2578) | `docs/runbook/2578-temporal-measurement.md` |

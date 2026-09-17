@@ -1,11 +1,15 @@
 """Ask-lane constant layer + canonical error vocabulary (#1987 Tasks 5/7).
 
-The single source of truth for the ask surface's boundary RULES and
-canonical error-code strings, referenced by BOTH the SDK local-lane
-validator (``TortoiseSDK.ask``) and the ``AskRequest`` field validators
-(Task 7) — no duplicated boundary literals (P2-14). Also re-exports the SDK
-typed ask exceptions AND the canonical error-code vocabulary (defined in
-``tortoise/exceptions.py``) so Tasks 9/11 have ONE import surface.
+The single source of truth for the ask lane's boundary RULES and canonical
+error-code strings, referenced by the eval-only lane's local validator
+(``tortoise.ask_lane._ask_validate``) — no duplicated boundary literals
+(P2-14). Also re-exports the typed ask exceptions AND the canonical
+error-code vocabulary (defined in ``tortoise/exceptions.py``) so callers
+have ONE import surface.
+
+⛔ The ask lane is EVAL-ONLY (#3849): this is the constant layer it
+validates against, NOT a product surface (no MCP tool, no SDK method, no
+REST route).
 """
 from __future__ import annotations
 
@@ -149,7 +153,6 @@ __all__ = [
     "AskInFlightLimit",
     "AskQuotaExceeded",
     "AskReaderUnavailable",
-    "AskRequest",
     "AskRetrievalUnavailable",
     "AskTimeout",
     "AskValidationError",
@@ -159,82 +162,3 @@ __all__ = [
     "validate_ask_question_date",
 ]
 
-
-# ── AskRequest (Task 7 — extends the Task-5 constant layer) ────────────────
-
-from fastapi import HTTPException  # noqa: E402
-from pydantic import BaseModel, field_validator, model_validator  # noqa: E402
-
-
-class AskRequest(BaseModel):
-    """POST /v1/ask request body (#1987 Task 7).
-
-    The boundary RULES are single-sourced above (P2-14): max chars, the
-    closed question_type enum, the date regex + calendar rule, the
-    control-char rule. The validators raise ``HTTPException(400, detail=<the
-    canonical code>)`` so FastAPI's default 422/``RequestValidationError``
-    body never ships on the ask surface (P1-7).
-
-    PERMISSIVE declaration + ``mode="before"`` validators (P1-7/P2-5): a
-    plain ``field_validator('question')`` is mode="after" and never sees a
-    wrong-typed value (``{"question": 123}`` raises a string_type
-    ValidationError before any after-validator runs); the before-validator
-    sees the RAW value, so the MISSING-question and wrong-type cases raise
-    400 ``invalid_question`` here — never the default 422.
-    """
-
-    question: str | None = None
-    question_type: str | None = None
-    question_date: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _missing_question(cls, data):
-        """MISSING question → 400 ``invalid_question`` (NOT the default 422):
-        a field-level mode="before" validator does not run for an absent
-        field with a default, so the model-level before validator sees the
-        RAW body dict and rejects a body without the question key (P1-7)."""
-        if isinstance(data, dict) and "question" not in data:
-            raise HTTPException(status_code=400,
-                                detail=CODE_INVALID_QUESTION)
-        return data
-
-    @field_validator("question", mode="before")
-    @classmethod
-    def _validate_question(cls, v):
-        if v is None or not str(v).strip():
-            raise HTTPException(status_code=400,
-                                detail=CODE_INVALID_QUESTION)
-        if not isinstance(v, str):
-            raise HTTPException(status_code=400,
-                                detail=CODE_INVALID_QUESTION)
-        if ask_question_has_control_chars(v):
-            raise HTTPException(status_code=400,
-                                detail=CODE_INVALID_QUESTION)
-        if ask_question_is_punctuation_only(v):
-            raise HTTPException(status_code=400,
-                                detail=CODE_INVALID_QUESTION)
-        if len(v) > MAX_ASK_QUESTION_CHARS:
-            raise HTTPException(status_code=400,
-                                detail=CODE_QUESTION_TOO_LONG)
-        return v
-
-    @field_validator("question_type", mode="before")
-    @classmethod
-    def _validate_question_type(cls, v):
-        if v is None:
-            return v
-        if v not in ASK_QUESTION_TYPES:
-            raise HTTPException(
-                status_code=400, detail=CODE_INVALID_QUESTION_TYPE)
-        return v
-
-    @field_validator("question_date", mode="before")
-    @classmethod
-    def _validate_question_date(cls, v):
-        if v is None:
-            return v
-        if not validate_ask_question_date(str(v)):
-            raise HTTPException(status_code=400,
-                                detail=CODE_INVALID_QUESTION_DATE)
-        return v

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""#1987 Task 12 (b)/(d): product-lane known-answer smoke + QA spot-check.
+"""#1987 Task 12 (b)/(d): eval-only ask-lane known-answer smoke + QA spot-check.
 
-Runs the REAL product lane (``sdk.ask`` → ``build_reader_model`` — the
-RoutingModel transport delta vs the eval's OpenAICompatModel) over:
+Runs the REAL eval-only lane (``ask_lane.run_ask_lane`` → ``build_reader_model``
+— the RoutingModel transport delta vs the eval's OpenAICompatModel) over:
   * (b) the gold-verbatim known-answer fixture (MUST commit),
   * (d) a bounded QA spot-check over real LongMemEval dataset questions
     (temporal / preference / KU / MSR / abstention (_abs) /
@@ -66,6 +66,7 @@ from tools.longmem_eval.judge import (  # noqa: E402
     build_judge,
 )
 from tools.longmem_eval.reader import _parse_model_spec  # noqa: E402
+from tortoise.ask_lane import run_ask_lane  # noqa: E402
 from tortoise.ingest import _PROVIDERS  # noqa: E402
 from tortoise.sdk import (  # noqa: E402
     _SESSION_LLM_PROVIDER_PRIORITY,
@@ -301,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
             _seed_memory(sdk, q)
             qdate = _to_iso_date(q.get("question_date") or "")
             try:
-                result = sdk.ask(q["question"], question_date=qdate)
+                result = run_ask_lane(sdk, q["question"], question_date=qdate)
             except Exception as e:  # noqa: BLE001, RUF100 — a per-question
                 # reader/retrieval malfunction (#2280: the empty-output
                 # fail-loud path raises AskReaderUnavailable) is a MISS for

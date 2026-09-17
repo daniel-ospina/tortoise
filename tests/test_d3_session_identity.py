@@ -30,10 +30,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from test_hosted_api import client as _hosted_client_fixture
 
 from tortoise import retrieval
-from tortoise.sdk import (
-    TortoiseSDK,
+from tortoise.ask_lane import (
     _reset_ask_reader_cache_for_tests,
+    run_ask_lane,
 )
+from tortoise.sdk import TortoiseSDK
 
 #: A real captured-session id (UUID shape); the captures in the measured
 #: defect looked exactly like this — the id survives only as the prefix of
@@ -118,15 +119,17 @@ def _seed_captured_session(sdk: TortoiseSDK, session_id: str,
 
 
 def _install_fake_reader(monkeypatch) -> _FakeReader:
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as ask_lane_mod
 
     fake = _FakeReader()
-    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
+    monkeypatch.setattr(ask_lane_mod, "_default_ask_reader_factory", lambda: fake)
     return fake
 
 
 def _ask(sdk: TortoiseSDK, question: str) -> dict:
-    return sdk.ask(question, question_date="2026-08-29")
+    # #3849: the ask pipeline is EVAL-ONLY — the surface under test is the
+    # lane entry point, not a (removed) SDK method.
+    return run_ask_lane(sdk, question, question_date="2026-08-29")
 
 
 # ── 1. The ask response NAMES the retrieved session ────────────────────────

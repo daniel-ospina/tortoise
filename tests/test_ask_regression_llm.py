@@ -42,6 +42,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise.ask_lane import run_ask_lane
 from tortoise.reader import reader_prompt_constants
 from tortoise.sdk import TortoiseSDK
 
@@ -126,7 +127,7 @@ class _ReplayReader:
 @pytest.fixture(autouse=True)
 def _clean_ask_state(monkeypatch):
     """Isolated per-test DB + a reset ask-reader cache (fresh namespace)."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     sdk_mod._reset_ask_reader_cache_for_tests()
     yield
     sdk_mod._reset_ask_reader_cache_for_tests()
@@ -136,7 +137,7 @@ def _run_fixture(tx: dict, monkeypatch) -> dict:
     """Seed + run the ask pipeline for one transcript. FIXTURE mode (the env
     var set — the CI shape, deterministic) uses the replay reader; LIVE-KEY
     mode (env var unset, provider keys present) uses the real factory."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     sdk_mod._reset_ask_reader_cache_for_tests()
     db = os.path.join(tempfile.mkdtemp(prefix="ask_reg_"), "t.db")
     sdk = TortoiseSDK(db)
@@ -147,7 +148,7 @@ def _run_fixture(tx: dict, monkeypatch) -> dict:
         monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
                             lambda: replay)
     try:
-        return sdk.ask(tx["question"], question_date=tx["question_date"])
+        return run_ask_lane(sdk, tx["question"], question_date=tx["question_date"])
     finally:
         sdk.close()
         if replay is not None:
@@ -210,7 +211,7 @@ def test_fixture_replay_user_message_byte_equal(monkeypatch) -> None:
     """P2-19: the replayed user message BYTE-EQUALS the pipeline's current
     rendered output for the same hits — render_context formatting changes
     (markers, headers, ordering) force fixture regeneration."""
-    import tortoise.sdk as sdk_mod
+    import tortoise.ask_lane as sdk_mod
     for tx in _load_transcripts():
         sdk_mod._reset_ask_reader_cache_for_tests()
         db = os.path.join(tempfile.mkdtemp(prefix="ask_reg_"), "t.db")
@@ -220,7 +221,7 @@ def test_fixture_replay_user_message_byte_equal(monkeypatch) -> None:
             replay = _ReplayReader(tx["completion"])
             monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
                                 lambda replay=replay: replay)
-            sdk.ask(tx["question"], question_date=tx["question_date"])
+            run_ask_lane(sdk, tx["question"], question_date=tx["question_date"])
             assert replay.user_message == tx["user_message"], (
                 f"rendered context drifted for {tx['fixture']} — regenerate")
         finally:

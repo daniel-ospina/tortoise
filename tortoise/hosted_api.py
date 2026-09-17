@@ -82,7 +82,6 @@ from tortoise.projection import (
 from tortoise.quota import (
     DEFAULT_MAX_SESSIONS,  # used by get_current_org (#754 P0: missing import → 500 on every agent_signup auth)
 )
-from tortoise.schemas import AskRequest
 from tortoise.sdk import (
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     TortoiseSDK,
@@ -100,7 +99,6 @@ from tortoise.sdk import (
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
-from tortoise.transport import ask_exposure_enabled
 
 _logger = logging.getLogger(__name__)
 
@@ -1480,77 +1478,6 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         },
     )
 
-
-# ── #1987 Task 7: path-scoped /v1/ask exception handlers ───────────────────
-# The canonical error body ({"error": {"code": …, "retry_after": …}}) ships
-# ONLY on /v1/ask; every other path/status keeps FastAPI's default
-# {"detail": …} via the CAPTURED default handler (P1-3). Mechanism pinned:
-# (i) capture the ORIGINAL default handler BEFORE registering the override —
-# keyed on the STARLETTE HTTPException class (fastapi.HTTPException is a
-# distinct subclass; the dict lookup would KeyError — P1-4); (ii) translate
-# by STATUS with a detail check; (iii) everything else → the captured
-# default's response, awaited (the default handler is a coroutine — P1-4),
-# with exc.headers preserved; never re-raise (→ ServerErrorMiddleware → the
-# app-wide handler → 500), never middleware.
-import starlette.exceptions as _starlette_exceptions  # noqa: E402
-from fastapi.exceptions import RequestValidationError as _RequestValidationError  # noqa: E402
-
-_ask_default_http_exc_handler = app.exception_handlers[
-    _starlette_exceptions.HTTPException]
-_ask_default_validation_handler = app.exception_handlers.get(
-    _RequestValidationError)
-
-
-@app.exception_handler(_starlette_exceptions.HTTPException)
-async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
-    """Path-scoped translation: /v1/ask → the canonical error body for the
-    ask lane's OWN statuses (401 STATUS-derived — the auth dependency's
-    401 details are non-canonical, P1-3; 400 detail-keyed only when the
-    detail IS a canonical code; 429/502/504 with a canonical detail).
-    EVERYTHING else (incl. the 403 suspended-org passthrough — the
-    ``_suspended_detail()`` DICT) → the captured default handler's response
-    with ``exc.headers`` preserved."""
-    from tortoise.schemas import (  # noqa: I001
-        ASK_ERROR_CODES, CODE_QUOTA_EXCEEDED, CODE_UNAUTHORIZED,
-    )
-    if request.url.path == "/v1/ask":
-        status = exc.status_code
-        detail = exc.detail
-        if status == 401:
-            return JSONResponse({"error": {"code": CODE_UNAUTHORIZED}},
-                                status_code=401, headers=exc.headers)
-        if (status in (400, 429, 502, 504)
-                and isinstance(detail, str) and detail in ASK_ERROR_CODES):
-            body = {"error": {"code": detail}}
-            # The documented 429 body contract ships ``retry_after`` IN THE
-            # BODY (the MCP surface reads it from the body; the SDK falls
-            # back to it when the header is unparseable) — the header alone
-            # would leave the body field absent (P2). Mirror the seconds
-            # when the Retry-After header is present.
-            if (status == 429 and detail == CODE_QUOTA_EXCEEDED
-                    and exc.headers and exc.headers.get("Retry-After")):
-                # RFC 7231 allows an HTTP-date Retry-After — the body field
-                # is omitted when it cannot be parsed as seconds.
-                with suppress(TypeError, ValueError):
-                    body["error"]["retry_after"] = int(
-                        float(exc.headers["Retry-After"]))
-            return JSONResponse(body, status_code=status, headers=exc.headers)
-    return await _ask_default_http_exc_handler(request, exc)
-
-
-@app.exception_handler(_RequestValidationError)
-async def _ask_path_scoped_validation_handler(request: Request,
-                                              exc: _RequestValidationError):
-    """Malformed JSON body on /v1/ask → 400 ``invalid_question`` (raised at
-    body-PARSE time, before any field validator runs — P1-3); other paths
-    keep FastAPI's default 422 behavior via the captured default handler."""
-    from tortoise.schemas import CODE_INVALID_QUESTION
-    if request.url.path == "/v1/ask":
-        return JSONResponse({"error": {"code": CODE_INVALID_QUESTION}},
-                            status_code=400)
-    if _ask_default_validation_handler is not None:
-        return await _ask_default_validation_handler(request, exc)
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 # ── Dreaming queue (#85) ────────────────────────────────────────────────
 # Per-tenant async queue: writes enqueue the affected roots; a cooperative
@@ -5218,129 +5145,6 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
             props["kind"] = "statement"
         out.append(props)
     return {"results": out, "count": len(out)}
-
-
-# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE is off by default ──────
-# The READER (tortoise/reader.py) stays shipped — it is the eval's reader
-# (the 500-Q LongMemEval benchmark runs through it; the eval re-exports the
-# product reader). The HOSTED ask EXPOSURE is gated: no /v1/ask route in
-# the served app unless TORTOISE_ENABLE_ASK=1 (tests/dev). The route
-# handler + the path-scoped error translation stay in the codebase,
-# tested, ready — just not served to customers until the reader-model
-# decision is made (the benchmark will use a strong reader model).
-
-
-_ASK_ROUTE_REGISTERED = False
-
-
-def _register_ask_route() -> None:
-    """Register the /v1/ask route on the module-level app (idempotent).
-    Called at import when ``TORTOISE_ENABLE_ASK=1``; tests call it to
-    exercise the ON state without a subprocess re-import."""
-    global _ASK_ROUTE_REGISTERED
-    if _ASK_ROUTE_REGISTERED:
-        return
-    app.add_api_route("/v1/ask", ask_question, methods=["POST"],
-                      response_model=None)
-    _ASK_ROUTE_REGISTERED = True
-
-
-async def ask_question(body: AskRequest,
-                       org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """Org-scoped answer surface (#1987 Task 7): one bounded RAG pass over
-    the org's memory — retrieval → annotation → dedup → context assembly →
-    ONE LLM reader call (the two-phase commit/abstain discipline) → metered
-    per-query cost.
-
-    Budget: per-org per-minute LLM budget (60/min) → 429 ``quota_exceeded``
-    + Retry-After; per-org in-flight cap 4 → 429 ``in_flight_limit``; the
-    shared ``run_ask_bounded`` wrapper bounds concurrency (global
-    Semaphore(8)) and total per-request latency (``_ASK_TIMEOUT_S`` → 504
-    ``timeout``). Error body: ``{"error": {"code": …, "retry_after": …}}``
-    with NO provider/model internals (the #329 scrub) — via the path-scoped
-    HTTPException handler. Metering: ``sdk.ask(org_id=org["org_id"])`` —
-    the SINGLE call site (the SDK local lane records with an explicit
-    org_id; ``org["org_id"]`` from the auth dependency — the /v1/search
-    pattern, NOT ``_current_org_id.get()`` which is MCP-only, P1-2); zero
-    records when the reader/retrieval call FAILS (honest metering).
-    """
-    import logging as _ask_log  # noqa: I001
-    from datetime import datetime as _dt2
-    from tortoise.quota import (
-        AskBoundedTimeoutError,
-        AskInFlightLimitError,
-        ask_budget_retry_after,
-        ask_in_flight_capacity,
-        ask_llm_budget_available,
-        run_ask_bounded,
-    )
-    from tortoise.schemas import (
-        CODE_IN_FLIGHT_LIMIT,
-        CODE_QUOTA_EXCEEDED,
-        CODE_READER_UNAVAILABLE,
-        CODE_RETRIEVAL_UNAVAILABLE,
-        CODE_TIMEOUT,
-    )
-    from tortoise.exceptions import (
-        AskQuotaExceeded,
-        AskReaderUnavailable,
-        AskRetrievalUnavailable,
-        AskValidationError,
-    )
-
-    org_id = org.get("org_id")
-    # Budget gate (per-org per-minute — shared with the MCP handler) — BUT
-    # only charge a slot when the per-org in-flight cap still has room: a
-    # request run_ask_bounded will 429 ``in_flight_limit`` must not burn
-    # budget (P2).
-    if ask_in_flight_capacity(org_id) and not ask_llm_budget_available(org_id):
-        raise HTTPException(
-            status_code=429, detail=CODE_QUOTA_EXCEEDED,
-            headers={"Retry-After": str(int(ask_budget_retry_after(org_id)))})
-    t0 = _dt2.now(UTC)
-    _require_scope(org, "graphs:read", "ask_question")
-    sdk = _data_sdk(org)
-    try:
-        result = await run_ask_bounded(
-            sdk.ask, org_id, body.question,
-            question_type=body.question_type,
-            question_date=body.question_date,
-            _sdk_org_id=org_id,
-        )
-    except AskValidationError as e:
-        raise HTTPException(status_code=400, detail=e.code) from e
-    except AskQuotaExceeded:
-        raise HTTPException(
-            status_code=429, detail=CODE_QUOTA_EXCEEDED,
-            headers={"Retry-After": str(int(ask_budget_retry_after(org_id)))}) from None
-    except AskInFlightLimitError:
-        raise HTTPException(status_code=429,
-                            detail=CODE_IN_FLIGHT_LIMIT) from None
-    except AskBoundedTimeoutError:
-        raise HTTPException(status_code=504, detail=CODE_TIMEOUT) from None
-    except AskReaderUnavailable:
-        raise HTTPException(status_code=502,
-                            detail=CODE_READER_UNAVAILABLE) from None
-    except AskRetrievalUnavailable:
-        raise HTTPException(status_code=502,
-                            detail=CODE_RETRIEVAL_UNAVAILABLE) from None
-    except Exception:
-        _ask_log.getLogger("tortoise.api").exception(
-            "ask failed (unexpected): team=%s", org_id)
-        raise
-    finally:
-        sdk.close()
-    # ``duration_ms`` = hosted wall-clock from request receipt to response.
-    result["duration_ms"] = max(0, int((_dt2.now(UTC) - t0).total_seconds() * 1000))
-    return result
-
-
-# #2013 PRODUCT-GATING: the /v1/ask route is served ONLY when the exposure
-# flag is on (the handler above is defined unconditionally — the route is
-# what is gated). TORTOISE_ENABLE_ASK=1 (tests/dev) registers it; the
-# default hosted app serves no /v1/ask (404).
-if ask_exposure_enabled():
-    _register_ask_route()
 
 
 @app.get("/v1/topics/{topic}/summary")

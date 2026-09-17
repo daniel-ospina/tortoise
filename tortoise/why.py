@@ -66,7 +66,7 @@ logger = logging.getLogger(__name__)
 # ── W4 flag ────────────────────────────────────────────────────────────────
 # Default OFF (production exposure gated by the epic's user-exposure gate —
 # both conditions must hold before the flip). Tests / dev / the A11 pilot set
-# it explicitly, mirroring the TORTOISE_ENABLE_ASK gating precedent (#2013).
+# it explicitly, mirroring the flag-gated rollout precedent.
 W4_FLAG_ENV = "TORTOISE_W4_ENRICHMENT"
 
 # ── Budgets (plan §3.1.1 — pinned by the S6 contract test) ────────────────

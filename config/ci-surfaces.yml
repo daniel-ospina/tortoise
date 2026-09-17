@@ -100,6 +100,11 @@ surfaces:
   # and a hosted_backup.py-only change select it (the #2938 precedent).
   - test_graphcopy_boolean_index_3154.py
   - test_hosted_api.py
+  # #3849: the eval-only ask-lane surface contract. Its N4/N5 assertions pin
+  # the ABSENCE of a /v1/ask route on BOTH the hosted app (api-owned) and the
+  # self-host router, so a hosted_api.py-only PR must run it — dual-registered
+  # with `core` (where the auto-register placed it) per the #2938 convention.
+  - test_ask_eval_only.py
   # #3359: per-session provider-cost measurement — the hosted emit path
   # (_capture_cost_props + the analytics allowlist) is api-owned, so the
   # acceptance test is dual-registered (also under `core` for the extractor
@@ -128,8 +133,6 @@ surfaces:
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
-  - test_ask_api.py
-  - test_ask_gating.py
   - test_attribution_actor.py   # #2600: session→human actor stamp + event backstop + forged-claim strip (docker lane)
   - test_attribution_machine_model.py   # #2599: additive session machine_id + model attribution (docker lane)
   - test_commit_supersession_parity.py
@@ -288,6 +291,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_ask_eval_only.py
   - test_capture_cost_measurement.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py

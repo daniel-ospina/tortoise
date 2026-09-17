@@ -1,7 +1,14 @@
-"""Product reader LLM — the two-phase retrieve-then-read answer surface (#1987).
+"""Product reader LLM — the two-phase retrieve-then-read reader (#1987).
 
-The product answer surface: an LLM reader that answers questions about
-captured memory, built from the LongMemEval benchmarked two-phase reader
+⛔ The ask lane that consumes this reader is EVAL-ONLY (#3849): the reader
+still ships, but there is NO ``/v1/ask`` REST route, NO SDK ``ask()`` method
+and NO MCP ask tool. Its only callers are the eval-only lane
+(``tortoise/ask_lane.py``), the LongMemEval benchmark (which measures this
+reader directly) and the eval spot-check. Do NOT build product features on it.
+
+The shipped reader for that eval-only lane: an LLM reader that answers
+questions about captured memory, built from the LongMemEval benchmarked
+two-phase reader
 (presence-commit → abstain). This module OWNS all reader prompt text and
 the reader class — the eval harness (`tools/longmem_eval/reader.py`) is a
 thin re-export so prompt drift is impossible by construction (the #1983
