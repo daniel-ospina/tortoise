@@ -118,6 +118,11 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_hosted_auth.py
   - test_hosted_backup.py
+  # #3895: the dump's node set and edge set must be the SAME set — registered
+  # under `api` because tortoise/hosted_backup.py owns that surface (see the
+  # #3154 note in tools/ci_selection.py). A hosted_backup.py-only change now
+  # selects this file (docker-lane; dump/restore round-trips).
+  - test_dump_edge_asymmetry_3895.py
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
@@ -1009,6 +1014,13 @@ durations:
   # not a precise cost. Re-measure rather than trusting it if the import graph
   # changes.
   test_no_legacy_token_path.py: 60.0
+  # #3895: 21 docker-lane dump/restore + graph-rebuild tests (~40 graph
+  # round-trips). HIGH-VARIANCE: measured 68-106s warm across runs (the
+  # session-hygiene sweep and the shared container's load dominate the tail),
+  # 126-183s on the embedded lane. Loose middle so the LPT packer does not
+  # under-weight it against default_weight=2.0 — the file is NOT slow-listed,
+  # it stays in the derived fast halves.
+  test_dump_edge_asymmetry_3895.py: 90.0
   test_divergence_conformance.py: 57.8
   test_export_cli.py: 53.7
   test_github_indexer.py: 51.5
