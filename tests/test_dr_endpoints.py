@@ -431,6 +431,7 @@ class TestDrSweep:
         # Seed the DATA plane (FalkorDB stays the graph store in both lanes).
         db = ha_mod._make_sdk(namespace=None)._get_proj().db
         for tid in ("team_s1", "team_s2"):
+            _reset_graph(db, f"org_{tid}")
             g = db.select_graph(f"org_{tid}")
             g.query("CREATE (p:Point {id:'p1', content:'c', pointKind:'claim'})")
 
@@ -667,7 +668,7 @@ class TestSupabaseLaneSeam:
         cp = self._fortify_supabase_lane(monkeypatch)
         self._seed_data_plane()
         key = _default_drill_key(client, mem_storage, org_id="team_s1")
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
                         json={"org_id": "team_s1", "backup_key": key})
         assert r.status_code == 200, r.text
@@ -680,7 +681,7 @@ class TestSupabaseLaneSeam:
         self._seed_data_plane()
         assert client.post("/v1/internal/backups/sweep",
                            headers=INTERNAL_HEADERS).json()["status"] == "backed_up"
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -851,7 +852,8 @@ class TestDrDrill:
         r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS, json={})
         assert r.status_code == 400
 
-    def test_drill_restores_to_scratch(self, client, dr_env, mem_storage):
+    def test_drill_restores_to_scratch(self, client, dr_env, mem_storage,
+                                       monkeypatch):
         _seed_team("team_x", nodes=2)
         # Produce a real archive for team_x via the sweep pipeline.
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
@@ -861,7 +863,7 @@ class TestDrDrill:
         ][0]
         backup_key = manifest.replace("/manifest.json", "/dump.enc")
 
-        ha_mod._LAST_DRILL_AT = 0.0  # clear cooldown
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)  # clear cooldown
         r2 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
             json={"org_id": "team_x", "backup_key": backup_key},
@@ -914,7 +916,7 @@ class TestDrDrill:
 
         # 3. The drill (which passes cfg.backup_key) must decrypt the OLD
         #    archive through the retained stream key — no manual recovery.
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r2 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
             json={"org_id": "team_x", "backup_key": backup_key},
@@ -923,14 +925,14 @@ class TestDrDrill:
         assert r2.json()["status"] == "drill_ok"
         monkeypatch.undo()
 
-    def test_drill_cooldown(self, client, dr_env, mem_storage):
+    def test_drill_cooldown(self, client, dr_env, mem_storage, monkeypatch):
         _seed_team("team_x", nodes=1)
         client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         manifest = [  # noqa: RUF015
             k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")
         ][0]
         backup_key = manifest.replace("/manifest.json", "/dump.enc")
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r1 = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
             json={"org_id": "team_x", "backup_key": backup_key},
@@ -956,6 +958,7 @@ class TestDrRebaselinePerGraph:
             "namespace:$ns, status:'active'})",
             params={"gid": gid, "tid": org_id, "ns": ns},
         )
+        _reset_graph(sdk._get_proj().db, ns)
         g = sdk._get_proj().db.select_graph(ns)
         g.query("CREATE (p:Point {id:'c-0', content:'c', pointKind:'claim'})")
 
@@ -1019,7 +1022,8 @@ class TestDrDrillPerGraph:
         assert len(keys) == 1
         return keys[0].replace("/manifest.json", "/dump.enc")
 
-    def test_drill_custom_graph_restores_to_scratch(self, client, dr_env, mem_storage):
+    def test_drill_custom_graph_restores_to_scratch(self, client, dr_env,
+                                                    mem_storage, monkeypatch):
         _seed_team("team_x", nodes=2)
         sdk = TortoiseSDK(namespace="registry")
         _SEED_SDKS.append(sdk)
@@ -1027,10 +1031,11 @@ class TestDrDrillPerGraph:
         reg.query(
             "CREATE (g:Graph {id:'g_c1', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_c1', status:'active'})")
+        _reset_graph(sdk._get_proj().db, "team_team_x_g_c1")
         g = sdk._get_proj().db.select_graph("team_team_x_g_c1")
         g.query("CREATE (p:Point {id:'c-0', content:'c', pointKind:'claim'})")
         key = self._sweep_and_pick(client, mem_storage, "g_c1")
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
             json={"org_id": "team_x", "backup_key": key},
@@ -1039,7 +1044,8 @@ class TestDrDrillPerGraph:
         assert r.json()["status"] == "drill_ok"
         assert r.json()["target_graph"].startswith("_drill_")
 
-    def test_drill_refuses_tombstoned_after_backup(self, client, dr_env, mem_storage):
+    def test_drill_refuses_tombstoned_after_backup(self, client, dr_env,
+                                                   mem_storage, monkeypatch):
         """Back the custom graph up while ACTIVE, then tombstone it (a graph
         deleted AFTER its last backup) — the drill's resolution must refuse:
         quarantined archives are never a drill/restore source (#2304)."""
@@ -1050,12 +1056,13 @@ class TestDrDrillPerGraph:
         reg.query(
             "CREATE (g:Graph {id:'g_x', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_x', status:'active'})")
+        _reset_graph(sdk._get_proj().db, "team_team_x_g_x")
         g = sdk._get_proj().db.select_graph("team_team_x_g_x")
         g.query("CREATE (p:Point {id:'x-0', content:'x', pointKind:'claim'})")
         key = self._sweep_and_pick(client, mem_storage, "g_x")
         reg.query(
             "MATCH (g:Graph {id:'g_x'}) SET g.status = 'deleted'")
-        ha_mod._LAST_DRILL_AT = 0.0
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
             json={"org_id": "team_x", "backup_key": key},
@@ -1365,6 +1372,21 @@ class TestDrDrillScheduled:
     """#2317 scheduled drill endpoint: oldest-eligible selection, records,
     incidents, cooldown, /status surfacing."""
 
+    @pytest.fixture(autouse=True)
+    def _isolated_drill_state(self, monkeypatch, mem_storage):
+        """#2878: the drill cooldown is MODULE state (`ha_mod._LAST_DRILL_AT`)
+        that both drill handlers overwrite on every accepted request, and the
+        drill record is written to a fixed storage key.
+
+        A bare ``ha_mod._LAST_DRILL_AT = …`` in a test body is never reverted,
+        so a cooldown left by one test 429s the next drill in the same process
+        — an order-dependent flake whose failing test moved run to run. Pin it
+        through ``monkeypatch`` (auto-reverted) so every test starts cleared and
+        the module ends where it started; drop any stale drill record so no test
+        inherits the previous test's record."""
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
+        mem_storage.delete(ha_mod._DRILL_RECORD_KEY)
+
     def test_requires_config(self, client, mem_storage):
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
@@ -1374,7 +1396,6 @@ class TestDrDrillScheduled:
                                                 mem_storage, monkeypatch):
         fake = _FakeAlerts()
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1397,7 +1418,6 @@ class TestDrDrillScheduled:
         assert first != second
         fake = _FakeAlerts()
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1429,6 +1449,7 @@ class TestDrDrillScheduled:
         reg.query(
             "CREATE (g:Graph {id:'g_dead', org_id:'team_x', kind:'custom', "
             "namespace:'team_team_x_g_dead', status:'active'})")
+        _reset_graph(sdk._get_proj().db, "team_team_x_g_dead")
         g = sdk._get_proj().db.select_graph("team_team_x_g_dead")
         g.query("CREATE (p:Point {id:'d-0', content:'d', pointKind:'claim'})")
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
@@ -1441,7 +1462,6 @@ class TestDrDrillScheduled:
         reg.query("MATCH (g:Graph {id:'g_dead'}) SET g.status = 'deleted'")
         fake = _FakeAlerts()
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1460,7 +1480,6 @@ class TestDrDrillScheduled:
         mem_storage.upload(key, b"corrupt-blob")  # sha256 mismatch
         fake = _FakeAlerts()
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 409, r.text
@@ -1472,7 +1491,10 @@ class TestDrDrillScheduled:
         mem_storage.delete(key)
         mem_storage.delete(key.replace("/dump.enc", "/manifest.json"))
         _default_drill_key(client, mem_storage, "team_x")
-        ha_mod._LAST_DRILL_AT = 0.0
+        # the 409 above already consumed the cooldown slot (the handler stamps
+        # _LAST_DRILL_AT at ACCEPT, before the integrity check) — clear it for
+        # the recovery drill. monkeypatch, so the reset cannot leak (#2878).
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", 0.0)
         r2 = client.post("/v1/internal/backups/drill-scheduled",
                          headers=INTERNAL_HEADERS)
         assert r2.status_code == 200, r2.text
@@ -1491,7 +1513,6 @@ class TestDrDrillScheduled:
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: fake)
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
@@ -1502,11 +1523,14 @@ class TestDrDrillScheduled:
         assert _has_open(fake.calls, ha_mod._DRILL_FAILED_KIND)
         assert not _has_resolve(fake.calls, ha_mod._DRILL_FAILED_KIND)
 
-    def test_respects_shared_cooldown(self, client, dr_env, mem_storage):
+    def test_respects_shared_cooldown(self, client, dr_env, mem_storage,
+                                      monkeypatch):
         import time as _time
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
-        ha_mod._LAST_DRILL_AT = _time.time()  # simulate a drill < 1h ago
+        # a drill accepted <1h ago — via monkeypatch so it is reverted after
+        # the test (a bare module-global write here leaked the cooldown, #2878).
+        monkeypatch.setattr(ha_mod, "_LAST_DRILL_AT", _time.time())
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.status_code == 429
@@ -1517,7 +1541,6 @@ class TestDrDrillScheduled:
         _seed_team("team_x", nodes=1)
         _default_drill_key(client, mem_storage)
         monkeypatch.setattr(ha_mod, "_alert_store_from", lambda cfg: _FakeAlerts())
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post("/v1/internal/backups/drill-scheduled",
                         headers=INTERNAL_HEADERS)
         assert r.json()["status"] == "drill_ok"
@@ -1533,7 +1556,6 @@ class TestDrDrillScheduled:
         time is written for every drill, not just the scheduled one."""
         _seed_team("team_x", nodes=2)
         key = _default_drill_key(client, mem_storage)
-        ha_mod._LAST_DRILL_AT = 0.0
         r = client.post(
             "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
             json={"org_id": "team_x", "backup_key": key},
