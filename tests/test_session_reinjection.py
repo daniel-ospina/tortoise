@@ -481,6 +481,61 @@ def test_c5_per_session_chunk_cap_holds_on_the_reinjected_pool(
     assert st["injected_merged"] < st["injected_total"]
 
 
+def test_total_cap_knob_threads_and_defaults(seeded_sdk, monkeypatch):
+    """The eval-side total-cap knob (#2513 cap sweep) reaches
+    ``source_session_chunk_pass`` and defaults to the PRODUCT constant.
+
+    The knob exists because the total budget is the only volume guard on
+    injected turn points (the C5 re-cap does not bound them), so whether the
+    shipped value truncates the arm is answerable only by sweeping it. It is
+    measurement-only and eval-side: the product constant stays the shipped
+    default, an OFF run never reads it, and a garbage/out-of-range value
+    falls back to the constant (``rerank._env_int`` clamp) rather than
+    crashing a measured run.
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+    from tortoise.session_reinjection import DEFAULT_REINJECTION_TOTAL_ITEMS
+
+    seen: list[int] = []
+    real = _sr.source_session_chunk_pass
+
+    def _capture(proj, seed_point_ids, **kw):
+        seen.append(kw["total_cap"])
+        return real(proj, seed_point_ids, **kw)
+
+    monkeypatch.setattr(_sr, "source_session_chunk_pass", _capture)
+
+    # unset → the product constant (never a ceiling, never a silent zero)
+    monkeypatch.delenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", raising=False)
+    retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                          pool_size=60, session_reinjection=True)
+    assert seen == [DEFAULT_REINJECTION_TOTAL_ITEMS]
+
+    # explicit env wins
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "15")
+    retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                          pool_size=60, session_reinjection=True)
+    assert seen == [DEFAULT_REINJECTION_TOTAL_ITEMS, 15]
+
+    # garbage / < 1 falls back to the constant — a measured run never crashes
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "garbage")
+    retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                          pool_size=60, session_reinjection=True)
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "0")
+    retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                          pool_size=60, session_reinjection=True)
+    assert seen == [DEFAULT_REINJECTION_TOTAL_ITEMS, 15,
+                    DEFAULT_REINJECTION_TOTAL_ITEMS,
+                    DEFAULT_REINJECTION_TOTAL_ITEMS]
+
+    # and an OFF run reads nothing at all (the arm gate comes first)
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "15")
+    retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                          pool_size=60, session_reinjection=False)
+    assert len(seen) == 4
+
+
 # ── (i) the PRODUCT turn shape: no ``session_id`` on the point ───────────
 
 def test_product_shaped_turn_is_injected_via_its_session(seeded_sdk):

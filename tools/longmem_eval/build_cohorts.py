@@ -53,11 +53,24 @@ TAIL_SLICE = (150, 250)
 HEAD_TYPE = "single-session-user"
 HEAD_N = 50
 
+#: #2513 (C4) multi-session measurement cohort: the WHOLE multi-session
+#: class inside the tail slice — the class the re-injection arm claims to
+#: close, at its largest available n (71 of the 100 tail questions; the
+#: tail's other 29 are temporal-reasoning / single-session-preference, which
+#: the arm's turn-grain fetch does not address). The prior campaign measured
+#: items [0:10] and [10:20] of this class as two independent samples; this
+#: selector materializes the same 71 in source order, so that n=20 sample is
+#: a strict SUBSET of this cohort and the two are directly comparable.
+#: Selected by ``question_type`` (a real dataset field), in source order —
+#: never re-sorted, so index identity is stable.
+MS_TAIL_TYPE = "multi-session"
+
 #: The per-cohort selector, keyed by cohort name — a sidecar records only
 #: ITS cohort's entry, so it can never advertise a sibling's.
 SELECTORS: dict[str, list] = {
     "tail": list(TAIL_SLICE),
     "head": [HEAD_TYPE, HEAD_N],
+    "ms_tail": [list(TAIL_SLICE), MS_TAIL_TYPE],
 }
 
 
@@ -119,7 +132,8 @@ def build_cohorts(source: Path) -> dict[str, list[dict]]:
     tail = instances[TAIL_SLICE[0]:TAIL_SLICE[1]]
     head = [q for q in instances if q.get("question_type") == HEAD_TYPE][
         :HEAD_N]
-    return {"tail": tail, "head": head}
+    ms_tail = [q for q in tail if q.get("question_type") == MS_TAIL_TYPE]
+    return {"tail": tail, "head": head, "ms_tail": ms_tail}
 
 
 def _write_provenance(out_dir: Path, *, name: str, source: Path,
@@ -167,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
                          "SPLIT_FILES[DEFAULT_SPLIT])")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="output directory (default: dataset.cache_dir())")
-    ap.add_argument("--cohort", choices=("tail", "head", "both"),
+    ap.add_argument("--cohort", choices=("tail", "head", "ms_tail", "both"),
                     default="both")
     ap.add_argument("--allow-unpinned-source", action="store_true",
                     help="slice a corpus whose basename matches no known "
@@ -185,7 +199,8 @@ def main(argv: list[str] | None = None) -> int:
         source, allow_unpinned=args.allow_unpinned_source)
 
     cohorts = build_cohorts(source)
-    wanted = (("tail", "head") if args.cohort == "both" else (args.cohort,))
+    want_all = args.cohort == "both"
+    wanted = (("tail", "head", "ms_tail") if want_all else (args.cohort,))
     out_dir.mkdir(parents=True, exist_ok=True)
     for name in wanted:
         out = out_dir / f"longmemeval_2517_{name}.json"
@@ -203,7 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provenance: {prov}")
     print(f"source: {source} sha256={digest} "
           f"verified={str(verified).lower()}")
-    print(f"selectors: tail={TAIL_SLICE} head=({HEAD_TYPE}, first {HEAD_N})")
+    print(f"selectors: tail={TAIL_SLICE} head=({HEAD_TYPE}, first {HEAD_N}) "
+          f"ms_tail=({TAIL_SLICE}, {MS_TAIL_TYPE})")
     return 0
 
 

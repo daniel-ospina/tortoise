@@ -1700,6 +1700,24 @@ def retrieve_for_question(
     sr_latency_ms = 0.0
     if reinjection_on and not is_tr and pool:
         from tortoise import session_reinjection as _sr
+        # MEASUREMENT-ONLY knob (#2513 total-cap sweep). At the shipped turn
+        # grain the C5 re-cap does NOT bound injected turn points, so the
+        # TOTAL budget is the only volume guard on the injection
+        # (session_reinjection.py:~109). Whether the shipped value truncates
+        # the arm is therefore only answerable by sweeping it — and the
+        # product function already takes it as a parameter
+        # (``source_session_chunk_pass(total_cap=…)``), so no product code
+        # changes. The product constant stays the shipped DEFAULT, never a
+        # ceiling; the env knob is read only when the arm fires (an OFF run
+        # resolves nothing and is byte-identical), and the clamp
+        # (``rerank._env_int``) falls garbage / <1 back to the constant —
+        # never a crash. Precedence: env > product constant. Precedent: the
+        # sibling eval knobs TORTOISE_LME_CONTEXT_ITEMS / _POOL_SIZE /
+        # _RERANK_CAP, resolved the same way one screen above.
+        from .rerank import _env_int
+        _sr_total_cap = _env_int(
+            "TORTOISE_LME_REINJECTION_TOTAL_CAP",
+            DEFAULT_REINJECTION_TOTAL_ITEMS)
         _t_sr = time.monotonic()
         try:
             _seeds = _sr.seeded_sessions(
@@ -1711,7 +1729,7 @@ def retrieve_for_question(
                     sdk._get_proj(), [s.point_id for s in _seeds],
                     pool_ids={h["id"] for h in pool},
                     per_session_cap=DEFAULT_REINJECTION_PER_SESSION,
-                    total_cap=DEFAULT_REINJECTION_TOTAL_ITEMS)
+                    total_cap=_sr_total_cap)
                 sr_fetch_ok = bool(_fetch.get("ok"))
                 sr_dropped_by_cap = int(_fetch.get("dropped_by_cap") or 0)
                 sr_total_cap_hit = bool(_fetch.get("total_cap_hit"))
