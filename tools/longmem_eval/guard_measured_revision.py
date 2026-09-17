@@ -262,7 +262,13 @@ def _compare(root: Path, rev: str, rel: str, rev_mode: str) -> bool:
             "re-measure rather than re-label"
         )
     if rev_is_link:
-        on_disk_bytes = os.readlink(on_disk).encode()
+        try:
+            on_disk_bytes = os.readlink(on_disk).encode()
+        except (OSError, UnicodeError) as exc:
+            raise GuardRefused(
+                f"guard: {rel} is a symlink whose target cannot be read "
+                f"({exc}) — refusing rather than reporting a clean surface"
+            ) from None
     else:
         rev_is_exec = rev_mode == "100755"
         if bool(st.st_mode & 0o111) != rev_is_exec:
@@ -271,7 +277,13 @@ def _compare(root: Path, rev: str, rel: str, rev_mode: str) -> bool:
                 "(a hook that can no longer run still has identical bytes) — "
                 "re-measure rather than re-label"
             )
-        on_disk_bytes = on_disk.read_bytes()
+        try:
+            on_disk_bytes = on_disk.read_bytes()
+        except OSError as exc:
+            raise GuardRefused(
+                f"guard: {rel} cannot be read in the working tree ({exc}) — "
+                "refusing rather than reporting a clean surface"
+            ) from None
     at_rev_bytes = _git_bytes(root, "cat-file", "blob", f"{rev}:{rel}")
     if on_disk_bytes == at_rev_bytes:
         return False
@@ -352,10 +364,21 @@ def guard(
     _git(worktree, "rev-parse", "--verify", f"{rev}^{{commit}}")
 
     for _base in paths:
-        if any(ch in _base for ch in "*?["):
+        # A pathspec that git understands but the filesystem does not (magic,
+        # an absolute path, a glob, a non-existent base) makes `start_dir` a
+        # non-directory, and the nested-git walk is then silently skipped while
+        # git still enumerates the revision side — reproduced with
+        # `--paths ':(top)tortoise/'` + a nested .git + an executable hook.
+        if (
+            any(ch in _base for ch in "*?[")
+            or _base.startswith((":", "/"))
+            or not (root / (_base.rstrip("/") or ".")).exists()
+        ):
             raise GuardRefused(
-                f"guard: --paths {_base!r} is a glob — the surface must be "
-                "literal paths, or the nested-git walk would skip it"
+                f"guard: --paths {_base!r} is not a plain relative path that "
+                "exists under the repository root — pathspec magic, absolute "
+                "paths, globs and missing bases are refused, because the "
+                "nested-git walk cannot see what git still enumerates"
             )
     modes_at_rev = _modes_at_rev(root, rev, paths)
     at_rev = list(modes_at_rev)

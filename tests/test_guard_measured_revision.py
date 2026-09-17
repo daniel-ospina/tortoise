@@ -283,7 +283,7 @@ def test_non_repository_worktree_refuses(tmp_path: Path) -> None:
 
 def test_empty_declared_surface_refuses(repo: Repo) -> None:
     """A typo'd pathspec must not read as a pass."""
-    with pytest.raises(GuardRefused, match="existed at"):
+    with pytest.raises(GuardRefused, match="is not a plain relative path"):
         _scan(repo, "typo_path/")
 
 
@@ -502,8 +502,34 @@ def test_shebang_change_is_refused(repo: Repo) -> None:
 
 def test_glob_pathspec_is_refused(repo: Repo) -> None:
     """A glob would skip the nested-git walk (`start_dir.is_dir()` is false)."""
-    with pytest.raises(GuardRefused, match="is a glob"):
+    with pytest.raises(GuardRefused, match="is not a plain relative path"):
         _scan(repo, "tortoise/*.py")
+
+
+@pytest.mark.parametrize("magic", [":(top)tortoise/", ":(literal)tortoise/", ":/tortoise/", "/tortoise/"])
+def test_pathspec_magic_is_refused_even_with_a_nested_git(repo: Repo, magic: str) -> None:
+    """git resolves these; the filesystem side does not, so the nested-git walk
+    was skipped while git still enumerated the revision — a false pass with an
+    executable hook inside `tortoise/.git` (reproduced; filed as #3720)."""
+    nested = repo.path("tortoise/.git")
+    nested.mkdir()
+    (nested / "hook").write_text("#!/bin/sh\necho pwned\n")
+    (nested / "hook").chmod(0o755)
+    with pytest.raises(GuardRefused, match="is not a plain relative path"):
+        _scan(repo, magic)
+
+
+def test_unreadable_tracked_file_refuses_with_a_reason(repo: Repo) -> None:
+    """A mode-000 file must produce the promised refusal, not a traceback."""
+    if os.geteuid() == 0:
+        pytest.skip("root ignores mode bits")
+    target = repo.path("tortoise/a.py")
+    target.chmod(0o000)
+    try:
+        with pytest.raises(GuardRefused, match="cannot be read"):
+            _scan(repo)
+    finally:
+        target.chmod(0o644)
 
 
 def test_path_with_a_space_passes_when_clean_and_drifts_when_edited(repo: Repo) -> None:
