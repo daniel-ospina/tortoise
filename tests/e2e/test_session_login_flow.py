@@ -337,7 +337,6 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
 
 
 def _open_auth(page: Page) -> None:
-    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     # #2744: the /auth DOCUMENT is loaded from the local site preview, never
     # the prod auth origin.
     _goto_local_auth(page)

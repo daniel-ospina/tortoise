@@ -641,6 +641,9 @@ test('#3428: the done screen is gated on the SERVER-observed connection, not a c
   // the approved screen's sentences: the capture tense is derived, never fixed
   assert.match(done, /doneCaptureClaim === 'present'/, 'present tense is claim-gated')
   assert.match(done, /doneCaptureClaim === 'future'/, 'future tense is claim-gated')
+  // #3782: the unobserved state renders the honest pending sentence (the same
+  // string Settings prints) rather than falling into the future-tense promise.
+  assert.match(done, /doneCaptureClaim === 'install-pending'/, 'the nothing-observed state is claim-gated')
   // #3428 requirements 1-2: the harness name is dynamic with a neutral
   // fallback — naming a harness we did not install for is a false claim.
   // review cycle 3 (P1-A): the name is now the DERIVED `doneHarnessName`, which
