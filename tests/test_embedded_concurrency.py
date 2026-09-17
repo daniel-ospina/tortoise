@@ -15,6 +15,13 @@ import time
 
 import pytest
 
+# #3752: every scan below must target the PRIVATE per-session temp root.
+# `scan_root()` asserts the isolation is installed and refuses to hand back
+# the shared system temp dir, so a socket/pid lookup can never again walk the
+# whole host temp tree (2 min at 53% CPU) nor match a concurrent suite's
+# redis.socket / redis.pid.
+from tests._tmpdir_isolation import scan_root
+
 pytest.importorskip("redislite")
 
 
@@ -74,7 +81,7 @@ def _count_redis_servers(path=None):
     # Map each server's socket tempdir -> check its redis.config for the path.
     # Use realpath on BOTH sides (macOS /var -> /private/var symlink).
     import glob as _glob  # noqa: F401
-    tmp = os.path.realpath(tempfile.gettempdir())
+    tmp = os.path.realpath(scan_root())  # #3752: private root, not the shared temp dir
     want_dir = os.path.realpath(os.path.dirname(path))
     want_name = os.path.basename(path)
     n = 0
@@ -293,7 +300,7 @@ def _clean_spawned_residue():
         except Exception:
             return None
         dirs: set[str] = set()
-        tmp = tempfile.gettempdir()
+        tmp = scan_root()  # #3752: private root, never the shared temp dir
         try:
             for entry in os.scandir(tmp):
                 if entry.is_dir() and (
@@ -337,7 +344,7 @@ def _sweep_stale_residue():
     """Module-start dead-dir cleanup — the test_reaper pattern (#1365):
     remove socket dirs whose redis.pid belongs to a provably dead process
     (crashed/killed prior run), never touching live servers."""
-    tmp = tempfile.gettempdir()
+    tmp = scan_root()  # #3752: private root, never the shared temp dir
     try:
         for entry in os.scandir(tmp):
             if not entry.is_dir():

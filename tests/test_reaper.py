@@ -19,6 +19,12 @@ from pathlib import Path
 
 import pytest
 
+# #3752: discovery must target the PRIVATE per-session temp root, never the
+# shared system temp dir. `scan_root()` asserts the isolation is installed and
+# refuses to hand back the shared tree, so the delta-sweep fixtures below can
+# no longer silently degrade into an O(whole-host) scan that also matches
+# another test's (or another session's) redis.socket / redis.pid.
+from tests._tmpdir_isolation import scan_root
 from tortoise.embedded_reaper import (
     _parse_min_uptime,
     discover,
@@ -58,7 +64,7 @@ def _clean_redislite_residue():
         except Exception:
             pass
         dirs: set[str] = set()
-        tmp = tempfile.gettempdir()
+        tmp = scan_root()  # #3752: private root, never the shared temp dir
         try:
             for entry in os.scandir(tmp):
                 if entry.is_dir() and (
@@ -110,7 +116,7 @@ def _sweep_stale_residue():
     definition (crashed run, killed server) — remove it so later tests in
     this module see the same clean state a fresh CI runner would.
     """
-    tmp = tempfile.gettempdir()
+    tmp = scan_root()  # #3752: private root, never the shared temp dir
     try:
         for entry in os.scandir(tmp):
             if not entry.is_dir():
@@ -2671,12 +2677,19 @@ def test_mark_orphan_confirmation_recycled_pid_restarts_window(
 
 
 def test_lock_is_tempdir_scoped_not_home_scoped():
-    """#1658: the sweep lock must be TEMPDIR-scoped (machine-global), not
-    HOME-scoped. Two sweepers with different $HOME on a shared box each flock
-    a different inode if the lock lives under ~/.tortoise — both acquire and
-    run overlapping sweeps (reaping each other's live sockets). The lock
-    must live under the real gettempdir, the same convention as
-    ACTIVE_SUITES_DIR."""
+    """#1658: the sweep lock must be TEMPDIR-scoped, not HOME-scoped. Two
+    sweepers with different $HOME on a shared box each flock a different
+    inode if the lock lives under ~/.tortoise — both acquire and run
+    overlapping sweeps (reaping each other's live sockets).
+
+    #3752 refines *which* temp dir. The lock must live under the temp dir the
+    SWEEP TARGETS — call it the sweep domain — because mutual exclusion is
+    only meaningful between sweeps that share one. ACTIVE_SUITES_DIR is a
+    different animal: it is HOST-pinned so a production/cron sweep can still
+    see a live suite whose scratch space is the private per-session root
+    (tests/_tmpdir_isolation.py). Under the suite they are deliberately NOT
+    siblings; in a production process, where nothing redirects the temp dir,
+    they coincide exactly as before."""
     import tempfile as _tf
 
     import tortoise.embedded_reaper as er
@@ -2687,9 +2700,29 @@ def test_lock_is_tempdir_scoped_not_home_scoped():
         f"_LOCK_PATH {lock_path!r} must be tempdir-scoped (was ~/.tortoise)"
     assert os.path.expanduser("~") not in lock_path, \
         f"_LOCK_PATH {lock_path!r} must not be HOME-scoped"
-    # It lives in the same <tempdir>/.tortoise/ dir as ACTIVE_SUITES_DIR.
-    assert os.path.dirname(lock_path) == os.path.dirname(er.ACTIVE_SUITES_DIR), \
-        "lock and active-suites dir must share the tempdir/.tortoise root"
+    # #1658: <sweep-domain tempdir>/.tortoise/.reaper.lock — the lock's scope
+    # follows the sweep target, whatever that resolves to.
+    assert lock_path == os.path.join(
+        os.path.realpath(_tf.gettempdir()), ".tortoise", ".reaper.lock"), \
+        f"_LOCK_PATH {lock_path!r} must be <sweep-domain tempdir>/.tortoise/"
+    # #3752: ACTIVE_SUITES_DIR is HOST-pinned — it shares the .tortoise root
+    # with the lock only when the sweep domain IS the host temp dir.
+    coordination_root = os.path.dirname(er.ACTIVE_SUITES_DIR)
+    assert coordination_root == os.path.join(
+        er._host_coordination_tmpdir(), ".tortoise"), \
+        "ACTIVE_SUITES_DIR must stay host-scoped (#3752)"
+    if os.path.realpath(_tf.gettempdir()) == er._host_coordination_tmpdir():
+        assert os.path.dirname(lock_path) == coordination_root, \
+            "unredirected process: lock and markers share <tempdir>/.tortoise"
+    else:
+        # A harness redirected the temp dir (the suite does, #3752). Assert
+        # the split is INTENTIONAL so a future refactor that silently makes
+        # the lock host-scoped fails here and forces the decision again.
+        assert os.path.dirname(lock_path) != coordination_root, \
+            "under a private temp root the lock must follow the sweep domain, " \
+            "not the host coordination dir"
+        assert os.environ.get("TORTOISE_HOST_TMPDIR") == \
+            er._host_coordination_tmpdir()
 
 
 def test_cross_home_sweepers_share_one_lock():
