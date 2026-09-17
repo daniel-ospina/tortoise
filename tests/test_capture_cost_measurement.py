@@ -1375,7 +1375,7 @@ def test_hosted_capture_emits_that_session_s_measured_cost_row(
     # contract this test pins — expected_props tolerates any call sequence,
     # so only the stage SET is asserted here)
     assert set(c[0] for c in model.calls) == {"s1", "s2", "s4"}
-    assert resp.json()["stats"]["llm"]["calls"] == 3   # telemetry present
+    assert resp.json()["stats"]["llm"]["calls"] == len(model.calls)  # telemetry present
 
     cost_rows = [r for r in _b7_rows(tmp_path)
                  if r.get("event_name") == "capture_cost"]
