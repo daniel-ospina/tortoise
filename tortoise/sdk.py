@@ -497,11 +497,11 @@ class _InMemoryEventLog:
 # search_keys / when / quote via the v2 payload point dict / the M2 folded
 # statement dict; a WRITE must never silently drop a value they carry (the
 # two presence normalizations — a None value, which the graph does not store,
-# and an empty/blank `search_keys` list, popped by _flatten_search_keys_prop
-# — are mirrored out of the response, so presence still agrees). #2949: on a
-# dedup HIT the seam writes nothing, so the response reports the canonical's
-# STORED props instead — a field the node does not hold is omitted, never
-# echoed from the payload. Deliberately a
+# and an empty/blank `search_keys` list/tuple, popped by
+# _flatten_search_keys_prop — are mirrored out of the response, so presence
+# still agrees). #2949: on a dedup HIT the seam writes nothing, so the
+# response reports the canonical's STORED props instead — a field the node
+# does not hold is omitted, never echoed from the payload. Deliberately a
 # WHITELIST (not a blacklist): folded statement dicts carry internal
 # projection state (provenance run_id/source, status, createdAt, operator,
 # speaker) that must never leak into the public capture response. E3 (#1535)
@@ -4070,7 +4070,7 @@ class TortoiseSDK:
                 #     stores NO such property (FalkorDB drops null props) —
                 #     `source_turn_id` arrives as `int|None` from the
                 #     extractor, so this is the routine path;
-                #   - an empty/blank `search_keys` list is popped by
+                #   - an empty/blank `search_keys` list/tuple is popped by
                 #     create_point's `_flatten_search_keys_prop`.
                 # Mirror both out of the response (the dedup read-back below
                 # already omits them). Presence only: a non-empty
@@ -4171,14 +4171,15 @@ class TortoiseSDK:
                 # shape. #2813/#2949: the response never advertises a
                 # passthrough FIELD the resolved node does not hold — a create
                 # normalizes presence to the write above (None-valued fields
-                # and an empty/blank `search_keys` LIST are dropped exactly as
-                # the graph drops them; a non-list `search_keys`, including a
-                # blank string, is stored verbatim by
-                # `_flatten_search_keys_prop` and stays advertised). A
-                # non-empty `search_keys` list differs in REPRESENTATION only
-                # (the response keeps the payload LIST, the node stores the
-                # flattened string). A dedup hit reports the canonical's
-                # STORED props read back above (absent fields omitted).
+                # and an empty/blank `search_keys` list/tuple are dropped
+                # exactly as the graph drops them; a SCALAR `search_keys` —
+                # neither list nor tuple, a blank string included — is left
+                # as-is by `_flatten_search_keys_prop` and stays advertised).
+                # A non-empty `search_keys` sequence differs in
+                # REPRESENTATION only (the response keeps the payload LIST,
+                # the node stores the flattened string). A dedup hit reports
+                # the canonical's STORED props read back above (absent fields
+                # omitted).
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
                     "props": props, "dedup": dedup})
