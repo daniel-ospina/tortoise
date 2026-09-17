@@ -6,7 +6,10 @@
 #   cp tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
 #   chmod +x .claude/hooks/session-start.sh
 #   # then add to .claude/settings.json:
-#   #   { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }] } }
+#   # #3754: an explicit timeout is set too — Claude Code's command-hook default on
+#   # SessionStart is 600s, so a hung `tortoise context` would stall the session
+#   # for 10 minutes; 60s bounds it with ~6× headroom over the measured path.
+#   #   { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }] } }
 #
 # The hook prints a Tortoise memory digest to stdout, which Claude Code
 # injects into the session context automatically. If Tortoise isn't
