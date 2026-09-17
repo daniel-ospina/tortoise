@@ -126,8 +126,9 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     two primitives both capture surfaces use — so coercion, the 5000-char
     cap and the "a blank session writes NOTHING" gate are structural rather
     than hand-copied. The ``[role] <content>`` framing and the node/edge
-    write below are still a THIRD copy of capture's per-turn store (with the
-    two live ``_capture_session_impl`` copies). The NOTE at
+    write below are still a THIRD copy of capture's per-turn store (the two
+    live writers being ``TortoiseSDK.capture_session`` and
+    ``hosted_api._capture_session_impl``). The NOTE at
     ``tortoise/sdk.py`` / ``tortoise/hosted_api.py`` names this file — it is
     a comment, not an enforced check; #3551 tracks collapsing all three onto
     one shared primitive — so an edit to one is an edit to all three.
