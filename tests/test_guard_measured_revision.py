@@ -30,6 +30,7 @@ whole import graph. ``known_residual`` at the bottom records what that leaves.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -364,8 +365,62 @@ def test_gitlink_under_the_surface_is_refused(repo: Repo) -> None:
     _git(repo.root, "commit", "-q", "-m", "register a gitlink")
     # the gitlink must exist AT the measured revision for the mode to be read
     at_rev = _git(repo.root, "rev-parse", "HEAD")
-    with pytest.raises(GuardRefused, match="gitlink"):
+    # path-free fragment: the tmpdir name used to satisfy a bare "gitlink" match
+    with pytest.raises(GuardRefused, match="is a gitlink/submodule at"):
         guard(repo.root, at_rev, SURFACE)
+    # …and with the submodule directory absent on disk (the common case)
+    (repo.path("tools/vendor")).mkdir()
+    with pytest.raises(GuardRefused, match="is a gitlink/submodule at"):
+        guard(repo.root, at_rev, SURFACE)
+
+
+def test_worktree_subdirectory_is_bound_to_the_toplevel(repo: Repo) -> None:
+    """`<rev>:path` is toplevel-relative: inspecting from a subdirectory used to
+    compare the WRONG blob and print OK (CLI-reproduced false pass)."""
+    sub = repo.path("tortoise")
+    (sub / "a.py").write_text("def f():\n    return 2\n")
+    with pytest.raises(GuardRefused, match="code under test changed"):
+        guard(sub, repo.rev, SURFACE)
+
+
+def test_git_replace_ref_is_refused(repo: Repo) -> None:
+    """A replacement object re-points `<rev>` silently."""
+    _git(
+        repo.root,
+        "replace",
+        repo.rev,
+        _git(repo.root, "commit-tree", "HEAD^{tree}", "-m", "replacement"),
+    )
+    assert _git(repo.root, "replace", "-l") != ""
+    with pytest.raises(GuardRefused, match="git replace refs"):
+        _scan(repo)
+
+
+def test_nested_git_directory_under_the_surface_is_refused(repo: Repo) -> None:
+    """git will not enumerate inside a nested .git, so its contents are invisible
+    to every scan the guard performs."""
+    nested = repo.path("tools/.git")
+    nested.mkdir()
+    (nested / "config").write_text("[core]\n")
+    with pytest.raises(GuardRefused, match=r"nested \.git"):
+        _scan(repo)
+
+
+def test_unlisted_executable_suffix_is_refused(repo: Repo) -> None:
+    """The allowlist boundary: an untracked `.so` (or any unlisted suffix) is not
+    excused — pinning the set, not just the .pyc member."""
+    (repo.path("tools/libnative.so")).write_bytes(b"\x7fELF")
+    with pytest.raises(GuardRefused, match="untracked file"):
+        _scan(repo)
+
+
+def test_non_regular_file_is_refused(repo: Repo) -> None:
+    """A FIFO would block the content read forever rather than refuse."""
+    fifo = repo.path("tortoise/b.py")
+    fifo.unlink()
+    os.mkfifo(fifo)
+    with pytest.raises(GuardRefused, match="neither a regular file nor a symlink"):
+        _scan(repo)
 
 
 def test_path_with_a_space_passes_when_clean_and_drifts_when_edited(repo: Repo) -> None:

@@ -31,19 +31,43 @@ third was reproduced against the committed form and is what forced the rewrite.
   while the content compare passes. The tracked mode and the on-disk file type
   are compared too.
 
-CONTRACT (declared surface — what is and is not covered):
+CONTRACT (declared surface — EVERY numbered class below has a test in
+``tests/test_guard_measured_revision.py``; the PR-body marker's ``threats=N``
+is this list's length):
 
-* **Refuses** when: ``<rev>`` does not resolve, or any git call fails; a file
-  present under the surface at ``<rev>`` is deleted or untracked in the working
-  tree; a tracked surface ``.py`` whose docstring-stripped AST differs from
-  ``<rev>``; a tracked non-``.py`` surface file whose bytes differ; or a
-  non-allowlisted untracked file exists under the surface.
-* **Reports but does not refuse** files *added* after ``<rev>``. They did not
-  exist during the run, so they cannot be what the run executed. This is what
-  lets the guard itself live on the measured surface. It does NOT extend to a
-  declared surface that matched NOTHING at ``<rev>``: that refuses, because
-  there is no revision side to compare against at all.
-* **Ignores** paths outside ``--paths``.
+ 1. ``<rev>`` does not resolve, any git call fails, or the worktree is not the
+    repository toplevel (``<rev>:path`` is resolved at the toplevel, so a
+    subdirectory would compare the WRONG blob).
+ 2. a ``git replace`` ref or a graft re-points an object reachable from ``<rev>``.
+ 3. a file present under the surface at ``<rev>`` is deleted.
+ 4. a file present under the surface at ``<rev>`` is no longer tracked.
+ 5. a tracked surface ``.py`` differs executably (docstrings/comments stripped
+    from the AST before comparing).
+ 6. a tracked non-``.py`` surface file differs in bytes.
+ 7. a tracked surface file's MODE changed (``chmod +/-x``).
+ 8. a tracked surface file's TYPE changed (symlink vs regular file).
+ 9. an entry under the surface at ``<rev>`` is a gitlink (mode ``160000``).
+10. a non-allowlisted untracked file exists under the surface.
+11. a nested ``.git`` directory exists under the surface — git's own walk does
+    not descend into it, so its contents cannot be enumerated.
+12. nothing under ``--paths`` existed at ``<rev>`` (an empty comparison must not
+    read as a clean one).
+13. nothing under ``--paths`` is tracked.
+14. a surface ``.py`` cannot be decoded or parsed.
+15. a tracked surface path is neither a regular file nor a symlink (a FIFO would
+    block the read forever).
+16. ``--strict-bytecode`` is set and a byte-cache exists under the surface.
+
+Declarations (asserted, not refusals):
+
+17. a comment/docstring-only difference is REPORTED, not refused;
+18. a file ADDED after ``<rev>`` is REPORTED, not refused (it did not exist
+    during the run, so it cannot be what ran);
+19. untracked files are excused by SUFFIX only (``NOISE_SUFFIXES``) — never by
+    directory — and the excused set includes executable bytecode, which is
+    covered by the STATED LIMIT below;
+20. the optional paths argument defaults to ``DEFAULT_PATHS`` (both the function
+    default and the CLI default).
 
 Untracked scanning deliberately does **not** honour ``.gitignore``: an ignore
 rule is a way to hide a file from the check. The only files excused are those
@@ -110,7 +134,15 @@ class GuardRefused(SystemExit):
 def _git(worktree: Path, *args: str) -> str:
     """Run ``git -C <worktree>`` and FAIL CLOSED on any non-zero exit."""
     cp = subprocess.run(
-        ["git", "-C", str(worktree), *args], capture_output=True, text=True
+        ["git", "-C", str(worktree), *args],
+        capture_output=True,
+        text=True,
+        # A non-UTF-8 filename must not turn the check into a traceback (it
+        # would still exit non-zero, but without the reason the contract
+        # promises) — and it must not break the -z framing.
+        errors="surrogateescape",
+        # ``git replace`` would otherwise re-point <rev> silently.
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
     )
     if cp.returncode != 0:
         raise GuardRefused(
@@ -162,12 +194,12 @@ def _is_noise(rel: str) -> bool:
     return rel.endswith(NOISE_SUFFIXES)
 
 
-def _modes_at_rev(worktree: Path, rev: str, paths: tuple[str, ...]) -> dict[str, str]:
+def _modes_at_rev(root: Path, rev: str, paths: tuple[str, ...]) -> dict[str, str]:
     """``{path: git mode}`` for every file at ``rev`` under the surface."""
     modes: dict[str, str] = {}
     # ``-z``: NUL-separated rows, so a path containing a tab or newline cannot
     # be mis-keyed by the parser (a dropped row would read as "not tracked").
-    for entry in _git(worktree, "ls-tree", "-r", "-z", rev, "--", *paths).split("\0"):
+    for entry in _git(root, "ls-tree", "-r", "-z", rev, "--", *paths).split("\0"):
         if not entry:
             continue
         meta, _, path = entry.partition("\t")
@@ -176,7 +208,7 @@ def _modes_at_rev(worktree: Path, rev: str, paths: tuple[str, ...]) -> dict[str,
     return modes
 
 
-def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
+def _compare(root: Path, rev: str, rel: str, rev_mode: str) -> bool:
     """Refuse unless ``rel`` is executably unchanged since ``rev``.
 
     Returns True when the file differs from ``rev`` only in comments,
@@ -189,7 +221,7 @@ def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
             f"guard: {rel} is a gitlink/submodule at {rev} — its contents are "
             "not in this repository, so they cannot be compared"
         )
-    on_disk = worktree / rel
+    on_disk = root / rel
     try:
         st = os.lstat(on_disk)
     except OSError as exc:
@@ -197,6 +229,11 @@ def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
             f"guard: {rel} exists at {rev} but cannot be read in the working "
             f"tree ({exc}) — re-measure rather than re-label"
         ) from None
+    if not (stat.S_ISLNK(st.st_mode) or stat.S_ISREG(st.st_mode)):
+        raise GuardRefused(
+            f"guard: {rel} is neither a regular file nor a symlink on disk "
+            "(mode %o) — its content cannot be read" % stat.S_IFMT(st.st_mode)
+        )
     rev_is_link = rev_mode == "120000"
     if stat.S_ISLNK(st.st_mode) != rev_is_link:
         raise GuardRefused(
@@ -215,7 +252,7 @@ def _compare(worktree: Path, rev: str, rel: str, rev_mode: str) -> bool:
                 "re-measure rather than re-label"
             )
         on_disk_bytes = on_disk.read_bytes()
-    at_rev_bytes = _git_bytes(worktree, "cat-file", "blob", f"{rev}:{rel}")
+    at_rev_bytes = _git_bytes(root, "cat-file", "blob", f"{rev}:{rel}")
     if on_disk_bytes == at_rev_bytes:
         return False
     if not rel.endswith(".py"):
@@ -262,11 +299,27 @@ def guard(
 ) -> Scan:
     """Return a :class:`Scan`, or raise :class:`GuardRefused` on drift."""
     worktree = Path(worktree)
+    # ``<rev>:path`` is a TOPLEVEL-relative lookup. Resolving the root here is
+    # what stops a subdirectory from being inspected against the wrong blob
+    # (reproduced: cwd=<repo>/sub compared sub/a.py, not a.py, and printed OK).
+    root = Path(_git(worktree, "rev-parse", "--show-toplevel"))
+    if _git(worktree, "replace", "-l"):
+        raise GuardRefused(
+            "guard: this repository has git replace refs, so an object in "
+            f"{rev} may be a replacement — remove them (git replace -d …) and "
+            "re-verify"
+        )
+    grafts = root / _git(worktree, "rev-parse", "--git-path", "info/grafts")
+    if grafts.exists():
+        raise GuardRefused(
+            f"guard: {grafts} exists — grafts rewrite history for git's own "
+            "object walk, so the revision cannot be trusted"
+        )
     _git(worktree, "rev-parse", "--verify", f"{rev}^{{commit}}")
 
-    modes_at_rev = _modes_at_rev(worktree, rev, paths)
+    modes_at_rev = _modes_at_rev(root, rev, paths)
     at_rev = list(modes_at_rev)
-    tracked = [f for f in _git(worktree, "ls-files", "-z", "--", *paths).split("\0") if f]
+    tracked = [f for f in _git(root, "ls-files", "-z", "--", *paths).split("\0") if f]
     if not at_rev:
         raise GuardRefused(
             f"guard: nothing under --paths {' '.join(paths)} existed at {rev} "
@@ -281,7 +334,7 @@ def guard(
     # NO --exclude-standard: an ignore rule must not hide a file from the check.
     untracked = [
         f
-        for f in _git(worktree, "ls-files", "-z", "--others", "--", *paths).split(
+        for f in _git(root, "ls-files", "-z", "--others", "--", *paths).split(
             "\0"
         )
         if f
@@ -298,6 +351,17 @@ def guard(
                 "byte-code-free (python -B / PYTHONDONTWRITEBYTECODE=1)"
             )
     hidden = [f for f in untracked if not _is_noise(f)]
+    for base in paths:
+        start_dir = root / (base.rstrip("/") or ".")
+        if not start_dir.is_dir():
+            continue
+        for dirpath, dirnames, _ in os.walk(start_dir):
+            if ".git" in dirnames:
+                raise GuardRefused(
+                    f"guard: nested .git directory under the measured surface "
+                    f"({dirpath}/.git) — git refuses to enumerate inside it, "
+                    "so its contents cannot be checked"
+                )
     if hidden:
         raise GuardRefused(
             "guard: untracked file(s) under the measured surface, which carry "
@@ -314,7 +378,7 @@ def guard(
             added.append(rel)  # did not exist during the measured run
             continue
         checked += 1
-        if _compare(worktree, rev, rel, modes_at_rev[rel]):
+        if _compare(root, rev, rel, modes_at_rev[rel]):
             comment_only.append(rel)
     for rel in at_rev:
         if rel in set(tracked):
