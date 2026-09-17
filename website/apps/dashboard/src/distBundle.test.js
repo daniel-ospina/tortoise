@@ -1,13 +1,19 @@
-// distBundle.test.js — the COMMITTED-BUNDLE tripwire (#2865).
+// distBundle.test.js — the SHIPPED-BUNDLE tripwire (#2865).
 //
-// Why this file exists: `website/apps/dashboard/dist/` is tracked (`.gitignore`
-// says so) and is what every runtime surface actually serves — `deploy-pages.yml`
-// publishes it as-is and `ci.yml`'s `dashboard-e2e` job starts `wrangler pages
-// dev dist` against it. That job runs only two e2e files and, crucially, NEVER
-// compares the committed bundle to a fresh build, so a src render change that
-// forgets `npm run build` ships a STALE bundle and every gate stays green. The
-// unit suite (`node --test 'src/*.test.js'`) reads `src/` as text and cannot see
-// this either.
+// #3775: `website/apps/dashboard/dist/` is no longer tracked — it is a build
+// artifact. Both deploy paths (`website/apps/dashboard/deploy.sh` and
+// `deploy-pages.yml`'s deploy-dashboard job) and the `dashboard-js-tests` CI
+// job build it with `vite 6.4.3` immediately before it is served. That removes
+// this file's ORIGINAL premise: there is no committed bundle that "a src render
+// change which forgets `npm run build`" could leave stale, so the staleness
+// tripwire is obsolete by construction. The file is KEPT because its
+// assertions are about the artifact that is actually SERVED, which
+// `src/`-as-text tripwires cannot fully replace — `shippedScripts()` walks
+// every `.js` the build emits, including the ones copied verbatim from
+// `public/` (never bundler-processed), and the #3428/#2937 probes below are the
+// only scan that sees a client-side writer hidden in one of those. They now run
+// against a FRESH build (the `dashboard-js-tests` job builds first, #3775),
+// which is byte-identical to what deploy ships.
 //
 // So this reads what is actually SERVED: `dist/index.html`, the entry chunk it
 // references, AND every other script the dist ships — every `.js` under
@@ -34,17 +40,17 @@ const dist = resolve(here, '..', 'dist')
 
 function shippedBundle() {
   const htmlPath = join(dist, 'index.html')
-  assert.ok(existsSync(htmlPath), 'dist/index.html must be committed (it is a tracked artifact)')
+  assert.ok(existsSync(htmlPath), 'dist/index.html must exist — run `npm run build` (the bundle is a build artifact since #3775)')
   const html = readFileSync(htmlPath, 'utf8')
   const entry = html.match(/src="\/assets\/(index-[A-Za-z0-9_-]+\.js)"/)
   assert.ok(entry, 'dist/index.html must reference the built entry chunk')
   const entryPath = join(dist, 'assets', entry[1])
   assert.ok(existsSync(entryPath),
-    `dist/index.html references ${entry[1]}, which is NOT committed — the bundle is stale`)
+    `dist/index.html references ${entry[1]}, which the build did not emit — the bundle is incomplete`)
   return { html, entryPath, entryName: entry[1], js: readFileSync(entryPath, 'utf8') }
 }
 
-// Every script the committed dist actually SERVES, as dist-relative names:
+// Every script the built dist actually SERVES, as dist-relative names:
 //   (i)   EVERY `.js` under the WHOLE `dist/` tree, recursively — not just
 //         `dist/assets/**` (review cycle 8 item 3: a writer copied by `public/`
 //         to `dist/<anything>.js` was shipped and executed and never scanned);
@@ -57,11 +63,11 @@ function shippedBundle() {
 //         neither `index.html` nor a `.js` walk on its own: `import("…")` and
 //         `new Worker("…")` (mutations M6/M9 shipped a writer in a copied
 //         public/ file reached only through those).
-// A missing reference is a hard fail (a stale/half-committed bundle), never a
+// A missing reference is a hard fail (a broken/half-written build), never a
 // silently skipped file — that is the whole point of this guard.
 function shippedScripts() {
   const htmlPath = join(dist, 'index.html')
-  assert.ok(existsSync(htmlPath), 'dist/index.html must be committed (it is a tracked artifact)')
+  assert.ok(existsSync(htmlPath), 'dist/index.html must exist — run `npm run build` (the bundle is a build artifact since #3775)')
   const html = readFileSync(htmlPath, 'utf8')
   const out = []
   const seen = new Set()
@@ -70,7 +76,7 @@ function shippedScripts() {
     seen.add(name)
     if (text === undefined) {
       assert.ok(existsSync(path),
-        `dist/${name} is referenced by the shipped bundle but is NOT committed — the bundle is stale`)
+        `dist/${name} is referenced by the shipped bundle but the build did not emit it — the bundle is incomplete`)
       text = readFileSync(path, 'utf8')
     }
     out.push({ name, path, js: text })
@@ -107,7 +113,7 @@ function shippedScripts() {
   return out
 }
 
-test('#2865: the committed dist ships the key-less OAuth Claude connector recipe', () => {
+test('#2865: the built dist ships the key-less OAuth Claude connector recipe', () => {
   const { js, entryName } = shippedBundle()
   // The canonical CONNECTOR url: no trailing slash, equal to the server's
   // RFC 8707 resource indicator (#2864). The keyed `…/mcp/` form lives in the
@@ -123,30 +129,30 @@ test('#2865: the committed dist ships the key-less OAuth Claude connector recipe
   }
 })
 
-test('#2865: the committed dist no longer carries the beta Request-headers caveat', () => {
+test('#2865: the built dist no longer carries the beta Request-headers caveat', () => {
   const { js, entryName } = shippedBundle()
   // The string was unique to WIZARD's live claude-desktop/claude-web branch (the
   // whole blocker: the field is absent on many accounts). Nothing else in the
-  // repo ever contained it, so its presence means a stale bundle.
+  // repo ever contained it, so its presence means a stale/unrebuilt bundle.
   assert.ok(!js.includes('rolling out in Anthropic'),
     `${entryName} still carries the removed beta caveat — rebuild dist/`)
   assert.ok(!js.includes('use the Claude Code surface instead'),
     `${entryName} still diverts users off the connector surfaces — rebuild dist/`)
 })
 
-test('#2865: every asset dist/index.html references is committed (no orphan or missing chunk)', () => {
+test('#2865: every asset dist/index.html references exists in the build (no orphan or missing chunk)', () => {
   const { html, entryName } = shippedBundle()
   const refs = [...new Set([...html.matchAll(/(?:src|href)="\/assets\/([^"]+)"/g)].map((m) => m[1]))]
   assert.ok(refs.length > 0, 'dist/index.html must reference at least one asset')
   for (const ref of refs) {
     assert.ok(existsSync(join(dist, 'assets', ref)),
-      `dist/index.html references /assets/${ref}, which is not committed`)
+      `dist/index.html references /assets/${ref}, which the build did not emit`)
   }
   // Every `index-*.js` on disk must be the referenced entry — an orphaned chunk
-  // is a half-committed rebuild (the old entry left behind, the new one added).
+  // is a half-written build (the old entry left behind, the new one added).
   const chunks = readdirSync(join(dist, 'assets')).filter((f) => /^index-.*\.js$/.test(f))
   assert.deepEqual(chunks, [entryName],
-    `dist/assets has an orphaned entry chunk — exactly ${entryName} may be committed`)
+    `dist/assets has an orphaned entry chunk — exactly ${entryName} may exist`)
 })
 
 test('#3428/#2937: the shipped bundle does not carry the deleted click-writer', () => {

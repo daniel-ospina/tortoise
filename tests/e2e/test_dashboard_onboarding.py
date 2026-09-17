@@ -292,7 +292,7 @@ def _wire(page: Page, *, seed_objects: list = None,  # noqa: RUF013
 
 def _walk_to_fork(page: Page) -> None:
     """Re-entry → step 0 (read-only org summary) → the fork card."""
-    # #2744: the DOCUMENT always loads from the local committed-dist preview.
+    # #2744: the DOCUMENT always loads from the local built-dist preview.
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
@@ -1081,7 +1081,7 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     name when #2763 lands."""
     _seed_cookie(page, "u-bld")
     cap = _wire(page, role="owner")
-    # #2744: the DOCUMENT always loads from the local committed-dist preview.
+    # #2744: the DOCUMENT always loads from the local built-dist preview.
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
