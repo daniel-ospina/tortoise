@@ -916,6 +916,47 @@ def test_falkor_rebuild_deny_warning_emitted_once_per_key(caplog):
         proj.close()
 
 
+def test_falkor_rebuild_resets_deny_warning_between_passes(caplog):
+    """#2958 review: the deny-drop report is reset per rebuild pass — a live
+    write earlier in the SAME process populates `_deny_drop_warned`, and that
+    must not suppress the report for a later `rebuild_all` pass on the same
+    projection instance (`rebuild_all`'s reset). Black-box: only `rebuild_all`
+    is exercised, so removing `self._deny_drop_warned = set()` from
+    `rebuild_all` leaves this RED (the live-write suppression swallows the
+    pass's report) while the single-pass test above stays green."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    proj = FalkorProjection(_tmp("deny_reset.db"), graph_name="test")
+    try:
+        # A live (door-3) write carrying a deny-listed prop: warns once and
+        # leaves the key in `_deny_drop_warned`.
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "live-1", "content": "x",
+                              "reason": "r"}})
+        assert any("deny-listed" in r.getMessage() and "reason" in r.getMessage()
+                   for r in caplog.records), "live-write precondition failed"
+        # Clear so only the REBUILD pass's records are inspected — otherwise the
+        # live warning above satisfies the assertion and the test is vacuous.
+        caplog.clear()
+        # A graph-only point carrying the SAME deny-listed key survives the
+        # #548 pre-wipe snapshot and is replayed through the Point writer.
+        proj.g.query(
+            "CREATE (n:Point {id:'go-1', content:'y', pointKind:'statement', "
+            "is_operator:false, status:'live', reason:'r'})")
+        with caplog.at_level(logging.WARNING,
+                             logger="tortoise.projection.entities"):
+            proj.rebuild_all(tempfile.mkdtemp(prefix="tortoise_deny_reset_"))
+        hits = [r.getMessage() for r in caplog.records
+                if "deny-listed" in r.getMessage()
+                and "reason" in r.getMessage()]
+        assert hits, ("per-pass deny report was suppressed by the earlier live "
+                      "write — rebuild_all must reset the warned set"
+                      + caplog.text)
+    finally:
+        proj.close()
+
+
 # ----------------------------------------------- FalkorProjection.edge_stats
 
 def test_falkor_edge_stats():
