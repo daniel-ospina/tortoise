@@ -4,7 +4,8 @@ The Graphs tab's render + management behavior (meter, per-graph key panel,
 one-time reveal, delete lifecycle, tier gate) is render/event logic in
 main.jsx that no unit test can reach (main.jsx has no component harness;
 graphs.js holds the pure derivations and IS node --test covered). This
-suite drives the real committed-dist dashboard (same two-server harness as
+suite drives the real built dashboard (`npm run build` first — dist/ is a
+build artifact since #3775; same two-server harness as
 test_keys_table_mixed.py):
 
   `wrangler@4 pages dev . --port 8788` from website/ (auth) +
@@ -79,7 +80,7 @@ def _local_preview_servers() -> None:
     _preflight_local_servers()
 
 
-TEAM_ID = "team_graphs2116"
+ORG_ID = "team_graphs2116"
 # #2306: key_count 1 deliberately — the registry-lane capstone artifact
 # (a legacy bound-default APIKey node counted against the default node's
 # real gid). The chosen shape suppresses the default row's Keys cell
@@ -114,7 +115,7 @@ _REVOKED_KEY = {
 
 def _team_row(tier: str, max_graphs: int | None) -> dict:
     return {
-        "team_id": TEAM_ID,
+        "org_id": ORG_ID,
         "name": "Graphs Fixture",
         "tier": tier,
         "max_graphs": max_graphs,
@@ -122,7 +123,7 @@ def _team_row(tier: str, max_graphs: int | None) -> dict:
     }
 
 
-def _wire_graphs_harness(page: Page, team_row: dict,
+def _wire_graphs_harness(page: Page, org_row: dict,
                          graphs: list[dict],
                          graph_keys: dict[str, list[dict]],
                          mint_bodies: list | None = None,
@@ -175,9 +176,9 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/teams") and route.request.method == "GET":
+            if path.endswith("/v1/organizations") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([team_row]))
+                              body=json.dumps([org_row]))
                 return
             if path.endswith("/v1/team/keys") and route.request.method == "GET":
                 # The API-Keys tab's mount read (no graph_id) returns the
@@ -267,7 +268,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps(team_row))
+                              body=json.dumps(org_row))
                 return
             route.fulfill(status=401, content_type="application/json",
                           body=json.dumps({"detail": "unauthorized"}))
@@ -295,12 +296,12 @@ def _team_key_rows(graph_keys: dict[str, list[dict]]) -> list[dict]:
     return out
 
 
-def _open_graphs_tab(page: Page, team_row: dict,
+def _open_graphs_tab(page: Page, org_row: dict,
                      graphs: list[dict] | None = None,
                      graph_keys: dict[str, list[dict]] | None = None,
                      **kw) -> None:
     _wire_graphs_harness(
-        page, team_row,
+        page, org_row,
         graphs if graphs is not None else [DEFAULT_ROW, CUSTOM_A],
         graph_keys if graph_keys is not None else {"g_prod": [_GRAPH_KEY]},
         **kw,
@@ -455,7 +456,7 @@ def test_default_graph_has_no_actions_and_custom_delete_armed(page: Page) -> Non
     reason); its Keys cell is #2306-suppressed (API-Keys-tab affordance
     instead of a count). A custom row's 🗑 opens the TYPE-TO-CONFIRM modal:
     cancel keeps the row, typing the literal word + confirming fires DELETE
-    /v1/graphs/{gid}?team_id=…. The inline rename pencil commits a PATCH
+    /v1/graphs/{gid}?org_id=…. The inline rename pencil commits a PATCH
     {name} and the row re-renders with the new name."""
     rename_bodies: list = []
     # A second custom row so the rename round-trip cannot disturb the
@@ -589,7 +590,7 @@ def test_solo_tier_create_stays_open_with_used_total_meter(page: Page) -> None:
 
 
 # ── #2298 (the #2248 sync-review gap): two-team panel-revoke pin ────────────
-# The per-graph [Keys] panel revoke (revokePanelKey) pins ?team_id= on its
+# The per-graph [Keys] panel revoke (revokePanelKey) pins ?org_id= on its
 # DELETE only since #2230; the pin is guarded by the STATIC
 # keyTeamPinsTripwire unit (presence of the pin string) — no behavioral
 # multi-team e2e proves the revoke TARGETS the SELECTED team. This leg is the
@@ -597,7 +598,7 @@ def test_solo_tier_create_stays_open_with_used_total_meter(page: Page) -> None:
 # (test_keys_table_mixed.py::test_two_team_key_writes_pin_selected_team):
 # a multi-membership session user on a NON-first membership team (Bravo)
 # revoking from the per-graph panel must have the DELETE carry
-# team_id=team_b (200), a dropped pin must 403 (server memberships[0]
+# org_id=team_b (200), a dropped pin must 403 (server memberships[0]
 # resolution = Alpha → "Not your API key"), and a wrong-team pin must 403
 # too. Revoke is a SOFT revoke (stamp revoked_at; list reads re-render the
 # row revoked/terminal — the module's per-graph revoke contract). Mirrors
@@ -629,20 +630,20 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
     Session user in TWO teams (Alpha = memberships[0], Bravo = selected via
     the account menu). Bravo's beta custom graph has one per-graph key
     (gk_beta_01) and Alpha's alpha graph one (gk_alpha_01). Harness resolves
-    every DELETE /v1/team/keys/{id} under the PINNED team (team_id param;
+    every DELETE /v1/team/keys/{id} under the PINNED team (org_id param;
     absent → team_a, the server's memberships[0] session resolution):
-    - dropped pin (Bravo's key, no team_id)  → 403 "Not your API key"
-    - wrong pin (Alpha's key, team_id=team_b) → 403 "Not your API key"
-    - panel revoke of Bravo's key (team_id=team_b) → 200; soft revoke (the
+    - dropped pin (Bravo's key, no org_id)  → 403 "Not your API key"
+    - wrong pin (Alpha's key, org_id=team_b) → 403 "Not your API key"
+    - panel revoke of Bravo's key (org_id=team_b) → 200; soft revoke (the
       real server stamps revoked_at and re-lists — rows never vanish), so the
       refreshed panel re-renders the row revoked/terminal, not empty.
     Assertions: the one 200 delete URL pins team_b; Bravo's key stamped
     revoked_at (Alpha's untouched, still active); zero POST /v1/session/key;
     zero key-authed."""
     import re as _re
-    team_a = {"team_id": "team_a", "team_name": "Alpha", "tier": "team",
+    team_a = {"org_id": "team_a", "org_name": "Alpha", "tier": "team",
               "max_graphs": None, "role": "owner", "anon": False}
-    team_b = {"team_id": "team_b", "team_name": "Bravo", "tier": "team",
+    team_b = {"org_id": "team_b", "org_name": "Bravo", "tier": "team",
               "max_graphs": None, "role": "owner", "anon": False}
     # Per-team per-graph key buckets (F10 shape) — writes resolve ONLY under
     # the owning team's bucket; a wrong/dropped pin cannot accidentally hit.
@@ -666,7 +667,7 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
             path = urllib.parse.urlsplit(url).path
             method = route.request.method
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-            tid = (qs.get("team_id") or ["team_a"])[0]  # server memberships[0]
+            tid = (qs.get("org_id") or ["team_a"])[0]  # server memberships[0]
             auth = (route.request.headers.get("authorization") or "")
             if auth.startswith("Bearer tt_"):
                 key_authed.append(url)
@@ -675,7 +676,7 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
                 route.fulfill(status=500, content_type="application/json",
                               body=json.dumps({"detail": "loud 500 — zero-mint tripwire"}))
                 return
-            if path.endswith("/v1/teams") and method == "GET":
+            if path.endswith("/v1/organizations") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([team_a, team_b]))
                 return
@@ -761,11 +762,11 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
     _goto_local_dashboard(page)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     # Select Bravo (≠ first membership Alpha) via the account menu — the
-    # switch's loadAll must pin ?team_id=team_b (a dropped pin cannot
+    # switch's loadAll must pin ?org_id=team_b (a dropped pin cannot
     # false-pass: expect_response only fires on the pinned read).
     page.get_by_role("button", name=_re.compile(r"Account menu")).click()
     with page.expect_response(lambda r: "/v1/team/keys" in r.url
-                              and "team_id=team_b" in r.url,
+                              and "org_id=team_b" in r.url,
                               timeout=15000):
         page.locator(".account-menu").get_by_role("button", name="Bravo").click()
     expect(page.locator("body")).to_contain_text("Bravo", timeout=15_000)
@@ -781,7 +782,7 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
     # ── Wrong-pin negatives (session-shaped probes, BEFORE the UI delete) ──
     # The probes replay revokePanelKey's exact request: session JWT Bearer
     # (read from the sb-tortoise-auth-token cookie, as the app does) with
-    # ONLY the team_id pin diverging. The harness resolves the team from the
+    # ONLY the org_id pin diverging. The harness resolves the team from the
     # pin; absent pin = server memberships[0] resolution = Alpha.
     _probe_js = """async (spec) => {
       const raw = document.cookie.split(';').find(c => c.trim().startsWith('sb-tortoise-auth-token='))
@@ -802,7 +803,7 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
     assert probe1["status"] == 403 and probe1["detail"] == "Not your API key", probe1
     # 2) Alpha's key pinned to the WRONG team (team_b) → 403, nothing mutated.
     probe2 = page.evaluate(_probe_js,
-                           {"url": f"{API_HOST}/v1/team/keys/gk_alpha_01?team_id=team_b"})
+                           {"url": f"{API_HOST}/v1/team/keys/gk_alpha_01?org_id=team_b"})
     assert probe2["status"] == 403 and probe2["detail"] == "Not your API key", probe2
     # Both probes must have mutated nothing — the keys stay ACTIVE in their
     # own buckets (probe 403s never stamp revoked_at).
@@ -822,12 +823,12 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
     expect(panel).to_contain_text("tt_beta01")
     expect(panel).not_to_contain_text("tt_alpha01")
     # Revoke with the confirm dialog naming the row; the DELETE must carry
-    # ?team_id=team_b (the SELECTED team) and return 200.
+    # ?org_id=team_b (the SELECTED team) and return 200.
     confirm_msgs: list = []
     page.once("dialog", lambda d: (confirm_msgs.append(d.message), d.accept()))
     with page.expect_response(lambda r: r.request.method == "DELETE"
                               and "/v1/team/keys/" in r.url
-                              and "team_id=team_b" in r.url,
+                              and "org_id=team_b" in r.url,
                               timeout=15000):
         panel_rows.get_by_role("button", name="Revoke key tt_beta01").click()
     assert confirm_msgs and "Revoke beta-ci" in confirm_msgs[0], confirm_msgs
@@ -846,7 +847,7 @@ def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
     ok = [d for d in delete_log if d["status"] == 200]
     forbidden = [d for d in delete_log if d["status"] == 403]
     assert len(ok) == 1, f"exactly one successful panel revoke: {delete_log}"
-    assert "team_id=team_b" in ok[0]["url"], f"panel revoke must pin team_b: {ok[0]}"
+    assert "org_id=team_b" in ok[0]["url"], f"panel revoke must pin team_b: {ok[0]}"
     assert len(forbidden) == 2, f"the two wrong-pin probes must 403: {delete_log}"
     # Bravo's key soft-revoked (row retained + stamped); Alpha's untouched.
     assert [r["id"] for r in keys_by_team["team_b"]["g_beta"]] == ["gk_beta_01"], \

@@ -126,6 +126,21 @@ if _OriginalFalkorDB is not None:
             if "host" not in kwargs and "port" not in kwargs:
                 from tortoise.embedded_lifecycle import register_embedded_client
                 register_embedded_client(self)
+                # #3599: record this process as a live OWNER of the server,
+                # so the reaper can decide orphanhood per-server ("no live
+                # owner") instead of via the global suite-marker gate that a
+                # fleet host keeps permanently True. Written in the server's
+                # own socket dir; removed by every close seam (_t_close,
+                # _atexit_close, close_embedded_clients). owner_socket_of
+                # resolves the INNER redislite client — the wrapper itself
+                # has no socket_file (redislite's FalkorDB keeps its server
+                # on self.client).
+                from tortoise.embedded_lifecycle import owner_socket_of, record_owner
+                # Capture the socket path NOW: redislite mutates the inner
+                # client during close(), so re-deriving it at release time
+                # can yield None and silently strand the record.
+                self._t_socket_file = owner_socket_of(self)
+                record_owner(self._t_socket_file)
             # #1371: route the atexit seam through the fast-close wrapper
             # (ephemeral test servers) so interpreter exit does not spend
             # 3-4s per leaked server on redislite's response-waiting close.
@@ -143,8 +158,98 @@ if _OriginalFalkorDB is not None:
             """
             if atexit_fast_close(getattr(self, "client", self)):
                 self._t_closed = True
+                # #3599: the fast path bypasses close()/_t_close — release
+                # the owner record here so a normal exit never leaves a
+                # live-looking record for a server that is already gone.
+                self._t_release_owner()
                 return
             self._t_close()
+
+        def _t_release_owner(self) -> None:
+            """#3599: release this client's owner record claim (idempotent).
+
+            Refcounted in embedded_lifecycle, so closing ONE of several
+            clients on a shared server keeps the record that protects the
+            others. The per-client flag makes the release idempotent across
+            the three teardown seams (explicit close, atexit, signal), which
+            would otherwise decrement twice and drop a record the process
+            still needs.
+            """
+            if getattr(self, "_t_owner_released", False):
+                return
+            self._t_owner_released = True
+            from tortoise.embedded_lifecycle import forget_owner, owner_socket_of
+            sock = getattr(self, "_t_socket_file", None) or owner_socket_of(self)
+            forget_owner(sock)
+
+        def close(self, *args, **kwargs):
+            """#3599: release the owner-record claim on the PUBLIC close seam.
+
+            The wrapper inherits redislite's ``close()`` (a redis-py pool
+            disconnect + ``_cleanup``), which has no hook for our owner
+            record. Without this override a direct ``db.close()`` bypasses
+            ``_t_close`` entirely and strands the record until interpreter
+            exit. Idempotent via ``_t_release_owner``'s per-client flag, so
+            the ``_t_close`` path (which calls ``close()`` and then
+            releases) stays correct.
+
+            #3653: redislite's ``_cleanup`` deletes the socket dir whenever
+            its own ``_connection_count() <= 1``, but that count is 0 once
+            the shared ``.settings`` registry file is gone — so closing one
+            client tore down a LIVE shared server (killing co-tenants'
+            seeded state, and surfacing as ``redis.socket ... No such file
+            or directory`` / a start-time ``FATAL CONFIG FILE ERROR``). Guard
+            the destructive path with the registry-independent co-tenant
+            test; a shared server gets a pool disconnect only, exactly like
+            redislite's own shared-server branch.
+
+            #3653 F1: the guard above only covers THIS seam. redislite's
+            OWN atexit-registered ``_cleanup`` and ``__del__`` still run,
+            and with the shared registry file gone its
+            ``_connection_count()`` reads 0 — so they would stop the live
+            server and ``rmtree`` its socket dir from under a live
+            co-tenant after all. Neutralize them on the shared path too.
+            #3653 F3: redislite's ``_cleanup`` only rmtrees inside
+            ``if self.pid:``, so a server that was already dead strands its
+            ephemeral dir — reclaim it here.
+            """
+            try:
+                inner = getattr(self, "client", None)
+                if inner is not None:
+                    from tortoise.embedded_lifecycle import (
+                        _neutralize_redislite_cleanup,
+                        _remove_ephemeral_socket_dir,
+                        _server_pid,
+                        cotenant_holds_server,
+                        disconnect_only,
+                    )
+                    if cotenant_holds_server(inner):
+                        disconnect_only(inner)
+                        _neutralize_redislite_cleanup(inner)
+                        return None
+                    rdir = getattr(inner, "redis_dir", None)
+                    sock_path = getattr(inner, "socket_file", None)
+                    pid_before = _server_pid(inner)
+                    try:
+                        return super().close(*args, **kwargs)
+                    finally:
+                        # #3653: `cotenant_holds_server()` above already
+                        # dropped this client's pool (its F4 probe). If the
+                        # subsequent `_cleanup()` aborts — e.g. the client is
+                        # a partially-initialized redislite `Redis` with no
+                        # `connection_pool`, or its socket dir has vanished —
+                        # the live pidfile is left behind and `__del__` runs
+                        # `_cleanup` again and throws. Neutralize
+                        # unconditionally so ANY client whose pool the guard
+                        # dropped reaches `__del__` already neutralized.
+                        # Idempotent: a no-op when `_cleanup` already nulled
+                        # the pidfile (the success path).
+                        _neutralize_redislite_cleanup(inner)
+                        if not pid_before:
+                            _remove_ephemeral_socket_dir(rdir, sock_path)
+                return super().close(*args, **kwargs)
+            finally:
+                self._t_release_owner()
 
         def _t_close(self) -> None:
             """Idempotent close; safe from atexit or __exit__."""
@@ -155,6 +260,10 @@ if _OriginalFalkorDB is not None:
                 self.close()
             except Exception:
                 pass  # teardown context: never raise
+            # #3599: release the owner record on EVERY close path, including
+            # the exception path above (a failed shutdown still means this
+            # process no longer owns the server).
+            self._t_release_owner()
 
         def __enter__(self):
             return self

@@ -10,13 +10,16 @@ Why a logical dump, not an RDB file:
   AES-256-GCM encrypted archives in Cloudflare R2 (S3-compatible), registry metadata,
   verified restore into a temp graph followed by an atomic swap (delete live → copy temp).
 
-Pipeline (per team graph):
+Pipeline (per org graph):
   create_backup:  dump_graph → encrypt (AES-256-GCM) → upload dump.enc + manifest.json
-                  → stamp Team.backup_latest_at in the registry graph.
+                  → stamp Org.backup_latest_at in the registry graph.
   restore_backup: download → sha256 verify vs manifest → decrypt → load into temp
                   graph → verify node+edge counts against the AUTHENTICATED payload
                   → empty-backup-over-live guard → pre-restore safety copy of the
-                  live graph → delete live → GRAPH.COPY temp → live → cleanup.
+                  live graph → delete live → GRAPH.COPY temp → live → boolean-index
+                  audit (#3154 — GRAPH.COPY can drop the `false` postings of a
+                  copied boolean index)
+                  → cleanup.
                   Any verification failure leaves the live graph untouched; a swap
                   failure leaves the verified temp + pre-restore copies recoverable.
   prune_backups:  keep N daily + M weekly (newest-first).
@@ -317,7 +320,7 @@ def restore_graph(g, dump: dict) -> dict:
     # verification gate must compare real graph state, mirroring the edge check.
     # #1625: count non-skip nodes by applying the SAME predicate as the dump
     # (_is_export_skip_node) so the two sides can never drift again (the
-    # earlier label/cypher query missed TeamMeta — a pre-fix team backup's
+    # earlier label/cypher query missed TeamMeta — a pre-fix org backup's
     # TeamMeta node made actual = expected + 1 → RestoreVerificationError).
     # The dst projection's open re-creates the FTS Meta markers, which the
     # dump excludes; calibration_milestone is data and IS counted.
@@ -754,15 +757,15 @@ def mirror_backup(storage, mirror, backup_id: str) -> dict:
 # ── pipeline ─────────────────────────────────────────────────────────────────
 
 
-def _validate_team_id(team_id: str) -> None:
-    """Team ids flow into object keys + prefix isolation — reject path-injection."""
-    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", team_id):
-        raise ValueError(f"Invalid team_id {team_id!r} — must be [A-Za-z0-9_-]")
+def _validate_org_id(org_id: str) -> None:
+    """Org ids flow into object keys + prefix isolation — reject path-injection."""
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", org_id):
+        raise ValueError(f"Invalid org_id {org_id!r} — must be [A-Za-z0-9_-]")
 
 
 def _validate_graph_id(graph_id: str) -> None:
     """#2313: graph ids flow into object keys (the graph key segment) —
-    reject path-injection with the same charset as team ids."""
+    reject path-injection with the same charset as org ids."""
     if not re.match(r"^[A-Za-z0-9_-]{1,64}$", graph_id):
         raise ValueError(f"Invalid graph_id {graph_id!r} — must be [A-Za-z0-9_-]")
 
@@ -808,24 +811,24 @@ def source_dialect(source) -> str:
     return "supabase" if _is_supabase_source(source) else "registry"
 
 
-def _compose_backup_id(team_id: str, backup_id_ts: str,
+def _compose_backup_id(org_id: str, backup_id_ts: str,
                         graph_id: str | None = None) -> str:
     """#2313: the UNPREFIXED composite backup id stored in manifests.
 
-    Legacy shape (graph_id None — team-era callers, pre-#2313 artifacts):
-    ``{team_id}/{ts}_{rnd}`` — byte-identical to the historical manifest
-    contract. Per-graph shape: ``{team_id}/{graph_id}/{ts}_{rnd}``. Object
+    Legacy shape (graph_id None — org-era callers, pre-#2313 artifacts):
+    ``{org_id}/{ts}_{rnd}`` — byte-identical to the historical manifest
+    contract. Per-graph shape: ``{org_id}/{graph_id}/{ts}_{rnd}``. Object
     keys are ``backups/`` + this id (every consumer prefixes it itself).
     """
     seg = f"{graph_id}/" if graph_id is not None else ""
-    return f"{team_id}/{seg}{backup_id_ts}"
+    return f"{org_id}/{seg}{backup_id_ts}"
 
 
 def _parse_backup_key(key: str) -> tuple[str, str | None, str]:
-    """#2313: parse a backup object key into (team_id, graph_id, id_ts).
+    """#2313: parse a backup object key into (org_id, graph_id, id_ts).
 
-    Accepts both shapes: ``backups/{team}/{ts}_{rnd}/{file}`` (legacy,
-    graph_id None) and ``backups/{team}/{graph}/{ts}_{rnd}/{file}``
+    Accepts both shapes: ``backups/{org}/{ts}_{rnd}/{file}`` (legacy,
+    graph_id None) and ``backups/{org}/{graph}/{ts}_{rnd}/{file}``
     (per-graph). ``id_ts`` is the ``{ts}_{rnd}`` token — feed it to
     ``_compose_backup_id`` to rebuild the manifest ``backup_id``. Raises
     ValueError on a malformed key.
@@ -838,29 +841,29 @@ def _parse_backup_key(key: str) -> tuple[str, str | None, str]:
     raise ValueError(f"malformed backup key {key!r}")
 
 
-def _stamp_backup_latest(source, team_id: str, ts: str) -> None:
-    """Seam: stamp ``backup_latest_at`` on the team's control-plane row.
+def _stamp_backup_latest(source, org_id: str, ts: str) -> None:
+    """Seam: stamp ``backup_latest_at`` on the org's control-plane row.
 
-    Registry mode: SET on the Team graph node. Supabase mode: PATCH the
-    ``teams`` row (the ``id`` filter pins the exact team). Raises on failure
+    Registry mode: SET on the Org graph node. Supabase mode: PATCH the
+    ``teams`` row (the ``id`` filter pins the exact org). Raises on failure
     — the callers (create_backup/restore_backup) keep the best-effort
     contract (#669 P3: a control-plane blip must not fail an
     otherwise-durable backup).
     """
     if _is_supabase_source(source):
         source.query(
-            "teams", method="PATCH", filters=[("id", "eq", team_id)],
+            "organizations", method="PATCH", filters=[("id", "eq", org_id)],
             json_body={"backup_latest_at": ts},
         )
     else:
         source.query(
             "MATCH (t:Team {id:$id}) SET t.backup_latest_at = $ts",
-            params={"id": team_id, "ts": ts},
+            params={"id": org_id, "ts": ts},
         )
 
 
-def _stamp_backup_restored(source, team_id: str, ts: str | None = None) -> None:
-    """Seam: stamp ``backup_restored_at`` on the team's control-plane row.
+def _stamp_backup_restored(source, org_id: str, ts: str | None = None) -> None:
+    """Seam: stamp ``backup_restored_at`` on the org's control-plane row.
 
     Same dialect split as ``_stamp_backup_latest``. Drills never reach it
     (restore_backup's ``drill`` flag skips the end-stamp entirely).
@@ -868,13 +871,13 @@ def _stamp_backup_restored(source, team_id: str, ts: str | None = None) -> None:
     ts = ts or datetime.now(timezone.utc).isoformat()  # noqa: UP017
     if _is_supabase_source(source):
         source.query(
-            "teams", method="PATCH", filters=[("id", "eq", team_id)],
+            "organizations", method="PATCH", filters=[("id", "eq", org_id)],
             json_body={"backup_restored_at": ts},
         )
     else:
         source.query(
             "MATCH (t:Team {id:$id}) SET t.backup_restored_at = $ts",
-            params={"id": team_id, "ts": ts},
+            params={"id": org_id, "ts": ts},
         )
 
 
@@ -883,38 +886,38 @@ def create_backup(
     registry,
     storage: BackupStorage,
     *,
-    team_id: str,
+    org_id: str,
     graph_name: str | None = None,
     graph_id: str | None = None,
     key: bytes | None = None,
 ) -> dict:
-    """Dump → encrypt → upload a team graph backup; stamp registry metadata.
+    """Dump → encrypt → upload an org graph backup; stamp registry metadata.
 
-    ``proj``: FalkorProjection bound to the team graph.
-    ``registry``: Graph handle of the control_plane registry (Team node lives there).
+    ``proj``: FalkorProjection bound to the org graph.
+    ``registry``: Graph handle of the control_plane registry (Org node lives there).
     ``graph_id`` (#2313): when set, the artifact is keyed under the graph
-    segment (``backups/{team}/{graph}/{ts}/…``) and the manifest records it;
-    None keeps the legacy team-level key shape byte-for-byte (pre-#2313
+    segment (``backups/{org}/{graph}/{ts}/…``) and the manifest records it;
+    None keeps the legacy org-level key shape byte-for-byte (pre-#2313
     callers and artifacts unchanged).
     Returns the plaintext manifest (also stored in R2 for listing).
     """
-    _validate_team_id(team_id)
+    _validate_org_id(org_id)
     if graph_id is not None:
         _validate_graph_id(graph_id)
-    graph_name = graph_name or getattr(getattr(proj, "g", None), "name", f"team_{team_id}")
+    graph_name = graph_name or getattr(getattr(proj, "g", None), "name", f"org_{org_id}")
     dump = dump_graph(proj.g, graph_name=graph_name)
     payload = json.dumps(dump).encode("utf-8")
     blob = encrypt_backup(payload, key=key)
     ts = datetime.now(timezone.utc)  # noqa: UP017
-    # Millisecond + random suffix — two backups for the same team within one
+    # Millisecond + random suffix — two backups for the same org within one
     # millisecond must not collide on the same object key (silent overwrite).
     backup_id_ts = (
         f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     )
-    backup_id = _compose_backup_id(team_id, backup_id_ts, graph_id=graph_id)
+    backup_id = _compose_backup_id(org_id, backup_id_ts, graph_id=graph_id)
     manifest = {
         "backup_id": backup_id,
-        "team_id": team_id,
+        "org_id": org_id,
         "graph_name": graph_name,
         "created_at": dump["dumped_at"],
         "node_count": dump["node_count"],
@@ -941,26 +944,26 @@ def create_backup(
             pass
         raise
     try:
-        _stamp_backup_latest(registry, team_id, dump["dumped_at"])
+        _stamp_backup_latest(registry, org_id, dump["dumped_at"])
     except Exception as e:  # backup already durable; the stamp is best-effort (#669 P3)
-        logger.warning("backup uploaded but stamp failed for %s: %s", team_id, e)
+        logger.warning("backup uploaded but stamp failed for %s: %s", org_id, e)
     return manifest
 
 
-def list_backups(storage: BackupStorage, team_id: str,
+def list_backups(storage: BackupStorage, org_id: str,
                  graph_id: str | None = None) -> list[dict]:
-    """Return manifests for a team's backups, newest first.
+    """Return manifests for an org's backups, newest first.
 
     ``graph_id`` (#2313): when set, lists only that graph's backups (the
-    graph key-segment prefix). When None, lists the whole team pool — both
+    graph key-segment prefix). When None, lists the whole org pool — both
     legacy flat artifacts and per-graph nested ones (manifest-based listing
-    carries graph_name/graph_id, so team-wide consumers keep working).
+    carries graph_name/graph_id, so org-wide consumers keep working).
     """
-    _validate_team_id(team_id)
+    _validate_org_id(org_id)
     if graph_id is not None:
         _validate_graph_id(graph_id)
-    prefix = f"backups/{team_id}/{graph_id}/" if graph_id is not None \
-        else f"backups/{team_id}/"
+    prefix = f"backups/{org_id}/{graph_id}/" if graph_id is not None \
+        else f"backups/{org_id}/"
     out: list[dict] = []
     for key in storage.list(prefix):
         if key.endswith("/manifest.json"):
@@ -976,6 +979,194 @@ def list_backups(storage: BackupStorage, team_id: str,
     return out
 
 
+def _audit_copied_boolean_indexes(
+    g,
+    *,
+    graph_name: str,
+    stage: str,
+    raise_on_failure: bool = True,
+) -> bool:
+    """#3154: verify + repair boolean predicates after a ``GRAPH.COPY``.
+
+    FalkorDB's ``GRAPH.COPY`` can copy a boolean RANGE index on
+    ``Point.is_operator`` without its ``false`` posting entries — observed on
+    docker FalkorDB 4.20.4 when the source's index set carries the boolean
+    index in its SDK-created position (a composite-ONLY source copies
+    healthy). The destination's index then has no entry for ``false``, so
+    ``n.is_operator = false`` matches ZERO rows on such a copy while
+    ``NOT n.is_operator`` and ``n.is_operator = true`` stay correct and
+    ``typeof(n.is_operator)`` still reports Boolean (the DATA is intact — the
+    index is corrupt). The restore/import swap (``temp → live``) and the
+    pre-restore safety copy are both GRAPH.COPYs, so an un-audited copy
+    can silently degrade EP anchor selection, the calibration gate and dedup on
+    the restored graph.
+
+    The repair is PRESENCE-based, never count-based: a copy destination can
+    hold a poisoned boolean index while the counts happen to agree — a graph
+    with no ``false`` rows at copy time hides the lost postings, and the
+    NEXT non-operator write then reads 0 (verified: 5 ``true`` nodes + a
+    boolean index copied, then one ``false`` node created → `= false` 0 vs
+    `NOT` 1). Any boolean index found is therefore dropped, and the DROP
+    succeeding is itself the presence signal (an absent index raises "no
+    such index" in O(1)).
+
+    A boolean index is DETECTED BY PRESENCE (`CALL db.indexes()`), not by
+    comparing two predicate counts: those counts come from separate
+    non-atomic queries, so a concurrent non-operator write landing between
+    them is indistinguishable from corruption (measured: 35/40 false
+    "corruption" raises on a graph with NO index while a writer ran). The
+    count probe is retained for diagnostics only and gates nothing.
+
+    Dropping is the only repair. A copy destination that carries an index set
+    rebuilds the boolean index CORRUPT: after ``DROP INDEX``, a fresh
+    ``CREATE INDEX`` on ``is_operator`` still reads 0 for `= false` (measured
+    on docker FalkorDB 4.20.4 — the single index, the ``(is_operator,
+    lastDreamedAt)`` composite, and a copy of an already-sanitized source all
+    reproduce it). A graph built from scratch with no indexes is healthy,
+    which is why the logical-dump restore path is safe today. This mirrors
+    #522's embedded policy: the full label scan for `= false` is correct, and
+    ``_ensure_indexes`` no longer creates the index on any backend.
+
+    Returns ``True`` when a boolean index was present and dropped. Raises
+    ``RuntimeError`` when the predicates are still inconsistent after the
+    drop — a caller must not report a successful copy that silently degrades
+    belief state. Never raises when ``raise_on_failure`` is False.
+    """
+    def _index_has_is_operator() -> bool:
+        """Is there a ``:Point`` index whose field list includes
+        ``is_operator``?  PRESENCE, read from the index catalogue — not a
+        predicate count.
+
+        Matched by EXACT field name, never by substring: ``row[1]`` is the
+        list of indexed field names, and ``"is_operator" in str(row[1])``
+        would also match an unrelated property such as ``is_operator_flag``.
+        That false positive is never cleared by the drop (which only targets
+        the two known boolean-index forms), so the re-check would report
+        "still present" and raise — the same post-swap user-visible failure
+        as the count race this function replaced (#3154 review P2).
+        """
+        rows = g.query("CALL db.indexes()").result_set
+        for row in rows:
+            if not row or row[0] != "Point":
+                continue
+            fields = row[1]
+            if isinstance(fields, str):
+                # Defensive: a stringified field list is tokenised, not
+                # substring-matched, so `is_operator_flag` cannot match.
+                fields = [
+                    f.strip().strip("[]'\"")
+                    for f in fields.strip("[]").split(",")
+                ]
+            if any(str(f) == "is_operator" for f in (fields or ())):
+                return True
+        return False
+
+    def _probe() -> tuple[int, int]:
+        """Diagnostic only — NEVER gates the repair. Two separate count()
+        queries are not atomic, so a concurrent non-operator write landing
+        between them desynchronises them indistinguishably from corruption
+        (measured: 35/40 false "corruption" raises on a graph with NO index
+        while a writer ran). Hence presence-based detection above/below, and
+        this is used solely to describe what was found."""
+        indexed = int(g.query(
+            "MATCH (n:Point) WHERE n.is_operator = false RETURN count(n)"
+        ).result_set[0][0])
+        truth = int(g.query(
+            "MATCH (n:Point) WHERE NOT n.is_operator RETURN count(n)"
+        ).result_set[0][0])
+        return indexed, truth
+
+    def _drop_boolean_indexes() -> bool:
+        """Unconditionally drop every known boolean-index form. Returns True
+        when a DROP actually removed something.
+
+        Only "no such index" is swallowed: treating EVERY failure as
+        "absent" silently skips the repair on a genuine drop error, which is
+        the silent-failure class #3154 exists to close.
+        """
+        dropped = False
+        for stmt in ("DROP INDEX ON :Point(is_operator)",
+                     "DROP INDEX ON :Point(is_operator, lastDreamedAt)"):
+            try:
+                g.query(stmt)
+                dropped = True
+            except Exception as e:
+                if "no such index" not in str(e).lower():
+                    logger.warning(
+                        "#3154: DROP INDEX failed on %s after %s (%s): %s",
+                        graph_name, stage, stmt, e,
+                    )
+                # else: absent — the healthy case (O(1), no startup penalty)
+        return dropped
+
+    # Presence FIRST, so nothing below depends on a racy count comparison.
+    try:
+        if not _index_has_is_operator():
+            return False
+    except Exception as e:
+        logger.warning(
+            "#3154: could not enumerate indexes on %s after %s: %s",
+            graph_name, stage, e,
+        )
+        return False
+
+    indexed = truth = None
+    try:
+        indexed, truth = _probe()
+    except Exception as e:
+        # A probe failure must not suppress the drop (it gates nothing now).
+        logger.warning(
+            "#3154: could not probe boolean predicates on %s after %s: %s",
+            graph_name, stage, e,
+        )
+
+    present = _drop_boolean_indexes()
+
+    # PRESENCE-based verification: the repair is "the index is GONE", not
+    # "two counts agree". A surviving index is the failure, whatever the
+    # counts say.
+    try:
+        still_present = _index_has_is_operator()
+    except Exception as e:
+        logger.warning(
+            "#3154: could not re-check indexes on %s after %s: %s",
+            graph_name, stage, e,
+        )
+        return present
+
+    if still_present:
+        msg = (
+            f"#3154: a boolean is_operator index on {graph_name} survived the "
+            f"{stage} copy's repair and could not be dropped — refusing to "
+            "report a successful copy that silently degrades EP/calibration "
+            "state (a surviving corrupt index returns ZERO rows for every "
+            "`is_operator = false` predicate)"
+        )
+        if raise_on_failure:
+            raise RuntimeError(msg)
+        logger.error("%s (raise_on_failure=False)", msg)
+        return present
+
+    if indexed is not None and indexed != truth:
+        logger.error(
+            "#3154: GRAPH.COPY dropped the `false` entries of the boolean "
+            "is_operator index on %s (%s) — `= false` read %d rows instead of "
+            "%d. Dropped the corrupt index: `= false` predicates now use the "
+            "correct label scan (perf cost, not a correctness cost).",
+            graph_name, stage, indexed, truth,
+        )
+    elif present:
+        logger.warning(
+            "#3154: dropped a boolean is_operator index on %s (%s) after the "
+            "copy. The counts agreed, so the index may have been healthy — "
+            "but a copied boolean index is not trustworthy (a graph with no "
+            "`false` rows hides the lost postings). No engine indexes the "
+            "property; `= false` now uses the correct label scan.",
+            graph_name, stage,
+        )
+    return present
+
+
 def _restore_into_temp_verify_swap(
     db,
     payload: dict,
@@ -986,7 +1177,7 @@ def _restore_into_temp_verify_swap(
     stamp: Callable[[], None] | None = None,
 ) -> dict:
     """Temp-graph restore → verify → atomic swap — the shared stage behind
-    ``restore_backup`` and the hosted ``POST /v1/teams/{team_id}/import``
+    ``restore_backup`` and the hosted ``POST /v1/organizations/{org_id}/import``
     endpoint (epic #1230 Task 2).
 
     ``db``: falkordb Connection handle (e.g. ``sdk._get_proj().db``) — the temp
@@ -1136,6 +1327,14 @@ def _restore_into_temp_verify_swap(
         try:
             live_g.copy(pre_name)
             pre_g = db.select_graph(pre_name)
+            # #3154: a boolean index corrupted by this copy would silently
+            # break `= false` predicates on the DR fallback copy. Repair and
+            # log loudly, but never abort an otherwise-healthy restore over
+            # a best-effort safety copy.
+            _audit_copied_boolean_indexes(
+                pre_g, graph_name=pre_name,
+                stage="pre-restore safety copy", raise_on_failure=False,
+            )
         except Exception as e:
             logger.warning("pre-restore copy failed (continuing): %s", e)
 
@@ -1158,6 +1357,21 @@ def _restore_into_temp_verify_swap(
         raise RuntimeError(
             f"Restore swap failed — verified temp graph {temp_name} intact: {e}"
         ) from e
+    # #3154: audit the swapped graph BEFORE declaring success — GRAPH.COPY is
+    # the corrupting step, and a silently dead `n.is_operator = false` on the
+    # live graph disables EP/calibration/dedup without any error. A failure
+    # here leaves the verified temp and pre-restore copies intact.
+    try:
+        _audit_copied_boolean_indexes(
+            db.select_graph(live_name), graph_name=live_name, stage="restore swap"
+        )
+    except RuntimeError:
+        logger.exception(
+            "#3154: boolean-index audit failed after the swap for %s — "
+            "verified temp graph %s and pre-restore copy %s left intact",
+            live_name, temp_name, pre_name,
+        )
+        raise
     # Success: remove the transient staging + pre-restore copies
     for g in (temp_g, pre_g):
         if g is not None:
@@ -1184,13 +1398,13 @@ def restore_backup(
     storage: BackupStorage,
     backup_key: str,
     *,
-    team_id: str,
+    org_id: str,
     graph_name: str,
     key: bytes | None = None,
     target_graph: str | None = None,
     drill: bool = False,
 ) -> dict:
-    """Restore a team graph from a stored backup: verify → temp graph → swap.
+    """Restore an org graph from a stored backup: verify → temp graph → swap.
 
     ``db``: falkordb Connection handle (e.g. ``sdk._get_proj().db``) — temp graph and
     the live graph live on the same server.
@@ -1199,10 +1413,10 @@ def restore_backup(
     read, pre-restore safety copy, live delete, swap copy) bind to ``target_graph``
     while the fail-closed graph-ISOLATION checks (manifest + decrypted payload) bind
     to the canonical ``graph_name``. This is what makes a drill scratch-only: it
-    restores a real team archive into ``_drill_*`` and can never touch the live team
+    restores a real org archive into ``_drill_*`` and can never touch the live org
     graph. Staging/pre-restore names derive from ``target_graph``.
 
-    ``drill``: skips the registry end-stamp (``Team.backup_restored_at``) so a drill
+    ``drill``: skips the registry end-stamp (``Org.backup_restored_at``) so a drill
     performs ZERO production writes.
 
     Flow: restore into ``{live}_restore_{ts}_{rnd}`` → verify node+edge counts
@@ -1211,17 +1425,17 @@ def restore_backup(
     and pre-restore copies. Any failure before the swap leaves the live graph
     untouched; a swap failure leaves the verified temp + pre-restore copies intact.
     """
-    _validate_team_id(team_id)
+    _validate_org_id(org_id)
     live_name = target_graph or graph_name
     if not backup_key.endswith("dump.enc"):
         raise ValueError("backup_key must reference a dump.enc object")
-    # Tenant isolation: the backup must belong to the requesting team.
-    # Defense in depth — the API already derives team_id from auth, but the
-    # pipeline must not accept a cross-team key (a leaked/guessed key would
-    # otherwise restore another tenant's graph into this team's live graph).
-    if not backup_key.startswith(f"backups/{team_id}/"):
+    # Tenant isolation: the backup must belong to the requesting org.
+    # Defense in depth — the API already derives org_id from auth, but the
+    # pipeline must not accept a cross-org key (a leaked/guessed key would
+    # otherwise restore another tenant's graph into this org's live graph).
+    if not backup_key.startswith(f"backups/{org_id}/"):
         raise ValueError(
-            f"backup_key does not belong to team {team_id} — cross-team restore rejected"
+            f"backup_key does not belong to team {org_id} — cross-team restore rejected"
         )
     try:
         blob = storage.download(backup_key)
@@ -1245,12 +1459,12 @@ def restore_backup(
         )
     if hashlib.sha256(blob).hexdigest() != manifest["sha256"]:
         raise ValueError("Backup integrity check failed (sha256 mismatch)")
-    # Fail-closed tenant isolation: a missing OR mismatched team_id is rejected.
-    if manifest.get("team_id") != team_id:
+    # Fail-closed tenant isolation: a missing OR mismatched org_id is rejected.
+    if manifest.get("org_id") != org_id:
         raise ValueError(
-            f"Backup manifest does not belong to team {team_id} — cross-team restore rejected"
+            f"Backup manifest does not belong to team {org_id} — cross-team restore rejected"
         )
-    # Fail-closed graph isolation within the team: the backup belongs to one
+    # Fail-closed graph isolation within the org: the backup belongs to one
     # graph; swapping it into a differently-named graph silently replaces that
     # graph's content with another's.
     if manifest.get("graph_name") and manifest["graph_name"] != graph_name:
@@ -1288,7 +1502,7 @@ def restore_backup(
     result = _restore_into_temp_verify_swap(
         db, payload,
         live_name=live_name,
-        stamp=(None if drill else lambda: _stamp_backup_restored(registry, team_id)),
+        stamp=(None if drill else lambda: _stamp_backup_restored(registry, org_id)),
     )
     result["backup_key"] = backup_key
     return result
@@ -1296,7 +1510,7 @@ def restore_backup(
 
 def prune_backups(
     storage: BackupStorage,
-    team_id: str,
+    org_id: str,
     keep_daily: int = 7,
     keep_weekly: int = 4,
     *,
@@ -1313,7 +1527,7 @@ def prune_backups(
     keep ALL backups younger than ``keep_hourly`` hours, then one anchor per
     UTC DAY-bucket for ages between ``keep_hourly`` and ``keep_daily`` days
     (bounded by the daily horizon), then the ``keep_weekly`` weekly anchors.
-    This bounds a team at hourly cadence to ~24 hourly + ~7 daily-anchors + 4
+    This bounds an org at hourly cadence to ~24 hourly + ~7 daily-anchors + 4
     weekly (≈35 objects/pool) — #2373: the anchor granularity was hour-
     buckets (retaining ~172/pool over 7 days), contradicting this docstring,
     the DR runbook, and #2319's lock-window premise; day anchors restore the
@@ -1325,13 +1539,13 @@ def prune_backups(
     stale manifest cannot trigger deletion of another (newer) backup's objects.
 
     ``graph_id`` (#2313): when set, retention is computed over ONLY that
-    graph's pool (``backups/{team}/{graph}/`` — independent per-graph
-    retention, Option A). When None, the legacy team-wide pool is pruned
+    graph's pool (``backups/{org}/{graph}/`` — independent per-graph
+    retention, Option A). When None, the legacy org-wide pool is pruned
     (pre-#2313 flat artifacts); per-graph nested keys are NEVER deleted by a
-    team-wide prune (their retention is owned by the per-graph prune). This
+    org-wide prune (their retention is owned by the per-graph prune). This
     split keeps the pre-#2313 contract byte-identical for existing callers.
     """
-    _validate_team_id(team_id)
+    _validate_org_id(org_id)
     if graph_id is not None:
         _validate_graph_id(graph_id)
     now = datetime.now(timezone.utc)  # noqa: UP017
@@ -1340,8 +1554,8 @@ def prune_backups(
     kept_day_buckets: set[tuple[int, int, int]] = set()
     hourly_mode = keep_hourly > 0
 
-    prefix = f"backups/{team_id}/{graph_id}/" if graph_id is not None \
-        else f"backups/{team_id}/"
+    prefix = f"backups/{org_id}/{graph_id}/" if graph_id is not None \
+        else f"backups/{org_id}/"
     # Newest first by the key-derived backup_id (from the listing prefix).
     manifest_keys = sorted(
         (k for k in storage.list(prefix) if k.endswith("/manifest.json")),
@@ -1350,15 +1564,15 @@ def prune_backups(
     )
     for key in manifest_keys:
         try:
-            _team, _graph, ts = _parse_backup_key(key)
+            _org, _graph, ts = _parse_backup_key(key)
         except ValueError:
             logger.warning("skipping malformed manifest key %s", key)
             continue
         if graph_id is not None and _graph != graph_id:
-            continue  # team-prefix listing under a graph filter — not ours
+            continue  # org-prefix listing under a graph filter — not ours
         if graph_id is None and _graph is not None:
             continue  # per-graph nested keys belong to the per-graph prune
-        backup_id = _compose_backup_id(_team, ts, graph_id=_graph)
+        backup_id = _compose_backup_id(_org, ts, graph_id=_graph)
         try:
             parsed = json.loads(storage.download(key))
             manifest = parsed if isinstance(parsed, dict) else {}
@@ -1377,7 +1591,7 @@ def prune_backups(
                 created = created.replace(tzinfo=timezone.utc)  # naive → assume UTC  # noqa: UP017
         except (ValueError, TypeError):
             # corrupt/naive-mismatch timestamps are deleted — a bad date must
-            # never abort pruning of the team's other backups (#2319: a
+            # never abort pruning of the org's other backups (#2319: a
             # bucket-locked object is skipped + logged, never a pool abort)
             if _delete_backup_objects(storage, backup_id):
                 deleted.append(backup_id)

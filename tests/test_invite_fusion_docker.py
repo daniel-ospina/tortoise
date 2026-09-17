@@ -77,29 +77,29 @@ class TestFusionDockerJourney:
         r = client.post("/v1/register",
                         json={"email": owner_email, "password": "password123"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
+        org_id = r.json()["org_id"]
 
         # owner Membership is required for invite RBAC — the register lane
         # keys the team by email (no membership row), so seed it directly on
         # the shared control graph.
         reg = _make_sdk(namespace="registry")._get_registry()
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:'owner', "
+            "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:'owner', "
             "status:'active', created_at:'2026-09-01T00:00:00+00:00'})",
-            params={"uid": _U_OWNER, "tid": team_id},
+            params={"uid": _U_OWNER, "tid": org_id},
         )
         # register provisions the team at tier='free' — invites need the Team
         # tier (docker lane is registry mode; the conftest provision fixture
         # does the same tier bump for its teams).
         reg.query("MATCH (t:Team {id:$id}) SET t.tier = 'team', "
                   "t.max_users = 3",
-                  params={"id": team_id})
+                  params={"id": org_id})
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _U_OWNER, "email": owner_email,
         }
         inv_email = _invitee_email()
         r = client.post("/v1/invites",
-                        json={"team_id": team_id, "email": inv_email})
+                        json={"org_id": org_id, "email": inv_email})
         assert r.status_code == 200, r.text
         token = r.json()["token"]
 
@@ -110,35 +110,35 @@ class TestFusionDockerJourney:
         }
         r = client.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 200, r.text
-        assert r.json() == {"team_id": team_id, "role": "member"}
+        assert r.json() == {"org_id": org_id, "role": "member"}
         # membership exists in the control graph
         rows = reg.query(
-            "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) "
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) "
             "RETURN count(m)",
-            params={"tid": team_id, "uid": _U_INVITEE},
+            params={"tid": org_id, "uid": _U_INVITEE},
         ).result_set
         assert rows[0][0] == 1
 
         # member slot armed: node exists (create-on-write) + user-scoped
         # member_progress {user_id: []} — never org-level steps.
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        node = _os.read_onboarding_node(proj, team_id)
+        proj = _make_sdk(namespace=org_id)._get_proj()
+        node = _os.read_onboarding_node(proj, org_id)
         assert node is not None, "OnboardingState node not armed after accept"
         progress = _os.parse_member_progress(node.get("member_progress"))
         assert progress.get(_U_INVITEE) == []
         assert node.get("status") == _os.STATUS_ACTIVE
         # the org's own register-time edge (team-named) is the ONLY org-level
         # step — the accept/member write never faked the rest.
-        steps = _os.completed_steps(proj, team_id)
+        steps = _os.completed_steps(proj, org_id)
         assert set(steps) <= {"team-named"}
 
         # consumed-token replay → idempotent failure, no double membership
         r2 = client.post("/v1/invites/accept", json={"token": token})
         assert r2.status_code == 400
         rows = reg.query(
-            "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) "
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) "
             "RETURN count(m)",
-            params={"tid": team_id, "uid": _U_INVITEE},
+            params={"tid": org_id, "uid": _U_INVITEE},
         ).result_set
         assert rows[0][0] == 1
 
@@ -151,25 +151,25 @@ class TestFusionDockerJourney:
         r = client.post("/v1/register",
                         json={"email": owner_email, "password": "password123"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
+        org_id = r.json()["org_id"]
         reg = _make_sdk(namespace="registry")._get_registry()
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:'owner', "
+            "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:'owner', "
             "status:'active', created_at:'2026-09-01T00:00:00+00:00'})",
-            params={"uid": _U_OWNER, "tid": team_id},
+            params={"uid": _U_OWNER, "tid": org_id},
         )
         # register provisions the team at tier='free' — invites need the Team
         # tier (docker lane is registry mode; the conftest provision fixture
         # does the same tier bump for its teams).
         reg.query("MATCH (t:Team {id:$id}) SET t.tier = 'team', "
                   "t.max_users = 3",
-                  params={"id": team_id})
+                  params={"id": org_id})
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _U_OWNER, "email": owner_email,
         }
         inv_email = _invitee_email()
         r = client.post("/v1/invites",
-                        json={"team_id": team_id, "email": inv_email})
+                        json={"org_id": org_id, "email": inv_email})
         assert r.status_code == 200, r.text
         inv = r.json()
 
@@ -194,7 +194,7 @@ class TestFusionDockerJourney:
         # send the OTP to the INVITEE mailbox (captured via the email seam)
         captured = {}
 
-        def fake_send(team_name, invitee_email, code, on_sent=None):
+        def fake_send(org_name, invitee_email, code, on_sent=None):
             captured.update(code=code, email=invitee_email)
 
         monkeypatch.setattr(email_notify, "send_otp_email", fake_send)
@@ -212,9 +212,9 @@ class TestFusionDockerJourney:
         assert body["accepted_via"] == "fuse"
         assert body["mismatch"] == {"invited_email": inv_email, "recorded": True}
         rows = reg.query(
-            "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) "
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) "
             "RETURN count(m)",
-            params={"tid": team_id, "uid": _U_INVITEE},
+            params={"tid": org_id, "uid": _U_INVITEE},
         ).result_set
         assert rows[0][0] == 1
         # invite records the override — never silent
@@ -238,25 +238,25 @@ class TestFusionDockerJourney:
         r = client.post("/v1/register",
                         json={"email": owner_email, "password": "password123"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
+        org_id = r.json()["org_id"]
         reg = _make_sdk(namespace="registry")._get_registry()
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:'owner', "
+            "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:'owner', "
             "status:'active', created_at:'2026-09-01T00:00:00+00:00'})",
-            params={"uid": _U_OWNER, "tid": team_id},
+            params={"uid": _U_OWNER, "tid": org_id},
         )
         # register provisions the team at tier='free' — invites need the Team
         # tier (docker lane is registry mode; the conftest provision fixture
         # does the same tier bump for its teams).
         reg.query("MATCH (t:Team {id:$id}) SET t.tier = 'team', "
                   "t.max_users = 3",
-                  params={"id": team_id})
+                  params={"id": org_id})
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _U_OWNER, "email": owner_email,
         }
         inv_email = _invitee_email()
         r = client.post("/v1/invites",
-                        json={"team_id": team_id, "email": inv_email})
+                        json={"org_id": org_id, "email": inv_email})
         assert r.status_code == 200, r.text
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _U_INVITEE,
@@ -285,35 +285,35 @@ class TestConcurrentClaimRace:
         r = client.post("/v1/register",
                         json={"email": owner_email, "password": "password123"})
         assert r.status_code == 200, r.text
-        team_id = r.json()["team_id"]
+        org_id = r.json()["org_id"]
         reg.query(
-            "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:'owner', "
+            "CREATE (m:Membership {user_id:$uid, org_id:$tid, role:'owner', "
             "status:'active', created_at:'2026-09-01T00:00:00+00:00'})",
-            params={"uid": _U_OWNER, "tid": team_id},
+            params={"uid": _U_OWNER, "tid": org_id},
         )
         reg.query("MATCH (t:Team {id:$id}) SET t.tier = 'team', "
                   "t.max_users = 5",
-                  params={"id": team_id})
+                  params={"id": org_id})
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": _U_OWNER, "email": owner_email,
         }
         inv_email = f"invitee-race-{_suffix()}@example.com"
         r = client.post("/v1/invites",
-                        json={"team_id": team_id, "email": inv_email})
+                        json={"org_id": org_id, "email": inv_email})
         assert r.status_code == 200, r.text
-        return team_id, inv_email, r.json()
+        return org_id, inv_email, r.json()
 
     def test_loser_409_no_dup_membership(self, client, env, monkeypatch):
         """Two DIFFERENT users race one token with the same valid OTP — one
         membership, loser 409 (never 200+200 / never a duplicate)."""
         reg = _make_sdk(namespace="registry")._get_registry()
-        team_id, inv_email, inv = self._seed(client, reg)
+        org_id, inv_email, inv = self._seed(client, reg)
 
         # a different logged-in account mints the OTP (sent to the invitee
         # mailbox — captured via the email seam, like the DE2E-7 test)
         captured = {}
 
-        def fake_send(team_name, invitee_email, code, on_sent=None):
+        def fake_send(org_name, invitee_email, code, on_sent=None):
             captured.update(code=code, email=invitee_email)
 
         monkeypatch.setattr(email_notify, "send_otp_email", fake_send)
@@ -330,7 +330,7 @@ class TestConcurrentClaimRace:
         # serialize at _invite_team_lock. The loser's conditional claim SET
         # matches 0 rows (winner already transitioned pending→accepted) → 409.
         sdk = _make_sdk(namespace="registry")
-        invite_row = {"id": inv["invite_id"], "team_id": team_id,
+        invite_row = {"id": inv["invite_id"], "org_id": org_id,
                       "email": inv_email, "role": "member"}
 
         async def _race():
@@ -361,10 +361,10 @@ class TestConcurrentClaimRace:
             errs[0].status_code in (403, 409), f"loser: {errs[0]}"
         # exactly ONE active membership for the racers (no dup from loser)
         rows = reg.query(
-            "MATCH (m:Membership {team_id:$tid, status:'active'}) "
+            "MATCH (m:Membership {org_id:$tid, status:'active'}) "
             "WHERE m.user_id = $b OR m.user_id = $c "
             "RETURN collect(m.user_id)",
-            params={"tid": team_id, "b": _U_RACER_B, "c": _U_RACER_C},
+            params={"tid": org_id, "b": _U_RACER_B, "c": _U_RACER_C},
         ).result_set[0][0]
         assert len(rows) == 1, f"expected 1 racer membership, got {rows}"
         # invite consumed exactly once by the winner (accepted_by matches)
@@ -395,12 +395,12 @@ class TestConcurrentClaimRace:
         from datetime import datetime as _dt
         sdk = _make_sdk(namespace="registry")
         reg = sdk._get_registry()
-        team_id, inv_email, inv = self._seed(client, reg)
+        org_id, inv_email, inv = self._seed(client, reg)
 
         # mint ONE outstanding code (captured via the email seam)
         captured = {}
 
-        def fake_send(team_name, invitee_email, code, on_sent=None):
+        def fake_send(org_name, invitee_email, code, on_sent=None):
             captured.update(code=code, email=invitee_email)
 
         monkeypatch.setattr(email_notify, "send_otp_email", fake_send)
@@ -438,11 +438,11 @@ class TestConcurrentClaimRace:
                             "uid": winner_uid, "via": "fuse",
                             "fused": inv_email},
                 )
-                sdk.membership_create(team_id, winner_uid, "member")
+                sdk.membership_create(org_id, winner_uid, "member")
             return orig_query(q, params=params, **kw)
 
         monkeypatch.setattr(reg, "query", _wrapped)
-        invite_row = {"id": inv["invite_id"], "team_id": team_id,
+        invite_row = {"id": inv["invite_id"], "org_id": org_id,
                       "email": inv_email, "role": "member"}
 
         async def _loser_accept():
@@ -459,10 +459,10 @@ class TestConcurrentClaimRace:
             assert e.status_code == 409, e
         # loser did NOT mint; winner has exactly one membership
         rows = reg.query(
-            "MATCH (m:Membership {team_id:$tid, status:'active'}) "
+            "MATCH (m:Membership {org_id:$tid, status:'active'}) "
             "WHERE m.user_id = $b OR m.user_id = $c "
             "RETURN collect(m.user_id)",
-            params={"tid": team_id, "b": loser_uid, "c": winner_uid},
+            params={"tid": org_id, "b": loser_uid, "c": winner_uid},
         ).result_set[0][0]
         assert rows == [winner_uid], f"expected only winner, got {rows}"
         # invite carries the winner's proof (never clobbered by the loser)

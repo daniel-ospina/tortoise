@@ -20,6 +20,7 @@ aboutObjects: tortoise
 | Temporal retrieval diagnosis + oracle ceiling (42/52 = 81%, #2976/#2978) — evidence | `docs/runbook/2578-oracle-ceiling.jsonl` · `docs/research/2026-09-11-subgraph-retrieval-research.md` |
 | **A/B/C context-assembly pre-registration** — verbatim vs epistemic subgraph vs union (#2976/#2978/#2683) | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` |
 | Competitor analysis — 14 profiles incl. the four-epistemic-primitives matrix (Kumiho/Cognee/Mem0/HippoRAG/GraphRAG/Emergence/Letta) | `product/competition/_analysis.md` · `product/competition/_index.md` |
+| Decision evidence — #2952 (degraded retrieval) + #2976 (temporal retrieval) from competitors (Hindsight TEMPR temporal leg, Zep bi-temporal, supermemory "dreaming") | `docs/research/2026-09-11-decisions-2952-2976-competitor-evidence.md` |
 | Auth architecture — standard patterns vs Tortoise (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
@@ -41,6 +42,7 @@ aboutObjects: tortoise
 | E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |
 | Temporal reasoning in competitor agent-memory systems (2026-09-02) | `docs/research/2026-09-02-temporal-reasoning-competitors.md` |
+| Temporal retrieval admission trace — where #2578's temporal evidence is lost (#2976, 2026-09-11) | `docs/research/2026-09-11-2976-temporal-retrieval-trace.md` |
 | Kinds classification-later deep research (#1695) | `docs/research/2026-08-26-classification-later.md` |
 | Reaper race scoping/research (#1658) | `docs/scoping/2026-08-24-1658-reaper-race-scoping.md` |
 | Test (b) lane 403/export-delete scoping (#2090) | `docs/scoping/2026-09-01-2090-test-b-lane-scoping.md` |

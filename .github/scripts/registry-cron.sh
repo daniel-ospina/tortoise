@@ -330,8 +330,8 @@ if [ "$R2_OK" = "1" ]; then
     # review). Skip keys that are not our validated team-id shape.
     while IFS= read -r prefix; do
       [ -n "$prefix" ] || continue
-      team="$(basename "$prefix")"
-      case "$team" in
+      org_id="$(basename "$prefix")"
+      case "$org_id" in
         ''|*[!A-Za-z0-9_-]*)
           log "skipping unexpected team prefix '${prefix}' (not a valid team id)"
           continue
@@ -339,7 +339,7 @@ if [ "$R2_OK" = "1" ]; then
       esac
       R2_TEAM_COUNT=$((R2_TEAM_COUNT + 1))
       # #2375: DEFAULT-graph freshness ONLY — nested default segment
-      # (backups/{team}/default/) + legacy flat (pre-#2313 default dumps;
+      # (backups/{org_id}/default/) + legacy flat (pre-#2313 default dumps;
       # flat keys start with the dump year "2xxx" so the 2-prefix never
       # matches custom nested gids g_*). The pre-#2375 leg took the newest
       # dump.enc under the WHOLE team prefix, so a team whose DEFAULT failed
@@ -350,20 +350,20 @@ if [ "$R2_OK" = "1" ]; then
       # pre-index).
       team_measured=1
       if ! newest="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
-        --bucket "$R2_BUCKET" --prefix "backups/${team}/default/" \
+        --bucket "$R2_BUCKET" --prefix "backups/${org_id}/default/" \
         --query "Contents[?ends_with(Key, 'dump.enc')] | sort_by(@, &LastModified) | [-1].LastModified" \
         --output text 2>/dev/null)"; then
         newest=""
         team_measured=0
-        log "team ${team}: default-archive listing FAILED — freshness UNKNOWN"
+        log "team ${org_id}: default-archive listing FAILED — freshness UNKNOWN"
       fi
       if ! flat_list="$(aws s3api list-objects-v2 --endpoint-url "$R2_ENDPOINT" \
-        --bucket "$R2_BUCKET" --prefix "backups/${team}/2" \
+        --bucket "$R2_BUCKET" --prefix "backups/${org_id}/2" \
         --query "Contents[?ends_with(Key, 'dump.enc')].[Key,LastModified]" \
         --output json 2>/dev/null)"; then
         flat_list="[]"
         team_measured=0
-        log "team ${team}: legacy-flat listing FAILED — freshness UNKNOWN"
+        log "team ${org_id}: legacy-flat listing FAILED — freshness UNKNOWN"
       fi
       if [ "$team_measured" = "0" ]; then
         # A failed per-team read is unmeasurable, never "no archive" (review
@@ -379,9 +379,9 @@ if [ "$R2_OK" = "1" ]; then
         # (NoSuchKey/404) means the pre-#2370 parity.
         idx=""; idx_rc=0
         idx="$(aws s3api get-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" \
-          --key "ops/legacy-flat-index/${team}.json" /dev/stdout 2>"$IDX_ERR")" || idx_rc=$?
+          --key "ops/legacy-flat-index/${org_id}.json" /dev/stdout 2>"$IDX_ERR")" || idx_rc=$?
         if [ "$idx_rc" != "0" ] && ! grep -qiE 'NoSuchKey|404|Not Found' "$IDX_ERR" 2>/dev/null; then
-          log "team ${team}: legacy-flat index read FAILED — freshness UNKNOWN"
+          log "team ${org_id}: legacy-flat index read FAILED — freshness UNKNOWN"
           R2_LIST_OK=0
           continue
         fi
@@ -405,13 +405,13 @@ if [ "$R2_OK" = "1" ]; then
         if [ "$newest_ts" = "0" ]; then
           # An unparseable timestamp is an unmeasurable pool — fail loud, never
           # report it fresh.
-          log "team ${team}: unparseable archive timestamp '${newest}' — treating pool as stale"
+          log "team ${org_id}: unparseable archive timestamp '${newest}' — treating pool as stale"
           POOL_STALE=1
         else
           age_min=$(( ($(date +%s) - newest_ts) / 60 ))
           if [ "$age_min" -gt "$STALE_MIN" ]; then
-            log "team ${team}: newest archive ${age_min}m old — filing STALE (direct leg)"
-            file_alert STALE "[DR] STALE — ${team}" "Direct R2 freshness check: newest archive ${age_min}m old (> ${STALE_MIN}m)." "$team"
+            log "team ${org_id}: newest archive ${age_min}m old — filing STALE (direct leg)"
+            file_alert STALE "[DR] STALE — ${org_id}" "Direct R2 freshness check: newest archive ${age_min}m old (> ${STALE_MIN}m)." "$org_id"
           fi
           if [ "$age_min" -gt "$DRIVER_DOWN_MIN" ]; then
             POOL_STALE=1
@@ -421,7 +421,7 @@ if [ "$R2_OK" = "1" ]; then
         # Team prefix present but no DEFAULT (or legacy-flat) archive: this
         # graph has NO restorable dump. Never-backed-up is worse than old, so
         # a disabled sweep must not read this as a fresh pool (#2796 review R5).
-        log "team ${team}: team prefix present but no default archive — treating pool as stale"
+        log "team ${org_id}: team prefix present but no default archive — treating pool as stale"
         POOL_STALE=1
       fi
     done < <(printf '%s\n' "$TEAMS" | tr '\t' '\n')

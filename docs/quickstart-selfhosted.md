@@ -394,7 +394,7 @@ tortoise serve --http --auth tenant # streamable-http on http://127.0.0.1:8000/m
 Point your client at `http://127.0.0.1:8000/mcp` with header `Authorization: Bearer tt_<key>`.
 
 > ℹ️ `serve --http --auth tenant` on an **embedded** DB is single-agent eval only — a durable team deployment uses Docker (Option A/B) or Cloud. (Compose users: the daemon already serves `/mcp` with auth via `TORTOISE_API_KEY`.)
-> ℹ️ HTTP tenant mode uses a fresh `team_{id}` namespace — data you wrote over stdio stays in the `tortoise` graph. They're separate namespaces.
+> ℹ️ HTTP tenant mode uses a fresh `org_{id}` namespace — data you wrote over stdio stays in the `tortoise` graph. They're separate namespaces.
 
 ## 6. Verify and back up
 
@@ -440,7 +440,7 @@ Tortoise ships a first-class migration path: **`tortoise export` → hosted impo
 4. **Import the artifact** into the team graph (owner session auth — the import endpoint is owner-scoped, like export):
 
    ```bash
-   curl -X POST https://api.premiselabs.co/v1/teams/<team_id>/import \
+   curl -X POST https://api.premiselabs.co/v1/organizations/<org_id>/import \
      -H "Authorization: Bearer <owner-session-jwt>" \
      -H "Content-Type: application/vnd.tortoise.export.v1" \
      -H "X-Tortoise-Import-Key: <key_b64>" \

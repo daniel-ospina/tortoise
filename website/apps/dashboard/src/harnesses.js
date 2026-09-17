@@ -145,6 +145,15 @@ const HARNESS_EXTRA_NAMES = { codexDesktop: 'Codex Desktop' }
 
 export const harnessDisplayName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAMES[id] || id
 
+// #3428 (lane B3, review cycle 1 P2-1): the connect step's fallback sentence
+// ("Head back to your agent") is reserved for a harness we genuinely cannot
+// name. `HARNESS_NAMES[id] || 'your agent'` sent a Codex Desktop user to the
+// neutral fallback even though the surface IS known (HARNESS_EXTRA_NAMES), and
+// `harnessDisplayName` is unusable unguarded because it falls back to the RAW
+// id. This returns a display name for a KNOWN harness and null otherwise — the
+// caller owns the user-facing fallback copy.
+export const knownHarnessName = (id) => HARNESS_NAMES[id] || HARNESS_EXTRA_NAMES[id] || null
+
 // Harnesses with no local file system for the file-based skills or shell
 // profile (Claude Desktop/Web connect from the app/cloud — MCP only).
 export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
@@ -171,7 +180,10 @@ cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/sessi
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
 chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 # then merge into .claude/settings.json:
-# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh" }] }] } }`,
+# #3754: the explicit timeout is load-bearing — Claude Code cancels a SessionEnd
+# hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
+# is the documented ceiling). session-end.sh measured 9.26s on a real run.
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
   // #2827: these constants are NOT wired to any live surface — they are only
   // reachable from the archived LEGACY_WIZARD_ARCHIVED render in main.jsx and
   // from harnesses.test.js. A remote HTTP MCP server must NOT be documented as
@@ -183,7 +195,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
   // issue (Anthropic's "Request headers" field is beta and absent on many
   // accounts). The `key` argument is kept so every caller keeps one signature.
   'claude-desktop': () =>
-    `Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: ${CANONICAL_MCP_URL}\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, click Authorize,\n   then pick the Organization you're onboarding.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say "Set up Tortoise" so the agent calls\n   tortoise_health to verify, and click "I've connected it — Continue" in the\n   dashboard connect step (that writes the harness-connected checkpoint).`,
+    `Tortoise — Claude Desktop (OAuth, no API key)\nClaude Desktop reaches a remote MCP server through the Connectors UI:\n1. Open Claude Desktop → Settings → Connectors → Add custom connector.\n2. Name: Tortoise\n3. Server URL: ${CANONICAL_MCP_URL}\n4. Leave Request headers empty — no API key is needed. Claude opens\n   Tortoise's sign-in page on the first connection: sign in, click Authorize,\n   then pick the Organization you're onboarding.\n5. Start a new chat and paste the Tortoise workflows prompt — it gives Claude\n   the Tortoise workflows. Then say "Set up Tortoise" so the agent calls\n   tortoise_health to verify, and click "I've connected it — Continue" in the\n   dashboard connect step (the click only advances — the connection itself is\n   confirmed by your agent's first successful write).`,
   'claude-web': () => {
     const base = WORKFLOWS_PROMPT
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
@@ -273,7 +285,10 @@ cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/sessi
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
 chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 # then merge into .claude/settings.json:
-# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh" }] }] } }`,
+# #3754: the explicit timeout is load-bearing — Claude Code cancels a SessionEnd
+# hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
+# is the documented ceiling). session-end.sh measured 9.26s on a real run.
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
   pi: `5. Session capture (#1727 T1): enable session capture in the Pi extension
 settings. The extension fires an install-probe on load (harness + timestamp
 only, no content) and files sessions to Tortoise Cloud when capture is
@@ -502,12 +517,12 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
    then pick the Organization you're onboarding.
 5. Start a new chat, paste the Tortoise workflows prompt, then say "Set up
    Tortoise" — the agent calls tortoise_health to verify. Click "I've connected
-   it — Continue" in the dashboard connect step when it passes (that writes the
-   harness-connected checkpoint).`,
+   it — Continue" in the dashboard connect step when it passes (the click only
+   advances — the agent's first successful write is what confirms it).`,
   'claude-web': () =>
-    `Tortoise — universal setup command (Claude Web — OAuth, no API key)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${CANONICAL_MCP_URL}\n3. Leave Request headers empty — no API key is needed. On the first connection\n   Claude opens Tortoise's sign-in page: sign in, click Authorize, then pick the\n   Organization you're onboarding.\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've connected it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
+    `Tortoise — universal setup command (Claude Web — OAuth, no API key)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps below, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${CANONICAL_MCP_URL}\n3. Leave Request headers empty — no API key is needed. On the first connection\n   Claude opens Tortoise's sign-in page: sign in, click Authorize, then pick the\n   Organization you're onboarding.\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've connected it — Continue" in the dashboard connect\n   step (the click only advances — the agent's first successful write is what\n   confirms it).`,
   chatgpt: () =>
-    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools, then click "I've\nconnected it — Continue →" in the dashboard connect step (that writes the\nharness-connected checkpoint).`,
+    `Tortoise — ChatGPT (Developer mode, OAuth)\n1. Enable Developer mode: chatgpt.com → Settings → Security and login →\n   Developer mode (Plus/Pro/Business/Enterprise/Education).\n2. Open chatgpt.com/plugins → the + button → create a Developer-mode app.\n3. MCP server URL: ${CHATGPT_MCP_URL}  (no API key — choose OAuth; ChatGPT\n   discovers Tortoise's authorization server automatically).\n4. Click Scan Tools — sign in to Tortoise when prompted and click Authorize.\n   When Tortoise prompts you to choose an organization, pick the one you're onboarding for.\n5. The tortoise_* tools appear (Developer mode). In the SAME ChatGPT chat,\n   paste the prompt below — it gives ChatGPT the Tortoise workflows:\n\n${WORKFLOWS_PROMPT}\n\nAfter you paste it, ask ChatGPT a Tortoise question (e.g. "are we connected?")\nand confirm it answers from the connected MCP tools, then click "I've\nconnected it — Continue →" in the dashboard connect step (the click only\nadvances — the agent's first successful write is what confirms it).`,
 }
 
 export const UNIVERSAL_COMMAND_HARNESSES = HARNESS_ORDER

@@ -180,7 +180,7 @@ Unit (crypto envelope: round-trip/tamper/rotation/KDF vectors) → integration (
 | Control-plane registry Team node (wrapped_key/key_version/kdf_params) | Data store | P3 + 7714 plan reservation | ✅ |
 | JSONL event log / rebuild (sdk.py:568-590) | Data store | P2 encrypted-verbatim snapshots + version-dependent replay | ✅ |
 | hosted_backup blobs + restore | Data store | P2/P5 ciphertext-inherits + backup→restore→decrypt test | ✅ |
-| POST /v1/points + /v1/teams/{id}/export + /v1/topics/{topic}/summary | API | P2 payload contract + fail-closed gate; P5 export-decrypt; P2 metadata-only summary | ✅ |
+| POST /v1/points + /v1/organizations/{id}/export + /v1/topics/{topic}/summary | API | P2 payload contract + fail-closed gate; P5 export-decrypt; P2 metadata-only summary | ✅ |
 | MCP tools (79, TOOL_REGISTRY) | API | P4 transport-level matrix transform + conformance matrix; interim freeze (criterion 12) | ✅ |
 | Reveal endpoints | API | none for encrypted teams (explicit) | ✅ |
 | API-key mint (hosted_api.py:1643/3953) | Auth | P3: never touches key material | ✅ |

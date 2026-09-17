@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 
+from .live import is_terminal_status  # #2498 shared terminal vocabulary
+
 _logger = logging.getLogger(__name__)
 
 # Statuses excluded from recall_state's default OBJECT view (the #1350 fold
@@ -376,16 +378,21 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             # re-ingested/overlapping terminal record is an idempotent
             # silent skip, never a warning and never a raised error.
             rows = proj.g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.id, n.status, coalesce(n.outdated, false)",
                 params={"ids": [ref, supersedes_by]},
             ).result_set
-            status_by_id = {r[0]: r[1] for r in rows}
-            if ref not in status_by_id:
+            state_by_id = {r[0]: (r[1], bool(r[2])) for r in rows}
+            if ref not in state_by_id:
                 warn(f"point supersession ref {ref!r} not found — "
                      f"skipped (fail-open)")
                 continue
-            if (status_by_id[ref] or "") in ("superseded", "retracted",
-                                              "archived"):
+            # #2498: the SHARED terminal vocabulary (status set + the legacy
+            # `outdated=true` flag) — the pre-#2498 3-status tuple let an
+            # `outdated` / `deprecated` / flag-dead ref fall through to
+            # sdk.supersede, which now RAISES, turning this documented
+            # idempotent no-op into a spurious warning.
+            if is_terminal_status(*state_by_id[ref]):
                 # already terminal — idempotent re-ingest no-op
                 continue
             try:

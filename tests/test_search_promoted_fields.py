@@ -127,8 +127,8 @@ def test_expand_mcp_tool(sdk, monkeypatch):
     from tortoise.mcp_server import tortoise_expand_relationships
     from tortoise import mcp_server as mcp_mod
     assert callable(tortoise_expand_relationships)
-    # repo convention: swap _get_team_sdk for the isolated fixture SDK
-    monkeypatch.setattr(mcp_mod, "_get_team_sdk", lambda: sdk)
+    # repo convention: swap _get_org_sdk for the isolated fixture SDK
+    monkeypatch.setattr(mcp_mod, "_get_org_sdk", lambda: sdk)
     token = _transport_mode.set("stdio")
     try:
         a = sdk.create_point("statement", "alpha claim")

@@ -13,8 +13,11 @@
 #   cp tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
 #   chmod +x .claude/hooks/session-end.sh
 #   # then add to .claude/settings.json:
+#   # #3754: the explicit timeout is load-bearing — Claude Code cancels SessionEnd
+#   # at its 1.5s default; the budget rises to the highest per-hook timeout (60 is
+#   # the documented ceiling). This hook measured 9.26s on a real hosted run.
 #   #   { "hooks": { "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command",
-#   #       "command": ".claude/hooks/session-end.sh" }] }] } }
+#   #       "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }
 #
 # Requires TORTOISE_API_KEY + TORTOISE_API_URL (hosted) or a local `tortoise`
 # install with hosted capture configured. For a LOCAL-only graph, replace the

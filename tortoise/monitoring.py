@@ -34,11 +34,97 @@ _sdk = None  # set by register()
 # Per-ATTEMPT bound on the deep DB probe (#1384): a stopped FalkorDB (incident
 # #1381 — NXDOMAIN with /health staying ok) must flip /health to degraded
 # within a sub-second-to-1.5s window, never hang the handler. This bounds ONE
-# attempt only: ``probe_db`` retries a transient connect failure once, so the
-# module's worst case is ``PROBE_DB_TOTAL_TIMEOUT`` (~3.1s), NOT 1.5s. Quoting
-# this figure as the flip bound is the trap that produced an inverted
-# coordinator ordering in the #2850/#2988 merge.
+# attempt. The #1565 retry does NOT take a SECOND bound of this size — it
+# rides the REMAINDER of the caller's one deadline (see ``probe_db``), so the
+# platform liveness shape's real total is ~``PROBE_TIMEOUT``, and the #3143
+# explicit-allowance shape's total is ``PROBE_SETUP_TIMEOUT + PROBE_TIMEOUT``.
+# ``PROBE_DB_TOTAL_TIMEOUT`` (2 x this + the retry delay) survives ONLY as the
+# loose outer-alignment figure for the platform plane — an over-estimate of
+# this shape, not its exact total. Quoting the per-attempt figure as the total
+# is the trap that produced an inverted coordinator ordering in the
+# #2850/#2988 merge.
 PROBE_TIMEOUT = 1.5
+
+# #3143: the probe has TWO phases and only the second is a reachability signal.
+#
+#   (1) projection cold-start — ``sdk._get_proj()``: connect + the FalkorDB
+#       version probe + ``_ensure_indexes()``. That is ~28 sequential round
+#       trips, and when an index is missing it BUILDS the index over the whole
+#       graph — cost that scales with graph size and server load. It is paid in
+#       full on every call that starts from a fresh SDK, which is exactly what
+#       mcp_server.tortoise_health does (request-scoped team SDK per call).
+#   (2) the ``RETURN 1`` reachability query — sub-millisecond.
+#
+# Bounding (1)+(2) with PROBE_TIMEOUT made a large, fully-reachable graph time
+# out during SETUP and report ``db.ok=false`` / ``status=degraded`` /
+# ``graph_size=0`` — the onboarding gate lie (#2202's symptom class). This is
+# the default cold-start allowance. It is opt-in: the platform liveness gate
+# (/health, selfhost /health, the standalone serve_health server) keeps the
+# tight 1.5s bound for BOTH phases (it is a fast-degrade gate, #1384), while
+# the on-demand MCP health tool — whose only job is to answer "is the served
+# graph reachable?" — passes it. Both phases stay bounded (the worker is
+# abandoned on overrun); the caller is never blocked past its budget.
+PROBE_SETUP_TIMEOUT = 20.0
+
+#: Accepted range for the operator override. Out-of-range values are rejected
+#: in favour of the default (with a warning), never clamped and never honoured:
+#:
+#: * below ``PROBE_TIMEOUT`` the allowance is TIGHTER than the platform
+#:   liveness gate's own cold-start budget: a cold-start the platform gate
+#:   would have covered now fails, reproducing #3143's false-degrade. The tool
+#:   is not uniformly stricter — an explicit allowance also buys the query a
+#:   fresh ``PROBE_TIMEOUT``, so the query phase can be MORE permissive than
+#:   ``/health``'s shared budget — but that compensation is not a reason to
+#:   accept the value: the cold-start bound is the one this knob exists to set,
+#:   so a value below the gate's own budget is a misconfiguration, not a tuning.
+#: * above the max, a typo (``3000``) would pin an on-demand tool call for tens
+#:   of minutes.
+#:
+#: Both bounds are inclusive. ``1.5`` is accepted because it IS the gate's own
+#: setup budget — but it is the FLOOR, not a safe value for a large graph: the
+#: #3143 shape (a cold-start over 1.5s) still times out there. And the explicit
+#: form always hands the query its own fresh ``PROBE_TIMEOUT``, so the total is
+#: ``setup_timeout + PROBE_TIMEOUT`` — never ``/health``'s single shared budget.
+PROBE_SETUP_TIMEOUT_MIN = PROBE_TIMEOUT
+PROBE_SETUP_TIMEOUT_MAX = 300.0
+
+
+def probe_setup_timeout() -> float:
+    """Resolve the #3143 cold-start allowance for the MCP health tool.
+
+    Read at CALL time, not import time, for two reasons:
+
+    * ``mcp_server._load_dotenv()`` runs AFTER ``tortoise.monitoring`` is
+      imported (monitoring is imported at ``tortoise.sdk`` module scope), so an
+      import-time read would silently ignore ``TORTOISE_PROBE_SETUP_TIMEOUT``
+      set in the repo-root ``.env`` — the very surface ``.env.example``
+      documents the knob on.
+    * A malformed value must never brick ``import tortoise.sdk`` (and with it
+      the CLI, MCP server and daemon). Blank/unset SILENTLY uses the default
+      (the shipped ``.env.example`` line is blank-valued, so warning on it
+      would warn on every default deployment); non-numeric, non-finite and
+      out-of-range values fall back to the default WITH a warning — the repo's
+      existing tolerant env convention (``rerank._env_float``).
+      The accepted range is ``[PROBE_SETUP_TIMEOUT_MIN, PROBE_SETUP_TIMEOUT_MAX]``
+      — see the constants above for why sub-PROBE_TIMEOUT values are rejected
+      rather than honoured.
+    """
+    raw = (os.environ.get("TORTOISE_PROBE_SETUP_TIMEOUT") or "").strip()
+    if not raw:
+        return PROBE_SETUP_TIMEOUT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("TORTOISE_PROBE_SETUP_TIMEOUT=%r is not a number — "
+                       "using %ss", raw, PROBE_SETUP_TIMEOUT)
+        return PROBE_SETUP_TIMEOUT
+    if not math.isfinite(value) or not (
+            PROBE_SETUP_TIMEOUT_MIN <= value <= PROBE_SETUP_TIMEOUT_MAX):
+        logger.warning("TORTOISE_PROBE_SETUP_TIMEOUT=%r is outside "
+                       "[%s, %s] — using %ss", raw, PROBE_SETUP_TIMEOUT_MIN,
+                       PROBE_SETUP_TIMEOUT_MAX, PROBE_SETUP_TIMEOUT)
+        return PROBE_SETUP_TIMEOUT
+    return value
 
 # ── #2850 (P0 liveness/readiness decouple) ────────────────────────────────
 #
@@ -61,9 +147,10 @@ PROBE_TIMEOUT = 1.5
 # `PROBE_STALE_AFTER` is when an in-flight probe is presumed wedged and its
 # last good result must stop being reported as live. `PROBE_HARD_TIMEOUT` —
 # the ``HealthProbe`` constructor DEFAULT — is defined below next to
-# ``PROBE_DB_TOTAL_TIMEOUT``, because the default is DERIVED from the DB
-# probes' statically-known inner total rather than chosen independently (the
-# pre-#2988 2.0s literal sat below the 3.1s total — see PROBE_HARD_TIMEOUT).
+# ``PROBE_DB_TOTAL_TIMEOUT``, because the default is DERIVED from that loose
+# outer-alignment over-estimate of the DB probes' platform-shape total rather
+# than chosen independently (the pre-#2988 2.0s literal sat below the 3.1s
+# total — see PROBE_HARD_TIMEOUT).
 # Deriving it lifts the default above the part of the inner path that IS
 # statically bound; it does NOT make the outer>inner ordering provable (see
 # the guarantee summary at ``PROBE_MAX_SUPERSEDES``).
@@ -103,13 +190,23 @@ PROBE_STALE_AFTER = 30.0
 # bounded by the redis READ timeout (10s default, clampable to 60s) with
 # redis-py's default 10 retries (a reviewer measured ~26.8s for one such
 # query). The LAYERED TIMEOUT — keep a coordinator's ``timeout`` ABOVE the
-# probe function's own statically-known TOTAL bound (see
-# ``PROBE_DB_TOTAL_TIMEOUT``) — is therefore a BEST-EFFORT ALIGNMENT that
+# probe function's own statically-known total for THAT caller's shape (the
+# platform liveness shape's real total is ~``PROBE_TIMEOUT``; the #3143
+# explicit-allowance shape's is ``setup_timeout + PROBE_TIMEOUT``;
+# ``PROBE_DB_TOTAL_TIMEOUT`` is only a loose OVER-ESTIMATE of the former, see
+# its definition) — is therefore a BEST-EFFORT ALIGNMENT that
 # reduces how often a worker is stranded. It is NOT, and cannot be, a
 # guarantee. Do not add another constant or another margin trying to make it
 # one. Abandoning a probe does not stop its thread (CPython #87185).
 PROBE_MAX_SUPERSEDES = 4
 PROBE_POLL_INTERVAL = 0.02
+
+#: Name of the single bounded daemon thread a ``HealthProbe`` starts for its
+#: probe (``_start_locked``). Defined once so callers/tests that must tell the
+#: background refresher's own worker apart from a request-path invocation can
+#: compare a symbol instead of re-typing the literal — if the literal drifts,
+#: such a check silently misclassifies the refresher.
+HEALTH_PROBE_THREAD_NAME = "tortoise-health-probe"
 
 # #1565: ONE bounded retry on a TRANSIENT connect failure only (an embedded
 # redislite server momentarily starting / momentarily unreachable under
@@ -118,17 +215,36 @@ PROBE_POLL_INTERVAL = 0.02
 # reports degraded ~0.1s later — the retry never masks a persistent failure.
 PROBE_RETRY_DELAY = 0.1
 
-#: The statically-known worst-case wall time of :func:`probe_db` ITSELF: the
-#: bound a DB-plane coordinator must sit ABOVE for the layered-timeout
-#: alignment to be meaningful. It does NOT cover the wrapper's SDK-acquisition
-#: prefix (see ``PROBE_SDK_ACQUISITION_BUDGET`` and the guarantee summary at
-#: ``PROBE_MAX_SUPERSEDES``). ``PROBE_TIMEOUT`` bounds ONE attempt, but a
-#: transient connect failure retries once after ``PROBE_RETRY_DELAY``, so the
-#: function's real ceiling is two attempts plus the delay. Reading only
-#: ``PROBE_TIMEOUT`` here
-#: is the trap that produced an inverted ordering in the #2850/#2988 merge:
-#: a 2.0s coordinator bound looks safely above a "1.5s" inner bound while in
-#: fact sitting below the 3.1s total. Derive it rather than restating it.
+#: Prefix of ``_probe_once``'s synthesized SETUP-phase timeout. ``probe_db``
+#: matches it to tell a retry that never reached the reachability query (its
+#: remaining slice of the deadline could not redo the cold-start) from one
+#: that reached (and failed at) the query: only the latter's error may replace
+#: the FIRST attempt's real error (#3143 review).
+#:
+#: ⚠️ This is a distinct error STRING, NOT a distinct status. A setup timeout
+#: still returns ``ok=False`` from ``probe_db``, and ``metrics()`` maps
+#: ``db["ok"] is False`` to ``status="degraded"`` + ``graph_size=0`` — #3143's
+#: symptom SHAPE, with only the ``error`` text changed. Do not read the
+#: separate spelling as "no verdict reported": to a caller the report is
+#: indistinguishable from a real unreachability except for that string.
+_PROBE_SETUP_TIMEOUT_MSG = "probe setup timeout after "
+
+#: A LOOSE outer-alignment bound for :func:`probe_db`'s PLATFORM liveness
+#: shape (no explicit ``setup_timeout``): the figure a DB-plane coordinator is
+#: sized ABOVE. It is deliberately an OVER-ESTIMATE, not the function's exact
+#: total — since #3143 the #1565 retry rides the REMAINDER of the caller's
+#: single deadline (``total_budget - elapsed - PROBE_RETRY_DELAY``) instead of
+#: taking a second ``PROBE_TIMEOUT``, so the platform shape's real total is
+#: ~``PROBE_TIMEOUT`` and this 2 x ``PROBE_TIMEOUT`` + delay figure sits
+#: comfortably above it. It does NOT bound the #3143 explicit-allowance (MCP)
+#: shape, whose total is ``setup_timeout + PROBE_TIMEOUT`` — that caller has no
+#: coordinator above it, the tool IS the outermost caller. Reading only
+#: ``PROBE_TIMEOUT`` as the platform total is the trap that produced an
+#: inverted ordering in the #2850/#2988 merge: a 2.0s coordinator bound looked
+#: safely above a "1.5s" inner bound while sitting below the then-real 3.1s
+#: total. It does NOT cover the wrapper's SDK-acquisition prefix either (see
+#: ``PROBE_SDK_ACQUISITION_BUDGET`` and the guarantee summary at
+#: ``PROBE_MAX_SUPERSEDES``). Derive it rather than restating it.
 PROBE_DB_TOTAL_TIMEOUT = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY
 
 #: #2850/#2988: the CONNECT leg of acquiring an SDK before :func:`probe_db`
@@ -159,7 +275,8 @@ PROBE_DB_TOTAL_TIMEOUT = 2 * PROBE_TIMEOUT + PROBE_RETRY_DELAY
 PROBE_SDK_ACQUISITION_BUDGET = 2.0
 
 #: Safety margin so a DB coordinator's outer bound sits STRICTLY above the
-#: statically-known inner total. A bound EXACTLY equal to that total is still
+#: loose outer-alignment figure (``PROBE_DB_TOTAL_TIMEOUT``), NOT the probes'
+#: exact inner total. A bound EXACTLY equal to that figure is still
 #: a race — the worker's own timeout and the coordinator's deadline fire at
 #: the same instant — and after the inner bound fires the worker still needs a
 #: moment to store and notify its result. 0.5s is ~25x ``PROBE_POLL_INTERVAL``
@@ -170,13 +287,17 @@ PROBE_SDK_ACQUISITION_BUDGET = 2.0
 PROBE_DB_BOUND_MARGIN_S = 0.5
 
 #: The ``HealthProbe`` constructor DEFAULT — a safety net for any future
-#: ``HealthProbe(fn)`` that omits ``timeout``. It is DERIVED from the DB
-#: probes' statically-known inner total: ``PROBE_DB_TOTAL_TIMEOUT`` PLUS the
-#: acquisition budget PLUS a strict-above margin — NOT the bare
-#: ``PROBE_TIMEOUT`` (1.5s). The pre-#2988 literal was 2.0s: it LOOKED safely
-#: above a "1.5s" inner bound while actually sitting below the 3.1s total,
-#: so any ``HealthProbe(lambda: _probe_db())`` built without an explicit
-#: timeout was stranded a worker thread on every timeout (CPython #87185 —
+#: ``HealthProbe(fn)`` that omits ``timeout``. It is DERIVED from
+#: ``PROBE_DB_TOTAL_TIMEOUT`` — the loose outer-alignment figure for the
+#: PLATFORM liveness shape, deliberately an OVER-ESTIMATE of that shape's real
+#: ~``PROBE_TIMEOUT`` total (see its definition), NOT the probes' exact inner
+#: total — PLUS the acquisition budget PLUS a strict-above margin, and NOT the
+#: bare ``PROBE_TIMEOUT`` (1.5s). The pre-#2988 literal was 2.0s: it LOOKED
+#: safely above a "1.5s" inner bound while actually sitting below the
+#: THEN-REAL ~3.1s total (the #1565 retry still took a second ``PROBE_TIMEOUT``
+#: before #3143 made it ride the remainder), so any
+#: ``HealthProbe(lambda: _probe_db())`` built without an explicit timeout was
+#: stranded a worker thread on every timeout (CPython #87185 —
 #: ``asyncio.wait_for`` cancels the awaitable, not the thread).
 #:
 #: What this does and does not buy: it lifts the default above the part of
@@ -206,7 +327,7 @@ def event_retention_interval() -> int:
     Round-4 review P2 (PRE-EXISTING, fixed here): a bare ``int()`` in both
     call sites accepted ``0``/``-1``. In the hosted retention loop
     ``asyncio.sleep(0)``/``sleep(-1)`` return immediately, hammering
-    ``_sweep_events``/``_purge_deleted_teams`` with no delay; in the SDK lazy
+    ``_sweep_events``/``_purge_deleted_orgs`` with no delay; in the SDK lazy
     purge the gate ``now - _EVENT_PURGE_LAST < interval`` is always false, so
     every ``events_poll`` issued a DELETE. A non-numeric value also raised out
     of the SDK poll. Anything that is not a positive whole number of seconds
@@ -414,34 +535,165 @@ async def run_on_daemon_worker(fn, *, name: str):
     return await asyncio.wrap_future(future)
 
 
-def _probe_once(sdk) -> tuple[bool, str | None, bool]:
-    """Execute ONE bounded ``RETURN 1`` probe on the shared probe worker.
+def _probe_once(sdk, timeout=None,
+                setup_timeout=None) -> tuple[bool, str | None, bool]:
+    """Execute ONE bounded probe on the shared probe worker.
 
     Returns ``(ok, error, transient)`` — ``transient`` is True only when the
     failure was a connection-level error that a single retry could clear,
     never a timeout (a hung DB stays hung).
 
-    #2850: the worker is process-lifetime and daemon (no per-call thread
-    leak); ``PROBE_TIMEOUT`` still bounds THIS caller's wait, so a probe that
-    never returns degrades /health instead of hanging it.
+    #3143: the two phases are bounded separately. ``setup_timeout`` bounds the
+    projection cold-start (``sdk._get_proj()`` — connect + ``_ensure_indexes()``,
+    see PROBE_SETUP_TIMEOUT); ``timeout`` bounds the ``RETURN 1`` query itself,
+    which is the only phase that is a reachability signal. Both resolve
+    ``PROBE_TIMEOUT`` at CALL time (not as frozen default args) so the
+    module-global stays monkeypatchable.
+
+    When ``setup_timeout`` is NOT given (the platform-liveness shape) the two
+    phases SHARE the single ``timeout`` budget, so the caller's total wait is
+    still ≤ ``timeout`` exactly as before #3143 (the `/health` fast-degrade
+    contract, #1384). Only callers that pass an explicit ``setup_timeout`` opt
+    into a separate cold-start allowance, and their total can then reach
+    ``setup_timeout + timeout``.
+
+    #3143 P1 (concurrency): ``future.result(timeout=…)`` starts its clock at
+    SUBMISSION, so with the single #3062 slot a query that queues behind
+    another probe's cold-start would spend its reachability budget queued and
+    time out — a reachable graph reported degraded. The explicit-allowance
+    shape therefore charges the WAIT FOR THE SLOT to the cold-start allowance's
+    LEFTOVER and applies ``timeout`` only once the worker has picked the query
+    up (the ``query_started`` event), keeping the call's total at
+    ``setup_timeout + timeout``. The platform-liveness shape keeps its single
+    hard total (#1384) — there the queue wait is deliberately INSIDE the
+    budget, because that gate exists to fast-degrade.
+
+    #2850: BOTH phases run on the process-lifetime daemon ``_probe_worker()``
+    — never a per-call executor — so a probe that overruns cannot leak a
+    thread; it holds the single slot only until its own blocked socket call
+    returns. The ``sdk._get_proj`` / ``proj.g.query`` lookups live INSIDE the
+    submitted callables, so a malformed SDK raises inside the future and is
+    classified here: this function keeps its never-raise contract. A TIMEOUT
+    is never retried by ``probe_db``.
     """
+    if timeout is None:
+        timeout = PROBE_TIMEOUT
+    combined = setup_timeout is None
+    if combined:
+        setup_timeout = timeout
+    start = time.monotonic()
 
-    def _ping() -> None:
-        proj = sdk._get_proj()
-        proj.g.query("RETURN 1")
+    def _setup():
+        # The lookup is INSIDE the worker: a missing/broken `_get_proj` must
+        # surface as a classified probe failure, never as a raised
+        # AttributeError on the caller thread (probe_db never raises).
+        return sdk._get_proj()
 
-    future = _probe_worker().submit(_ping)
+    setup = _probe_worker().submit(_setup)
     try:
-        future.result(timeout=PROBE_TIMEOUT)
+        proj = setup.result(timeout=setup_timeout)
+    except concurrent.futures.TimeoutError as e:
+        # ``setup.done()`` is True for TWO different causes and so cannot be
+        # read as "the worker refused the submission" (#3143 review P2):
+        #   (a) the worker refused/aborted the submission (saturated #2850
+        #       backlog) — the Future already carries its own message; or
+        #   (b) the CALLABLE raised a TimeoutError — on py3.12
+        #       ``concurrent.futures.TimeoutError`` IS ``builtins.TimeoutError``,
+        #       so a bare ``TimeoutError()``/``socket.timeout`` from inside
+        #       ``_get_proj`` is re-raised here and ``str(e)`` is often EMPTY.
+        #       Fall back to the synthesized setup message rather than
+        #       returning ``error=""``.
+        msg = str(e)[:200] or f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s"
+        if setup.done():
+            return False, msg, _is_transient_connect_error(e)
+        # Not done: the cold-start genuinely overran its allowance (the worker
+        # is abandoned, never cancelled — #2850).
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+    except Exception as e:  # noqa: BLE001, RUF100
+        return False, str(e)[:200], _is_transient_connect_error(e)
+
+    if combined:
+        # Platform-liveness shape (#1384): the query may spend only what the
+        # cold-start left of the SINGLE budget, so the caller's total wait
+        # stays ≤ timeout. A busy worker's queue wait is inside that total BY
+        # DESIGN — this is a fast-degrade gate, not a reachability report, so
+        # congestion must not extend its budget.
+        query_budget = timeout - (time.monotonic() - start)
+        if query_budget <= 0:
+            # The cold-start consumed the shared budget, so the reachability
+            # query never ran. Report the SETUP spelling (the phase at fault):
+            # ONE spelling per phase, and ``probe_db``'s retry uses this prefix
+            # to keep the first attempt's real error when its own remainder was
+            # eaten by the cold-start (#3143 review P2).
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+        slot_wait_budget = None
+    else:
+        # Explicit-allowance shape (#3143, the MCP health tool): ``timeout``
+        # bounds the reachability query's OWN execution. The wait for the
+        # single #3062 worker to PICK THE QUERY UP is not a reachability
+        # signal — it is charged to the LEFTOVER of the cold-start allowance
+        # instead. Without this, a query queued behind another probe's slow
+        # (or already-abandoned) cold-start spent the 1.5s reachability budget
+        # queued, timed out, and reported a REACHABLE graph ``degraded``/0 —
+        # the #3143 symptom surviving under concurrency (review P1).
+        query_budget = timeout
+        slot_wait_budget = max(0.0, setup_timeout - (time.monotonic() - start))
+
+    query_started = threading.Event()
+
+    def _run_query():
+        # The signal fires as the WORKER picks the submission up, so the
+        # caller can bound EXECUTION rather than the queue wait (a
+        # ``Future.result`` clock starts at SUBMISSION — the whole P1 bug).
+        query_started.set()
+        # Same for `proj.g.query` — the lookup is the worker's.
+        return proj.g.query("RETURN 1")
+
+    query = _probe_worker().submit(_run_query)
+    # The ``query.done()`` guard skips the wait when ``submit()`` refused the
+    # submission outright (saturated #2850 backlog) — fail fast.
+    # TRUTHINESS is deliberate: ``slot_wait_budget`` is ``None`` in the
+    # COMBINED shape (no slot wait) and a float in the EXPLICIT one, where it
+    # clamps to exactly ``0.0``. A zero leftover is NOT a fault: the caller has
+    # not yielded the GIL, so ``wait(0.0)`` can never let a submission made
+    # microseconds earlier look started, and firing on ``is not None`` there
+    # would fail a REACHABLE graph on a FREE slot (the reverted #3143
+    # false-FAIL — a zero-leftover query runs as soon as the caller blocks in
+    # ``Future.result``, which DOES release the GIL).
+    if (slot_wait_budget and not query.done()
+            and not query_started.wait(slot_wait_budget)):
+        # The worker never BEGAN the query inside the leftover allowance, so the
+        # query never ran. That is a distinct error STRING, NOT a distinct
+        # status: ``ok=False`` still flows out to ``metrics()`` as
+        # ``status="degraded"`` + ``graph_size=0`` — #3143's shape with only
+        # the text changed (see ``_PROBE_SETUP_TIMEOUT_MSG``). Same setup
+        # spelling as a cold-start overrun (one spelling per phase). The
+        # abandoned submission holds no extra thread (#2850).
+        return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
+    try:
+        query.result(timeout=query_budget)
         return True, None, False
-    except concurrent.futures.TimeoutError:
+    except concurrent.futures.TimeoutError as e:
+        if query.done() and not query_started.is_set():
+            # The worker refused/aborted the submission (saturated backlog) —
+            # its own message, never a synthesized phase timeout.
+            return False, str(e)[:200], _is_transient_connect_error(e)
+        if not query_started.is_set():
+            # The submission was QUEUED and never RAN (the worker was busy for
+            # the whole reachability budget), so the phase at fault is the
+            # wait for the slot, not a query that overran — report the SETUP
+            # spelling, the same "one spelling per phase" rule the guard above
+            # follows. Only a query that actually STARTED may claim
+            # ``probe timeout after …``. Reuses the EXISTING ``query_started``
+            # event; no new machinery.
+            return False, f"{_PROBE_SETUP_TIMEOUT_MSG}{setup_timeout}s", False
         # NOT retried — a slow/hung DB would just hang again.
-        return False, f"probe timeout after {PROBE_TIMEOUT}s", False
+        return False, f"probe timeout after {timeout}s", False
     except Exception as e:  # noqa: BLE001, RUF100
         return False, str(e)[:200], _is_transient_connect_error(e)
 
 
-def probe_db(sdk) -> dict:
+def probe_db(sdk, setup_timeout=None) -> dict:
     """Deep-check graph-DB connectivity through an SDK's projection.
 
     Runs a trivial ``RETURN 1`` on the SAME connection graph-touching
@@ -449,13 +701,30 @@ def probe_db(sdk) -> dict:
     depending on caller), hard-bounded by a 1.5s worker-thread timeout PER
     ATTEMPT: the redis client's own socket_connect_timeout is 2s
     (``projection._DB_CONNECT_TIMEOUT_DEFAULT``; 5s pre-#2850), still slower
-    than a health poll, so a dead URI would otherwise hang the handler. Note
-    the TOTAL bound of THIS FUNCTION is ``PROBE_DB_TOTAL_TIMEOUT`` (two
-    attempts plus the retry delay, ~3.1s) because of the #1565 retry below —
-    callers bounding it must clear the total, not the per-attempt figure. That
-    says nothing about the SDK-acquisition prefix that runs BEFORE this
+    than a health poll, so a dead URI would otherwise hang the handler. The
+    TOTAL bound of THIS FUNCTION is ONE caller deadline, not the per-attempt
+    figure and not ``PROBE_DB_TOTAL_TIMEOUT``:
+
+    * no ``setup_timeout`` (the platform liveness shape, #1384): a single
+      ``PROBE_TIMEOUT`` covering BOTH phases. The #1565 retry adds no second
+      bound — it rides what is LEFT of that deadline
+      (``total_budget - elapsed - PROBE_RETRY_DELAY``), so this shape's real
+      total is ~``PROBE_TIMEOUT``. ``PROBE_DB_TOTAL_TIMEOUT`` (2 x
+      ``PROBE_TIMEOUT`` + the retry delay) survives only as the loose
+      outer-alignment figure a coordinator is sized above.
+    * explicit ``setup_timeout`` (the MCP ``tortoise_health`` tool): one
+      deadline of ``setup_timeout + PROBE_TIMEOUT`` — the cold-start allowance
+      plus one reachability budget; the retry rides the remainder of THAT.
+
+    That says nothing about the SDK-acquisition prefix that runs BEFORE this
     function (see ``PROBE_SDK_ACQUISITION_BUDGET``), so an outer bound sized
     against it is best-effort alignment, not a proven ordering.
+
+    #3143: callers may pass a ``setup_timeout`` — the projection-cold-start
+    allowance that bears the ``sdk._get_proj()`` cost (connect + a
+    size-dependent ``_ensure_indexes()``) ON TOP of the ``PROBE_TIMEOUT``
+    reachability budget. The platform liveness gate passes nothing and keeps
+    the single shared budget; only the MCP ``tortoise_health`` tool opts in.
 
     #1565: a single TRANSIENT connection-level failure (embedded redislite
     # server mid-startup / momentarily unreachable under parallel load —
@@ -468,12 +737,50 @@ def probe_db(sdk) -> dict:
     Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
     NEVER raises, so /health can report ``status: degraded`` instead of
     crashing the process.
+
+    #3143: ``setup_timeout`` is the projection-cold-start allowance (see
+    ``_probe_once``). When it is not given, the cold-start and the query SHARE
+    the single ``PROBE_TIMEOUT`` budget, so the platform liveness gate keeps
+    its tight fast-degrade bound (#1384). Only callers that opt in (the MCP
+    ``tortoise_health`` tool) pay a separate allowance for a large graph's
+    cold-start instead of being reported unreachable for it. In that explicit
+    shape the reachability budget is NOT spent waiting for the single #3062
+    worker slot — a query queued behind another probe's cold-start is charged
+    to the leftover of the allowance instead, so congestion cannot fake the
+    degraded/0 report this change exists to remove (review P1).
+
+    ONE spelling per phase in ``error``: a cold-start that overran its
+    allowance, OR consumed the whole shared budget so the reachability query
+    never ran, reports ``probe setup timeout after Ns``; only a query that
+    actually RAN and overran reports ``probe timeout after Ns``. The setup
+    spelling is also the prefix ``probe_db`` uses to keep the first attempt's
+    real error when the retry's own remainder was eaten by the cold-start.
     """
     start = time.monotonic()
-    ok, error, transient = _probe_once(sdk)
+    # Resolve at CALL time so the module-global stays monkeypatchable.
+    attempt_timeout = PROBE_TIMEOUT
+    total_budget = (attempt_timeout if setup_timeout is None
+                    else setup_timeout + attempt_timeout)
+    ok, error, transient = _probe_once(sdk, setup_timeout=setup_timeout)
     if not ok and transient:
-        time.sleep(PROBE_RETRY_DELAY)
-        ok, error, _ = _probe_once(sdk)
+        remaining = total_budget - (time.monotonic() - start) - PROBE_RETRY_DELAY
+        if remaining > 0:
+            time.sleep(PROBE_RETRY_DELAY)
+            # Combined shape on purpose: the retry gets what the deadline has
+            # LEFT, split across both phases — not a second allowance.
+            retry_ok, retry_error, _ = _probe_once(
+                sdk, timeout=remaining, setup_timeout=None)
+            if retry_ok:
+                ok, error = True, None
+            elif not (retry_error or "").startswith(_PROBE_SETUP_TIMEOUT_MSG):
+                # The retry reached (and failed at) the query — a genuine
+                # verdict; take it.
+                ok, error = retry_ok, retry_error
+            # else: the remainder was too small to REDO the cold-start, so the
+            # retry never observed the DB. Keep the FIRST attempt's real error
+            # instead of letting the clock artifact ("probe setup timeout
+            # after 0.01s") mask it — the `remaining > 0` guard alone does not
+            # cover the 0 < remaining < cold-start window (#3143 review).
     return {
         "ok": ok,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),
@@ -509,9 +816,10 @@ class HealthProbe:
        that wedges, recovers and wedges again can strand up to
        ``max_supersedes`` threads per episode. What keeps the steady state
        bounded in practice is the caller's LAYERED TIMEOUT — keep ``timeout``
-       ABOVE the probe function's own statically-known TOTAL bound (stated in
-       full once, at ``PROBE_DB_TOTAL_TIMEOUT``; the per-attempt figure is
-       NEVER the right one) so the inner timeout normally fires first and the
+       ABOVE the probe function's own total for THAT caller's shape (for the
+       platform shape ~``PROBE_TIMEOUT``; ``PROBE_DB_TOTAL_TIMEOUT`` is only a
+       loose outer-alignment figure, and the per-attempt figure is NEVER the
+       right one) so the inner timeout normally fires first and the
        worker returns by itself, making abandonment the exception instead of
        the norm. This is a BEST-EFFORT ALIGNMENT, not a proven ordering — the
        inner worst case is unbounded; see the guarantee summary at
@@ -601,7 +909,7 @@ class HealthProbe:
         self._started_at = time.monotonic()
         self._worker = threading.Thread(
             target=self._run, args=(seq,),
-            name="tortoise-health-probe", daemon=True,
+            name=HEALTH_PROBE_THREAD_NAME, daemon=True,
         )
         self._worker.start()
 
@@ -1723,7 +2031,7 @@ def _counter_val(counter) -> int:
     return 0
 
 
-def metrics(sdk=None) -> dict:
+def metrics(sdk=None, setup_timeout=None) -> dict:
     """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
 
     ``db`` is the deep-check result ({ok, latency_ms, error}) added by
@@ -1747,18 +2055,37 @@ def metrics(sdk=None) -> dict:
     a broken DB, so reporting degraded there is the lie #2202 removes.
 
     ``graph_size`` is counted ONLY on a successful probe (review fix, #2202):
-    a dead/hung DB must degrade fast (the bounded RETURN-1 probe —
-    ``PROBE_TIMEOUT`` per attempt, ``PROBE_DB_TOTAL_TIMEOUT`` as the worst-case
-    total) and never drag an extra unbounded taxonomy round-trip onto the
-    health call, and its failure must not inflate the very ``errors`` field
-    this response reports. A degraded report carries graph_size 0 with the
-    probe error.
+    a dead/hung DB must degrade fast (the bounded RETURN-1 probe — ONE
+    ``PROBE_TIMEOUT`` deadline in the default shape, or ``setup_timeout +
+    PROBE_TIMEOUT`` when an explicit allowance is passed) and never drag an
+    extra unbounded taxonomy round-trip onto the health call, and its failure
+    must not inflate the very ``errors`` field this response reports. A
+    degraded report carries graph_size 0 with the probe error. The count
+    itself (``taxonomy()``) carries NO budget of its own — it is safe only
+    because it runs after a successful ``RETURN 1`` (a reachable server is
+    expected to answer label counts promptly; that is an assumption, not a
+    measurement), so the MCP tool's total latency is ``setup_timeout +
+    PROBE_TIMEOUT`` PLUS that round-trip. If the probe SUCCEEDS but the count
+    raises, the report is ``status="ok"`` with ``graph_size 0`` and an
+    incremented ``errors`` counter — the failure is recorded, never raised, so
+    ``ok`` + 0 is deliberately indistinguishable from a genuinely empty graph
+    and callers needing certainty must read ``errors``.
+
+    #3143: ``setup_timeout`` (named to match ``probe_db``'s keyword — the
+    previous ``probe_setup_timeout`` SHADOWED the module function of the same
+    name inside this body, review P2) is the projection-cold-start allowance
+    threaded to ``probe_db``. It is the MCP health tool's seam: the platform
+    liveness gate passes nothing (tight 1.5s, fail-fast), while
+    ``tortoise_health`` passes its call-time-resolved allowance
+    (``probe_setup_timeout()``) so a reachable graph whose cold-start exceeds
+    1.5s is reported ``ok`` with its real ``graph_size`` instead of
+    ``degraded``/0.
     """
     target = sdk if sdk is not None else _sdk
     if target is None:
         db = {"ok": None, "latency_ms": 0.0, "error": "no_sdk_registered"}
     else:
-        db = probe_db(target)
+        db = probe_db(target, setup_timeout=setup_timeout)
     if db["ok"] is True:
         status = "ok"
     elif db["ok"] is False:

@@ -74,9 +74,15 @@ jobs:
                   startswith("supabase/migrations/"),
                   startswith(".github/scripts/check-migration-"),
               ),
-              # dashboard-js-tests (agent-infra node-ci in website/apps/dashboard)
+              # dashboard-js-tests (agent-infra node-ci in website/apps/dashboard).
+              # #3775: the suite BUILDS the bundle before testing it, and
+              # src/pricing.js imports product/pricing.json at build time — a
+              # pricing-only change can break that build. It used to ride in via
+              # the committed dist under website/apps/dashboard/; the artifact is
+              # untracked now, so name the input explicitly.
               "dashboard": any_file(
                   startswith("website/apps/dashboard/"),
+                  isfile("product/pricing.json"),
               ),
               # uv-lock-check
               "uv_lock": any_file(
@@ -120,6 +126,13 @@ jobs:
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
                          "tests/test_tenant_provision_cors.mjs"),
+                  # #3501: the BFF auth suites live here and had NO path entry,
+                  # so a PR touching only them could not trigger the job that
+                  # runs them — the job would be skipped, not failed.
+                  startswith("tests/e2e/auth/"),
+                  isfile("tests/test_no_legacy_token_path.py"),
+                  isfile("tests/e2e/test_auth_bff_clickthrough.py",
+                         "tests/e2e/test_auth_cross_origin_cookie.py"),
                   startswith("supabase/functions/waitlist-subscribe/"),
                   startswith("supabase/functions/tenant-provision/"),
                   startswith("supabase/functions/_shared/"),
@@ -211,23 +224,40 @@ jobs:
               ),
               # dashboard-e2e (#2166/#2178): the two-server keys-table suite
               # (mixed fixture — durable-only render regression). Triggers on
-              # the suite + the harness module/fixtures it imports + the
-              # render-critical src (a render PR runs the suite against its
-              # committed dist — render changes ship the dist rebuild in the
-              # same PR per convention, #2175 precedent) + any committed-dist
-              # change + workflow edits (a job-definition change re-runs its
-              # own suite). Known blind spot (accepted): a src render change
-              # that forgets its dist rebuild runs against the previous
-              # bundle — detecting that would require an in-CI npm build,
-              # which the scope doc S6 explicitly excludes (committed-dist
-              # convention; deploy-pages rebuilds from src at deploy).
+              # the suite + the harness module/fixtures it imports + every
+              # input the served dashboard bundle is BUILT from + workflow edits
+              # (a job-definition change re-runs its own suite).
+              #
+              # #3775: `dist/` was untracked, so it can no longer appear in a
+              # diff — this entry used to catch the committed rebuild, which was
+              # how a `public/`-only change (or a build-input change) became
+              # visible at all. The filter now names the build INPUTS directly,
+              # which is strictly more robust than the rebuild convention was:
+              # a change to any of them changes the bundle the job serves.
+              # (The pre-#3775 'known blind spot' — a src change that forgot its
+              # dist rebuild ran against the previous bundle — is GONE: the job
+              # builds before it boots.)
               "dashboard_e2e": any_file(
                   isfile("tests/e2e/test_keys_table_mixed.py"),
                   isfile("tests/e2e/test_graphs_management.py"),
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
                   startswith("website/apps/dashboard/src/"),
-                  startswith("website/apps/dashboard/dist/"),
+                  # public/ is copied verbatim into dist/ by vite (default
+                  # publicDir) and was previously only visible via the
+                  # committed dist rebuild — a public-only change must still
+                  # run the suite that serves that copy.
+                  startswith("website/apps/dashboard/public/"),
+                  # the vite entry document + build config + deps
+                  isfile("website/apps/dashboard/index.html",
+                         "website/apps/dashboard/vite.config.js",
+                         "website/apps/dashboard/package.json",
+                         "website/apps/dashboard/package-lock.json"),
+                  # src/pricing.js imports product/pricing.json from the repo
+                  # root (4 levels up) at build time, so a pricing change
+                  # changes the served bundle — it too used to surface only
+                  # through the committed dist rebuild.
+                  isfile("product/pricing.json"),
                   isfile(".github/workflows/ci.yml"),
               ),
           }
@@ -385,19 +415,32 @@ jobs:
 
   dashboard-js-tests:
     needs: changes
-    if: needs.changes.outputs.dashboard == 'true'  # #2149: website/apps/dashboard/** only
-    # #1894/#387: the dashboard's pure-derivation + CSS-rule test suite (node
-    # --test, zero deps) now runs via the agent-infra reusable unit-test
-    # capability (node-ci.yml@v0.1.2) — the migration target of #387.
+    if: needs.changes.outputs.dashboard == 'true'  # #2149: dashboard surface (+ product/pricing.json, #3775)
+    # #1894/#387: the dashboard's derivation + CSS-rule test suite (node --test)
+    # runs via the agent-infra reusable unit-test capability
+    # (node-ci.yml@v0.1.3) — the migration target of #387.
+    #
+    # #3775: it is no longer a zero-dep suite. `dist/` was untracked (it is a
+    # build artifact), and two members of the glob read the SHIPPED bundle off
+    # disk — `distBundle.test.js` (the #2865/#3428/#2937 artifact backstop,
+    # which is the only scan that sees a writer living in a `public/`-copied
+    # script) and the dist-copy case in `graphsBackupColumnTripwire.test.js`.
+    # The suite therefore builds first (`npm ci && npm run build`) and asserts
+    # against the fresh vite output — byte-identical to what deploy-pages
+    # ships — instead of a committed bundle that can no longer exist. This is
+    # the reusable workflow's documented `test-command` escape hatch (it
+    # overrides `test-glob`). The old staleness premise ("src changed, dist
+    # not rebuilt") is structurally gone: there is no committed bundle to go
+    # stale.
     # script-validate/skill-lint skipped: tortoise's scripts/ symlink is
     # machine-local (broken on the runner) and there is no
     # scripts/check-skill-lint.mjs (un-bootstrapped) — the stack gates live
     # in python-ci.yml.
-    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@v0.1.2
+    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@v0.1.3
     with:
       node-version: '22'
       working-directory: website/apps/dashboard
-      test-glob: 'src/*.test.js'
+      test-command: 'npm ci && npm run build && node --test src/*.test.js'
       script-validate: false
       skill-lint: false
     secrets: inherit
@@ -629,6 +672,20 @@ jobs:
         run: |
           npx --yes wrangler@4 --version
           npx --yes wrangler@4 pages dev --help >/dev/null
+      # #3501: the auth suites resolve wrangler via `shutil.which("wrangler")`
+      # and FAIL (not skip) when it is missing — `require_toolchain()` calls
+      # `pytest.fail()`, so a missing toolchain reds this job instead of
+      # reporting a green step that asserted nothing. An earlier draft of that
+      # helper SKIPPED, which is exactly the silent no-op this step exists to
+      # prevent: PATH had no wrangler, so the suite reported "33 skipped", exit
+      # 0, and asserted nothing. Verified with a wrangler-less PATH. Skipping is
+      # still reachable, but only via an explicit `AUTH_ALLOW_NO_TOOLCHAIN=1`
+      # opt-in that no workflow sets.
+      #
+      # The npx pre-warm above does NOT put wrangler on PATH; this does. Removing
+      # this step reds welcome-e2e — it is load-bearing, not belt-and-braces.
+      - name: Install wrangler on PATH (required by the #3501 auth suites)
+        run: npm install -g wrangler@4.127.0
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -673,6 +730,39 @@ jobs:
           # (the e2e surface needs no FalkorDB server) — the URI-required
           # enforcement opt-in.
           TORTOISE_TEST_CARVE_OUT: "1"
+      # --- #3501 BFF auth -------------------------------------------------
+      # These four steps are the reason the suites exist in CI at all. Before
+      # them, all 33 auth tests + the static gate were LOCAL-ONLY: they ran
+      # green on a developer machine and nowhere else, which is the same class
+      # of hole the static gate's own docstring warns about ("a gate that
+      # scans nothing passes") — one level up.
+      #
+      # The static gate is first and needs no servers: it asserts the BFF
+      # invariant repo-wide, so it fails fast and names the offending file.
+      - name: BFF invariant gate — no client-held session token (#3501)
+        run: python -m pytest tests/test_no_legacy_token_path.py -q -rs -p no:cacheprovider
+        env:
+          TORTOISE_TEST_CARVE_OUT: "1"
+      # HTTP-level: real `wrangler pages dev` + a dependency-free mock Supabase,
+      # real ES256 JWKS verification, real PKCE. Ports are claimed at runtime so
+      # this can never silently no-op on a busy runner.
+      - name: BFF auth flow + proxy suites (#3501)
+        run: python -m pytest tests/e2e/auth/ -q -rs -p no:cacheprovider
+        env:
+          TORTOISE_TEST_CARVE_OUT: "1"
+      # Browser-level: the ONLY place the security property is asserted as a
+      # real browser sees it (HttpOnly unreadable from JS, no token in
+      # localStorage/sessionStorage). Opt-in by env var, so it MUST be set here
+      # or the assertion silently never runs.
+      - name: BFF auth real-browser clickthrough (#3501)
+        run: |
+          python -m pytest \
+            tests/e2e/test_auth_bff_clickthrough.py \
+            tests/e2e/test_auth_cross_origin_cookie.py \
+            -q -rs -p no:cacheprovider
+        env:
+          TORTOISE_TEST_CARVE_OUT: "1"
+          AUTH_CLICKTHROUGH: "1"
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
@@ -793,7 +883,7 @@ jobs:
 
   dashboard-e2e:
     needs: changes
-    if: needs.changes.outputs.dashboard_e2e == 'true'  # #2149: keys-table suite + harness + committed dist
+    if: needs.changes.outputs.dashboard_e2e == 'true'  # #2149: keys-table suite + harness + dashboard build inputs
     runs-on: ubuntu-latest
     # #2166/#2178: the mixed-fixture API Keys table suite — durable-only
     # render regression (bootstrap/session rows never render; truthful
@@ -803,10 +893,14 @@ jobs:
     # e2e jobs serve website/ on :8788 only).
     #
     # TWO wrangler boots (the #1511/#2166 harness): website/ on :8788 (the
-    # auth origin the gate redirects to) + the dashboard's COMMITTED dist on
-    # :8790. NO npm build inside CI (committed-dist convention): the mixed
-    # fixture asserts against the exact bundle PRs ship, so a stale/missing
-    # dist commit red-fails the job = tripwire.
+    # auth origin the gate redirects to) + the dashboard bundle on :8790.
+    #
+    # #3775: the job now BUILDS that bundle (step below). Before #3775 `dist/`
+    # was tracked and CI had no build — the committed bundle was served and a
+    # stale/missing dist commit red-failed the job. With `dist/` untracked
+    # there is nothing to serve unless we build, and building is strictly
+    # better for this suite's purpose: the fixtures assert against the exact
+    # bundle THIS revision produces, instead of whatever was last committed.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -818,6 +912,15 @@ jobs:
           node-version: '22'
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
+      # #3775: `dist/` is a build artifact (untracked). Build it before any
+      # preview boots — `npm ci` is lockfile-pinned, so this is the same
+      # vite output the deploy-dashboard job ships (byte-identical, verified
+      # by a clean-build diff on #3775).
+      - name: Build dashboard bundle (:8790 origin, #3775)
+        run: |
+          cd website/apps/dashboard
+          npm ci
+          npm run build
       # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
       # clock starts — a fresh runner's npx fetch was eating most of the 120s
       # boot budget (first CI run died here with an empty log). --version is
@@ -1032,7 +1135,7 @@ jobs:
     #                           top-level dir with __init__.py, sorted) — not
     #                           the engine. `mypy tortoise/` is what the
     #                           baseline was measured against.
-    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.2
+    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.3
     with:
       python-version: '3.12'
       test-command: ''

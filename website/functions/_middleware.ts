@@ -57,6 +57,7 @@ export const onRequest: PagesFunction = async (context) => {
   // app.premiselabs.co/skills/...) are not in the set.
   const TORTOISE_ONLY = new Set([
     "/docs", "/docs.html",
+    "/faq", "/faq.html",
     "/security", "/security.html",
     "/self-hosted", "/self-hosted.html",
     "/privacy", "/privacy.html",

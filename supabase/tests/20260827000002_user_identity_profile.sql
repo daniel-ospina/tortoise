@@ -3,7 +3,7 @@
 -- Identity model substrate: user_unlink_permits + link_intents tables (RLS
 -- deny-by-default, partial unique indexes), user_identity_inventory +
 -- reserve_unlink SECURITY DEFINER RPCs, claim_membership changes (no
--- teams.email write, created_by migration), teams.email demotion + reg-
+-- organizations.email write, created_by migration), organizations.email demotion + reg-
 -- idempotency index.
 --
 -- HOW TO RUN (no Docker — PGlite harness):
@@ -16,9 +16,9 @@
 -- ── Cleanup prior test rows (idempotent re-runs) ─────────────────────────
 DELETE FROM public.user_unlink_permits WHERE user_id::text LIKE '%1765%';
 DELETE FROM public.link_intents WHERE nonce LIKE '1765-%';
-DELETE FROM public.api_keys WHERE team_id LIKE '%-1765';
-DELETE FROM public.team_memberships WHERE team_id LIKE '%-1765' OR identity LIKE '%1765%';
-DELETE FROM public.teams WHERE id LIKE '%-1765';
+DELETE FROM public.api_keys WHERE org_id LIKE '%-1765';
+DELETE FROM public.org_memberships WHERE org_id LIKE '%-1765' OR identity LIKE '%1765%';
+DELETE FROM public.organizations WHERE id LIKE '%-1765';
 DELETE FROM auth.identities WHERE user_id::text LIKE '%1765%' OR provider_id LIKE '1765-%';
 DELETE FROM auth.users WHERE id::text LIKE '%1765%';
 
@@ -39,12 +39,12 @@ SELECT tests.assert(
   'uq_user_unlink_permits_active partial unique index must exist');
 
 SELECT tests.assert(
-  EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='team_memberships'
+  EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='org_memberships'
             AND indexname='uq_member_identity_active'),
   'uq_member_identity_active partial unique index must exist');
 
 SELECT tests.assert(
-  NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='teams'
+  NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='organizations'
                 AND indexname='uq_teams_email'),
   'uq_teams_email must be dropped (demotion)');
 
@@ -236,38 +236,38 @@ SELECT tests.assert((SELECT count(*) FROM consumed) = 0,
   're-consume must affect 0 rows (consumed-once)');
 
 -- ============================================================================
--- SECTION 5 — claim_membership: NO teams.email write + created_by migration
+-- SECTION 5 — claim_membership: NO organizations.email write + created_by migration
 -- ============================================================================
-INSERT INTO public.teams (id, name, graph_name) VALUES ('t1765-a', 't1765-a', 'team_t1765-a');
-INSERT INTO public.api_keys (id, team_id, lookup_hash, created_via, created_by) VALUES
+INSERT INTO public.organizations (id, name, graph_name) VALUES ('t1765-a', 't1765-a', 'org_t1765-a');
+INSERT INTO public.api_keys (id, org_id, lookup_hash, created_via, created_by) VALUES
   ('k1765-a1', 't1765-a', 'lkp-1765-a1', 'provisioned', 'anon-1765'),
   ('k1765-a2', 't1765-a', 'lkp-1765-a2', 'provisioned', 'reg-' || left(encode(sha256('a@1765.test'::bytea), 'hex'), 12));
-INSERT INTO public.teams (id, name, graph_name) VALUES ('t1765-b', 't1765-b', 'team_t1765-b');
-INSERT INTO public.api_keys (id, team_id, lookup_hash, created_via, created_by) VALUES
+INSERT INTO public.organizations (id, name, graph_name) VALUES ('t1765-b', 't1765-b', 'org_t1765-b');
+INSERT INTO public.api_keys (id, org_id, lookup_hash, created_via, created_by) VALUES
   ('k1765-b1', 't1765-b', 'lkp-1765-b1', 'provisioned', 'reg-' || left(encode(sha256('other@1765.test'::bytea), 'hex'), 12));
-INSERT INTO public.team_memberships (user_id, team_id, team_name, key_hash, graph_name, role, status, identity)
-  SELECT NULL, 't1765-a', 't1765-a', 'pending', 'team_t1765-a', 'owner', 'active', 'anon-1765';
+INSERT INTO public.org_memberships (user_id, org_id, org_name, key_hash, graph_name, role, status, identity)
+  SELECT NULL, 't1765-a', 't1765-a', 'pending', 'org_t1765-a', 'owner', 'active', 'anon-1765';
 
 -- claim with a confirmed-email user (plain SELECT — PERFORM is PL/pgSQL-only)
 SELECT public.claim_membership('lkp-1765-a1', '60000000-0000-0000-0000-000000001765'::uuid, 'shape5@1765.test');
 
--- (a) teams.email NOT written by claim (demotion)
+-- (a) organizations.email NOT written by claim (demotion)
 SELECT tests.assert(
-  (SELECT email FROM public.teams WHERE id='t1765-a') IS NULL,
-  'claim must NOT write teams.email (demotion)');
--- (b) created_by migration: team A keys attributed to claimer
+  (SELECT email FROM public.organizations WHERE id='t1765-a') IS NULL,
+  'claim must NOT write organizations.email (demotion)');
+-- (b) created_by migration: org A keys attributed to claimer
 SELECT tests.assert(
-  (SELECT count(*) FROM public.api_keys WHERE team_id='t1765-a' AND created_by = '60000000-0000-0000-0000-000000001765') = 2,
-  'claim must migrate anon-/reg- created_by keys to the claimer within the team');
--- (c) foreign team reg- keys UNTOUCHED (operator-precedence guard)
+  (SELECT count(*) FROM public.api_keys WHERE org_id='t1765-a' AND created_by = '60000000-0000-0000-0000-000000001765') = 2,
+  'claim must migrate anon-/reg- created_by keys to the claimer within the org');
+-- (c) foreign org reg- keys UNTOUCHED (operator-precedence guard)
 SELECT tests.assert(
   (SELECT created_by FROM public.api_keys WHERE id='k1765-b1') =
     'reg-' || left(encode(sha256('other@1765.test'::bytea), 'hex'), 12),
-  'foreign-team reg- keys must be untouched by a claim (parenthesized predicate)');
+  'foreign-org reg- keys must be untouched by a claim (parenthesized predicate)');
 -- (d) owner row linked
 SELECT tests.assert(
-  (SELECT count(*) FROM public.team_memberships
-    WHERE team_id='t1765-a' AND user_id='60000000-0000-0000-0000-000000001765'::uuid
+  (SELECT count(*) FROM public.org_memberships
+    WHERE org_id='t1765-a' AND user_id='60000000-0000-0000-0000-000000001765'::uuid
       AND role='owner' AND status='active' AND identity IS NULL) = 1,
   'claim must link the owner row and clear identity');
 
@@ -277,20 +277,20 @@ SELECT tests.assert(
 -- ============================================================================
 -- clean: the pre-scan ran at migration time; here assert the index rejects a second
 -- active owner with the SAME non-null identity
-INSERT INTO public.teams (id, name, graph_name) VALUES ('t1765-c', 't1765-c', 'team_t1765-c');
-INSERT INTO public.team_memberships (user_id, team_id, team_name, key_hash, graph_name, role, status, identity)
-  SELECT NULL, 't1765-c', 't1765-c', 'pending', 'team_t1765-c', 'owner', 'active', '1765-shared-identity';
+INSERT INTO public.organizations (id, name, graph_name) VALUES ('t1765-c', 't1765-c', 'org_t1765-c');
+INSERT INTO public.org_memberships (user_id, org_id, org_name, key_hash, graph_name, role, status, identity)
+  SELECT NULL, 't1765-c', 't1765-c', 'pending', 'org_t1765-c', 'owner', 'active', '1765-shared-identity';
 DO $$ BEGIN
   BEGIN
-    INSERT INTO public.team_memberships (user_id, team_id, team_name, key_hash, graph_name, role, status, identity)
-      SELECT NULL, 't1765-d', 't1765-d', 'pending', 'team_t1765-d', 'owner', 'active', '1765-shared-identity';
+    INSERT INTO public.org_memberships (user_id, org_id, org_name, key_hash, graph_name, role, status, identity)
+      SELECT NULL, 't1765-d', 't1765-d', 'pending', 'org_t1765-d', 'owner', 'active', '1765-shared-identity';
     RAISE EXCEPTION 'FAIL: second active owner with same identity must be rejected by uq_member_identity_active';
   EXCEPTION WHEN unique_violation THEN NULL;
   END;
 END $$;
 
 -- cleanup
-DELETE FROM public.teams WHERE id LIKE '%-1765';
+DELETE FROM public.organizations WHERE id LIKE '%-1765';
 DELETE FROM public.user_unlink_permits WHERE user_id::text LIKE '%1765%';
 DELETE FROM public.link_intents WHERE nonce LIKE '1765-%';
 DELETE FROM auth.identities WHERE user_id::text LIKE '%1765%' OR provider_id LIKE '1765-%';

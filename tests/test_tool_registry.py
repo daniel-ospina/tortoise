@@ -75,7 +75,7 @@ class TestRegistryEquivalence:
             f"  In derived but not set: {derived - HTTP_ALLOWED}\n"
             f"  In set but not derived: {HTTP_ALLOWED - derived}"
         )
-        for excluded in ("tortoise_team_create", "tortoise_backfill_v25",
+        for excluded in ("tortoise_org_create", "tortoise_backfill_v25",
                          "tortoise_ingest_corpus", "tortoise_index_sessions",
                          "tortoise_dream"):
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
@@ -129,7 +129,7 @@ class TestRegistryEquivalence:
         """Known exclusions are http_policy=False."""
         from tortoise.tool_registry import TOOL_REGISTRY
         by_name = {t.name: t for t in TOOL_REGISTRY}
-        excluded = {"tortoise_team_create", "tortoise_backfill_v25",
+        excluded = {"tortoise_org_create", "tortoise_backfill_v25",
                      "tortoise_ingest_corpus", "tortoise_index_sessions",
                      "tortoise_index_files"}
         for name in excluded:
@@ -313,7 +313,7 @@ class TestFastMCPAdapter:
             tools = await mcp._list_tools()
             registered = {t.name for t in tools}
             # Excluded tools should still be registered (HTTP filter handles hiding them)
-            assert "tortoise_team_create" in registered
+            assert "tortoise_org_create" in registered
             assert "tortoise_backfill_v25" in registered
             assert "tortoise_ingest_corpus" in registered
             assert "tortoise_index_sessions" in registered
