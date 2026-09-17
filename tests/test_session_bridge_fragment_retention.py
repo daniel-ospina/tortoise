@@ -386,7 +386,12 @@ function extractFunction(src, name) {
 async function runDashboardScenario(kind) {
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
   const role = kind === 'small' ? 200 : 4000;
-  const env = makeEnv({ hash: fragment(role, expiresAt) });
+  const opts = { hash: fragment(role, expiresAt) };
+  // The P2-1 precondition: a still-valid PREVIOUS cookie. `getSession()` then
+  // answers with the OLD session — the case where a guard nested inside the
+  // "no session" branch never runs.
+  if (kind === 'preseeded_old_cookie') opts.preseed = oldCookie(expiresAt);
+  const env = makeEnv(opts);
   env.sandbox.claimIntentInFlight = function () { return false; };
   vm.runInContext(src, env.sandbox, { filename: bridgePath });
   const hashAfterBridge = env.sandbox.window.location.hash;
@@ -402,9 +407,12 @@ async function runDashboardScenario(kind) {
   }
   await new Promise((r) => setTimeout(r, 50));
 
-  // The REAL mount-gate branch, extracted from main.jsx.
+  // The REAL mount-gate region, extracted from main.jsx: the live-fragment
+  // guard through the end of the session-validity branch. `session`/`error` are
+  // the values supabase-js's getSession() resolved — passed in so the harness
+  // exercises BOTH the no-session and the still-valid-OLD-cookie cases.
   const dash = fs.readFileSync(dashboardPath, 'utf8');
-  // The branch guards on src/sessionBounce.js's predicate. Load the REAL module
+  // The branch guards on src/sessionBounce.js's predicates. Load the REAL module
   // (stripping the ESM `export` keyword — the harness is CJS/vm, not a bundler).
   const helperPath = require('path').join(
     require('path').dirname(dashboardPath), 'sessionBounce.js');
@@ -414,22 +422,33 @@ async function runDashboardScenario(kind) {
       env.sandbox, { filename: helperPath }
     );
   }
-  const branchStart = dash.indexOf('const claimIntent = claimIntentInFlight()');
-  const branchEnd = dash.indexOf('// Claim-intent: render the claim-paste screen');
-  if (branchStart < 0 || branchEnd < 0 || branchEnd < branchStart) {
+  const branchStart = dash.indexOf('\n', dash.indexOf(
+    'const { data: { session }, error } = await supabaseClient.auth.getSession()')) + 1;
+  const branchEnd = dash.indexOf('sessionTokenRef.current = session.access_token', branchStart);
+  if (branchStart <= 0 || branchEnd < 0 || branchEnd < branchStart) {
     throw new Error('main.jsx: mount-gate branch anchors not found');
   }
+  // Slice from the statement AFTER getSession() to the first statement after the
+  // session-validity branch: brace-balanced in every revision (the round-2 tree
+  // nested the guard inside that branch, the round-3 tree hoists it above).
   const branch = dash.slice(branchStart, branchEnd);
+  const session = kind === 'preseeded_old_cookie'
+    ? { access_token: 'OLD-ACCESS-TOKEN', refresh_token: 'old-refresh',
+        expires_at: expiresAt, expires_in: 3600, token_type: 'bearer' }
+    : null;
   const gateSrc =
     'const landingHash = ' + JSON.stringify(hashAfterBridge) + ';\n' +
     extractFunction(dash, 'oauthErrorHash') + '\n' +
-    'const __mountGate = function (setChecking, setAuthUnavailable) {\n' +
+    'const __mountGate = function (setChecking, setAuthUnavailable, setFragmentRefused, session, error) {\n' +
     branch + '\n};\n__mountGate;';
   const gate = vm.runInContext(gateSrc, env.sandbox, { filename: 'main.jsx#mountGate' });
-  const calls = { checking: [], unavailable: [] };
+  const calls = { checking: [], unavailable: [], refused: [] };
   gate(
     (v) => calls.checking.push(v),
     (v) => calls.unavailable.push(v),
+    (v) => calls.refused.push(v),
+    session,
+    null,
   );
 
   const finalHash = env.sandbox.window.location.hash;
@@ -441,6 +460,7 @@ async function runDashboardScenario(kind) {
       navigated: env.replaceCalls.length > 0,
       replace_target: env.replaceCalls[env.replaceCalls.length - 1] || null,
       auth_unavailable: calls.unavailable[calls.unavailable.length - 1] || '',
+      fragment_refused: calls.refused.indexOf(true) !== -1,
       checking_cleared: calls.checking.indexOf(false) !== -1,
       errors: env.logs.filter((l) => l.level === 'error').map((l) => l.text),
     },
@@ -525,6 +545,8 @@ async function runE2EIngestScenario(kind) {
   } else if (mode === 'dashboard') {
     out.dashboard_small = await safeAsync(() => runDashboardScenario('small'));
     out.dashboard_oversized = await safeAsync(() => runDashboardScenario('oversized'));
+    out.dashboard_preseeded_old_cookie =
+      await safeAsync(() => runDashboardScenario('preseeded_old_cookie'));
   } else {
     out.e2e_small = await safeAsync(() => runE2EIngestScenario('small'));
     out.e2e_oversized = await safeAsync(() => runE2EIngestScenario('oversized'));
@@ -890,6 +912,11 @@ def test_dashboard_mount_gate_keeps_the_live_fragment(dashboard_report: dict) ->
         "a refused write must surface a visible failure state, not a silent "
         "'Redirecting…' shell"
     )
+    assert r["fragment_refused"] is True, (
+        "the terminal state must be flagged so the error card can offer an "
+        "explicit route to /auth — the reload retry is a guaranteed no-op for "
+        "the too-large cause (#3503 review P3)"
+    )
     assert r["checking_cleared"] is True, (
         "the error card is unreachable while `checking` is true — the gate must "
         "clear it or the user sees 'Checking your session…' forever"
@@ -917,22 +944,41 @@ def test_dashboard_success_path_still_navigates_when_there_is_no_fragment(
     assert not r["auth_unavailable"]
 
 
-def test_dashboard_mount_gate_never_navigates_over_a_live_token_fragment() -> None:
-    """#3503 (review P1, round 2). The dashboard is the primary OAuth landing
-    origin (signup.html's redirectTo is the app root), so a refused write strands
-    the live fragment HERE. The mount gate's bounce calls
-    ``bounceToAuth(search, oauthErrorHash())``, and ``oauthErrorHash()`` returns
-    ``''`` for a live token fragment by design (#1566) — the navigation then
-    drops the fragment and reproduces #3503 exactly.
+def test_dashboard_mount_gate_survives_a_still_valid_old_cookie(
+    dashboard_report: dict,
+) -> None:
+    """#3503 (review P2, round 3): a still-valid PREVIOUS cookie satisfies the
+    session-validity branch, so a guard nested INSIDE that branch never runs —
+    `getSession()` answers with the OLD identity, the dashboard proceeds, and the
+    user is silently kept on the OLD account while the NEW credential sits unused
+    in the URL. The guard must be hoisted above the branch and keyed on the
+    fragment carrying a DIFFERENT token than the resolved session."""
+    r = _scenario(dashboard_report, "dashboard_preseeded_old_cookie")
+    assert r["cookie_token"] == "OLD-ACCESS-TOKEN", "harness precondition: the old session is stored"
+    assert r["hash_after_bridge_has_token"] is True, (
+        "harness precondition: the NEW fragment was refused and retained"
+    )
+    assert r["fragment_survived_supabase"] is True
+    assert r["navigated"] is False
+    assert r["fragment_refused"] is True, (
+        "the dashboard proceeded as the OLD account: a live fragment carrying a "
+        "different credential than the resolved session must surface the "
+        "failure, not silently continue (#3503 P2-1 mix-up)"
+    )
+    assert r["auth_unavailable"], (
+        "the user must see WHY they are not signed in as the account they just "
+        "authenticated as"
+    )
+    assert r["checking_cleared"] is True
 
-    The gate must therefore consult ``hasLiveTokenFragment`` BEFORE the bounce.
-    Pinned statically because the guard lives in a React mount effect the
-    node/vm harness cannot execute; the predicate itself is unit-tested in
-    website/apps/dashboard/src/sessionBounce.test.js.
-    """
+
+def test_dashboard_mount_gate_never_navigates_over_a_live_token_fragment() -> None:
+    """Static companion to the harness above: the guard must run BEFORE the
+    session-validity branch it protects (a nested guard is unreachable exactly
+    when a previous cookie is valid) and before the bounce."""
     dash = DASHBOARD.read_text(encoding="utf-8")
     assert "from './sessionBounce.js'" in dash, (
-        "main.jsx must import the live-fragment predicate (src/sessionBounce.js)"
+        "main.jsx must import the live-fragment predicates (src/sessionBounce.js)"
     )
     anchor = dash.index("const claimIntent = claimIntentInFlight()")
     bounce = dash.index(
@@ -943,17 +989,74 @@ def test_dashboard_mount_gate_never_navigates_over_a_live_token_fragment() -> No
         "the live-fragment guard must run BEFORE the mount-gate bounce — "
         "otherwise the navigation destroys the only copy of the credential"
     )
-    segment = dash[anchor:bounce]
+    # Hoisted above `if (error || !session …)`: the guard must not be nested in
+    # the no-session branch, or a valid old cookie skips it entirely.
+    session_branch = dash.find("if (error || !session || !session.expires_at", anchor)
+    assert session_branch != -1, (
+        "the session-validity branch was not found AFTER the guard — the guard "        "is therefore nested inside it, where a still-valid old cookie makes it "        "unreachable (#3503 review P2)"
+    )
+    assert guard < session_branch, (
+        "the live-fragment guard must run BEFORE the session-validity branch — "
+        "nested inside it, a still-valid old cookie makes it unreachable and "
+        "the user is silently kept on the old account (#3503 review P2)"
+    )
+    segment = dash[anchor:session_branch]
     assert "hasLiveTokenFragment(window.location.hash)" in segment, (
         "the guard must test the CURRENT URL fragment, not a stale snapshot"
     )
-    assert "setAuthUnavailable(" in segment and "setChecking(false)" in segment, (
-        "a refused write must render a terminal error state (which is also the "
-        "working retry, via window.location.reload()), not a silent redirect"
+    assert "fragmentAccessToken(window.location.hash)" in segment, (
+        "the guard must compare the fragment's own token with the resolved "
+        "session — a bare `hasLiveTokenFragment` would refuse to continue even "
+        "when the stored session IS that credential"
     )
-    after_guard = segment.split("hasLiveTokenFragment(window.location.hash)")[1]
-    assert "return" in after_guard, (
-        "the guard must RETURN so the bounce below is not reached"
+    assert "setAuthUnavailable(" in segment and "setChecking(false)" in segment, (
+        "a refused write must render a terminal error state, not a silent redirect"
+    )
+    assert "setFragmentRefused(true)" in segment, (
+        "the terminal state must be flagged so the card can offer an explicit "
+        "route to /auth (the reload retry is a no-op for the too-large cause)"
+    )
+    # ...and the flag must actually drive a recovery action in the error card.
+    assert "{fragmentRefused ?" in dash, (
+        "nothing renders off `fragmentRefused` — the flag would be dead state "
+        "and the user would be left with only a retry that cannot succeed"
+    )
+    assert "window.bounceToAuth(window.location.search, '')" in dash, (
+        "the error card needs an explicit route to /auth that deliberately "
+        "discards the fragment (a user-chosen discard, never the silent #3503 one)"
+    )
+
+
+def test_head_gate_exempts_every_fragment_the_guard_calls_a_credential() -> None:
+    """#3503 (review P3, round 3): three predicates classify a live credential.
+    The pre-React head gate's `hasCallbackFragment` omitted `refresh_token`,
+    so a `#refresh_token=…` fragment was bounced (and thus destroyed) by the
+    gate before the mount guard could see it. All of them must agree."""
+    head_gate = (REPO_ROOT / "website" / "apps" / "dashboard" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    m = re.search(r"var hasCallbackFragment = (/.*?/)\.test", head_gate)
+    assert m, "index.html: hasCallbackFragment not found — the head gate changed"
+    pattern = m.group(1)
+    for token in ("access_token", "refresh_token", "code"):
+        assert token in pattern, (
+            f"the head gate's callback-fragment pattern ({pattern}) omits "
+            f"{token!r} — that fragment is bounced and destroyed before the "
+            "mount guard can retain it (#3503 review P3)"
+        )
+    # ...and the mount guard must agree with it (same three tokens).
+    helper = (REPO_ROOT / "website" / "apps" / "dashboard" / "src"
+              / "sessionBounce.js").read_text(encoding="utf-8")
+    live = re.search(r"LIVE_TOKEN_FRAGMENT = (/.*?/)", helper)
+    assert live, "sessionBounce.js: LIVE_TOKEN_FRAGMENT not found"
+    for token in ("access_token", "refresh_token", "code"):
+        assert token in live.group(1)
+    # The committed dist must carry the fixed head gate too (it is what ships).
+    dist_html = (REPO_ROOT / "website" / "apps" / "dashboard" / "dist"
+                 / "index.html").read_text(encoding="utf-8")
+    assert "refresh_token|code" in dist_html or "refresh_token" in dist_html, (
+        "the committed dashboard dist/index.html still carries the old head "
+        "gate — rebuild (npm run build) after editing index.html"
     )
 
 

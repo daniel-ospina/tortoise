@@ -60,8 +60,9 @@ import {
 import { bannerShow, shouldRefetchOnFocus } from './identity.js'
 // #3503: the mount gate must not navigate while a live OAuth token fragment is
 // in the URL — the navigation itself destroys the only surviving copy of the
-// credential when the bridge's cookie write was refused.
-import { hasLiveTokenFragment } from './sessionBounce.js'
+// credential when the bridge's cookie write was refused — and must not silently
+// continue as a DIFFERENT stored account.
+import { fragmentAccessToken, hasLiveTokenFragment } from './sessionBounce.js'
 import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
 // #2392: minimal a11y focus management for the dialog family — capture the
 // opening trigger, restore focus to it on close (pure, node --test
@@ -1106,6 +1107,13 @@ function claimIntentInFlight() {
 
   const [authed, setAuthed] = React.useState(false)
   const [authUnavailable, setAuthUnavailable] = React.useState('')
+  // #3503 (review P1, round 3): the browser refused to store the OAuth
+  // credential and kept it in the URL. The retry (reload) re-runs the bridge
+  // against the same fragment, which for the too-large cause is a guaranteed
+  // no-op — so the card also offers an explicit route to /auth, which
+  // deliberately discards the fragment (a user-chosen discard, not a silent
+  // one).
+  const [fragmentRefused, setFragmentRefused] = React.useState(false)
   // #1559: a session-resolution / mount or team-load failure (e.g. 429 rate
   // limit, 5xx, suspension) must surface an actionable error — never the
   // silent "Redirecting to the sign-in page…" shell (which does NOT redirect
@@ -3356,6 +3364,33 @@ function claimIntentInFlight() {
           return
         }
         const { data: { session }, error } = await supabaseClient.auth.getSession()
+        // #3503 (review rounds 2 + 3): a LIVE token fragment still in the URL
+        // after the bridge ran means the bridge could NOT store it (its write
+        // was refused) and kept the fragment as the only surviving copy of the
+        // credential. Two failure modes follow, and BOTH must be handled here —
+        // before the session-validity branch, because a still-valid PREVIOUS
+        // cookie satisfies that branch and would silently keep the user on the
+        // OLD account while the NEW credential rots unused in the URL:
+        //   (a) no session → the old code navigated to /auth, and the
+        //       navigation itself destroyed the fragment (oauthErrorHash()
+        //       returns '' for a live fragment by design, #1566);
+        //   (b) a DIFFERENT session is already stored → the user is silently
+        //       authenticated as that other account (the #3503 P2-1 mix-up).
+        // Render the explicit failure instead and leave the URL — and the
+        // retry (window.location.reload(), which re-runs the bridge against the
+        // same fragment) — intact. A fragment whose access_token IS the session
+        // we already resolved is not "unrescuable": it is the same credential,
+        // so the normal path applies.
+        const claimIntent = claimIntentInFlight()
+        if (hasLiveTokenFragment(window.location.hash) &&
+            fragmentAccessToken(window.location.hash) !== (session && session.access_token) &&
+            !claimIntent) {
+          setChecking(false)
+          setFragmentRefused(true)
+          setAuthUnavailable(
+            'Signed in, but this browser could not save the session — the sign-in cookie was rejected (it can exceed the browser\'s cookie limit, or cookies may be blocked). Nothing was discarded: your sign-in is still in the address bar. Retry, or sign in again.')
+          return
+        }
         if (error || !session || !session.expires_at || session.expires_at * 1000 <= Date.now()) {
           // #1511: NO strictly-valid session (missing OR past expires_at =
           // invalid — the presence-over-validity bug class) → the dashboard
@@ -3364,30 +3399,13 @@ function claimIntentInFlight() {
           // /auth via the origin-aware bounceToAuth (Back-proof). The
           // storedKey exemption is gone — a stored key is a "Last used" hint
           // on /auth, not a dashboard credential.
-          const claimIntent = claimIntentInFlight()
           if (!claimIntent) {
-            // #3503 (review P1, round 2): a LIVE token fragment still in the
-            // URL here means the shared bridge could not store the session
-            // (storeSession() refused an over-cap cookie write) and therefore
-            // KEPT the fragment as the only surviving copy of the credential.
-            // Navigating would destroy it: oauthErrorHash() returns '' for a
-            // live token fragment by design (#1566 — the destination must not
-            // re-ingest it), so the bounce silently drops the credential and
-            // reproduces exactly #3503 one navigation later. Render the
-            // explicit failure instead and leave the URL — and the retry
-            // (window.location.reload(), which re-runs the bridge against the
-            // same fragment) — intact.
-            if (hasLiveTokenFragment(window.location.hash)) {
-              setChecking(false)
-              setAuthUnavailable(
-                'Signed in, but this browser refused to save the session — the session cookie was rejected (too large for the cookie limit, or cookies are blocked). Nothing was discarded: your sign-in is still in the address bar. Enable cookies for premiselabs.co and try again.')
-              return
-            }
             // #1224/#1566: OAuth state-expiry errors land as ?error=… (or,
             // #1909, as #error=… in the fragment) on the app origin now —
             // preserve the SEARCH and any ERROR fragment so /auth renders the
             // banner (never a live #access_token fragment: it must not be
-            // re-ingested by the destination).
+            // re-ingested by the destination). A live credential never reaches
+            // this bounce: the guard above returns first (#3503).
             if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, oauthErrorHash())
             else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search + oauthErrorHash())
             return
@@ -5861,6 +5879,21 @@ function claimIntentInFlight() {
                   </p>
                 ) : null}
                 <button type="button" className="btn-submit" onClick={() => window.location.reload()}>Try again</button>
+                {fragmentRefused ? (
+                  <p style={{ marginTop: 12 }}>
+                    <button type="button" className="btn-submit"
+                      onClick={() => {
+                        // Origin-aware (dashboard origin → the tortoise auth
+                        // page). Passing an empty hash is the point: this is an
+                        // explicit user discard of a credential the browser
+                        // would not store, never the silent drop of #3503.
+                        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, '')
+                        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
+                      }}>
+                      Sign in again
+                    </button>
+                  </p>
+                ) : null}
                 <p className="dim" style={{ marginTop: 12 }}>
                   Still stuck? Contact <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.
                 </p>

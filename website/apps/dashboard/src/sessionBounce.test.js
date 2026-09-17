@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { hasLiveTokenFragment, LIVE_TOKEN_FRAGMENT } from './sessionBounce.js'
+import { fragmentAccessToken, hasLiveTokenFragment, LIVE_TOKEN_FRAGMENT } from './sessionBounce.js'
 
 const LIVE = [
   '#access_token=AAAA&refresh_token=r&expires_at=1&token_type=bearer',
@@ -61,4 +61,39 @@ test('the exported pattern is anchored to a delimiter, not a bare substring', ()
   assert.equal(hasLiveTokenFragment('?access_token_like=1'), false)
   assert.equal(hasLiveTokenFragment('?x=1&y=access_token=2'), false)
   assert.equal(LIVE_TOKEN_FRAGMENT.test('access_token='), false)
+})
+
+// #3503 review round 3 (P2): the guard must not treat a fragment as "the session
+// we already have" unless it literally carries that access_token. Anything else
+// (a different token, a bare #code=…, an unparsable fragment) is a credential the
+// browser refused to store, and continuing silently keeps the user on the OLD
+// account.
+test('fragmentAccessToken reads the token a live fragment actually carries', () => {
+  assert.equal(fragmentAccessToken('#access_token=AAA&refresh_token=r&expires_at=1'), 'AAA')
+  assert.equal(fragmentAccessToken('?next=%2F#access_token=AAA'), 'AAA')
+  assert.equal(
+    fragmentAccessToken('#provider_token=p&access_token=AAA&token_type=bearer'),
+    'AAA'
+  )
+})
+
+test('fragmentAccessToken is null for every fragment with no comparable token', () => {
+  for (const hash of [
+    '', '#', '#code=abc123', '#refresh_token=r', '#error=access_denied',
+    '#/overview?access_token=AAA', // hash route: not a real query, stay null
+    '#access_token=', // empty value must not read as an empty token
+    undefined, null, 42, {},
+  ]) {
+    assert.equal(fragmentAccessToken(hash), null, `expected null for: ${hash}`)
+  }
+})
+
+test('only an exact token match means "already stored"', () => {
+  const stored = 'STORED-TOKEN'
+  const live = (hash) => hasLiveTokenFragment(hash) &&
+    fragmentAccessToken(hash) !== stored
+  assert.equal(live('#access_token=STORED-TOKEN'), false, 'same credential')
+  assert.equal(live('#access_token=NEW-TOKEN'), true, 'different credential')
+  assert.equal(live('#code=abc'), true, 'unverifiable — treat as refused')
+  assert.equal(live('#error=access_denied'), false, 'not a credential at all')
 })

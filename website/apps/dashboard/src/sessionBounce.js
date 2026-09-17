@@ -23,3 +23,27 @@ export const LIVE_TOKEN_FRAGMENT = /[?&#](?:access_token|refresh_token|code)=/
 export function hasLiveTokenFragment(hash) {
   return LIVE_TOKEN_FRAGMENT.test(String(hash || ''))
 }
+
+/** The `access_token` carried by a fragment, or null when it has none (a
+ * `#code=…` PKCE fragment, a plain `#error=…`, or an unparsable one).
+ *
+ * Used to distinguish "this fragment IS the session we already have" (nothing
+ * to rescue) from "the browser refused to store a DIFFERENT credential" — the
+ * #3503 account-mix-up case, where a still-valid PREVIOUS cookie makes
+ * `getSession()` answer with the OLD identity. */
+export function fragmentAccessToken(hash) {
+  const h = String(hash || '')
+  const at = h.indexOf('#')
+  if (at < 0) return null
+  const raw = h.slice(at + 1)
+  // Only a real `?`-delimited query inside the fragment yields params; a hash
+  // route (`#/overview?x=1`) deliberately returns null (conservative: the
+  // caller treats "unparseable" as "not the stored session").
+  if (raw.startsWith('/')) return null
+  try {
+    const token = new URLSearchParams(raw).get('access_token')
+    return token || null
+  } catch (e) {
+    return null
+  }
+}

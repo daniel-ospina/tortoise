@@ -36,7 +36,7 @@
           // here would DROP the fragment and loop first-time signups back to
           // /auth. Exempt callback fragments: the async mount check owns the
           // outcome (ingest → session → dashboard; stale → /auth).
-          var hasCallbackFragment = /[?#&](access_token|code)=/.test(window.location.search + window.location.hash);
+          var hasCallbackFragment = /[?#&](?:access_token|refresh_token|code)=/.test(window.location.search + window.location.hash);
           // #1909: a DENIED provider round-trip lands on this origin as
           // #error=…&error_code=… (supabase-js implicit flow). Preserve ONLY
           // error fragments on the /auth bounce — never a live token fragment
@@ -55,7 +55,7 @@
         } catch (e) { /* best-effort — the app's async check still applies */ }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-C8jemJvs.js"></script>
+    <script type="module" crossorigin src="/assets/index-C8fN3Amm.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-yCCoO1bF.css">
   </head>
   <body>
