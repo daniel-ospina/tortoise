@@ -715,7 +715,7 @@ def push_legs(manifest: dict) -> dict:
     # 28.0m. split_fast_gate returns `tests/`-prefixed names; the workflow's
     # matrix format is bare, so strip the prefix.
     fast_a, fast_b = split_fast_gate(fast,
-                                     manifest.get("durations", {}) or {})
+                                     _durations_map(manifest))
     half_a = [f[len("tests/"):] for f in fast_a]
     half_b = [f[len("tests/"):] for f in fast_b]
     # #1485: distribute push_extra (bench files) evenly across the halves.
@@ -879,7 +879,7 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
     # The ±3 count check would red that correct split, so it now applies only
     # to manifests with no durations map at all (e.g. the small test
     # fixtures, or a repo that has not adopted durations).
-    durations = manifest.get("durations") or {}
+    durations = _durations_map(manifest)
     if durations:
         weights = {h: sum(_duration_weight(durations.get(
                             f if f.endswith(".py") else f + ".py"))
@@ -983,10 +983,35 @@ def split_fast_gate(files, durations: dict, default_weight: float = DEFAULT_FAST
     return a, b
 
 
+def _durations_map(manifest: dict) -> dict:
+    """`durations` as a mapping, or `{}` — never a non-mapping. (#3407 c4)
+
+    `None`/absent is the documented "this repo has not adopted the duration
+    gate" state and collapses to `{}` (a PASS, per `duration_coverage_issues`).
+    A non-mapping is malformed and is NAMED by `duration_issues` before it gets
+    here; this exists so a PRODUCER path (`--split`) can never crash either.
+    """
+    raw = manifest.get("durations")
+    return raw if isinstance(raw, dict) else {}
+
+
 def duration_issues(manifest: dict) -> list[str]:
     """#1473: every durations key must be classified and non-slow."""
     issues = []
-    durations = manifest.get("durations", {})
+    # #3407 review cycle 4 (pre-existing): this site and `--split` below used
+    # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
+    # as `None` — the empty-map state `duration_coverage_issues` documents as
+    # "NOT a failure" — and crashed with a raw TypeError instead.
+    #
+    # The precise predicate: `None`/absent means "this repo has not adopted the
+    # duration gate" and is a PASS. ANY other non-mapping (`0`, a string, a
+    # list) is a malformed declaration and must be NAMED — collapsing it into
+    # the empty case with `or {}` would have turned a wrong crash into a silent
+    # wrong pass.
+    raw = manifest.get("durations")
+    if raw is not None and not isinstance(raw, dict):
+        return [f"durations is not a mapping: {type(raw).__name__}"]
+    durations = _durations_map(manifest)
     slow = set(manifest.get("slow_files", []))
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
@@ -1036,7 +1061,7 @@ def duration_coverage_issues(manifest: dict,
     the map is populated; an ABSENT or EMPTY map is NOT a failure, so a repo
     that has not adopted durations is never hard-failed by this guard.
     """
-    durations = manifest.get("durations") or {}
+    durations = _durations_map(manifest)
     if not durations:
         return []
     fast = fast_pool(manifest)
@@ -1853,7 +1878,7 @@ def main() -> int:
         # every tier-2 PR (json.loads('') raises).
         raw = sys.stdin.read().strip()
         files = json.loads(raw) if raw else []
-        a, b = split_fast_gate(files, manifest.get("durations", {}))
+        a, b = split_fast_gate(files, _durations_map(manifest))
         result = {"a": a, "b": b}
         out_dir = Path(os.environ.get("CI_SELECTION_ARTIFACT_DIR", REPO / ".ci-selection"))
         out_dir.mkdir(exist_ok=True)

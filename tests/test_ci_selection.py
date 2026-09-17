@@ -2181,3 +2181,39 @@ def test_integrity_cli_exits_nonzero_for_a_huge_int_and_a_negative(tmp_path, mon
         monkeypatch.setattr(cs, "MANIFEST", poisoned)
         monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
         assert cs.main() != 0, f"a bad duration value ({bad!r}) exited 0"
+
+
+def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path, monkeypatch):
+    # #3407 review cycle 4 (pre-existing): `duration_issues` and `--split` read
+    # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
+    # as None — the empty-map state `duration_coverage_issues` documents as
+    # "NOT a failure". A raw TypeError traceback is not a diagnosis: it makes
+    # the gate look broken rather than making it say what is wrong.
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+    # `None` is NOT in this list: null/absent is the documented empty-map
+    # PASS, and is asserted below.
+    for bad in (0, "foo", [1.0]):
+        m = dict(cs.load_manifest())
+        m["durations"] = bad
+        poisoned = tmp_path / "bad-durations.yml"
+        poisoned.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", poisoned)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() != 0, f"durations={bad!r} exited 0"
+    # The documented empty-map contracts must still PASS, or the guard above
+    # has simply turned one wrong answer into another.
+    for empty in ({}, None):
+        m = dict(cs.load_manifest())
+        if empty is None:
+            m.pop("durations", None)
+        else:
+            m["durations"] = {}
+        ok = tmp_path / "empty-durations.yml"
+        ok.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", ok)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() == 0, f"an empty durations map ({empty!r}) was treated as a failure"
