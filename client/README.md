@@ -75,8 +75,20 @@ result = call_tool("tortoise_create_point",
 The compatibility namespace `tortoise.mcp_client` is also provided
 (identical module — `from tortoise.mcp_client import status` works).
 
-`status()`/`available()` degrade gracefully: a down server reports
-`tortoise_unavailable` instead of raising.
+`status()`/`available()` degrade gracefully — **this describes the library
+surface**: a down server reports `tortoise_unavailable` instead of raising, so
+script callers skip cleanly. The `tortoise-client status` CLI **probe** presents
+the same payload under a distinct process exit code (`0` ok · `3` can't reach
+it · `4` not set up · `1` a query that genuinely fails · `2` argparse usage) —
+#526's *exit 0 on degradation* clause is **superseded for the CLI probe only**
+(#3832 / D5, 2026-09-17). The library keeps its never-raise contract.
+
+Only the `status` probe emits `3`/`4`; `list-tools` and `call` are operations
+against a declared endpoint, so any failure there keeps the generic code `1`.
+On the probe, `TORTOISE_MCP_URL` **unset** *is* the definition of not set up —
+a self-hoster running the default daemon without declaring the variable reads
+as `not_configured` (exit `4`) when that daemon is down. Declare the endpoint
+(set the variable, even to the default) to get the can't-reach-it state.
 
 ## What's inside
 
