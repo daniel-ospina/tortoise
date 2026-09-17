@@ -3834,7 +3834,8 @@ def _observed_capture_harness(org: dict, claimed: str | None,
     return stored or claimed
 
 
-def _stored_session_harness(org: dict, session_id: str | None) -> str | None:
+async def _stored_session_harness(org: dict,
+                                  session_id: str | None) -> str | None:
     """The SERVER's recorded harness for an existing session, or None (#3681).
 
     The capture ERROR paths live in ``capture_session`` — outside
@@ -3844,16 +3845,43 @@ def _stored_session_harness(org: dict, session_id: str | None) -> str | None:
     ``session_capture_last_error_{claim}`` key, re-opening the very relabel /
     receipt forgery #3681 closes (review P2). Fail-open: a lookup failure
     returns None, which restores the fresh-session rule (the claim only ever
-    introduces a harness the server has not stamped)."""
+    introduces a harness the server has not stamped).
+
+    GRAPH-BOUND (review P1): the read resolves through ``_data_sdk`` — the
+    SAME tenancy resolver the capture writes the Session with — so a
+    graph-bound key's Session is read from its OWN graph (C5 #2114).
+    ``_org_proj`` reads the org-DEFAULT graph, which a bound key's Session is
+    never written to: the lookup would miss, ``_observed_capture_harness``
+    would fall back to the caller's ``body.harness``, and the error path would
+    plant a claim-named ``session_capture_last_error_{claim}`` — re-opening
+    the relabel hole, and writing org-DEFAULT state from a graph-bound key.
+
+    #3718: sync FalkorDB I/O must stay OFF the event loop. ``_data_sdk``'s
+    ownership pre-check and the query both run in a worker thread (this helper
+    is awaited from the async ``capture_session`` error paths; the auto-file
+    precedent ``_maybe_file_harness_connected`` shows the shape)."""
     if not session_id:
         return None
     try:
-        rows = _org_proj(org["org_id"]).g.query(
+        return await asyncio.to_thread(
+            _read_stored_session_harness, org, session_id)
+    except Exception:
+        return None
+
+
+def _read_stored_session_harness(org: dict, session_id: str) -> str | None:
+    """The sync body of ``_stored_session_harness`` (runs off-loop).
+
+    Owns and closes its SDK handle — ``_org_proj`` opened a fresh SDK per
+    call and leaked the connection (review P2)."""
+    sdk = _data_sdk(org)
+    try:
+        rows = sdk._get_proj().g.query(
             "OPTIONAL MATCH (s:Session {id:$sid}) RETURN s.harness AS harness",
             params={"sid": session_id}).result_set
         return rows[0][0] if rows else None
-    except Exception:
-        return None
+    finally:
+        sdk.close()
 
 
 async def get_current_org_session(request: Request, gate_key_login: bool = True) -> dict:
@@ -8216,7 +8244,8 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
                     org["org_id"],
                     _observed_capture_harness(
                         org, body.harness,
-                        _stored_session_harness(org, body.session_id)),
+                        await _stored_session_harness(
+                            org, body.session_id)),
                     e.detail)
             except Exception:
                 logging.getLogger("tortoise.api").exception(
@@ -8233,7 +8262,7 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
                 org["org_id"],
                 _observed_capture_harness(
                     org, body.harness,
-                    _stored_session_harness(org, body.session_id)),
+                    await _stored_session_harness(org, body.session_id)),
                 "internal capture error — see server logs")
         except Exception:
             logging.getLogger("tortoise.api").exception(
@@ -18754,17 +18783,30 @@ class OnboardingStatePatchRequest(BaseModel):
 # filed (the same false-claim class as #3671, one key further down). Derived
 # from the canonical harness value set so a new harness cannot silently
 # re-open the surface; the bare (harness-less) receipt is the legacy member.
-_CAPTURE_SERVER_OWNED_KEYS = {
-    "session_capture_receipt",
-    *{f"session_capture_receipt_{h}" for h in _SESSION_HARNESS_VALUES},
-    *{f"session_capture_last_error_{h}" for h in _SESSION_HARNESS_VALUES},
-    # install probes are DERIVED from the registration table
-    # (_ALLOWED_STATE_KEYS ← _ONBOARDING_DEFAULT_STATE), so a harness that
-    # registers an ``install_probe_{h}`` key is server-owned the moment it is
-    # registered — a hand-listed pair would silently re-open a client-writable
-    # evidence key for the next harness (review P2).
-    *{k for k in _ALLOWED_STATE_KEYS if k.startswith("install_probe_")},
-}
+def _capture_server_owned_keys() -> set[str]:
+    """The DERIVATION behind ``_CAPTURE_SERVER_OWNED_KEYS`` (#3681).
+
+    Kept CALLABLE (not inlined into the constant) so the registration-table
+    derivation is testable: a test that merely compares two filters of the
+    SAME frozen table cannot distinguish derivation from coincidence — a
+    hand-listed pair would satisfy it. Re-running this over an EXTENDED
+    registration table proves a newly registered harness becomes
+    server-owned (``tests/test_onboarding_truth_surface.py``).
+
+    The install probes are DERIVED from the registration table
+    (``_ALLOWED_STATE_KEYS`` ← ``_ONBOARDING_DEFAULT_STATE``), so a harness
+    that registers an ``install_probe_{h}`` key is server-owned the moment it
+    is registered — a literal pair would silently re-open a client-writable
+    evidence key for the next harness (review P2)."""
+    return {
+        "session_capture_receipt",
+        *{f"session_capture_receipt_{h}" for h in _SESSION_HARNESS_VALUES},
+        *{f"session_capture_last_error_{h}" for h in _SESSION_HARNESS_VALUES},
+        *{k for k in _ALLOWED_STATE_KEYS if k.startswith("install_probe_")},
+    }
+
+
+_CAPTURE_SERVER_OWNED_KEYS = _capture_server_owned_keys()
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
     "completed_steps", "member_progress", "last_decide_attempt",

@@ -262,6 +262,13 @@ _CAPTURE_TEAM = {
     "org_id": "team-truth", "tier": "free", "key_id": "k-capture",
     "legacy_full_access": True, "max_points": 100000,
 }
+# A GRAPH-BOUND variant of the same agent key (C5 #2114): the Session it
+# captures lives in its OWN graph (`graph_namespace`), never the org DEFAULT
+# graph. Presents the P1 shape — a session that exists ONLY in the bound graph.
+_CAPTURE_TEAM_GRAPH_SCOPED = {
+    **_CAPTURE_TEAM, "key_id": "k-capture-bound",
+    "graph_id": "g-truth", "graph_namespace": "org_truth_gtruth",
+}
 _CONV = [
     {"role": "user", "content": "We decided to ship serve --http first."},
     {"role": "assistant", "content": "Agreed, the config was the root cause."},
@@ -352,6 +359,91 @@ class TestCaptureReceiptHarnessIsServerResolved:
         assert receipts == [{"session_capture_receipt": receipts[0][
             "session_capture_receipt"]}], (
             f"a session (browser) capture named a harness: {receipts}")
+
+    def test_error_path_reads_the_stored_harness_from_the_bound_graph(
+            self, env):
+        """#3681 review P1: the capture ERROR path must resolve the stored
+        harness from the SAME graph the capture WRITES the Session to.
+
+        A graph-bound key's Session lives in its OWN graph (C5 #2114), so a
+        lookup against the org-DEFAULT graph misses it, the helper fails open,
+        and the caller's ``body.harness`` wins — planting a caller-named
+        ``session_capture_last_error_{claim}`` and re-opening the relabel hole
+        #3681 closes (the existing new test only covers the points auto-file,
+        not this error path).
+
+        RED mutation: resolve via ``_org_proj(org["org_id"])`` (the org-DEFAULT
+        graph) → the bound-graph Session is invisible → the last-error key is
+        ``session_capture_last_error_cursor`` (the client's claim) → both
+        assertions fail. GREEN: resolving via ``_data_sdk(org)`` (the same
+        resolver the capture writes with) sees the bound graph's stored
+        ``claude`` harness."""
+        tc, holder, seen = env
+        ns = "org_truth_gtruth"
+        holder["org"] = dict(_CAPTURE_TEAM_GRAPH_SCOPED)
+        # the key's graph is registered (the ownership pre-check reads it)
+        ha._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (g:Graph {id:'g-truth', org_id:'team-truth', "
+            "namespace:$ns})", params={"ns": ns})
+        # a Session that exists ONLY in the key's bound graph
+        ha._make_sdk(graph_name=ns)._get_proj().g.query(
+            "CREATE (s:Session {id:'S-bound', harness:'claude'})")
+        # an empty conversation raises at the pre-write 422 gate — the ERROR
+        # path, where the harness is resolved for the last-error key
+        r = tc.post(_resolved_path("capture_session"),
+                    json={"session_id": "S-bound", "harness": "cursor",
+                          "conversation": []})
+        assert r.status_code == 422, r.text
+        error_keys = {k for c in seen for k in c
+                      if k.startswith("session_capture_last_error_")}
+        assert error_keys == {"session_capture_last_error_claude"}, (
+            f"the bound graph's stored harness did not name the last-error "
+            f"key: {sorted(error_keys)}")
+        assert "session_capture_last_error_cursor" not in error_keys, (
+            "the client's body.harness claimed the last-error key")
+
+
+@pytest.mark.asyncio
+async def test_stored_session_harness_owns_and_closes_its_data_sdk(
+        monkeypatch):
+    """#3681 review P2: the error-path lookup must (a) resolve through the
+    data-plane tenancy resolver (``_data_sdk`` — the same graph the capture
+    writes the Session to), never ``_org_proj``, and (b) own and CLOSE its SDK
+    handle — ``_org_proj`` opened a fresh SDK per call and leaked the
+    connection, and this runs on the async request path.
+
+    RED mutation 1: resolve via ``_org_proj`` (monkeypatched here to answer
+    from the org-DEFAULT graph) → the harness comes back ``"wrong-graph"`` →
+    the harness assertion fails.
+    RED mutation 2: drop the ``sdk.close()`` → ``closed`` stays empty → the
+    leak assertion fails.
+    GREEN: ``_data_sdk`` answers ``"claude"`` and the handle is closed."""
+    from types import SimpleNamespace
+
+    closed: list[bool] = []
+    seen: list[tuple] = []
+
+    def _proj(harness):
+        def _query(cypher, params=None):
+            seen.append((harness, params["sid"]))
+            return SimpleNamespace(result_set=[[harness]])
+        return SimpleNamespace(g=SimpleNamespace(query=_query))
+
+    class _Sdk:
+        def _get_proj(self):
+            return _proj("claude")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(ha, "_data_sdk", lambda org: _Sdk())
+    monkeypatch.setattr(ha, "_org_proj", lambda oid: _proj("wrong-graph"))
+    assert await ha._stored_session_harness(
+        {"org_id": "o"}, "S-bound") == "claude"
+    assert seen == [("claude", "S-bound")]
+    assert closed == [True], "the SDK handle was not closed (connection leak)"
+    # no session id → no lookup, no SDK opened
+    assert await ha._stored_session_harness({"org_id": "o"}, None) is None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -446,9 +538,30 @@ class TestAgentRestWriteFilesHarnessConnected:
 
         RED mutation: drop `and not org.get("graph_id")` → the graph-bound
         write files the org-level step → the `steps == []` assertion fails.
-        GREEN: the org-wide agent key still files it (test above)."""
-        r, steps = self._post_point(monkeypatch, _AGENT_GRAPH_SCOPED)
+
+        This test is SELF-CONTAINED: `steps == []` alone is satisfied by ANY
+        skip reason (a dead auto-file, a mis-wired credential), so the test
+        (a) asserts the credential really is AGENT-lane — an `_credential_is_
+        agent` skip cannot be what empties `steps` — and (b) carries its own
+        positive control: the SAME credential minus `graph_id` DOES file the
+        step. GREEN: the org-wide agent key still files it."""
+        scoped = _AGENT_GRAPH_SCOPED
+        # (a) the guard under test is the GRAPH-BOUND clause, not the agent
+        # gate — this credential is agent-lane and carries a graph_id.
+        assert ha._credential_is_agent(scoped) is True
+        assert scoped["graph_id"] == "g-truth"
+        # (b) positive control IN THIS TEST: the same agent-lane credential
+        # WITHOUT graph_id files the step, so an empty `steps` below can only
+        # be the graph-bound skip.
+        org_wide = {k: v for k, v in scoped.items() if k != "graph_id"}
+        assert "graph_id" not in org_wide
+        r_wide, steps_wide = self._post_point(monkeypatch, org_wide)
+        assert r_wide.status_code == 200, r_wide.text
+        assert steps_wide == ["harness-connected"]
+        # the graph-bound write files NO org-level step, but the point lands
+        r, steps = self._post_point(monkeypatch, scoped)
         assert r.status_code == 200, r.text
+        assert r.json()["id"] == "p-truth"
         assert steps == []
 
 
@@ -458,18 +571,42 @@ def test_install_probe_server_owned_keys_are_derived_from_the_registry():
     table (``_ALLOWED_STATE_KEYS`` ← ``_ONBOARDING_DEFAULT_STATE``), not
     hand-listed.
 
-    RED mutation: replace the derivation with the literal pair
-    ``{"install_probe_claude", "install_probe_pi"}`` and register a third
-    probe → the new probe is client-PATCHable evidence (the surface re-opens)
-    → the bidirectional assertion fails.
-    GREEN: every registered probe is server-owned, and no unregistered probe
-    is claimed as server-owned."""
+    RED mutation: replace the derivation (``ha._capture_server_owned_keys``'s
+    install-probe comprehension) with the literal pair
+    ``{"install_probe_claude", "install_probe_pi"}`` → a THIRD registered probe
+    does not become owned → the synthetic-probe assertion fails.
+
+    Why the mutation NEEDS to be run through the derivation: comparing two
+    filters of the SAME frozen registry (`owned` vs `probes`) is satisfied by
+    the literal pair whenever the table happens to hold exactly those two
+    probes — it cannot tell derivation from coincidence. Re-running the
+    production derivation over an EXTENDED table is what makes it RED.
+
+    GREEN: every registered probe is server-owned, and the live set is
+    exactly the derivation over the live table."""
     probes = {k for k in ha._ALLOWED_STATE_KEYS
               if k.startswith("install_probe_")}
     assert probes, "no install probes registered — the derivation is vacuous"
+    # the LIVE constant is the derivation's output over the live table
+    assert ha._capture_server_owned_keys() == ha._CAPTURE_SERVER_OWNED_KEYS, (
+        "_CAPTURE_SERVER_OWNED_KEYS is not the derivation over the live "
+        "registration table")
     owned = {k for k in ha._CAPTURE_SERVER_OWNED_KEYS
              if k.startswith("install_probe_")}
     assert owned == probes, (
         "install-probe server-owned set drifted from the registration table: "
         f"registered={sorted(probes)} owned={sorted(owned)}")
+    # DERIVATION, not coincidence: a third REGISTERED probe must become owned.
+    synthetic = "install_probe_third"
+    ha._ALLOWED_STATE_KEYS.add(synthetic)
+    try:
+        extended = ha._capture_server_owned_keys()
+    finally:
+        ha._ALLOWED_STATE_KEYS.discard(synthetic)
+    assert synthetic in extended, (
+        "a newly registered install probe did not become server-owned — the "
+        "capture server-owned set is hand-listed, not derived")
+    assert extended - ha._CAPTURE_SERVER_OWNED_KEYS == {synthetic}, (
+        "the derivation changed more than the newly registered probe: "
+        f"{sorted(extended - ha._CAPTURE_SERVER_OWNED_KEYS)}")
     assert probes <= ha._PATCH_SERVER_OWNED_KEYS
