@@ -64,7 +64,14 @@ import tempfile
 _ENV_TMPDIR_AT_IMPORT = (os.environ.get("TMPDIR") or "").rstrip(os.sep)
 HOST_TMPDIR = os.path.realpath(tempfile.gettempdir())
 _TMPDIR_SPELLINGS = tuple(dict.fromkeys(
-    s for s in (HOST_TMPDIR, _ENV_TMPDIR_AT_IMPORT,
+    s for s in (HOST_TMPDIR,
+                # The RAW gettempdir() too: with $TMPDIR unset the fallback is
+                # /tmp on macOS while its realpath is /private/tmp, so a list
+                # seeded only from the env var AND realpaths would miss the
+                # string form entirely (#3752 review cycle 5).
+                tempfile.gettempdir(),
+                os.path.realpath(tempfile.gettempdir()),
+                _ENV_TMPDIR_AT_IMPORT,
                 os.path.realpath(_ENV_TMPDIR_AT_IMPORT)
                 if _ENV_TMPDIR_AT_IMPORT else "") if s
 ))
@@ -506,15 +513,16 @@ def _command_touches_host_tempdir(command) -> str | None:
     while ``find <host T>`` does not.
 
     The fast-path substring test uses EVERY spelling of the temp dir captured
-    at import (the realpath AND the $TMPDIR spelling — on macOS ``$TMPDIR`` is
-    ``/var/folders/...`` while the realpath is ``/private/var/folders/...``, so
-    testing only the realpath made the shell form fail OPEN on the canonical
-    spelling), and it is only a short-circuit: the decision is always the
-    realpath comparison.
+    at import (the raw `tempfile.gettempdir()`, its realpath, the `$TMPDIR`
+    spelling and ITS realpath — on macOS `$TMPDIR` is `/var/folders/...` while
+    the realpath is `/private/var/folders/...`, so testing only the realpath
+    made the shell form fail OPEN on the canonical spelling), and it is only a
+    short-circuit: the decision is the realpath comparison per token.
 
-    ``$VAR`` indirection (``sh -c 'find "$TT"'``) remains a bypass of any
-    static-content heuristic — the argv/`os.exec` layers are the ones that see
-    the resolved path.
+    Known limits, both inherent to a static-content check on a command
+    STRING: an ANCESTOR of the temp dir is not in the spelling list (so
+    `find $(dirname <T>)` passes here — the argv/`os.exec` layers catch it),
+    and `$VAR` indirection is invisible to it.
     """
     if isinstance(command, bytes):
         command = os.fsdecode(command)

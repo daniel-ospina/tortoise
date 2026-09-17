@@ -223,10 +223,10 @@ def _kill_pid(pid: int) -> None:
 
 # AF_UNIX sun_path cap: the kernel REFUSES >= 104 bytes on macOS (redislite
 # reports "unix socket path too long (108), must be under 104"); Linux allows
-# ~108. Redislite nests its autogen dir under the child's TMPDIR, so the bind
-# path is TMPDIR + this tail.
+# ~108. Redislite nests its autogen dir (its default `tmp` prefix + 8 random
+# chars) under the child's TMPDIR, so the bind path is TMPDIR + this tail.
 _AF_UNIX_SOCKET_BUDGET = 104
-_REDISLITE_SOCKET_TAIL = len("/tmpsXXXXXXXX/redis.socket")
+_REDISLITE_SOCKET_TAIL = len("/tmpXXXXXXXX/redis.socket")
 
 
 def _make_flat_tmpdir() -> str:
@@ -234,7 +234,7 @@ def _make_flat_tmpdir() -> str:
 
     AF_UNIX socket paths are capped (the kernel needs < 104 bytes on macOS)
     and the child's autogen redislite dir nests under TMPDIR
-    (`<TMPDIR>/tmpsXXXX/redis.socket`), so the child TMPDIR must stay short.
+    (`<TMPDIR>/tmpXXXXXXXX/redis.socket`), so the child TMPDIR must stay short.
 
     #3752: the private per-session temp root adds 12 bytes to every scratch
     path. The historical `tchaos`-prefixed name (TMPDIR 83 on this host) put
@@ -245,7 +245,7 @@ def _make_flat_tmpdir() -> str:
     host tempdir fails by name instead of surfacing as an empty spawn error.
     """
     root = tempfile.mkdtemp(prefix="", dir=tempfile.gettempdir())
-    bind_path = os.path.join(root, "tmpsXXXXXXXX", "redis.socket")
+    bind_path = os.path.join(root, "tmpXXXXXXXX", "redis.socket")
     assert len(bind_path) < _AF_UNIX_SOCKET_BUDGET, (
         f"child TMPDIR {root!r} leaves no room for the redislite socket path "
         f"({len(bind_path)} bytes >= {_AF_UNIX_SOCKET_BUDGET}): the #3752 "

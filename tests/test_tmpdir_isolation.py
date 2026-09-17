@@ -66,24 +66,28 @@ def test_session_temp_root_is_short_enough_for_af_unix():
     """The REAL worst case, not a one-level approximation (#3752 review
     cycle 4 — the approximation is why an AF_UNIX regression shipped): the
     suite's scratch nests two levels, `<root>/<scratch>/<redislite autogen>/
-    redis.socket`, and the redislite autogen dir is `tmpsXXXXXXXX`. The kernel
-    needs the bind path to stay UNDER 104 bytes on macOS, and a child process
-    that sets its OWN TMPDIR (tests/test_embedded_concurrency.py) gets one
-    more level of the same shape. Guard the arithmetic here rather than
-    discovering it as a flaky 'socket path too long' at test time.
+    redis.socket`, and the redislite autogen dir is its default `tmp` prefix
+    plus 8 random chars. The kernel needs the bind path to stay UNDER 104 bytes
+    on macOS, and a child process that sets its OWN TMPDIR
+    (tests/test_embedded_concurrency.py) gets one more level of the same
+    shape. Guard the arithmetic here rather than discovering it as a flaky
+    'socket path too long' at test time.
     """
     root = scan_root()
     # The deepest path the suite itself creates: a test scratch dir inside the
-    # root, then redislite's autogen dir, then the socket.
-    deepest = os.path.join(root, "" + "x" * 8, "tmps" + "x" * 8,
+    # root, then redislite's autogen dir (its default `tmp` prefix + 8 random
+    # chars), then the socket.
+    deepest = os.path.join(root, "" + "x" * 8, "tmp" + "x" * 8,
                            "redis.socket")
     assert len(deepest) < 104, (
         f"private temp root makes socket paths too long: {deepest!r} "
         f"({len(deepest)} >= 104)")
     # A child that inherits a TMPDIR nested one level under the root
-    # (test_embedded_concurrency._make_flat_tmpdir) must still fit.
+    # (test_embedded_concurrency._make_flat_tmpdir) must still fit: its bind
+    # path is its TMPDIR + "/tmpXXXXXXXX/redis.socket" (25 bytes), so the child
+    # TMPDIR has to stay at or below 78 bytes.
     child_tmpdir = os.path.join(root, "" + "x" * 8)
-    child_bind = os.path.join(child_tmpdir, "tmps" + "x" * 8, "redis.socket")
+    child_bind = os.path.join(child_tmpdir, "tmp" + "x" * 8, "redis.socket")
     assert len(child_bind) < 104, (
         f"child TMPDIR under the private root leaves no AF_UNIX room: "
         f"{child_bind!r} ({len(child_bind)} >= 104)")
@@ -434,6 +438,70 @@ def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
     reaper._sweep_quarantine_dirs(dry_run=True)
     assert str(tmp_path) in seen, \
         f"_sweep_quarantine_dirs: discovery charged to the walk {seen!r}"
+
+
+def test_env_spelling_of_the_shared_tempdir_is_blocked():
+    """#3752 review cycles 4-5: on macOS `$TMPDIR` is `/var/folders/...` while
+    the realpath is `/private/var/folders/...`. The string/`os.system` branch
+    matched only the realpath and therefore failed OPEN on the canonical
+    spelling — the one the issue's own `find <shared TMPDIR>` used."""
+    from tests import _tmpdir_isolation as iso
+
+    assert iso._ENV_TMPDIR_AT_IMPORT, "no $TMPDIR at import; test proves nothing"
+    env_spelling = iso._ENV_TMPDIR_AT_IMPORT
+    with pytest.raises(SharedTmpdirScanError):
+        subprocess.run(["find", env_spelling, "-maxdepth", "2"],
+                       capture_output=True, check=False)
+    with pytest.raises(SharedTmpdirScanError):
+        subprocess.run(f"find {env_spelling} -maxdepth 2", shell=True,
+                       capture_output=True, check=False)
+    with pytest.raises(SharedTmpdirScanError):
+        os.system(f"ls {env_spelling}")
+    # The raw fallback spelling (TMPDIR unset -> /tmp whose realpath is
+    # /private/tmp) must be a known spelling too, or the same branch fails open.
+    for spelling in iso._TMPDIR_SPELLINGS:
+        assert iso._command_touches_host_tempdir(f"find {spelling}") is not None, \
+            f"spelling {spelling!r} is not recognised by the string branch"
+    # ...while the session root (a DESCENDANT, reachable via the redirect) must
+    # still be allowed — the guard blocks the shared tree, not our own scratch.
+    assert iso._command_touches_host_tempdir(f"find {scan_root()}") is None
+
+
+def test_teardown_after_fail_closed_abort_keeps_operator_env(tmp_path,
+                                                            monkeypatch):
+    """#3752 review cycle 5: a teardown that consumed no install (the extra
+    atexit registration left by the fail-closed abort) must not touch the
+    environment — restoring before the `if not root` guard destroyed an
+    operator-supplied TORTOISE_HOST_TMPDIR."""
+    from tests import _tmpdir_isolation as iso
+
+    real_root, real_host = iso._SESSION_TMPDIR, iso.HOST_TMPDIR
+    real_env = os.environ.get("TORTOISE_HOST_TMPDIR")
+    os.environ["TORTOISE_HOST_TMPDIR"] = "/OPERATOR/VALUE"
+    iso._SESSION_TMPDIR = None
+    iso.HOST_TMPDIR = str(tmp_path)
+
+    def boom(_root):
+        raise OSError("read-only temp dir")
+
+    monkeypatch.setattr(iso, "_write_marker", boom)
+    try:
+        with pytest.raises(iso.SessionIsolationError):
+            iso.install_session_tmpdir()
+        # The abort already cleaned up; a SECOND teardown is what the extra
+        # atexit registration does at interpreter exit.
+        iso.teardown_session_tmpdir()
+        assert os.environ.get("TORTOISE_HOST_TMPDIR") == "/OPERATOR/VALUE", \
+            "a no-op teardown destroyed the operator's TORTOISE_HOST_TMPDIR"
+    finally:
+        monkeypatch.undo()
+        iso._SESSION_TMPDIR = real_root
+        iso.HOST_TMPDIR = real_host
+        if real_env is None:
+            os.environ.pop("TORTOISE_HOST_TMPDIR", None)
+        else:
+            os.environ["TORTOISE_HOST_TMPDIR"] = real_env
+        tempfile.tempdir = real_root
 
 
 def test_probe_socket_falls_back_to_tmp_for_a_link_that_cannot_fit(

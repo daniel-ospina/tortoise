@@ -1443,11 +1443,15 @@ def _bind_unix_socket(path) -> socket.socket:
     """
     target = str(path)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    if len(target.encode("utf-8", "surrogateescape")) <= 100:
+    budget = 104  # the kernel cap on macOS: the bind path must stay UNDER it
+    if len(target.encode("utf-8", "surrogateescape")) < budget:
         s.bind(target)
         return s
     short = os.path.join(tempfile.gettempdir(),
                          f".tl{os.getpid():x}{next(_BIND_SEQ):x}")
+    assert len(short.encode("utf-8", "surrogateescape")) < budget, (
+        f"the short bind path {short!r} does not fit either — the private "
+        f"session temp root is too deep for AF_UNIX (#3752)")
     s.bind(short)
     os.rename(short, target)
     return s
