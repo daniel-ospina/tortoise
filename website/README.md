@@ -12,9 +12,15 @@ Single-scroll landing page for **Premise Labs**, the AI lab behind
 into it, and uploads it. Abridged below to the load-bearing commands — CI also
 runs `rm -rf "$STAGE"`, five survival guards that abort the step *before* the
 upload if a load-bearing entry did not survive, and takes `RUNNER_TEMP` from the
-runner (`${RUNNER_TEMP:?}` there; `mktemp -d` here, so the snippet is runnable):
+runner (`${RUNNER_TEMP:?}` there; `mktemp -d` here, so the snippet is runnable).
+
+Run this **from the repository root** — `rsync`'s `website/` source is resolved
+relative to the current directory, and this README itself lives inside
+`website/`, so copy-pasting from there fails with
+`link_stat "website/" failed`:
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
 STAGE="$(mktemp -d)/pages-upload" && mkdir -p "$STAGE"
 rsync -a --exclude='/apps/' --exclude='/migrations/' \
   --exclude='node_modules/' --exclude='/.wranglerignore' --exclude='*.md' \
@@ -56,19 +62,16 @@ The post-deploy step `Post-deploy — internal paths are not publicly served
 fails the step, because "could not read it" is not "it is not served").
 
 **Residual risk:** a *new* top-level entry under `website/` **is** staged unless
-it is excluded in the deploy step. That case is pinned by
+it is excluded in the deploy step — but it can no longer ship on a green deploy.
+The deploy job runs `tools/check_pages_upload_root.py` **before** the upload,
+which fails if any tracked top-level entry is missing from
+`config/pages-upload-classification.txt`, and
 `tests/test_pages_bindings.py::test_every_top_level_entry_under_website_is_classified`
-(a new tracked top-level entry fails the suite until it is classified public or
-excluded) — but only on the **full** test selection (push to `main`); a PR that
-only *adds* an unknown top-level path selects no surface, so that ratchet does
-not run pre-merge (a PR that touches an existing entry does select `onboarding`
-and runs it). That ratchet is a detector, not an upload gate — the deploy job
-runs no pytest, so such a file is uploaded and only reds afterwards. A new
-**nested** file under an already-public directory (e.g.
-`website/blog/internal.txt`) is **not pinned by any test** — add it to the
-exclude list **and** to the 404 assertion step by hand (a nested `*.md` is at
-least covered by the blanket `*.md` exclusion, but that is a coincidence, not a
-pin).
+pins the same table on the full test selection. A new **nested** file under an
+already-public directory (e.g. `website/blog/internal.txt`) is **not** caught by
+that classification (it is top-level only) — add it to the exclude list **and**
+to the post-deploy 404 assertion step by hand (a nested `*.md` is at least
+covered by the blanket `*.md` exclusion, but that is a coincidence, not a pin).
 
 For local troubleshooting only, `npx wrangler pages deploy <dir>` still works —
 but never point it at `website/` itself.

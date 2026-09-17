@@ -20,8 +20,12 @@ verified that four ways: wrangler's `pages/validate.ts` uses a hardcoded
 IGNORE_LIST with no ignore-file read; the string `wranglerignore` appears in 0
 files across all locally installed wrangler versions; `wrangler pages deploy
 --help` exposes no include/exclude; and live,
-`https://tortoise.premiselabs.co/.wranglerignore` returns 200 while `apps/` is
-served despite being listed. Anything left under `website/` WILL be published.
+`https://tortoise.premiselabs.co/.wranglerignore` returns 200 while `apps/` was
+served despite being listed. #3620 replaced that wholesale upload with a staged
+DENYLIST copy, so excluded paths are no longer published — but a NEW top-level
+entry under `website/` is still staged unless it is excluded (the deploy job's
+classification preflight and `tests/test_pages_bindings.py` pin that). Keeping
+the manifest in `config/` is what makes it immune to that residual risk.
 
 Usage:
     check_pages_bindings.py --manifest config/required-bindings.yml \\
