@@ -20,11 +20,96 @@ import logging
 import os
 import re
 import tempfile
+import threading
 
 import pytest
 
 from tortoise.config import is_db_uri
 from tortoise.projection import FalkorProjection
+
+# ── #3546: ONE process-wide embedded construction lock ────────────────────
+# Consolidated here from the two per-file copies that #3511 installed
+# (`tests/test_import_endpoint.py`, `tests/test_export_delete.py`). The
+# invariant is PROCESS-wide while each copy was a module-scoped lock OBJECT —
+# two independent RLocks cannot serialize against each other, so every other
+# file that constructs an embedded projection without a prior construction on
+# its pinned path stayed exposed. `tests/test_invites_http.py` was one of
+# them: its `client` fixture enters `TestClient(app)` (arming the lifespan's
+# `tortoise-health-probe` constructor) before the `reg` fixture constructs the
+# seeder's projection, both on the same fresh temp db_path.
+#
+# The race (redislite `RedisMixin.__init__`): a NEW redis-server daemon is
+# started whenever `<db>.settings` is absent (or its recorded pid is dead).
+# Two constructions that interleave BEFORE either calls
+# `_save_setting_registry()` both take the fresh-start branch, each spawning a
+# daemon in its own tempdir; the LATER writer silently owns the registry, and
+# the loser's writes become invisible to every later opener. It surfaces as a
+# seed that reads back empty — e.g. a seeded Membership that an owner/admin
+# gate cannot see, so POST /v1/invites 403s instead of reaching its 402/200
+# branch (test_invites_http), or an import that looks like it wiped the graph
+# (`assert [] == ['old-0']`, test_import_endpoint #3505).
+#
+# Scope of the guarantee (this is NOT a global single-writer guarantee): the
+# lock serializes only IN-PROCESS `FalkorProjection.__init__` calls; two paths
+# stay outside it and can still add or remove a registry entry — (1) a
+# construction that raises inside `_start_redis()` (RedisLiteException /
+# RedisLiteServerStartError) after its daemon spawned but before
+# `_save_setting_registry()`, leaving an unregistered orphan; and (2)
+# redislite's `_cleanup()` last-client branch, which removes `<db>.settings`
+# and shuts the daemon down from `__del__`/atexit on any thread. Callers that
+# need more than the lock must therefore ALSO verify visibility at seed time
+# (the named `SeedVisibilityError` guard in test_import_endpoint's
+# `_seed_live_graph` is the reference shape).
+#
+# Two further classes sit outside the lock BY CONSTRUCTION — they are limits,
+# not coverage gaps to close here: (3) a construction made at test-module
+# IMPORT time, because the fixture installs at first test SETUP, after
+# collection has already imported every module; and (4) a raw redislite
+# `FalkorDB(path)` client, which never calls `FalkorProjection.__init__` — the
+# raw-layer files that build clients directly (RAW_EMBEDDED_ALLOWLIST in
+# test_embedded_lifecycle.py) do so because the construction IS their test
+# input. Subprocess constructions are likewise outside an IN-PROCESS lock.
+# A test that monkeypatches `FalkorProjection.__init__` itself (e.g.
+# test_pipeline_cli) replaces this wrapper for that test's duration; those
+# seams are function-scoped and single-threaded.
+#
+# Blast radius of the critical section: it spans the WHOLE `__init__`,
+# including redislite's blocking `subprocess.call` server start and the
+# post-start `_auto_health_recover()` / `_ensure_indexes()` work. A wedged
+# embedded start therefore stalls every in-process constructor, not just its
+# own thread. That wait is bounded by redislite's socket-wait `start_timeout`,
+# but NOT by any timeout on a hung `redis-server` binary — accepted
+# deliberately: a hung start is a louder failure than a silent second daemon.
+EMBEDDED_CONSTRUCTION_LOCK = threading.RLock()
+
+
+def serialize_embedded_construction(monkeypatch) -> None:
+    """Install THE process-wide `FalkorProjection.__init__` wrapper (#3546).
+
+    Called exactly once, by the session-scoped autouse
+    `_serialize_embedded_construction` fixture in `tests/conftest.py` — never
+    per file. Files must NOT install their own copy: a second lock object
+    cannot serialize against this one, which is the defect #3546 names.
+
+    `monkeypatch` is a `pytest.MonkeyPatch` instance owned by the caller (the
+    session fixture cannot use the function-scoped `monkeypatch` fixture), so
+    the caller controls undo. Idempotent: re-wrapping an already-wrapped
+    `__init__` is a no-op, so a duplicate install can never stack a redundant
+    critical section.
+    """
+    prev = FalkorProjection.__init__
+    if getattr(prev, "_tortoise_construction_serialized", False):
+        return
+
+    def _serialized_proj_init(self, *args, **kwargs):
+        # `return` forwarded deliberately: `__init__` must return None, so it
+        # is inert today, but it stays correct if this wrapper is ever reused
+        # for a factory or `__new__` (where dropping the result is a bug).
+        with EMBEDDED_CONSTRUCTION_LOCK:
+            return prev(self, *args, **kwargs)
+
+    _serialized_proj_init._tortoise_construction_serialized = True
+    monkeypatch.setattr(FalkorProjection, "__init__", _serialized_proj_init)
 
 
 # ── Epic #1686: worker-thread probe ───────────────────────────────────────
@@ -833,17 +918,25 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
                            skip_on_non_loopback=skip_on_non_loopback)
 
 
-def _team_sweep_allowed(uri: str) -> bool:
-    """#1686 (review P1-1): may the team_* stray pass run against `uri`?
+# The product's own mint namespace, for the journal-blind stray pass below.
+# `org_` is current (tenancy rename, #3543); `team_` is retained so an
+# opted-in run still reclaims graphs minted before the rename. Both identify
+# REAL tenant graphs — which is why the pass is opt-in only.
+_PRODUCT_GRAPH_PREFIXES = ("org_", "team_")
 
-    team_<name> is the PRODUCT's own mint namespace (hosted parity: real
-    tenant graphs are named team_...). A blanket team_* delete on a shared
-    or dev docker would destroy legitimate product data — the pre-#1686
-    design deliberately kept wipes fail-closed to test_/tortoise_test_
-    prefixes. Allowed ONLY via an explicit operator opt-in
-    (TORTOISE_TEST_SWEEP_TEAM_STRAYS=1). Journaled team_* graphs are always
-    dropped via _sweep_drop (the journal is the ownership record) — this
-    gate protects only the journal-blind residual pass.
+
+def _team_sweep_allowed(uri: str) -> bool:
+    """#1686 (review P1-1): may the product-namespace stray pass run on `uri`?
+
+    The product's own mint namespace (hosted parity: real tenant graphs) is
+    the _PRODUCT_GRAPH_PREFIXES family — `org_` since the tenancy rename
+    (#3543), `team_` for graphs minted before it. A blanket delete there on
+    a shared or dev docker would destroy legitimate product data — the
+    pre-#1686 design deliberately kept wipes fail-closed to
+    test_/tortoise_test_ prefixes. Allowed ONLY via an explicit operator
+    opt-in (TORTOISE_TEST_SWEEP_TEAM_STRAYS=1). Journaled product-namespace
+    graphs are always dropped via _sweep_drop (the journal is the ownership
+    record) — this gate protects only the journal-blind residual pass.
 
     #1884: the URI-path inference ("test" substring in the graph name) is
     RETRACTED. The longmem_eval re-validation runs against the SAME
@@ -851,7 +944,7 @@ def _team_sweep_allowed(uri: str) -> bool:
     container that concurrent docker-lane pytest sessions use; a session
     ending last-suite-standing inferred "dedicated test DB" from the path
     and the journal-blind pass DETACH-DELETEd + GRAPH.DELETEd the eval's
-    LIVE per-question graphs (team_default__default__{qid}) mid-ingest —
+    LIVE per-question graphs (then minted team_default__default__{qid}) mid-ingest —
     silent write loss (writes succeed client-side, the post-ingest census
     reads an empty namespace, gate red). A test-named path on a shared
     server is NOT an ownership record; the explicit opt-in is (CI's
@@ -861,22 +954,24 @@ def _team_sweep_allowed(uri: str) -> bool:
 
 
 def _sweep_team_strays(proj, uri: str) -> list[str]:
-    """Drop journal-blind stray team_* graphs (#1686 closure).
+    """Drop journal-blind stray product-namespace graphs (#1686 closure).
 
-    Guarded by _team_sweep_allowed(uri) — never on a shared/dev docker
-    (explicit opt-in only since #1884; the URI-path "test" inference
-    retracted — see _team_sweep_allowed). DETACH+DELETE per graph,
-    log-and-continue; returns the dropped names.
-    Runs AFTER wipe_server in _leftover_sweep (journaled team_* names were
-    already dropped by _sweep_drop; this closes the raw-select_graph class)."""
+    Matches _PRODUCT_GRAPH_PREFIXES. Guarded by _team_sweep_allowed(uri) —
+    never on a shared/dev docker (explicit opt-in only since #1884; the
+    URI-path "test" inference retracted — see _team_sweep_allowed).
+    DETACH+DELETE per graph, log-and-continue; returns the dropped names.
+    Runs AFTER wipe_server in _leftover_sweep (journaled product-namespace
+    names were already dropped by _sweep_drop; this closes the
+    raw-select_graph class)."""
     if not _team_sweep_allowed(uri):
         logging.getLogger(__name__).info(
-            "leftover team_* pass SKIPPED — %r (set "
-            "TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)", uri)
+            "leftover %s pass SKIPPED — %r (set "
+            "TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)",
+            "/".join(_PRODUCT_GRAPH_PREFIXES), uri)
         return []
     dropped: list[str] = []
     for g in proj.db.list_graphs() or []:
-        if not g.startswith("team_"):
+        if not g.startswith(_PRODUCT_GRAPH_PREFIXES):
             continue
         try:
             proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
@@ -884,19 +979,20 @@ def _sweep_team_strays(proj, uri: str) -> list[str]:
             dropped.append(g)
         except Exception as e:
             logging.getLogger(__name__).warning(
-                "leftover team_* drop failed for %r: %r", g, e)
+                "leftover product-namespace drop failed for %r: %r", g, e)
     return dropped
 
 
 def _leftover_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
     """LAST-suite-standing FULL sweep: every test-prefixed graph on the
     server (wipe_server scope=None → global, drop=True) PLUS, since #1686,
-    journal-blind stray team_* graphs — but ONLY when _team_sweep_allowed
-    (an explicit TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in; the URI-path
-    inference is retracted since #1884): team_* is the product's mint
-    namespace and a blanket delete on a shared/dev docker would destroy
-    real tenant data (review P1-1). Log-and-continue on errors — hygiene
-    never fails the suite."""
+    journal-blind stray product-namespace graphs (org_*/team_*) — but ONLY
+    when _team_sweep_allowed (an explicit
+    TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in; the URI-path inference is
+    retracted since #1884): that family is the product's mint namespace and
+    a blanket delete on a shared/dev docker would destroy real tenant data
+    (review P1-1). Log-and-continue on errors — hygiene never fails the
+    suite."""
     with _sweep_proj(uri) as proj:
         from tortoise.projection import _is_loopback_host
         host = _projection_host(proj)

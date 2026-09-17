@@ -94,7 +94,7 @@ class BackupConfig:
     retention_daily: int = 7
     retention_weekly: int = 4
     simulate_enabled: bool = False
-    team_sweep_enabled: bool = False
+    org_sweep_enabled: bool = False
     # #2319: immutability + geo-mirror surface (defaults are the documented
     # production values; drift-bounds enforced in _load_from_env).
     lock_enabled: bool = False
@@ -190,7 +190,7 @@ def load_config(env: dict[str, str] | None = None) -> BackupConfig:
 
 def _load_from_env() -> BackupConfig:
     enabled = _env_bool("BACKUP_SWEEP_ENABLED", default=False)
-    team_sweep_enabled = _env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False)
+    org_sweep_enabled = _env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False)
     if not enabled:
         # Fail-closed default: build a disabled config with empty keys; the
         # app must not call into the sweep machinery when disabled.
@@ -207,7 +207,7 @@ def _load_from_env() -> BackupConfig:
             github_issues_pat="",
             alert_assignee="",
             gh_repo=_DEFAULT_GH_REPO,
-            team_sweep_enabled=team_sweep_enabled,
+            org_sweep_enabled=org_sweep_enabled,
         )
 
     # ── #2319 immutability contract (validated when the sweep is enabled). ──
@@ -366,7 +366,7 @@ def _load_from_env() -> BackupConfig:
         retention_daily=_env_int("BACKUP_RETENTION_DAILY", 7),
         retention_weekly=_env_int("BACKUP_RETENTION_WEEKLY", 4),
         simulate_enabled=_env_bool("BACKUP_SIMULATE_ENABLED", default=False),
-        team_sweep_enabled=_env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False),
+        org_sweep_enabled=_env_bool("BACKUP_TEAM_SWEEP_ENABLED", default=False),
         lock_enabled=lock_enabled,
         lock_days=lock_days,
         cf_api_token=cf_api_token,

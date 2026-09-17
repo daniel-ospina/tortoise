@@ -172,7 +172,7 @@ class AskValidationError(ValueError):
 
 
 class AskQuotaExceeded(RuntimeError):
-    """429 ``quota_exceeded`` — the team's per-minute ask budget is spent.
+    """429 ``quota_exceeded`` — the org's per-minute ask budget is spent.
     Carries ``retry_after`` (seconds) when the server provided one."""
 
     code = CODE_QUOTA_EXCEEDED
@@ -185,7 +185,7 @@ class AskQuotaExceeded(RuntimeError):
 
 
 class AskInFlightLimit(RuntimeError):
-    """429 ``in_flight_limit`` — the per-team in-flight ask cap is full."""
+    """429 ``in_flight_limit`` — the per-org in-flight ask cap is full."""
 
     code = CODE_IN_FLIGHT_LIMIT
 

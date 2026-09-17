@@ -464,10 +464,10 @@ async def volunteer_context(body: VolunteerContextRequest):
 @router.post("/ask", dependencies=[Depends(_require_key)])
 async def ask_question(body: AskRequest):
     """Self-host answer surface — REST parity with hosted /v1/ask (#1987
-    Task 9): the LOCAL SDK lane (no team registry, NO budget — unmetered,
-    ZERO metering records: ``team_id=None`` flows through the ``not team_id``
+    Task 9): the LOCAL SDK lane (no org registry, NO budget — unmetered,
+    ZERO metering records: ``org_id=None`` flows through the ``not org_id``
     exemption), bounded by the SAME ``run_ask_bounded`` wrapper (Semaphore(8)
-    + 60s → 504 discipline) via ``team_id=None`` (P2-4). Errors mirror the
+    + 60s → 504 discipline) via ``org_id=None`` (P2-4). Errors mirror the
     hosted vocabulary via the path-scoped handler on ``selfhost.app``:
     502 ``reader_unavailable`` / ``retrieval_unavailable``, 504 ``timeout``,
     400 canonical codes from the SHARED ``AskRequest`` validators (identical
@@ -487,7 +487,7 @@ async def ask_question(body: AskRequest):
             sdk.ask, None, body.question,
             question_type=body.question_type,
             question_date=body.question_date,
-            _sdk_team_id=None,
+            _sdk_org_id=None,
         )
     except AskValidationError as e:
         raise HTTPException(status_code=400, detail=e.code) from e

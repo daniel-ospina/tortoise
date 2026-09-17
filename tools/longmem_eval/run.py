@@ -3279,8 +3279,19 @@ class _ReplayLoadWorkers:
 
     def _worker(self, i: int) -> None:
         import random as _random
+        sdk = None
+        cleanup = None
         try:
-            sdk = self.sdk_factory()
+            # #3599: the factory contract is `(sdk, cleanup)`. Accept a bare
+            # SDK too — a legacy single-value factory would otherwise raise
+            # `TypeError` into the broad handler below and silently no-op
+            # the whole load worker (the failure this contract change is
+            # reviewed against).
+            produced = self.sdk_factory()
+            if isinstance(produced, tuple):
+                sdk, cleanup = produced
+            else:
+                sdk, cleanup = produced, None
             proj = sdk._get_proj()
             qid = f"replay-load-{i}"
             while not self._stop.is_set():
@@ -3293,6 +3304,18 @@ class _ReplayLoadWorkers:
                         params={"id": pid, "q": qid, "si": si})
         except Exception:  # noqa: BLE001, RUF100
             pass
+        finally:
+            # #3599: a load worker's embedded server must not outlive the
+            # worker. Previously the factory returned only the SDK, so the
+            # TemporaryDirectory was dropped on the floor (GC'd while its
+            # server was still live) and the SDK was never closed — one
+            # orphaned redislite server per --load-worker per run.
+            if sdk is not None:
+                with contextlib.suppress(Exception):
+                    sdk.close()
+            if cleanup is not None:
+                with contextlib.suppress(Exception):
+                    cleanup()
 
 
 # ── falsification-trigger predicate (Task 5 consumes; pure) ────────────────
@@ -4705,10 +4728,12 @@ def run_evaluation(
     # cycle4-P1-13(d)); the Task 3 load-injection workers run concurrently
     # with the per-session-census replay questions.
     _load_workers = (_ReplayLoadWorkers(
+        # #3599: return (sdk, cleanup) TOGETHER — the worker closes both in a
+        # finally. The old form kept only [0], discarding the
+        # TemporaryDirectory (GC'd while its redislite server was live) and
+        # leaking one embedded server per --load-worker.
         lambda: _make_question_sdk(db_uri=db_uri, namespace=None,
-                                   work_dir=work_dir)[0] if db_uri
-        else _make_question_sdk(db_uri=None, namespace=None,
-                                work_dir=work_dir)[0],
+                                   work_dir=work_dir),
         replay_load_workers)
         if (per_session_census and replay_load_workers > 0) else None)
     if _load_workers is not None:
@@ -5952,6 +5977,15 @@ def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
 
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     _assert_python_version()
+    # #3599: the embedded lane spawns one redislite server per question (and
+    # per --load-worker). atexit covers a clean interpreter exit, but a
+    # DEFAULT-disposition SIGTERM/SIGHUP (external `timeout`, CI cancel, a
+    # watchdog) kills the process without running atexit and orphans every
+    # one of them. The other embedded entry points (__main__, mcp_server,
+    # selfhost) install this guard; the eval lane — the highest-fan-out
+    # embedded spawner in the repo — did not. Idempotent and never raises.
+    from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
+    install_embedded_signal_cleanup()
     parser = _build_parser()
     args = parser.parse_args(argv)
     # M7 #1739 / #1742: session-parallel extraction exists only on the v2

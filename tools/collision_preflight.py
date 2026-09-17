@@ -20,8 +20,9 @@ Design contract
 2. Worktree enumeration is UNTRUNCATED, and the GitHub PR surfaces are
    enumerated to COMPLETENESS. This module never pipes, heads or tails git
    output — the reported count is the full count — and a PR list is fetched
-   with ``--limit N+1`` so a list longer than its cap is detectable and is
-   reported TRUNCATED → INCOMPLETE, never silently partial. A capped list that
+   with ``--limit N+1`` (open PRs) or ``--paginate`` over the REST API (closed
+   PRs) so a list longer than its cap is detectable and is reported
+   TRUNCATED → INCOMPLETE, never silently partial. A capped list that
    quietly queried a subset of PRs is the same fail-open class as the bug this
    tool exists to fix.
 3. A hit exits non-zero and names the surface. An unqueryable surface exits
@@ -36,9 +37,10 @@ Surfaces (7 rows; 6 are hit-capable, the 7th is the keyword source)
   open PRs                  gh pr list --state open   (title / headRef;
                                                          body only as a closing
                                                          reference)
-  recently-closed PRs       gh pr list --state closed (title / headRef;
-                                                         body only as a closing
-                                                         reference)
+  recently-closed PRs       gh api --paginate REST    (title / headRef;
+                            /repos/…/pulls?state=closed   body only as a
+                                                         closing reference)
+                                                         (#3587)
   local branches            git for-each-ref refs/heads
   remote branches           git for-each-ref refs/remotes   (all remotes)
   local worktrees           git worktree list --porcelain   (UNTRUNCATED)
@@ -81,6 +83,7 @@ Usage
     python3 tools/collision_preflight.py <issue-number> [--repo PATH]
         [--keywords a,b,c] [--min-keywords N] [--gh PATH] [--git PATH]
         [--timeout SECS] [--pr-limit N] [--closed-pr-limit N]
+        [--closed-pr-timeout SECS]
 
 Exit codes
 ----------
@@ -96,11 +99,13 @@ Env seams (tests point these at stubs; production defaults are the real tools)
     COLLISION_PREFLIGHT_TIMEOUT           per-command secs (default: 60)
     COLLISION_PREFLIGHT_PR_LIMIT          open-PR cap     (default: 1000)
     COLLISION_PREFLIGHT_CLOSED_PR_LIMIT   closed-PR cap    (default: 5000)
+    COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT closed-PR REST   (default: 600)
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -114,13 +119,35 @@ EXIT_INCOMPLETE = 2
 EXIT_USAGE = 3
 
 DEFAULT_TIMEOUT = 60.0
-# PR caps are completeness bounds, not sampling windows: the lists are fetched
-# with `--limit cap+1` and a longer list is reported TRUNCATED -> INCOMPLETE.
+# PR caps are completeness bounds, not sampling windows: OPEN PRs are fetched
+# with `--limit cap+1`, CLOSED PRs are fetched to exhaustion with
+# `gh api --paginate` (#3587) and the cap is applied to the full result — either
+# way a list longer than its cap is reported TRUNCATED -> INCOMPLETE.
 # `gh pr list --search` is deliberately never used: the search API silently
 # caps at 1000 results (observed on this repo's closed surface), which is the
 # exact partial-query failure mode this tool exists to prevent.
 PR_LIMIT = 1000
 CLOSED_PR_LIMIT = 5000
+
+# The closed-PR surface is enumerated over the GitHub REST API with
+# ``gh api --paginate``, NOT the ``gh pr list`` GraphQL path, which resets
+# deterministically on this host (``read: connection reset by peer``) while
+# REST works (#3587). REST enumeration is inherently MULTI-REQUEST, so this
+# surface gets its own wall-clock budget: a single GraphQL call's 60 s budget
+# would falsely report a large repo's COMPLETE enumeration as INCOMPLETE. This
+# is a budget, not a completeness relaxation — exceeding it is still
+# INCOMPLETE (exit 2), never CLEAN. The cap and the budget bound different
+# things: `--closed-pr-limit` truncates the SCAN of the fully-fetched list,
+# while this budget bounds the FETCH — lowering the cap cannot shorten (or
+# fail fast) the enumeration.
+CLOSED_PR_TIMEOUT = 600.0
+# REST page size. A page is one HTTP response; the issue's suggested
+# ``per_page=100`` resets on this host (3/3 runs, ~40 s) while ``per_page=20``
+# completes a full 356-PR enumeration under the same transport. Completeness
+# comes from ``--paginate`` following the ``Link: rel="next"`` chain, never
+# from this number.
+REST_PAGE_SIZE = 20
+
 DEFAULT_MIN_KEYWORDS = 2
 MAX_HITS_SHOWN = 20
 
@@ -519,6 +546,79 @@ def _gh_json(gh_bin: str, args: list[str], repo: str, timeout: float):
         ) from exc
 
 
+def _gh_json_stream(gh_bin: str, args: list[str], repo: str, timeout: float) -> list:
+    """Like `_gh_json`, but for a stream of CONCATENATED JSON values.
+
+    `gh api --paginate --jq …` emits one JSON value (a page array) per page.
+    Parsing is deliberately strict, and partial output is NEVER salvaged: a
+    non-zero exit is a failure even when earlier pages were printed, and a
+    truncated value raises rather than yielding a silently-shorter list. That
+    is the difference between a loud INCOMPLETE and a false CLEAN — the exact
+    failure class this tool exists to prevent.
+    """
+    rc, out, err, timed_out = _run([gh_bin, *args], repo, timeout)
+    if rc != 0:
+        why = "timeout" if timed_out else f"exit {rc}"
+        raise SurfaceError(f"gh {' '.join(args)} failed ({why}): {_one_line(err or out)}")
+    values: list = []
+    decoder = json.JSONDecoder()
+    idx, end = 0, len(out)
+    while True:
+        while idx < end and out[idx] in " \t\r\n":
+            idx += 1
+        if idx >= end:
+            break
+        try:
+            value, idx = decoder.raw_decode(out, idx)
+        except json.JSONDecodeError as exc:
+            raise SurfaceError(
+                f"gh {' '.join(args)} returned a truncated/malformed JSON stream "
+                f"at offset {idx}: {exc}"
+            ) from exc
+        values.append(value)
+    if not values:
+        # An rc-0 transport that prints nothing must never read as a complete,
+        # EMPTY enumeration: `_gh_json` rejects empty output (`json.loads("")`
+        # raises), and this path must not be weaker than the one it parallels.
+        # A genuinely exhausted list still emits one `[]` page, so this cannot
+        # reject a legitimate empty result.
+        raise SurfaceError(
+            f"gh {' '.join(args)} returned no JSON values (empty output) — "
+            "refusing to read an empty stream as a complete enumeration"
+        )
+    return values
+
+
+def _closed_pr_list_rest(gh_bin: str, repo: str, timeout: float) -> list[dict]:
+    """Enumerate ALL closed PRs over the REST API (#3587).
+
+    `gh pr list --state closed` (GraphQL) resets on this host while the REST
+    endpoint works, so this surface is fetched as
+    `GET /repos/{owner}/{repo}/pulls?state=closed&per_page=N` with
+    `--paginate`. Completeness lives in `--paginate`: gh follows the
+    `Link: rel="next"` chain to exhaustion, and without it only the first page
+    would be returned — a short enumeration wearing a complete face. `--jq`
+    projects exactly the fields the surface consumes; REST nests the branch
+    under `head.ref`, so it is re-keyed to `headRefName` to keep
+    `scan_pr_surface` transport-agnostic.
+    """
+    args = [
+        "api", "--paginate",
+        f"repos/{{owner}}/{{repo}}/pulls?state=closed&per_page={REST_PAGE_SIZE}",
+        "--jq",
+        "map({number, title, body, state, url, headRefName: .head.ref})",
+    ]
+    prs: list[dict] = []
+    for page in _gh_json_stream(gh_bin, args, repo, timeout):
+        if not isinstance(page, list):
+            raise SurfaceError(
+                f"gh {' '.join(args)} returned a non-list page: "
+                f"{_one_line(json.dumps(page))}"
+            )
+        prs.extend(page)
+    return prs
+
+
 def _pr_ref(pr: dict) -> str:
     return (
         f"PR #{pr.get('number', '?')} "
@@ -599,6 +699,7 @@ def run_preflight(
     min_keywords: int = DEFAULT_MIN_KEYWORDS,
     open_pr_limit: int = PR_LIMIT,
     closed_pr_limit: int = CLOSED_PR_LIMIT,
+    closed_pr_timeout: float = CLOSED_PR_TIMEOUT,
 ) -> tuple[list[Surface], str | None, list[str], int, bool]:
     surfaces: dict[str, Surface] = {name: Surface(name) for name in ALL_SURFACES}
 
@@ -660,22 +761,28 @@ def run_preflight(
             "--keywords was not supplied"
         )
 
-    # 2. PR surfaces — enumerated to COMPLETENESS. Each list is fetched with an
-    #    extra row (`--limit cap+1`) so a longer list is detectable: hitting the
-    #    cap marks the surface TRUNCATED, which keeps the run out of CLEAN. The
-    #    `--search` filter is deliberately NOT used (the search API silently
-    #    caps at 1000 results — a partial query wearing a complete face).
+    # 2. PR surfaces — enumerated to COMPLETENESS, each over the transport that
+    #    actually works for its state. Open PRs use `gh pr list` (one GraphQL
+    #    request, fetched as `--limit cap+1`); closed PRs use the REST API with
+    #    `--paginate` (#3587 — the GraphQL path resets on this host). Either
+    #    way, hitting the cap marks the surface TRUNCATED, which keeps the run
+    #    out of CLEAN. The `--search` filter is deliberately NOT used (the
+    #    search API silently caps at 1000 results — a partial query wearing a
+    #    complete face).
     for surface_name, state, limit in (
         (SURFACE_OPEN_PRS, "open", open_pr_limit),
         (SURFACE_CLOSED_PRS, "closed", closed_pr_limit),
     ):
         surface = surfaces[surface_name]
         try:
-            args = ["pr", "list", "--state", state, "--limit", str(limit + 1),
-                    "--json", "number,title,body,headRefName,state,url"]
-            prs = _gh_json(gh_bin, args, repo, timeout)
+            if state == "closed":
+                prs = _closed_pr_list_rest(gh_bin, repo, closed_pr_timeout)
+            else:
+                args = ["pr", "list", "--state", state, "--limit", str(limit + 1),
+                        "--json", "number,title,body,headRefName,state,url"]
+                prs = _gh_json(gh_bin, args, repo, timeout)
             if not isinstance(prs, list):
-                raise SurfaceError("gh pr list returned non-list JSON")
+                raise SurfaceError(f"gh {state}-PR enumeration returned non-list JSON")
             if len(prs) > limit:
                 surface.mark_truncated(
                     f"truncated at the {limit} cap — more than {limit} {state} "
@@ -866,8 +973,20 @@ def main(argv: list[str] | None = None) -> int:
                              f"(default {PR_LIMIT}; env COLLISION_PREFLIGHT_PR_LIMIT)")
     parser.add_argument("--closed-pr-limit", type=int,
                         default=int(os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_LIMIT", CLOSED_PR_LIMIT)),
-                        help="closed-PR completeness cap; a longer list is TRUNCATED/INCOMPLETE "
+                        help="closed-PR completeness cap applied to the full REST enumeration; a "
+                             "longer list is TRUNCATED/INCOMPLETE. It truncates the SCAN, not the "
+                             "fetch — the enumeration itself is bounded only by --closed-pr-timeout "
                              f"(default {CLOSED_PR_LIMIT}; env COLLISION_PREFLIGHT_CLOSED_PR_LIMIT)")
+    # Deliberately NO ``type=float`` here. A bad value must be EXIT_USAGE, and
+    # neither argparse's own error path (exits 2 == EXIT_INCOMPLETE) nor an
+    # eagerly-converted env default (uncaught ValueError -> exit 1 ==
+    # EXIT_COLLISION) reports a misconfiguration as itself. Validated below.
+    parser.add_argument("--closed-pr-timeout",
+        default=os.environ.get("COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT", CLOSED_PR_TIMEOUT),
+        metavar="SECS",
+        help="wall-clock budget (secs) for the closed-PR REST enumeration, which is "
+             f"multi-request (default {CLOSED_PR_TIMEOUT:g}; env "
+             "COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT)")
     args = parser.parse_args(argv)
 
     if args.issue <= 0:
@@ -887,10 +1006,25 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return EXIT_USAGE
 
+    # `nan`/`inf` are the trap: `nan <= 0` and `inf <= 0` are both False, so a
+    # bare positivity check passes them to subprocess.run(timeout=…), where they
+    # raise ValueError/OverflowError out of `_run` — no VERDICT line, exit 1 (the
+    # COLLISION code). Reject non-numeric and non-finite explicitly.
+    try:
+        closed_pr_timeout = float(args.closed_pr_timeout)
+    except (TypeError, ValueError):
+        print("collision-preflight: --closed-pr-timeout must be a number > 0",
+              file=sys.stderr)
+        return EXIT_USAGE
+    if not math.isfinite(closed_pr_timeout) or closed_pr_timeout <= 0:
+        print("collision-preflight: --closed-pr-timeout must be > 0", file=sys.stderr)
+        return EXIT_USAGE
+
     try:
         ordered, title, keywords, issue, _ = run_preflight(
             args.issue, args.repo, args.gh, args.git, args.timeout, args.keywords,
             args.min_keywords, args.pr_limit, args.closed_pr_limit,
+            closed_pr_timeout,
         )
         report, code = format_report(
             ordered, issue, args.repo, title, keywords, args.min_keywords

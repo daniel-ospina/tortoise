@@ -1,13 +1,13 @@
-"""Per-team write-op metering for overage billing (#681).
+"""Per-org write-op metering for overage billing (#681).
 
 Design
 ~~~~~~
 Metering records live as ``:MeteringRecord`` nodes in the FalkorDB **registry**
-namespace (not team-specific graphs), keyed by ``(team_id, billing_period)``
+namespace (not org-specific graphs), keyed by ``(org_id, billing_period)``
 where ``billing_period`` is a calendar-month string ``"YYYY-MM"``.
 
 Why the registry graph?
-- All billing state (Team nodes, subscription fields, WebhookEvent) already
+- All billing state (Org nodes, subscription fields, WebhookEvent) already
   lives in the registry — metering is billing infrastructure, not user data.
 - Lift-and-shift to Supabase (#669) is straightforward: one node label →
   one table.
@@ -32,7 +32,7 @@ Storage
 ::
 
     (:MeteringRecord {
-        team_id:   "team_abc123",
+        org_id:   "org_abc123",
         period:    "2026-08",
         write_ops: 42,
         nodes_written: 12,
@@ -47,33 +47,33 @@ is billed exactly once — PL4).
 
 Atomic increment via FalkorDB Cypher::
 
-    MERGE (m:MeteringRecord {team_id: $tid, period: $period})
+    MERGE (m:MeteringRecord {org_id: $tid, period: $period})
     SET m.write_ops = coalesce(m.write_ops, 0) + $n,
         m.updated_at = $now
 
 Threshold events
 ~~~~~~~~~~~~~~~~
-When a team crosses 80% or 100% of its ``included_write_ops_per_month``
+When an org crosses 80% or 100% of its ``included_write_ops_per_month``
 (from ``product/pricing.json``), a structured log event is emitted at
 WARNING (80%) or ERROR (100%). This feeds into the existing alerting
 pipeline (Resend + Telegram — see #310 billing notifications).
 
-Thresholds are checked **post-increment** on every write for teams on
-overage-eligible tiers (pro, team). Free and Solo tiers have no overage
+Thresholds are checked **post-increment** on every write for orgs on
+overage-eligible tiers (pro, org). Free and Solo tiers have no overage
 and never trigger threshold events — they simply hit the hard quota limit.
 
 Usage exposure
 ~~~~~~~~~~~~~~
-``get_current_usage(team_id)`` returns ``{write_ops_used, write_ops_limit,
+``get_current_usage(org_id)`` returns ``{write_ops_used, write_ops_limit,
 period, overage_eligible}`` for the current billing period. Wired into
-``GET /v1/team`` (see ``TeamInfoResponse`` extension).
+``GET /v1/team`` (see ``OrgInfoResponse`` extension).
 
 MCP writes
 ~~~~~~~~~~
 MCP write tools call ``_safe`` which runs the write inside a try/except.
 Metering is recorded **after** a successful write (no exception) and only
 for quota-gated tools (the ``_QUOTA_GATED`` set). Stdio/selfhost mode
-(with no team context) skips metering entirely.
+(with no org context) skips metering entirely.
 """
 from __future__ import annotations
 
@@ -84,29 +84,29 @@ from datetime import datetime, timezone
 
 _logger = logging.getLogger(__name__)
 
-#: #1987 Task 6: per-team increment serialization — the MERGE+coalesce
+#: #1987 Task 6: per-org increment serialization — the MERGE+coalesce
 #: increment is atomic per statement on server-mode FalkorDB, but embedded
 #: FalkorDBLite connections race the read-modify-write (the pre-existing
 #: write-op path has the same shape); the ask meter closes it in-process
-#: with a per-team lock (cross-process races remain possible and are
+#: with a per-org lock (cross-process races remain possible and are
 #: documented best-effort, mirroring the per-process budget bucket).
 import threading as _threading  # noqa: E402
 from weakref import WeakValueDictionary as _WeakValueDictionary  # noqa: E402
 
-#: Per-team increment-serialization lock registry — BOUNDED by construction:
+#: Per-org increment-serialization lock registry — BOUNDED by construction:
 #: a WeakValueDictionary keeps each lock alive only while some thread holds
-#: it (a released lock with no holder is GC'd), so a fresh team id never leaks
+#: it (a released lock with no holder is GC'd), so a fresh org id never leaks
 #: a permanent registry entry (the ask build-lock finding's mirror).
 _ask_meter_locks: _WeakValueDictionary = _WeakValueDictionary()
 _ask_meter_locks_guard = _threading.Lock()
 
 
-def _ask_meter_lock(team_id: str) -> _threading.Lock:
+def _ask_meter_lock(org_id: str) -> _threading.Lock:
     with _ask_meter_locks_guard:
-        lock = _ask_meter_locks.get(team_id)
+        lock = _ask_meter_locks.get(org_id)
         if lock is None:
             lock = _threading.Lock()
-            _ask_meter_locks[team_id] = lock
+            _ask_meter_locks[org_id] = lock
         return lock
 
 # ── Period helpers ───────────────────────────────────────────────────────────
@@ -163,12 +163,12 @@ def _reg_sdk():
 
 # ── Core increment ──────────────────────────────────────────────────────────
 
-def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
+def record_write_ops(org_id: str, tier: str | None = None, n: int = 1,
                      nodes_written: int = 0) -> dict | None:
-    """Increment the write-op counter for *team_id* in the current billing period.
+    """Increment the write-op counter for *org_id* in the current billing period.
 
     Args:
-        team_id: Team identifier (required).
+        org_id: Org identifier (required).
         tier: Team tier — used to determine overage eligibility and allowance
             for threshold events. If None, threshold checks are skipped (e.g.
             when called from a context where tier isn't readily available).
@@ -186,7 +186,7 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
     Raises:
         Nothing — metering is best-effort. Failures are logged and swallowed.
     """
-    if not team_id:
+    if not org_id:
         return None
     period = _current_period()
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -196,7 +196,7 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
                 get_control_plane, metering_increment,
             )
             write_ops = metering_increment(
-                get_control_plane(), team_id, period, n,
+                get_control_plane(), org_id, period, n,
                 nodes_written=nodes_written)
             result = {
                 "write_ops": write_ops,
@@ -205,29 +205,29 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
                 "ops_allowance": _ops_allowance(tier) if tier else 0,
                 "overage_eligible": _overage_eligible(tier) if tier else False,
             }
-            _check_thresholds(team_id, tier, result, n)
+            _check_thresholds(org_id, tier, result, n)
             return result
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         reg.query(
-            "MERGE (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "MERGE (m:MeteringRecord {org_id: $tid, period: $period}) "
             "SET m.write_ops = coalesce(m.write_ops, 0) + $n, "
             "    m.nodes_written = coalesce(m.nodes_written, 0) + $nw, "
             "    m.updated_at = $now",
-            params={"tid": team_id, "period": period, "n": n,
+            params={"tid": org_id, "period": period, "n": n,
                     "nw": nodes_written, "now": now_iso},
         )
         rows = reg.query(
-            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "MATCH (m:MeteringRecord {org_id: $tid, period: $period}) "
             "RETURN m.write_ops, m.nodes_written",
-            params={"tid": team_id, "period": period},
+            params={"tid": org_id, "period": period},
         ).result_set
         write_ops = int(rows[0][0]) if rows else n
         nodes_written_total = int(rows[0][1]) if rows else nodes_written
     except Exception as e:
         _logger.warning(
             "metering increment failed (non-fatal): team=%s period=%s error=%s",
-            team_id, period, e,
+            org_id, period, e,
         )
         return None
 
@@ -240,7 +240,7 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
     }
 
     # Threshold events
-    _check_thresholds(team_id, tier, result, n)
+    _check_thresholds(org_id, tier, result, n)
 
     return result
 
@@ -256,15 +256,15 @@ _thresholds_fired: set[tuple[str, str, int]] = set()
 
 
 def _check_thresholds(
-    team_id: str,
+    org_id: str,
     tier: str | None,
     result: dict,
     n: int = 1,
 ) -> None:
     """Emit log events if write_ops crossed an 80% or 100% threshold.
 
-    Only fires for overage-eligible tiers (pro, team). Each threshold fires
-    at most once per (team_id, period, pct) per process lifetime.
+    Only fires for overage-eligible tiers (pro, org). Each threshold fires
+    at most once per (org_id, period, pct) per process lifetime.
     """
     if not tier or not result.get("overage_eligible"):
         return
@@ -281,7 +281,7 @@ def _check_thresholds(
         # threshold (e.g. 0 → 105 with n=105) still fires the event.
         previous = write_ops - max(n, 1)
         if previous < threshold <= write_ops:
-            key = (team_id, period, pct)
+            key = (org_id, period, pct)
             if key in _thresholds_fired:
                 continue
             _thresholds_fired.add(key)
@@ -289,7 +289,7 @@ def _check_thresholds(
             _logger.log(
                 level,
                 "write-op threshold %d%% reached: team=%s period=%s count=%d/%d",
-                pct, team_id, period, write_ops, allowance,
+                pct, org_id, period, write_ops, allowance,
             )
 
 
@@ -364,13 +364,13 @@ def estimate_ask_cost_usd(tokens_in: int, tokens_out: int,
 def _selfhost_transport_active() -> bool:
     """True while a selfhost HTTP MCP transport is serving the request — the
     transport-keyed exemption channel (tortoise/transport.py; the value
-    "selfhost" is NEVER the exemption key — a hosted team with the raw id
+    "selfhost" is NEVER the exemption key — a hosted org with the raw id
     "selfhost" is legal and MUST record usage, P1-4)."""
     from tortoise.transport import _selfhost_transport
     return _selfhost_transport.get()
 
 
-def record_ask_usage(team_id: str | None, tier: str | None = None, *,
+def record_ask_usage(org_id: str | None, tier: str | None = None, *,
                      calls: int = 1, tokens_in: int = 0, tokens_out: int = 0,
                      cost_usd: float = 0.0,
                      _selfhost_transport: bool = False) -> dict | None:
@@ -382,36 +382,36 @@ def record_ask_usage(team_id: str | None, tier: str | None = None, *,
     the MERGE+coalesce pattern (mirrors ``record_write_ops``); Supabase mode
     routes through the ``metering_increment_ask`` seam.
 
-    Exemptions (no record, zero writes): ``not team_id`` (stdio/None) OR the
+    Exemptions (no record, zero writes): ``not org_id`` (stdio/None) OR the
     selfhost-transport ContextVar (``_selfhost_transport`` — set True ONLY
-    by the selfhost HTTP MCP transport; the SELFHOST_TEAM_ID value is never
+    by the selfhost HTTP MCP transport; the SELFHOST_ORG_ID value is never
     the exemption key). ``tier`` stays None for the ask lane (tier-based ask
     budgets are OUT of v1).
 
     Returns a dict summary or None (exempt/no-op/failure).
     """
-    if not team_id or _selfhost_transport or _selfhost_transport_active():
+    if not org_id or _selfhost_transport or _selfhost_transport_active():
         return None
     period = _current_period()
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-    with _ask_meter_lock(team_id):
-        return _record_ask_usage_locked(team_id, period, now_iso,
+    with _ask_meter_lock(org_id):
+        return _record_ask_usage_locked(org_id, period, now_iso,
                                         calls=calls, tokens_in=tokens_in,
                                         tokens_out=tokens_out,
                                         cost_usd=cost_usd)
 
 
-def _record_ask_usage_locked(team_id: str, period: str, now_iso: str, *,
+def _record_ask_usage_locked(org_id: str, period: str, now_iso: str, *,
                              calls: int, tokens_in: int, tokens_out: int,
                              cost_usd: float) -> dict | None:
-    """The serialized increment body (under the per-team lock — embedded
+    """The serialized increment body (under the per-org lock — embedded
     concurrency-safe)."""
     try:
         if _supabase_mode():
             from tortoise.supabase_control import (  # noqa: I001
                 get_control_plane, metering_increment_ask,
             )
-            metering_increment_ask(get_control_plane(), team_id, period,
+            metering_increment_ask(get_control_plane(), org_id, period,
                                    calls=calls, tokens_in=tokens_in,
                                    tokens_out=tokens_out, cost_usd=cost_usd)
             return {"period": period, "ask_calls": calls,
@@ -421,13 +421,13 @@ def _record_ask_usage_locked(team_id: str, period: str, now_iso: str, *,
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         reg.query(
-            "MERGE (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "MERGE (m:MeteringRecord {org_id: $tid, period: $period}) "
             "SET m.ask_calls = coalesce(m.ask_calls, 0) + $calls, "
             "    m.ask_tokens_in = coalesce(m.ask_tokens_in, 0) + $tin, "
             "    m.ask_tokens_out = coalesce(m.ask_tokens_out, 0) + $tout, "
             "    m.ask_cost_usd = coalesce(m.ask_cost_usd, 0) + $cost, "
             "    m.updated_at = $now",
-            params={"tid": team_id, "period": period, "calls": calls,
+            params={"tid": org_id, "period": period, "calls": calls,
                     "tin": tokens_in, "tout": tokens_out, "cost": cost_usd,
                     "now": now_iso},
         )
@@ -437,16 +437,16 @@ def _record_ask_usage_locked(team_id: str, period: str, now_iso: str, *,
     except Exception as e:
         _logger.warning(
             "ask metering increment failed (non-fatal): team=%s period=%s "
-            "error=%s", team_id, period, e,
+            "error=%s", org_id, period, e,
         )
         return None
 
 
-def get_ask_usage(team_id: str) -> dict:
-    """Ask usage for *team_id* in the current billing period (#1987 Task 6).
+def get_ask_usage(org_id: str) -> dict:
+    """Ask usage for *org_id* in the current billing period (#1987 Task 6).
 
     Returns ``{ask_calls, ask_tokens_in, ask_tokens_out, ask_cost_usd}`` for
-    the team's current period — ZEROS for a team with no ask records yet (a
+    the org's current period — ZEROS for an org with no ask records yet (a
     successful read returning NO row is not an error; the MERGE only creates
     the record on the first write — P2-14). Read failures degrade to the
     zero-usage view (never 500).
@@ -454,23 +454,23 @@ def get_ask_usage(team_id: str) -> dict:
     period = _current_period()
     zeros = {"ask_calls": 0, "ask_tokens_in": 0, "ask_tokens_out": 0,
              "ask_cost_usd": 0.0}
-    if not team_id:
+    if not org_id:
         return {**zeros, "period": period}
     try:
         if _supabase_mode():
             from tortoise.supabase_control import (  # noqa: I001
                 get_control_plane, metering_get_usage,
             )
-            row = metering_get_usage(get_control_plane(), team_id, period)
+            row = metering_get_usage(get_control_plane(), org_id, period)
             return {**zeros, **{k: row.get(k, 0) for k in zeros},
                     "period": period}
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         rows = reg.query(
-            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "MATCH (m:MeteringRecord {org_id: $tid, period: $period}) "
             "RETURN m.ask_calls, m.ask_tokens_in, m.ask_tokens_out, "
             "m.ask_cost_usd",
-            params={"tid": team_id, "period": period},
+            params={"tid": org_id, "period": period},
         ).result_set
         if not rows:
             return {**zeros, "period": period}
@@ -484,15 +484,15 @@ def get_ask_usage(team_id: str) -> dict:
     except Exception as e:
         _logger.warning(
             "ask usage query failed (degrading to zero view): team=%s "
-            "period=%s error=%s", team_id, period, e,
+            "period=%s error=%s", org_id, period, e,
         )
         return {**zeros, "period": period}
 
 
 # ── Usage query ─────────────────────────────────────────────────────────────
 
-def get_current_usage(team_id: str) -> dict:
-    """Return write-op usage for *team_id* in the current billing period.
+def get_current_usage(org_id: str) -> dict:
+    """Return write-op usage for *org_id* in the current billing period.
 
     Returns:
         ``{write_ops_used: int, write_ops_limit: int, period: str,
@@ -506,12 +506,12 @@ def get_current_usage(team_id: str) -> dict:
     ops_used = 0
     if _supabase_mode():
         from tortoise.supabase_control import (  # noqa: I001
-            get_control_plane, metering_get, team_tier,
+            get_control_plane, metering_get, org_tier,
         )
         try:
             cp = get_control_plane()
-            ops_used = metering_get(cp, team_id, period)
-            tier = team_tier(cp, team_id) or "free"
+            ops_used = metering_get(cp, org_id, period)
+            tier = org_tier(cp, org_id) or "free"
             ops_limit = _ops_allowance(tier)
             eligible = _overage_eligible(tier)
             overage_cost = None
@@ -532,7 +532,7 @@ def get_current_usage(team_id: str) -> dict:
             # free-tier zero-usage view, mirroring the registry path below.
             _logger.warning(
                 "metering usage query failed: team=%s period=%s error=%s",
-                team_id, period, e,
+                org_id, period, e,
             )
             return {
                 "write_ops_used": 0,
@@ -545,25 +545,25 @@ def get_current_usage(team_id: str) -> dict:
         sdk = _reg_sdk()
         reg = sdk._get_registry()
         rows = reg.query(
-            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "MATCH (m:MeteringRecord {org_id: $tid, period: $period}) "
             "RETURN m.write_ops",
-            params={"tid": team_id, "period": period},
+            params={"tid": org_id, "period": period},
         ).result_set
         if rows:
             ops_used = int(rows[0][0])
     except Exception as e:
         _logger.warning(
             "metering usage query failed: team=%s period=%s error=%s",
-            team_id, period, e,
+            org_id, period, e,
         )
 
-    # Determine tier from the Team node for allowance
+    # Determine tier from the Org node for allowance
     try:
         sdk2 = _reg_sdk()
         reg2 = sdk2._get_registry()
         trows = reg2.query(
             "MATCH (t:Team {id: $tid}) RETURN t.tier",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
         tier = trows[0][0] if trows else "free"
     except Exception:

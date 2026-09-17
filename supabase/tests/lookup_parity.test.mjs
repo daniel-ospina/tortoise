@@ -6,7 +6,7 @@
 // Contract: tortoise/auth.py lookup_hash() and
 // supabase/functions/_shared/lookup.ts lookupHash() MUST produce identical
 // digests — Task 3 (#767) resolves keys against these hashes, so any drift
-// breaks auth for every provisioned team. This test locks both sides:
+// breaks auth for every provisioned org. This test locks both sides:
 //
 //   1. hardcoded test vectors (independently computed with hashlib.sha256 —
 //      the authoritative digest),

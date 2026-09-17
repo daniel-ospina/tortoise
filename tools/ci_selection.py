@@ -94,7 +94,25 @@ SOURCE_PATTERNS = {
                    # self-hosted.html -> test_harness_mcp_config.py.
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
-                   "website/docs.html", "website/faq.html"),
+                   "website/docs.html", "website/faq.html",
+                   # #3616: the deploy-binding gate is a PAIR — the checker and
+                   # the manifest it reads. Neither path is under a Python
+                   # package prefix, so without these two entries a PR that
+                   # edits the gate's logic or downgrades a binding to
+                   # `recommended` selects NO surface (surfaces=[], full=False)
+                   # and test_pages_bindings.py never runs on the PR that owns
+                   # it. That is the #3616 pattern one level up: the thing that
+                   # decides whether the gate works would not itself be gated.
+                   "tools/check_pages_bindings.py",
+                   "config/required-bindings.yml"),
+    # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
+    # A review pointed out that adding it would be a coverage DOWNGRADE: an
+    # unlisted path falls into the unknown-path branch -> FULL matrix (fail
+    # closed), whereas listing it selects only `onboarding`. Today the two tests
+    # that read that workflow both live in onboarding, so nothing is lost — but
+    # a future core-registered test reading it would silently stop running on
+    # the PR that edits it. Fail-closed is the right default for the file that
+    # owns the deploy.
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
@@ -153,6 +171,13 @@ SOURCE_PATTERNS = {
              "tools/embedder_probe.py", "tools/calibrate_thresholds.py",
              "tools/pair_label_runner.py", "benchmarks/",
              "graph-scripts/backfill_embeddings.py",
+             # #3359: the per-session cost report CLI consumes the eval-owned
+             # versioned PRICING_MAP (tools/longmem_eval/costing.py) and is
+             # exercised by tests/test_capture_cost_measurement.py — without
+             # this entry a report-CLI-only change selects NO surface
+             # (surfaces=[], full=False) and that test never runs on the PR
+             # that owns the launch-gate number (the #3616 pattern).
+             "tools/capture_cost_report.py",
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).

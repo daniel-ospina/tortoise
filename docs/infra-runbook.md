@@ -104,10 +104,22 @@ fly ssh console -a tortoise-api -C "python -c 'from tortoise.sdk import Tortoise
 point local tooling at the hosted (cloud) DB — a remote connection from a local
 install defeats the purpose of hosting locally.
 
+> **Exception — the committed repo-root `.mcp.json` defaults to the HOSTED
+> endpoint.** That file ships pointed at `https://api.premiselabs.co/mcp/` with
+> an env-indirect `Bearer ${TORTOISE_API_KEY}` (`tortoise/onboarding/SKILL.md`
+> §3b), so an agent launched inside this checkout talks to the hosted API, not
+> to a local daemon, unless you point the `tortoise` entry's `url` back at your
+> own daemon (`http://localhost:8000/mcp` — the self-host path in
+> `docs/quickstart-selfhosted.md`). The local rules below describe that
+> self-hosted/stdio configuration.
+
 - Local tooling (MCP server, SDK scripts, graph-scripts) resolves its DB target
   from `TORTOISE_DB_URI` — canonical local form
   `docker://:falkordb@localhost:6379/tortoise` (compose publishes 127.0.0.1:6379;
-  `.mcp.json`, `.env.example`). The legacy `FALKORDB_*` trio defaults to the
+  `.env.example`). A **stdio** MCP entry sets its own `env` block; the compose
+  daemon resolves `TORTOISE_DB_URI` from its own environment, and the committed
+  repo-root `.mcp.json`'s `tortoise` entry carries no `env` at all (see the
+  exception above). The legacy `FALKORDB_*` trio defaults to the
   same port (`FALKORDB_PORT=6379` in `.env.example`; code defaults stay
   on the legacy port — env-overridable — for backward compat with older local containers).
 - The MCP server loads a repo-root `.env` if present and **fails loud** when the
@@ -134,7 +146,7 @@ TORTOISE_DB_PATH=~/.tortoise/tortoise.db tortoise serve --http   # tenant auth, 
 > Teams/multi-agent/production use the compose sidecar or managed Cloud.
 
 - Client config: `url http://127.0.0.1:8000/mcp`, header `Authorization: Bearer tt_<key>`.
-- HTTP (tenant) mode uses a fresh `team_{id}` namespace — existing stdio data
+- HTTP (tenant) mode uses a fresh `org_{id}` namespace — existing stdio data
   stays in the `tortoise` graph (no automatic migration).
 - `--auth static` (single `TORTOISE_API_KEY`/`--api-key`) and `--auth none`
   (localhost eval, NO auth) are available; default bind 127.0.0.1.
@@ -335,7 +347,7 @@ removes the only source of that hazard from this PR.
 ### 6.1 What happened (2026-09-10, ~19:10–20:35 UTC)
 
 - Public API unreachable ~35 min. Fly's proxy logged `[PR01] no known healthy
-  instances found for route tcp/443` continuously for `/health`, `/v1/teams`,
+  instances found for route tcp/443` continuously for `/health`, `/v1/organizations`,
   `/v1/sessions`, `/mcp/`.
 - `flyctl machines list` showed exactly **one** machine, state `started`,
   `CHECKS 0/1`.
@@ -777,7 +789,7 @@ every 5 minutes.
 
 ### 7.1 What the probe checks
 
-`GET https://api.premiselabs.co/v1/teams` with **no auth** — the real user
+`GET https://api.premiselabs.co/v1/organizations` with **no auth** — the real user
 path (an authenticated API route served by the app), not just an open socket.
 Unauthenticated, that route must answer **`401`** (`Missing session token`) —
 verified in source: `tortoise/session_auth.py::verify_session_jwt` raises 401
@@ -975,7 +987,7 @@ your shell environment. `gh workflow run` cannot pass them inline.
 ### 7.8 Known limits
 
 - **Single-route, unauthenticated blindness.** The probe checks ONE route
-  (`/v1/teams`) and only its no-auth branch. An outage that leaves that route
+  (`/v1/organizations`) and only its no-auth branch. An outage that leaves that route
   answering `401` while other routes fail reads as UP (green) — and so does an
   auth-leg break that rejects every *real* token. The probe proves liveness and
   route presence, not end-to-end authenticated traffic.

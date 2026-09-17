@@ -45,6 +45,7 @@ surfaces:
   - test_billing.py
   - test_body_cap_sweep.py
   - test_bridge_mcp.py
+  - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
   - test_user_identity_inventory.py
@@ -93,12 +94,18 @@ surfaces:
   # and a hosted_backup.py-only change select it (the #2938 precedent).
   - test_graphcopy_boolean_index_3154.py
   - test_hosted_api.py
+  # #3359: per-session provider-cost measurement — the hosted emit path
+  # (_capture_cost_props + the analytics allowlist) is api-owned, so the
+  # acceptance test is dual-registered (also under `core` for the extractor
+  # roll-up it drives). Same #2938 dual-membership convention as
+  # test_graphcopy_boolean_index_3154.py.
+  - test_capture_cost_measurement.py
   - test_hosted_auth.py
   - test_hosted_backup.py
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
-  - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?team_id= pin parity tripwire
+  - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
   - test_mcp_client.py
   - test_mcp_http.py
@@ -275,6 +282,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_capture_cost_measurement.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -628,6 +636,33 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_signup_form_safety.py
+  # #3616: the deploy-binding gate. A pure unit test of the (env, type, name)
+  # comparison in tools/check_pages_bindings.py plus an execution harness for the
+  # workflow's probe shell — no network, no Cloudflare credentials, no wrangler.
+  # It runs in the python-ci matrix because the checker itself runs in the
+  # `deploy` job, and a gate whose logic is only exercised during a production
+  # deploy is a gate nobody has ever seen fail.
+  - test_pages_bindings.py
+  # #3501: the BFF auth suites deliberately live under tests/e2e/auth/ and are
+  # therefore NOT registered here. They stand up a real `wrangler pages dev`
+  # server, a dependency-free mock Supabase process and (for the clickthrough) a
+  # browser. Registering them in a surface made the python-ci `test` matrix run
+  # them, where wrangler is not installed — and `require_toolchain()` correctly
+  # FAILS rather than skipping, so both matrix legs went red for a missing
+  # toolchain rather than a defect.
+  #
+  # tests/e2e/ is the repository's convention for exactly this case: the
+  # manifest's integrity() skips that prefix because those suites are owned by
+  # dedicated jobs that provision their own toolchain. `welcome-e2e` installs
+  # wrangler and runs them via `pytest tests/e2e/auth/`.
+  #
+  # The migration-backlog gate below is DIFFERENT and does belong here: it is a
+  # pure static scan (no wrangler, no server), so the python-ci matrix can run
+  # it. It is the acceptance criterion for #3559 — it asserts that no browser
+  # surface reads or holds session material and that every client data call goes
+  # through the same-origin BFF. It lives at the tests/ root because it scans all
+  # of website/, not just the onboarding pages.
+  - test_no_legacy_token_path.py
   - test_waitlist_form.py
   - test_w7_publish.py
   - test_welcome_url_consolidation.py
@@ -698,6 +733,7 @@ surfaces:
   - bench/test_roundrobin.py
   - bench/test_smoke_embedded.py
   - test_2952_degraded_read.py  # #2952: embeddings.py selects the eval surface — dual-registered so the (B) warm-up is covered there too
+  - test_capture_cost_measurement.py  # #3359: the report reprices from the eval-owned PRICING_MAP (tools/longmem_eval/costing.py), so a pricing-map change must run it — dual-registered with `api`/`core`
   - eval/retrieval/test_1348.py
   - eval/retrieval/test_bootstrap.py
   - eval/retrieval/test_gate_1349.py
@@ -848,6 +884,23 @@ carve_out:
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:
+  # #3501: the migration-backlog gate. A pure static scan of website/ (no
+  # wrangler, no server), so it runs in the python-ci matrix like any other
+  # static guard. Measured 53s-90s standalone across runs — a SINGLE SAMPLE of a
+  # high-variance quantity dominated by the repo's heavy conftest import path,
+  # not a precise cost. Re-measure rather than trusting it if the import graph
+  # changes.
+  test_no_legacy_token_path.py: 60.0
+  # #3616: 33 test functions / 49 collected cases over the binding-manifest
+  # comparison and the deploy workflow's probe shell.
+  #
+  # DURATION IS HIGH-VARIANCE — do not trust a single sample. Observed across
+  # runs: ~1.7-2.1s warm, 6.3-14.4s standalone, and 86s on a cold conftest
+  # import (the repo's heavy tests/conftest.py graph dominates; the tests
+  # themselves are millisecond-scale). A first draft recorded 85.0 from the cold
+  # run, which is ~40x the warm cost and would over-weight the LPT packing. 10.0
+  # is a deliberately loose middle. Re-measure rather than trusting it.
+  test_pages_bindings.py: 10.0
   test_oauth_token_fault.py: 100.0  # #2863: fault matrix + real-seam HTTPServer (measured ~100s locally)
   test_2199_decide_calibration.py: 8.5
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
