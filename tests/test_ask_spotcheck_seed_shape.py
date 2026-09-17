@@ -6,9 +6,10 @@ Points carrying ``p.sessionId`` / ``p.eventId`` PROPS and **no edge at all**.
 Capture instead writes deterministic ``f"{sid}_t{i}"`` episodic turn Points
 with NO ``sessionId``/``eventId`` prop, and wires provenance with
 ``MERGE (s)-[:CONTAINS]->(t)`` — which is what the shipping read resolves
-identity from (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``). A
-consumer that read ``p.sessionId`` therefore reported GREEN on a graph where
-the CONTAINS-edge path was broken: the fixture taught the wrong shape.
+identity from (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``). The
+shipping fetch PREFERS a renderable ``p.sessionId`` prop, so a consumer that
+read that prop reported GREEN on a graph where the CONTAINS-edge path was
+broken: the fixture taught the wrong shape.
 
 These tests assert on what the fixture WRITES (graph shape) and on the VALUE
 the shipping read returns for it — never a grep of source text. One test is a
@@ -17,9 +18,7 @@ is then GONE, so the positive assertions cannot pass vacuously.
 """
 from __future__ import annotations
 
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,7 +32,7 @@ from tortoise.sdk import (  # noqa: E402, RUF100
 )
 
 #: A question in the committed composition's schema (the keys
-#: ``_seed_memory`` consumes), small enough to seed twice per test.
+#: ``_seed_memory`` consumes), small enough to seed per test.
 QUESTION = {
     "question_id": "seed-shape-1",
     "question": "what is the gym schedule?",
@@ -56,9 +55,12 @@ QUESTION = {
     ],
 }
 
-#: The capture loop's id prefix for the seeded sessions (``sess-{i}``).
-SID_0, SID_1 = "sess-0", "sess-1"
+#: The fixture's OWN session ids — the identity the seeded turns must carry
+#: (capture keys a session by the id the client supplied, never a synthetic
+#: ``sess-N``).
+SID_0, SID_1 = QUESTION["haystack_session_ids"]
 TURNS_0 = [f"{SID_0}_t0", f"{SID_0}_t1"]
+ALL_TURNS = [*TURNS_0, f"{SID_1}_t0"]
 
 
 class _FakeReader:
@@ -83,9 +85,15 @@ def _clean_ask_state(monkeypatch):
     _reset_ask_reader_cache_for_tests()
 
 
-def _new_sdk() -> TortoiseSDK:
-    db = os.path.join(tempfile.mkdtemp(prefix="seed_shape_"), "t.db")
-    return TortoiseSDK(db)
+@pytest.fixture
+def seeded(tmp_path):
+    """A seeded temp DB, closed and removed by pytest's tmp_path teardown."""
+    sdk = TortoiseSDK(str(tmp_path / "t.db"))
+    _seed_memory(sdk, QUESTION)
+    try:
+        yield sdk
+    finally:
+        sdk.close()
 
 
 def _install_fake_reader(monkeypatch) -> _FakeReader:
@@ -96,29 +104,42 @@ def _install_fake_reader(monkeypatch) -> _FakeReader:
     return fake
 
 
-def _seeded() -> TortoiseSDK:
-    sdk = _new_sdk()
-    _seed_memory(sdk, QUESTION)
-    return sdk
+def _wire(sdk: TortoiseSDK, query: str) -> list[dict]:
+    """The shared point fetch behind ``tortoise_fts_query`` / ``/v1/search``.
+
+    Retried past the embedded engine's collective-strategy deadline: under
+    host load the pool can come back empty (a known flake class — PR #3888
+    recorded `Strategies timed out (500ms) — collected 0/3`), which would
+    redden a correctness pin for an unrelated reason.
+    """
+    hits: list[dict] = []
+    for _ in range(3):
+        hits = sdk.tortoise_fts_query(query, limit=40,
+                                      include_terminal=True)
+        if hits:
+            return hits
+    return hits
+
+
+def _ask(sdk: TortoiseSDK, query: str) -> dict:
+    return sdk.ask(query, question_date="2023-05-22")
 
 
 # ── 1. The fixture WRITES the capture shape ───────────────────────────────
 
-def test_seeded_turn_points_are_capture_shaped():
+def test_seeded_turn_points_are_capture_shaped(seeded):
     """Every haystack turn lands as capture writes it: a ``:Session``, an
     episodic ``pointKind='event'`` turn Point with the deterministic
     ``f"{sid}_t{i}"`` id and a ``speaker``, and a real
     ``(:Session)-[:CONTAINS]->(:Point)`` edge — and NO ``sessionId`` /
     ``eventId`` prop (the seeder's old, unforgeable-elsewhere provenance)."""
-    sdk = _seeded()
-    proj = sdk._get_proj()
+    proj = seeded._get_proj()
 
     points = proj.g.query(
         "MATCH (p:Point) RETURN p.id, p.pointKind, p.is_episodic, p.speaker, "
         "       p.sessionId, p.eventId ORDER BY p.id",
     ).result_set
-    all_turns = [*TURNS_0, f"{SID_1}_t0"]
-    assert [r[0] for r in points] == all_turns, points
+    assert [r[0] for r in points] == sorted(ALL_TURNS), points
     for pid, kind, episodic, speaker, sess_prop, ev_prop in points:
         assert kind == "event", (pid, kind)
         assert episodic is True, (pid, episodic)
@@ -128,21 +149,27 @@ def test_seeded_turn_points_are_capture_shaped():
         assert sess_prop is None, (pid, sess_prop)
         assert ev_prop is None, (pid, ev_prop)
 
+    # The :Session nodes carry the FIXTURE's own ids (not a synthetic
+    # sess-N) — the identity the shipping read now reports is the one the
+    # question's gold sessions are keyed by.
+    sessions = proj.g.query(
+        "MATCH (s:Session) RETURN s.id ORDER BY s.id").result_set
+    assert [r[0] for r in sessions] == sorted([SID_0, SID_1]), sessions
+
     # ... and the provenance edge IS there, one per turn.
-    sessions = proj.g.query("MATCH (s:Session) RETURN s.id ORDER BY s.id").result_set
-    assert [r[0] for r in sessions] == [SID_0, SID_1], sessions
     edges = proj.g.query(
         "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
         "RETURN s.id, p.id ORDER BY s.id, p.id",
     ).result_set
-    assert [list(r) for r in edges] == [
-        [SID_0, TURNS_0[0]], [SID_0, TURNS_0[1]],
-        [SID_1, f"{SID_1}_t0"]], edges
+    assert [list(r) for r in edges] == sorted(
+        [[SID_0, TURNS_0[0]], [SID_0, TURNS_0[1]], [SID_1, f"{SID_1}_t0"]]), \
+        edges
 
 
 # ── 2. MUTATION PROOF: the CONTAINS edge IS the identity ──────────────────
 
-def test_identity_resolves_from_the_edge_and_vanishes_without_it(monkeypatch):
+def test_identity_resolves_from_the_edge_and_vanishes_without_it(seeded,
+                                                                 monkeypatch):
     """The fixture is faithful when the SHIPPING read resolves the seeded
     session from the ``CONTAINS`` edge — and RED when that edge is deleted.
 
@@ -151,30 +178,35 @@ def test_identity_resolves_from_the_edge_and_vanishes_without_it(monkeypatch):
     the shared point fetch behind ``tortoise_fts_query`` (the ``/v1/search``
     payload). No new surface is exercised.
     """
-    sdk = _seeded()
     _install_fake_reader(monkeypatch)
     question = "what is the gym schedule?"
 
     # GREEN — the seeded shape resolves the identity on both read paths.
-    result = sdk.ask(question, question_date="2023-05-22")
+    result = None
+    for _ in range(3):
+        result = _ask(seeded, question)
+        if set(result["retrieved_session_ids"]) == {SID_0, SID_1}:
+            break
     assert set(result["retrieved_session_ids"]) == {SID_0, SID_1}, result.get(
         "retrieved_session_ids")
     assert f"[session {SID_0}]" in result["evidence"]
     assert f"[session {SID_1}]" in result["evidence"]
     assert "[session ?]" not in result["evidence"]
 
-    wire = sdk.tortoise_fts_query(question, limit=40, include_terminal=True)
+    wire = _wire(seeded, question)
     ours = [h for h in wire if h["id"] in TURNS_0]
-    assert [h["id"] for h in ours] == TURNS_0, [h.get("id") for h in wire]
+    assert sorted(h["id"] for h in ours) == sorted(TURNS_0), (
+        "precondition: both seeded turns must be retrievable — got "
+        f"{[h.get('id') for h in wire]!r}")
     assert [h["sessionId"] for h in ours] == [SID_0, SID_0], ours
 
     # MUTATION — delete the ONLY provenance mechanism (capture writes no
     # sessionId/eventId prop, so nothing else can carry the identity).
-    sdk._get_proj().g.query(
+    seeded._get_proj().g.query(
         "MATCH (:Session)-[r:CONTAINS]->(:Point) DELETE r",
     )
 
-    mutated = sdk.ask(question, question_date="2023-05-22")
+    mutated = _ask(seeded, question)
     assert mutated["retrieved_session_ids"] == [], (
         "the CONTAINS edge is gone but the ask lane still names a session — "
         f"the identity is not derived from that edge: "
@@ -182,10 +214,9 @@ def test_identity_resolves_from_the_edge_and_vanishes_without_it(monkeypatch):
     assert f"[session {SID_0}]" not in mutated["evidence"]
     assert "[session ?]" in mutated["evidence"]
 
-    wire_mut = sdk.tortoise_fts_query(question, limit=40,
-                                      include_terminal=True)
+    wire_mut = _wire(seeded, question)
     still_there = [h for h in wire_mut if h["id"] in TURNS_0]
-    assert [h["id"] for h in still_there] == TURNS_0, (
+    assert sorted(h["id"] for h in still_there) == sorted(TURNS_0), (
         "precondition: the turns must survive the edge delete — got "
         f"{[h.get('id') for h in wire_mut]!r}")
-    assert [h["sessionId"] for h in still_there] == ["", ""], still_there
+    assert all(h["sessionId"] == "" for h in still_there), still_there

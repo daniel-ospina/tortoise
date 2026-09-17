@@ -39,12 +39,14 @@ VENICE_API_KEY for the reader AND the judge provider key
 (``TORTOISE_LME_JUDGE_MODEL`` — default ``openai:gpt-4o-2024-08-06`` →
 ``OPENAI_API_KEY``) for grading. Seeding (``_seed_memory``, #3910)
 reproduces the memory the question was asked about in the CAPTURE shape a
-captured session actually has: one episodic turn Point per haystack turn
+captured session's turn store actually has: one episodic turn Point per
+haystack turn
 (deterministic ``f"{sid}_t{i}"`` id, ``pointKind='event'``,
 ``is_episodic=true``, ``speaker``, no ``sessionId``/``eventId`` prop) wired
-to its ``:Session`` by the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the
-provenance mechanism the shipping read resolves identity from — plus the
-per-session ``:Event`` (startedAt from haystack_dates).
+to its ``:Session`` (id = the fixture's own ``haystack_session_ids[i]``) by
+the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance mechanism the
+shipping read resolves identity from — plus the per-session ``:Event``
+(startedAt from haystack_dates), retained but not joined to the turns.
 
 Composition fixture: the committed ``tests/fixtures/ask_spotcheck_composition.json``
 (21 questions — the reproducibility gap closed by issue #2071 step 1).
@@ -75,6 +77,7 @@ from tortoise.ingest import _PROVIDERS  # noqa: E402
 from tortoise.sdk import (  # noqa: E402
     _SESSION_LLM_PROVIDER_PRIORITY,
     TortoiseSDK,
+    _capture_turn_window,
     _content_hash,
     _normalize_turn_role,
 )
@@ -94,39 +97,53 @@ def _to_iso_date(raw: str) -> str:
 def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     """Seed the haystack in the CAPTURE shape (#3910).
 
-    Reproduces what the real capture loop writes for a session — and nothing
-    the real read path cannot consume:
+    Mirrors the turn-store sub-step of ``_capture_session_impl`` — the part
+    of a capture this fixture reproduces — and nothing the real read path
+    cannot consume:
 
-      * a ``(:Session {id})`` node (``_capture_session_impl``);
-      * one episodic turn ``:Point`` per non-blank haystack turn with the
-        deterministic id ``f"{sid}_t{i}"``, ``pointKind='event'``,
-        ``is_episodic=true``, ``is_operator=false``, ``speaker`` and the
-        ``[role] <content>`` text — and NO ``sessionId`` / ``eventId`` prop
-        (the capture loop writes neither on turn Points);
+      * a ``(:Session {id})`` node, id = the question's own
+        ``haystack_session_ids[i]`` when the fixture carries one (fallback
+        ``sess-{i}``), so the identity the shipping read now reports is the
+        identity the question's gold sessions are keyed by;
+      * ONE episodic turn ``:Point`` PER windowed turn — no blank skip,
+        exactly as capture — with the deterministic id ``f"{sid}_t{i}"``,
+        ``pointKind='event'``, ``is_episodic=true``, ``is_operator=false``,
+        ``speaker`` and the ``[role] <content>`` text — and NO
+        ``sessionId`` / ``eventId`` prop (capture writes neither);
       * the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance
         mechanism the shipping read resolves identity from
         (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``).
 
+    Content coercion and the 5000-char window come from the SHARED
+    ``_capture_turn_window`` — the same primitive both capture surfaces use
+    — so the stored text and ``content_hash`` match capture's by
+    construction rather than by a hand-copied transform.
+
     Pre-#3910 this seeder instead made plain ``statement`` Points and wrote
     ``p.sessionId`` / ``p.eventId`` PROPS with NO edge — a graph the capture
-    path cannot produce, so the fixture taught every consumer the wrong
-    provenance shape: a consumer reading ``p.sessionId`` reported GREEN on a
-    graph where the CONTAINS-edge path was broken. The deterministic turn
-    ids are index-aligned with the capture window (a blank turn consumes its
-    index but writes no node), exactly as ``_capture_session_impl`` does.
+    path cannot produce. The shipping fetch PREFERS a renderable
+    ``p.sessionId`` prop over the CONTAINS edge, so that fixture read GREEN
+    on a graph where the edge path was entirely broken.
 
-    The per-session ``:Event`` (``startedAt`` from ``haystack_dates``) is
-    kept unchanged. Turn Points carry no ``eventId`` prop, so — as in
-    capture — the ask lane's ``:Event`` date join does not reach them; the
-    date annotation is not part of the capture shape and is NOT fabricated
-    here.
+    Deliberately NOT reproduced (this seeds a TURN STORE, it is not a
+    capture): no ``embedding`` / ``search_keys`` on turn Points, no
+    ``:Source`` materialization, no extracted claim Points. The per-session
+    ``:Event`` write is RETAINED — nothing here joins a turn Point to it,
+    because capture's turn Points carry no ``eventId`` either — so the
+    ``ev-s{i}`` nodes other consumers may look for still exist, while the ask
+    lane's ``:Event`` date annotation does not reach these turns and is NOT
+    fabricated.
     """
     proj = sdk._get_proj()
     sessions = question.get("haystack_sessions") or []
     dates = question.get("haystack_dates") or []
+    session_ids = question.get("haystack_session_ids") or []
     now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     for i, session in enumerate(sessions):
-        sid = f"sess-{i}"
+        raw_sid = session_ids[i] if i < len(session_ids) else None
+        sid = (raw_sid.strip()
+               if isinstance(raw_sid, str) and raw_sid.strip()
+               else f"sess-{i}")
         sdate = _to_iso_date(dates[i]) if i < len(dates) else "2020-01-01"
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
@@ -136,16 +153,15 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
             "MERGE (s:Session {id:$sid})",
             params={"sid": sid},
         )
-        for t, turn in enumerate(session):
-            content = (turn.get("content") or "").strip()
-            if not content:
-                continue
-            # Capture shape, byte-for-byte (sdk.py _capture_session_impl):
-            # deterministic id, role-normalized speaker, bracket-tagged text,
-            # content hash — and no sessionId/eventId prop.
+        # The SAME windowed turns capture stores (coercion + 5000-char cap
+        # via the shared primitive), and the same per-turn write — including
+        # the blank turn, which capture stores as "[role] ".
+        for t, turn in enumerate(_capture_turn_window(session or [])):
             role = _normalize_turn_role(turn.get("role"))
             turn_id = f"{sid}_t{t}"
-            turn_text = f"[{role}] {content[:5000]}"
+            # `_capture_turn_window` already truncated to the cap; the
+            # [:5000] mirrors the store loop's explicit (idempotent) window.
+            turn_text = f"[{role}] {turn['content'][:5000]}"
             proj.g.query(
                 "MERGE (p:Point {id:$id}) "
                 "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
