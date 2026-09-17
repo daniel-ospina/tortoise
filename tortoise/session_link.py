@@ -237,9 +237,9 @@ ENTITY_LINKED_LABELS = frozenset({
 def link_entity(proj, source_label: str, source_id: str, target_id: str,
                 edge_type: str = "aboutObject", target_label: str = "Object",
                 sdk=None) -> int:
-    """Mint ONE (source)-[:about*]->(target) edge; returns 1 when the edge
-    was NEW (0 when it already existed). Probe BEFORE the MERGE so the created
-    counter stays honest.
+    """Mint ONE ``about*`` edge from (source) to (target); returns 1 when the
+    edge was NEW (0 when it already existed). Probe BEFORE the MERGE so the
+    created counter stays honest.
 
     #3664: when ``sdk`` is given, a NEW edge also emits an ``EntityLinked``
     JSONL record (flat logical identities) so the projection can fold it back
