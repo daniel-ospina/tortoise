@@ -10,7 +10,7 @@ Test classes:
 - RED (missing-line class — fail at base, no SubjectAdded exists pre-fix):
   round-trip byte-identity, re-mention, stub adoption + EventAPI-lane
   delta-1 variant, reserved props, no-log pop, probe fail-open,
-  append-fail, delete pins, EventAPI-coexistence.
+  append-fail, delete durability, EventAPI-coexistence.
 - Green-pins (pass at base BY CONSTRUCTION; discriminate a wrong/missing
   fix): duplicate-replay first-wins, falsy-name no-phantom-line.
 
@@ -455,20 +455,19 @@ class TestFailureInjection:
             sdk.close()
 
 
-# ── Tests 9a-9b (RED/green-pins): delete non-durability ────────────────────
+# ── Tests 9a-9b: delete durability (#3299) ─────────────────────────────────
 
-class TestDeleteNonDurability:
-    """Pins for the accepted delete asymmetry (#2295 plan; #2296 scope hook —
-    the durability write-surface invariant must cover deletion).
+class TestDeleteDurability:
+    """Delete durability (#3295 plan; #2296 scope hook; closed by #3299).
 
-    _delete_entity is a bare DETACH DELETE — no tombstone in the journal
-    vocabulary, so a deleted canonical Subject's SubjectAdded line still
-    replays: test 9a — deleted Subject RESURRECTS on the next rebuild_all;
-    test 9b — delete→recreate journals TWO first-registrations; replay
-    first-wins the earlier line's createdAt (≠ the live node's second).
+    #3299 journals ``_delete_entity`` as an ``EntityMutated op=delete``
+    JSONL record and replays it as a hard delete, so:
+    - test 9a — a deleted canonical Subject is ABSENT after rebuild_all;
+    - test 9b — delete→recreate journals TWO first-registrations and replay
+      reproduces the SECOND (live) incarnation, not the first.
     """
 
-    def test_deleted_subject_resurrects_on_rebuild(self, tmp_path):
+    def test_deleted_subject_absent_after_rebuild(self, tmp_path):
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t9a.db"),
@@ -485,15 +484,13 @@ class TestDeleteNonDurability:
             assert not rows, "live node must be gone after delete"
             proj.rebuild_all(str(events))
             rows = _subject_row(proj, "delete-me-A", "createdAt")
-            assert rows, (
-                "deleted Subject resurrects on rebuild "
-                "(no delete tombstone in the journal vocabulary)")
-            assert rows[0][0] == journal[0]["createdAt"], (
-                "resurrected node carries the journaled createdAt")
+            assert not rows, (
+                "deleted Subject resurrects on rebuild — the #3299 defect "
+                "(the delete is now journaled as EntityMutated op=delete)")
         finally:
             sdk.close()
 
-    def test_delete_recreate_replays_first_incarnation(self, tmp_path):
+    def test_delete_recreate_replays_second_incarnation(self, tmp_path):
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t9b.db"),
@@ -516,9 +513,9 @@ class TestDeleteNonDurability:
                 "live node carries the SECOND registration's createdAt")
             proj.rebuild_all(str(events))
             rows = _subject_row(proj, "delete-me-B", "createdAt")
-            assert rows and rows[0][0] == sas[0]["createdAt"], (
-                "replay first-wins the FIRST registration's createdAt — "
-                "accepted delete→recreate divergence (#2296 hook)")
+            assert rows and rows[0][0] == sas[1]["createdAt"], (
+                "replay must reproduce the SECOND incarnation — the "
+                "journaled delete must not swallow the later recreate")
         finally:
             sdk.close()
 

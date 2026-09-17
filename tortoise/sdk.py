@@ -749,6 +749,17 @@ _GRAPH_EVENT_TYPES = frozenset({
 # mitigation_strength) after a rebuild.
 _BATCH_ID_RECORD_TYPE = "BatchIdStamped"
 
+# #3299: JSONL-ONLY entity-mutation record type — deliberately NOT in
+# _GRAPH_EVENT_TYPES, so it rides the durability journal (rebuild replay)
+# and not the :GraphEvent store. ONE record type with an ``op`` discriminator
+# (the write-surface contract the #3299 design round chose over one event type
+# per label×operation): replay dispatches on ``op``, so `delete`/`retract`/
+# `revise`/`rename`/`restatus`/`supersede` share one fold vocabulary.
+# `op="delete"` is the first operation (#3299); the siblings #3300 (MCP Point
+# delete), #3312 (unjournaled entity update) and #3377 (unjournaled rename)
+# extend the op set rather than adding record types.
+_ENTITY_MUTATION_RECORD_TYPE = "EntityMutated"
+
 
 def _raise_update_point_status_error(proj, id: str) -> None:
     """#432: error path for the update_point draft→live promote guard.
@@ -17084,8 +17095,19 @@ class TortoiseSDK:
                 f"MATCH (n:{label} {{{prop}:$id}}) DETACH DELETE n RETURN count(n)",
                 params={"id": id_val},
             )
-            if r.result_set:
+            if r.result_set and r.result_set[0][0]:
                 total += r.result_set[0][0]
+                # #3299: journal the destruction at the write surface that
+                # performs it. Post-hoc (after the live write succeeds,
+                # matching every other emitter) so a failed/no-op delete
+                # never leaves a phantom record — and one record PER LABEL
+                # THAT MATCHED, carrying the identity as written (label+id),
+                # so replay hard-deletes exactly what live hard-deleted
+                # instead of resurrecting it from the creation line. Ontology
+                # §5: delete hard-deletes, retract tombstones — `op:delete`
+                # replays `_delete_entity_by_id`, `op:retract` would tombstone.
+                self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, id=id_val,
+                                 op="delete", label=label)
         return bool(total)
 
     def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,
