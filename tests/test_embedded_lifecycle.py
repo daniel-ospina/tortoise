@@ -1568,3 +1568,49 @@ def test_peer_completes_a_run_while_a_cotenant_exits_cross_process(tmp_path):
         proc.wait()
         with contextlib.suppress(Exception):
             proj.close()
+
+
+def test_partial_init_cleanup_reclaims_the_orphaned_server(tmp_path):
+    """#3653 regression: a redislite client whose ``__init__`` aborted AFTER
+    the embedded server started has a live pidfile but NO ``connection_pool``.
+
+    redislite's ``_start_redis()`` runs before the redis-py ``ConnectionPool``
+    is built, so a failure in that window (a ``<db>.settings`` parent that
+    vanished under the tempdir race, a registry read that lost its file)
+    leaves the object half-built. Its own atexit-registered ``_cleanup`` and
+    ``__del__`` then abort at ``self.shutdown(...)`` with
+    ``AttributeError: 'Redis' object has no attribute 'connection_pool'``,
+    leaking one embedded server per aborted ``__del__`` (CI measured 43).
+
+    These objects never pass through a ``tortoise.FalkorDB`` close seam (the
+    wrapper registers only after ``super().__init__()`` returns), so the
+    guarded ``_cleanup`` must reclaim the orphan itself: stop the server over
+    the raw socket and neutralize the client.
+
+    RED mutation: restore the unguarded ``RedisMixin._cleanup`` (drop
+    ``_install_partial_init_cleanup_guard``). ``ia._cleanup()`` then raises
+    ``AttributeError`` and the server survives.
+    """
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "partial_init.db")
+    proj = FalkorProjection(db_path, graph_name="test")
+    inner = getattr(proj.db, "client", proj.db)
+    pid, sock = inner.pid, inner.socket_file
+    assert sock and _pid_alive(pid), "server owns a live socket"
+
+    # The exact half-built shape: a live pidfile, no connection pool.
+    del inner.connection_pool
+    assert not hasattr(inner, "connection_pool")
+    assert _pid_alive(pid)
+
+    # Byte-for-byte what redislite's atexit handler and ``__del__`` call.
+    inner._cleanup()
+
+    assert _wait_server_dead(pid), (
+        "#3653: a partial-init client's _cleanup leaked its orphaned server")
+    assert getattr(inner, "pidfile", "MISSING") is None, (
+        "#3653: _cleanup must leave the client neutralized")
+
+    with contextlib.suppress(Exception):
+        proj.db._t_close()

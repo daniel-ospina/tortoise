@@ -233,6 +233,18 @@ if _OriginalFalkorDB is not None:
                     try:
                         return super().close(*args, **kwargs)
                     finally:
+                        # #3653: `cotenant_holds_server()` above already
+                        # dropped this client's pool (its F4 probe). If the
+                        # subsequent `_cleanup()` aborts — e.g. the client is
+                        # a partially-initialized redislite `Redis` with no
+                        # `connection_pool`, or its socket dir has vanished —
+                        # the live pidfile is left behind and `__del__` runs
+                        # `_cleanup` again and throws. Neutralize
+                        # unconditionally so ANY client whose pool the guard
+                        # dropped reaches `__del__` already neutralized.
+                        # Idempotent: a no-op when `_cleanup` already nulled
+                        # the pidfile (the success path).
+                        _neutralize_redislite_cleanup(inner)
                         if not pid_before:
                             _remove_ephemeral_socket_dir(rdir, sock_path)
                 return super().close(*args, **kwargs)

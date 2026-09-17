@@ -54,6 +54,13 @@ gone.
 guarded `tortoise.FalkorDB` constructor) has no owner record; the guard
 fails closed on a missing record dir, but a peer that attaches AFTER the
 record dir is dropped is caught only by the CLIENT LIST probe.
+- `RedisMixin.__init__` starts the embedded server BEFORE it builds its
+redis-py `ConnectionPool`. If that window fails (a vanished `<db>.settings`
+parent), the client is left with a live pidfile and no pool; redislite's
+own atexit `_cleanup`/`__del__` then abort and leak one server each. Those
+clients never reach a `tortoise.FalkorDB` close seam, so redislite's own
+`_cleanup` is guarded too (`_install_partial_init_cleanup_guard`) — it
+reclaims the orphan over the raw socket instead of raising.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -61,6 +68,7 @@ import os
 import contextlib
 
 import shutil
+import signal
 import socket
 import tempfile
 
@@ -205,6 +213,11 @@ def _neutralize_redislite_cleanup(client) -> None:
         shared registry file gone `_connection_count()` reads 0 -> they
         would stop the live server and delete its socket dir from under a
         live co-tenant. Nulling the pidfile makes both no-ops.
+
+    Idempotent and safe to call repeatedly (setting `pidfile = None` twice
+    is a no-op): every teardown seam,
+    `_reclaim_partial_init_server`, and the guarded redislite `_cleanup` may
+    each call it for the same client.
     """
     try:  # noqa: SIM105
         client.pidfile = None
@@ -373,6 +386,93 @@ def cotenant_holds_server(client) -> bool:
     return verdict not in ("dead", "missing")
 
 
+# ── #3653: reclaim a partially-initialized client's orphaned server ────────
+#
+# `RedisMixin.__init__` starts the embedded server (and writes its pidfile)
+# BEFORE it constructs the redis-py `ConnectionPool` (redislite `client.py`:
+# `_start_redis()` runs ahead of `super().__init__()`, which is what sets
+# `self.connection_pool`). If anything in that window fails — the
+# `<db>.settings` parent vanished under the tempdir race, a registry read
+# lost its file — the object is left with a live pidfile and NO
+# `connection_pool`. redislite's own atexit-registered `_cleanup` and its
+# `__del__` then both run it and abort at `self.shutdown(...)` with
+# ``AttributeError: 'Redis' object has no attribute 'connection_pool'``, so
+# the server is never stopped: one orphan per aborted `__del__` (CI measured
+# 43).
+#
+# These objects never pass through any `tortoise.FalkorDB` close seam (the
+# wrapper registers its handlers only AFTER `super().__init__()` returns),
+# so per-seam neutralization cannot reach them. Cover redislite's own
+# teardown seam instead: reclaim the orphan and make the
+# connection-pool-dependent body a no-op.
+_ORIGINAL_REDISLITE_CLEANUP = None
+
+
+def _reclaim_partial_init_server(client) -> None:
+    """#3653: reap a server whose `Redis.__init__` aborted after start.
+
+    A partial client knows `socket_file`/`redis_dir`/`pidfile` but has no
+    `connection_pool`, so redislite's destructive teardown cannot run. Stop
+    the server over the raw unix socket (the same #1371 fire-and-forget
+    `SHUTDOWN NOSAVE` — no pool needed), fall back to `SIGTERM` on the
+    readable pid, neuter the client's own atexit/`__del__`, and reclaim the
+    ephemeral socket dir. Idempotent; never raises.
+    """
+    sock = getattr(client, "socket_file", None)
+    pid = _server_pid(client)
+    if sock:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(sock)
+            s.sendall(b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n")
+            s.close()
+        except OSError:
+            pass
+    if pid:
+        try:  # noqa: SIM105
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    rdir = getattr(client, "redis_dir", None)
+    _neutralize_redislite_cleanup(client)
+    _remove_ephemeral_socket_dir(rdir, sock)
+
+
+def _install_partial_init_cleanup_guard() -> None:
+    """#3653: make redislite's `_cleanup` safe for partial clients (once).
+
+    A client with no `connection_pool` cannot run redislite's teardown (it
+    raises before reaching the server), so the guard reclaims its orphaned
+    server instead. Every complete client delegates to the original
+    `_cleanup` unchanged.
+    """
+    global _ORIGINAL_REDISLITE_CLEANUP
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to guard
+        return
+    if getattr(RedisMixin, "_tortoise_partial_init_guard", False):
+        return
+    original = RedisMixin._cleanup
+    _ORIGINAL_REDISLITE_CLEANUP = original
+
+    def _cleanup(self, *args, **kwargs):
+        if not hasattr(self, "connection_pool"):
+            _reclaim_partial_init_server(self)
+            return None
+        return original(self, *args, **kwargs)
+
+    RedisMixin._cleanup = _cleanup
+    RedisMixin._tortoise_partial_init_guard = True
+
+
+# Installed at import (before any client is constructed). Redislite's own
+# `atexit.register(self._cleanup, ...)` resolves `self._cleanup` through the
+# class, so both its atexit seam and `__del__` pick up the guarded version.
+_install_partial_init_cleanup_guard()
+
+
 # ── Issue #1475: deterministic close-on-GC (lifecycle finalize) ────────────
 #
 # Leaked (never-explicitly-closed) SDK/projection objects used to be pinned
@@ -513,10 +613,18 @@ def _gc_close(db_ref) -> None:
         client._cleanup()
     except Exception:
         pass
+    # #3653: `cotenant_holds_server()` above already dropped this client's
+    # pool (its F4 probe). A `_cleanup()` that aborts (a partially-created
+    # redislite client with no `connection_pool`, a vanished socket dir)
+    # leaves the live pidfile in place, and redislite's own atexit
+    # `_cleanup` + `__del__` then run it again and throw. Neutralize every
+    # such client here so it reaches `__del__` already neutralized
+    # (idempotent — a no-op when `_cleanup` succeeded).
     # #3653 F3: redislite's `_cleanup` only rmtrees inside `if self.pid:`,
     # so a server that was already dead (pid 0) strands its dir. Reclaim it
     # here — the fast path above already does this for the CI-default case,
     # this covers the flag-off / non-ephemeral fall-through.
+    _neutralize_redislite_cleanup(client)
     if not pid_before:
         _remove_ephemeral_socket_dir(rdir, sock_path)
     _release_owner_quietly(db)
@@ -672,6 +780,9 @@ def close_embedded_clients() -> int:
                 cleanup()
             except Exception:
                 pass
+            # #3653: same contract as `_gc_close` — a raw client whose
+            # `_cleanup` aborted must not re-run it from `__del__`.
+            _neutralize_redislite_cleanup(inner)
             closed += 1
         _release_owner(client, inner)
     return closed
