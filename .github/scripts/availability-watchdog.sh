@@ -233,14 +233,20 @@ AUTH_PROBE_URL="https://tortoise.premiselabs.co/auth/start"
 # by a boolean flag: an unrecognised URL is ALWAYS a drill, so a typo'd or
 # forgotten flag can never arm self-heal against an unexpected host (fail
 # closed in the no-restart direction). A trailing `/` is normalised away.
-PROD_PROBE_URLS="${PROD_PROBE_URLS:-$DEFAULT_PROBE_URL $AUTH_PROBE_URL}"
+# SINGLE-DASH default (not `:-`): an explicit EMPTY value must stay EMPTY so an
+# operator who neutralises the set by setting it to "" gets the FAIL-CLOSED
+# direction (everything is a drill) rather than `:-`'s opposite — the default
+# set with self-heal ARMED. The default applies only when the variable is UNSET.
+PROD_PROBE_URLS="${PROD_PROBE_URLS-$DEFAULT_PROBE_URL $AUTH_PROBE_URL}"
 # Which production URLs have a Fly machine behind them and may therefore arm
 # the restart leg. The auth surface is PRODUCTION for alerting and incident
 # identity, but it is served by Cloudflare Pages: a 503 there means a missing
 # binding, and `flyctl machine restart` on the API app cannot repair it — it
 # would restart an unrelated service. Membership again (fail closed): a new
-# production URL is non-restartable until explicitly added here.
-RESTARTABLE_PROBE_URLS="${RESTARTABLE_PROBE_URLS:-$DEFAULT_PROBE_URL}"
+# production URL is non-restartable until explicitly added here — and an
+# explicit EMPTY value stays empty (single-dash), so the kill-intent cannot
+# fail OPEN into an armed restart (the `:-` form substituted the default).
+RESTARTABLE_PROBE_URLS="${RESTARTABLE_PROBE_URLS-$DEFAULT_PROBE_URL}"
 PROBE_URL="${PROBE_URL:-$DEFAULT_PROBE_URL}"
 # Display name in titles/logs. Deliberately NOT derived from PROBE_URL: the
 # title is the dedupe key and must not move when a drill overrides the URL.
@@ -1930,8 +1936,16 @@ A restart is a **symptom fix** — if this recurs, the root cause is still live 
       disarmed:unexpected)
         if [ "$PROBE_DEGRADED_REASON" = "header" ]; then
           heal_note="⛔ **No restart attempted** — the app ANSWERED, so a process restart is not the remediation. The failure is in the **PKCE flow**, not a wedged process: the redirect came back with an allowed status but without the required \`$(scrub_output "$PROBE_REQUIRE_HEADER" 120)\` header, which is the proof the flow row was written. Check the PKCE state written to D1/KV behind the auth route — the \`code_challenge\`/\`code_challenge_method\` pair, the D1 binding, and the last deploy of the auth function — NOT the route table or the deployed revision of the API app. Runbook § *Out-of-band availability watchdog*."
-        else
+        elif is_restartable_url "$PROBE_URL"; then
           heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`404\`/\`3xx\` on an authenticated API route usually means a bad deploy or a moved route, not a wedged process: check the deployed revision and the route."
+        else
+          # Target-aware (review P3): this sibling branch used to call EVERY
+          # surface "an authenticated API route", but the runbook tells
+          # operators the incident body is the primary diagnostic — and the
+          # auth target is a Cloudflare Pages route, not an API route. Keyed
+          # on RESTARTABILITY (the same discriminator render_body uses), not on
+          # the presence of an expectation knob.
+          heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`404\`/\`3xx\` on the probed production route \`$(redact_url "$PROBE_URL")\` — a Cloudflare Pages surface with no Fly machine behind it — usually means a bad deploy or a moved route, not a wedged process: check the Pages deployment and the route."
         fi
         transition_kind="disarmed"
         ;;

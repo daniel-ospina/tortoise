@@ -1718,6 +1718,7 @@ export WATCHDOG_NOW_EPOCH="$NOW"
 #     was a single-literal comparison, so the auth URL classified as a DRILL
 #     ([DRILL]-titled incident, no PROD page).
 AUTH_URL="https://tortoise.premiselabs.co/auth/start"
+API_URL="https://api.premiselabs.co/v1/organizations"
 AUTH_TITLE_DOWN='[monitor] PROD DOWN — tortoise.premiselabs.co is not answering the availability probe'
 PKCE_HEADERS=$'HTTP/2 302\r\nlocation: https://github.com/login/oauth/authorize?client_id=x&code_challenge=abc&code_challenge_method=s256\r\n'
 
@@ -1754,6 +1755,51 @@ assert_eq "$(prod_unit "https://api.premiselabs.co/v1/organizations/")" "PROD" "
 assert_eq "$(restartable_unit "https://api.premiselabs.co/v1/organizations")" "YES" "restart set: the Fly API surface may restart"
 assert_eq "$(restartable_unit "$AUTH_URL")" "NO" "restart set: the Pages auth surface is NEVER restartable"
 assert_eq "$(restartable_unit "https://staging.example.test/v1/organizations")" "NO" "restart set: a drill is not restartable"
+
+# ── 94b: an explicitly EMPTY set is honoured — empty ≠ unset (P3) ──────────
+# `${VAR:-default}` substitutes on unset OR EMPTY, so an operator who sets
+# `PROD_PROBE_URLS=""` to neutralise the set gets the exact opposite: the
+# default (production membership + an ARMED restart). The documented fail-closed
+# property must hold for the value an operator would actually use, so the
+# default is applied ONLY when the variable is UNSET (single-dash).
+export PROD_PROBE_URLS=""
+assert_eq "$(prod_unit "$API_URL")" "DRILL" "empty PROD_PROBE_URLS: the API URL is a DRILL (fail closed)"
+assert_eq "$(prod_unit "$AUTH_URL")" "DRILL" "empty PROD_PROBE_URLS: the auth URL is a DRILL (fail closed)"
+unset PROD_PROBE_URLS
+assert_eq "$(prod_unit "$API_URL")" "PROD" "unset PROD_PROBE_URLS: the defaults still apply (API production membership)"
+assert_eq "$(prod_unit "$AUTH_URL")" "PROD" "unset PROD_PROBE_URLS: the defaults still apply (auth production membership)"
+export RESTARTABLE_PROBE_URLS=""
+assert_eq "$(restartable_unit "$API_URL")" "NO" "empty RESTARTABLE_PROBE_URLS: nothing may restart (fail closed)"
+unset RESTARTABLE_PROBE_URLS
+assert_eq "$(restartable_unit "$API_URL")" "YES" "unset RESTARTABLE_PROBE_URLS: the default applies (API still restartable)"
+
+# ── 94c: an EMPTY prod set cannot ARM a restart (end to end) ────────────────
+# The strongest case: sustained DOWN and a Fly token, so the ONLY thing that
+# can disarm the restart is the (now empty) production set.
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export PROD_PROBE_URLS=""
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL')" "0" "empty prod set: sustained DOWN + a token → ZERO flyctl calls (fail closed)"
+assert_contains "$OUT" "restart decision: disarmed:drill" "empty prod set: the run log names the drill disarm"
+assert_contains "$(created_json)" "DRILL DOWN" "empty prod set: files a DRILL-titled incident, not a PROD one"
+
+# ── 94d: an EMPTY restartable set cannot ARM a restart (end to end) ─────────
+reset_case
+seed_issue down "$((NOW - 1200))" 3 0 ""
+export RESTARTABLE_PROBE_URLS=""
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"
+run_watchdog
+assert_eq "$(count_calls 'FLYCTL')" "0" "empty restartable set: sustained DOWN + a token → ZERO flyctl calls (fail closed)"
+assert_contains "$OUT" "restart decision: disarmed:no_machine" "empty restartable set: the production URL is disarmed as no_machine"
+# Membership and restartability are SEPARATE sets: emptying the restart set must
+# not demote the target to a drill. The run log's [DRILL:…] marker is the
+# membership signal, and the adopted production incident is still tracked.
+assert_not_contains "$OUT" "[DRILL:" "empty restartable set: still PRODUCTION for alerting (membership is a separate set)"
+assert_contains "$(patched_body)" "down_runs=4" "empty restartable set: the production incident is still tracked and alerted"
 
 # ── 86: a healthy 302 + the PKCE header on the auth target → UP ─────────────
 reset_case
@@ -1793,6 +1839,35 @@ assert_not_contains "$(patched_body)" "check the deployed revision and the route
 assert_contains "$(created_json)" "PROD DEGRADED" "auth: answered-but-wrong → PROD DEGRADED (an ANSWER, not an outage)"
 assert_eq "$(count_calls 'FLYCTL')" "0" "auth: answered-but-wrong → no restart attempt"
 assert_eq "$(cat "$STUB_TMP/probe.count")" "1" "auth: the header check is deterministic → no retry budget burned"
+
+# ── 87b: an AUTH STATUS mismatch diagnoses the Pages route, not "an API route" ─
+# The status branch (PROBE_DEGRADED_REASON=status) is the header branch's
+# sibling and needs the SAME target-awareness. `/auth/start` is a Cloudflare
+# Pages route, and the runbook tells operators this body is the primary
+# diagnostic, so calling it "an authenticated API route" sends them to the
+# wrong surface (review P3).
+reset_case
+export PROBE_URL="$AUTH_URL"
+export PROBE_HOST_LABEL="tortoise.premiselabs.co"
+export PROBE_EXPECT_STATUS="302"
+export PROBE_REQUIRE_HEADER="code_challenge_method=s256"
+export STUB_PROBE_CODES="200"          # answered, but OUTSIDE the allow-list
+export STUB_PROBE_HEADERS="$PKCE_HEADERS"   # header present → the failure is the STATUS
+run_watchdog
+assert_eq "$RC" "1" "auth status mismatch: 200 vs an allow-list of 302 → exit 1 (DEGRADED)"
+assert_contains "$(created_json)" "PROD DEGRADED" "auth status mismatch: PROD DEGRADED (an ANSWER, not an outage)"
+assert_contains "$(patched_body)" "disarmed" "auth status mismatch: the body says self-healing is disarmed"
+assert_not_contains "$(patched_body)" "authenticated API route" "auth status mismatch: the heal note does NOT call the Pages route an API route (P3)"
+assert_contains "$(patched_body)" "No restart attempted" "auth status mismatch: the heal note still explains why nothing restarted"
+assert_eq "$(count_calls 'FLYCTL')" "0" "auth status mismatch: no restart attempt"
+
+# ── 99b: the API target's status mismatch KEEPS the API-route guidance ──────
+# The contrast case: target-awareness must not degrade the restartable API
+# target's own (correct) guidance into Pages prose.
+reset_case
+export STUB_PROBE_CODES="404"
+run_watchdog
+assert_contains "$(patched_body)" "authenticated API route" "api status mismatch: the heal note still names the API surface (no regression)"
 
 # ── 88: a 503 on the auth target → DOWN and flyctl is NEVER called ─────────
 reset_case
