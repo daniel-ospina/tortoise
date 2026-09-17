@@ -46,6 +46,7 @@ import atexit
 import contextlib
 import os
 import shutil
+import sys
 import tempfile
 
 # ── the host (shared) temp dir, captured BEFORE any redirect ─────────────
@@ -76,6 +77,7 @@ _ROOT_PREFIX = "tt_"
 
 _SESSION_TMPDIR: str | None = None
 _GUARD_INSTALLED = False
+_AUDIT_HOOK_ADDED = False
 _ORIGINALS: dict[str, object] = {}
 
 # The unpatched primitives, captured at import (before install_scan_guard).
@@ -98,6 +100,34 @@ def host_tempdir_entries():
 def session_tmpdir() -> str | None:
     """The private session root, or None when isolation was never installed."""
     return _SESSION_TMPDIR
+
+
+class SessionIsolationError(RuntimeError):
+    """The private session temp root could not be established.
+
+    Raised at conftest import, i.e. it fails the whole collection loudly
+    rather than letting the suite run UNISOLATED (silently polluting the
+    shared temp dir again) or run against a root the reaper cannot recognise
+    (a silent leak). Isolation is a hard requirement of #3752, so it fails
+    closed.
+    """
+
+
+def _write_marker(root: str) -> None:
+    """Record ``pid`` (and start time, when available) inside the root.
+
+    The marker is what makes the root a SESSION ROOT: `_socket_walk_roots`
+    requires it (that is what keeps the reaper off the ~250 legacy `tt_*`
+    scratch dirs) and `sweep_stale_session_roots` refuses to reclaim a root
+    without one. A root that exists but has no marker is therefore invisible
+    to both — permanently polluting the temp dir after a SIGKILL — so a
+    failure to write it is escalated by the caller, never swallowed.
+    """
+    start = _process_start_time(os.getpid())
+    with open(os.path.join(root, _PID_MARKER), "w") as fh:
+        fh.write(f"pid={os.getpid()}\n")
+        if start is not None:
+            fh.write(f"start={start}\n")
 
 
 def install_session_tmpdir() -> str:
@@ -134,13 +164,20 @@ def install_session_tmpdir() -> str:
     atexit.register(teardown_session_tmpdir)
 
     try:
-        start = _process_start_time(os.getpid())
-        with open(os.path.join(root, _PID_MARKER), "w") as fh:
-            fh.write(f"pid={os.getpid()}\n")
-            if start is not None:
-                fh.write(f"start={start}\n")
-    except OSError:
-        pass
+        _write_marker(root)
+    except OSError as exc:
+        # Fail closed: undo the redirect and remove the unmarked root, then
+        # abort loudly. An unmarked root would be invisible to the reaper's
+        # nested pass (it requires SESSION_ROOT_MARKER) and unreclaimable by
+        # sweep_stale_session_roots (no marker -> keep) — a permanent leak
+        # that only a loud failure can prevent (#3752 review cycle 2).
+        teardown_session_tmpdir()
+        raise SessionIsolationError(
+            f"could not write the {_PID_MARKER} marker in the private session "
+            f"temp root {root!r}; the temp-dir isolation cannot be trusted "
+            f"without it (an unmarked root is invisible to the reaper and "
+            f"unreclaimable after a kill) — fix the temp dir's permissions "
+            f"rather than running the suite unisolated") from exc
     return root
 
 
@@ -189,10 +226,12 @@ def _process_start_time(pid: int) -> float | None:
 
     Lazy import on purpose: this module must stay import-cheap and the reaper
     resolves ``ACTIVE_SUITES_DIR`` / ``_LOCK_PATH`` once, at its import, from
-    the temp dir. By the time this is reached the redirect is installed and
-    ``TORTOISE_HOST_TMPDIR`` is exported, so the reaper's import-time
-    constants resolve exactly as ``tests/conftest.py`` expects (it is
-    import-pure — stdlib only — so the early import is safe).
+    the temp dir. Every caller runs AFTER ``install_session_tmpdir`` has
+    installed the redirect and exported ``TORTOISE_HOST_TMPDIR`` — the marker
+    write below, and ``sweep_stale_session_roots``, which conftest calls after
+    the install — so the reaper's import-time constants resolve exactly as
+    ``tests/conftest.py`` requires (it is import-pure — stdlib only — so the
+    early import is safe).
     """
     try:
         from tortoise.embedded_reaper import _process_start_time as impl
@@ -319,6 +358,29 @@ def _is_under(child: str, parent: str) -> bool:
     return child.startswith(parent.rstrip(os.sep) + os.sep)
 
 
+def _fd_target_path(fd) -> str | None:
+    """Resolve an already-open file descriptor to its path, or None.
+
+    Required because ``os.scandir`` accepts an int fd, and on macOS
+    ``shutil.rmtree`` uses that path (``shutil._use_fd_functions`` is True) —
+    so without this the guard is bypassed by exactly the call that deletes a
+    whole tree.
+    """
+    if not isinstance(fd, int):
+        return None
+    try:  # macOS / BSD
+        import fcntl
+        raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+        path = raw.decode("utf-8", "surrogateescape").rstrip("\0")
+        return path or None
+    except Exception:
+        pass  # fall through to the Linux form
+    try:  # Linux
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return None
+
+
 def _is_host_tempdir_scope(path) -> bool:
     """True when ``path`` IS the host temp dir or an ANCESTOR of it.
 
@@ -326,11 +388,18 @@ def _is_host_tempdir_scope(path) -> bool:
     the host-global marker dir, and the session root itself lives under the
     host temp dir. Only scanning the shared tree (or above it) is the defect.
 
-    Accepts str, bytes and PathLike (all three are legal for os.scandir /
-    os.listdir / os.walk); bytes is decoded with ``os.fsdecode`` rather than
-    compared as-is, so a bytes-path caller still gets the original stdlib
-    behaviour instead of a TypeError raised from inside the guard.
+    Accepts str, bytes, PathLike AND an int file descriptor (all four are
+    legal for ``os.scandir``); bytes is decoded with ``os.fsdecode`` rather
+    than compared as-is, so a bytes-path caller still gets the original
+    stdlib behaviour instead of a TypeError raised from inside the guard, and
+    an fd is resolved through ``_fd_target_path`` so ``shutil.rmtree`` (which
+    scans an fd on macOS) cannot slip through.
     """
+    if isinstance(path, int):
+        resolved = _fd_target_path(path)
+        if resolved is None:
+            return False  # unidentifiable fd — cannot judge, must not guess
+        path = resolved
     try:
         raw = os.fspath(path)
     except TypeError:
@@ -344,6 +413,17 @@ def _is_host_tempdir_scope(path) -> bool:
     return target == HOST_TMPDIR or _is_under(HOST_TMPDIR, target)
 
 
+def _fmt_path(path) -> str:
+    """repr for a guard message; an int fd has no fspath (and must not
+    raise while the guard is reporting a violation)."""
+    if isinstance(path, int):
+        return f"fd {path}"
+    try:
+        return repr(os.fspath(path))
+    except TypeError:
+        return repr(path)
+
+
 def _guard_reason() -> str:
     return (
         "scanning the SHARED temp dir is forbidden in tests (#3752): this is "
@@ -354,15 +434,62 @@ def _guard_reason() -> str:
     )
 
 
+def _subprocess_touches_host_tempdir(args) -> str | None:
+    """Return the offending argv token when a command scans the shared temp
+    dir, else None.
+
+    Needed because the shell-out form is INVISIBLE to the in-process guard and
+    yet is the exact shape of the original #3752 defect
+    (``find <shared T> -maxdepth 2 (...)`` run at 53% CPU). Only an argv token
+    that IS the host temp dir (or an ancestor) is rejected: a DESCENDANT — the
+    private session root, ``<host>/.tortoise/...`` — is legitimate and must
+    keep working, and a flag such as ``-maxdepth`` is not a path at all.
+    """
+    if not args:
+        return None
+    for token in args:
+        if isinstance(token, bytes):
+            token = os.fsdecode(token)
+        if isinstance(token, (str, os.PathLike)) and \
+                _is_host_tempdir_scope(token):
+            return os.fspath(token) if not isinstance(token, str) else token
+    return None
+
+
+def _audit_hook(event: str, args: tuple) -> None:
+    """Process-wide audit hook: refuse to SHELL OUT at the shared temp dir.
+
+    Installed via ``sys.addaudithook`` (cannot be removed, so
+    ``uninstall_scan_guard`` flips ``_GUARD_INSTALLED`` and this no-ops
+    instead). Never raises from an unrelated event: only the
+    ``subprocess.Popen`` audit event is inspected, and only its argv.
+    """
+    if event != "subprocess.Popen" or not _GUARD_INSTALLED:
+        return
+    argv = args[1] if len(args) > 1 else None
+    if argv is None and args and isinstance(args[0], (list, tuple)):
+        argv = args[0]
+    if isinstance(argv, (str, bytes)):
+        return  # shell string form: not inspectable without false positives
+    token = _subprocess_touches_host_tempdir(argv)
+    if token is not None:
+        raise SharedTmpdirScanError(
+            f"subprocess argv {list(argv)!r} targets the SHARED temp dir "
+            f"({token!r}) — {_guard_reason()}")
+
+
 def install_scan_guard() -> None:
     """Fail loudly on any in-process scan of the shared temp dir.
 
     Patches ``os.scandir`` / ``os.walk`` / ``os.listdir``. ``os.walk``
     resolves ``os.scandir`` at call time, so patching all three is belt and
-    braces rather than duplication. Idempotent, and reversible via
-    ``uninstall_scan_guard()`` so the guard can be exercised by its own test.
+    braces rather than duplication. An int fd (which ``shutil.rmtree`` passes
+    on macOS) is resolved rather than ignored, and a ``subprocess.Popen``
+    audit hook covers the shell-out form the in-process patch cannot see.
+    Idempotent, and reversible via ``uninstall_scan_guard()`` so the guard can
+    be exercised by its own test.
     """
-    global _GUARD_INSTALLED
+    global _GUARD_INSTALLED, _AUDIT_HOOK_ADDED
     if _GUARD_INSTALLED:
         return
 
@@ -375,24 +502,29 @@ def install_scan_guard() -> None:
     def guarded_scandir(path=".", *args, **kwargs):
         if _is_host_tempdir_scope(path):
             raise SharedTmpdirScanError(
-                f"os.scandir({os.fspath(path)!r}) — {_guard_reason()}")
+                f"os.scandir({_fmt_path(path)}) — {_guard_reason()}")
         return original_scandir(path, *args, **kwargs)
 
     def guarded_listdir(path=".", *args, **kwargs):
         if _is_host_tempdir_scope(path):
             raise SharedTmpdirScanError(
-                f"os.listdir({os.fspath(path)!r}) — {_guard_reason()}")
+                f"os.listdir({_fmt_path(path)}) — {_guard_reason()}")
         return original_listdir(path, *args, **kwargs)
 
     def guarded_walk(top, *args, **kwargs):
         if _is_host_tempdir_scope(top):
             raise SharedTmpdirScanError(
-                f"os.walk({os.fspath(top)!r}) — {_guard_reason()}")
+                f"os.walk({_fmt_path(top)}) — {_guard_reason()}")
         return original_walk(top, *args, **kwargs)
 
     os.scandir = guarded_scandir  # type: ignore[assignment]
     os.listdir = guarded_listdir  # type: ignore[assignment]
     os.walk = guarded_walk  # type: ignore[assignment]
+    if not _AUDIT_HOOK_ADDED:
+        # sys.addaudithook is irreversible — install it exactly once per
+        # process and gate it on _GUARD_INSTALLED instead.
+        sys.addaudithook(_audit_hook)
+        _AUDIT_HOOK_ADDED = True
     _GUARD_INSTALLED = True
 
 

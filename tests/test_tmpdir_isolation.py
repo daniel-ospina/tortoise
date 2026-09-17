@@ -74,13 +74,35 @@ def test_session_temp_root_is_short_enough_for_af_unix():
 
 def test_install_is_idempotent():
     """A defensive second install must not create a second root — teardown
-    only removes the one it knows about."""
-    before = {e.name for e in host_tempdir_entries()}
+    only removes the one it knows about.
+
+    Scoped to THIS pid's roots rather than to a before/after snapshot of the
+    whole host temp dir: other pi sessions and the box's cruft sweeper add and
+    remove entries in that window, which made the snapshot version fail for
+    reasons that have nothing to do with the isolation.
+    """
+    mine = _session_roots_owned_by(os.getpid())
+    assert len(mine) == 1, f"expected exactly one root for this pid, got {mine}"
     again = install_session_tmpdir()
     assert again == scan_root()
-    after = {e.name for e in host_tempdir_entries()}
-    assert after - before == set(), \
-        f"second install created a new temp root: {sorted(after - before)}"
+    assert _session_roots_owned_by(os.getpid()) == mine, \
+        "second install created a second temp root for this pid"
+
+
+def _session_roots_owned_by(pid: int) -> set[str]:
+    """Host-tempdir `tt_*` roots whose marker names ``pid``. Read-only, and
+    filtered to this process, so concurrent suites cannot perturb it."""
+    owned: set[str] = set()
+    for entry in host_tempdir_entries():
+        marker = os.path.join(entry.path, ".session-pid")
+        try:
+            with open(marker) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        if f"pid={pid}\n" in text:
+            owned.add(entry.name)
+    return owned
 
 
 # ── scratch created by the suite lands inside the root ───────────────────
@@ -299,6 +321,37 @@ def test_socket_walk_orders_nested_roots_before_the_tempdir(tmp_path):
         f"nested root must precede the tempdir, got {roots!r}"
 
 
+def test_socket_walk_reserves_budget_for_the_global_pass(tmp_path, monkeypatch):
+    """#3752 review cycle 2: nested session roots are walked FIRST, so N of them
+    could consume the single shared deadline and silently skip the GLOBAL
+    (tempdir) pass — the only pass that reaches non-session dirs. Each nested
+    root's timeout is therefore capped at `remaining - GLOBAL_WALK_RESERVE_S`,
+    which makes the reserve unspendable by construction."""
+    from tortoise import embedded_reaper as reaper
+
+    roots = [str(tmp_path / "tt_aaaaaaaa"), str(tmp_path / "tt_bbbbbbbb"),
+             str(tmp_path)]
+    for r in roots[:2]:
+        os.makedirs(r, exist_ok=True)
+    monkeypatch.setattr(reaper, "_socket_walk_roots", lambda _tmpdir: list(roots))
+    seen: list[tuple[str, float]] = []
+    real_run = subprocess.run
+
+    def recording_run(cmd, *a, **kw):
+        seen.append((str(cmd[1]), float(kw.get("timeout", -1))))
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(reaper.subprocess, "run", recording_run)
+    reaper._find_socket_dirs(str(tmp_path))
+    assert [r for r, _ in seen] == roots, \
+        "the global root must still be walked after the nested roots"
+    nested_max = reaper.SOCKET_WALK_TIMEOUT - reaper.GLOBAL_WALK_RESERVE_S
+    for root, timeout in seen[:-1]:
+        assert timeout <= nested_max + 1.0, \
+            f"nested root {root} could spend the global reserve ({timeout}s)"
+    assert seen[-1][1] > 0, "the global pass was starved by the nested roots"
+
+
 def test_quarantine_walk_reaches_nested_session_roots(tmp_path, monkeypatch):
     """#3752 review finding: the rename-aside is IN PLACE, so a quarantined
     dir under a nested session root is invisible to a `-maxdepth 1` walk of
@@ -439,6 +492,100 @@ def test_guard_tolerates_bytes_and_pathlike_shared_paths():
     assert _is_host_tempdir_scope(Path(HOST_TMPDIR)) is True
     assert _is_host_tempdir_scope(os.fsencode(scan_root())) is False
     assert _is_host_tempdir_scope(12345) is False
+
+
+def test_marker_write_failure_fails_closed(tmp_path, monkeypatch):
+    """#3752 review cycle 2: an unmarked root is invisible to the reaper's
+    nested pass (it requires SESSION_ROOT_MARKER) AND unreclaimable by
+    sweep_stale_session_roots (no marker -> keep) — a permanent leak after a
+    SIGKILL. So a marker-write failure must abort loudly and leave nothing
+    behind, never run the suite unisolated against an unusable root."""
+    from tests import _tmpdir_isolation as iso
+
+    real_root, real_host = iso._SESSION_TMPDIR, iso.HOST_TMPDIR
+    real_env_tmpdir = os.environ.get("TMPDIR")
+    iso._SESSION_TMPDIR = None
+    iso.HOST_TMPDIR = str(tmp_path)
+
+    def boom(_root):
+        raise OSError("read-only temp dir")
+
+    monkeypatch.setattr(iso, "_write_marker", boom)
+    try:
+        with pytest.raises(iso.SessionIsolationError) as excinfo:
+            iso.install_session_tmpdir()
+        assert "marker" in str(excinfo.value)
+        # host_tempdir_entries() is the UNGUARDED scan; it is the sanctioned
+        # way to look into the (here: patched) host temp dir — tmp_path
+        # itself cannot be iterdir'd while HOST_TMPDIR points at it.
+        leftovers = [e.name for e in iso.host_tempdir_entries()]
+        assert not any(n.startswith("tt_") for n in leftovers), \
+            f"a root survived the fail-closed abort: {leftovers}"
+    finally:
+        monkeypatch.undo()
+        iso._SESSION_TMPDIR = real_root
+        iso.HOST_TMPDIR = real_host
+        if real_env_tmpdir is not None:
+            os.environ["TMPDIR"] = real_env_tmpdir
+        tempfile.tempdir = real_root
+    assert tempfile.gettempdir() == real_root, \
+        "the session redirect was not restored after the abort"
+
+
+def test_guard_blocks_shutil_rmtree_of_the_shared_temp_dir(tmp_path):
+    """The dangerous case: on macOS `shutil._use_fd_functions` is True, so
+    rmtree scans an int FD — invisible to a path-only guard — and
+    `shutil.rmtree(<shared temp dir>)` would delete the whole shared tree.
+    Verified against a FAKE host temp dir, never the real one."""
+    import shutil
+
+    from tests import _tmpdir_isolation as iso
+
+    fake = tmp_path / "fakehost"
+    (fake / "a" / "b").mkdir(parents=True)
+    (fake / "a" / "b" / "f").write_text("")
+    real = iso.HOST_TMPDIR
+    iso.HOST_TMPDIR = os.path.realpath(str(fake))
+    try:
+        with pytest.raises(SharedTmpdirScanError):
+            shutil.rmtree(str(fake))
+    finally:
+        iso.HOST_TMPDIR = real
+    assert (fake / "a" / "b" / "f").exists(), \
+        "rmtree was refused only after it had already deleted files"
+
+
+def test_guard_blocks_fd_scandir_of_the_shared_temp_dir():
+    """An fd is a legal `os.scandir` argument, so the guard must resolve it
+    rather than skip it (an int has no fspath — it must not raise TypeError
+    while reporting the violation either)."""
+    from tests import _tmpdir_isolation as iso
+
+    fd = os.open(iso.HOST_TMPDIR, os.O_RDONLY)
+    try:
+        with pytest.raises(SharedTmpdirScanError):
+            os.scandir(fd)
+    finally:
+        os.close(fd)
+    private_fd = os.open(scan_root(), os.O_RDONLY)
+    try:
+        assert list(os.scandir(private_fd)) is not None, \
+            "an fd into the PRIVATE root must still be usable"
+    finally:
+        os.close(private_fd)
+
+
+def test_guard_blocks_shelling_out_to_the_shared_temp_dir():
+    """The in-process patch cannot see a subprocess, and the shell-out is the
+    exact shape of the original #3752 defect (`find <shared T> -maxdepth 2`).
+    The subprocess audit hook must reject it while still allowing the private
+    root — a DESCENDANT of the shared temp dir — as an argv token."""
+    allowed = subprocess.run(["find", scan_root(), "-maxdepth", "1"],
+                             capture_output=True, check=False)
+    assert allowed.returncode == 0
+    with pytest.raises(SharedTmpdirScanError):
+        subprocess.run(["find", HOST_TMPDIR, "-maxdepth", "2"],
+                       capture_output=True, check=False)
 
 
 # ── static guard: the idiom cannot come back unnoticed ───────────────────

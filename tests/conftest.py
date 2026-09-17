@@ -89,8 +89,13 @@ from tests._tmpdir_isolation import (  # noqa: E402
     sweep_stale_session_roots,
 )
 
-sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
 install_session_tmpdir()
+# AFTER the redirect, deliberately: this scans HOST_TMPDIR (the module constant,
+# captured before the redirect) and its pid+start probe lazily imports
+# tortoise.embedded_reaper — which must happen only once the private root is
+# the temp dir, or _LOCK_PATH freezes on the shared temp dir for the whole
+# session (the #1658 sweep domain would silently become host-wide again).
+sweep_stale_session_roots()  # reclaim a SIGKILLed prior run's root, if any
 install_scan_guard()
 
 from tests._embedded import shared_proj  # noqa: E402, F401, I001

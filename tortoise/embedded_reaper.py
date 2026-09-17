@@ -210,6 +210,16 @@ ZERO_CLIENT_STATE_PATH = os.path.join(
 # pathological tree, never an entry-count gate.
 SOCKET_WALK_TIMEOUT = 20.0
 
+# #3752: share of SOCKET_WALK_TIMEOUT that the GLOBAL (tempdir) root keeps no
+# matter how many nested session roots are walked. The nested roots' own
+# timeout is capped at ``remaining - GLOBAL_WALK_RESERVE_S``, so they can
+# never consume the reserve: the global pass is the only one that reaches
+# non-session dirs, and letting N nested roots starve it would silently stop
+# cleaning ordinary killed-suite residue. In the common case (1-2 cheap
+# nested roots) the reserve costs nothing — the global pass still gets the
+# whole budget; only a slow nested root shortens the others.
+GLOBAL_WALK_RESERVE_S = SOCKET_WALK_TIMEOUT / 2.0
+
 
 def _is_ephemeral_dir(dbdir_real: str, tmpdir_real: str) -> bool:
     """True when dbdir sits under the system tempdir AND any path component
@@ -1207,11 +1217,15 @@ def _find_socket_dirs(tmpdir: str) -> list[str]:
     """
     deadline = time.monotonic() + SOCKET_WALK_TIMEOUT
     dirs: set[str] = set()
-    for root in _socket_walk_roots(tmpdir):
+    roots = _socket_walk_roots(tmpdir)
+    for idx, root in enumerate(roots):
         remaining = deadline - time.monotonic()
+        if idx < len(roots) - 1:  # a nested session root; last root is tmpdir
+            remaining = max(0.0, remaining - GLOBAL_WALK_RESERVE_S)
         if remaining <= 0:
-            logger.warning("socket-dir walk budget exhausted for %s", tmpdir)
-            break
+            logger.warning("socket-dir walk budget exhausted for %s (root %s)",
+                           tmpdir, root)
+            continue  # NOT break: the reserved global root must still run
         try:
             out = subprocess.run(
                 # marker files live one level BELOW the walk root
@@ -1254,7 +1268,12 @@ def _socket_walk_roots(tmpdir: str) -> list[str]:
     its own bounded depth-2 walk instead.
 
     The nested roots come FIRST so a slow global pass cannot consume the
-    shared budget before the dirs only the nested pass can reach are walked.
+    shared budget before the dirs only the nested pass can reach are walked —
+    and the callers in turn reserve ``GLOBAL_WALK_RESERVE_S`` of that budget
+    for the LAST root returned here (always the tempdir), so the order cannot
+    starve the global pass either. The two rules are complementary: nested
+    first protects the dirs nothing else can reach, the reserve protects the
+    dirs only the global pass can reach.
 
     Both filters below are load-bearing. ``tt_`` is a long-standing
     test-scratch prefix in its own right (``test_about_edges.py`` ->
@@ -2111,11 +2130,15 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
     tmpdir = _real_gettempdir()
     deadline = time.monotonic() + SOCKET_WALK_TIMEOUT
     found: list[str] = []
-    for root in _socket_walk_roots(tmpdir):
+    roots = _socket_walk_roots(tmpdir)
+    for idx, root in enumerate(roots):
         remaining = deadline - time.monotonic()
+        if idx < len(roots) - 1:  # a nested session root; last root is tmpdir
+            remaining = max(0.0, remaining - GLOBAL_WALK_RESERVE_S)
         if remaining <= 0:
-            logger.warning("quarantine walk budget exhausted for %s", tmpdir)
-            break
+            logger.warning("quarantine walk budget exhausted for %s (root %s)",
+                           tmpdir, root)
+            continue  # NOT break: the reserved global root must still run
         try:
             out = subprocess.run(
                 ["find", root, "-maxdepth", "1", "-name",
