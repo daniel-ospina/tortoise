@@ -1363,9 +1363,10 @@ function claimIntentInFlight() {
   // stated as two, which made the invariant unauditable.)
   const effectivelyPaused = wizardPaused && !serverHarnessConnected
   // #3428 (lane B3, option (a)): the success screen's capture sentence is
-  // DERIVED, never asserted — 'present' | 'future' | 'none'. Computed here so
-  // the derivation is a plain value (unit-testable without a React harness,
-  // which this repo does not have).
+  // DERIVED, never asserted — 'present' | 'future' | 'install-pending' | 'none'
+  // (#3782 added the pending state: nothing observed is not a promise). Computed
+  // here so the derivation is a plain value (unit-testable without a React
+  // harness, which this repo does not have).
   const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
@@ -7263,21 +7264,30 @@ function claimIntentInFlight() {
                               <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
                               <p style={{ fontWeight: 600, margin: '0 0 0.5rem' }}>Connected</p>
                               <p className="dim" style={{ lineHeight: 1.6 }}>
-                                {/* Lane B3, option (a) / review cycle 3 P1-A, corrected in
-                                    cycle 4 (item 8): the TENSE follows the receipt
-                                    (present only on an observed per-harness receipt),
-                                    and the capability flag decides whether ANY sentence
-                                    prints at all ('none' for no install path, recording
-                                    off, or NO HARNESS PICKER offered). That is NOT a
-                                    guarantee that the printed sentence is
-                                    installed-truthful: HARNESS_CAPTURE_SUPPORT.pi is
-                                    true while Pi's installer ships no capture seam, so
-                                    a Pi user does read the 'future' sentence for a
-                                    capability that is not installed. That flag being
-                                    wrong is #3575 (lane B1) — this screen cannot
-                                    detect it. */}
+                                {/* Lane B3, option (a) / review cycle 3 P1-A,
+                                    corrected in cycle 4 (item 8), and #3782: the
+                                    sentence printed follows the server's
+                                    OBSERVATION, not the capability flag.
+                                    'present' prints only on an observed
+                                    per-harness RECEIPT; 'future' only once an
+                                    install PROBE was observed (the install is
+                                    confirmed server-side, capture has not fired);
+                                    'install-pending' — recording on, nothing
+                                    observed for this harness — prints the SAME
+                                    "not installed yet" string Settings renders
+                                    for the identical state, instead of promising
+                                    a capture the server never saw (#3782: live,
+                                    probe AND receipt were null while Settings
+                                    said "not installed yet"). The capability
+                                    flag still decides whether ANY sentence may
+                                    print ('none' for no install path, recording
+                                    off, or NO HARNESS PICKER offered). A true
+                                    flag with no installed seam (#3575, lane B1)
+                                    is still a separate defect this screen cannot
+                                    detect. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
                                 {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
+                                {doneCaptureClaim === 'install-pending' && `Session capture is ${HARNESS_CAPTURE_STATUS_LABEL['install-pending']}. `}
                                 You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
                               </p>
                               {/* The redirect is PROSE, not a control: we cannot open
