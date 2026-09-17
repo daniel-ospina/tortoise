@@ -1183,7 +1183,7 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     call) returning an ANSWER (not ranked hits), with the full ask response
     shape: {answer, abstained, question_type, question_date, evidence,
     context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
-    retrieval_degraded}.
+    retrieval_degraded, retrieved_session_ids}.
 
     COST PROFILE (group="ask" — #2013-gated exposure): unlike tortoise_search
     (LLM-free), tortoise_ask consumes LLM tokens against the org's

@@ -567,6 +567,19 @@ surfaces:
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
   # code with no surface mapping (tortoise/session_import/ parsers etc.).
   - eval/write_path/test_write_path_benchmark.py
+  # #3575 P1-B: this pins tortoise/pi-hooks/tortoise-capture.ts — the artifact
+  # HARNESS_INSTALL.pi installs. `tortoise/pi-hooks/` matches no SOURCE_PATTERNS
+  # entry, so a change to the extension selects `core` via the `tortoise/`
+  # fallback; registered ONLY under `onboarding`, the guard was never selected
+  # for the very change it guards (neither this Python guard nor the
+  # extension's `node --test` suite ran). Dual-registered with `onboarding`.
+  - test_pi_capture_hooks.py
+  # #3575 P1-A: this pins `tortoise/session_import/parsers.py::window_turns`.
+  # `tortoise/session_import/` maps to no named surface, so a parsers.py change
+  # selects `core` via the fallback — registered only under `api` (its
+  # hosted_api import), the window guard did not run for the very change it
+  # guards. Dual-registered with `api` (same #2938 precedent).
+  - test_session_import_codex.py
   ep:
   - test_a9_direct_edge_traversal.py
   # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
@@ -664,6 +677,7 @@ surfaces:
   - test_onboarding_w4_settings.py  # #2000 (W4): docker-lane Settings-surface toggle-persistence tests
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
+  - test_pi_capture_hooks.py
   - test_signup_form_safety.py
   # #3616: the deploy-binding gate. A pure unit test of the (env, type, name)
   # comparison in tools/check_pages_bindings.py plus an execution harness for the
@@ -706,6 +720,7 @@ surfaces:
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
+  - test_d3_session_identity.py   # D3/#3800: retrieved-session identity — ask `retrieved_session_ids` + `[session <id>]` evidence tag + wire `sessionId`
   - test_eval_ingest_cache.py  # #2080 ingest-cache seam (docker-lane leg — the retriever/namespace surface, mirrors test_retrieval.py)
   - test_operator_dedup_parity.py
   - test_postmerge_dedup.py

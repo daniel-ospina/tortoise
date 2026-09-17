@@ -85,7 +85,7 @@ class TestSearch:
 
 
 class TestAsk:
-    """Self-host /v1/ask (#1987 Task 9): 200 12-field shape, canonical 400,
+    """Self-host /v1/ask (#1987 Task 9): 200 13-field shape, canonical 400,
     and non-ask paths keep the default error body (path-scoped handler)."""
 
     def _install_fake_reader(self, monkeypatch, reply="selfhost answer"):
@@ -117,7 +117,8 @@ class TestAsk:
             assert set(body) == {"answer", "abstained", "question_type",
                                  "question_date", "evidence", "context_tokens",
                                  "model", "provider", "route", "cost_estimate_usd",
-                                 "duration_ms", "retrieval_degraded"}
+                                 "duration_ms", "retrieval_degraded",
+                                 "retrieved_session_ids"}
             assert body["answer"] == "selfhost answer"
             assert calls["n"] == 1
 

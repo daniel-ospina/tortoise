@@ -32,11 +32,16 @@ export const WORKFLOWS_PROMPT =
 // #1727 (Task 13): per-harness session-capture support gate — the single
 // source of truth consumed by BOTH the dashboard's per-harness sessions
 // toggle AND the conditional claude-web prompt paragraph below (flipped in
-// the same slice/commit as the dist rebuild). Values:
-//   true  — the harness has an executable filing path AND a server-visible
-//           signal (claude = SessionStart install-probe + end-hook capture;
-//           pi = extension-on-load probe + capture)
-//   false — disabled-with-reason: no install/capture path confirmed yet.
+// the same slice/commit as the dist rebuild).
+//
+// #3575: `true` is DERIVED from HARNESS_CAPTURE_SEAM below, never asserted.
+// A harness is capturable only when the product actually INSTALLS a capture
+// step: (a) HARNESS_CAPTURE_SEAM names an in-repo artifact, (b) that artifact
+// is committed, and (c) HARNESS_INSTALL[h] installs it. A `true` with no
+// installed step is a false PASS — the #3575 defect (Pi advertised capture
+// while HARNESS_INSTALL.pi delivered MCP config + skills only). All three
+// legs are pinned by harnesses.test.js and tests/test_harness_mcp_config.py.
+//
 // The Claude-Web filing-path spike verdict (Slice 2, Task 13): the MCP
 // custom-connector path CAN expose tortoise_session_capture to claude.ai
 // workflows prompts, but the plan pins that disclosure-only is NOT a
@@ -44,13 +49,33 @@ export const WORKFLOWS_PROMPT =
 // SERVER-VISIBLE web signal is confirmed (a web install-probe variant or
 // observed web-harness POSTs; workflows-prompt presence alone is client-
 // side and unpinnable). Until then web = false.
+//
+// The capture-INSTALL SEAM (#1727 T1): harness → the in-repo artifact
+// HARNESS_INSTALL[h] installs. A harness with a seam entry fires a
+// server-visible install-probe and files sessions with the same harness +
+// session_id + conversation shape. Which harnesses have it:
+//   claude = tortoise/claude-hooks/session-{start,end}.sh copied into
+//            .claude/hooks + wired in .claude/settings.json
+//            (SessionStart install-probe + SessionEnd capture)
+//   pi     = tortoise/pi-hooks/tortoise-capture.ts copied into
+//            ~/.pi/agent/extensions/ (extension session_start install-probe +
+//            session_shutdown capture; recording ON by default)
+// No other harness has a seam: codex/claude-desktop are backfill-import only,
+// cursor's spike found no capture path, and web/chatgpt are cloud-hosted.
+export const HARNESS_CAPTURE_SEAM = {
+  claude: 'tortoise/claude-hooks/session-end.sh',
+  pi: 'tortoise/pi-hooks/tortoise-capture.ts',
+}
+
+const CAPTURE_SEAM_HARNESSES = new Set(Object.keys(HARNESS_CAPTURE_SEAM))
+
 export const HARNESS_CAPTURE_SUPPORT = {
-  claude: true,
+  claude: CAPTURE_SEAM_HARNESSES.has('claude'),
   'claude-desktop': false,  // backfill import only (Task 15) — no live install path
   'claude-web': false,      // disabled-with-reason pending the Task 13 spike signal
   codex: false,             // backfill import only (Task 15) — no live install path
   cursor: false,            // cursor spike verdict: unsupported for capture
-  pi: true,
+  pi: CAPTURE_SEAM_HARNESSES.has('pi'),
   chatgpt: false,        // #1701: cloud-hosted — no server-visible filing signal
 }
 
@@ -162,6 +187,39 @@ export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web', 'chatgpt']
 // contained prompt (Pi) — nothing extra is appended after the copy.
 export const HARNESS_SKILLS_IN_PROMPT = ['pi']
 
+// #3575: the Pi capture-INSTALL step — the in-repo extension that makes Pi
+// sessions land in Tortoise Cloud. Shared by HARNESS_INSTALL.pi (the setup
+// prompt) and HARNESS_CAPTURE_INSTALL.pi (the Memory-sources inline row) so
+// the two surfaces can never drift. Recording is ON by default (ToS-covered
+// — the same default as the Claude hooks); the server refuses the capture
+// POST with a 409 while the organization has agent sessions switched off
+// (Memory sources > Agent sessions). The extension fires an install-probe on
+// load (harness + timestamp only, no content) and files the session when it
+// ends. It has no agent-infra dependency and needs no local tortoise CLI.
+export const PI_CAPTURE_INSTALL = `# Session capture for Pi (#1727 T1, #3575): install the in-repo capture
+# extension. Recording is ON by default (ToS-covered) — switch it off in
+# Memory sources > Agent sessions (the server then returns a 409). The
+# extension probes on load (harness + timestamp only, no content) and files
+# each session on exit. Install from your Tortoise checkout
+# (github.com/daniel-ospina/tortoise):
+mkdir -p ~/.pi/agent/extensions
+# #3713 collision guard: Pi's loader treats a top-level tortoise-capture.ts
+# AND a tortoise-capture/index.ts as TWO extensions (no basename dedupe).
+# A pre-existing agent-infra tortoise-capture/ registers its own agent_end
+# capture, so both POST the same session_id — doubled work, and the loser can
+# 409. Disable the legacy entry before installing this one. NON-DESTRUCTIVE:
+# unlink a symlink (the agent-infra checkout is untouched), or move a real
+# directory to a dot-prefixed name Pi's loader SKIPS (it ignores dotfiles) —
+# never a recursive delete.
+if [ -L ~/.pi/agent/extensions/tortoise-capture ]; then
+  rm ~/.pi/agent/extensions/tortoise-capture
+elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
+  mv ~/.pi/agent/extensions/tortoise-capture ~/.pi/agent/extensions/.tortoise-capture.disabled
+fi
+cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts ~/.pi/agent/extensions/tortoise-capture.ts
+# Backfill past Pi sessions with:
+tortoise sessions import --harness pi --file <session.jsonl>`
+
 // #1710: the copyable payload is EXACTLY what the user pastes into the
 // harness target (terminal / config file / chat). The lead-in instructions
 // ("Run this command:", "Paste this into...") live in HARNESS_INTRO /
@@ -215,6 +273,9 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 2. Create or merge .mcp.json in this project with:
 ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}
 3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi
+
+${PI_CAPTURE_INSTALL}
+
 4. Restart Pi from a NEW terminal — quit Pi fully, open a new terminal
    window, and start Pi there. A "/reload" is NOT enough: Pi reads the key
    from the environment of the shell that LAUNCHED it, so a reload (or a
@@ -289,12 +350,10 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
 # hook at its 1.5s default; the budget rises to the highest per-hook timeout (60
 # is the documented ceiling). session-end.sh measured 9.26s on a real run.
 # { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh", "timeout": 60 }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh", "timeout": 60 }] }] } }`,
-  pi: `5. Session capture (#1727 T1): enable session capture in the Pi extension
-settings. The extension fires an install-probe on load (harness + timestamp
-only, no content) and files sessions to Tortoise Cloud when capture is
-enabled. Backfill past sessions with:
-tortoise sessions import --harness pi --file <session.jsonl>
-(local receipt written only on a 2xx).`,
+  // #3575: the SAME constant HARNESS_INSTALL.pi installs — the in-repo
+  // extension, not an agent-infra settings toggle. Shared so the Memory-
+  // sources row and the setup prompt can never drift.
+  pi: PI_CAPTURE_INSTALL,
 }
 
 // #1728 Slice 3 (Task 16/17): per-harness disabled-with-reason copy for the
