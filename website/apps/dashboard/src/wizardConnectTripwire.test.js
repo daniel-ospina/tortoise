@@ -145,9 +145,14 @@ test('#2710/#2912: the no-key affordance is the KEY block branch — never a pla
     'the key block condition is harnessKey (else the no-key branch is dead code)')
   // #2865: the no-key branch is now role-aware. Only an owner/admin can mint
   // (POST /v1/team/keys is `_require_owner_admin`), so a member on a keyed leaf
-  // gets the paste escape instead of a CTA that would 403.
-  assert.match(owner, /\)\s*:\s*\(\s*isOwnerAdmin \? wizardNoKeyAffordance : wizardPasteRow\s*\)/,
-    'the key block renders the mint affordance for owner/admins and the paste row for members')
+  // gets the paste escape instead of a CTA that would 403. #3783: the branch is
+  // ALSO source-aware — the role/source/affordance derivation is one const and
+  // the arm renders it.
+  assert.match(owner, /\bwizardKeyAffordance\b/,
+    'the key block renders the derived role+source affordance')
+  assert.match(connectStep(),
+    /const wizardKeyAffordance = isOwnerAdmin\n\s*\? \(connectGate\.mode === 'existing' \? wizardExistingKeyAffordance : wizardNoKeyAffordance\)\n\s*: wizardPasteRow/,
+    'the derivation is role-aware AND source-aware: a usable existing key routes to the reuse path, never the mint')
   assert.doesNotMatch(owner, /YOUR_API_KEY/, 'no placeholder key may remain')
   assert.doesNotMatch(owner, /wizardKeyCodeStyle\}>\{harnessKey \|\| '…'\}/,
     'no fake key row may render before a key exists')
@@ -1350,8 +1355,11 @@ test('#2865: the two Claude tabs are no longer hidden from members', () => {
   assert.match(src, /\)\s*:\s*\(!capNotice \? \(/,
     'the connect-step gate is the cap remedy alone (capNotice is owner/admin-only)')
   // a member on a KEYED leaf keeps a paste escape, never a mint CTA that 403s
-  assert.match(ownerBranch(), /isOwnerAdmin \? wizardNoKeyAffordance : wizardPasteRow/,
-    'the keyed-leaf no-key branch is role-aware')
+  assert.match(connectStep(),
+    /const wizardKeyAffordance = isOwnerAdmin[\s\S]{0,160}?: wizardPasteRow/,
+    'the keyed-leaf no-key branch is role-aware (members get the paste row)')
+  assert.match(ownerBranch(), /\bwizardKeyAffordance\b/,
+    'the key block renders the derived affordance')
   // the member-only dead-end subtree must be gone, not left unreachable
   assert.doesNotMatch(src, /Only owners and admins can create API keys in this dashboard/,
     'the pre-#2865 member paste-only subtree is deleted (no unreachable branch)')
@@ -1385,4 +1393,38 @@ test('#2865: a user holding a key does NOT get a key row on a key-less OAuth lea
     'no key-mode pills on a key-less OAuth leaf')
   assert.doesNotMatch(keylessBlock, /\{harnessKey &&/,
     'the key-less leaf block is not key-gated')
+})
+
+// ── #3783: the connect step offers the EXISTING key instead of minting ───────
+// The behavioral contract (which mode the gate resolves) is EXECUTED in
+// connectKeyGate.test.js. These are the cheap structural backstops: the
+// affordance exists, its primary action routes to the existing key rather than
+// minting, and the API Keys table gives the unnamed provisioned key an identity.
+test('#3783: the existing-key affordance routes to the key instead of minting', () => {
+  const connect = connectStep()
+  // the affordance exists and names the existing key
+  assert.match(connect, /const wizardExistingKeyAffordance = \(/,
+    'the existing-key affordance is defined in the connect step')
+  assert.match(connect, /Your organization already has an API key/,
+    'it names the key that already exists')
+  // the PRIMARY action is the reuse route (keys tab), not the mint
+  assert.match(connect,
+    /className="btn-primary small"\s*\n\s*onClick=\{\(\) => \{ setWelcomeMode\(false\); setWizardDurableKey\(''\); setWizardDurablePaste\(''\); setWizardDurableError\(''\); setWizardDurableCapped\(false\); setWizardShowPaste\(false\); setTab\('keys'\) \}\}>\s*\n\s*Use an existing key →/,
+    'the primary action leaves for the API Keys tab (where the key can be rotated), clearing the in-memory plaintext')
+  // the mint is DEMOTED and its cost named
+  assert.match(connect, /Create a new key instead/,
+    'a fresh mint is still offered, but as an explicit secondary choice')
+  assert.match(connect, /spends another of your plan&apos;s key slots/,
+    'the copy names the allowance cost of the fresh mint')
+  // BOTH keyed arms render the derived affordance (no drift between them)
+  assert.equal((stripBlockAndWholeLineComments(mainJsx).match(/\bwizardKeyAffordance\b/g) || []).length, 3,
+    'one definition + exactly two render sites (shared arm + Codex Desktop arm)')
+})
+
+test('#3783: the API Keys table names the auto-provisioned key instead of rendering it as —', () => {
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  assert.match(src, /\{keyDisplayName\(k\) \? keyDisplayName\(k\) : <span className="dim">—<\/span>\}/,
+    'the keys table resolves a display name before falling back to the dash')
+  assert.match(src, /import \{ isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName \} from '\.\/sessionKey\.js'/,
+    'the display-name helper is imported from the pure module')
 })

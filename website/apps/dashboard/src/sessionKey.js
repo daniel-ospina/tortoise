@@ -112,3 +112,43 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   if (row.expires_at) return { key: '', durable: false, source: 'expiring' }
   return { key: apiKey, durable: true, source: 'durable' }
 }
+
+// #3783: the connect step's KEY-SOURCE GATE. `durableConnectKey` answers
+// "which plaintext, if any, may we EMBED" — it returns an empty key for BOTH
+// `'none'` (the org holds no key at all) and `'rows-durable'` (a usable
+// durable row exists, but its plaintext was displayed once and is not in this
+// browser). The wizard rendered ONE affordance for both: the mint CTA. So an
+// owner/admin whose organization was provisioned with a key at org creation
+// (`created_via: 'provisioned'`, revealed in the org-create→connect window and
+// lost by any reload before the connect step) minted a SECOND key at connect —
+// spending the free tier's entire 2-key allowance on a key the user never got
+// to use — while the Overview banner read the SAME `'rows-durable'` source and
+// said an existing key was usable. This gate separates the two so the connect
+// step can offer the existing key (rotate reuses its slot) instead of minting.
+// Returns { mode, key, existing }:
+//   - front-channel plaintext held → { mode: 'embed',  key, existing: null }
+//   - usable durable row, no held plaintext → { mode: 'existing', existing: row }
+//   - no usable key anywhere → { mode: 'mint', existing: null }
+// Consumers may mint ONLY on `'mint'`; `'existing'` must route to a reuse path.
+export function connectKeyGate(welcomeKey, keyRows) {
+  const dc = durableConnectKey(welcomeKey, '', keyRows)
+  if (dc.key) return { mode: 'embed', key: dc.key, existing: null }
+  if (dc.source === 'rows-durable') {
+    return { mode: 'existing', key: '', existing: usableDurableRows(keyRows)[0] || null }
+  }
+  return { mode: 'mint', key: '', existing: null }
+}
+
+// #3783: a display identity for a key row the user never named. The org-create
+// provisioning mints the organization's first key with `name: null`, so the
+// API Keys table rendered it as "—" — the user could see it (the issue's own
+// walk did) but could not ACCOUNT for it, and could not tell it apart from any
+// other unnamed row. A `'provisioned'` row with no name IS the organization's
+// setup key; name it. Returns null when there is nothing honest to show (a
+// user-named row always wins), so callers keep their own "—" fallback.
+export function keyDisplayName(k) {
+  if (!k) return null
+  if (k.name) return k.name
+  if (k.created_via === 'provisioned') return 'Organization key'
+  return null
+}

@@ -30,7 +30,7 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 // session mode; durableConnectKey + usableDurableRows resolve the connect
 // step's gate from the keys-table rows (Never-keys-only embed policy, #2426
 // decision 2).
-import { isManagedKey, durableConnectKey } from './sessionKey.js'
+import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from './sessionKey.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -6325,6 +6325,15 @@ function claimIntentInFlight() {
   // create/rotate/paste ('rows-durable' when a usable durable exists, 'none'
   // when not).
   const durableConnect = durableConnectKey(welcomeKey, '', keys)
+  // #3783: the connect step's source-aware key gate. `durableConnect.source`
+  // already distinguishes 'rows-durable' (a usable row exists; its plaintext
+  // is not held) from 'none' (no key at all) — the wizard used to collapse
+  // both into the mint CTA, so an org whose key was provisioned at creation
+  // got a SECOND key minted here, spending the free tier's 2-key allowance on
+  // a key the user never chose to create, while the Overview (reading this
+  // same source) said an existing key was usable. Consumed by
+  // `wizardKeyAffordance` below.
+  const connectGate = connectKeyGate(welcomeKey, keys)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -6507,6 +6516,62 @@ function claimIntentInFlight() {
       )}
     </>
   )
+
+  // #3783: the connect step's EXISTING-key affordance. `connectKeyGate` returns
+  // mode 'existing' when a usable durable row exists but its plaintext is not
+  // in this browser (keys are shown once). The step used to fall straight
+  // through to the mint CTA here, so an organization provisioned with a key at
+  // creation (created_via 'provisioned', name null) had a SECOND key minted at
+  // connect — burning the free tier's 2-key allowance on a key the user never
+  // chose to create — while the Overview banner read the same 'rows-durable'
+  // source and said an existing key was usable. Route to the existing key
+  // (rotating replaces it in place, without growing the count) and demote the
+  // fresh mint to an explicit choice whose cost is named. Owner/admin only
+  // (POST /v1/team/keys is _require_owner_admin); members keep the paste row.
+  const wizardExistingKeyAffordance = (
+    <>
+      <p className="dim small">
+        Your organization already has an API key
+        {connectGate.existing && connectGate.existing.key_prefix
+          ? <> (<code>{connectGate.existing.key_prefix}</code>, created {fmtTime(connectGate.existing.created_at)})</>
+          : null}{' '}
+        — its value can&apos;t be shown here: keys are displayed once, when they are created.
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        {/* Every connect-step exit clears the in-memory plaintext + cap state
+            (pinned by wizardConnectTripwire #3218/#3428) and lands on the tab
+            where the existing key can be rotated. */}
+        <button type="button" className="btn-primary small"
+          onClick={() => { setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardDurableCapped(false); setWizardShowPaste(false); setTab('keys') }}>
+          Use an existing key →
+        </button>
+        <button type="button" className="ghost small" aria-expanded={wizardShowPaste}
+          aria-controls={wizardShowPaste ? 'wizard-paste-row' : undefined}
+          onClick={() => setWizardShowPaste((v) => !v)}>
+          I already have a key — paste it instead
+        </button>
+        <button type="button" className="ghost small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+          {wizardDurableBusy ? 'Creating…' : 'Create a new key instead'}
+        </button>
+      </div>
+      <p className="wizard-note">
+        Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it
+        without adding a key. Creating a new key here spends another of your plan&apos;s key slots.
+      </p>
+      {wizardShowPaste && wizardPasteRow}
+      {!wizardShowPaste && wizardDurableError && (
+        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
+      )}
+    </>
+  )
+
+  // #3783: ONE role- and source-aware derivation for every keyed leaf, so the
+  // source-aware branch cannot drift between the shared and Codex Desktop arms.
+  // Minting is offered ONLY when `connectGate.mode === 'mint'` (no usable key
+  // exists at all); 'existing' routes to the reuse path above.
+  const wizardKeyAffordance = isOwnerAdmin
+    ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
+    : wizardPasteRow
 
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
@@ -7093,7 +7158,7 @@ function claimIntentInFlight() {
                                   <p className="wizard-note">{KEY_VISIBILITY_NOTE}</p>
                                   {procedure}
                                 </>
-                              ) : wizardNoKeyAffordance}
+                              ) : wizardKeyAffordance}
                             </WizardBlock>
                           ) : (
                             <>
@@ -7138,8 +7203,12 @@ function claimIntentInFlight() {
                                      (POST /v1/team/keys is owner/admin-gated).
                                      A member on a keyed leaf keeps the paste
                                      escape they have today — never a mint CTA
-                                     that would 403. */
-                                  isOwnerAdmin ? wizardNoKeyAffordance : wizardPasteRow
+                                     that would 403. #3783: the same derivation
+                                     also routes an owner/admin who already has
+                                     a usable durable key to the existing-key
+                                     path instead of minting a second (which
+                                     spends the free tier's allowance). */
+                                  wizardKeyAffordance
                                 )}
                               </WizardBlock>
 
@@ -8481,7 +8550,7 @@ function claimIntentInFlight() {
                         />
                       ) : (
                         <span className="key-name">
-                          {k.name ? k.name : <span className="dim">—</span>}
+                          {keyDisplayName(k) ? keyDisplayName(k) : <span className="dim">—</span>}
                           {!k.revoked_at && isOwnerAdmin && (
                             <button
                               className="ghost small key-rename"
