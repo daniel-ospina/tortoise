@@ -3834,6 +3834,28 @@ def _observed_capture_harness(org: dict, claimed: str | None,
     return stored or claimed
 
 
+def _stored_session_harness(org: dict, session_id: str | None) -> str | None:
+    """The SERVER's recorded harness for an existing session, or None (#3681).
+
+    The capture ERROR paths live in ``capture_session`` — outside
+    ``_capture_session_impl``, where the stored harness is read — so without
+    this lookup they would resolve the harness from ``body.harness`` (a
+    client assertion) and could plant a caller-named
+    ``session_capture_last_error_{claim}`` key, re-opening the very relabel /
+    receipt forgery #3681 closes (review P2). Fail-open: a lookup failure
+    returns None, which restores the fresh-session rule (the claim only ever
+    introduces a harness the server has not stamped)."""
+    if not session_id:
+        return None
+    try:
+        rows = _org_proj(org["org_id"]).g.query(
+            "OPTIONAL MATCH (s:Session {id:$sid}) RETURN s.harness AS harness",
+            params={"sid": session_id}).result_set
+        return rows[0][0] if rows else None
+    except Exception:
+        return None
+
+
 async def get_current_org_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
     identity) OR an API key. Key-auth goes through get_current_org + the
@@ -4987,8 +5009,17 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # the connected screen. A session-JWT (dashboard/browser) write must NOT
     # file it: it observes no agent, and filing generically would re-create
     # the false claim lane B3 deleted. Fail-open (never fails the write).
-    if _credential_is_agent(org):
-        _maybe_file_harness_connected(org["org_id"])
+    # C5 #2114: the auto-file writes ORG-LEVEL onboarding state on the org's
+    # DEFAULT graph, so a GRAPH-BOUND key must not trigger it — every sibling
+    # org-level surface rejects that key class via
+    # `_reject_graph_bound_org_surface` (the checkpoint route included). It is
+    # also OFF-LOADED: this handler is `async` and
+    # `_maybe_file_harness_connected` runs sync FalkorDB I/O — calling it
+    # inline would re-open the #3718 "no sync I/O on the loop" invariant the
+    # `asyncio.to_thread` write above exists to hold.
+    if _credential_is_agent(org) and not org.get("graph_id"):
+        await asyncio.to_thread(
+            _maybe_file_harness_connected, org["org_id"])
     # #308 (R1, delta 8): one Point created → one point_create event.
     await _abuse_record_points(request, org, 1)
 
@@ -8182,7 +8213,10 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
                 and e.detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             try:
                 _record_capture_last_error(
-                    org["org_id"], _observed_capture_harness(org, body.harness),
+                    org["org_id"],
+                    _observed_capture_harness(
+                        org, body.harness,
+                        _stored_session_harness(org, body.session_id)),
                     e.detail)
             except Exception:
                 logging.getLogger("tortoise.api").exception(
@@ -8196,7 +8230,10 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
             "session capture failed (unexpected error)")
         try:
             _record_capture_last_error(
-                org["org_id"], _observed_capture_harness(org, body.harness),
+                org["org_id"],
+                _observed_capture_harness(
+                    org, body.harness,
+                    _stored_session_harness(org, body.session_id)),
                 "internal capture error — see server logs")
         except Exception:
             logging.getLogger("tortoise.api").exception(
@@ -9444,7 +9481,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "capture_observation emit failed (non-fatal)")
     return build_write_verb(
         source_session=session_id,
-        source_harness=body.harness or "unknown",
+        source_harness=capture_harness or "unknown",
         ingested_at=now,
         status=verb_status,
         error=None,
@@ -18355,21 +18392,31 @@ def _maybe_file_harness_connected(org_id: str) -> None:
     write IS the observation the step claims: the agent's own credential was
     used, so "your agent connected" is literally true.
 
-    Callers MUST gate on ``_credential_is_agent`` — a session-JWT
-    (dashboard/browser) write observes no agent and must never file this (the
-    #3670 design constraint: filing generically would re-create the exact
-    false claim lane B3 deleted, merely moved from the client into the
-    server). Step write is FWW/keyed-MERGE (replay is a no-op). Fail-open: a
-    graph/state hiccup must never fail the agent's committed write (the MCP
-    auto-complete precedent #2985)."""
+    Callers MUST gate on ``_credential_is_agent`` AND on the key NOT being
+    graph-bound — a session-JWT (dashboard/browser) write observes no agent
+    and must never file this (the #3670 design constraint: filing generically
+    would re-create the exact false claim lane B3 deleted, merely moved from
+    the client into the server), and a graph-bound key writing org-DEFAULT
+    graph state would be a cross-graph write (C5 #2114). Step write is
+    FWW/keyed-MERGE (replay is a no-op). Fail-open: a graph/state hiccup must
+    never fail the agent's committed write (the MCP auto-complete precedent
+    #2985)."""
     try:
         if not _graph_available(org_id):
             return
         legacy_mirror = bool(
             _get_onboarding_state(org_id).get("onboarding_complete"))
-        _os.write_completed_step(
-            _org_proj(org_id), org_id, "harness-connected",
-            status_from_mirror=legacy_mirror)
+        # review P2: own the SDK handle and close it. `_org_proj` opens a
+        # fresh SDK per call and leaks a connection otherwise (the same leak
+        # the PATCH handler documents at #1997); this runs on the hot
+        # point-write path, so it must not add a per-write leak.
+        _sdk = _make_sdk(namespace=org_id)
+        try:
+            _os.write_completed_step(
+                _sdk._get_proj(), org_id, "harness-connected",
+                status_from_mirror=legacy_mirror)
+        finally:
+            _sdk.close()
         _maybe_apply_completion(org_id)
     except Exception:
         _logger.exception(
@@ -18711,10 +18758,12 @@ _CAPTURE_SERVER_OWNED_KEYS = {
     "session_capture_receipt",
     *{f"session_capture_receipt_{h}" for h in _SESSION_HARNESS_VALUES},
     *{f"session_capture_last_error_{h}" for h in _SESSION_HARNESS_VALUES},
-    # only the TWO registered install-probe keys exist on the PATCH model
-    # (Task 11 registration table) — never enumerate a harness with no probe
-    # surface.
-    "install_probe_claude", "install_probe_pi",
+    # install probes are DERIVED from the registration table
+    # (_ALLOWED_STATE_KEYS ← _ONBOARDING_DEFAULT_STATE), so a harness that
+    # registers an ``install_probe_{h}`` key is server-owned the moment it is
+    # registered — a hand-listed pair would silently re-open a client-writable
+    # evidence key for the next harness (review P2).
+    *{k for k in _ALLOWED_STATE_KEYS if k.startswith("install_probe_")},
 }
 _PATCH_SERVER_OWNED_KEYS = {
     "fork", "compact", "status", "version",
@@ -18892,8 +18941,18 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 # #2001 (W5): agent/internal checkpoint — the ONLY surface for the agent
 # steps + fork/compact set-once + last_decide_attempt LWW + member_progress.
-# Per-step write-surface ownership (scope pin 8): the dashboard PATCHes only
-# operational keys + catalog-presented; agents checkpoint everything else.
+# Per-step write-surface ownership (scope pin 8): the dashboard owns the
+# catalog-presented step; agents checkpoint everything else.
+#
+# #3671: the steps a SESSION JWT (dashboard/browser) may checkpoint. A NAMED
+# allowlist — not "everything except the server-observed set" — so a future
+# step added to _CHECKPOINT_STEPS defaults to agent-only (fail-closed).
+# ``catalog-presented`` is that one dashboard step: the B3 tripwire
+# (#3428/#2937) pins the browser's checkpoint body to exactly it, and
+# ``_GATE_BUILD`` needs it for the build fork to complete.
+_DASHBOARD_WRITABLE_STEPS: frozenset[str] = frozenset({
+    "catalog-presented",
+})
 _CHECKPOINT_STEPS: frozenset[str] = frozenset({
     "harness-connected",      # W2: harness connected
     "first-points-filed",     # W3: org-anchor Subject filed (seed)
@@ -18932,6 +18991,11 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     - step ∈ {harness-connected, first-points-filed, decide-completed,
       capture-disclosed, catalog-presented} — keyed-MERGE, first-write-wins
       (replay → noop), unknown step → 422.
+      #3671: the server-observed steps (all but ``catalog-presented``)
+      require an AGENT credential — a session-JWT step write is refused 403
+      ``agent_credential_required``. ``catalog-presented`` stays
+      session-writable: the dashboard is its only honest observer. The
+      non-step FLOW ops below keep the dual-auth lane.
     - fork/compact → set-once (first write wins; same-value replay 200;
       changed → 409).
     - fork_unsure_at (true) → #2407 "not sure yet — decide later": records
@@ -18972,16 +19036,26 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
         raise HTTPException(
             status_code=403,
             detail={"message": "server_owned_key", "keys": ["status"]})
-    # #3671 (assertion ≠ observation): a STEP is a server-observed fact (an
-    # agent connected / filed / decided / was disclosed). A session JWT is
-    # the dashboard/browser lane — it observes no agent, so a step assertion
-    # from it is exactly the false claim lane B3 deleted, merely moved from
-    # the client into the server. Only an AGENT credential (tt_/tk_ key,
-    # MCP/OAuth) may write a step; a session write is REFUSED loudly (403)
-    # rather than silently accepted. Non-step FLOW ops (fork/compact/
-    # member_progress/fork_unsure_at) keep their existing lanes — the
-    # dashboard legitimately records the human's fork answer.
-    if body.step is not None and not _credential_is_agent(org):
+    # #3671 (assertion ≠ observation): a SERVER-OBSERVED step is a fact only
+    # the server can witness (an agent connected / filed / decided / was
+    # disclosed). A session JWT is the dashboard/browser lane — it observes
+    # no agent, so asserting one of those from it is exactly the false claim
+    # lane B3 deleted, merely moved from the client into the server. Only an
+    # AGENT credential (tt_/tk_ key, MCP/OAuth) may write them; a session
+    # write is REFUSED loudly (403) rather than silently accepted.
+    #
+    # ``catalog-presented`` is deliberately NOT in that set: it is the ONE
+    # step the DASHBOARD owns (W1/W8 — the browser rendered the catalog; no
+    # agent can observe that), the B3 tripwire (#3428/#2937) pins the
+    # browser's checkpoint body to exactly this step, and _GATE_BUILD
+    # requires it — gating it would make the build-fork completion path
+    # unreachable, i.e. re-create the #3670 defect this PR exists to close.
+    # Non-step FLOW ops (fork/compact/member_progress/fork_unsure_at) keep
+    # their existing lanes — the dashboard legitimately records the human's
+    # fork answer.
+    if (body.step is not None
+            and body.step not in _DASHBOARD_WRITABLE_STEPS
+            and not _credential_is_agent(org)):
         raise HTTPException(
             status_code=403,
             detail={"message": "agent_credential_required",

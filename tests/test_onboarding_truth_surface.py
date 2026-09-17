@@ -92,6 +92,12 @@ _SESSION = {
     "session_user_id": "11111111-1111-1111-1111-111111111111",
     "auth_lane": "session",
 }
+# GRAPH-BOUND agent key: a machine credential scoped to ONE graph (C5 #2114).
+_AGENT_GRAPH_SCOPED = {
+    "org_id": "org-truth", "tier": "free", "key_id": "k-truth-graph",
+    "graph_id": "g-truth",
+    "legacy_full_access": True, "max_points": 100000,
+}
 
 
 def _set_dependency(credential: dict) -> None:
@@ -110,7 +116,7 @@ class TestCheckpointStepRequiresAgentCredential:
     GREEN mutation: use an agent credential (the legitimate form) → 200 and
     the setter receives exactly ``harness-connected``."""
 
-    def _post_step(self, monkeypatch, credential):
+    def _post_step(self, monkeypatch, credential, step="harness-connected"):
         steps: list[str] = []
         monkeypatch.setattr(ha, "_graph_available", lambda oid: True)
         monkeypatch.setattr(ha, "_org_proj", lambda oid: object())
@@ -127,7 +133,7 @@ class TestCheckpointStepRequiresAgentCredential:
         try:
             with TestClient(app) as tc:
                 r = tc.post(_resolved_path("onboarding_checkpoint"),
-                            json={"step": "harness-connected"})
+                            json={"step": step})
         finally:
             app.dependency_overrides.clear()
         return r, steps
@@ -143,6 +149,23 @@ class TestCheckpointStepRequiresAgentCredential:
         r, steps = self._post_step(monkeypatch, _AGENT)
         assert r.status_code == 200, r.text
         assert steps == ["harness-connected"]
+
+    def test_session_jwt_may_still_write_the_dashboard_catalog_step(
+            self, monkeypatch):
+        """``catalog-presented`` is the ONE dashboard-owned step (W1/W8): the
+        browser rendered the catalog, no agent can observe that, the B3
+        tripwire (#3428/#2937) pins the dashboard's checkpoint body to exactly
+        it, and ``_GATE_BUILD`` requires it.
+
+        RED mutation: gate ``body.step is not None`` (drop the
+        ``_DASHBOARD_WRITABLE_STEPS`` exemption) → this session write returns
+        403 and the step setter is never called → both assertions fail; the
+        build-fork completion path becomes unreachable, re-creating #3670.
+        GREEN: the dashboard's own step stays session-writable."""
+        r, steps = self._post_step(
+            monkeypatch, _SESSION, step="catalog-presented")
+        assert r.status_code == 200, r.text
+        assert steps == ["catalog-presented"]
 
     def test_non_step_flow_op_keeps_its_session_lane(self, monkeypatch):
         """The dashboard's human answer (fork) is NOT a step observation — it
@@ -352,6 +375,19 @@ class TestAgentRestWriteFilesHarnessConnected:
         monkeypatch.setattr(ha, "_enqueue_dream", lambda *a, **k: None)
         monkeypatch.setattr(ha, "_record_write_op", lambda org: None)
 
+        class _SdkHandle:
+            """The auto-file now OWNS its SDK handle (review P2: `_org_proj`
+            leaked a connection per write) instead of routing through the
+            monkeypatched `_org_proj` — so the seam is `_make_sdk`."""
+
+            def _get_proj(self):
+                return object()
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(ha, "_make_sdk", lambda **kw: _SdkHandle())
+
         async def _noop(*a, **k):
             return None
 
@@ -398,3 +434,42 @@ class TestAgentRestWriteFilesHarnessConnected:
         r, steps = self._post_point(monkeypatch, _SESSION)
         assert r.status_code == 200, r.text
         assert steps == []
+
+    def test_graph_bound_agent_write_files_no_org_level_step(
+            self, monkeypatch):
+        """C5 #2114: a per-graph key must not write ORG-DEFAULT graph state.
+
+        The auto-file goes through the org projection (`_org_proj` → the
+        default graph), so a graph-bound credential firing it would be a
+        cross-graph write — the class every sibling org-level surface rejects
+        via `_reject_graph_bound_org_surface`. The point itself still lands.
+
+        RED mutation: drop `and not org.get("graph_id")` → the graph-bound
+        write files the org-level step → the `steps == []` assertion fails.
+        GREEN: the org-wide agent key still files it (test above)."""
+        r, steps = self._post_point(monkeypatch, _AGENT_GRAPH_SCOPED)
+        assert r.status_code == 200, r.text
+        assert steps == []
+
+
+def test_install_probe_server_owned_keys_are_derived_from_the_registry():
+    """#3681 review P2: the install-probe members of
+    ``_CAPTURE_SERVER_OWNED_KEYS`` must be DERIVED from the registration
+    table (``_ALLOWED_STATE_KEYS`` ← ``_ONBOARDING_DEFAULT_STATE``), not
+    hand-listed.
+
+    RED mutation: replace the derivation with the literal pair
+    ``{"install_probe_claude", "install_probe_pi"}`` and register a third
+    probe → the new probe is client-PATCHable evidence (the surface re-opens)
+    → the bidirectional assertion fails.
+    GREEN: every registered probe is server-owned, and no unregistered probe
+    is claimed as server-owned."""
+    probes = {k for k in ha._ALLOWED_STATE_KEYS
+              if k.startswith("install_probe_")}
+    assert probes, "no install probes registered — the derivation is vacuous"
+    owned = {k for k in ha._CAPTURE_SERVER_OWNED_KEYS
+             if k.startswith("install_probe_")}
+    assert owned == probes, (
+        "install-probe server-owned set drifted from the registration table: "
+        f"registered={sorted(probes)} owned={sorted(owned)}")
+    assert probes <= ha._PATCH_SERVER_OWNED_KEYS
