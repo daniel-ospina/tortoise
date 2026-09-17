@@ -356,3 +356,75 @@ def test_the_gate_does_not_loosen_as_the_substrate_degrades():
     d_no = decide(worse, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
                   k_main=8, k_pr=8)
     assert not d_no.visible_exemptions(), "a PR worse than a broken main is still a regression"
+
+
+# --------------------------------------------------------------------------
+# Review cycle 1 — the two reproduced in-surface bypasses, as regression tests
+# --------------------------------------------------------------------------
+
+
+def test_E3_zero_main_rate_does_not_buy_the_strongest_exemption():
+    """Bypass 1a: `main 0/8` vs `PR 8/8` printed as "rates equivalent".
+
+    The guard was `mr.rate > 0 and ...`, so a ZERO main rate SKIPPED the comparison
+    entirely: the weakest possible main evidence bought the strongest exemption. A
+    PR failure main never had is a NEW failure, not an equivalent one.
+    """
+    main = parse_rates("tests/a.py::T::t1\t0\t8\n")
+    pr = {"tests/a.py::T::t1": Failure(rate=Rate(8, 8), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
+               k_main=8, k_pr=8)
+    assert not d.visible_exemptions(), "0% vs 100% is not 'equivalent'"
+    assert [v.nodeid for v in d.blocked] == ["tests/a.py::T::t1"]
+
+
+def test_E3_the_default_call_still_applies_the_min_runs_floor():
+    """Bypass 1b: the DEFAULT call had no floor and emitted no note.
+
+    `k_main` defaults to None; the note was gated on `is not None` and the block on
+    truthiness, so a single-sample main row exempted silently. The declared K must
+    come from the table itself when the caller does not state it.
+    """
+    main = parse_rates("tests/a.py::T::t1\t1\t1\n")  # a SINGLE sample
+    pr = {"tests/a.py::T::t1": Failure(rate=Rate(1, 1), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})})
+    assert not d.visible_exemptions(), "a single-sample main row must not exempt"
+    assert any("insufficient evidence" in n for n in d.notes), d.notes
+
+
+def test_E2_a_new_signature_alongside_mains_is_not_exempt():
+    """Bypass 2: intersection exempted a PR that ADDED a new failing assertion.
+
+    Intersection only asked "do the two sets share ANY failure", so a PR keeping
+    main's assertion while introducing a new one was exempt — masking exactly the
+    failure the PR introduced. The PR's signature set must be a SUBSET of main's.
+    """
+    main = parse_rates("tests/a.py::T::t1\t4\t8\n")
+    pr = {"tests/a.py::T::t1": Failure(
+        rate=Rate(5, 8), signatures=frozenset({"sg", "a-brand-new-assertion"}))}
+    d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
+               k_main=8, k_pr=8)
+    assert not d.visible_exemptions(), "a NEW assertion failure is not exempt"
+
+
+def test_the_subset_rule_still_exempts_a_genuine_subset():
+    """The legitimate form that must STAY green — the complement of bypass 2."""
+    main = parse_rates("tests/a.py::T::t1\t4\t8\n")
+    pr = {"tests/a.py::T::t1": Failure(rate=Rate(4, 8), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
+               k_main=8, k_pr=8)
+    assert d.visible_exemptions(), "a genuine subset at an equivalent rate IS exempt"
+
+
+def test_E3_an_explicit_k_main_of_zero_does_not_remove_the_floor():
+    """F3: `k_main=0` must not read as "no floor". Zero is the WEAKEST evidence.
+
+    The old guard gated the block on `main_k and ...`, so an explicit 0 was falsy and
+    the floor vanished — while `k_main=1` (what the original test passed) was truthy
+    and blocked. The most degenerate input was the one input that removed the rule.
+    """
+    main = parse_rates("tests/a.py::T::t1\t1\t1\n")
+    pr = {"tests/a.py::T::t1": Failure(rate=Rate(1, 1), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
+               k_main=0, k_pr=1)
+    assert not d.visible_exemptions(), "k_main=0 is insufficient evidence, not unlimited evidence"

@@ -245,7 +245,12 @@ def _signatures_overlap(pr: frozenset[str], main: frozenset[str]) -> bool:
     """
     if not pr or not main:
         return False
-    return bool(pr & main)
+    # SUBSET, not intersection (review cycle 1, bypass 2). Intersection only asked
+    # "do the two sets share ANY failure", so a PR that keeps main's assertion and
+    # ADDS a new one was exempt — and the NEW failure, the one the PR introduced,
+    # was exactly what got masked. Every signature the PR failed with must have
+    # been measured on main; an extra one is a failure main never had.
+    return pr <= main
 
 
 def decide(
@@ -279,15 +284,22 @@ def decide(
     decision = Decision()
     sig_main = main_signatures or {}
 
-    if k_main is not None and k_main < min_runs:
+    # The floor is derived, not optional (review cycle 1, bypass 1b). `k_main`
+    # defaults to None, and gating BOTH the note and the block on it being passed
+    # made the DEFAULT call the weakest: no floor and no warning, so a single-sample
+    # main row exempted while the note still claimed exemptions need evidence. The
+    # declared K now comes from the table itself when the caller does not state it.
+    main_k = (
+        k_main if k_main is not None
+        else max((r.runs for r in main_rates.values()), default=0)
+    )
+    if main_k < min_runs:
         decision.notes.append(
-            f"insufficient evidence: k_main={k_main} < min_runs={min_runs} — "
-            "no exemption may rest on a single sample"
+            f"insufficient evidence: k_main={main_k} < min_runs={min_runs} — "
+            "no exemption may rest on a sample this small"
         )
     if k_pr is not None and k_pr < 1:
         decision.notes.append("pr sample empty — treating every failure as PR-side")
-
-    main_k = k_main if k_main is not None else 0
 
     for nodeid in sorted(pr_failures):
         pr = pr_failures[nodeid]
@@ -306,7 +318,7 @@ def decide(
                 "a DIFFERENT failure is not exempt"))
             continue
 
-        if main_k and main_k < min_runs:
+        if main_k < min_runs:
             decision.blocked.append(Verdict(
                 nodeid, True,
                 f"insufficient evidence (main {mr}, k_main={main_k} < {min_runs})"))
@@ -314,8 +326,15 @@ def decide(
 
         # THE RATE COMPARISON — the heart of the fix. Compares the two RATES
         # (floats), never the two presences.
+        #
+        # No `mr.rate > 0` guard (review cycle 1, bypass 1a). Guarding on it SKIPPED
+        # the comparison whenever main's rate was 0, so `main 0/8` vs `PR 8/8` — the
+        # weakest possible main evidence — printed as "rates equivalent" and the
+        # strongest exemption was bought with no evidence at all. A PR failure main
+        # never had is a NEW failure, and `pr_rate > 0` against a zero main rate
+        # blocks it.
         pr_rate = pr.rate.rate
-        if mr.rate > 0 and pr_rate > mr.rate * rate_tolerance:
+        if pr_rate > mr.rate * rate_tolerance:
             decision.blocked.append(Verdict(
                 nodeid, True,
                 f"PR rate {pr.rate} materially higher than main {mr} "
