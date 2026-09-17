@@ -27,6 +27,7 @@ from tools.ci_exemption import (
     Rate,
     decide,
     parse_failed_ids,
+    parse_rates,
 )
 
 ID = "tests/test_dr_endpoints.py::TestDrDrill::test_restores_to_scratch"
@@ -274,3 +275,84 @@ def test_substrate_misfire_does_not_launder_a_pr_caused_failure():
     )
 
     assert decision.any_blocked
+
+
+# --------------------------------------------------------------------------
+# The consumer: reading `ci-failure-set.sh --main-union-rates` (#3756)
+# --------------------------------------------------------------------------
+
+
+def test_parse_rates_reads_the_emitted_wire_format():
+    """`<nodeid>\t<failures>\t<runs>` — exactly what the shell mode writes."""
+    wire = "tests/a.py::T::t1\t8\t8\ntests/b.py::T::t2\t1\t8\n"
+    r = parse_rates(wire)
+    assert r.rejected == []
+    assert r.runs == 8
+    assert r.rates["tests/a.py::T::t1"] == Rate(8, 8)
+    assert r.rates["tests/b.py::T::t2"] == Rate(1, 8)
+
+
+def test_parse_rates_rejects_a_vacuous_run_count():
+    """`0/0` must not read as "main never fails this".
+
+    `Rate(0, 0).rate` is `0.0` — a zero-evidence pass. The line is rejected rather
+    than trusted, and the id then has NO rate, which fails closed (no exemption).
+    """
+    r = parse_rates("tests/a.py::T::t1\t0\t0\n")
+    assert r.rates == {}
+    assert r.rejected == ["tests/a.py::T::t1\t0\t0"]
+    assert r.runs == 0
+
+
+def test_parse_rates_rejects_malformed_and_impossible_lines():
+    r = parse_rates(
+        "tests/a.py::T::t1\t3\n"              # too few fields
+        "tests/a.py::T::t2\t3\t8\textra\n"  # too many
+        "FAILED tests/a.py::T::t3\n"           # a union line, not a rate line
+        "tests/a.py::T::t4\tx\t8\n"          # non-numeric
+        "tests/a.py::T::t5\t9\t8\n"          # failures > runs
+    )
+    assert r.rates == {}
+    assert len(r.rejected) == 5
+
+
+def test_E3_via_the_real_wire_format_blocks_a_deterministic_regression():
+    """The live case, driven through the format the shell actually emits.
+
+    Main's own table says it failed the id in 1 of 8 runs; the PR fails it 8 of 8
+    with the SAME signature. A presence test ("it fails on main too") exempts this.
+    The rate comparison must not: an eight-fold jump is a regression the PR
+    introduced, and the fix that matters is the one that gets this right.
+    """
+    main = parse_rates("tests/a.py::T::t1\t1\t8\n")
+    pr = {"tests/a.py::T::t1": Failure(rate=Rate(8, 8), signatures=frozenset({"sg"}))}
+    decision = decide(
+        pr, main.rates,
+        main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
+        k_main=main.runs, k_pr=8, rate_tolerance=1.5,
+    )
+    assert [v.nodeid for v in decision.blocked] == ["tests/a.py::T::t1"]
+    assert decision.visible_exemptions() == []
+    assert "rates" in decision.report().lower() or "BLOCK" in decision.report()
+
+
+def test_the_gate_does_not_loosen_as_the_substrate_degrades():
+    """#3756's compounding finding, as a single assertion.
+
+    Substrate flakiness puts more ids into main's union. Under presence-based
+    subtraction each one becomes an exemption, so the gate's discriminating power
+    FALLS as real health falls — confidence inversely coupled to health. Here main
+    is BADLY broken (it fails 3 of 8 runs) and the SAME table must still block a PR
+    at 8/8 — a 2.7x jump, far outside tolerance. The table cannot be read as
+    "everything is excused".
+    """
+    main = parse_rates("tests/a.py::T::t1\t3\t8\n")
+    innocent = {"tests/a.py::T::t1": Failure(rate=Rate(3, 8), signatures=frozenset({"sg"}))}
+    d_ok = decide(innocent, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
+                  k_main=8, k_pr=8)
+    assert d_ok.visible_exemptions(), "the innocent PR must be exempt, visibly"
+
+    worse = {"tests/a.py::T::t1": Failure(rate=Rate(8, 8), signatures=frozenset({"sg"}))}
+    d_no = decide(worse, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
+                  k_main=8, k_pr=8)
+    assert not d_no.visible_exemptions(), "a PR worse than a broken main is still a regression"

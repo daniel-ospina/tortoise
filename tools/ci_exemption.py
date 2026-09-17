@@ -144,6 +144,58 @@ class Rate:
 
 
 @dataclass(frozen=True)
+class RatesResult:
+    """The rate table read from ``ci-failure-set.sh --main-union-rates``."""
+
+    rates: dict[str, Rate] = field(default_factory=dict)
+    rejected: list[str] = field(default_factory=list)
+
+    @property
+    def runs(self) -> int:
+        """The declared K, or 0 when nothing was usable."""
+        return max((r.runs for r in self.rates.values()), default=0)
+
+
+_RATES_RE = re.compile(
+    r"^(?P<nodeid>\S+)\t(?P<failures>[0-9]+)\t(?P<runs>[0-9]+)$"
+)
+
+
+def parse_rates(lines: str) -> RatesResult:
+    """Parse the ``<nodeid>\\t<failures>\\t<runs>`` rate table.
+
+    Fail-closed, for the same reason as :func:`parse_failed_ids`: this table feeds
+    the comparison that OVERRIDES a failure, so a line the reader does not fully
+    understand must never become evidence of main-side unhealth. Anything not
+    exactly three tab-separated fields -- a valid nodeid, a non-negative failure
+    count, and a **positive** run count -- is rejected, counted and reported.
+
+    ``runs`` must be positive: ``X\\t0\\t0`` would give a ``0/0`` rate of ``0.0``
+    and read as "main never fails this", which is the exemption-by-vacuity this
+    module exists to prevent. A rejected line simply contributes no rate, and an
+    id with no rate is **not exempt** (the existing default in :func:`decide`).
+    """
+    rates: dict[str, Rate] = {}
+    rejected: list[str] = []
+    for raw in lines.splitlines():
+        line = raw.strip("\n")
+        if not line.strip():
+            continue
+        m = _RATES_RE.match(line)
+        if not m:
+            rejected.append(line)
+            continue
+        nodeid = m.group("nodeid")
+        failures = int(m.group("failures"))
+        runs = int(m.group("runs"))
+        if not _NODEID_RE.match(nodeid) or runs <= 0 or failures > runs:
+            rejected.append(line)
+            continue
+        rates[nodeid] = Rate(failures=failures, runs=runs)
+    return RatesResult(rates=rates, rejected=rejected)
+
+
+@dataclass(frozen=True)
 class Failure:
     """A PR-side failure: how often, and with which signatures."""
 
