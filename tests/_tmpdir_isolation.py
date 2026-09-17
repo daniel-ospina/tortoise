@@ -68,12 +68,20 @@ _TMPDIR_SPELLINGS = tuple(dict.fromkeys(
                 # The RAW gettempdir() too: with $TMPDIR unset the fallback is
                 # /tmp on macOS while its realpath is /private/tmp, so a list
                 # seeded only from the env var AND realpaths would miss the
-                # string form entirely (#3752 review cycle 5).
+                # string form entirely (#3752 review cycles 5-6, and $TMPDIR
+                # is UNSET on GitHub's ubuntu runners).
                 tempfile.gettempdir(),
                 os.path.realpath(tempfile.gettempdir()),
                 _ENV_TMPDIR_AT_IMPORT,
                 os.path.realpath(_ENV_TMPDIR_AT_IMPORT)
-                if _ENV_TMPDIR_AT_IMPORT else "") if s
+                if _ENV_TMPDIR_AT_IMPORT else "",
+                # The PARENT too, so a shell string naming an ancestor of the
+                # temp dir reaches the per-token realpath check instead of
+                # short-circuiting here. On Linux this is "/", which makes the
+                # pre-filter always run — harmless (a bare "/" token is
+                # blocked by the argv path too) and it keeps the string layer
+                # as opinionated as the argv layer.
+                os.path.dirname(HOST_TMPDIR)) if s
 ))
 
 # Marker file written inside the root so a SIGKILLed run's root is
@@ -514,15 +522,19 @@ def _command_touches_host_tempdir(command) -> str | None:
 
     The fast-path substring test uses EVERY spelling of the temp dir captured
     at import (the raw `tempfile.gettempdir()`, its realpath, the `$TMPDIR`
-    spelling and ITS realpath — on macOS `$TMPDIR` is `/var/folders/...` while
-    the realpath is `/private/var/folders/...`, so testing only the realpath
-    made the shell form fail OPEN on the canonical spelling), and it is only a
-    short-circuit: the decision is the realpath comparison per token.
+    spelling and ITS realpath, and the temp dir's parent — on macOS `$TMPDIR`
+    is `/var/folders/...` while the realpath is `/private/var/folders/...`, so
+    testing only the realpath made the shell form fail OPEN on the canonical
+    spelling; `$TMPDIR` is also unset on GitHub's ubuntu runners, where the
+    spelling is `tempfile.gettempdir()`'s own fallback). A hit then routes the
+    string to the per-token realpath scope test — a pre-filter MISS returns
+    None without deciding anything, which is why the list has to be complete.
 
-    Known limits, both inherent to a static-content check on a command
-    STRING: an ANCESTOR of the temp dir is not in the spelling list (so
-    `find $(dirname <T>)` passes here — the argv/`os.exec` layers catch it),
-    and `$VAR` indirection is invisible to it.
+    Still unguarded (inherent to a static-content check on a command STRING):
+    a command SUBSTITUTION that computes an ancestor or the temp dir at run
+    time (`sh -c 'echo $(dirname <T>)'`) and `$VAR` indirection. The argv /
+    `os.exec` layers see the resolved path in those cases only when the path
+    is passed literally.
     """
     if isinstance(command, bytes):
         command = os.fsdecode(command)

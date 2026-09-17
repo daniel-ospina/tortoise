@@ -21,7 +21,8 @@ so orphans are cleaned within 2-3 spawn cycles).
 > state ≥ 10 min with no live suite markers — the #1642 FIX 3
 > discriminator that #1557's blanket live-pid protection lacked) plus
 > stale_socket leftovers, so a running test suite's servers are never
-> disturbed. The singleton lock (~/.tortoise/.reaper.lock) makes concurrent
+> disturbed. The singleton lock (`<tempdir>/.tortoise/.reaper.lock`, #1658 —
+> tempdir-scoped, not `~/.tortoise`) makes concurrent
 > runs safe.
 
 ## Cron (Linux / macOS with cron)

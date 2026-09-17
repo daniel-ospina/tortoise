@@ -75,19 +75,23 @@ def test_session_temp_root_is_short_enough_for_af_unix():
     """
     root = scan_root()
     # The deepest path the suite itself creates: a test scratch dir inside the
-    # root, then redislite's autogen dir (its default `tmp` prefix + 8 random
-    # chars), then the socket.
-    deepest = os.path.join(root, "" + "x" * 8, "tmp" + "x" * 8,
-                           "redis.socket")
+    # root, then redislite's autogen dir, then the socket. The autogen dir name
+    # is DERIVED from tempfile's own prefix (the redislite typos this replaced
+    # — `tmps` vs `tmp` — both satisfied the old hand-written bound), and its
+    # length is asserted so a prefix change fails by name.
+    autogen = tempfile.gettempprefix() + "x" * 8
+    assert len(autogen) == 11, \
+        f"redislite autogen dir shape changed: {autogen!r} is {len(autogen)}"
+    deepest = os.path.join(root, "" + "x" * 8, autogen, "redis.socket")
     assert len(deepest) < 104, (
         f"private temp root makes socket paths too long: {deepest!r} "
         f"({len(deepest)} >= 104)")
     # A child that inherits a TMPDIR nested one level under the root
     # (test_embedded_concurrency._make_flat_tmpdir) must still fit: its bind
-    # path is its TMPDIR + "/tmpXXXXXXXX/redis.socket" (25 bytes), so the child
-    # TMPDIR has to stay at or below 78 bytes.
+    # path is its TMPDIR + "/<autogen>/redis.socket", so the child TMPDIR has
+    # to stay at or below 78 bytes.
     child_tmpdir = os.path.join(root, "" + "x" * 8)
-    child_bind = os.path.join(child_tmpdir, "tmp" + "x" * 8, "redis.socket")
+    child_bind = os.path.join(child_tmpdir, autogen, "redis.socket")
     assert len(child_bind) < 104, (
         f"child TMPDIR under the private root leaves no AF_UNIX room: "
         f"{child_bind!r} ({len(child_bind)} >= 104)")
@@ -441,30 +445,65 @@ def test_walk_deadline_starts_after_root_discovery(tmp_path, monkeypatch):
 
 
 def test_env_spelling_of_the_shared_tempdir_is_blocked():
-    """#3752 review cycles 4-5: on macOS `$TMPDIR` is `/var/folders/...` while
-    the realpath is `/private/var/folders/...`. The string/`os.system` branch
-    matched only the realpath and therefore failed OPEN on the canonical
-    spelling — the one the issue's own `find <shared TMPDIR>` used."""
+    """#3752 review cycles 4-6: on macOS `$TMPDIR` is `/var/folders/...` while
+    the realpath is `/private/var/folders/...`, and on GitHub's ubuntu runners
+    `$TMPDIR` is UNSET entirely (so the spelling is
+    `tempfile.gettempdir()`'s own fallback). A string branch matching only the
+    realpath fails OPEN on both — the canonical spelling is the one the
+    issue's own `find <shared TMPDIR>` used.
+
+    Every assertion is driven from a spelling that EXISTS on the running host,
+    so the test is meaningful with or without `$TMPDIR`.
+    """
     from tests import _tmpdir_isolation as iso
 
-    assert iso._ENV_TMPDIR_AT_IMPORT, "no $TMPDIR at import; test proves nothing"
-    env_spelling = iso._ENV_TMPDIR_AT_IMPORT
-    with pytest.raises(SharedTmpdirScanError):
-        subprocess.run(["find", env_spelling, "-maxdepth", "2"],
-                       capture_output=True, check=False)
-    with pytest.raises(SharedTmpdirScanError):
-        subprocess.run(f"find {env_spelling} -maxdepth 2", shell=True,
-                       capture_output=True, check=False)
-    with pytest.raises(SharedTmpdirScanError):
-        os.system(f"ls {env_spelling}")
-    # The raw fallback spelling (TMPDIR unset -> /tmp whose realpath is
-    # /private/tmp) must be a known spelling too, or the same branch fails open.
+    # The string branch must recognise every spelling it advertises. Whether
+    # the RAW fallback (`/tmp` when `$TMPDIR` is unset — the GitHub-runner case)
+    # is among them is pinned non-vacuously by
+    # test_spelling_list_is_not_vacuous, which re-imports in a subprocess with
+    # TMPDIR='' rather than reading the tuple it asserts about.
+    if iso._ENV_TMPDIR_AT_IMPORT:
+        assert iso._ENV_TMPDIR_AT_IMPORT in iso._TMPDIR_SPELLINGS
+        assert os.path.realpath(iso._ENV_TMPDIR_AT_IMPORT) \
+            in iso._TMPDIR_SPELLINGS
     for spelling in iso._TMPDIR_SPELLINGS:
         assert iso._command_touches_host_tempdir(f"find {spelling}") is not None, \
             f"spelling {spelling!r} is not recognised by the string branch"
+
+    spellings = ([iso._ENV_TMPDIR_AT_IMPORT] if iso._ENV_TMPDIR_AT_IMPORT
+                 else ["/tmp", os.path.realpath("/tmp")])
+    for spelling in spellings:
+        with pytest.raises(SharedTmpdirScanError):
+            subprocess.run(["find", spelling, "-maxdepth", "2"],
+                           capture_output=True, check=False)
+        with pytest.raises(SharedTmpdirScanError):
+            subprocess.run(f"find {spelling} -maxdepth 2", shell=True,
+                           capture_output=True, check=False)
+        with pytest.raises(SharedTmpdirScanError):
+            os.system(f"ls {spelling}")
     # ...while the session root (a DESCENDANT, reachable via the redirect) must
     # still be allowed — the guard blocks the shared tree, not our own scratch.
     assert iso._command_touches_host_tempdir(f"find {scan_root()}") is None
+
+
+def test_spelling_list_is_not_vacuous(monkeypatch):
+    """#3752 review cycle 6: the loop above iterates the tuple under test, so
+    it passes for ANY contents. This pins the raw-fallback entry from OUTSIDE:
+    a subprocess with `TMPDIR=""` must advertise both `/tmp` and its realpath.
+    """
+    code = (
+        "import sys; sys.path.insert(0, '.');"
+        "from tests import _tmpdir_isolation as iso;"
+        "assert '/tmp' in iso._TMPDIR_SPELLINGS, iso._TMPDIR_SPELLINGS;"
+        "assert iso._command_touches_host_tempdir('find /tmp -maxdepth 2');"
+        "print('OK')"
+    )
+    env = dict(os.environ, TMPDIR="", TORTOISE_TEST_CARVE_OUT="1")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, env=env, cwd=str(Path.cwd()))
+    assert out.returncode == 0, (
+        f"raw-fallback spelling not recognised with TMPDIR unset:\n"
+        f"stdout={out.stdout!r}\nstderr={out.stderr[-2000:]}")
 
 
 def test_teardown_after_fail_closed_abort_keeps_operator_env(tmp_path,
@@ -477,6 +516,8 @@ def test_teardown_after_fail_closed_abort_keeps_operator_env(tmp_path,
 
     real_root, real_host = iso._SESSION_TMPDIR, iso.HOST_TMPDIR
     real_env = os.environ.get("TORTOISE_HOST_TMPDIR")
+    real_env_tmpdir = os.environ.get("TMPDIR")
+    real_prev = iso._PREV_HOST_TMPDIR_ENV
     os.environ["TORTOISE_HOST_TMPDIR"] = "/OPERATOR/VALUE"
     iso._SESSION_TMPDIR = None
     iso.HOST_TMPDIR = str(tmp_path)
@@ -497,10 +538,13 @@ def test_teardown_after_fail_closed_abort_keeps_operator_env(tmp_path,
         monkeypatch.undo()
         iso._SESSION_TMPDIR = real_root
         iso.HOST_TMPDIR = real_host
+        iso._PREV_HOST_TMPDIR_ENV = real_prev
         if real_env is None:
             os.environ.pop("TORTOISE_HOST_TMPDIR", None)
         else:
             os.environ["TORTOISE_HOST_TMPDIR"] = real_env
+        if real_env_tmpdir is not None:
+            os.environ["TMPDIR"] = real_env_tmpdir
         tempfile.tempdir = real_root
 
 

@@ -223,10 +223,14 @@ def _kill_pid(pid: int) -> None:
 
 # AF_UNIX sun_path cap: the kernel REFUSES >= 104 bytes on macOS (redislite
 # reports "unix socket path too long (108), must be under 104"); Linux allows
-# ~108. Redislite nests its autogen dir (its default `tmp` prefix + 8 random
-# chars) under the child's TMPDIR, so the bind path is TMPDIR + this tail.
+# ~108. Redislite nests its autogen dir (tempfile's default prefix + 8 random
+# chars) under the child's TMPDIR, so the bind path is TMPDIR + this tail —
+# DERIVED from tempfile's own prefix, not hand-written (a hand-written `tmps`
+# typo satisfied the old hand-written bound, #3752 review cycle 6).
 _AF_UNIX_SOCKET_BUDGET = 104
-_REDISLITE_SOCKET_TAIL = len("/tmpXXXXXXXX/redis.socket")
+_REDISLITE_AUTOGEN = tempfile.gettempprefix() + "x" * 8
+_REDISLITE_SOCKET_TAIL = len("/" + _REDISLITE_AUTOGEN + "/redis.socket")
+assert len(_REDISLITE_AUTOGEN) == 11, _REDISLITE_AUTOGEN
 
 
 def _make_flat_tmpdir() -> str:
@@ -245,7 +249,7 @@ def _make_flat_tmpdir() -> str:
     host tempdir fails by name instead of surfacing as an empty spawn error.
     """
     root = tempfile.mkdtemp(prefix="", dir=tempfile.gettempdir())
-    bind_path = os.path.join(root, "tmpXXXXXXXX", "redis.socket")
+    bind_path = os.path.join(root, _REDISLITE_AUTOGEN, "redis.socket")
     assert len(bind_path) < _AF_UNIX_SOCKET_BUDGET, (
         f"child TMPDIR {root!r} leaves no room for the redislite socket path "
         f"({len(bind_path)} bytes >= {_AF_UNIX_SOCKET_BUDGET}): the #3752 "
