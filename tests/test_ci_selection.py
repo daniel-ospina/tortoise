@@ -2136,7 +2136,9 @@ def test_integrity_chain_names_bad_duration_instead_of_crashing():
         leg_coverage_issues,
         load_manifest,
     )
-    for bad in (None, "fast", float("nan")):
+    # cycle 3 added an int beyond float range (math.isfinite raises
+    # OverflowError) and a negative duration (impossible data, exited 0).
+    for bad in (None, "fast", float("nan"), 10 ** 400, -5.0):
         m = load_manifest()
         key = fast_pool(m)[0]
         m = dict(m)
@@ -2157,3 +2159,25 @@ def test_split_fast_gate_cannot_crash_on_a_malformed_duration():
     for bad in (None, "fast", float("nan"), float("inf"), True):
         a, b = split_fast_gate(files, {"test_a.py": bad})
         assert len(a) + len(b) == 2, (bad, a, b)
+
+
+def test_integrity_cli_exits_nonzero_for_a_huge_int_and_a_negative(tmp_path, monkeypatch):
+    # #3407 review cycle 3: the isolated helper tests could not see an EXIT
+    # CODE, and the two residual classes were both silent-green failures. This
+    # drives the real CLI entry point (`main()`, which reads sys.argv and the
+    # module-level MANIFEST) over a genuinely poisoned manifest.
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+    for bad in (10 ** 400, -5.0, float("nan")):
+        m = cs.load_manifest()
+        m = dict(m)
+        m["durations"] = dict(m.get("durations") or {})
+        m["durations"][cs.fast_pool(m)[0]] = bad
+        poisoned = tmp_path / "poisoned-ci-surfaces.yml"
+        poisoned.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", poisoned)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() != 0, f"a bad duration value ({bad!r}) exited 0"

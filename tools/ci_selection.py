@@ -942,10 +942,19 @@ def _duration_weight(value, default: float = DEFAULT_FAST_WEIGHT) -> float:
     Coercing to the default here means every consumer degrades safely, while
     `duration_issues()` still names the offending entry and fails the gate.
     `bool` is excluded explicitly (`isinstance(True, int)` is True).
+
+    #3407 review cycle 3: the finiteness probe must be TOTAL. `math.isfinite`
+    converts to float, so an int beyond float range (>=309 digits) raised
+    `OverflowError` — i.e. the probe introduced to stop a crash could itself
+    crash. A negative duration is impossible data and is likewise coerced.
     """
-    if (isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:  # an int beyond float range
+        finite = False
+    if not finite or value < 0:
         return default
     return value
 
@@ -997,12 +1006,22 @@ def duration_issues(manifest: dict) -> list[str]:
         v = durations[name]
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             issues.append(f"durations value for {name} is not numeric: {v!r}")
-        elif not math.isfinite(v):
+        else:
             # #3407 review P2: a NaN passed the type check AND was invisible to
             # the imbalance guard (every comparison is False), so it produced a
             # maximally single-sided pack with a green exit. Type-checking is
             # necessary but not sufficient — finiteness is the real predicate.
-            issues.append(f"durations value for {name} is not finite: {v!r}")
+            # Cycle 3: the probe must be TOTAL (`math.isfinite` raises
+            # OverflowError on an int beyond float range), and a negative
+            # duration is impossible data that otherwise exited 0.
+            try:
+                finite = math.isfinite(v)
+            except OverflowError:
+                finite = False
+            if not finite:
+                issues.append(f"durations value for {name} is not finite: {v!r}")
+            elif v < 0:
+                issues.append(f"durations value for {name} is negative: {v!r}")
     return issues
 
 
