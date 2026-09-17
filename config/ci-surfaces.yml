@@ -107,6 +107,7 @@ surfaces:
   - test_index_mcp.py
   - test_init_apikey_validation.py
   - test_key_write_pins_tripwire.py  # #2299: server-side session key-write ?org_id= pin parity tripwire
+  - test_org_graph_open_tripwire.py  # #3645: bare-verdict-then-open silent-empty-graph tripwire (hosted_api org graph open)
   - test_session_key_recovery_gate.py  # #2380: recovery-mint owner/admin gate matrix (both lanes) + created_by/outage/lane-marker pins
   - test_mcp_client.py
   - test_mcp_http.py
