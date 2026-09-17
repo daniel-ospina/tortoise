@@ -1529,6 +1529,16 @@ class FalkorProjection(
             return self._fold_entity_mutation(ev)
         elif t == "EventRecorded":
             return self._upsert_event(ev)
+        elif t == "EntityLinked":
+            # #3664: the capture entity-attachment replay consumer — an
+            # idempotent about* edge MERGE keyed on the flat logical ids
+            # (Session/Point -> Object). JSONL-only record (no GraphEvent).
+            return self._fold_entity_linked(ev)
+        elif t == "SessionRecorded":
+            # #3664: the :Session node's journal carrier — the capture MERGE
+            # is a raw write, so without this a rebuild lost the node (and
+            # made any EntityLinked edge from it unreplayable).
+            return self._fold_session_recorded(ev)
         elif t == "SubjectAdded":
             self._upsert_subject(ev)
         elif t == "ObjectSuperseded":
@@ -1761,6 +1771,12 @@ class FalkorProjection(
                 self._upsert_point_props(p)
 
         supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
+        # #3664: EntityLinked records are deferred to a trailing sweep (after
+        # every ObjectRegistered/DocumentCreated event has run) so a link
+        # whose target is created later in the journal still folds — the fold
+        # is an idempotent MERGE, so ordering vs its own target creation is
+        # irrelevant and later creations are caught.
+        entity_link_events: list = []
         # #2488: ONE cross-family deferred list for point re-stamp folds —
         # PointSuperseded (#2423) + PointInvalidated (#2488) — carrying the
         # journal (enumerate) seq: the trailing sweep's survivor rule and
@@ -1985,6 +2001,13 @@ class FalkorProjection(
                 direct_repoint_events.append(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
+            elif t == "EntityLinked":
+                # #3664: defer to the trailing sweep (see declaration).
+                entity_link_events.append(ev)
+            elif t == "SessionRecorded":
+                # #3664: the :Session node must exist before any deferred
+                # EntityLinked fold FROM it runs (the sweep below).
+                self._fold_session_recorded(ev)
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
@@ -1999,6 +2022,17 @@ class FalkorProjection(
                 # P2-1 (#3299): a record type outside the recognized
                 # vocabulary must not be dropped silently.
                 logger.warning("unrecognized event type %r — skipped", t)
+
+        # ── Pass 1b entity-link sweep (#3664) ─────────────────────────────
+        # Every object/document creation event has now run; fold each
+        # EntityLinked record into its idempotent about* edge. A 0-row fold
+        # means the target was never re-created by any journaled event
+        # (pre-#2194 journal, unjournaled producer, delete race) — honest:
+        # the journal could not reproduce that attachment. No warning here:
+        # unlike a supersession fold-miss (which means a claim of state was
+        # lost), an absent link target is simply an absent entity.
+        for ev in entity_link_events:
+            self._fold_entity_linked(ev)
 
         # Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
         # creation events (see the branch above). Warn on 0-row folds — a

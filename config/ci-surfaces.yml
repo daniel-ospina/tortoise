@@ -289,6 +289,7 @@ surfaces:
   - test_battery_write_channel.py
   core:
   - test_capture_cost_measurement.py
+  - test_capture_entity_attachment_3664.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py

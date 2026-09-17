@@ -31,6 +31,16 @@ The linking pass runs (1) after capture in ``_capture_session_impl`` and
 (2) again on index completion (``_run_indexing``'s completion hook, T1-P15)
 so sessions captured before their entities materialize still resolve once the
 index lands.
+
+Durability (#3664): every edge minted here is LIVE-ONLY unless an ``sdk`` is
+passed. With ``sdk``, ``_link`` additionally emits a JSONL-only
+``EntityLinked`` record (the flat logical identities ``{source_label,
+source_id, target_label, target_id, edge_type}``) which
+``FalkorProjection`` folds back on replay — so the capture's entity
+attachment survives ``rebuild_all``/``recover_from_log`` (the #2296
+live-only-edge hazard is closed for this edge class). Without ``sdk`` (the
+index-completion re-link, direct callers) behaviour is byte-identical to
+pre-#3664 — the edges are wired live and never journaled.
 """
 from __future__ import annotations
 
@@ -153,7 +163,8 @@ def _resolve_targets(proj, refs: list[dict[str, str]]) -> list[str]:
 
 def link_session_entities(proj, session_id: str,
                           turn_texts: list[str],
-                          turn_ids: list[str] | None = None) -> dict[str, Any]:
+                          turn_ids: list[str] | None = None,
+                          sdk=None) -> dict[str, Any]:
     """Link a Session + its turn Points to WorkItem Objects via aboutObject.
 
     Args:
@@ -164,6 +175,9 @@ def link_session_entities(proj, session_id: str,
             Point contents).
         turn_ids: optional per-turn Point ids ({session_id}_t{i} — the
             capture path passes them). When None, only the Session links.
+        sdk: optional TortoiseSDK whose JSONL journal should carry an
+            ``EntityLinked`` record per NEW edge (#3664). None = live-only
+            (back-compat).
 
     Returns {"attempted", "created", "links": [session/point-target pairs]}
     — attempted = number of link operations attempted (Session + points that
@@ -182,7 +196,7 @@ def link_session_entities(proj, session_id: str,
     if session_targets:
         attempted += 1
         for oid in session_targets:
-            created += _link(proj, "Session", session_id, oid)
+            created += _link(proj, "Session", session_id, oid, sdk=sdk)
             links.append({"from": f"Session:{session_id}", "to": oid})
 
     # Per-point: FIRST-match only.
@@ -195,7 +209,7 @@ def link_session_entities(proj, session_id: str,
             if first:
                 attempted += 1
                 for oid in first:
-                    created += _link(proj, "Point", tid, oid)
+                    created += _link(proj, "Point", tid, oid, sdk=sdk)
                     links.append({"from": f"Point:{tid}", "to": oid})
 
     if attempted and created < attempted:
@@ -206,20 +220,79 @@ def link_session_entities(proj, session_id: str,
     return {"attempted": attempted, "created": created, "links": links}
 
 
-def _link(proj, source_label: str, source_id: str, target_id: str) -> int:
-    """Mint ONE (source)-[:aboutObject]->(Object) edge; returns 1 when the
+# #3664: validated vocabularies for the EntityLinked edge record. The journal
+# is a FILE — its labels/relationship types must never be interpolated into
+# Cypher unvalidated (a tampered line would otherwise be a Cypher-injection
+# sink). The set mirrors the ONTOLOGY about* predicate family + the entity
+# labels the capture path may use as endpoints.
+ENTITY_LINKED_RELS = frozenset({
+    "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
+    "aboutDocument",
+})
+ENTITY_LINKED_LABELS = frozenset({
+    "Session", "Point", "Document", "Event", "Object", "Subject",
+})
+
+
+def link_entity(proj, source_label: str, source_id: str, target_id: str,
+                edge_type: str = "aboutObject", target_label: str = "Object",
+                sdk=None) -> int:
+    """Mint ONE ``about*`` edge from (source) to (target); returns 1 when the
     edge was NEW (0 when it already existed). Probe BEFORE the MERGE so the
-    created counter stays honest."""
+    created counter stays honest.
+
+    #3664: when ``sdk`` is given, a NEW edge also emits an ``EntityLinked``
+    JSONL record (flat logical identities) so the projection can fold it back
+    on replay — live == rebuild. ``edge_type``/labels are validated against
+    the module's frozen vocabularies (a fail-closed backstop against Cypher
+    interpolation of untrusted values).
+    """
+    if edge_type not in ENTITY_LINKED_RELS:
+        raise ValueError(
+            f"link_entity: edge_type {edge_type!r} is not a known about* "
+            f"predicate ({sorted(ENTITY_LINKED_RELS)})")
+    if source_label not in ENTITY_LINKED_LABELS:
+        raise ValueError(
+            f"link_entity: source_label {source_label!r} is not a known "
+            f"entity label ({sorted(ENTITY_LINKED_LABELS)})")
+    if target_label not in ENTITY_LINKED_LABELS:
+        raise ValueError(
+            f"link_entity: target_label {target_label!r} is not a known "
+            f"entity label ({sorted(ENTITY_LINKED_LABELS)})")
     pre = proj.g.query(
-        f"MATCH (s:{source_label} {{id:$sid}})-[:aboutObject]->"
-        "(o:Object {id:$oid}) RETURN count(s)",
-        params={"sid": source_id, "oid": target_id},
+        f"MATCH (s:{source_label} {{id:$sid}})-[:{edge_type}]->"
+        f"(t:{target_label} {{id:$tid}}) RETURN count(s)",
+        params={"sid": source_id, "tid": target_id},
     ).result_set
     if pre and pre[0][0]:
         return 0
     proj.g.query(
-        f"MATCH (s:{source_label} {{id:$sid}}), (o:Object {{id:$oid}}) "
-        "MERGE (s)-[:aboutObject]->(o)",
-        params={"sid": source_id, "oid": target_id},
+        f"MATCH (s:{source_label} {{id:$sid}}), "
+        f"(t:{target_label} {{id:$tid}}) "
+        f"MERGE (s)-[:{edge_type}]->(t)",
+        params={"sid": source_id, "tid": target_id},
     )
+    if sdk is not None:
+        # JSONL-only (not in _GRAPH_EVENT_TYPES) — the durable carrier the
+        # rebuild fold consumes. Best-effort: _emit_event never raises, and a
+        # journal-less SDK no-ops.
+        try:
+            sdk._emit_event(
+                "EntityLinked", id=source_id, source_id=source_id,
+                source_label=source_label, target_label=target_label,
+                target_id=target_id, edge_type=edge_type)
+        except Exception:  # noqa: BLE001, RUF100 — journaling is best-effort
+            _logger.warning(
+                "session_link: EntityLinked journal emit failed for "
+                "%s:%s -[:%s]-> %s:%s", source_label, source_id, edge_type,
+                target_label, target_id, exc_info=True)
     return 1
+
+
+def _link(proj, source_label: str, source_id: str, target_id: str,
+          edge_type: str = "aboutObject", target_label: str = "Object",
+          sdk=None) -> int:
+    """Back-compat alias for :func:`link_entity` (the pre-#3664 private name)."""
+    return link_entity(proj, source_label, source_id, target_id,
+                       edge_type=edge_type, target_label=target_label,
+                       sdk=sdk)
