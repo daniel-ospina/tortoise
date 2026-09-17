@@ -159,6 +159,30 @@ def test_test_file_change_selects_owning_surface():
     assert "onboarding" in r2["surfaces"]
 
 
+def test_pi_hooks_change_selects_the_capture_guard():
+    """#3575 P1-B: `tortoise/pi-hooks/` matches no SOURCE_PATTERNS entry, so a
+    change to the extension selects `core` via the `tortoise/` fallback. The
+    guard that pins the extension must be IN that selection — registered only
+    under `onboarding`, a PR fixing the extension ran neither the Python guard
+    nor the extension's `node --test` suite. `--integrity` cannot see this
+    (the file is classified); only a selection assertion can."""
+    r = _sel(["tortoise/pi-hooks/tortoise-capture.ts"])
+    assert r["full"] is False
+    assert "core" in r["surfaces"]
+    assert "test_pi_capture_hooks.py" in r["test_files"]
+
+
+def test_session_import_change_selects_the_window_guard():
+    """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
+    parsers.py change selects `core` via the fallback. The window guard must be
+    in that selection — registered only under `api`, it did not run for the
+    change it guards."""
+    r = _sel(["tortoise/session_import/parsers.py"])
+    assert r["full"] is False
+    assert "core" in r["surfaces"]
+    assert "test_session_import_codex.py" in r["test_files"]
+
+
 def test_two_surfaces_union():
     r = _sel(["tortoise/decide.py", "tortoise/onboarding/SKILL.md"])
     assert r["full"] is False
