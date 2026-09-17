@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   HARNESS,
+  MAX_TURNS,
   PROBE_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
   buildCapturePayload,
@@ -112,6 +113,23 @@ test("extractTurns truncates at the hosted per-turn window", () => {
     { type: "message", message: { role: "user", content: long } },
   ]);
   assert.equal(turns[0].content.length, 5000);
+});
+
+test("extractTurns keeps the MOST RECENT turns at the cap (matches the backfill leg)", () => {
+  // #3707: an early `break` kept the OLDEST MAX_TURNS while the Python
+  // backfill (`window_turns` = turns[-MAX_TURNS:]) kept the NEWEST — the two
+  // legs of one seam filed opposite halves of a >MAX_TURNS session. Pin the
+  // direction: the LAST turns must survive.
+  const n = MAX_TURNS + 5;
+  const entries = Array.from({ length: n }, (_, i) => ({
+    type: "message",
+    message: { role: i % 2 === 0 ? "user" : "assistant", content: `turn ${i}` },
+  }));
+  const turns = extractTurns(entries as never);
+  assert.equal(turns.length, MAX_TURNS);
+  assert.equal(turns[0].content, `turn ${n - MAX_TURNS}`,
+    "the oldest turns must be dropped, not the newest");
+  assert.equal(turns[turns.length - 1].content, `turn ${n - 1}`);
 });
 
 test("buildCapturePayload carries harness + session_id (the idempotency key)", () => {

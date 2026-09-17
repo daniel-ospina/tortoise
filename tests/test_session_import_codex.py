@@ -185,11 +185,15 @@ def test_codex_parser_missing_file_raises(tmp_path):
         parse_codex(tmp_path / "nope.jsonl")
 
 
-# ── #3575 P2: the backfill leg must apply the SAME 1000-turn window the live
-# Pi capture extension applies (SessionRequest.conversation max_length=1000).
-# An over-long file would POST >1000 turns → HTTP 422 → NO receipt, and the
-# longest sessions would silently never be imported (measured: 21/369 real
-# local Pi sessions exceed the bound, max 2555).
+# ── #3575 P1-A: the backfill leg must apply the SAME window the live Pi capture
+# extension applies, and it must be the bound the HANDLER enforces
+# (`MAX_SESSION_TURNS = 500`, tortoise/quota.py) — NOT the Pydantic
+# `SessionRequest.conversation` max_length=1000. The Pydantic boundary only
+# decides whether the model accepts the body; the handler then raises HTTP 400
+# above 500, so a 501–1000-turn payload passes `SessionRequest(...)` and still
+# writes NO receipt. Measured on the real local Pi corpus (2026-09, 374 files
+# with >=1 turn): 45 files (12.0%) exceed 500 turns; 21 (5.6%) exceed 1000
+# (max 2555).
 
 
 def _pi_turns_file(tmp_path, n: int):
@@ -205,14 +209,21 @@ def _pi_turns_file(tmp_path, n: int):
     return p
 
 
-def test_sessions_import_windows_to_last_1000_turns(tmp_path, monkeypatch, capsys):
-    """A >1000-turn session POSTs the LAST 1000 turns — the payload passes
-    the real SessionRequest boundary (no 422) and the truncation is reported."""
+def test_sessions_import_windows_to_last_max_session_turns(tmp_path, monkeypatch, capsys):
+    """A >MAX_SESSION_TURNS session POSTs the LAST MAX_SESSION_TURNS turns —
+    the payload clears the HANDLER cap, not merely the Pydantic boundary, and
+    the truncation is reported."""
     from tortoise.__main__ import _cmd_sessions_import
     from tortoise.hosted_api import SessionRequest
+    from tortoise.quota import MAX_SESSION_TURNS
     from tortoise.session_import import MAX_TURNS
 
-    assert MAX_TURNS == 1000, "the window must mirror the hosted max_length"
+    # The client bound MUST mirror the bound the handler enforces
+    # (tortoise/quota.py::MAX_SESSION_TURNS), never the Pydantic max_length.
+    assert MAX_TURNS == MAX_SESSION_TURNS, (
+        "the window must mirror the HANDLER cap (tortoise/quota.py), not "
+        "SessionRequest.conversation's max_length"
+    )
 
     p = _pi_turns_file(tmp_path, 1005)
     monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
@@ -244,10 +255,16 @@ def test_sessions_import_windows_to_last_1000_turns(tmp_path, monkeypatch, capsy
     assert rc == 0
     conv = captured["conversation"]
     assert len(conv) == MAX_TURNS
+    assert len(conv) <= MAX_SESSION_TURNS, (
+        f"window kept {len(conv)} > handler cap {MAX_SESSION_TURNS} — the "
+        "real route 400s and no receipt is written"
+    )
     # the LAST turns win — recent context is what memory wants
-    assert conv[0]["content"] == "turn 5"
+    assert conv[0]["content"] == "turn 505"
     assert conv[-1]["content"] == "turn 1004"
-    # the payload passes the REAL hosted boundary (pre-fix: 422, no receipt)
+    # clears the Pydantic boundary — necessary but NOT sufficient (the handler
+    # cap above is the one that actually refuses; the real-route 2xx is pinned
+    # by tests/test_hosted_api.py::test_backfill_window_lands_below_the_handler_cap)
     SessionRequest(conversation=conv)
     # ...and the receipt is written for what was actually sent
     receipts = list((tmp_path / "receipts").glob("*.json"))
@@ -256,7 +273,7 @@ def test_sessions_import_windows_to_last_1000_turns(tmp_path, monkeypatch, capsy
     assert receipt["turns"] == MAX_TURNS
     # never a silent drop
     err = capsys.readouterr().err.lower()
-    assert "truncat" in err and "5 older turns dropped" in err
+    assert "truncat" in err and "505 older turns dropped" in err
 
 
 def test_sessions_import_window_is_a_noop_at_or_below_the_limit(tmp_path, monkeypatch, capsys):

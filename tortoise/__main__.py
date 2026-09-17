@@ -2987,9 +2987,10 @@ def _cmd_sessions_import(args) -> int:
     re-POST without a local receipt converges server-side (same session_id ⇒
     zero new nodes). pi parses its own record shape (#3667 — it no longer
     aliases the codex parser, which returned 0 turns for real Pi sessions).
-    The parsed conversation is windowed to the hosted 1000-turn limit (the
-    SAME bound the live Pi capture extension applies) keeping the most recent
-    turns, with the truncation reported — never a silent drop.
+    The parsed conversation is windowed to the hosted turn cap
+    (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
+    capture extension applies) keeping the most recent turns, with the
+    truncation reported — never a silent drop.
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
@@ -3015,10 +3016,12 @@ def _cmd_sessions_import(args) -> int:
         print("No conversation turns parsed from session file.", file=_sys.stderr)
         return 1
 
-    # Hosted SessionRequest.conversation is max_length=1000; the live capture
-    # extension caps at the same bound, so this backfill leg must too — an
-    # over-long file would 422 the POST and write no receipt. Keep the MOST
-    # RECENT turns and REPORT the truncation (never a silent drop).
+    # The bound is the HANDLER's `MAX_SESSION_TURNS` (tortoise/quota.py) — not
+    # `SessionRequest.conversation`'s max_length=1000, which the handler then
+    # overrides with an HTTP 400 above 500. The live capture extension caps at
+    # the same constant, so this backfill leg must too — a 501–1000-turn file
+    # would otherwise clear the Pydantic boundary and still write no receipt.
+    # Keep the MOST RECENT turns and REPORT the truncation (never a silent drop).
     parsed_total = len(turns)
     turns, dropped_turns = window_turns(turns)
     if dropped_turns:

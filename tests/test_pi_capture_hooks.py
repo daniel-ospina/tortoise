@@ -71,6 +71,27 @@ def test_capture_is_not_gated_behind_a_default_false_flag():
     )
 
 
+def test_extension_turn_cap_matches_the_server_handler_cap():
+    """#3575 P1-A: the shipped extension's `MAX_TURNS` must equal the bound the
+    HANDLER enforces (`tortoise/quota.py::MAX_SESSION_TURNS`), never the
+    Pydantic `SessionRequest.conversation` max_length.
+
+    The extension is shipped standalone (it cannot import Python), so this
+    parity guard is what makes drift impossible: if the server cap moves, the
+    literal here must move with it or CI goes red — a 501+-turn Pi session
+    would otherwise POST >cap, get HTTP 400, and log "capture FAILED" while
+    the backfill leg (which derives from the same constant) still succeeded.
+    """
+    from tortoise.quota import MAX_SESSION_TURNS
+
+    m = re.search(r"^export const MAX_TURNS = (\d+);", _src(), re.M)
+    assert m, "extension must export a literal MAX_TURNS"
+    assert int(m.group(1)) == MAX_SESSION_TURNS, (
+        f"extension MAX_TURNS={m.group(1)} != handler cap MAX_SESSION_TURNS="
+        f"{MAX_SESSION_TURNS} — a >cap session would 400 the live capture"
+    )
+
+
 def test_extension_posts_both_capture_endpoints():
     src = _src()
     # install-probe on load (server-visible install signal) …

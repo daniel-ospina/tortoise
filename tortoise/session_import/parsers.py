@@ -35,23 +35,30 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
+from tortoise.quota import MAX_SESSION_TURNS
+
 _logger = logging.getLogger("tortoise.session_import")
 
 # Roles we keep. Anything else (system, tool, function, model-rollout,
 # …) is context noise for the capture surface — skipped, never coerced.
 _KEEP_ROLES = {"user", "assistant"}
 
-# Hosted POST /v1/sessions contract: ``SessionRequest.conversation`` is
-# ``max_length=1000`` (tortoise/hosted_api.py). The live Pi capture extension
-# caps at the same bound (``MAX_TURNS`` in tortoise/pi-hooks/tortoise-capture.ts);
-# the backfill leg must agree or the two legs of the same seam diverge — a
-# >1000-turn file 422s the POST and writes NO receipt. Measured on the real
-# local Pi corpus: 21/369 files (>5%) exceed 1000 turns (max 2555).
-MAX_TURNS = 1000
+# Hosted POST /v1/sessions turn cap. This is the bound the HANDLER
+# enforces — ``hosted_api._capture_session_impl`` raises HTTP 400 when
+# ``len(conversation) > MAX_SESSION_TURNS`` (``tortoise/quota.py``). It is
+# NOT ``SessionRequest.conversation``'s ``max_length=1000``: that is only the
+# Pydantic boundary, so a payload the model accepts (500 < n <= 1000) still
+# 400s at the handler and the backfill writes NO receipt. The live Pi capture
+# extension caps at the same bound (``MAX_TURNS`` in
+# ``tortoise/pi-hooks/tortoise-capture.ts``), pinned to this constant by
+# ``tests/test_pi_capture_hooks.py`` so the two legs cannot drift. Measured on
+# the real local Pi corpus (2026-09, 374 files with >=1 turn): 45 files
+# (12.0%) exceed 500 turns; 21 (5.6%) exceed 1000 (max 2555).
+MAX_TURNS = MAX_SESSION_TURNS
 
 
 def window_turns(turns: list[dict]) -> tuple[list[dict], int]:
-    """Cap a parsed conversation at the hosted 1000-turn limit.
+    """Cap a parsed conversation at the hosted turn cap (``MAX_SESSION_TURNS``).
 
     Keeps the **LAST** ``MAX_TURNS`` turns — recent context is what memory
     wants — and returns ``(windowed, dropped)`` so the caller can report the

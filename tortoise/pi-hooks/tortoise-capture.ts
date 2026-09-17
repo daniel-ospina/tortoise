@@ -38,8 +38,16 @@ import { basename, join } from "node:path";
 export const HARNESS = "pi";
 export const DEFAULT_API_URL = "https://api.premiselabs.co";
 export const CONFIG_PATH = join(homedir(), ".pi", "agent", "tortoise-config.json");
-/** Hosted POST /v1/sessions limits (SessionRequest: max_length=1000). */
-export const MAX_TURNS = 1000;
+/**
+ * Hosted POST /v1/sessions turn cap — the bound the BFF HANDLER enforces
+ * (`tortoise/quota.py::MAX_SESSION_TURNS`; `hosted_api._capture_session_impl`
+ * raises HTTP 400 above it), NOT `SessionRequest.conversation`'s
+ * `max_length=1000` (a Pydantic boundary the handler then rejects). The
+ * backfill leg derives its cap from the same constant
+ * (`tortoise/session_import/parsers.py::MAX_TURNS`); `tests/test_pi_capture_hooks.py`
+ * pins this literal to it so the two legs cannot drift.
+ */
+export const MAX_TURNS = 500;
 /** Hosted per-turn stored window (tortoise _capture_turn_window). */
 export const TURN_MAX_CHARS = 5000;
 /** Bounded network budget — Pi must never be blocked by a capture. */
@@ -166,7 +174,11 @@ export function extractTurns(entries: Array<Record<string, unknown>>): Turn[] {
     const text = flattenContent(message.content).trim();
     if (!text) continue;
     turns.push({ role, content: text.slice(0, TURN_MAX_CHARS) });
-    if (turns.length >= MAX_TURNS) break;
+    // Keep the MOST RECENT turns — matching the backfill leg's
+    // `window_turns` (`turns[-MAX_TURNS:]`). Dropping the oldest is the
+    // whole point: recent context is what memory wants. An early `break`
+    // here would keep the OLDEST MAX_TURNS instead (#3707).
+    if (turns.length > MAX_TURNS) turns.shift();
   }
   return turns;
 }

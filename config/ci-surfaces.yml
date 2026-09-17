@@ -534,6 +534,19 @@ surfaces:
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
   # code with no surface mapping (tortoise/session_import/ parsers etc.).
   - eval/write_path/test_write_path_benchmark.py
+  # #3575 P1-B: this pins tortoise/pi-hooks/tortoise-capture.ts — the artifact
+  # HARNESS_INSTALL.pi installs. `tortoise/pi-hooks/` matches no SOURCE_PATTERNS
+  # entry, so a change to the extension selects `core` via the `tortoise/`
+  # fallback; registered ONLY under `onboarding`, the guard was never selected
+  # for the very change it guards (neither this Python guard nor the
+  # extension's `node --test` suite ran). Dual-registered with `onboarding`.
+  - test_pi_capture_hooks.py
+  # #3575 P1-A: this pins `tortoise/session_import/parsers.py::window_turns`.
+  # `tortoise/session_import/` maps to no named surface, so a parsers.py change
+  # selects `core` via the fallback — registered only under `api` (its
+  # hosted_api import), the window guard did not run for the very change it
+  # guards. Dual-registered with `api` (same #2938 precedent).
+  - test_session_import_codex.py
   ep:
   - test_a9_direct_edge_traversal.py
   # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
