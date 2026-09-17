@@ -33,12 +33,18 @@
   var COOKIE_PATH = '/';
   var EXPIRY_MS = 7 * 24 * 3600 * 1000; // 7 days — #572 parity
   var SIZE_GUARD = 3800; // encoded bytes; strip provider tokens above this
-  // The browser's per-cookie limit is 4096 bytes and an over-limit write is
-  // dropped SILENTLY (no exception, any previous value kept) — the observed
-  // drop boundary is ~4077 encoded bytes. Refusing above it is the honest
-  // signal: storeSession() re-reads and returns false, so the caller keeps the
-  // fragment instead of destroying the only copy of the credential (#3503).
-  var SIZE_CAP = 4077;
+  // Chrome's per-cookie limit is 4096 bytes on `name=value`. (RFC 6265's 4KB
+  // minimum spans name + value + ATTRIBUTES; engines enforce the smaller
+  // name=value cap, which is the rule the regression harness models.) An
+  // over-limit write is dropped SILENTLY — no exception, any previous value
+  // kept. Refusing above the limit is the honest signal: storeSession() then
+  // reports false and the caller keeps the fragment instead of destroying the
+  // only copy of the credential (#3503).
+  // DERIVE the limit from the rule; do not hardcode the byte count. A literal
+  // (4077) disagreed with this rule by 4 bytes, leaving an untested band where
+  // the code wrote, the browser dropped, and the advertised error never fired.
+  var COOKIE_LIMIT = 4096; // bytes of `name` + '=' + `value`
+  var SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1; // largest value we may write
 
   var isLocal = function () {
     var h = window.location.hostname;
@@ -185,13 +191,21 @@
           flowType: 'implicit', // #1566: cross-origin OAuth (tortoise → app)
           // must share the flow — a pkce verifier is origin-scoped and cannot
           // cross subdomains, so the app cannot exchange a pkce code minted
-          // on /auth. Implicit #access_token fragments are ingested by the
-          // app's implicit client (the raw tt_ key never leaves sessionStorage).
+          // on /auth. The #access_token fragment is consumed by this bridge's
+          // load-time IIFE, not by supabase-js (see detectSessionInUrl below);
+          // the raw tt_ key never leaves sessionStorage.
           storage: supabaseStorage,
           storageKey: COOKIE_NAME, // cookie name = storage key (dashboard parity)
           persistSession: true,
           autoRefreshToken: true,
-          detectSessionInUrl: true,
+          // ONE fragment consumer (#3503): the load-time IIFE above already
+          // consumes #access_token and writes this same cookie. Letting
+          // supabase-js ALSO ingest the fragment is fully redundant — it reads
+          // the same hash and writes the same storage — and it clears
+          // window.location.hash BEFORE awaiting _saveSession(), so an
+          // over-cap session loses the fragment a SECOND time and the
+          // bridge-level retention is invisible in the product.
+          detectSessionInUrl: false,
         },
       });
     } catch (err) {
@@ -205,6 +219,8 @@
     COOKIE_NAME: COOKIE_NAME,
     COOKIE_DOMAIN: COOKIE_DOMAIN,
     EXPIRY_MS: EXPIRY_MS,
+    COOKIE_LIMIT: COOKIE_LIMIT,
+    SIZE_CAP: SIZE_CAP,
   };
 
   // ── #1511 shared auth-gate helpers ────────────────────────────────────────
@@ -311,7 +327,24 @@
     if (!session || !session.access_token || !session.refresh_token) return false;
     try {
       supabaseStorage.setItem(COOKIE_NAME, JSON.stringify(session));
-      return readValidSession() !== null;
+      // Prove THIS write — not merely that SOME valid session is readable.
+      // readValidSession() accepts a still-valid PREVIOUS cookie AND falls back
+      // to the legacy localStorage keys, so a REFUSED write could look like
+      // success: the caller then stripped the fragment, destroying the NEW
+      // credential while the user stayed signed in as the OLD account (and the
+      // cross-subdomain cookie the dashboard reads was never written). Read the
+      // COOKIE itself and compare the pair just written — the
+      // migrateLegacySession value-comparison precedent. refresh_token is part
+      // of the identity too: a prior cookie that happens to share the
+      // access_token but carries a stale refresh_token is still NOT this write.
+      // The setItem token-stripping path never removes refresh_token, so this
+      // comparison is exact. Keep the strict expiry check.
+      var storedRaw = readCookie(COOKIE_NAME);
+      if (!storedRaw) return false;
+      var stored = JSON.parse(storedRaw);
+      return !!(stored && stored.access_token === session.access_token &&
+        stored.refresh_token === session.refresh_token &&
+        stored.expires_at && stored.expires_at * 1000 > Date.now());
     } catch (e) { return false; }
   };
 
