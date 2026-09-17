@@ -631,6 +631,7 @@ surfaces:
   - test_onboarding_w4_settings.py  # #2000 (W4): docker-lane Settings-surface toggle-persistence tests
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
+  - test_pi_capture_hooks.py
   - test_signup_form_safety.py
   # #3616: the deploy-binding gate. A pure unit test of the (env, type, name)
   # comparison in tools/check_pages_bindings.py plus an execution harness for the
