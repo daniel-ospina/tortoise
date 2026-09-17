@@ -617,12 +617,13 @@ async function runDashboardScenario(kind) {
     // NB: for the sign-out scenarios the dashboard has ALREADY cleared the
     // cookie before it bounces (that is the product flow) — only the legacy key
     // survives, and clearing THAT is the whole point of ?signout=1.
-    // EXCEPT: `signout_forged` (a forged link must not destroy anything, so the
-    // cookie is seeded to prove it survives) and `signout_slow` (the dashboard's
-    // bridge never loaded, or the 120s marker TTL elapsed — the cookie the
-    // dashboard could not clear is still there and /auth must clear it).
+    // EXCEPT: `signout_forged` / `signout_expired_marker` (an untrusted request
+    // must not destroy anything, so the cookie is seeded to prove it survives),
+    // `signout_slow` (the dashboard's own clear never ran — the cookie is still
+    // there and /auth, behind a LIVE marker, must clear it) and
+    // `signout_bridge_blocked` (no bridge on /auth, so nothing can be cleared).
     const keepsCookie = kind === 'signout_forged' || kind === 'signout_slow' ||
-      kind === 'signout_bridge_blocked';
+      kind === 'signout_bridge_blocked' || kind === 'signout_expired_marker';
     if (kind !== 'no_session' && (keepsCookie || kind !== 'signout')) {
       opts.preseed = oldCookie(expiresAt);
     }
@@ -630,7 +631,8 @@ async function runDashboardScenario(kind) {
     // legacy localStorage session, and readValidSession() falls back to it.
     // `?signout=1` is how the refusal card asks this page to clear its own.
     if (kind === 'signout' || kind === 'signout_forged' || kind === 'signout_slow' ||
-        kind === 'signout_with_error' || kind === 'signout_bridge_blocked') {
+        kind === 'signout_with_error' || kind === 'signout_bridge_blocked' ||
+        kind === 'signout_expired_marker') {
       // Round 9: the dashboard's OAuth-error bounce forwards `?error=…` verbatim
       // and signOutSearch() copies the whole query, so `/auth?error=…&signout=1`
       // is one URL-shape away.
@@ -641,9 +643,12 @@ async function runDashboardScenario(kind) {
       opts.legacyLocalStorage = {};
       opts.legacyLocalStorage['sb-ybetwichurajbfswfeqa-auth-token'] =
         decodeURIComponent(oldCookie(expiresAt));
-      // The origin-proven marker: only the dashboard origin can set a cookie on
-      // .premiselabs.co, so its presence is the authorisation for the clear.
-      if (kind !== 'signout_forged') opts.extraCookies = { tt_signout: '1' };
+      // The marker is the authorisation for the clear. `signout_forged` (never
+      // trusted) and `signout_expired_marker` (the dashboard's marker outlived
+      // its TTL before /auth's gate ran) reach /auth WITHOUT it.
+      if (kind !== 'signout_forged' && kind !== 'signout_expired_marker') {
+        opts.extraCookies = { tt_signout: '1' };
+      }
     }
     const env = makeEnv(opts);
     // signup.html's /admin round-trip (__ADMIN_RETURN_TO): the destination the
@@ -700,7 +705,8 @@ async function runDashboardScenario(kind) {
     // A completed sign-out leaves nothing for getSession() to resolve — the
     // real flow, since the gate cleared the cookie above.
     const asyncSession = ['no_session', 'signout', 'signout_forged',
-      'signout_slow', 'signout_with_error', 'signout_bridge_blocked'].includes(kind) ? null : {
+      'signout_slow', 'signout_with_error', 'signout_bridge_blocked',
+      'signout_expired_marker'].includes(kind) ? null : {
       access_token: 'OLD-ACCESS-TOKEN', refresh_token: 'old-refresh',
       expires_at: expiresAt, expires_in: 3600, token_type: 'bearer',
     };
@@ -822,6 +828,8 @@ async function runE2EIngestScenario(kind) {
       await safeAsync(() => runAuthPageScenario('signout_with_error'));
     out.auth_page_signout_bridge_blocked =
       await safeAsync(() => runAuthPageScenario('signout_bridge_blocked'));
+    out.auth_page_signout_expired_marker =
+      await safeAsync(() => runAuthPageScenario('signout_expired_marker'));
   } else if (mode === 'consent_page') {
     out.consent_page_oversized = await safeAsync(() => runConsentPageScenario('oversized'));
     out.consent_page_small = await safeAsync(() => runConsentPageScenario('small'));
@@ -1345,17 +1353,19 @@ def test_dashboard_mount_gate_never_navigates_over_a_live_token_fragment() -> No
         "nothing renders off `fragmentRefused` — the flag would be dead state "
         "and the user would be left with only a retry that cannot succeed"
     )
-    assert "window.bounceToAuth(signOutSearch, '')" in dash, (
+    assert "bounceToAuthSigningOut('')" in dash, (
         "the error card needs an explicit route to /auth that deliberately "
         "discards the fragment (a user-chosen discard, never the silent #3503 "
         "one)"
     )
-    # #3503 (review P2, round 6): the marker is what makes /auth clear ITS OWN
-    # origin's legacy localStorage session — the key readValidSession() falls
-    # back to, which main.jsx cannot reach across origins.
-    assert dash.count("q.set('signout', '1')") >= 2, (
-        "both forward routes (the error card and the claim screen) must carry "
-        "?signout=1, or /auth hands the visitor back to the OLD account"
+    # #3503 (review P2 round 6, P1 round 10): the marker + `?signout=1` are what
+    # make /auth clear ITS OWN origin's legacy localStorage session — the key
+    # readValidSession() falls back to, which main.jsx cannot reach across
+    # origins. Every forward route now shares ONE helper, so the signal cannot be
+    # present on some routes and missing on others (logout() was missing it).
+    assert "q.set('signout', '1')" in dash, (
+        "the sign-out routes must carry ?signout=1, or /auth hands the visitor "
+        "back to the OLD account"
     )
 
 
@@ -1588,7 +1598,7 @@ def test_dashboard_refusal_card_is_reachable_with_claim_intent() -> None:
         "the claim screen's only forward route must discard the session it "
         "leaves behind, or /auth forwards the OLD cookie straight back here"
     )
-    assert "window.bounceToAuth(signOutSearch, '')" in segment
+    assert "bounceToAuthSigningOut('')" in segment
 
 
 def test_consent_page_recovers_after_a_fresh_signin(consent_page_report: dict) -> None:
@@ -1662,10 +1672,11 @@ def test_auth_page_ignores_a_forged_signout_request(auth_page_report: dict) -> N
     real = _scenario(auth_page_report, "auth_page_signout")
     assert real["legacy_key_at_load"] is True
     assert real["legacy_key_present"] is False
-    # ...including when the dashboard's own clear never ran (bridge unavailable,
-    # or the marker TTL elapsed mid-navigation) and the cookie it could not clear
-    # is still present: /auth, behind the marker, clears BOTH copies, so the gate
-    # cannot then forward the visitor back as the OLD account (#3503 P3, round 8).
+    # ...including when the dashboard's own clear never ran (its bridge failed to
+    # load) and the cookie it could not clear is still present: /auth, behind a
+    # LIVE marker, clears BOTH copies, so the gate cannot then forward the
+    # visitor back as the OLD account (#3503 P3, round 8). NB the marker
+    # *expiring* mid-navigation is the untrusted path below, not this one.
     slow = _scenario(auth_page_report, "auth_page_signout_slow")
     assert slow["cookie_at_load"] is True, "harness precondition"
     assert slow["legacy_key_present"] is False, (
@@ -1722,6 +1733,72 @@ def test_a_blocked_bridge_does_not_burn_the_signout_authorisation(
     assert r["navigated"] is False, (
         "nor may a page without the bridge forward anywhere"
     )
+
+
+def test_an_expired_marker_clears_nothing(auth_page_report: dict) -> None:
+    """#3503 (review P3, round 10). The marker TTL (120s) starts at the click and
+    is read after a full page load, so a sufficiently slow navigation — or a
+    replayed `/auth?signout=1` link — arrives with no marker. That state must be
+    the UNTRUSTED path: /auth destroys nothing, exactly like a forged link. The
+    cost is stated plainly: the dashboard's own clear has already run by then, so
+    the surviving legacy key can still resolve in `readValidSession()` and the
+    gate may forward. That is the pre-existing legacy-fallback behaviour in the
+    bridge (#1225 migration), not something this branch can fix by clearing on an
+    untrusted request — doing so is the one-link forced logout the ?stale=1
+    branch refuses."""
+    r = _scenario(auth_page_report, "auth_page_signout_expired_marker")
+    assert r["cookie_at_load"] is True, "harness precondition"
+    assert r["marker_present"] is False
+    assert r["cookie_present"] is True, (
+        "an untrusted /auth?signout=1 (expired marker) cleared the SHARED cookie "
+        "— that is a one-link forced logout"
+    )
+    assert r["legacy_key_present"] is True, (
+        "and it must not clear this origin's legacy session either"
+    )
+
+
+def test_every_dashboard_signout_is_marker_routed() -> None:
+    """#3503 (review P1, round 10). `logout()` — the dashboard's PRIMARY sign-out
+    — cleared storage and bounced to /auth with no marker and no `?signout=1`, so
+    /auth re-adopted the tortoise-origin legacy session (which migrateLegacySession
+    deliberately retains when the cookie write was refused) and forwarded the
+    visitor straight back: the OLD account, or an /auth ↔ dashboard redirect loop.
+    The inline snippet was duplicated in two places and absent from the other
+    three; every clear-then-leave path now routes through `bounceToAuthSigningOut()`."""
+    dash = DASHBOARD.read_text(encoding="utf-8")
+    assert "function bounceToAuthSigningOut(hash) {" in dash, (
+        "the shared sign-out route is gone"
+    )
+    helper = dash[dash.index("function bounceToAuthSigningOut(hash) {"):]
+    helper = helper[:helper.index("\n}\n")]
+    assert "setSignOutMarker()" in helper and "q.set('signout', '1')" in helper, (
+        "the route must set the marker AND carry ?signout=1"
+    )
+    # The invariant: no clear-then-leave path may bypass it.
+    calls = [m.start() for m in re.finditer(
+        r"if \(typeof window\.clearStoredSession === 'function'\) window\.clearStoredSession\(\)",
+        dash)]
+    assert len(calls) >= 4, f"expected the sign-out sites, found {len(calls)}"
+    for pos in calls:
+        # Window wide enough for the comment block that explains the route at
+        # each site, tight enough that a DIFFERENT function's route cannot
+        # satisfy it.
+        window = dash[pos:pos + 1200]
+        assert "bounceToAuthSigningOut(" in window, (
+            "a sign-out path clears storage without the marker route at offset "
+            f"{pos} — /auth will re-adopt the legacy session (P1, round 10)"
+        )
+    # ...and no sign-out may still call bounceToAuth() bare (a bare call has no
+    # marker and no ?signout=1).
+    for m in re.finditer(r"window\.bounceToAuth\((?:[^)]*)\)", dash):
+        line_start = dash.rfind("\n", 0, m.start()) + 1
+        if dash[line_start:m.start()].lstrip().startswith("//"):
+            continue  # a comment mentioning the helper is not a call site
+        text = m.group(0)
+        assert "search" in text or "oauthErrorHash" in text or "'signout'" in text, (
+            f"bare bounceToAuth() at offset {m.start()} drops the sign-out signal"
+        )
 
 
 def test_signout_is_origin_proven_and_clears_only_behind_the_marker() -> None:

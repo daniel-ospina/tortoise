@@ -679,14 +679,43 @@ function clearClaimPendingMarker() {
   } catch { /* best-effort */ }
 }
 
-// #3503 (review P2, round 7): a sign-out must be ORIGIN-PROVEN. A bare
+// #3503 (review P2 round 7 / P3 round 9): a sign-out must be GATED. A bare
 // `?signout=1` on /auth is forgeable — a third-party link would force-log-out
 // the visitor, and clearing the shared parent-domain cookie would take the
 // dashboard with it (the same one-link forced logout the /auth `?stale=1`
-// branch explicitly refuses). Only this origin can write a cookie on
-// .premiselabs.co, so the marker IS the proof; /auth clears its own origin's
-// legacy session only when it is present, and consumes it.
+// branch explicitly refuses). The bound is the parent-domain cookie trust
+// boundary, NOT this origin: any *.premiselabs.co page can set a cookie on
+// .premiselabs.co, so a sibling subdomain (or a preview deploy there) can mint
+// this marker — accepted, because such a page already holds the shared session
+// cookie and can clear it directly. What the marker excludes is every origin
+// OUTSIDE that boundary, which no third-party site can cross. Behind it /auth
+// performs the SAME full clear this function's caller just did (legacy key AND
+// shared cookie), then consumes the marker.
 const SIGN_OUT_MARKER = 'tt_signout'
+
+// #3503 (review P1, round 10): EVERY dashboard-initiated sign-out must go
+// through here — not just the refused-fragment card's. `clearStoredSession()`
+// clears the cookie and THIS origin's legacy keys, but /auth keeps its own
+// `sb-…-auth-token` localStorage copy that `readValidSession()` falls back to,
+// and migrateLegacySession() deliberately RETAINS it when the cookie write was
+// refused (the over-cap case this PR exists for). A sign-out that reaches /auth
+// without the marker is therefore re-adopted there: the visitor is forwarded
+// back as the OLD account, or into an /auth ↔ dashboard redirect loop. Routing
+// every sign-out through `bounceToAuthSigningOut()` is what makes the clear
+// reach the other origin.
+function bounceToAuthSigningOut(hash) {
+  setSignOutMarker()
+  const q = new URLSearchParams(window.location.search)
+  q.set('signout', '1')
+  const s = q.toString()
+  const search = s ? '?' + s : '?signout=1'
+  if (typeof window.bounceToAuth === 'function') {
+    window.bounceToAuth(search, hash || '')
+  } else {
+    window.location.replace('https://tortoise.premiselabs.co/auth' + search + (hash || ''))
+  }
+}
+
 function setSignOutMarker() {
   try {
     // 120s: the marker's clock starts at the click, and /auth's gate reads it
@@ -3265,12 +3294,10 @@ function claimIntentInFlight() {
         // window.location.search on its bounce; the bare call here dropped
         // them, so an OAuth failure during provisioning silently lost the
         // banner's cause). #1909: an error FRAGMENT rides along too.
-        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, oauthErrorHash())
-        // #1860 (P3-5, review P2-1): the degraded fallback must preserve the
-        // params too — mirror the mount gate's fallback exactly, or the
-        // OAuth-error banner's cause is lost precisely when the bridge is
-        // blocked/unavailable.
-        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search + oauthErrorHash())
+        // #3503 (review P1, round 10): `bounceToAuthSigningOut` derives the
+        // search from window.location itself, so the params are still carried
+        // — with `signout=1` and the marker added.
+        bounceToAuthSigningOut(oauthErrorHash())
         return { routedAway: true }
       }
       if (response && response.ok) {
@@ -3489,9 +3516,9 @@ function claimIntentInFlight() {
             sessionTokenRef.current = null
             setTeams([])
             setAuthed(false)
+            // #3503 (review P1, round 10): same origin-marked route as logout().
             if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-            if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
-            else window.location.replace('https://tortoise.premiselabs.co/auth')
+            bounceToAuthSigningOut('')
           }
         })
         authSubRef.current = authSub?.subscription || null
@@ -4108,9 +4135,10 @@ function claimIntentInFlight() {
     // the dead redirect shell. clearStoredSession is belt-and-braces (signOut
     // already clears the cookie via the adapter; a blocked script is covered
     // by the mount-effect redirect on next load).
+    // #3503 (review P1, round 10): marker + `?signout=1`, or /auth re-adopts the
+    // tortoise-origin legacy session and bounces the visitor straight back.
     if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-    if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
-    else window.location.replace('https://tortoise.premiselabs.co/auth')
+    bounceToAuthSigningOut('')
   }
 
   async function loadAll(key) {
@@ -5931,15 +5959,7 @@ function claimIntentInFlight() {
                         // account), and the shared cookie if this origin's own
                         // clear above did not run (round 8).
                         if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-                        setSignOutMarker()
-                        const signOutSearch = (() => {
-                          const q = new URLSearchParams(window.location.search)
-                          q.set('signout', '1')
-                          const s = q.toString()
-                          return s ? '?' + s : ''
-                        })()
-                        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(signOutSearch, '')
-                        else window.location.replace('https://tortoise.premiselabs.co/auth' + signOutSearch)
+                        bounceToAuthSigningOut('')
                       }}>
                       Sign in again
                     </button>
@@ -6046,15 +6066,7 @@ function claimIntentInFlight() {
                          textDecoration: 'underline', cursor: 'pointer' }}
                 onClick={() => {
                   if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-                  setSignOutMarker()
-                  const signOutSearch = (() => {
-                    const q = new URLSearchParams(window.location.search)
-                    q.set('signout', '1')
-                    const s = q.toString()
-                    return s ? '?' + s : ''
-                  })()
-                  if (typeof window.bounceToAuth === 'function') window.bounceToAuth(signOutSearch, '')
-                  else window.location.replace('https://tortoise.premiselabs.co/auth' + signOutSearch)
+                  bounceToAuthSigningOut('')
                 }}>
                 ← Back to sign in
               </button>
