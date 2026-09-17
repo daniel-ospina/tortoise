@@ -207,9 +207,32 @@ def test_find_socket_dirs_is_called_with_the_private_root(monkeypatch):
                                f"private root {scan_root()!r}"
 
 
+def _make_session_root(parent: Path, name: str) -> Path:
+    """A directory that _socket_walk_roots must recognise as a session root:
+    the `tt_` prefix AND the marker file the harness writes."""
+    from tortoise.embedded_reaper import SESSION_ROOT_MARKER
+    root = parent / name
+    root.mkdir(parents=True)
+    (root / SESSION_ROOT_MARKER).write_text(f"pid={os.getpid()}\n")
+    return root
+
+
+def test_marker_name_matches_the_reaper_contract():
+    """tests/_tmpdir_isolation._PID_MARKER is the name
+    tortoise.embedded_reaper.SESSION_ROOT_MARKER requires. If these drift,
+    every session root silently stops being swept AND silently stops being
+    recognised — both failures are invisible without this pin."""
+    from tests import _tmpdir_isolation
+    from tortoise import embedded_reaper
+    assert _tmpdir_isolation._PID_MARKER == \
+        embedded_reaper.SESSION_ROOT_MARKER
+    assert os.path.exists(os.path.join(scan_root(), _tmpdir_isolation._PID_MARKER)), \
+        "the live session root must carry the marker the reaper looks for"
+
+
 def test_socket_walk_reaches_into_a_nested_session_scratch_root(tmp_path):
     """#3752 regression, found in review: the suite nests its scratch one
-    level deeper (`<tmpdir>/tt_<8-char random>/<socket dir>/redis.socket` = depth 3),
+    level deeper (`<tmpdir>/tt_<8-char>/<socket dir>/redis.socket` = depth 3),
     which the walk's maxdepth-2 global pass cannot reach — so a SIGKILLed
     suite's dead socket dirs would stop being swept by the host reaper.
 
@@ -224,12 +247,14 @@ def test_socket_walk_reaches_into_a_nested_session_scratch_root(tmp_path):
     direct.mkdir()
     (direct / "redis.socket").write_text("")
 
-    nested = tmp_path / "tt_abc12345" / "redislite_nested"
-    nested.mkdir(parents=True)
+    session = _make_session_root(tmp_path, "tt_abc12345")
+    nested = session / "redislite_nested"
+    nested.mkdir()
     (nested / "redis.socket").write_text("")
 
-    pid_only = tmp_path / "tt_def67890" / "tmpXYZ"
-    pid_only.mkdir(parents=True)
+    pid_session = _make_session_root(tmp_path, "tt_def67890")
+    pid_only = pid_session / "tmpXYZ"
+    pid_only.mkdir()
     (pid_only / "redis.pid").write_text("1\n")
 
     found = _find_socket_dirs(str(tmp_path))
@@ -238,6 +263,69 @@ def test_socket_walk_reaches_into_a_nested_session_scratch_root(tmp_path):
         "socket dir nested inside a tt_ session root was not reached"
     assert str(pid_only) in found, \
         "redis.pid marker nested inside a tt_ session root was not reached"
+
+
+def test_socket_walk_ignores_legacy_tt_prefixed_scratch_dirs(tmp_path):
+    """#3752 review finding: `tt_` is ALSO the long-standing prefix of plain
+    test-scratch dirs (`tt_211_`, `tt_1162_`, `tt_395_`, ...). Matching the
+    prefix alone made `_socket_walk_roots` return 252 roots on the polluted
+    host this was measured on, 207 of which were skipped once the shared walk
+    budget ran out — starving the real session root the nested pass exists
+    for. Only a root carrying SESSION_ROOT_MARKER is a session root."""
+    from tortoise.embedded_reaper import _find_socket_dirs, _socket_walk_roots
+
+    legacy = tmp_path / "tt_211_deadbeef"
+    (legacy / "redislite_legacy").mkdir(parents=True)
+    (legacy / "redislite_legacy" / "redis.socket").write_text("")
+
+    roots = _socket_walk_roots(str(tmp_path))
+    assert str(legacy) not in roots, \
+        "a bare tt_* test-scratch dir was treated as a session root"
+    assert roots[-1] == str(tmp_path), "the tempdir root must still be walked"
+    assert str(legacy / "redislite_legacy") not in \
+        _find_socket_dirs(str(tmp_path)), \
+        "a legacy tt_* scratch dir's socket must not be reached as a session root"
+
+
+def test_socket_walk_orders_nested_roots_before_the_tempdir(tmp_path):
+    """The nested roots come first so a slow global pass cannot consume the
+    shared walk budget before the dirs only the nested pass can reach."""
+    from tortoise.embedded_reaper import _socket_walk_roots
+
+    _make_session_root(tmp_path, "tt_aaaaaaaa")
+    roots = _socket_walk_roots(str(tmp_path))
+    assert roots[-1] == str(tmp_path)
+    assert roots[0] == str(tmp_path / "tt_aaaaaaaa"), \
+        f"nested root must precede the tempdir, got {roots!r}"
+
+
+def test_quarantine_walk_reaches_nested_session_roots(tmp_path, monkeypatch):
+    """#3752 review finding: the rename-aside is IN PLACE, so a quarantined
+    dir under a nested session root is invisible to a `-maxdepth 1` walk of
+    the tempdir root alone and would never converge."""
+    from tortoise import embedded_reaper as reaper
+
+    session = _make_session_root(tmp_path, "tt_abc12345")
+    q = session / f"redislite_live{reaper.STALE_QUARANTINE_SUFFIX}123"
+    q.mkdir()
+    (q / reaper.REAPER_OWNED_MARKER).write_text("")
+    (q / "redis.socket").write_text("")
+    (q / "redis.pid").write_text("1\n")
+
+    monkeypatch.setattr(reaper, "_real_gettempdir", lambda: str(tmp_path))
+    argv_log: list[list[str]] = []
+    real_run = subprocess.run
+
+    def recording_run(cmd, *a, **kw):
+        argv_log.append([str(c) for c in cmd])
+        return real_run(cmd, *a, **kw)
+
+    monkeypatch.setattr(reaper.subprocess, "run", recording_run)
+    reaper._sweep_quarantine_dirs(dry_run=True)
+    roots = [argv[1] for argv in argv_log if "-maxdepth" in argv]
+    assert str(session) in roots, \
+        f"the nested session root was not walked for quarantines: {roots!r}"
+    assert str(tmp_path) in roots, "the tempdir root walk regressed"
 
 
 def test_discover_never_shells_out_to_the_shared_temp_dir(monkeypatch):
@@ -261,6 +349,96 @@ def test_discover_never_shells_out_to_the_shared_temp_dir(monkeypatch):
                  if any(_is_host_tempdir_scope(tok) for tok in argv)]
     assert not offenders, \
         f"discovery shelled out to the shared temp dir: {offenders}"
+
+
+# ── stale-root reclaim: pid + start time, never a bare pid ───────────────
+
+def _stale_root(tmp_path: Path, marker: str) -> Path:
+    root = tmp_path / "tt_deadbeef"
+    root.mkdir()
+    (root / ".session-pid").write_text(marker)
+    return root
+
+
+def test_sweep_reclaims_root_of_a_dead_process(tmp_path, monkeypatch):
+    """A SIGKILLed suite cannot run its own teardown; the next suite must
+    reclaim its root."""
+    from tests import _tmpdir_isolation as iso
+
+    root = _stale_root(tmp_path, "pid=999999\nstart=1.0\n")
+    monkeypatch.setattr(iso, "HOST_TMPDIR", str(tmp_path))
+    assert iso.sweep_stale_session_roots() == [str(root)]
+    assert not root.exists()
+
+
+def test_sweep_preserves_root_of_a_live_concurrent_suite(tmp_path, monkeypatch):
+    """A live pid with a MATCHING start time is a concurrent suite — its root
+    must never be deleted."""
+    from tests import _tmpdir_isolation as iso
+
+    start = iso._process_start_time(os.getpid())
+    assert start is not None, "cannot verify start time; test proves nothing"
+    root = _stale_root(tmp_path, f"pid={os.getpid()}\nstart={start}\n")
+    monkeypatch.setattr(iso, "HOST_TMPDIR", str(tmp_path))
+    assert iso.sweep_stale_session_roots() == []
+    assert root.exists()
+
+
+def test_sweep_reclaims_root_whose_pid_was_recycled(tmp_path, monkeypatch):
+    """#1642 FIX 5: `os.kill(pid, 0)` alone proves nothing — the pid may now
+    belong to an unrelated process, pinning a dead suite's root forever. A
+    live pid whose start time does NOT match is reclaimable."""
+    from tests import _tmpdir_isolation as iso
+
+    start = iso._process_start_time(os.getpid())
+    assert start is not None
+    root = _stale_root(tmp_path, f"pid={os.getpid()}\nstart={start - 3600}\n")
+    monkeypatch.setattr(iso, "HOST_TMPDIR", str(tmp_path))
+    assert iso.sweep_stale_session_roots() == [str(root)]
+    assert not root.exists()
+
+
+def test_sweep_keeps_root_when_the_owner_is_undeterminable(tmp_path, monkeypatch):
+    """Every undeterminable case fails SAFE: a pid-only (legacy) marker, and
+    an unparseable marker, must both survive."""
+    from tests import _tmpdir_isolation as iso
+
+    pid_only = _stale_root(tmp_path, f"pid={os.getpid()}\n")
+    monkeypatch.setattr(iso, "HOST_TMPDIR", str(tmp_path))
+    assert iso.sweep_stale_session_roots() == []
+    assert pid_only.exists()
+
+    garbage = tmp_path / "tt_garbage0"
+    garbage.mkdir()
+    (garbage / ".session-pid").write_text("not-a-marker\n")
+    assert iso.sweep_stale_session_roots() == []
+    assert garbage.exists()
+
+
+def test_sweep_ignores_tt_dirs_without_a_marker(tmp_path, monkeypatch):
+    """Legacy `tt_*` test scratch is not ours; no marker means no delete."""
+    from tests import _tmpdir_isolation as iso
+
+    foreign = tmp_path / "tt_211_legacy"
+    foreign.mkdir()
+    monkeypatch.setattr(iso, "HOST_TMPDIR", str(tmp_path))
+    assert iso.sweep_stale_session_roots() == []
+    assert foreign.exists()
+
+
+# ── bytes paths must not blow up the process-wide guard ──────────────────
+
+def test_guard_tolerates_bytes_and_pathlike_shared_paths():
+    """os.scandir / os.listdir / os.walk all accept bytes, and the guard sees
+    EVERY call in the session, so a bytes path must be decoded rather than
+    reaching str.startswith as bytes (that raised a misleading TypeError from
+    inside the guard, process-wide)."""
+    from tests._tmpdir_isolation import _is_host_tempdir_scope
+
+    assert _is_host_tempdir_scope(os.fsencode(HOST_TMPDIR)) is True
+    assert _is_host_tempdir_scope(Path(HOST_TMPDIR)) is True
+    assert _is_host_tempdir_scope(os.fsencode(scan_root())) is False
+    assert _is_host_tempdir_scope(12345) is False
 
 
 # ── static guard: the idiom cannot come back unnoticed ───────────────────

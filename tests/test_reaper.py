@@ -6,6 +6,7 @@ unknown old-settings dirname protection, client-count via CLIENT LIST.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import shutil
@@ -663,9 +664,7 @@ def test_reap_kill_removes_socket_dir_and_ephemeral_data_dir(monkeypatch):
         sock_dir = base / "redislite_x"
         sock_dir.mkdir()
         sp = sock_dir / "redis.socket"
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(sp))
-        s.close()
+        _bind_unix_socket(sp).close()
         (sock_dir / "redis.pid").write_text("99999999\n")
         data_dir = base / "tortoise_test_y"
         data_dir.mkdir()
@@ -703,9 +702,7 @@ def test_reap_kill_preserves_non_ephemeral_data_dir(monkeypatch):
         sock_dir = base / "redislite_x"
         sock_dir.mkdir()
         sp = sock_dir / "redis.socket"
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(sp))
-        s.close()
+        _bind_unix_socket(sp).close()
         user_dir = Path(tempfile.gettempdir()) / \
             f"reaper-user-data-test-{os.getpid()}"  # non-ephemeral name
         user_dir.mkdir()
@@ -1424,6 +1421,38 @@ def test_pid_alive_live_and_dead_unchanged():
 
 # ── #1383: classification honesty — dead-pid → stale_socket (plan Task 2) ─
 
+_BIND_SEQ = itertools.count()
+
+
+def _bind_unix_socket(path) -> socket.socket:
+    """Bind an AF_UNIX socket at ``path``, returning the (unlistened) socket.
+
+    Works around macOS' ~104-byte sun_path limit, which the #3752 private
+    session temp root makes reachable for ordinary scratch paths (host temp
+    dir 56 + ``/tt_<8>`` + ``/tt_<8>`` + ``/<dir>`` + ``/redis.socket``
+    already exceeds it for a 12-char dir name). When the path does not fit,
+    the socket is bound at a SHORT path inside the temp dir and its file is
+    RENAMED onto ``path``: the kernel resolves a unix socket by inode, so a
+    client connecting to the final path still reaches this listener. Callers
+    that want a DEAD socket close it after the bind (the file persists); that
+    is also why a renamed socket probes as 'dead' rather than 'missing'.
+
+    Renaming the inode is exactly the situation several reaper tests simulate
+    (a server "moved with its dir"), so this is a faithful fixture, not a
+    concession.
+    """
+    target = str(path)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if len(target.encode("utf-8", "surrogateescape")) <= 100:
+        s.bind(target)
+        return s
+    short = os.path.join(tempfile.gettempdir(),
+                         f".tl{os.getpid():x}{next(_BIND_SEQ):x}")
+    s.bind(short)
+    os.rename(short, target)
+    return s
+
+
 def _make_dead_pid_dir(base=None, name="tmp"):
     """Synthetic leftover dir with a real dead socket + registry pointing at
     a provably-dead pid. Uses a SHORT base dir: macOS AF_UNIX sun_path is
@@ -1434,9 +1463,7 @@ def _make_dead_pid_dir(base=None, name="tmp"):
     dbdir = base / name
     dbdir.mkdir(exist_ok=True)
     sp = dbdir / "redis.socket"
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.bind(str(sp))
-    s.close()  # real dead socket file (persists)
+    _bind_unix_socket(sp).close()  # real dead socket file (persists)
     (dbdir / "redis.pid").write_text("99999999\n")  # > pid_max everywhere
     (dbdir / "x.settings").write_text(json.dumps({
         "pidfile": str(dbdir / "redis.pid"),
@@ -1518,9 +1545,7 @@ def test_classify_live_never_stale_socket_for_path_based_server(monkeypatch):
         dbdir = base / "redislite_pb"
         dbdir.mkdir()
         sp = dbdir / "redis.socket"
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(sp))
-        s.close()
+        _bind_unix_socket(sp).close()
         (dbdir / "redis.pid").write_text("99999999\n")  # stale/dead owner
         # Path-based registry: user dir OUTSIDE the ephemeral tempdir +
         # user dbfilename (Signal 1 + Signal 2 both say "protected class").
@@ -1974,8 +1999,7 @@ def test_run_sweep_live_quarantine_not_killed():
         # A live listener bound on the moved socket (server moved with the dir)
         moved_sock = os.path.join(q, "redis.socket")
         os.remove(moved_sock)  # macOS bind() refuses to overwrite a stale file
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(moved_sock)
+        srv = _bind_unix_socket(moved_sock)
         srv.listen(1)
         try:
             acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True,
@@ -2003,8 +2027,7 @@ def test_run_sweep_pass1_live_server_in_quarantine_not_killed(monkeypatch):
         # A live listener on the MOVED socket (server moved with its dir)
         moved_sock = os.path.join(q, "redis.socket")
         os.remove(moved_sock)  # macOS bind() refuses to overwrite a stale file
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(moved_sock)
+        srv = _bind_unix_socket(moved_sock)
         srv.listen(1)
         live_pid = 42424242
         # Make ONLY the fake live pid 'alive' (all real pids report dead).
@@ -2112,17 +2135,22 @@ def test_sweep_quarantine_dirs_removes_dead_leftover():
 
 
 def test_sweep_quarantine_dirs_keeps_live_leftover():
-    """A quarantine whose socket is live is WARNed and kept (forensic)."""
+    """A quarantine whose socket is live is WARNed and kept (forensic).
+
+    The listener is bound at a SHORT path and then MOVED onto the quarantined
+    socket name. Binding at the quarantined path is impossible: under the
+    #3752 private session temp root the quarantined path exceeds macOS' ~104-
+    byte AF_UNIX sun_path limit. Moving the inode is the faithful simulation
+    anyway — a real server moved with its dir keeps its socket inode, which is
+    what makes the reaper's re-probe authoritative (#1383)."""
     from tortoise.embedded_reaper import _sweep_quarantine_dirs
     with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-456"
         os.rename(dbdir, q)
         _mark_quarantine(q)
-        _mark_quarantine(q)
         moved_sock = os.path.join(q, "redis.socket")
         os.remove(moved_sock)  # macOS bind() refuses to overwrite a stale file
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(moved_sock)
+        srv = _bind_unix_socket(moved_sock)
         srv.listen(1)
         try:
             removed = _sweep_quarantine_dirs(dry_run=False)

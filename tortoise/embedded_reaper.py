@@ -128,15 +128,26 @@ EPHEMERAL_PREFIXES = (
 
 # #3752: session-scratch ROOTS whose contents sit one level deeper than the
 # autogen layout — a harness that redirects TMPDIR to one private root per
-# session puts every scratch dir at <tmpdir>/tt_<8-char random>/<socket dir>/, i.e. the
-# markers land at depth 3 from the tempdir instead of depth 2. The walk keeps
-# its cheap maxdepth-2 global pass and adds a bounded maxdepth-2 pass per
+# session puts every scratch dir at <tmpdir>/tt_<8-char>/<socket dir>/, i.e.
+# the markers land at depth 3 from the tempdir instead of depth 2. The walk
+# keeps its cheap maxdepth-2 global pass and adds a bounded maxdepth-2 pass per
 # matching root; see _socket_walk_roots for the measurement that rules out
 # simply walking deeper (on a 23k-entry tempdir the depth-3 walk blew past
 # SOCKET_WALK_TIMEOUT, which also fails the walk closed). Deliberately a
 # SUBSET of EPHEMERAL_PREFIXES: each entry costs one `find` per matching
 # tempdir child, and the members omitted here hold their socket dirs directly.
+# NOTE: the prefix is only the first filter — the root must also carry
+# SESSION_ROOT_MARKER, or `tt_`'s long-standing use as a plain test-scratch
+# prefix turns this into hundreds of extra `find` roots (see
+# _socket_walk_roots).
 NESTED_SCRATCH_PREFIXES = ("tt_",)
+
+# #3752: marker file a session-scratch root must contain to be recognised as a
+# session root by _socket_walk_roots, and whose recorded (pid, start) decides
+# whether sweep_stale_session_roots may reclaim it. Contract with
+# tests/_tmpdir_isolation.py (its _PID_MARKER); pinned by
+# tests/test_tmpdir_isolation.py so the two cannot drift.
+SESSION_ROOT_MARKER = ".session-pid"
 
 
 def _host_coordination_tmpdir() -> str:
@@ -731,6 +742,18 @@ def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
         return "undetermined"
 
 
+# Directories the over-long-socket symlink fallback may create its link in,
+# in preference order. `None` means the current temp dir — the natural choice
+# (it is what the reaper owns, and under the suite it is the private session
+# root, so the common case writes nothing outside it). The absolute fallbacks
+# exist because the LINK path must itself fit in sun_path (~104 bytes on
+# macOS): the #3752 private session root plus a deep $TMPDIR can consume the
+# whole budget, and then creating the link fails ENAMETOOLONG — turning every
+# probe into 'undetermined', which fails the quarantine sweep closed forever
+# (#1383 convergence). /tmp and /var/tmp are short on every POSIX host.
+_PROBE_LINK_DIRS: tuple[str | None, ...] = (None, "/tmp", "/var/tmp")
+
+
 def _probe_socket_any(socket_path: str,
                       timeout: float = PROBE_SOCKET_TIMEOUT) -> str:
     """Probe a socket path that may exceed the macOS AF_UNIX sun_path limit
@@ -738,24 +761,36 @@ def _probe_socket_any(socket_path: str,
     connect() fail ENAMETOOLONG even for a LIVE server. Probes through a
     SHORT symlink to the same inode (a server holding the socket accepts
     through any path to that inode) when the path is long; direct probe
-    otherwise. Fail closed ('undetermined') if the symlink cannot be made.
+    otherwise. Fail closed ('undetermined') if no link can be made.
+
+    The link name is deliberately minimal (``.rp<pid-hex><ns-hex>``) and the
+    link directory is chosen as the first candidate whose FULL path fits —
+    see _PROBE_LINK_DIRS. Unlinked in a finally, so the fallback dirs hold
+    nothing after a normal return.
     """
     path = os.path.abspath(socket_path)
     if len(path.encode("utf-8", "surrogateescape")) <= 100:
         return _probe_socket(path, timeout=timeout)
-    link = os.path.join(_real_gettempdir(),
-                        f".rp_{os.getpid()}_{time.time_ns()}.sock")
-    try:
-        os.symlink(socket_path, link)
-    except OSError:
-        return "undetermined"  # cannot verify — fail closed
-    try:
-        return _probe_socket(link, timeout=timeout)
-    finally:
-        try:  # noqa: SIM105
-            os.unlink(link)
+    name = f".rp{os.getpid():x}{time.time_ns():x}"
+    for root in _PROBE_LINK_DIRS:
+        base = _real_gettempdir() if root is None else root
+        if root is not None and not os.path.isdir(base):
+            continue
+        link = os.path.join(base, name)
+        if len(link.encode("utf-8", "surrogateescape")) > 100:
+            continue  # link itself would not fit in sun_path
+        try:
+            os.symlink(socket_path, link)
         except OSError:
-            pass
+            continue
+        try:
+            return _probe_socket(link, timeout=timeout)
+        finally:
+            try:  # noqa: SIM105
+                os.unlink(link)
+            except OSError:
+                pass
+    return "undetermined"  # cannot verify — fail closed
 
 
 def _client_list(socket_path: str) -> list[dict] | None:
@@ -1203,7 +1238,7 @@ def _socket_walk_roots(tmpdir: str) -> list[str]:
     (``T/<tmpXXXX>/redis.socket``), which maxdepth 2 covers. A harness that
     redirects ``TMPDIR`` to ONE private per-session root
     (``tests/_tmpdir_isolation.py``) nests everything one level deeper —
-    ``T/tt_<8-char random>/<socket dir>/redis.socket`` is depth 3 — and a tempdir whose
+    ``T/tt_<8-char>/<socket dir>/redis.socket`` is depth 3 — and a tempdir whose
     every scratch dir sits under such a root would silently stop being
     swept, re-opening the #1642 accumulation this walk exists to stop.
 
@@ -1216,23 +1251,36 @@ def _socket_walk_roots(tmpdir: str) -> list[str]:
     pollution-disables-cleanup failure mode of #1449; the depth-2 variance is
     why the budget is a deadline rather than a per-invocation timeout. So the
     global pass keeps its cheap depth and each recognised scratch root gets
-    its own bounded depth-2 walk instead: cost is one `find` per root (in
-    practice 0 or 1) rather than one extra level over every directory.
+    its own bounded depth-2 walk instead.
 
-    Adding a prefix here is not free — it costs one `find` per matching
-    tempdir child — so the list is deliberately limited to the session-root
-    convention, not every EPHEMERAL_PREFIXES member (those hold the socket
-    dirs directly, or are far too numerous to walk individually).
+    The nested roots come FIRST so a slow global pass cannot consume the
+    shared budget before the dirs only the nested pass can reach are walked.
+
+    Both filters below are load-bearing. ``tt_`` is a long-standing
+    test-scratch prefix in its own right (``test_about_edges.py`` ->
+    ``tt_211_``, ``test_1162_add_operator_local_svbp.py`` -> ``tt_1162_``,
+    ``test_ep_local_395.py`` -> ``tt_395_``, ...): a prefix-only match made
+    this function return **252** roots on the polluted box it was measured on,
+    207 of them never walked once the shared budget ran out — the opposite of
+    the intended cost, and it starved the very session root the nested pass
+    exists for. Requiring ``SESSION_ROOT_MARKER`` reduces that to the live
+    session roots (0 or 1 in the common case), so extending the prefix list
+    stays cheap.
     """
-    roots = [tmpdir]
+    nested: list[str] = []
     try:
         for entry in os.scandir(tmpdir):
-            if entry.is_dir(follow_symlinks=False) \
-                    and entry.name.startswith(NESTED_SCRATCH_PREFIXES):
-                roots.append(entry.path)
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if not entry.name.startswith(NESTED_SCRATCH_PREFIXES):
+                continue
+            if not os.path.exists(
+                    os.path.join(entry.path, SESSION_ROOT_MARKER)):
+                continue
+            nested.append(entry.path)
     except OSError:
         pass
-    return roots
+    return [*nested, tmpdir]
 
 
 def _classify_dir(dbdir: str, socket_path: str,
@@ -2053,20 +2101,33 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
     can remove up to 2xSTALE_SWEEP_BUDGET (plan-review cycle 2). Scanned
     via the C-speed `find` walk (#1642 FIX 2 — no longer gated on the
     tempdir entry count); symlinked entries are skipped (mirror discover
-    pass 2).
+    pass 2). The walk covers the SAME root set as discover pass 2 — including
+    the nested session-scratch roots (#3752) — because the rename-aside happens
+    IN PLACE: quarantining a socket dir under ``T/tt_<8-char>/`` produces
+    ``T/tt_<8-char>/<dir>.reaper-stale-<ns>``, which a `-maxdepth 1` walk of
+    the tempdir root alone can never see — silently voiding this pass's
+    convergence promise for every root the nested walk reaches.
     """
     tmpdir = _real_gettempdir()
-    try:
-        out = subprocess.run(
-            ["find", tmpdir, "-maxdepth", "1", "-name",
-             f"*{STALE_QUARANTINE_SUFFIX}*"],
-            capture_output=True, text=True, timeout=SOCKET_WALK_TIMEOUT,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        logger.warning("quarantine find walk failed/timeout for %s", tmpdir)
-        return []
+    deadline = time.monotonic() + SOCKET_WALK_TIMEOUT
+    found: list[str] = []
+    for root in _socket_walk_roots(tmpdir):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning("quarantine walk budget exhausted for %s", tmpdir)
+            break
+        try:
+            out = subprocess.run(
+                ["find", root, "-maxdepth", "1", "-name",
+                 f"*{STALE_QUARANTINE_SUFFIX}*"],
+                capture_output=True, text=True, timeout=remaining,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            logger.warning("quarantine find walk failed/timeout for %s", root)
+            continue
+        found.extend(out.stdout.splitlines())
     removed = []
-    for q in out.stdout.splitlines():
+    for q in found:
         if len(removed) >= budget:
             break
         if os.path.islink(q) or not os.path.isdir(q):

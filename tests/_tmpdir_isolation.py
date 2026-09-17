@@ -55,8 +55,18 @@ import tempfile
 HOST_TMPDIR = os.path.realpath(tempfile.gettempdir())
 
 # Marker file written inside the root so a SIGKILLed run's root is
-# attributable and reclaimable by the next run (sweep_stale_session_roots).
+# attributable and reclaimable by the next run (sweep_stale_session_roots),
+# and so the reaper can tell a session root apart from the plain `tt_*`
+# test-scratch dirs that have used that prefix for years. The name is a
+# CONTRACT with tortoise.embedded_reaper.SESSION_ROOT_MARKER (required by its
+# _socket_walk_roots) — pinned by tests/test_tmpdir_isolation.py so the two
+# cannot drift.
 _PID_MARKER = ".session-pid"
+
+# (pid, start-time) identity tolerance, mirroring
+# embedded_reaper._pid_identity_matches' default: a recycled pid has a
+# different start time, so a bare pid is not a liveness proof (#1642 FIX 5).
+_START_TOLERANCE_S = 2.0
 
 # Prefix that means "this is a pytest scratch dir" — must stay consistent
 # with tortoise.embedded_reaper.EPHEMERAL_PREFIXES, which classifies servers
@@ -110,18 +120,27 @@ def install_session_tmpdir() -> str:
 
     root = os.path.realpath(tempfile.mkdtemp(prefix=_ROOT_PREFIX,
                                              dir=HOST_TMPDIR))
-    try:
-        with open(os.path.join(root, _PID_MARKER), "w") as fh:
-            fh.write(str(os.getpid()))
-    except OSError:
-        pass
 
+    # The redirect comes FIRST, before anything below can import
+    # tortoise.embedded_reaper (the start-time probe does, lazily). That
+    # module resolves _LOCK_PATH once at import from the temp dir — and this
+    # lock must stay in the SWEEP DOMAIN, which under the suite IS the private
+    # root (#1658 / #3752), so the import has to happen after the redirect.
+    # ACTIVE_SUITES_DIR resolves via TORTOISE_HOST_TMPDIR, set here too.
     _SESSION_TMPDIR = root
-    # The host coordination dir must stay host-global (see module docstring).
     os.environ["TORTOISE_HOST_TMPDIR"] = HOST_TMPDIR
     os.environ["TMPDIR"] = root
     tempfile.tempdir = root
     atexit.register(teardown_session_tmpdir)
+
+    try:
+        start = _process_start_time(os.getpid())
+        with open(os.path.join(root, _PID_MARKER), "w") as fh:
+            fh.write(f"pid={os.getpid()}\n")
+            if start is not None:
+                fh.write(f"start={start}\n")
+    except OSError:
+        pass
     return root
 
 
@@ -165,15 +184,102 @@ def _prune_host_coordination_dir() -> None:
             pass
 
 
+def _process_start_time(pid: int) -> float | None:
+    """Epoch-seconds start time of ``pid`` from the reaper's own helper.
+
+    Lazy import on purpose: this module must stay import-cheap and the reaper
+    resolves ``ACTIVE_SUITES_DIR`` / ``_LOCK_PATH`` once, at its import, from
+    the temp dir. By the time this is reached the redirect is installed and
+    ``TORTOISE_HOST_TMPDIR`` is exported, so the reaper's import-time
+    constants resolve exactly as ``tests/conftest.py`` expects (it is
+    import-pure — stdlib only — so the early import is safe).
+    """
+    try:
+        from tortoise.embedded_reaper import _process_start_time as impl
+        return impl(pid)
+    except Exception:
+        return None
+
+
+def _read_marker(marker_path: str) -> tuple[int, float | None] | None:
+    """Parse a ``.session-pid`` marker: ``pid=<int>`` plus an optional
+    ``start=<float>``.
+
+    Returns None for anything unreadable, or without a parseable pid — an
+    unrecognised marker must never authorise a delete.
+    """
+    try:
+        with open(marker_path) as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    pid: int | None = None
+    start: float | None = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("pid="):
+            try:
+                pid = int(line[4:])
+            except ValueError:
+                return None
+        elif line.startswith("start="):
+            try:
+                start = float(line[6:])
+            except ValueError:
+                start = None  # recorded-but-degraded -> keep (fail safe)
+    if pid is None:
+        return None
+    return pid, start
+
+
+def _marker_owner_provably_dead(marker_path: str) -> bool:
+    """True only when the marker's owner is PROVABLY not the same process.
+
+    Three cases must not be conflated (#1642 FIX 5):
+      * pid dead -> reclaim;
+      * pid alive with a matching start time -> a concurrent suite, never
+        touch it;
+      * pid alive with a non-matching start time -> a RECYCLED pid, i.e. the
+        owner is gone -> reclaim (a bare `os.kill(pid, 0)` would pin a dead
+        suite's root forever here).
+
+    Every undeterminable case (no marker, unparseable, permission denied, no
+    start recorded, `ps` unavailable) fails SAFE and keeps the root.
+
+    Deliberately NOT ``embedded_reaper._pid_identity_matches``: that helper is
+    the OWNER-ADOPTION predicate and fails CLOSED (returns False) when the
+    start time cannot be determined, which here would delete a live suite's
+    root. This is the mirror-image question — "may I delete?" — so it is
+    fail-safe instead.
+    """
+    rec = _read_marker(marker_path)
+    if rec is None:
+        return False
+    pid, start = rec
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True  # provably dead
+    except (PermissionError, OSError):
+        return False  # alive-but-unsignalable, or an indeterminate probe
+    if start is None:
+        return False  # legacy/pid-only record -> keep
+    current = _process_start_time(pid)
+    if current is None:
+        return False  # cannot verify -> fail safe
+    return abs(current - start) >= _START_TOLERANCE_S
+
+
 def sweep_stale_session_roots() -> list[str]:
     """Reclaim roots left by a SIGKILLed suite (a ``tt_`` dir whose recorded
     pid is dead). Best-effort, never raises.
 
     A suite killed by SIGKILL/segfault cannot run its own teardown, so a root
     would otherwise survive. This runs at install time (the next suite
-    reclaims it) and mirrors the reaper's own dead-pid reasoning rather than
-    an age heuristic: a *live* pid means a concurrent suite, whose root is
-    not ours to delete.
+    reclaims it) and mirrors the reaper's own pid+start-time reasoning rather
+    than an age heuristic: a *live* pid with a matching start time means a
+    concurrent suite, whose root is not ours to delete. Undeterminable cases
+    keep the root (see _marker_owner_provably_dead).
     """
     reclaimed: list[str] = []
     try:
@@ -185,18 +291,9 @@ def sweep_stale_session_roots() -> list[str]:
             continue
         if not entry.name.startswith(_ROOT_PREFIX):
             continue
-        try:
-            with open(os.path.join(entry.path, _PID_MARKER)) as fh:
-                pid = int(fh.read().strip())
-        except (OSError, ValueError):
-            continue  # not ours (no marker) — never delete on a guess
-        try:
-            os.kill(pid, 0)
-            continue  # live owner: a concurrent suite's root
-        except PermissionError:
-            continue  # live process we may not signal
-        except ProcessLookupError:
-            pass
+        if not _marker_owner_provably_dead(
+                os.path.join(entry.path, _PID_MARKER)):
+            continue  # ours-but-live, or undeterminable — never delete on a guess
         shutil.rmtree(entry.path, ignore_errors=True)
         reclaimed.append(entry.path)
     return reclaimed
@@ -213,6 +310,12 @@ class SharedTmpdirScanError(AssertionError):
 
 
 def _is_under(child: str, parent: str) -> bool:
+    # Type-guarded: the guard is process-wide and sees EVERY scandir / listdir
+    # / walk in the session, so a bytes path (legal for all three) must never
+    # reach str.startswith with a mismatched type — that raised a misleading
+    # `TypeError: a bytes-like object is required` from inside the guard.
+    if not isinstance(child, str) or not isinstance(parent, str):
+        return False
     return child.startswith(parent.rstrip(os.sep) + os.sep)
 
 
@@ -222,10 +325,21 @@ def _is_host_tempdir_scope(path) -> bool:
     Descendants are allowed on purpose: ``<host>/.tortoise/active_suites`` is
     the host-global marker dir, and the session root itself lives under the
     host temp dir. Only scanning the shared tree (or above it) is the defect.
+
+    Accepts str, bytes and PathLike (all three are legal for os.scandir /
+    os.listdir / os.walk); bytes is decoded with ``os.fsdecode`` rather than
+    compared as-is, so a bytes-path caller still gets the original stdlib
+    behaviour instead of a TypeError raised from inside the guard.
     """
     try:
-        target = os.path.realpath(os.fspath(path))
-    except (TypeError, ValueError):
+        raw = os.fspath(path)
+    except TypeError:
+        return False
+    if isinstance(raw, bytes):
+        raw = os.fsdecode(raw)
+    try:
+        target = os.path.realpath(raw)
+    except (TypeError, ValueError, OSError):
         return False
     return target == HOST_TMPDIR or _is_under(HOST_TMPDIR, target)
 
