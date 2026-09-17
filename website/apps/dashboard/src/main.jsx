@@ -106,6 +106,11 @@ const _MS_PER_DAY = 86400000
 // #2479 code-review fix P2: named constant for max re-auth attempts (spec: 1)
 const MAX_REAUTH_ATTEMPTS = 1
 const REAUTH_EXCEEDED_MESSAGE = 'Re-authentication failed — try again later or contact support.'
+// #3783 (review P2): how long the connect step waits on GET /v1/team/keys before
+// its wait state becomes actionable. A request that never settles produces no
+// rejection, so this bound is the only thing that turns a hang into a retry
+// instead of an infinite "Checking…" (the dead end the failed-read fix closes).
+const KEYS_LOAD_SLOW_MS = 12000
 
 // #2426: Custom date (YYYY-MM-DD) → whole days until that date, clamped to
 // 1..366. Null when missing/invalid/out-of-range — the + New key button stays
@@ -1087,6 +1092,23 @@ function claimIntentInFlight() {
   // in the window where a slow/failed GET /v1/team/keys would otherwise resolve
   // 'mint' and can burn the plan's last key slot.
   const [keysLoaded, setKeysLoaded] = React.useState(false)
+  // #3783 (review P2): `keysLoaded` flips on SUCCESS only, so it cannot tell
+  // "still in flight" from "the GET failed". The connect gate's 'loading' arm
+  // therefore had no failure exit — a failed or hanging keys read left the
+  // wizard on a dead wait (no mint, no action, reload-only). `keysLoadError`
+  // carries the failure so the gate resolves 'error' (a retryable state, still
+  // no mint); `keysLoadSlow` bounds a request that never settles at all (a hang
+  // never reaches loadAll's catch), degrading the wait to that same retry.
+  // `keysLoadNonce` re-arms the bound on an explicit retry: `keysLoaded` stays
+  // false across a retry, so the flag alone would not restart the clock.
+  const [keysLoadError, setKeysLoadError] = React.useState('')
+  const [keysLoadSlow, setKeysLoadSlow] = React.useState(false)
+  const [keysLoadNonce, setKeysLoadNonce] = React.useState(0)
+  React.useEffect(() => {
+    if (keysLoaded) { setKeysLoadSlow(false); return undefined }
+    const t = setTimeout(() => setKeysLoadSlow(true), KEYS_LOAD_SLOW_MS)
+    return () => clearTimeout(t)
+  }, [keysLoaded, keysLoadNonce])
   const [sessions, setSessions] = React.useState([])
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -4230,6 +4252,10 @@ function claimIntentInFlight() {
     setStaleFired(false) // #1858: null→null when logging out from the terminal '—' state — the reset effect won't fire, so clear the per-load latch directly; the next session's skeleton must get a fresh floor
     setKeys([])
     setKeysLoaded(false)
+    // #3783 (review P2): the failed/stalled read's state is per-user — never
+    // let one session's keys-read error (or a fired wait bound) land on the next.
+    setKeysLoadError('')
+    setKeysLoadSlow(false)
     setSessions([])
     setNewKey(null)
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
@@ -4337,6 +4363,7 @@ function claimIntentInFlight() {
       if (orgIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
       setKeys(Array.isArray(k) ? k : k.keys || [])
       setKeysLoaded(true)
+      setKeysLoadError('')
       // #2246 (ADR-010): the rule-5/7 held-key classification hook is DELETED
       // — no held key exists to classify in session mode (apiKey state is ''
       // and the KEY_STORAGE slot was purged at session resolution). keys[]
@@ -4346,7 +4373,16 @@ function claimIntentInFlight() {
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) {
+        setError(e.message)
+        // #3783 (review P2): Promise.all rejects both reads together, so a
+        // failure here means the keys payload never landed. Record it, so the
+        // connect gate resolves 'error' (retryable) instead of waiting on a
+        // read that has already failed — the 'loading' arm has no failure exit,
+        // which trapped the wizard until a full page reload.
+        setKeysLoadError(
+          (e && e.message) || 'Could not load your organization\u2019s API keys.')
+      }
     }
   }
 
@@ -4737,6 +4773,18 @@ function claimIntentInFlight() {
   // owner/admin, matching the server contract. The plaintext is shown ONCE —
   // the connect command embeds it (the reveal); afterwards the key is
   // managed/regenerable from the API Keys tab.
+  // #3783 (review P2): the connect step's in-wizard recovery for an unresolved
+  // keys read (a failed GET, or a wait that exceeded KEYS_LOAD_SLOW_MS). It
+  // re-issues the same load the mount used, so a transient failure no longer
+  // forces a page reload. Clearing the error flips the affordance back to the
+  // wait state (the retry's own feedback); the nonce re-arms the wait bound.
+  function wizardRetryKeysLoad() {
+    setKeysLoadError('')
+    setKeysLoadSlow(false)
+    setKeysLoadNonce((n) => n + 1)
+    loadAll('').catch(() => {})
+  }
+
   async function wizardMintDurableKey() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
@@ -4856,6 +4904,10 @@ function claimIntentInFlight() {
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
     setKeysLoaded(false)
+    // #3783 (review P2): the previous team's keys-read failure (or a fired wait
+    // bound) must not render as the NEW team's state before its loadAll lands.
+    setKeysLoadError('')
+    setKeysLoadSlow(false)
     setSessions([])
     clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
     setSessionDeletingId(null)
@@ -6342,7 +6394,7 @@ function claimIntentInFlight() {
   // a key the user never chose to create, while the Overview (reading this
   // same source) said an existing key was usable. Consumed by
   // `wizardKeyAffordance` below.
-  const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded)
+  const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -6577,23 +6629,55 @@ function claimIntentInFlight() {
   )
 
   // #3783 (review P2): the 'loading' mode offers NEITHER the mint nor the
-  // paste row — the rows GET has not landed (or failed), so "no key" is not a
-  // resolved answer and a mint CTA could burn a slot while an unloaded row
-  // already exists. The gate re-renders the moment `keysLoaded` flips.
+  // paste row — the rows GET has not landed, so "no key" is not a resolved
+  // answer and a mint CTA could burn a slot while an unloaded row already
+  // exists. The gate re-renders the moment `keysLoaded` flips.
   const wizardLoadingKeyAffordance = (
     <p className="dim small" aria-live="polite">Checking your organization&apos;s API keys…</p>
+  )
+
+  // #3783 (review P2 — the dead end this closes): the wait state above had no
+  // exit. `keysLoaded` flips on SUCCESS only, so a FAILED (or hanging) keys read
+  // left the connect step waiting forever: the mint was correctly withheld, but
+  // nothing replaced it, and the only recovery was a full page reload. An
+  // unresolved read is still NOT "no key" (offering a mint there re-opens the
+  // slot burn #3783 fixed), so this state keeps the mint withheld and adds the
+  // one honest action — retry the read in place. A failed read is ACTIONABLE,
+  // never a terminal wait.
+  const wizardKeysUnavailableKeyAffordance = (
+    <>
+      <p className="dim small" role="status">
+        {keysLoadError
+          ? `We couldn’t check your organization’s API keys — ${keysLoadError}`
+          : 'We still can’t see your organization’s API keys.'}
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        <button type="button" className="btn-primary small" onClick={wizardRetryKeysLoad}>
+          Try again
+        </button>
+      </div>
+      <p className="wizard-note">
+        We don&apos;t create a key until we can read the keys your organization already has — creating
+        one now could spend a plan slot on a key you already hold.
+      </p>
+    </>
   )
 
   // #3783: ONE role- and source-aware derivation for every keyed leaf, so the
   // source-aware branch cannot drift between the shared, Codex Desktop and
   // build-fork arms. Minting is offered ONLY when `connectGate.mode === 'mint'`
   // (no usable key exists at all); 'existing' routes to the reuse path above;
-  // 'loading' shows the wait state and no action at all.
-  const wizardKeyAffordance = connectGate.mode === 'loading'
-    ? wizardLoadingKeyAffordance
-    : isOwnerAdmin
-      ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
-      : wizardPasteRow
+  // an unresolved read ('error', or a 'loading' that has exceeded the wait
+  // bound) shows the retryable state and NO mint; a read still in flight shows
+  // the wait state, also with no action.
+  const wizardKeyAffordance = connectGate.mode === 'error'
+    || (connectGate.mode === 'loading' && keysLoadSlow)
+    ? wizardKeysUnavailableKeyAffordance
+    : connectGate.mode === 'loading'
+      ? wizardLoadingKeyAffordance
+      : isOwnerAdmin
+        ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
+        : wizardPasteRow
 
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the

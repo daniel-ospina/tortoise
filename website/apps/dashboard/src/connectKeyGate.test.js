@@ -26,6 +26,11 @@
 //   payload collapses to `'mint'` (review P2: a slow/failed GET re-opened the
 //   mint CTA while a row might already exist). The `'loading'` test reds with
 //   `expected 'loading', actual 'mint'`.
+//   CONNECT_GATE_FAILED_READ_STAYS_UNRESOLVED — drop the `keysError` arm of
+//   that same branch (`{ mode: keysError ? 'error' : 'loading' }` → always
+//   `'loading'`), the shipped second-pass shape. A failed read then keeps the
+//   no-action wait state and the retry test reds with
+//   `expected 'error', actual 'loading'`.
 //   KEY_DISPLAY_NAME_LEAVES_OTHER_ROWS_BLANK — revert the `'recovery'`/
 //   fallback labels to `return null` (review P2: unnamed recovery/legacy rows
 //   stayed an unaccountable "—"). The identity test reds.
@@ -138,4 +143,27 @@ test('#3783 (review P2): rows-not-loaded is a distinct WAIT state, never "no key
     'a loaded-empty org may mint (the gate only withholds mint while unknown)')
   assert.equal(connectKeyGate('', [], false).mode !== 'mint', true,
     'the unknown state must never offer the mint arm')
+})
+
+test('#3783 (review P2): a FAILED rows read is ACTIONABLE — "error", never an eternal "loading"', () => {
+  // Review of the loading-mode fix: `keysLoaded` flips on SUCCESS only, so a
+  // failed GET also resolved 'loading' — an arm with no action and no exit,
+  // where the only recovery was a full page reload. A failed read is not
+  // "still loading": it is a state the caller can retry, and it still must not
+  // offer the mint (an unknown inventory is not "no key").
+  const failed = connectKeyGate('', [], false, true)
+  assert.equal(failed.mode, 'error',
+    'a FAILED read resolves the retryable error state, not the eternal wait')
+  assert.equal(failed.existing, null, 'a failed read identifies no row')
+  assert.equal(failed.key, '', 'a failed read never invents a plaintext')
+  // Same 4th argument, three shapes: no failure → wait; failure → error.
+  assert.equal(connectKeyGate('', [], false, false).mode, 'loading',
+    'an in-flight read (no error) is still the wait state')
+  assert.equal(connectKeyGate('', [], true, true).mode, 'mint',
+    'once the rows ARE loaded the recorded failure is stale — the loaded payload decides')
+  // A held plaintext needs no rows at all: it embeds even on a failed read.
+  assert.equal(connectKeyGate('tt_c2215b3' + 'a'.repeat(54), [], false, true).mode, 'embed',
+    'a held plaintext short-circuits before the load state is consulted')
+  assert.equal(connectKeyGate('', [], false, true).mode !== 'mint', true,
+    'the failed state must never offer the mint arm')
 })

@@ -152,9 +152,10 @@ test('#2710/#2912: the no-key affordance is the KEY block branch — never a pla
   assert.match(owner, /\bwizardKeyAffordance\b/,
     'the key block renders the derived role+source affordance')
   assert.match(connectStep(),
-    /const wizardKeyAffordance = connectGate\.mode === 'loading'\n\s*\? wizardLoadingKeyAffordance\n\s*: isOwnerAdmin\n\s*\? \(connectGate\.mode === 'existing' \? wizardExistingKeyAffordance : wizardNoKeyAffordance\)\n\s*: wizardPasteRow/,
-    'the derivation is load-, role- AND source-aware: an unloaded rows payload shows the wait ' +
-    'state, a usable existing key routes to the reuse path, and only the mint mode mints')
+    /const wizardKeyAffordance = connectGate\.mode === 'error'\n\s*\|\| \(connectGate\.mode === 'loading' && keysLoadSlow\)\n\s*\? wizardKeysUnavailableKeyAffordance\n\s*: connectGate\.mode === 'loading'\n\s*\? wizardLoadingKeyAffordance\n\s*: isOwnerAdmin\n\s*\? \(connectGate\.mode === 'existing' \? wizardExistingKeyAffordance : wizardNoKeyAffordance\)\n\s*: wizardPasteRow/,
+    'the derivation is load-, role- AND source-aware: an unresolved read (failed, or a wait past ' +
+    'the bound) shows the retryable state, an in-flight read shows the wait state, a usable existing ' +
+    'key routes to the reuse path, and only the mint mode mints')
   assert.doesNotMatch(owner, /YOUR_API_KEY/, 'no placeholder key may remain')
   assert.doesNotMatch(owner, /wizardKeyCodeStyle\}>\{harnessKey \|\| '…'\}/,
     'no fake key row may render before a key exists')
@@ -1358,7 +1359,7 @@ test('#2865: the two Claude tabs are no longer hidden from members', () => {
     'the connect-step gate is the cap remedy alone (capNotice is owner/admin-only)')
   // a member on a KEYED leaf keeps a paste escape, never a mint CTA that 403s
   assert.match(connectStep(),
-    /const wizardKeyAffordance = connectGate\.mode === 'loading'[\s\S]{0,200}?: wizardPasteRow/,
+    /const wizardKeyAffordance = connectGate\.mode === 'error'[\s\S]{0,400}?: wizardPasteRow/,
     'the keyed-leaf no-key branch is load- and role-aware (members get the paste row)')
   assert.match(ownerBranch(), /\bwizardKeyAffordance\b/,
     'the key block renders the derived affordance')
@@ -1455,15 +1456,51 @@ test('#3783 (review P2): an unloaded rows payload is a WAIT state — never a mi
     'a successful keys fetch marks the rows loaded')
   assert.equal((src.match(/setKeysLoaded\(false\)/g) || []).length, 2,
     'logout and team-switch both reset the flag (the switch then reloads)')
-  assert.match(src, /const connectGate = connectKeyGate\(welcomeKey, keys, keysLoaded\)/,
-    'the live load state is passed to the gate')
+  assert.match(src, /const connectGate = connectKeyGate\(welcomeKey, keys, keysLoaded, !!keysLoadError\)/,
+    'the live load state — and its failure — are passed to the gate')
   assert.match(connectStep(), /const wizardLoadingKeyAffordance = \(/,
     'the wait affordance exists')
   assert.doesNotMatch(slice('const wizardLoadingKeyAffordance = (',
-                            'const wizardKeyAffordance = connectGate.mode',
+                            'const wizardKeysUnavailableKeyAffordance = (',
                             'loading affordance'),
     /wizardMintDurableKey/,
     'the wait state must not offer the mint')
+})
+
+test('#3783 (review P2): a FAILED or stalled rows read is ACTIONABLE — a retry, never a dead wait', () => {
+  // The dead end this closes: `keysLoaded` flips on SUCCESS only, so a failed
+  // GET left the wizard on the wait state with no action and no failure exit —
+  // the only recovery was a full page reload. Pins: the failure is recorded,
+  // the wait is bounded, and BOTH unresolved states route to a retryable
+  // affordance that still withholds the mint (offering one re-opens the
+  // slot burn #3783 fixed).
+  const src = stripBlockAndWholeLineComments(mainJsx)
+  // (1) the failure is RECORDED where the gate can see it, and cleared on a
+  // later success (a stale failure must not survive a successful retry).
+  assert.match(src, /setKeysLoadError\(\s*\n\s*\(e && e\.message\)/,
+    'a failed keys read records its error (the gate resolves the retryable error state)')
+  assert.match(src, /setKeysLoaded\(true\)\n\s*setKeysLoadError\(''\)/,
+    'a successful keys read clears the recorded failure')
+  assert.equal((src.match(/setKeysLoadError\(''\)/g) || []).length, 4,
+    'every reset that clears keysLoaded also clears the failure (logout, team switch, ' +
+    'success, retry) — a stale failure must never render as the new state')
+  // (2) the wait is BOUNDED — a request that never settles produces no
+  // rejection, so the timer is the only thing that turns a hang into a retry.
+  assert.match(src, /const t = setTimeout\(\(\) => setKeysLoadSlow\(true\), KEYS_LOAD_SLOW_MS\)/,
+    'an unresolved keys read is bounded — a hang degrades to the retryable state')
+  assert.match(src, /const KEYS_LOAD_SLOW_MS = \d+/,
+    'the bound is a named constant')
+  // (3) the retryable affordance offers the retry and withholds the mint.
+  const unavailable = slice('const wizardKeysUnavailableKeyAffordance = (',
+                            'const wizardKeyAffordance = connectGate.mode',
+                            'keys-unavailable affordance')
+  assert.match(unavailable, /onClick=\{wizardRetryKeysLoad\}/,
+    'the unresolved state offers the in-place retry (the dead end had no action at all)')
+  assert.doesNotMatch(unavailable, /wizardMintDurableKey/,
+    'the unresolved state must NOT offer the mint — an unread inventory is not "no key" (#3783)')
+  // (4) the retry re-issues the load the mount used.
+  assert.match(src, /function wizardRetryKeysLoad\(\) \{\n\s*setKeysLoadError\(''\)\n\s*setKeysLoadSlow\(false\)\n\s*setKeysLoadNonce\(\(n\) => n \+ 1\)\n\s*loadAll\(''\)\.catch/,
+    'the retry clears the failure, re-arms the wait bound, and re-issues loadAll')
 })
 
 test('#3783: the API Keys table names the auto-provisioned key instead of rendering it as —', () => {

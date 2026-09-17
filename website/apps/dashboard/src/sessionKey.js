@@ -129,9 +129,10 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
 //   - front-channel plaintext held → { mode: 'embed',  key, existing: null }
 //   - usable durable row, no held plaintext → { mode: 'existing', existing: row }
 //   - no usable key anywhere → { mode: 'mint', existing: null }
-//   - rows not loaded yet (or the GET failed) → { mode: 'loading', existing: null }
+//   - rows not loaded yet → { mode: 'loading', existing: null }
+//   - the rows GET FAILED → { mode: 'error', existing: null }
 // Consumers may mint ONLY on `'mint'`; `'existing'` must route to a reuse path,
-// and `'loading'` must offer NEITHER — it is not a resolved answer.
+// and `'loading'`/`'error'` must offer NEITHER — neither is a resolved answer.
 //
 // #3783 (review P2): `keysLoaded` marks whether the rows payload has actually
 // ARRIVED. Without it, `keys` initialises to `[]`, so a slow or failed `GET
@@ -140,10 +141,19 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
 // tier's last slot in exactly the window it must not. The default is `true` so
 // existing callers (and the unit tests) that pass a real rows array keep the
 // loaded meaning; `main.jsx` passes the live load state explicitly.
-export function connectKeyGate(welcomeKey, keyRows, keysLoaded = true) {
+//
+// #3783 (review P2, second pass): `keysLoaded` flips on SUCCESS only, so it
+// cannot tell "still in flight" from "the GET failed". Collapsing both into
+// `'loading'` gave that arm no failure exit — a failed read rendered the wait
+// state forever, its only recovery a full page reload. `keysError` (main.jsx's
+// recorded failure) therefore resolves `'error'`: still NO mint (an unresolved
+// read is not "no key", the slot-burn this gate exists to prevent), but a
+// state the caller can act on with a retry. Default `false` keeps the callers
+// that never observe a fetch (and the unit tests) unchanged.
+export function connectKeyGate(welcomeKey, keyRows, keysLoaded = true, keysError = false) {
   const dc = durableConnectKey(welcomeKey, '', keyRows)
   if (dc.key) return { mode: 'embed', key: dc.key, existing: null }
-  if (!keysLoaded) return { mode: 'loading', key: '', existing: null }
+  if (!keysLoaded) return { mode: keysError ? 'error' : 'loading', key: '', existing: null }
   if (dc.source === 'rows-durable') {
     return { mode: 'existing', key: '', existing: usableDurableRows(keyRows)[0] || null }
   }
