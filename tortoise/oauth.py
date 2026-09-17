@@ -1347,6 +1347,17 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   const FRAGMENT_SNAPSHOT = window.location.hash || "";
   const HAD_LIVE_TOKEN_FRAGMENT =
     /[?&#](?:access_token|refresh_token|code)=/.test(FRAGMENT_SNAPSHOT);
+  // #3503 (review P1, round 5): the credential the URL carried, so the recovery
+  // below can tell "this fragment IS the session we resolved" (nothing to
+  // rescue) from "the browser refused to store a DIFFERENT credential while a
+  // still-valid PREVIOUS cookie answered getSession()" — the account mix-up
+  // class. Mirrors src/sessionBounce.js's fragmentAccessToken().
+  const SNAPSHOT_ACCESS_TOKEN = (function () {
+    if (!HAD_LIVE_TOKEN_FRAGMENT) return null;
+    try {
+      return new URLSearchParams(FRAGMENT_SNAPSHOT.replace(/^#/, "")).get("access_token") || null;
+    } catch (e) { return null; }
+  })();
   // #1704: parent-domain cookie storage — a faithful port of the
   // dashboard's supabaseStorage (website/assets/supabase-session.js):
   // getItem reads an existing dashboard session (no second login),
@@ -1515,22 +1526,25 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
 
   async function showConsentOnce() {
     const { data } = await supabaseClient.auth.getSession();
-    if (!data.session) {
-      // #3503 (review P1, round 4): a live token fragment was present at load
-      // and is gone now — supabase-js ingested it, its `_saveSession` write was
-      // REFUSED (over-cap cookie), and it cleared the hash before failing. The
-      // fragment is the only surviving copy of the credential: restore it and
-      // say why, instead of silently dropping to the sign-in view (where a
-      // fresh OAuth would return the same over-cap fragment and loop).
-      if (HAD_LIVE_TOKEN_FRAGMENT &&
-          !/[?&#](?:access_token|refresh_token|code)=/.test(window.location.hash)) {
+    // #3503 (review P1, rounds 4+5): a live token fragment was present at load
+    // and the URL no longer has it — supabase-js ingested it, its `_saveSession`
+    // write was REFUSED (over-cap cookie), and it cleared the hash before
+    // failing. The fragment is the only surviving copy of the credential.
+    // The `!data.session` half of this test is not enough on its own: a
+    // still-valid PREVIOUS cookie makes getSession() answer with the OLD
+    // session, and the page would then authorize (binding the MCP client to)
+    // the OLD account while the NEW credential was destroyed — the #3503 mix-up
+    // class, already fixed on the dashboard and /auth.
+    if (HAD_LIVE_TOKEN_FRAGMENT &&
+        (!data.session || SNAPSHOT_ACCESS_TOKEN !== data.session.access_token)) {
+      if (!/[?&#](?:access_token|refresh_token|code)=/.test(window.location.hash)) {
         window.location.hash = FRAGMENT_SNAPSHOT;
-        showSignin();
-        showError("Signed in, but this browser could not save the session — the sign-in cookie was rejected (it can exceed the browser's cookie limit, or cookies may be blocked). Nothing was discarded: reload the page to retry, or sign in again below.");
-        return "refused";
       }
-      showSignin(); return "nosession";
+      showSignin();
+      showError("Signed in, but this browser could not save the session — the sign-in cookie was rejected (it can exceed the browser's cookie limit, or cookies may be blocked). Nothing was discarded: reload the page to retry, or sign in again below.");
+      return "refused";
     }
+    if (!data.session) { showSignin(); return "nosession"; }
     document.getElementById("view-consent").style.display = "block";
     document.getElementById("view-signin").style.display = "none";
     hideError();

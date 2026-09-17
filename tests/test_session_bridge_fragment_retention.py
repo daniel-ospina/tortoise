@@ -252,8 +252,15 @@ function makeEnv(opts) {
     setItem(k, v) { store[k] = String(v); },
     removeItem(k) { delete store[k]; },
   };
-  const fetchStub = function (input) {
+  const authzTokens = [];
+  const fetchStub = function (input, init) {
     const u = String(input);
+    if (init && init.headers) {
+      const h = init.headers;
+      const raw = (typeof h.get === 'function') ? h.get('Authorization')
+        : (h.Authorization || h.authorization);
+      if (raw) authzTokens.push(String(raw));
+    }
     // The only network call on the fragment path is GoTrue /user.
     return Promise.resolve({
       ok: true, status: 200,
@@ -279,11 +286,12 @@ function makeEnv(opts) {
     navigator: { userAgent: 'node-harness', locks: undefined },
     process: undefined,
   };
+  sandbox.authzTokens = authzTokens;
   sandbox.window = sandbox;
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  return { sandbox, jar, historyCalls, replaceCalls, navCalls, logs };
+  return { sandbox, jar, historyCalls, replaceCalls, navCalls, logs, authzTokens };
 }
 
 function fragment(tokenLen, expiresAt) {
@@ -522,6 +530,9 @@ async function runDashboardScenario(kind) {
   async function runConsentPageScenario(kind) {
     const expiresAt = Math.floor(Date.now() / 1000) + 3600;
     const opts = { hash: kind === 'small' ? fragment(200, expiresAt) : fragment(4000, expiresAt) };
+    // #3503 (review P1, round 5): a still-valid PREVIOUS cookie makes
+    // getSession() non-null, so a restore gated on `!session` never fires.
+    if (kind === 'preseeded_old_cookie') opts.preseed = oldCookie(expiresAt);
     const env = makeEnv(opts);
     vm.runInContext(fs.readFileSync(bundlePath, 'utf8'), env.sandbox,
                     { filename: bundlePath });
@@ -542,6 +553,10 @@ async function runDashboardScenario(kind) {
       hash: env.sandbox.window.location.hash,
       fields: {
         fragment_survived_consent: /access_token=/.test(env.sandbox.window.location.hash),
+        // #3503 P1-5: the identity the page went on to authorize as. `fetch` is
+        // called by fetchPreview/doPost with `Authorization: Bearer <token>`
+        // derived from getSession() — i.e. whatever was in the cookie.
+        authz_tokens: env.sandbox.authzTokens || [],
         error_text: errorEl ? String(errorEl.textContent || '') : '',
         errors: env.logs.filter((l) => l.level === 'error').map((l) => l.text),
       },
@@ -708,6 +723,8 @@ async function runE2EIngestScenario(kind) {
   } else if (mode === 'consent_page') {
     out.consent_page_oversized = await safeAsync(() => runConsentPageScenario('oversized'));
     out.consent_page_small = await safeAsync(() => runConsentPageScenario('small'));
+    out.consent_page_preseeded_old_cookie =
+      await safeAsync(() => runConsentPageScenario('preseeded_old_cookie'));
   } else {
     out.e2e_small = await safeAsync(() => runE2EIngestScenario('small'));
     out.e2e_oversized = await safeAsync(() => runE2EIngestScenario('oversized'));
@@ -1399,6 +1416,51 @@ def test_consent_page_restores_a_refused_fragment(consent_page_report: dict) -> 
     assert "could not save the session" in r["error_text"], (
         f"the refusal must be visible on the page, got: {r['error_text']!r}"
     )
+
+
+def test_consent_page_does_not_carry_on_as_the_old_account(
+    consent_page_report: dict,
+) -> None:
+    """#3503 (review P1, round 5). A restore gated on `!session` is unreachable
+    whenever a still-valid PREVIOUS cookie answers `getSession()` — supabase-js
+    had already cleared the refused NEW fragment, so the page went on to
+    authorize the MCP client as the OLD account (`Authorization: Bearer
+    OLD-ACCESS-TOKEN`) with the new credential destroyed. The gate must compare
+    the snapshot's own token, exactly like the dashboard and /auth."""
+    r = _scenario(consent_page_report, "consent_page_preseeded_old_cookie")
+    assert r["cookie_token"] == "OLD-ACCESS-TOKEN", "harness precondition"
+    assert r["fragment_survived_consent"] is True, (
+        "the consent page proceeded as the OLD account and never restored the "
+        "refused NEW fragment (#3503 P1)"
+    )
+    assert "could not save the session" in r["error_text"]
+    assert all("OLD-ACCESS-TOKEN" not in t for t in r["authz_tokens"]), (
+        f"the page authorized as the OLD account: {r['authz_tokens']}"
+    )
+
+
+def test_dashboard_refusal_card_is_reachable_with_claim_intent() -> None:
+    """#3503 (review P1/P2, round 5). The refusal card was nested inside
+    `if (!claimIntent)`, so on the `?claim=1` route the mount guard set the state
+    and the render fell through to the claim-paste screen: the visitor was never
+    told, and the only forward route was unreachable. The claim screen's own
+    "Back to sign in" had the same trap round 4 closed on the error card — it
+    navigated without discarding the OLD session /auth would then forward
+    straight back to `?claim=1`."""
+    dash = DASHBOARD.read_text(encoding="utf-8")
+    assert "if (!claimIntent || fragmentRefused) {" in dash, (
+        "the refusal card must render even when claim intent is in flight, or "
+        "the flag is dead state on the ?claim=1 route"
+    )
+    assert "authUnavailable || mountError" in dash
+    # The claim screen's forward route must clear the stored session first.
+    back = dash.index("← Back to sign in")
+    segment = dash[max(0, back - 900):back]
+    assert "window.clearStoredSession()" in segment, (
+        "the claim screen's only forward route must discard the session it "
+        "leaves behind, or /auth forwards the OLD cookie straight back here"
+    )
+    assert "window.bounceToAuth(window.location.search, '')" in segment
 
 
 def test_consent_page_success_path_is_unchanged(consent_page_report: dict) -> None:

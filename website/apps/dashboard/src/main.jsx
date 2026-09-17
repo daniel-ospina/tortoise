@@ -5860,7 +5860,12 @@ function claimIntentInFlight() {
     // flight (paste tt_ → OAuth → claim; D2) — the claim-paste screen — or
     // the split-second before the redirect lands (the shell).
     const claimIntent = claimIntentInFlight()
-    if (!claimIntent) {
+    // #3503 (review P1, round 5): the refused-fragment card must render even when
+    // claim intent is in flight. Otherwise `?claim=1` (the exact route the round-4
+    // exemption fix targets) falls through to the claim-paste screen: the state is
+    // set but the visitor is never told, and the "Sign in again" route is
+    // unreachable — a silent loop for a session the browser would not store.
+    if (!claimIntent || fragmentRefused) {
       // #1559: a mount failure (429/5xx on session resolution or team
       // load, auth lib blocked — #2246: no session-key mint runs in the
       // !authed mount window) renders a REAL error card with a retry —
@@ -5992,7 +5997,25 @@ function claimIntentInFlight() {
             )}
             {claimError && <p className="error" role="alert">{claimError}</p>}
             <p className="dim">
-              <a href="https://tortoise.premiselabs.co/auth">← Back to sign in</a>
+              {/* #3503 (review P2, round 5): this is the claim screen's only
+                  forward route, and it must DISCARD the session it is leaving
+                  behind. With a still-valid OLD cookie, /auth's head gate sees a
+                  valid session and no fragment and forwards straight back to
+                  ?claim=1, where the stashed tt_ claim key makes performClaim
+                  POST with the OLD session token — the mix-up the round-4 work
+                  closed on the error card. Route it through the same
+                  clear-then-bounce path so it genuinely signs out. */}
+              <button type="button"
+                style={{ background: 'none', border: 0, padding: 0,
+                         font: 'inherit', color: 'inherit',
+                         textDecoration: 'underline', cursor: 'pointer' }}
+                onClick={() => {
+                  if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+                  if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, '')
+                  else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
+                }}>
+                ← Back to sign in
+              </button>
             </p>
           </div>
         </main>
