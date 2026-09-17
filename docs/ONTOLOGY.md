@@ -181,6 +181,9 @@ doc_status: live
 **Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case) — e.g. `doc_status`, `file_hash`, `is_episodic`, `c_cal`, `story_arc`, `passes_frequency_gate`, `provenance_spans` (v3.6, #909).
 
 ---
+CRITICAL RULE: no modification to this file is allowed without explicit approval of the exact changes by Daniel Ospina.
+
+---
 
 ## §1. Entity Types
 
@@ -1018,37 +1021,6 @@ subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
   `reliability_derived_at`) — the derivation is the truth, the cache is a
   performance artifact.
 
----
-
-## §11.5 Object Confidence — Compositional Projection (spec — proposed, not yet implemented)
-
-> **Status:** PROPOSED design — no code implements this projection yet (landed with the
-> #2238 problem-family manifests, which declare the composition-eligible relations).
-> Follow-up issue filed for the read-time projection. Do not treat as shipped behavior.
-
-Object confidence is derived at read time — a **derived value that may be cached but is
-never authoritative**, per the §11 v3.2 cache doctrine (the same doctrine Object.status
-follows: §2/§4.3 describe a write-through fold cache, NOT a query-time projection) — as
-the **compensating mean** of two evidence sets:
-
-1. the mean EP posterior of Points `aboutObject → O` (the §11 reputation/derivation
-   family — the epistemic base already computed for subjects extends naturally), and
-2. the derived confidence of O's parts via declared **composition channels** —
-   pack relations carrying `semantics: hasPart` (currently an intent annotation on
-   relations: `semantics` is NOT yet validated or read by any code), e.g.
-   `(O)-[:hasPart]->(C)` for dev's theme → epic decomposition:
-   `{ confidence(C) : (O)-[:hasPart]->(C) }`.
-
-Propagation flows **child → parent** (reverse traversal of the declared edge),
-recursive over the composition DAG with fixpoint iteration (reusing EP convergence).
-A drop in any child lowers the parent, but the mean is compensating — *"unless
-another child rises"*. v1: composition channels only; signed channels (e.g.
-`competesWith`) deferred — note `mechanism: NAND` remains an EPISTEMIC operator
-between Points (§3.1 operator table), not an object-relation sign.
-
-Objects remain nouns — no object-level operators. The projection only walks
-structural edges at read time; the epistemic layer (Points) is unchanged and is
-the bottom of the recursion (leaf confidence = mean EP of attached points).
 
 ---
 
