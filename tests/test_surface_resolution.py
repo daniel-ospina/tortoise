@@ -17,8 +17,13 @@ actually served) is resolved a second, independent way, so "resolves to a live
 method" is asserted on the surface an agent calls, not only on the declaration.
 
 RED BY DESIGN for the five known-dead entries (#3863): their ``sdk_method``
-names an attribute ``TortoiseSDK`` does not have. Do NOT fix, stub, rename or
-delete them here — the registry surface is FROZEN until the owner approves the
+names an attribute ``TortoiseSDK`` does not have. The dead thing is the DECLARED
+SDK BINDING, not the capability — this is registry drift, not a missing feature:
+the behaviour already exists one import away (``pack_state.get_tenant_packs``,
+``pack_manifest_store.upsert_tenant_manifest``, ``navigation.entityProfile``,
+``monitoring.metrics``, ``analyze.analyze``) and the MCP handlers already call it.
+Do NOT fix, stub, rename or delete them here — the registry surface is FROZEN
+until the owner approves the
 curated list, and this test is the instrument that keeps the surface measurable
 meanwhile. #3835 and #3838 were superseded by #3863 and are closed; #3863 is the
 binding, and it stays open until the list is approved.
@@ -95,7 +100,9 @@ def _marks(entry):
     )
 
 
-# Resolved once for parametrization + the coverage assertion below.
+# Resolved once for parametrization: the decorator consumes this list, and the
+# coverage assertion pins the cases pytest was actually GIVEN (the decorator's
+# argvalues) rather than this declared list.
 _TARGETS = [(entry, *_resolve(entry)) for entry in TOOL_REGISTRY]
 
 
@@ -132,8 +139,8 @@ def _parametrized_cases():
     ``_TARGETS``, so a decorator-only mutation (``_TARGETS[:5]``) shrinks the
     collection while ``_TARGETS`` itself stays full: an assertion on ``_TARGETS``
     is tautological in exactly the case that matters. Reading the marks also keeps
-    the count correct under ``-k``/``--deselect``, which remove the parametrised
-    items from ``session.items``.
+    the count correct when the run deselects items, which would empty
+    ``session.items`` of those cases.
     """
     for mark in test_every_registered_entry_resolves_to_a_live_method.pytestmark:
         if mark.name == "parametrize":
@@ -142,12 +149,7 @@ def _parametrized_cases():
 
 
 def _collected_entry_names(session):
-    """Names of the registry entries pytest actually COLLECTED a case for.
-
-    Empty when the run keyword-deselects the scoreboard (``-k``/``--deselect``
-    drop those items from the session); the cross-check is skipped then, because
-    the parametrised-case assertion below already pins the case set.
-    """
+    """Names of the registry entries pytest actually COLLECTED a case for."""
     names = []
     for item in session.items:
         if item.function is not test_every_registered_entry_resolves_to_a_live_method:
@@ -162,10 +164,14 @@ def test_resolution_exercises_every_registry_entry(request):
     """The scoreboard must cover ALL entries — a sample (or a truncated list) is
     a false PASS.
 
-    The case count is pinned on the cases pytest was actually GIVEN, never on
-    ``_TARGETS`` alone: the decorator-only mutation ``_TARGETS[:5]`` leaves
-    ``_TARGETS`` full while the parametrised collection drops to 5, so a check
-    against ``_TARGETS`` stays green.
+    The case set is pinned on what pytest was actually GIVEN — the ``parametrize``
+    argvalues the decorator was handed — never on ``_TARGETS`` alone: the
+    decorator-only mutation ``_TARGETS[:5]`` leaves ``_TARGETS`` full while the
+    parametrised collection drops to 5, so a check against ``_TARGETS`` stays
+    green. The collected cross-check is UNCONDITIONAL (fail-closed): a run that
+    did not collect every case is not evidence of coverage, whether that is
+    because a decorator shrank the set or because the invocation deselected
+    cases. Running this file with ``-k`` on a subset therefore REDs by design.
 
     Mutations that RED this assertion:
     * truncate the decorator's parametrize list (``for e, t, w in _TARGETS[:5]``)
@@ -183,15 +189,11 @@ def test_resolution_exercises_every_registry_entry(request):
     assert names == [e.name for e in TOOL_REGISTRY], (
         "parametrised case ids do not cover the registry in order — a sample is not a scoreboard"
     )
-    assert len(_TARGETS) == len(TOOL_REGISTRY), (
-        f"resolution covers {len(_TARGETS)} of {len(TOOL_REGISTRY)} registry entries"
-    )
     collected = _collected_entry_names(request.session)
-    if collected:
-        assert collected == names, (
-            f"the run COLLECTED {len(collected)} cases but the decorator parametrised "
-            f"{len(names)} — the run is not covering what the decorator declares"
-        )
+    assert collected == names, (
+        f"the run COLLECTED {len(collected)} cases but the decorator parametrised "
+        f"{len(names)} — a run that did not collect the scoreboard is not coverage"
+    )
     orphans = sorted(_DEAD_LINKS_AWAITING_3863 - set(names))
     assert not orphans, (
         f"orphaned ledger entries — recorded dead in _DEAD_LINKS_AWAITING_3863 but "
@@ -219,13 +221,17 @@ def test_live_mcp_surface_registers_every_entry():
 
 
 def test_live_mcp_tools_are_callable():
-    """Each live tool resolves to a callable entrypoint — not just a name.
+    """Each live tool resolves to a callable ENTRYPOINT — not just a name.
 
-    Mutation that REDs this assertion: register a non-callable placeholder where
-    a FastMCP tool is expected (the adapter registers whatever ``register_all``
-    is handed).
+    The entrypoint is ``FunctionTool.fn``. Asserting on ``run`` instead (as this
+    once did) verifies nothing: ``FunctionTool.run`` is defined on the class, so
+    it is callable for every instance ``_list_tools()`` can return — a registered
+    tool with a broken entrypoint stays green.
+
+    Mutation that REDs this assertion: give a registered tool a non-callable
+    entrypoint (``tools[0].fn = 42``) — the entrypoint list then names it.
     """
     tools = asyncio.run(mcp_server.mcp._list_tools())
     assert tools, "live MCP surface is empty (fail-closed)"
-    not_callable = [t.name for t in tools if not callable(getattr(t, "run", None))]
+    not_callable = [t.name for t in tools if not callable(getattr(t, "fn", None))]
     assert not not_callable, f"live MCP tools with no callable entrypoint: {not_callable}"
