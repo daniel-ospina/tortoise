@@ -21,6 +21,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -145,6 +146,106 @@ class TestWizardCopyParity:
         html = self.HARNESSES.read_text(encoding="utf-8")
         assert "codex mcp add" in html
         assert "TORTOISE_API_KEY" in html
+
+
+class TestClaudeHookTimeouts:
+    """#3754: every shipped Claude Code capture snippet must pin a per-hook
+    `timeout`.
+
+    Claude Code cancels a SessionEnd hook at its **1.5 s default budget**; the
+    budget only rises to the highest per-hook `timeout` in the settings files,
+    **capped at 60 s**. `tortoise/claude-hooks/session-end.sh` measures 9.26 s
+    end-to-end on a real hosted run (CLI cold start ~1.2 s + `POST /v1/sessions`
+    ~4.4 s + the backgrounded index sweep), so the shipped seam — which
+    specified no `timeout` — was cancelled on a normal session and filed
+    nothing (debug log: `SessionEnd:other [...] cancelled`), silently, because
+    the hook is fail-open (`2>/dev/null || exit 0`).
+
+    FOUR surfaces ship the same `settings.json` snippet, and a copy that loses
+    its `timeout` re-opens the bug on that surface alone:
+
+    1. `harnesses.js` `HARNESS_INSTALL.claude` — the full install copy
+    2. `harnesses.js` `HARNESS_CAPTURE_INSTALL.claude` — the Memory-sources step
+    3. `session-end.sh` header — the in-repo install comment
+    4. `session-start.sh` header — the in-repo install comment
+
+    Each is JSON-PARSED back out of the file rather than substring-matched (a
+    `"timeout": 60` sitting anywhere else in the file, or on the wrong event,
+    must not pass), and the per-surface event counts are pinned — a new copy
+    must be added here, not shipped unprotected.
+    """
+
+    HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
+    HOOKS = REPO_ROOT / "tortoise" / "claude-hooks"
+    MEASURED_S = 9.26  # #3754: real hosted run with the seam-literal settings
+    MAX_TIMEOUT_S = 60  # documented ceiling the per-hook timeout may raise to
+    # surface → {event: number of snippets carrying that event}
+    SURFACES: ClassVar[dict[str, dict[str, int]]] = {
+        "harnesses.js": {"SessionStart": 2, "SessionEnd": 2},
+        "session-end.sh": {"SessionEnd": 1},
+        "session-start.sh": {"SessionStart": 1},
+    }
+
+    @staticmethod
+    def _snippets(text: str) -> list[dict]:
+        """Every `{ "hooks": ... }` object literal in `text`, JSON-parsed.
+
+        Brace-balanced so the multi-line literals in the shell-script headers
+        parse too; the `#` comment markers carry no JSON meaning and are
+        stripped from the span.
+        """
+        docs = []
+        for m in re.finditer(r'\{\s*"hooks"\s*:', text):
+            depth = 0
+            for j in range(m.start(), len(text)):
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            else:  # pragma: no cover - malformed source, not a test condition
+                raise AssertionError('unbalanced { "hooks": ... } literal')
+            docs.append(json.loads(text[m.start() : j + 1].replace("#", "")))
+        return docs
+
+    def _walk(self):
+        """`(surface, event, inner-hook-entry)` for every shipped snippet."""
+        texts = {"harnesses.js": self.HARNESSES.read_text(encoding="utf-8")}
+        for script in ("session-end.sh", "session-start.sh"):
+            texts[script] = (self.HOOKS / script).read_text(encoding="utf-8")
+        for name, text in texts.items():
+            for doc in self._snippets(text):
+                for event, groups in doc["hooks"].items():
+                    for group in groups:
+                        for entry in group["hooks"]:
+                            yield name, event, entry
+
+    def test_every_shipped_snippet_pins_a_hook_timeout(self):
+        for name, event, entry in self._walk():
+            timeout = entry.get("timeout")
+            assert isinstance(timeout, int) and not isinstance(timeout, bool), (
+                f"#3754: {name} ships a {event} hook entry with no integer "
+                f'"timeout" ({entry!r}) — Claude Code cancels SessionEnd at its '
+                f"1.5s default, so the session is silently never filed"
+            )
+            assert self.MEASURED_S < timeout <= self.MAX_TIMEOUT_S, (
+                f"#3754: {name} {event} timeout={timeout} is outside the "
+                f"documented envelope ({self.MEASURED_S}s measured, "
+                f"{self.MAX_TIMEOUT_S}s ceiling)"
+            )
+
+    def test_snippet_surfaces_are_fully_pinned(self):
+        # An added or removed copy of the snippet must land here: an
+        # unprotected surface is exactly how this bug shipped (#3754).
+        counts: dict[str, dict[str, int]] = {}
+        for name, event, _ in self._walk():
+            counts.setdefault(name, {})
+            counts[name][event] = counts[name].get(event, 0) + 1
+        assert counts == self.SURFACES, (
+            f"the shipped settings.json snippet surfaces changed: {counts} != "
+            f"{self.SURFACES} — pin the new copy's hook timeout here"
+        )
 
 
 class TestSelfHostedStdioShapes:
