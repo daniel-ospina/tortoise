@@ -6,13 +6,16 @@ which honours ``TORTOISE_LME_CACHE_DIR``) because a 49 MB slice is not
 committed; the committed builder plus the pinned selector is what makes the
 measurement reproducible.
 
-Cohorts (both materialized from the same source file, in source order):
+Cohorts (all three materialized from the same source file, in source order):
 
   * ``tail`` — questions at index range ``s[150:250]`` (100 questions; the
     #2519 doc's tail slice — the cross-session-heavy stretch).
   * ``head`` — the first 50 ``single-session-user`` questions (a real
     ``question_type`` field value; the reader-item-cap / token-budget
     cohort).
+  * ``ms_tail`` — the WHOLE ``multi-session`` class inside the tail slice
+    (the #2513 C4 measurement cohort; 71 of the 100 tail questions) — the
+    class the re-injection arm claims to close, at its largest available n.
 
 The source path resolves through ``tools.longmem_eval.dataset`` (the single
 source of truth: ``cache_dir()`` + ``SPLIT_FILES[DEFAULT_SPLIT]``), and a
@@ -22,7 +25,7 @@ denominator. The source sha256 is printed so a receipt can pin it.
 
 Usage::
 
-    python -m tools.longmem_eval.build_cohorts            # both cohorts
+    python -m tools.longmem_eval.build_cohorts            # all cohorts
     python -m tools.longmem_eval.build_cohorts --cohort tail
 
 Writes ``longmemeval_2517_<cohort>.json`` (the same list-of-question shape
@@ -120,7 +123,7 @@ def _verify_source(path: Path, *, allow_unpinned: bool = False) -> tuple[str, bo
 
 
 def build_cohorts(source: Path) -> dict[str, list[dict]]:
-    """Materialize both cohorts from ``source`` (in-memory, source order).
+    """Materialize all cohorts from ``source`` (in-memory, source order).
 
     Parses through :func:`dataset._read_instances` — the eval lane's own
     reader for the ``--data`` path — so a JSONL source (one instance per

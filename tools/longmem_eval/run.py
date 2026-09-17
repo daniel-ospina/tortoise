@@ -112,6 +112,7 @@ from .retrieve import (
     DEFAULT_EVIDENCE_BOOST_SOURCE,
     DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
+    DEFAULT_REINJECTION_TOTAL_ITEMS,
     DEFAULT_RETRIEVAL_BUDGET_MS,
     DEFAULT_TR_TOP_K,
     EVAL_RETRIEVAL_BUDGET_MS,
@@ -437,6 +438,35 @@ def _resolve_rerank(*, rerank: bool | None, rerank_model: str | None,
         "model": model, "rerank_pool": pool,
         "per_session_cap": cap, "mmr_lambda": lam,
     }
+
+
+def _resolve_reinjection_total_cap(arm_on: bool,
+                                   explicit: int | None = None) -> int | None:
+    """C4 (#2513): the resolved source-session injection TOTAL budget — the
+    volume guard on the re-injection sweep, resolved ONCE before the loop.
+
+    Contract (the sibling-knob precedent, ``_resolve_rerank`` /
+    ``context_item_cap``): the run path passes the resolved value to
+    ``retrieve_for_question`` and stamps it on BOTH the checkpoint
+    fingerprint and the methodology record, so a cap-10 checkpoint can
+    never be resumed by a cap-15 run — two injection volumes must not blend
+    into one artifact that declares one config.
+
+    Off-path hygiene (the evidence_boost multiplier precedent): an arm-OFF
+    run resolves ``None`` — it never reads the env, never records a stray
+    env value, and never stamps an inert knob on the fingerprint (an OFF
+    run stays byte-identical to a pre-knob OFF checkpoint). Arm-ON
+    resolution is explicit > env > product constant, through the SAME
+    ``rerank._env_int`` clamp the direct-caller fallback uses (garbage / <1
+    falls back to ``DEFAULT_REINJECTION_TOTAL_ITEMS``) — so the run path
+    and a direct caller can never resolve the knob differently.
+    """
+    if not arm_on:
+        return None
+    if explicit is not None:
+        return explicit
+    return _env_int("TORTOISE_LME_REINJECTION_TOTAL_CAP",
+                    DEFAULT_REINJECTION_TOTAL_ITEMS)
 
 
 # R3 (#1542): the embedder pinned for the eval pre-flight — now derived from
@@ -1253,6 +1283,17 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # on resume and an arm/guard flip can never cross.
                        session_reinjection: bool = False,
                        session_reinjection_guard: bool = True,
+                       # C4 (#2513, delta-review P1): the RESOLVED injection
+                       # total budget — conditional presence (None when the
+                       # arm is OFF: an inert knob never gates a checkpoint,
+                       # the evidence_boost-multiplier precedent). When the
+                       # arm is ON the cap is ALWAYS stamped, so a cap-10
+                       # checkpoint can never be resumed by a cap-15 run —
+                       # the two injection volumes must not blend into one
+                       # artifact that declares one config. The env is not
+                       # part of any fingerprint, so a lazily re-read cap
+                       # could not gate resume at all.
+                       reinjection_total_cap: int | None = None,
                        # C5 (#2521, #2513): the aggregative-intent coverage-
                        # check arm — conditional presence like the other C2/C5
                        # knobs (a flagged checkpoint resumed without the arm
@@ -1405,6 +1446,14 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
             ("coverage_loop", coverage_loop),
+            # C4 (#2513): the resolved injection total budget — conditional
+            # presence like the sibling knobs (absent for an arm-OFF run:
+            # the knob is inert there, and a pre-knob arm-OFF checkpoint
+            # resumes byte-identically). When the arm is ON the cap is
+            # always stamped, so a cap change (10 vs 15 vs the product
+            # default) refuses the resume in either direction via the
+            # key-union in ``_fingerprint_diffs``.
+            ("reinjection_total_cap", reinjection_total_cap),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — conditional presence like the C2 knob (a flagged checkpoint
             # resumed without the arm is refused by the fingerprint gate).
@@ -3414,6 +3463,14 @@ def run_evaluation(
     # same pool order are never left order-dependent.
     session_reinjection: bool | None = None,
     session_reinjection_guard: bool | None = None,
+    # C4 (#2513, delta-review P1): the RESOLVED injection total budget
+    # (explicit value > ``TORTOISE_LME_REINJECTION_TOTAL_CAP`` env > the
+    # product constant ``DEFAULT_REINJECTION_TOTAL_ITEMS``), resolved ONCE
+    # here — before the loop — and stamped on BOTH the checkpoint
+    # fingerprint and the methodology record (the TORTOISE_LME_CONTEXT_ITEMS
+    # / _RERANK_CAP contract). None while the arm is OFF: the knob is inert,
+    # never read, never fingerprinted, never recorded as a stray env value.
+    reinjection_total_cap: int | None = None,
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (explicit flag > ``TORTOISE_LME_AGGREGATIVE_FLAG``
     # env > OFF, the #1745 fail-safe default). The A/B switch that MEASURES
@@ -3573,6 +3630,15 @@ def run_evaluation(
         session_reinjection = sr_env.strip().lower() in _TRUTHY
     if session_reinjection_guard is None:
         session_reinjection_guard = True
+    # C4 (#2513, delta-review P1): the injection total budget is a
+    # results-affecting knob (it is the volume guard the re-injection sweep
+    # varies) — resolve it ONCE, before the loop, and thread the SAME value
+    # into the fingerprint, the methodology and every question's fetch. A
+    # lazily re-read cap (the pre-fix shape) is invisible to the fingerprint
+    # gate: a cap-10 checkpoint would be resumed by a cap-15 run and the two
+    # volumes would blend into one artifact declaring one config.
+    reinjection_total_cap = _resolve_reinjection_total_cap(
+        bool(session_reinjection), reinjection_total_cap)
     # §0.2: C3-1 and C4 both own the pool order — REFUSE the both-ON
     # combination HERE (arm resolution, before the question loop and
     # outside every fail-open region), so the refusal aborts the run
@@ -3712,6 +3778,13 @@ def run_evaluation(
         # guard flipped.
         session_reinjection=bool(session_reinjection),
         session_reinjection_guard=bool(session_reinjection_guard),
+        # C4 (#2513): the resolved injection total budget rides the
+        # fingerprint as a CONDITIONAL member (absent while the arm is OFF
+        # — the knob is inert there and a pre-knob arm-OFF checkpoint must
+        # keep resuming). Arm-ON: always stamped, so the cap the
+        # checkpoint was produced under can never differ silently from the
+        # cap a resume serves (10 vs 15 vs the product default all refuse).
+        reinjection_total_cap=reinjection_total_cap,
         # C5 (#2521, #2513): the resolved aggregative-check arm rides the
         # fingerprint — a flagged checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
@@ -4168,6 +4241,14 @@ def run_evaluation(
                             # decides adoption).
                             session_reinjection=session_reinjection,
                             session_reinjection_guard=session_reinjection_guard,
+                            # C4 (#2513): the SAME resolved cap the
+                            # checkpoint fingerprint and the methodology
+                            # record carry — never re-resolved per question
+                            # (a lazy re-read is invisible to the
+                            # fingerprint gate and would blend two
+                            # injection volumes into one artifact).
+                            session_reinjection_total_cap=(
+                                reinjection_total_cap),
                             # C5 (#2521, #2513): the aggregative-intent
                             # coverage-check arm (resolved above; OFF by
                             # default — records the per-outcome verdict
@@ -4854,6 +4935,16 @@ def run_evaluation(
             # bool distinguishes the injection-only ablation).
             "session_reinjection": bool(session_reinjection),
             "session_reinjection_guard": bool(session_reinjection_guard),
+            # C4 (#2513): the resolved injection total budget — recorded so
+            # a published number carries the volume guard it was produced
+            # under (the sweep's arms differ ONLY by this value). The
+            # product default is recorded when the arm is OFF (the
+            # evidence_boost-multiplier precedent: an inert knob never lets
+            # a stray env value into the methodology).
+            "session_reinjection_total_cap": (
+                reinjection_total_cap
+                if reinjection_total_cap is not None
+                else DEFAULT_REINJECTION_TOTAL_ITEMS),
             # C5 (#2521, #2513): the aggregative-intent coverage-check arm
             # — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them; OFF by default — the C3-3

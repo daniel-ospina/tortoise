@@ -408,6 +408,86 @@ def test_fingerprint_refuses_arm_and_guard_mismatches():
     assert "session_reinjection" in _run._fingerprint_diffs({}, fp)
 
 
+def test_reinjection_total_cap_resolves_once_before_the_loop(monkeypatch):
+    """#2513 (delta-review P1): the injection total budget resolves ONCE,
+    outside the per-question path.
+
+    Arm-ON: explicit > env > the product constant. Arm-OFF: ``None`` — the
+    knob is inert, so a stray env value is never read and never stamped
+    (an OFF run stays byte-identical to a pre-knob OFF run). The pre-fix
+    shape read the env lazily inside ``retrieve_for_question``, where no
+    fingerprint or methodology record can see it.
+    """
+    from tools.longmem_eval import run as _run
+
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "15")
+    assert _run._resolve_reinjection_total_cap(False) is None
+    assert _run._resolve_reinjection_total_cap(False, 99) is None
+    assert _run._resolve_reinjection_total_cap(True) == 15
+    assert _run._resolve_reinjection_total_cap(True, 7) == 7
+    # garbage / <1 / unset fall back to the shipped product constant — the
+    # SAME ``rerank._env_int`` clamp the direct-caller fallback uses, so a
+    # measured run never crashes
+    for raw in ("garbage", "0"):
+        monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", raw)
+        assert _run._resolve_reinjection_total_cap(
+            True) == DEFAULT_REINJECTION_TOTAL_ITEMS
+    monkeypatch.delenv("TORTOISE_LME_REINJECTION_TOTAL_CAP")
+    assert _run._resolve_reinjection_total_cap(
+        True) == DEFAULT_REINJECTION_TOTAL_ITEMS
+
+
+def test_fingerprint_and_resume_refuse_a_total_cap_change(tmp_path):
+    """#2513 (delta-review P1, false-PASS class): the resolved injection
+    total budget gates the checkpoint — a cap-10 checkpoint is REFUSED by a
+    cap-15 resume, so two injection volumes can never blend into one
+    artifact that declares one config.
+
+    Every call below executes the real handlers (``_build_fingerprint`` /
+    ``_save_checkpoint`` / ``_load_checkpoint``) — no source inspection.
+    """
+    from tools.longmem_eval import run as _run
+
+    base = dict(reader_model="m", judge_model="m", ks=(5,), top_k=5,
+                split="s", ingest_mode="v2", extractor_model=None,
+                max_retries=0, dataset_fingerprint="unknown",
+                rerank_config={}, session_reinjection=True,
+                session_reinjection_guard=True)
+    fp10 = _run._build_fingerprint(**base, reinjection_total_cap=10)
+    cp = tmp_path / "cp_cap10.json"
+    _run._save_checkpoint(str(cp), [], [], fp10)
+
+    fp15 = _run._build_fingerprint(**base, reinjection_total_cap=15)
+    # THE DEFECT: a cap-10 checkpoint must be REFUSED by a cap-15 resume —
+    # asserted BEFORE the key-existence checks so a fingerprint that drops
+    # the cap REDs here (silent acceptance of a different injection volume),
+    # not on an incidental KeyError.
+    with pytest.raises(_run.CheckpointStaleError) as ei:
+        _run._load_checkpoint(str(cp), fp15)
+    assert "reinjection_total_cap" in str(ei.value)
+    assert fp10["reinjection_total_cap"] == 10
+    assert fp15["reinjection_total_cap"] == 15
+
+    # the LEGITIMATE form stays GREEN: the same cap resumes the checkpoint
+    done, failures = _run._load_checkpoint(str(cp), fp10)
+    assert done == {} and failures == []
+
+    # an arm-OFF fingerprint carries NO cap key at all (the knob is inert —
+    # a pre-knob arm-OFF checkpoint keeps resuming byte-identically)
+    off = _run._build_fingerprint(**dict(base, session_reinjection=False))
+    assert "reinjection_total_cap" not in off
+
+    # an arm-ON run at the product default stamps it explicitly, and BOTH
+    # directions of the cross refuse (the key-union compares values)
+    on_default = _run._build_fingerprint(
+        **base, reinjection_total_cap=DEFAULT_REINJECTION_TOTAL_ITEMS)
+    assert on_default["reinjection_total_cap"] == \
+        DEFAULT_REINJECTION_TOTAL_ITEMS
+    assert "reinjection_total_cap" in _run._fingerprint_diffs(
+        on_default, fp15)
+    assert "reinjection_total_cap" in _run._fingerprint_diffs({}, fp10)
+
+
 def test_merge_with_no_new_ids_returns_the_base_pool_unchanged():
     pool = [_point("a0", "s1"), _chunk("x1", "s1")]
     out = reinjection_merge_order(

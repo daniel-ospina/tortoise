@@ -536,6 +536,32 @@ def test_total_cap_knob_threads_and_defaults(seeded_sdk, monkeypatch):
     assert len(seen) == 4
 
 
+def test_total_cap_run_resolved_value_wins_over_env(seeded_sdk, monkeypatch):
+    """#2513 (delta-review P1): the run path resolves the cap ONCE and passes
+    it explicitly — the env read is the direct-caller fallback only.
+
+    A run whose fingerprint recorded cap 10 must serve 10 even if the env
+    moves to 15 before the question runs; otherwise the artifact declares
+    one config while the fetch serves another.
+    """
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    from tortoise import session_reinjection as _sr
+
+    seen: list[int] = []
+    real = _sr.source_session_chunk_pass
+
+    def _capture(proj, seed_point_ids, **kw):
+        seen.append(kw["total_cap"])
+        return real(proj, seed_point_ids, **kw)
+
+    monkeypatch.setattr(_sr, "source_session_chunk_pass", _capture)
+    monkeypatch.setenv("TORTOISE_LME_REINJECTION_TOTAL_CAP", "15")
+    retrieve_for_question(seeded_sdk, _question(), ks=(5,), top_k=10,
+                          pool_size=60, session_reinjection=True,
+                          session_reinjection_total_cap=10)
+    assert seen == [10]  # explicit run-resolved value, never the stray env
+
+
 # ── (i) the PRODUCT turn shape: no ``session_id`` on the point ───────────
 
 def test_product_shaped_turn_is_injected_via_its_session(seeded_sdk):

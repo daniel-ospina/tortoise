@@ -34,6 +34,55 @@ def test_selectors_are_pinned():
     assert bc.TAIL_SLICE == (150, 250)
     assert bc.HEAD_TYPE == "single-session-user"
     assert bc.HEAD_N == 50
+    # #2513 (C4): the ms_tail selector is pinned too — it defines the
+    # measurement cohort's denominator, and an unpinned selector could drift
+    # while the built payload's provenance still read as authoritative.
+    assert bc.MS_TAIL_TYPE == "multi-session"
+    assert bc.SELECTORS["ms_tail"] == [list(bc.TAIL_SLICE), bc.MS_TAIL_TYPE]
+    # every declared selector is pinned (a dropped/renamed cohort key is a
+    # silently missing artifact in every ``--cohort both`` receipt)
+    assert sorted(bc.SELECTORS) == ["head", "ms_tail", "tail"]
+    assert bc.SELECTORS["tail"] == list(bc.TAIL_SLICE)
+    assert bc.SELECTORS["head"] == [bc.HEAD_TYPE, bc.HEAD_N]
+
+
+def test_build_cohorts_slices_the_ms_tail_cohort(tmp_path):
+    """``ms_tail`` = the multi-session class INSIDE the tail slice, in
+    source order (and only inside it — a multi-session question before
+    index 150 never leaks in)."""
+    instances = [_instance(f"q{i}", "multi-session") for i in range(260)]
+    instances[7] = _instance("before-tail", "multi-session")
+    src = _write(tmp_path / "corpus.json", instances)
+    cohorts = bc.build_cohorts(src)
+    assert [q["question_id"] for q in cohorts["ms_tail"]] == \
+        [f"q{i}" for i in range(150, 250)]
+    assert "before-tail" not in [q["question_id"]
+                                  for q in cohorts["ms_tail"]]
+
+
+def test_main_both_writes_all_three_cohorts(tmp_path, monkeypatch):
+    """``--cohort both`` materializes every declared selector — including
+    the #2513 ``ms_tail`` cohort (a hardcoded tail+head pair would silently
+    drop it from the receipt's artifact set)."""
+    monkeypatch.setattr(bc, "SPLIT_FILES", {})
+    monkeypatch.setattr(bc, "SPLIT_DIGESTS", {})
+    instances = [_instance(f"q{i}", "multi-session") for i in range(260)]
+    src = _write(tmp_path / "corpus.json", instances)
+    assert bc.main(["--source", str(src), "--out-dir", str(tmp_path),
+                    "--cohort", "both",
+                    "--allow-unpinned-source"]) == 0
+    for name in ("tail", "head", "ms_tail"):
+        assert (tmp_path / f"longmemeval_2517_{name}.json").exists()
+        prov = json.loads(
+            (tmp_path /
+             f"longmemeval_2517_{name}.provenance.json").read_text())
+        assert prov["cohort"] == name
+        assert prov["selector"] == bc.SELECTORS[name]
+    ms_prov = json.loads(
+        (tmp_path / "longmemeval_2517_ms_tail.provenance.json").read_text())
+    assert ms_prov["questions"] == 100
+    assert ms_prov["selectors_pinned"]["ms_tail"] == \
+        [list(bc.TAIL_SLICE), bc.MS_TAIL_TYPE]
 
 
 def test_build_cohorts_slices_both_cohorts_in_source_order(tmp_path):

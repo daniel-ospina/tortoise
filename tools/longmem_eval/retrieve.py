@@ -1121,6 +1121,14 @@ def retrieve_for_question(
     # reorder.
     session_reinjection: bool | None = None,
     session_reinjection_guard: bool | None = None,
+    # C4 (#2513): the RESOLVED total injection budget (env
+    # ``TORTOISE_LME_REINJECTION_TOTAL_CAP``, default the product constant
+    # ``DEFAULT_REINJECTION_TOTAL_ITEMS``). The run path resolves it once,
+    # before the loop, and passes it explicitly so the value that gated the
+    # checkpoint fingerprint and the methodology record is EXACTLY the value
+    # the fetch serves (methodology == actual == fingerprint). None = a
+    # direct caller passed nothing; the env fallback below resolves it.
+    session_reinjection_total_cap: int | None = None,
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (True/False explicit, None = env
     # ``TORTOISE_LME_AGGREGATIVE_FLAG``; only 1/true/yes/on enables —
@@ -1708,16 +1716,27 @@ def retrieve_for_question(
         # product function already takes it as a parameter
         # (``source_session_chunk_pass(total_cap=…)``), so no product code
         # changes. The product constant stays the shipped DEFAULT, never a
-        # ceiling; the env knob is read only when the arm fires (an OFF run
-        # resolves nothing and is byte-identical), and the clamp
-        # (``rerank._env_int``) falls garbage / <1 back to the constant —
-        # never a crash. Precedence: env > product constant. Precedent: the
-        # sibling eval knobs TORTOISE_LME_CONTEXT_ITEMS / _POOL_SIZE /
-        # _RERANK_CAP, resolved the same way one screen above.
+        # ceiling; the clamp (``rerank._env_int``) falls garbage / <1 back
+        # to the constant — never a crash. Precedence: the RUN-RESOLVED
+        # value (below) > env > product constant.
+        #
+        # #2513 (delta-review P1): the run path resolves this knob ONCE,
+        # before the question loop (``run._resolve_reinjection_total_cap``),
+        # and passes it explicitly via ``session_reinjection_total_cap`` —
+        # EXACTLY the sibling-knob contract (TORTOISE_LME_CONTEXT_ITEMS /
+        # _POOL_SIZE / _RERANK_CAP are all resolved in run.py before the
+        # loop and ride the checkpoint fingerprint + methodology record).
+        # Re-reading the env HERE is legitimate only as the direct-caller
+        # fallback: a lazily-read cap would let a cap-10 checkpoint be
+        # resumed by a cap-15 run (two injection volumes blended into one
+        # artifact that declares one config), because the env is not part
+        # of any fingerprint.
         from .rerank import _env_int
-        _sr_total_cap = _env_int(
-            "TORTOISE_LME_REINJECTION_TOTAL_CAP",
-            DEFAULT_REINJECTION_TOTAL_ITEMS)
+        _sr_total_cap = (
+            session_reinjection_total_cap
+            if session_reinjection_total_cap is not None
+            else _env_int("TORTOISE_LME_REINJECTION_TOTAL_CAP",
+                          DEFAULT_REINJECTION_TOTAL_ITEMS))
         _t_sr = time.monotonic()
         try:
             _seeds = _sr.seeded_sessions(
