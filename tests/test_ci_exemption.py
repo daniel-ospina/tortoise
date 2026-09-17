@@ -428,3 +428,35 @@ def test_E3_an_explicit_k_main_of_zero_does_not_remove_the_floor():
     d = decide(pr, main.rates, main_signatures={"tests/a.py::T::t1": frozenset({"sg"})},
                k_main=0, k_pr=1)
     assert not d.visible_exemptions(), "k_main=0 is insufficient evidence, not unlimited evidence"
+
+
+def test_min_runs_floor_is_PER_ID_not_table_wide():
+    """Cycle-2 SURVIVOR: the floor was `max(runs)` over the WHOLE table.
+
+    A row with `runs=1` was exempted whenever ANY OTHER row in the table had
+    `>= min_runs` runs — and with NO insufficient-evidence note, because the global
+    looked healthy. That is the permissive direction, and it violates the module's own
+    invariant ("one observation cannot establish a rate"), which is a claim about THIS
+    id's evidence. The earlier test built a SINGLE-ROW table, so `max(runs)` degenerated
+    to that row's runs and the hole was structurally invisible.
+    """
+    main = parse_rates(
+        "tests/test_a.py::test_a11\t1\t1\n"      # the id under test: ONE observation
+        "tests/test_b.py::test_b48\t4\t8\n")     # a healthy row ELSEWHERE in the table
+    pr = {"tests/test_a.py::test_a11": Failure(rate=Rate(1, 1), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates,
+               main_signatures={"tests/test_a.py::test_a11": frozenset({"sg"})})
+    assert not d.visible_exemptions(), (
+        "a healthy OTHER row must not license THIS id's exemption")
+    assert [v.nodeid for v in d.blocked] == ["tests/test_a.py::test_a11"]
+
+
+def test_the_per_id_floor_still_exempts_a_genuinely_well_measured_row():
+    """The legitimate form that must STAY green — complement of the survivor."""
+    main = parse_rates(
+        "tests/test_a.py::test_a11\t4\t8\n"
+        "tests/test_b.py::test_b48\t1\t1\n")     # a thin row must not block THIS id
+    pr = {"tests/test_a.py::test_a11": Failure(rate=Rate(4, 8), signatures=frozenset({"sg"}))}
+    d = decide(pr, main.rates,
+               main_signatures={"tests/test_a.py::test_a11": frozenset({"sg"})})
+    assert d.visible_exemptions(), "a well-measured row at an equivalent rate IS exempt"

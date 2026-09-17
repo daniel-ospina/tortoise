@@ -284,19 +284,20 @@ def decide(
     decision = Decision()
     sig_main = main_signatures or {}
 
-    # The floor is derived, not optional (review cycle 1, bypass 1b). `k_main`
-    # defaults to None, and gating BOTH the note and the block on it being passed
-    # made the DEFAULT call the weakest: no floor and no warning, so a single-sample
-    # main row exempted while the note still claimed exemptions need evidence. The
-    # declared K now comes from the table itself when the caller does not state it.
+    # NOTE (informational only): a thin TABLE gets a note. It is deliberately NOT
+    # the gate — the gate is PER-ID below (review cycle 2, survivor). Deriving the
+    # floor from `max(runs)` over the whole table let a row with `runs=1` be exempted
+    # whenever ANY OTHER row in the table had >= min_runs runs, with NO note, because
+    # the global looked healthy. "One observation cannot establish a rate" is a claim
+    # about THIS id's evidence, so the comparison must be against THIS id's runs.
     main_k = (
         k_main if k_main is not None
         else max((r.runs for r in main_rates.values()), default=0)
     )
     if main_k < min_runs:
         decision.notes.append(
-            f"insufficient evidence: k_main={main_k} < min_runs={min_runs} — "
-            "no exemption may rest on a sample this small"
+            f"insufficient evidence: no main row reaches min_runs={min_runs} "
+            f"(widest k_main={main_k})"
         )
     if k_pr is not None and k_pr < 1:
         decision.notes.append("pr sample empty — treating every failure as PR-side")
@@ -318,10 +319,11 @@ def decide(
                 "a DIFFERENT failure is not exempt"))
             continue
 
-        if main_k < min_runs:
+        if mr.runs < min_runs:
             decision.blocked.append(Verdict(
                 nodeid, True,
-                f"insufficient evidence (main {mr}, k_main={main_k} < {min_runs})"))
+                f"insufficient evidence (main {mr}, {mr.runs} run(s) < "
+                f"min_runs={min_runs}) — one observation cannot establish a rate"))
             continue
 
         # THE RATE COMPARISON — the heart of the fix. Compares the two RATES
