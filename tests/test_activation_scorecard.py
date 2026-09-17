@@ -81,23 +81,12 @@ def _seed(sid: str, created_at: str, events: int, claims: int) -> None:
             params={"i": sid, "p": pid})
 
 
-def _seed_memory_without_created_at(sid: str) -> None:
-    """A Session holding a memory point but with NO ``created_at`` — the shape
-    that makes ``min(s.created_at)`` NULL while ``count(DISTINCT s)`` is
-    positive. Memory EXISTS; only its timestamp is missing."""
-    import tortoise.hosted_api as ha
-    proj = ha._make_sdk(namespace=ORG["org_id"])._get_proj()
-    proj.g.query("MERGE (s:Session {id:$i})", params={"i": sid})
-    pid = f"{sid}_p0"
-    proj.g.query("MERGE (p:Point {id:$i}) SET p.pointKind='statement'",
-                 params={"i": pid})
-    proj.g.query(
-        "MATCH (s:Session {id:$i}),(p:Point {id:$p}) MERGE (s)-[:CONTAINS]->(p)",
-        params={"i": sid, "p": pid})
+_UNSET = object()
 
 
 def _stub_graph(monkeypatch, *, created_at="2026-09-16T01:00:00+00:00",
-                turn_points=2, extracted=1, sessions=1) -> None:
+                turn_points=2, extracted=1, sessions=1,
+                first_memory_at=_UNSET) -> None:
     """Bind the endpoint's graph leg to EXPLICIT rows, bypassing the graph.
 
     The recall/stage-4 tests are about the ANALYTICS leg; they only need the
@@ -108,18 +97,24 @@ def _stub_graph(monkeypatch, *, created_at="2026-09-16T01:00:00+00:00",
     that exercise the real Cypher still seed — this is only for the ones whose
     subject is elsewhere.
 
-    ``first_memory_at`` tracks ``extracted``: no memory means the lifetime
-    query returns nothing, which is a distinct (and load-bearing) state.
+    ``first_memory_at`` models the lifetime row and defaults to
+    ``created_at``. It must NOT be conflated with the funnel rows: those come
+    from ``FUNNEL_QUERY``, whose ``>= $since AND < $until`` predicate cannot
+    return a NULL-``created_at`` Session, so a NULL funnel row is an impossible
+    shape. ``first_memory_at=None`` gives the shape that IS real — (NULL,
+    positive count): memory exists, its timestamp is missing — which must read
+    as ``unavailable``/``first_memory_at_missing``, never "never produced".
+
+    ``extracted=0`` means the org has produced no memory at all, so the
+    lifetime query returns nothing (a distinct, load-bearing state).
     """
     import tortoise.hosted_api as ha
     from tortoise.activation_scorecard import FUNNEL_QUERY as _FUNNEL
 
     rows = [(f"s{i}", created_at, turn_points, extracted)
             for i in range(sessions)]
-    # `created_at=None` models the distinct shape the lifetime query returns
-    # for a Session that HAS memory but no timestamp: (NULL, positive count) —
-    # must be `unavailable`/`first_memory_at_missing`, not "never produced".
-    life = [(created_at, sessions)] if extracted >= 1 else []
+    first = created_at if first_memory_at is _UNSET else first_memory_at
+    life = [(first, sessions)] if extracted >= 1 else []
 
     class _Res:
         def __init__(self, r):
@@ -399,10 +394,12 @@ def test_analytics_leg_interval_matches_the_graph_legs(client, monkeypatch):
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
-    # Collect EVERY call's filters rather than "last call wins": the read path
-    # issues more than one query (narrow + wide allowlist), so a single
-    # overwritten dict made the assertion depend on call ORDER and could fail
-    # with `conds == []` (caught by a VGATE run, cycle 6).
+    # Collect EVERY call's filters rather than "last call wins". The read path
+    # makes ONE `get_control_plane().query(...)` call — the narrow and wide
+    # allowlists are two in-memory passes over those same rows, not two queries
+    # (review cycle 6, F1: the earlier comment claimed otherwise) — but a bare
+    # overwritten dict made the assertion depend on incidental call order and
+    # could fail with `conds == []`.
     calls: list[dict] = []
 
     class _CP:
@@ -421,6 +418,47 @@ def test_analytics_leg_interval_matches_the_graph_legs(client, monkeypatch):
     assert windows == {(("gte", body["window"]["since"]),
                         ("lt", body["window"]["until"]))}, windows
     assert body["stages"]["recall_attempted"]["state"] == "measured", body
+
+
+def test_graph_legs_window_operators_are_half_open():
+    """F9 (review cycle 6): the analytics leg's bounds were pinned by a test,
+    but the GRAPH legs' were not — nothing asserted that `FUNNEL_QUERY` uses
+    `>=` on `since` and `<` on `until`. The runbook calls the matching
+    intervals a "guarantee"; for the graph side that was only an assertion in
+    prose. Pin it, so a later `>=`→`>` edit fails a test instead of silently
+    dropping a session created exactly on the boundary."""
+    from tortoise.activation_scorecard import FUNNEL_QUERY, LIFETIME_MEMORY_QUERY
+
+    assert "s.created_at >= $since" in FUNNEL_QUERY, FUNNEL_QUERY
+    assert "s.created_at < $until" in FUNNEL_QUERY, FUNNEL_QUERY
+    # ...and the lifetime query is window-free on purpose (it is the baseline
+    # stage 4 conditions on, so restricting it to the window would defeat it).
+    assert "$since" not in LIFETIME_MEMORY_QUERY, LIFETIME_MEMORY_QUERY
+    assert "$until" not in LIFETIME_MEMORY_QUERY, LIFETIME_MEMORY_QUERY
+
+
+def test_window_boundaries_match_the_analytics_leg():
+    """The other half: a Session exactly ON `since` counts, exactly on `until`
+    does not — the same half-open rule the analytics leg now uses."""
+    from tortoise.activation_scorecard import stage_counts
+
+    since, until = "2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00"
+    # Exactly ON `since` — INCLUDED (`>=`): the leg is closed on the left.
+    stages, _ = stage_counts([("at-since", since, 1, 1)], since, until)
+    assert stages["captured"]["state"] == "measured", stages
+    assert stages["captured"]["value"] == 1, stages
+    # Exactly ON `until` — EXCLUDED (`<`): open on the right. And because ANY
+    # out-of-window row withholds ALL THREE graph stages (fail closed), a
+    # session on `until` is not "counted as 0" — the number is refused.
+    stages, detail = stage_counts([("at-until", until, 1, 1)], since, until)
+    assert stages["captured"]["state"] == "unavailable", stages
+    assert stages["captured"]["value"] is None, stages
+    assert stages["captured"]["reason"] == "window_predicate_not_applied", stages
+    assert "window_predicate_not_applied" in detail["integrity"], detail
+    # One bad row poisons the batch rather than silently adjusting the count.
+    stages, _ = stage_counts([("at-since", since, 1, 1),
+                              ("at-until", until, 1, 1)], since, until)
+    assert stages["captured"]["value"] is None, stages
 
 
 def test_first_memory_at_unparseable_is_unavailable():
@@ -446,6 +484,10 @@ def test_truncated_page_does_not_mask_a_no_memory_org():
     # ...but truncation still refuses when the org DOES have memory.
     stage, _ = recall_stages([{}] * 1000, "2026-09-16T01:00:00+00:00",
                              truncated=True, memory_sessions=1)
+    # `state` is the load-bearing field — `not_measurable` and `unavailable`
+    # are classified differently downstream. Omitting it let a production
+    # change to `STATE_NOT_MEASURABLE` pass all 58 tests (review cycle 6).
+    assert stage["state"] == "unavailable", stage
     assert stage["reason"] == "analytics_page_cap_truncated", stage
 
 
@@ -724,6 +766,7 @@ def test_analytics_page_cap_is_unavailable_never_a_lower_bound(client, monkeypat
     stage = client.get("/v1/activation/scorecard",
                        params=WINDOW).json()["stages"]["recall_attempted"]
     assert stage["value"] is None, stage
+    assert stage["state"] == "unavailable", stage
     assert stage["reason"] == "analytics_page_cap_truncated", stage
 
 
@@ -733,9 +776,9 @@ def test_memory_without_a_timestamp_is_unavailable_not_no_memory(client, monkeyp
     question — so a positive memory-Session count with a NULL timestamp is a
     data gap (``unavailable``), not an absence."""
     import tortoise.supabase_control as sc
-    # `created_at=None` gives the lifetime row (NULL, 1) — memory EXISTS, only
-    # its timestamp is missing.
-    _stub_graph(monkeypatch, created_at=None, turn_points=2, extracted=1)
+    # The funnel rows keep a real in-window timestamp (FUNNEL_QUERY cannot
+    # return a NULL one); only the LIFETIME value is NULL.
+    _stub_graph(monkeypatch, first_memory_at=None, turn_points=2, extracted=1)
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
@@ -780,7 +823,11 @@ def test_unavailable_is_reserved_for_the_recoverable_failures(client, monkeypatc
     metric exists but could not be read now (retry/repair fixes it);
     `not_measurable` = there is nothing to measure. A store that is merely
     unconfigured is the former."""
-    _seed("s1", "2026-09-16T01:00:00+00:00", 2, 0)
+    # The graph is deliberately NOT seeded: `_read_recall` checks the write-path
+    # configuration BEFORE it looks at the graph, so the subject never depends
+    # on it — and seeding kept this test on the shared embedded DB for nothing
+    # (review cycle 6, F6, mutation-proven: making `_data_sdk` raise leaves it
+    # green).
     for var in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY",
                 "SUPABASE_SERVICE_ROLE_KEY"):
         monkeypatch.delenv(var, raising=False)

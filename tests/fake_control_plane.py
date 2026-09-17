@@ -699,6 +699,9 @@ class FakeControlPlane:
                 # SQL semantics: NULL never matches an ordered comparison
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) > value]
+            elif op == "gte":
+                rows = [r for r in rows
+                        if r.get(col) is not None and r.get(col) >= value]
             elif op == "lt":
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) < value]
@@ -743,6 +746,8 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
         if op == "is" and (row.get(col) is None) != (value is None):
             return False
         if op == "gt" and (row.get(col) is None or row.get(col) <= value):
+            return False
+        if op == "gte" and (row.get(col) is None or row.get(col) < value):
             return False
         if op == "lt" and (row.get(col) is None or row.get(col) >= value):
             return False

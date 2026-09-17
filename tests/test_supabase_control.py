@@ -1585,6 +1585,50 @@ class TestFakeControlPlane:
         assert cp.query("t", filters=[("b", "lt", "z")]) == [
             {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
 
+    def test_gte_lte_filters_null_excluding(self):
+        """`gte` matters: the activation scorecard's analytics leg reads its
+        window with `gte since` / `lt until`, so the real client and this fake
+        must agree on the operator. Before this test the fake RAISED
+        ``unsupported filter op 'gte'`` — a trap for the next test that wires
+        the two together (review cycle 6, F8)."""
+        cp = FakeControlPlane({"t": [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"}, {"a": 3, "b": "y"},
+        ]})
+        # Boundary is INCLUSIVE for gte, EXCLUSIVE for lt.
+        assert cp.query("t", filters=[("a", "gte", 2)]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+        assert cp.query("t", filters=[("a", "gt", 2)]) == [{"a": 3, "b": "y"}]
+        assert cp.query("t", filters=[("a", "lte", 2)]) == [
+            {"a": 1, "b": None}, {"a": 2, "b": "x"}]
+        # NULL never matches an ordered comparison.
+        assert cp.query("t", filters=[("b", "gte", "a")]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+        assert cp.query("t", filters=[("b", "lte", "z")]) == [
+            {"a": 2, "b": "x"}, {"a": 3, "b": "y"}]
+        # ...and the window the scorecard actually issues.
+        rows = [{"c": "2026-09-15T00:00:00+00:00"},
+                {"c": "2026-09-16T00:00:00+00:00"},
+                {"c": "2026-09-17T00:00:00+00:00"}]
+        cp2 = FakeControlPlane({"e": rows})
+        assert cp2.query("e", filters=[
+            ("c", "gte", "2026-09-16T00:00:00+00:00"),
+            ("c", "lt", "2026-09-17T00:00:00+00:00")]) == [
+            {"c": "2026-09-16T00:00:00+00:00"}]
+
+    def test_matches_helper_agrees_with_the_get_path(self):
+        """`_matches` (the PATCH/DELETE path) must mirror the GET semantics —
+        the same two-operator window, same boundary rules."""
+        cp = FakeControlPlane({"e": [
+            {"c": "2026-09-15T00:00:00+00:00"},
+            {"c": "2026-09-16T00:00:00+00:00"},
+            {"c": "2026-09-17T00:00:00+00:00"},
+        ]})
+        got = cp.query("e", method="PATCH", json_body={"seen": True}, filters=[
+            ("c", "gte", "2026-09-16T00:00:00+00:00"),
+            ("c", "lt", "2026-09-17T00:00:00+00:00")])
+        assert [r["c"] for r in cp.tables["e"] if r.get("seen")] == [
+            "2026-09-16T00:00:00+00:00"], (cp.tables["e"], got)
+
     def test_patch_and_post(self):
         cp = FakeControlPlane({"t": [{"id": "k1", "x": None}]})
         assert cp.query("t", method="PATCH", filters=[("id", "eq", "k1")],

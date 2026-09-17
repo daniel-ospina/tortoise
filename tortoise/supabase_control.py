@@ -313,8 +313,13 @@ class SupabaseControlPlane:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
-        (value None → ``col=is.null``), ``gt``, ``lt``. Raises RuntimeError
-        on any failure.
+        (value None → ``col=is.null``), ``gt``, ``gte``, ``lt``, ``lte``.
+        Raises RuntimeError on any failure.
+
+        Two conditions on the SAME column are combined into one PostgREST
+        ``and=(...)`` group (see ``_LOGIC_TREE_RESERVED``) — a flat query string
+        carries one operator per column, so a second condition would otherwise
+        silently REPLACE the first.
 
         ``timeout`` (#2850/#2988): an optional PER-REQUEST override for the
         httpx call. ``None`` (the default) keeps the client-level timeout —
