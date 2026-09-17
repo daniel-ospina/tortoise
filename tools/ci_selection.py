@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import math
 import os
 import re
 import sys
@@ -880,8 +881,8 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
     # fixtures, or a repo that has not adopted durations).
     durations = manifest.get("durations") or {}
     if durations:
-        weights = {h: sum(durations.get(f if f.endswith(".py") else f + ".py",
-                                        DEFAULT_FAST_WEIGHT)
+        weights = {h: sum(_duration_weight(durations.get(
+                            f if f.endswith(".py") else f + ".py"))
                           for f in fs)
                    for h, fs in halves.items()}
         lo, hi = min(weights.values()), max(weights.values())
@@ -927,6 +928,28 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
     return sorted(f for f in fast if f[:-3] not in halfset)
 
 
+def _duration_weight(value, default: float = DEFAULT_FAST_WEIGHT) -> float:
+    """#3407 review: a malformed `durations` value must never crash a consumer.
+
+    `split_fast_gate`'s sort key negates the weight, so a `None`/string value
+    raised `TypeError: bad operand type for unary -` deep inside the sort —
+    which killed `--integrity` in `leg_coverage_issues()` *before*
+    `duration_issues()` was ever called, so the gate that exists to NAME the bad
+    entry tracebacked instead. A `NaN` was worse: every comparison is False, so
+    it passed both the value check and the imbalance check and silently
+    produced a maximally single-sided pack with a green exit.
+
+    Coercing to the default here means every consumer degrades safely, while
+    `duration_issues()` still names the offending entry and fails the gate.
+    `bool` is excluded explicitly (`isinstance(True, int)` is True).
+    """
+    if (isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)):
+        return default
+    return value
+
+
 def split_fast_gate(files, durations: dict, default_weight: float = DEFAULT_FAST_WEIGHT):
     """#1473: LPT greedy pack of the selected fast-gate files across halves
     a/b by measured duration — deterministic (ties -> a; assignment order).
@@ -937,7 +960,8 @@ def split_fast_gate(files, durations: dict, default_weight: float = DEFAULT_FAST
     weighted = []
     for f in files:
         name = f[len("tests/"):] if f.startswith("tests/") else f
-        weighted.append((name, durations.get(name, default_weight)))
+        weighted.append((name, _duration_weight(
+            durations.get(name, default_weight), default_weight)))
     a, b = [], []
     ta = tb = 0.0
     for name, w in sorted(weighted, key=lambda x: (-x[1], x[0])):
@@ -973,6 +997,12 @@ def duration_issues(manifest: dict) -> list[str]:
         v = durations[name]
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             issues.append(f"durations value for {name} is not numeric: {v!r}")
+        elif not math.isfinite(v):
+            # #3407 review P2: a NaN passed the type check AND was invisible to
+            # the imbalance guard (every comparison is False), so it produced a
+            # maximally single-sided pack with a green exit. Type-checking is
+            # necessary but not sufficient — finiteness is the real predicate.
+            issues.append(f"durations value for {name} is not finite: {v!r}")
     return issues
 
 
@@ -1729,8 +1759,14 @@ def main() -> int:
 
     if args.integrity:
         missing = integrity(manifest)
+        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`.
+        # The latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
+        # durations value used to raise inside the packer before the check that
+        # names it had run — fail-closed, but with no diagnosis. (Belt and
+        # braces: `_duration_weight` also coerces, so the packer can no longer
+        # raise at all.)
         problems = missing + slow_file_issues(manifest) \
-            + leg_coverage_issues(manifest) + duration_issues(manifest) \
+            + duration_issues(manifest) + leg_coverage_issues(manifest) \
             + duration_coverage_issues(manifest)
         # #1472: the matrix rows must come from the selector derivation
         # (space-joined matrix_* outputs) — when they do, the #1266

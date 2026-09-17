@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
-    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,  # noqa: F401
+    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
 )
@@ -2118,3 +2118,42 @@ def test_duration_issues_flags_non_numeric_value():
          "durations": {"test_crypto.py": "fast"}}
     issues = duration_issues(m)
     assert any("not numeric" in i for i in issues), issues
+
+
+def test_integrity_chain_names_bad_duration_instead_of_crashing():
+    # #3407 review P1 (cycle 2): `duration_issues` alone is NOT the gate. The
+    # real `--integrity` chain evaluates `leg_coverage_issues()` -> `push_legs()`
+    # -> `split_fast_gate()`, whose sort key negates the weight — so a
+    # non-numeric value raised TypeError inside the packer BEFORE the check
+    # that names it had run, and the gate tracebacked instead of diagnosing.
+    # This test runs the CLI's actual chain, on a real manifest with one real
+    # fast-pool key poisoned, which the isolated helper test cannot see.
+    from tools.ci_selection import (
+        duration_coverage_issues,
+        duration_issues,
+        fast_pool,
+        integrity,
+        leg_coverage_issues,
+        load_manifest,
+    )
+    for bad in (None, "fast", float("nan")):
+        m = load_manifest()
+        key = fast_pool(m)[0]
+        m = dict(m)
+        m["durations"] = dict(m.get("durations") or {})
+        m["durations"][key] = bad
+        # Must not raise.
+        problems = (integrity(m) + slow_file_issues(m) + duration_issues(m)
+                    + leg_coverage_issues(m) + duration_coverage_issues(m))
+        named = [p for p in problems if "durations value" in p]
+        assert named, f"a bad duration value ({bad!r}) was not named: {problems}"
+
+
+def test_split_fast_gate_cannot_crash_on_a_malformed_duration():
+    # The packer must degrade to the default, never raise — belt and braces for
+    # the ordering fix above (any consumer, any order).
+    from tools.ci_selection import split_fast_gate
+    files = ["tests/test_a.py", "tests/test_b.py"]
+    for bad in (None, "fast", float("nan"), float("inf"), True):
+        a, b = split_fast_gate(files, {"test_a.py": bad})
+        assert len(a) + len(b) == 2, (bad, a, b)
