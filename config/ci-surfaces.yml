@@ -46,6 +46,7 @@ surfaces:
   - test_body_cap_sweep.py
   - test_bridge_mcp.py
   - test_ci_exemption.py  # #3756: the pre-merge EXEMPTION decision — signature-scoped, rate-compared, visible exemptions, fail-closed parser
+  - test_ci_exemption_producer.py  # #3756: Step A/B — the PR-side signature producer (grounded on a real `gh run view --log-failed` capture) + the `decide` CLI
   - test_cimd_ssrf.py  # #2847: CIMD SSRF control set (URL/host validation, DNS-rebinding pin, redirects, caps, cache, rate limit)
   - test_claim_endpoints.py
   - test_user_identity_authority.py
