@@ -785,6 +785,128 @@ def _health_probe_interval() -> float:
     return v
 
 
+async def _first_contact_prewarm() -> None:
+    """#3284 Move A — pre-pay the process's first contacts, behind the listener.
+
+    Two calls, both already-bounded seams, in ONE background task:
+
+    * the JWKS fetch the first session-authenticated request used to pay
+      inline (``session_auth.prefetch_jwks`` — ``_keys is None`` on a fresh
+      process, so a cold/slow/retried fetch was charged to a user-facing
+      call: a slow 401 the client reads as a hang);
+    * the Supabase control-plane client's first TLS handshake + PostgREST
+      round trip (``_CONTROL_PLANE_PROBE.run``), whose only other caller is
+      ``/health/ready`` — so it too is cold on a fresh process.
+
+    The FalkorDB data plane needs nothing: ``_health_probe_loop`` below already
+    pre-pays it on its first iteration.
+
+    ⛔ This MUST be a task, never awaited before ``yield``: uvicorn binds the
+    listening socket only after ``lifespan.startup()`` returns, so awaiting a
+    warm-up here means the machine accepts NOTHING until it finishes (#2953).
+    It is CREATED before the embedding pre-warm thread — but creating a task
+    does not START it, and there is no ``await`` between the two, so this is
+    NOT a wall-clock ordering guarantee: the torch thread may begin first. The
+    property it does guarantee is the load-bearing one — the warm-up runs
+    behind the listener, off the request path.
+
+    Both halves are gated on Supabase mode (the same predicate
+    ``/health/ready`` uses for its control-plane probe): registry/self-host
+    deployments have no Supabase session JWTs to verify and no control plane,
+    so there is nothing to warm — and no network I/O at boot. It never raises
+    (a warm-up must never break boot) and every skip/failure reason is logged
+    with its own line (#2922: no silently-dead subsystem).
+    """
+    try:
+        from tortoise.supabase_control import is_supabase_enabled
+        supabase_mode = is_supabase_enabled()
+    except Exception as exc:  # pragma: no cover — import/env edge
+        _logger.warning("first-contact pre-warm skipped (mode undeterminable): %s", exc)
+        return
+    if not supabase_mode:
+        _logger.info(
+            "first-contact pre-warm skipped: registry mode (no Supabase session "
+            "JWTs or control plane to warm)"
+        )
+        return
+
+    try:
+        from tortoise.session_auth import prefetch_jwks
+
+        report = await prefetch_jwks()
+        outcome = report.get("outcome")
+        if outcome == "ready":
+            _logger.info(
+                "auth: JWKS pre-warm ready in %.0fms (%d keys)",
+                report["elapsed_ms"],
+                report["keys"],
+            )
+        elif outcome == "empty":
+            _logger.warning(
+                "auth: JWKS pre-warm got an EMPTY key set in %.0fms (%s) — "
+                "an upstream 200 with zero usable keys (bad rotation / empty "
+                "body), NOT a transport outage. The first session-"
+                "authenticated request will re-attempt the fetch and, if the "
+                "upstream is still empty, answer 401 'Unknown signing key' — "
+                "not a 503.",
+                report["elapsed_ms"],
+                report["error"],
+            )
+        elif outcome == "stale":
+            _logger.warning(
+                "auth: JWKS pre-warm did NOT refresh in %.0fms (%s) — serving "
+                "%d last-good cached key(s). The first session-authenticated "
+                "request is served from that set; a kid miss triggers its "
+                "own bounded refetch UNLESS the failure/miss cooldown is "
+                "still armed (a cooldown an earlier lifespan armed also "
+                "blocks the request path) — either way the answer is 401 "
+                "'Unknown signing key' from the stale set, never a 503 "
+                "(last-good keys exist) and never an unbounded wait.",
+                report["elapsed_ms"],
+                report["error"],
+                report["keys"],
+            )
+        else:
+            # ``keys == 0`` with no successful parse covers TWO distinct cache
+            # states: COLD (``_keys is None`` — the request path answers a
+            # bounded 503) and EMPTY (``_keys == {}`` from a prior 200 — the
+            # request path answers 401 "Unknown signing key", never 503, since
+            # a keyless set is not a transport failure). The report does not
+            # distinguish them, so naming only 503 here was the #2922 misreport
+            # class for the empty case.
+            #
+            # A THIRD axis cuts across both: an already-armed failure/miss
+            # cooldown (``_last_failure_at`` is a module global that survives
+            # across lifespans, so a fresh boot can inherit one) short-circuits
+            # the request path at ZERO fetches, so the sentence must not
+            # promise a fetch attempt unconditionally. Every ``transport_error``
+            # report sets ``error`` — it is never ``None`` here.
+            _logger.warning(
+                "auth: JWKS pre-warm failed in %.0fms (%s) — the first "
+                "session-authenticated request makes its own bounded fetch "
+                "attempt UNLESS the request-path failure/miss cooldown is "
+                "already armed (the warm-up itself does not arm it, but it is "
+                "a module global that survives across lifespans), in which "
+                "case it is answered from the cooldown with NO fetch. If the "
+                "upstream is still unreachable (or still answering with zero "
+                "usable keys), that request answers a bounded 503 + "
+                "Retry-After when no key set has ever been cached, or 401 "
+                "'Unknown signing key' from an empty cached set",
+                report["elapsed_ms"],
+                report["error"],
+            )
+    except Exception as exc:  # a warm-up must never break boot
+        _logger.warning("auth: JWKS pre-warm not run: %s", exc)
+
+    try:
+        report = await _CONTROL_PLANE_PROBE.run()
+        _logger.info("control plane: pre-warm %s in %sms",
+                     "ready" if report.get("ok") else "not ready",
+                     report.get("latency_ms"))
+    except Exception as exc:  # a warm-up must never break boot
+        _logger.warning("control plane: pre-warm not run: %s", exc)
+
+
 async def _health_probe_loop() -> None:
     """Keep ``_HEALTH_PROBE`` warm, entirely off the request path (#2850).
 
@@ -892,6 +1014,7 @@ _LIVENESS_TASK_ATTRS = (
     "_health_probe_task",
     "_boot_sweep_task",
     "_event_retention_task",
+    "_first_contact_task",
 )
 
 
@@ -1006,6 +1129,22 @@ async def _lifespan(app):
         pass
 
     async with mcp_http_app.lifespan(mcp_http_app):
+        # ── #3284 Move A: pre-pay the first contacts, behind the listener.
+        # Two bounded calls (JWKS + control plane) in one background task, so
+        # the FIRST session-authenticated request after a (re)start does not
+        # pay for them. The task is created here, before the embedding pre-warm
+        # thread below — but creating a task does NOT start it and nothing
+        # awaits in between, so this is NOT a wall-clock ordering guarantee
+        # (torch may start first). Not awaited — uvicorn binds only after this
+        # half returns (#2953). Inert in registry mode (no Supabase session
+        # auth).
+        try:
+            app.state._first_contact_task = asyncio.get_event_loop().create_task(
+                _first_contact_prewarm()
+            )
+        except Exception as exc:
+            _logger.warning("first-contact pre-warm not scheduled: %s", exc)
+
         try:
 
             def _probe_loaded_model_id(model) -> str | None:
@@ -1294,6 +1433,12 @@ app.add_middleware(
     allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
+    # ``Retry-After`` is NOT a CORS-safelisted response header, so without this
+    # the dashboard JS on app.premiselabs.co cannot read the value the
+    # session-auth 503 carries (#3284) — the "retryable, not an outage" signal
+    # would exist only for non-browser clients. Starlette emits
+    # ``Access-Control-Expose-Headers`` only for listed names.
+    expose_headers=["Retry-After"],
 )
 
 
