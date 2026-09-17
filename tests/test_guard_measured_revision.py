@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,9 @@ from tools.longmem_eval.guard_measured_revision import (
     GuardRefused,
     guard,
 )
+
+#: repo root, so the CLI is invoked as a module from the checkout
+REPO_PARENT = Path(__file__).resolve().parents[1]
 
 SURFACE = ("tortoise/", "tools/")
 
@@ -402,7 +406,7 @@ def test_nested_git_directory_under_the_surface_is_refused(repo: Repo) -> None:
     nested = repo.path("tools/.git")
     nested.mkdir()
     (nested / "config").write_text("[core]\n")
-    with pytest.raises(GuardRefused, match=r"nested \.git"):
+    with pytest.raises(GuardRefused, match="nested git directory"):
         _scan(repo)
 
 
@@ -414,13 +418,92 @@ def test_unlisted_executable_suffix_is_refused(repo: Repo) -> None:
         _scan(repo)
 
 
-def test_non_regular_file_is_refused(repo: Repo) -> None:
-    """A FIFO would block the content read forever rather than refuse."""
+def test_non_regular_file_is_refused(repo: Repo, tmp_path: Path) -> None:
+    """A FIFO would block the content read forever rather than refuse.
+
+    Run through the CLI with a timeout: an in-process pytest.raises would HANG
+    instead of failing if the refusal regressed (the pin must go red, not stall).
+    """
     fifo = repo.path("tortoise/b.py")
     fifo.unlink()
     os.mkfifo(fifo)
-    with pytest.raises(GuardRefused, match="neither a regular file nor a symlink"):
+    cp = subprocess.run(
+        [sys.executable, "-m", "tools.longmem_eval.guard_measured_revision",
+         "--rev", repo.rev, "--worktree", str(repo.root)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_PARENT),
+        timeout=30,
+    )
+    assert cp.returncode == 1
+    assert "neither a regular file nor a symlink" in cp.stderr
+
+
+def test_graft_file_is_refused(repo: Repo) -> None:
+    """`git replace -l` and info/grafts are two disjuncts of one class; the
+    graft half was unpinned."""
+    grafts = repo.path(".git/info/grafts")
+    grafts.parent.mkdir(parents=True, exist_ok=True)
+    grafts.write_text(f"{repo.rev} {repo.rev}\n")
+    with pytest.raises(GuardRefused, match="grafts"):
         _scan(repo)
+
+
+def test_unreadable_directory_under_the_surface_is_refused(repo: Repo) -> None:
+    """git EXITS 0 while omitting an unreadable tree, and os.walk swallows the
+    PermissionError — so untracked files and nested .git dirs went unseen."""
+    hidden = repo.path("tortoise/hidden")
+    hidden.mkdir()
+    (hidden / "smuggled.py").write_text("x = 1\n")
+    (hidden / ".git").mkdir()
+    hidden.chmod(0o111)
+    try:
+        assert _git(repo.root, "ls-files", "--others", "--", "tortoise/") == ""
+        with pytest.raises(GuardRefused):
+            _scan(repo)
+    finally:
+        hidden.chmod(0o755)
+
+
+def test_uppercase_git_directory_is_refused(repo: Repo) -> None:
+    """git treats .GIT as a gitdir on a case-insensitive filesystem; an exact
+    lowercase comparison was defeatable."""
+    nested = repo.path("tools/.GIT")
+    nested.mkdir()
+    (nested / "config").write_text("[core]\n")
+    with pytest.raises(GuardRefused, match=r"nested git directory"):
+        _scan(repo)
+
+
+def test_symlink_retarget_to_an_ast_equivalent_name_is_refused(repo: Repo) -> None:
+    """A symlink's blob is link TEXT, not source: two targets that parse to the
+    same AST (`real.py` vs `real .py`) are still different files."""
+    (repo.path("tortoise/real .py")).write_text("def z():\n    return 9\n")
+    link = repo.path("tortoise/link.py")
+    link.symlink_to("real.py")
+    rev = repo.commit("measured with a symlink")
+    assert guard(repo.root, rev, SURFACE).comment_only == []
+    link.unlink()
+    link.symlink_to("real .py")
+    with pytest.raises(GuardRefused, match="symlink whose target changed"):
+        guard(repo.root, rev, SURFACE)
+
+
+def test_shebang_change_is_refused(repo: Repo) -> None:
+    """A shebang is a comment to the AST but the interpreter line for a script —
+    the comment-only exemption must not swallow it."""
+    script = repo.path("tools/run.py")
+    script.write_text("#!/usr/bin/env python3\nprint('hi')\n")
+    rev = repo.commit("measured with a script")
+    script.write_text("#!/bin/sh -e\nprint('hi')\n")
+    with pytest.raises(GuardRefused, match="changed its shebang"):
+        guard(repo.root, rev, SURFACE)
+
+
+def test_glob_pathspec_is_refused(repo: Repo) -> None:
+    """A glob would skip the nested-git walk (`start_dir.is_dir()` is false)."""
+    with pytest.raises(GuardRefused, match="is a glob"):
+        _scan(repo, "tortoise/*.py")
 
 
 def test_path_with_a_space_passes_when_clean_and_drifts_when_edited(repo: Repo) -> None:

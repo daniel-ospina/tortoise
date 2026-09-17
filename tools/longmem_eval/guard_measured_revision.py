@@ -75,11 +75,12 @@ whose name ends in ``NOISE_SUFFIXES`` — excused by SUFFIX, never by directory,
 a stray ``__pycache__/evil.py`` refuses. Excused files are reported in the output
 rather than silently accepted. Those are editor/VCS droppings **plus byte-caches** — and a ``.pyc``
 IS executable code that CPython will run in preference to the ``.py`` beside it,
-so this check does NOT cover it. That is a deliberate, stated limit: a
-byte-code-free measured run (``python -B`` or ``PYTHONDONTWRITEBYTECODE=1``) is
-what makes the content compare meaningful, and ``--strict-bytecode`` refuses any
-``.pyc`` under the surface for callers who want that enforced rather than
-assumed.
+so this check does NOT cover it. That is a deliberate, stated limit:
+``--strict-bytecode`` refuses any ``.pyc`` under the surface for callers who want
+that enforced rather than assumed. Note what a byte-code-free run does NOT fix:
+``python -B`` / ``PYTHONDONTWRITEBYTECODE=1`` stop bytecode being WRITTEN, not
+READ, so a sourceless ``pkg/__init__.pyc`` (no ``.py`` beside it) is still
+imported in preference to a package — file #3712.
 
 ``--paths`` that matches nothing is refused rather than reported as clean: an
 empty surface must not read as a passing check.
@@ -149,13 +150,22 @@ def _git(worktree: Path, *args: str) -> str:
             f"guard: git {' '.join(args)} failed ({cp.returncode}): "
             f"{cp.stderr.strip()}"
         )
+    if "could not open directory" in cp.stderr:
+        # git exits 0 here and simply omits the unreadable tree — a
+        # reproduction (mode 0111) hid both untracked files and a nested .git.
+        raise GuardRefused(
+            "guard: git could not read a directory under the surface, so its "
+            f"contents are missing from the enumeration: {cp.stderr.strip()}"
+        )
     return cp.stdout.strip()
 
 
 def _git_bytes(worktree: Path, *args: str) -> bytes:
     """``_git`` for binary payloads (``cat-file blob``)."""
     cp = subprocess.run(
-        ["git", "-C", str(worktree), *args], capture_output=True
+        ["git", "-C", str(worktree), *args],
+        capture_output=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"},
     )
     if cp.returncode != 0:
         raise GuardRefused(
@@ -187,6 +197,16 @@ def _ast_without_docstrings(source: str) -> str:
             ):
                 node.body = body[1:]
     return ast.dump(tree)
+
+
+def _shebang_changed(before: bytes, after: bytes) -> bool:
+    """True when either side starts with ``#!`` and the first lines differ."""
+    def first_line(raw: bytes) -> bytes:
+        return raw.split(b"\n", 1)[0]
+
+    if not (before.startswith(b"#!") or after.startswith(b"#!")):
+        return False
+    return first_line(before) != first_line(after)
 
 
 def _is_noise(rel: str) -> bool:
@@ -261,6 +281,20 @@ def _compare(root: Path, rev: str, rel: str, rev_mode: str) -> bool:
             "a data/config file can change behaviour, and it cannot be "
             "compared structurally"
         )
+    if rel.endswith(".py") and _shebang_changed(at_rev_bytes, on_disk_bytes):
+        # A shebang is a comment to the AST but the interpreter line for a
+        # directly-executed script — class 17 must not swallow it.
+        raise GuardRefused(
+            f"guard: {rel} changed its shebang since {rev} — a directly "
+            "executed script changes interpreter even though the AST matches"
+        )
+    if rev_mode == "120000" and at_rev_bytes != on_disk_bytes:
+        # A symlink target is not source: two different targets that happen to
+        # parse to the same AST are still different files.
+        raise GuardRefused(
+            f"guard: {rel} is a symlink whose target changed since {rev} — "
+            "re-measure rather than re-label"
+        )
     try:
         before = _ast_without_docstrings(at_rev_bytes.decode())
         after = _ast_without_docstrings(on_disk_bytes.decode())
@@ -317,6 +351,12 @@ def guard(
         )
     _git(worktree, "rev-parse", "--verify", f"{rev}^{{commit}}")
 
+    for _base in paths:
+        if any(ch in _base for ch in "*?["):
+            raise GuardRefused(
+                f"guard: --paths {_base!r} is a glob — the surface must be "
+                "literal paths, or the nested-git walk would skip it"
+            )
     modes_at_rev = _modes_at_rev(root, rev, paths)
     at_rev = list(modes_at_rev)
     tracked = [f for f in _git(root, "ls-files", "-z", "--", *paths).split("\0") if f]
@@ -355,12 +395,26 @@ def guard(
         start_dir = root / (base.rstrip("/") or ".")
         if not start_dir.is_dir():
             continue
-        for dirpath, dirnames, _ in os.walk(start_dir):
-            if ".git" in dirnames:
+
+        def _walk_error(exc: OSError, _base: str = base) -> None:
+            # os.walk swallows PermissionError by default: an unreadable
+            # directory hid untracked files AND a nested .git while the guard
+            # printed OK (reproduced with mode 0111).
+            raise GuardRefused(
+                f"guard: cannot enumerate {getattr(exc, 'filename', _base)!r} "
+                f"under the surface ({exc}) — an unreadable directory hides "
+                "its contents from every scan"
+            )
+
+        for dirpath, dirnames, _ in os.walk(start_dir, onerror=_walk_error):
+            nested = [d for d in dirnames if d.casefold() == ".git"]
+            if nested:
+                # casefold: git treats .GIT as a gitdir on a case-insensitive
+                # filesystem, so an exact lowercase match was defeatable.
                 raise GuardRefused(
-                    f"guard: nested .git directory under the measured surface "
-                    f"({dirpath}/.git) — git refuses to enumerate inside it, "
-                    "so its contents cannot be checked"
+                    f"guard: nested git directory under the measured surface "
+                    f"({dirpath}/{nested[0]}) — git refuses to enumerate inside "
+                    "it, so its contents cannot be checked"
                 )
     if hidden:
         raise GuardRefused(
