@@ -4054,9 +4054,12 @@ class TortoiseSDK:
                 resolved = exact_hit_id(canonical_by_hash, content)
                 dedup = DEDUP_CONTENT_HASH_HIT if resolved else DEDUP_NEW
                 # #2813: read the four E3 passthrough props OFF the payload
-                # point dict ONCE, before the write, so the SAME dict reaches
+                # point dict ONCE, before the write, so the same VALUES reach
                 # both `create_point` (node persistence) and the response
-                # `props` superset. Before this fix the write dropped them and
+                # `props` superset — a COPY, not the same dict object:
+                # create_point normalizes in place (a `**props` unpack is a new
+                # dict) and none of that propagates back to the response.
+                # Before this fix the write dropped them and
                 # only the response carried them — the reply looked right while
                 # the node stored nothing (the extractor is shared with the
                 # eval lane, whose writer persisted them; the persistence
@@ -4074,8 +4077,9 @@ class TortoiseSDK:
                 #     create_point's `_flatten_search_keys_prop`.
                 # Mirror both out of the response (the dedup read-back below
                 # already omits them). Presence only: a non-empty
-                # `search_keys` still rides as the payload LIST (the node
-                # stores the flattened string — representation, not presence).
+                # `search_keys` sequence still rides as the payload's
+                # list/tuple (the node stores the flattened string —
+                # representation, not presence).
                 props = {k: v for k, v in props.items() if v is not None}
                 _sk = props.get("search_keys")
                 if isinstance(_sk, (list, tuple)) and not any(
@@ -4149,10 +4153,16 @@ class TortoiseSDK:
                     # persisted them. Same principle as step 2's "never report
                     # a phantom id": the response describes what the graph
                     # HOLDS. Read back rather than assume; absent props are
-                    # omitted (never fabricated) and `search_keys` returns in
-                    # its stored flat-string form (_flatten_search_keys_prop).
+                    # omitted (never fabricated) and `search_keys` is returned
+                    # exactly as stored — a flat space-joined string for
+                    # SDK-written nodes (`_flatten_search_keys_prop` is
+                    # WRITE-side; the read-back does not coerce), though
+                    # legacy/raw-written nodes can still hold an array
+                    # (tortoise/sparse.py; the R2 array fixup).
                     # Only the create branch may echo the payload's raw values
-                    # — the SAME dict passed to create_point.
+                    # — the same values it handed to create_point (a copy, not
+                    # the same dict object: create_point's in-place
+                    # normalization does not propagate back here).
                     _rows = proj.g.query(
                         "MATCH (n:Point {id:$pid}) RETURN n.quote, n.when, "
                         "n.search_keys, n.source_turn_id",
@@ -4176,10 +4186,10 @@ class TortoiseSDK:
                 # neither list nor tuple, a blank string included — is left
                 # as-is by `_flatten_search_keys_prop` and stays advertised).
                 # A non-empty `search_keys` sequence differs in
-                # REPRESENTATION only (the response keeps the payload LIST,
-                # the node stores the flattened string). A dedup hit reports
-                # the canonical's STORED props read back above (absent fields
-                # omitted).
+                # REPRESENTATION only (the response keeps the payload's
+                # list/tuple as-is, the node stores the flattened string). A
+                # dedup hit reports the canonical's STORED props read back
+                # above (absent fields omitted).
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
                     "props": props, "dedup": dedup})
