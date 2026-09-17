@@ -69,6 +69,7 @@ surfaces:
   - test_commit_endpoint.py
   - test_commit_schema.py
   - test_cross_subdomain_cookie_sync.py
+  - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
