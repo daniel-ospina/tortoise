@@ -782,14 +782,16 @@ the API step failed) and each files its **own** incident, keyed by its own host
 label — the two never share an issue. Only the Fly API target is restartable;
 the auth target is **hard-disarmed** from the restart leg (§7.4).
 
-> **The production alert path has never fired.**
+> **The `PROD DOWN` path has never fired; `PROD DEGRADED` fired once.**
 > `gh issue list --state all --search '"[monitor] PROD DOWN" in:title'` returns
-> `[]` — every exercise of the alerting machinery so far has been a **drill**
-> (§7.7), which is the **only proven route**. That makes the drill path the one
-> to trust when changing this code, and it is why `is_prod` is a **set
-> membership** test rather than a boolean flag: an unrecognised URL must stay a
-> DRILL, so a misconfigured or newly-added target can never arm self-heal
-> against an unexpected host (fail closed).
+> `[]`, but `"[monitor] PROD DEGRADED"` matches **#3637** (2026-09-16T07:34:59Z,
+> now closed) — the only production exercise of the alerting machinery. There is
+> **no `[monitor] DRILL` incident at all**, so the drill path (§7.7) has not been
+> exercised and is *not* the proven route the production incident is. That makes
+> it all the more important that `is_prod` is a **set membership** test rather
+> than a boolean flag: an unrecognised URL must stay a DRILL, so a misconfigured
+> or newly-added target can never arm self-heal against an unexpected host (fail
+> closed).
 
 ### 7.1 What the probe checks
 
@@ -854,8 +856,10 @@ this blocks living with it).
 there means a missing/renamed binding (D1/KV) or a Pages routing change, which
 `flyctl machine restart` on the API app cannot repair and which would restart an
 **unrelated service**. The auth URL is in the production set but **not** in the
-restartable set, and the run log / incident body say `disarmed:no_machine`
-explicitly (§7.4).
+restartable set; on a **DOWN** verdict the run log / incident body say
+`disarmed:no_machine` explicitly (§7.4), while an answered-but-wrong
+(**DEGRADED**) verdict logs `disarmed:unexpected` — the restart leg is off the
+table either way.
 
 ### 7.2 How to read a failure
 
@@ -928,7 +932,8 @@ set** — an unrecognised URL is a drill and a drill automatically disarms the
 restart leg, and a production URL that is **not** restartable (the Pages auth
 surface — no Fly machine behind it, so a restart of the API app cannot repair a
 missing binding and would restart an unrelated service) is hard disarmed
-(`disarmed:no_machine`) regardless of the failure class; (c) when the failure is
+regardless of the failure class (`disarmed:no_machine` on a DOWN verdict,
+`disarmed:unexpected` on a DEGRADED one); (c) when the failure is
 one a restart cannot fix — `classify_failure()` maps curl's exit code to a
 class, and **DNS**
 (6) and **TLS/certificate** (35, 51, 58–60, 66, 77, 80, 82–83, 90–91) failures
@@ -981,7 +986,10 @@ The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
 that as “this is not a wedged process”. Four disarm reasons also land here
 without the cap being reached, and all are named in the incident body and the
 run log: **`disarmed:no_machine`** (a production surface with no Fly machine —
-the Pages auth target: repair the binding/route, there is nothing to restart),
+the Pages auth target on a **DOWN** verdict: repair the binding/route, there is
+nothing to restart; the same target logs `disarmed:unexpected` on a DEGRADED
+verdict, because a restart is off the table before the no-machine guard is even
+reached),
 **`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
 resolver or the certificate; a restart is not the fix), **`disarmed:no_ledger`**
 (the prior incident's restart ledger could not be read), and
@@ -1043,9 +1051,11 @@ To check the *paging* path, set the repo secrets (`gh secret set
 TELEGRAM_BOT_TOKEN`) — a dispatched workflow uses the repository secrets, not
 your shell environment. `gh workflow run` cannot pass them inline.
 
-**The production alert path has never fired** — `gh issue list --state all
---search '"[monitor] PROD DOWN" in:title'` returns `[]`, so a drill is the
-**only proven route** for the alerting machinery (§7, §7.7). Two consequences:
+**The `PROD DOWN` path has never fired; `PROD DEGRADED` fired once (#3637,
+2026-09-16T07:34:59Z)** — `gh issue list --state all --search '"[monitor] PROD
+DOWN" in:title'` returns `[]`, and **no `[monitor] DRILL` incident exists**, so
+the production DEGRADED incident is the only *proven* exercise of the alerting
+machinery (§7, §7.7). Two consequences:
 
 1. **Drill the drill before trusting a change.** A reverted/mis-wired
    `is_prod` set would make every production run a silent drill (no PROD page),
