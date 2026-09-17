@@ -8,6 +8,7 @@ import json
 import os
 import tempfile
 from typing import ClassVar
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -121,6 +122,30 @@ def mem_storage(monkeypatch):
 _SEED_SDKS: list = []
 
 
+def _reset_graph(db, graph_name: str) -> None:
+    """DETACH-DELETE every node in ``graph_name`` before seeding it (#3745).
+
+    These tests assert on RAW node counts (``MATCH (n) RETURN count(n)`` —
+    drill's ``== 2``, the sweep manifests' ``node_count``), which counts
+    whatever the graph holds, not just the seed. A graph can already carry
+    the projection's INTERNAL ``:Meta {key:'point_fts_v2'}`` bookkeeping
+    marker: ``FalkorProjection._ensure_indexes`` MERGEs it whenever a
+    projection is opened ON that graph, and an SDK that opens its projection
+    on this graph (``_make_sdk(graph_name=...)`` — the sweep / re-baseline /
+    acl-reconcile seams) writes it into the CURRENT ``TORTOISE_DB_PATH``.
+    Because ``patched_tortoise_sdk`` re-pins that path per test, work
+    deferred past a test's teardown lands in the NEXT test's temp DB — so
+    the seed accumulated one bookkeeping node and the counts read 3 == 2 /
+    2 == 1.
+
+    Seeding from an EMPTY graph is the same contract ``_clean_team_graphs``
+    already gives the server lane (it drops the raw ``org_*`` graphs before
+    each test); this makes the embedded lane mirror it instead of letting
+    the count depend on what a previous test left behind.
+    """
+    db.select_graph(graph_name).query("MATCH (n) DETACH DELETE n")
+
+
 def _seed_team(org_id: str = "team_x", nodes: int = 2) -> None:
     # The path arg is IGNORED under the client fixture's patched __init__
     # (all current callers use client); the SDK binds to the per-test temp DB.
@@ -129,6 +154,7 @@ def _seed_team(org_id: str = "team_x", nodes: int = 2) -> None:
     reg = sdk._get_registry()
     reg.query("MATCH (t:Team {id:$id}) DELETE t", params={"id": org_id})
     reg.query("CREATE (t:Team {id:$id, tier:'pro'})", params={"id": org_id})
+    _reset_graph(sdk._get_proj().db, f"org_{org_id}")
     g = sdk._get_proj().db.select_graph(f"org_{org_id}")
     for i in range(nodes):
         g.query(
@@ -516,6 +542,18 @@ class TestSupabaseLaneSeam:
         import tortoise.hosted_api as ha
         from tests.fake_control_plane import FakeControlPlane
 
+        # #3745: a PER-TEST graph name. These tests assert on the graph's RAW
+        # node count (`node_count`) and the graph projection MERGEs its own
+        # internal `:Meta {key:'point_fts_v2'}` bookkeeping marker into
+        # whatever `TORTOISE_DB_PATH` is current whenever a projection is
+        # opened ON that graph — so work deferred past a sibling test's
+        # teardown lands in the NEXT test's temp DB under the SAME graph name
+        # and inflates the count (2 == 1). A unique name per test makes that
+        # structurally impossible: the stale writer's target no longer exists
+        # in this test's DB, so the seed is the only content (the same
+        # per-test isolation `_clean_team_graphs` gives the server lane).
+        monkeypatch.setitem(TestSupabaseLaneSeam.TEAM, "graph_name",
+                            f"org_team_s1_{uuid4().hex[:8]}")
         cp = FakeControlPlane().seed("organizations", [dict(TestSupabaseLaneSeam.TEAM)])
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
                             lambda: True)
@@ -536,8 +574,9 @@ class TestSupabaseLaneSeam:
         """The graph store stays FalkorDB in both lanes — the Supabase lane
         only changes where TEAMS/GRAPHS rows are read from."""
         import tortoise.hosted_api as ha
-        g = ha._make_sdk(namespace=None)._get_proj().db.select_graph(
-            TestSupabaseLaneSeam.TEAM["graph_name"])
+        db = ha._make_sdk(namespace=None)._get_proj().db
+        _reset_graph(db, TestSupabaseLaneSeam.TEAM["graph_name"])
+        g = db.select_graph(TestSupabaseLaneSeam.TEAM["graph_name"])
         g.query("CREATE (p:Point {id:'p1', content:'c', pointKind:'claim'})")
 
     @pytest.mark.parametrize("path,body", [
@@ -831,10 +870,15 @@ class TestDrDrill:
         body = r2.json()
         assert body["status"] == "drill_ok"
         assert body["target_graph"].startswith("_drill_")
-        # Live graph untouched, scratch cleaned.
+        # Live graph untouched, scratch cleaned. The count is taken over
+        # `:Point` — the label `_seed_team` writes, and the convention the
+        # sibling backup/restore tests use (tests/test_backup_e2e.py:70) — so
+        # the projection's internal `:Meta {key:'point_fts_v2'}` bookkeeping
+        # node cannot be mistaken for restored data (#3745: it made this read
+        # 3 == 2 whenever a projection had been opened on the graph).
         sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
         live = sdk._get_proj().db.select_graph("org_team_x")
-        assert live.query("MATCH (n) RETURN count(n)").result_set[0][0] == 2
+        assert live.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 2
         graphs = sdk._get_proj().db.list_graphs()
         assert body["target_graph"] not in graphs
         # Zero production writes (review P2-8): no registry end-stamp, no
