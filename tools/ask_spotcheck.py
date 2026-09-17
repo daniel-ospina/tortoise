@@ -37,10 +37,14 @@ provider key is absent (see ``_require_judge_key``).
 Requires live provider keys: DEEPSEEK_API_KEY / OPENROUTER_API_KEY /
 VENICE_API_KEY for the reader AND the judge provider key
 (``TORTOISE_LME_JUDGE_MODEL`` — default ``openai:gpt-4o-2024-08-06`` →
-``OPENAI_API_KEY``) for grading. Seeding reproduces the memory the
-question was asked about: one Point per haystack turn + an Event per
-session (startedAt from haystack_dates) so the ask lane's annotation
-renders session dates.
+``OPENAI_API_KEY``) for grading. Seeding (``_seed_memory``, #3910)
+reproduces the memory the question was asked about in the CAPTURE shape a
+captured session actually has: one episodic turn Point per haystack turn
+(deterministic ``f"{sid}_t{i}"`` id, ``pointKind='event'``,
+``is_episodic=true``, ``speaker``, no ``sessionId``/``eventId`` prop) wired
+to its ``:Session`` by the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the
+provenance mechanism the shipping read resolves identity from — plus the
+per-session ``:Event`` (startedAt from haystack_dates).
 
 Composition fixture: the committed ``tests/fixtures/ask_spotcheck_composition.json``
 (21 questions — the reproducibility gap closed by issue #2071 step 1).
@@ -55,6 +59,7 @@ import os
 import re
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
@@ -70,6 +75,8 @@ from tortoise.ingest import _PROVIDERS  # noqa: E402
 from tortoise.sdk import (  # noqa: E402
     _SESSION_LLM_PROVIDER_PRIORITY,
     TortoiseSDK,
+    _content_hash,
+    _normalize_turn_role,
 )
 
 _COMMITTED_FIXTURE = os.path.join(
@@ -85,25 +92,76 @@ def _to_iso_date(raw: str) -> str:
 
 
 def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
+    """Seed the haystack in the CAPTURE shape (#3910).
+
+    Reproduces what the real capture loop writes for a session — and nothing
+    the real read path cannot consume:
+
+      * a ``(:Session {id})`` node (``_capture_session_impl``);
+      * one episodic turn ``:Point`` per non-blank haystack turn with the
+        deterministic id ``f"{sid}_t{i}"``, ``pointKind='event'``,
+        ``is_episodic=true``, ``is_operator=false``, ``speaker`` and the
+        ``[role] <content>`` text — and NO ``sessionId`` / ``eventId`` prop
+        (the capture loop writes neither on turn Points);
+      * the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance
+        mechanism the shipping read resolves identity from
+        (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``).
+
+    Pre-#3910 this seeder instead made plain ``statement`` Points and wrote
+    ``p.sessionId`` / ``p.eventId`` PROPS with NO edge — a graph the capture
+    path cannot produce, so the fixture taught every consumer the wrong
+    provenance shape: a consumer reading ``p.sessionId`` reported GREEN on a
+    graph where the CONTAINS-edge path was broken. The deterministic turn
+    ids are index-aligned with the capture window (a blank turn consumes its
+    index but writes no node), exactly as ``_capture_session_impl`` does.
+
+    The per-session ``:Event`` (``startedAt`` from ``haystack_dates``) is
+    kept unchanged. Turn Points carry no ``eventId`` prop, so — as in
+    capture — the ask lane's ``:Event`` date join does not reach them; the
+    date annotation is not part of the capture shape and is NOT fabricated
+    here.
+    """
     proj = sdk._get_proj()
     sessions = question.get("haystack_sessions") or []
     dates = question.get("haystack_dates") or []
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     for i, session in enumerate(sessions):
+        sid = f"sess-{i}"
         sdate = _to_iso_date(dates[i]) if i < len(dates) else "2020-01-01"
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
             params={"eid": f"ev-s{i}", "st": f"{sdate}T10:00:00Z"},
         )
-        for turn in session:
+        proj.g.query(
+            "MERGE (s:Session {id:$sid})",
+            params={"sid": sid},
+        )
+        for t, turn in enumerate(session):
             content = (turn.get("content") or "").strip()
             if not content:
                 continue
-            point = sdk.create_point("statement", content)
+            # Capture shape, byte-for-byte (sdk.py _capture_session_impl):
+            # deterministic id, role-normalized speaker, bracket-tagged text,
+            # content hash — and no sessionId/eventId prop.
+            role = _normalize_turn_role(turn.get("role"))
+            turn_id = f"{sid}_t{t}"
+            turn_text = f"[{role}] {content[:5000]}"
             proj.g.query(
-                "MATCH (p:Point {id: $pid}) SET p.eventId = $eid, "
-                "p.sessionId = $sid",
-                params={"pid": point["id"], "eid": f"ev-s{i}",
-                        "sid": f"sess-{i}"},
+                "MERGE (p:Point {id:$id}) "
+                "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
+                "    p.speaker=$speaker, "
+                "    p.is_episodic=true, "
+                "    p.status=coalesce(p.status, $s), "
+                "    p.createdAt=coalesce(p.createdAt, $now), "
+                "    p.updatedAt=$now, p.content_hash=$ch",
+                params={"id": turn_id, "c": turn_text, "k": "event",
+                        "speaker": role, "s": "draft", "now": now,
+                        "ch": _content_hash(turn_text)},
+            )
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": sid, "tid": turn_id},
             )
 
 
