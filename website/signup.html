@@ -61,6 +61,22 @@
        or #1909 fragment) — the #1224 OAuth state-expiry banner must render.
        Falls back to the async getSession bounce below. -->
   <script>
+    // #3503 (review P1, round 4): "the URL still carries a live OAuth
+    // credential" — one predicate for this page's head gate AND its async
+    // getSession bounce, mirrored from the dashboard's
+    // website/apps/dashboard/src/sessionBounce.js (there is no bundler here, so
+    // the logic lives on `window` for both scripts to share).
+    window.liveFragmentCredential = function () {
+      var hash = window.location.hash || "";
+      if (!/[?&#](?:access_token|refresh_token|code)=/.test(hash)) {
+        return { live: false, token: null };
+      }
+      var token = null;
+      try {
+        token = new URLSearchParams(hash.replace(/^#/, "")).get("access_token") || null;
+      } catch (e) { token = null; }
+      return { live: true, token: token };
+    };
     (function () {
       try {
         var p = new URLSearchParams(window.location.search);
@@ -89,6 +105,21 @@
           return;
         }
         var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
+        // #3503 (review P1, round 4): a LIVE token fragment still in the URL
+        // means the bridge could not store the session — its cookie write was
+        // refused (over-cap, or cookies blocked) — and it therefore KEPT the
+        // fragment as the only surviving copy of the credential. Navigating
+        // destroys it, and with a still-valid PREVIOUS cookie the visitor would
+        // silently continue as the OLD account. This page receives the /admin
+        // round-trip (see __ADMIN_RETURN_TO), so the same guard the dashboard's
+        // mount gate applies is required here.
+        var lf = window.liveFragmentCredential();
+        if (lf.live && (!s || lf.token !== s.access_token)) {
+          // Surface it from the module script below (#error lives after this
+          // <script>); stay put so the credential and the reload retry survive.
+          window.__FRAGMENT_REFUSED = true;
+          return;
+        }
         if (!s) return;  // no VALID session → stay on the auth card
         var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
         // #3080: an explicit /admin return-to wins — claim routing is
@@ -888,6 +919,13 @@
         // without this the async path re-enters the /admin ↔ /auth loop that the
         // head gate just broke.
         if (window.__ADMIN_STALE) return;
+        // #3503 (review P1, round 4): never navigate over a live credential the
+        // browser refused to store. The head gate above already refused for this
+        // URL and set the flag; without this return the async path would destroy
+        // the very fragment the gate just preserved.
+        var lf = window.liveFragmentCredential();
+        var rs = (r && r.data && r.data.session) ? r.data.session : null;
+        if (lf.live && (!rs || lf.token !== rs.access_token)) return;
         if (r && r.data && r.data.session) {
           // #1511: strict validity — missing/past expires_at is NOT authed
           // (a presence-only bounce here loops /auth↔welcome with the
@@ -900,6 +938,13 @@
           }
         }
       }).catch(function () { /* best-effort */ });
+    }
+
+    // #3503: the head gate (and the async bounce above) refused to navigate over
+    // a live credential the browser would not store — say so, instead of leaving
+    // the card silent while the credential sits unread in the URL.
+    if (window.__FRAGMENT_REFUSED) {
+      showError("Signed in, but this browser could not save the session — the sign-in cookie was rejected (it can exceed the browser's cookie limit, or cookies may be blocked). Nothing was discarded: your sign-in is still in the address bar. Reload this page to retry, or sign in again below.");
     }
 
     // ── Error display ──────────────────────────────────────────────────────

@@ -3383,7 +3383,12 @@ function claimIntentInFlight() {
         // so the normal path applies.
         const claimIntent = claimIntentInFlight()
         if (hasLiveTokenFragment(window.location.hash) &&
-            fragmentAccessToken(window.location.hash) !== (session && session.access_token) &&
+            // `!session` is load-bearing: with NO session, `session &&
+            // session.access_token` is `null`, which would compare EQUAL to a
+            // fragment carrying no access_token (`#code=…`, `#refresh_token=…`)
+            // and let the bounce destroy it (review P3, round 3).
+            (!session ||
+             fragmentAccessToken(window.location.hash) !== session.access_token) &&
             !claimIntent) {
           setChecking(false)
           setFragmentRefused(true)

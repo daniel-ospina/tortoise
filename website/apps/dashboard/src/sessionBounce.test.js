@@ -97,3 +97,23 @@ test('only an exact token match means "already stored"', () => {
   assert.equal(live('#code=abc'), true, 'unverifiable — treat as refused')
   assert.equal(live('#error=access_denied'), false, 'not a credential at all')
 })
+
+// #3503 review round 3 (P3): the dashboard's exemption is
+// `!session || fragmentAccessToken(hash) !== session.access_token`. Dropping the
+// `!session` clause overloads null ("fragment carries no access_token") with
+// "no resolved session", so `#code=…`/`#refresh_token=…` compared EQUAL to a
+// missing session and were bounced over.
+test('with no resolved session, the exemption requires a session', () => {
+  const refused = (hash, session) => hasLiveTokenFragment(hash) &&
+    (!session || fragmentAccessToken(hash) !== session.access_token)
+  assert.equal(refused('#access_token=AAA', null), true)
+  assert.equal(refused('#code=abc', null), true, '#code must not match a null session')
+  assert.equal(refused('#refresh_token=r', null), true)
+  assert.equal(refused('#error=access_denied', null), false, 'errors are not credentials')
+  assert.equal(refused('#access_token=AAA', { access_token: 'AAA' }), false)
+  assert.equal(refused('#access_token=NEW', { access_token: 'AAA' }), true)
+  // The clause is load-bearing: without it the #code case above is a false pass.
+  const withoutClause = (hash, session) => hasLiveTokenFragment(hash) &&
+    fragmentAccessToken(hash) !== (session && session.access_token)
+  assert.equal(withoutClause('#code=abc', null), false, 'the regression this pins')
+})

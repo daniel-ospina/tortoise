@@ -94,6 +94,7 @@ SHARED = REPO_ROOT / "website" / "assets" / "supabase-session.js"
 DASHBOARD = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
 DASHBOARD_BUNDLE_GLOB = "website/apps/dashboard/dist/assets/index-*.js"
 OAUTH = REPO_ROOT / "tortoise" / "oauth.py"
+SIGNUP = REPO_ROOT / "website" / "signup.html"
 VENDORED_SUPABASE = (
     REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "vendor"
     / "supabase-2.112.2.min.js"
@@ -142,6 +143,7 @@ const bridgePath = process.argv[2];
 const mode = process.argv[3] || 'bridge';
 const bundlePath = process.argv[4] || '';
 const dashboardPath = process.argv[5] || '';
+const authPagePath = process.argv[5] || '';
 const src = fs.readFileSync(bridgePath, 'utf8');
 
 // Chrome limits a cookie's NAME + VALUE (net/cookies/parsed_cookie.h
@@ -161,6 +163,7 @@ function makeEnv(opts) {
 
   const historyCalls = [];
   const replaceCalls = [];
+  const navCalls = [];
   const logs = [];
   const store = {};
   const rec = (level) => (...a) => logs.push({ level, text: a.map(String).join(' ') });
@@ -194,7 +197,7 @@ function makeEnv(opts) {
 
   const location = {
     get href() { return url.toString(); },
-    set href(v) { url.href = new URL(v, url).href; },
+    set href(v) { navCalls.push(String(v)); url.href = new URL(v, url).href; },
     get hash() { return url.hash; },
     set hash(v) { url.hash = v; },
     get search() { return url.search; },
@@ -205,7 +208,7 @@ function makeEnv(opts) {
     get hostname() { return url.hostname; },
     get protocol() { return url.protocol; },
     assign(v) { url.href = new URL(v, url).href; },
-    replace(v) { replaceCalls.push(String(v)); url.href = new URL(v, url).href; },
+    replace(v) { replaceCalls.push(String(v)); navCalls.push(String(v)); url.href = new URL(v, url).href; },
     toString() { return url.toString(); },
   };
   const history = {
@@ -255,7 +258,7 @@ function makeEnv(opts) {
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  return { sandbox, jar, historyCalls, replaceCalls, logs };
+  return { sandbox, jar, historyCalls, replaceCalls, navCalls, logs };
 }
 
 function fragment(tokenLen, expiresAt) {
@@ -386,7 +389,7 @@ function extractFunction(src, name) {
 async function runDashboardScenario(kind) {
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
   const role = kind === 'small' ? 200 : 4000;
-  const opts = { hash: fragment(role, expiresAt) };
+  const opts = { hash: kind === 'code_fragment' ? '#code=abc123' : fragment(role, expiresAt) };
   // The P2-1 precondition: a still-valid PREVIOUS cookie. `getSession()` then
   // answers with the OLD session — the case where a guard nested inside the
   // "no session" branch never runs.
@@ -456,9 +459,11 @@ async function runDashboardScenario(kind) {
     hash: finalHash,
     fields: {
       hash_after_bridge_has_token: /access_token=/.test(hashAfterBridge),
+      hash_after_bridge_raw: hashAfterBridge,
+      hash_after_final_raw: finalHash,
       fragment_survived_supabase: /access_token=/.test(finalHash),
-      navigated: env.replaceCalls.length > 0,
-      replace_target: env.replaceCalls[env.replaceCalls.length - 1] || null,
+      navigated: env.navCalls.length > 0,
+      replace_target: env.navCalls[env.navCalls.length - 1] || null,
       auth_unavailable: calls.unavailable[calls.unavailable.length - 1] || '',
       fragment_refused: calls.refused.indexOf(true) !== -1,
       checking_cleared: calls.checking.indexOf(false) !== -1,
@@ -466,6 +471,83 @@ async function runDashboardScenario(kind) {
     },
   });
 }
+
+  // ── /auth (signup.html) head gate + async getSession bounce ────────────
+  //
+  // The OTHER fragment-receiving page. Its inline gate and its async bounce are
+  // plain JS in signup.html (no bundler), executed here verbatim against the
+  // REAL bridge — the round-4 P1 was that both navigated over a live refused
+  // fragment whenever a still-valid OLD cookie was present.
+  async function runAuthPageScenario(kind) {
+    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    const opts = { hash: kind === 'no_fragment' ? '' : fragment(4000, expiresAt) };
+    if (kind !== 'no_session') opts.preseed = oldCookie(expiresAt);
+    const env = makeEnv(opts);
+    // signup.html's /admin round-trip (__ADMIN_RETURN_TO): the destination the
+    // gate picks when the return-to param is present, and what makes the
+    // navigation observable in the report.
+    env.sandbox.__ADMIN_RETURN_TO = '/admin/';
+    env.sandbox.__DASHBOARD_BASE_URL = 'https://app.premiselabs.co';
+    vm.runInContext(src, env.sandbox, { filename: bridgePath });
+    const hashAfterBridge = env.sandbox.window.location.hash;
+
+    const html = fs.readFileSync(authPagePath, 'utf8');
+    // Anchored on the gate's own first statement so the harness runs the REAL
+    // gate in ANY revision (the round-4 guard is what the predicate adds — the
+    // gate itself predates it).
+    const pAnchor = html.indexOf('var p = new URLSearchParams(window.location.search);');
+    const gateStart = html.lastIndexOf('(function () {', pAnchor);
+    const gateEnd = html.indexOf('})();', pAnchor);
+    const predStart = html.indexOf('window.liveFragmentCredential = function');
+    if (pAnchor < 0 || gateStart < 0 || gateEnd < 0) {
+      throw new Error('signup.html: head-gate anchors not found');
+    }
+    if (predStart >= 0 && predStart < gateStart) {
+      vm.runInContext(html.slice(predStart, gateStart), env.sandbox,
+                      { filename: 'signup.html#predicate' });
+    }
+    vm.runInContext(html.slice(gateStart, gateEnd + 5), env.sandbox,
+                    { filename: 'signup.html#headGate' });
+
+    // The async getSession bounce from the module script, with the resolved
+    // session injected (the real supabaseClient is built further down the page).
+    const asyncAnchor = html.indexOf(
+      'supabaseClient.auth.getSession().then(function (r) {');
+    if (asyncAnchor < 0) throw new Error('signup.html: async bounce anchor not found');
+    const bodyStart = html.indexOf('{', html.indexOf('function (r)', asyncAnchor));
+    const asyncBody = extractBraceBalanced(html, bodyStart);
+    // NOTE: at a pre-fix revision the async body does not reference the guard at
+    // all, so it runs unchanged and its navigation is observed directly.
+    env.sandbox.claimRedirectTarget = function () {
+      // Mirrors signup.html's own precedence: the /admin return-to wins.
+      return env.sandbox.__ADMIN_RETURN_TO || env.sandbox.__DASHBOARD_BASE_URL;
+    };
+    env.sandbox.oauthErrorParams = function () { return { error: '', code: '' }; };
+    const bounce = vm.runInContext('(function (r) ' + asyncBody + ')', env.sandbox,
+                                   { filename: 'signup.html#asyncBounce' });
+    bounce({
+      data: {
+        session: kind === 'no_session' ? null : {
+          access_token: 'OLD-ACCESS-TOKEN', refresh_token: 'old-refresh',
+          expires_at: expiresAt, expires_in: 3600, token_type: 'bearer',
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const finalHash = env.sandbox.window.location.hash;
+    return report(env, {
+      hash: finalHash,
+      fields: {
+        hash_after_bridge_has_token: /access_token=/.test(hashAfterBridge),
+        fragment_survived_gate: /access_token=/.test(finalHash),
+        navigated: env.navCalls.length > 0,
+        replace_target: env.navCalls[env.navCalls.length - 1] || null,
+        fragment_refused: env.sandbox.window.__FRAGMENT_REFUSED === true,
+        errors: env.logs.filter((l) => l.level === 'error').map((l) => l.text),
+      },
+    });
+  }
 
 function runBoundaryScenario(kind) {
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
@@ -547,6 +629,11 @@ async function runE2EIngestScenario(kind) {
     out.dashboard_oversized = await safeAsync(() => runDashboardScenario('oversized'));
     out.dashboard_preseeded_old_cookie =
       await safeAsync(() => runDashboardScenario('preseeded_old_cookie'));
+    out.dashboard_code_fragment = await safeAsync(() => runDashboardScenario('code_fragment'));
+  } else if (mode === 'auth_page') {
+    out.auth_page_oversized = await safeAsync(() => runAuthPageScenario('oversized'));
+    out.auth_page_no_session = await safeAsync(() => runAuthPageScenario('no_session'));
+    out.auth_page_no_fragment = await safeAsync(() => runAuthPageScenario('no_fragment'));
   } else {
     out.e2e_small = await safeAsync(() => runE2EIngestScenario('small'));
     out.e2e_oversized = await safeAsync(() => runE2EIngestScenario('oversized'));
@@ -561,7 +648,9 @@ async function runE2EIngestScenario(kind) {
 
 
 def _run_harness(mode: str, bundle: Path | None = None,
-                 dashboard: Path | None = None) -> dict:
+                 page: Path | None = None) -> dict:
+    """`page` is the surface under test for dashboard/auth_page modes:
+    main.jsx for `dashboard`, signup.html for `auth_page`."""
     node = _require_node()
     assert SHARED.exists(), f"missing file: {SHARED}"
     args = [node]
@@ -572,8 +661,8 @@ def _run_harness(mode: str, bundle: Path | None = None,
         args += [harness, str(SHARED), mode]
         if bundle is not None:
             args.append(str(bundle))
-        if dashboard is not None:
-            args.append(str(dashboard))
+        if page is not None:
+            args.append(str(page))
         proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
     finally:
         os.unlink(harness)
@@ -613,6 +702,15 @@ def dashboard_report() -> dict:
     assert VENDORED_SUPABASE.exists(), f"missing vendored bundle: {VENDORED_SUPABASE}"
     assert DASHBOARD.exists(), f"missing dashboard source: {DASHBOARD}"
     return _run_harness("dashboard", VENDORED_SUPABASE, DASHBOARD)
+
+
+@pytest.fixture(scope="module")
+def auth_page_report() -> dict:
+    """The OTHER fragment-receiving page: the real bridge + signup.html's real
+    inline head gate and real async getSession bounce."""
+    assert VENDORED_SUPABASE.exists(), f"missing vendored bundle: {VENDORED_SUPABASE}"
+    assert SIGNUP.exists(), f"missing auth page: {SIGNUP}"
+    return _run_harness("auth_page", VENDORED_SUPABASE, SIGNUP)
 
 
 # ── the refusal boundary IS the modelled browser limit (P3-1) ───────────────
@@ -1057,6 +1155,122 @@ def test_head_gate_exempts_every_fragment_the_guard_calls_a_credential() -> None
     assert "refresh_token|code" in dist_html or "refresh_token" in dist_html, (
         "the committed dashboard dist/index.html still carries the old head "
         "gate — rebuild (npm run build) after editing index.html"
+    )
+
+
+def test_dashboard_lone_code_fragment_with_no_session_is_not_dropped(
+    dashboard_report: dict,
+) -> None:
+    """#3503 (review P3, round 3): `session && session.access_token` is `null`
+    when there is NO session, which compares EQUAL to a fragment carrying no
+    access_token (`#code=…`, `#refresh_token=…`) — so those fragments skipped the
+    guard and were destroyed by the bounce. No configured flow emits a lone
+    #code fragment today (the implicit flow carries #access_token), so this is
+    defence in depth: the exemption requires a RESOLVED session."""
+    r = _scenario(dashboard_report, "dashboard_code_fragment")
+    # The bridge itself only reads #access_token (implicit flow), so it does not
+    # touch a #code fragment — but the MOUNT GATE still classified it as live and
+    # bounced over it.
+    assert r["hash_after_bridge_raw"] == "#code=abc123", (
+        f"harness precondition: the #code fragment is intact, got "
+        f"{r['hash_after_bridge_raw']!r}"
+    )
+    assert r["fragment_refused"] is True, (
+        "a live #code fragment with no resolved session was bounced over — the "
+        "browser drops it on navigation and the credential is gone (#3503 P3)"
+    )
+    assert r["navigated"] is False
+    assert r["hash_after_final_raw"] == "#code=abc123", (
+        f"the #code fragment was destroyed: {r['hash_after_final_raw']!r}"
+    )
+    assert r["auth_unavailable"]
+
+
+# ── the /auth page gate (review P1, round 4) ────────────────────────────────
+
+
+def test_auth_page_gate_keeps_a_refused_fragment_instead_of_navigating(
+    auth_page_report: dict,
+) -> None:
+    """signup.html (`/auth`) is the other page that receives a fragment — it is
+    where the bridge lands for the `/admin` round-trip (`__ADMIN_RETURN_TO`).
+    Its inline head gate and its async `getSession` bounce both navigated on a
+    still-valid PREVIOUS cookie, so the refused NEW credential was destroyed and
+    the visitor silently continued as the OLD account: the dashboard round-3 fix
+    did not cover this page."""
+    r = _scenario(auth_page_report, "auth_page_oversized")
+    assert r["cookie_token"] == "OLD-ACCESS-TOKEN", "harness precondition"
+    assert r["hash_after_bridge_has_token"] is True, (
+        "harness precondition: the bridge refused the write and kept the fragment"
+    )
+    assert r["navigated"] is False, (
+        f"the /auth gate navigated to {r['replace_target']!r} while a live "
+        "refused fragment was in the URL — the browser drops the fragment on "
+        "navigation, destroying the credential and continuing as the OLD "
+        "account (#3503 review P1)"
+    )
+    assert r["fragment_survived_gate"] is True
+    assert r["fragment_refused"] is True, (
+        "the refusal must be flagged so the card can explain it"
+    )
+
+
+def test_auth_page_gate_still_bounces_without_a_live_fragment(
+    auth_page_report: dict,
+) -> None:
+    """Narrowness control: a signed-in visitor with NO fragment must still be
+    forwarded to the /admin return-to, or the fix would strand every already
+    authenticated visitor on the auth card."""
+    r = _scenario(auth_page_report, "auth_page_no_fragment")
+    assert r["navigated"] is True, "a live fragment is the ONLY thing that may block the bounce"
+    assert r["replace_target"] == "/admin/", (
+        f"the /admin return-to must be preserved, got {r['replace_target']!r}"
+    )
+    assert r["fragment_refused"] is False
+
+
+def test_auth_page_without_a_session_keeps_the_fragment(auth_page_report: dict) -> None:
+    """No cookie at all: the gate already returned early (nothing to forward),
+    and the fragment must still be there afterwards — this is the pre-existing
+    behaviour the guard must not regress."""
+    r = _scenario(auth_page_report, "auth_page_no_session")
+    assert r["navigated"] is False
+    assert r["fragment_survived_gate"] is True
+
+
+def test_auth_page_gate_predicate_matches_the_dashboard() -> None:
+    """Static parity: the /auth gate has no bundler, so its predicate is a
+    separate copy of src/sessionBounce.js's. Both must classify the same three
+    tokens and both must guard BEFORE navigating."""
+    html = SIGNUP.read_text(encoding="utf-8")
+    helper = (REPO_ROOT / "website" / "apps" / "dashboard" / "src"
+              / "sessionBounce.js").read_text(encoding="utf-8")
+    live = re.search(r"LIVE_TOKEN_FRAGMENT = (/.*?/)", helper)
+    assert live, "sessionBounce.js: LIVE_TOKEN_FRAGMENT not found"
+    assert "window.liveFragmentCredential = function" in html, (
+        "signup.html lost the shared live-credential predicate"
+    )
+    # The regex literal must be IDENTICAL to the dashboard's (a drift here is
+    # how `refresh_token` fell out of the dashboard's head gate).
+    assert live.group(1) in html, (
+        f"signup.html's predicate does not use the dashboard's pattern "
+        f"({live.group(1)}) — the two copies have drifted"
+    )
+    gate = html.index("window.liveFragmentCredential()")
+    admin_bounce = html.index("window.location.replace(window.__ADMIN_RETURN_TO)")
+    async_bounce = html.index("window.location.href = claimRedirectTarget()")
+    assert gate < admin_bounce, (
+        "the head gate must refuse BEFORE the __ADMIN_RETURN_TO navigation"
+    )
+    assert html.count("window.liveFragmentCredential()") >= 2, (
+        "the async getSession bounce must apply the same guard — it would "
+        "otherwise destroy the fragment the head gate just preserved"
+    )
+    assert html.index("window.liveFragmentCredential()", gate + 1) < async_bounce, (
+        "the async bounce's guard must precede its navigation"
+    )
+    assert "__FRAGMENT_REFUSED" in html, (
+        "nothing surfaces the refusal to the visitor on /auth"
     )
 
 
