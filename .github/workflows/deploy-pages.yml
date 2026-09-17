@@ -124,6 +124,16 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
+      # #3620: the staged-upload DENYLIST has one residual hole — a NEW top-level
+      # entry under `website/` is uploaded unless it is excluded. The pytest
+      # ratchet pins that case, but this job runs no pytest and does not depend
+      # on python-ci, so a push adding an unclassified entry would publish it and
+      # only red afterwards. This step closes it BEFORE the upload: the tracked
+      # top-level entries under `website/` are compared against the reviewed
+      # classification in config/pages-upload-classification.txt. No pytest, no
+      # network, no third-party deps (stdlib + git) — ~1s.
+      - name: Preflight — every website/ top-level entry is classified (#3620)
+        run: python3 tools/check_pages_upload_root.py
       # #3620: `wrangler pages deploy .` uploaded EVERY file under `website/`.
       # There is no ignore mechanism on the Pages upload path — wrangler uses a
       # hardcoded IGNORE_LIST and the string `wranglerignore` appears in 0 files
@@ -159,21 +169,16 @@ jobs:
       # The five survival guards below are what keep the denylist honest.
       #
       # RESIDUAL RISK: a NEW top-level entry under `website/` is staged unless it
-      # is excluded here. That case is pinned — but only on the FULL test
-      # selection (`tests/test_pages_bindings.py::test_every_top_level_entry_under_website_is_classified`
-      # runs on the push-to-main matrix; a PR that touches an EXISTING entry does
-      # select the `onboarding` surface pre-merge, but one that ONLY ADDS an
-      # unknown top-level path selects no surface at all, so it does NOT run
-      # pre-merge). That pin is a DETECTOR, not an upload gate:
-      # this job runs no pytest and does not depend on python-ci, so a push adding
-      # a new top-level entry uploads it, and the ratchet only reds afterwards on
-      # that same push. The 404 step below cannot cover it either — it asserts a
-      # fixed enumeration, so a genuinely new internal file stays published until
-      # it is added to the exclude list AND to that enumeration. What
-      # remains unpinned entirely is a new NESTED file under an already-public
-      # directory (e.g. `website/blog/internal.txt`): the ratchet is top-level
-      # only, so a nested internal file must be added to the exclude list AND to
-      # the 404 assertion step below by hand.
+      # is excluded — but it can no longer ship on a green deploy. The preflight
+      # step above compares the tracked top-level entries against
+      # `config/pages-upload-classification.txt` BEFORE the upload, so an
+      # unclassified entry fails the deploy (the pytest ratchet in
+      # tests/test_pages_bindings.py pins the same table). What remains unpinned
+      # entirely is a new NESTED file under an already-public directory (e.g.
+      # `website/blog/internal.txt`): the classification is top-level only, so a
+      # nested internal file must be added to the exclude list AND to the 404
+      # assertion step below by hand — the 404 probe asserts a fixed
+      # enumeration, so it cannot notice a nested file on its own.
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           # `${RUNNER_TEMP:?}` and not `$RUNNER_TEMP`: the next command is

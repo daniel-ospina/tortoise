@@ -7,8 +7,11 @@ a checker that always returns [] would have let #3616 ship again.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,8 +22,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
 import check_pages_bindings as cpb  # noqa: E402
+import check_pages_upload_root as cpur  # noqa: E402
 
 MANIFEST_PATH = REPO / "config" / "required-bindings.yml"
+UPLOAD_CLASSIFICATION_PATH = REPO / "config" / "pages-upload-classification.txt"
 
 
 def _manifest() -> dict:
@@ -431,6 +436,8 @@ def test_the_gate_files_select_a_surface_so_their_test_runs() -> None:
     for path in (
         "tools/check_pages_bindings.py",
         "config/required-bindings.yml",
+        "tools/check_pages_upload_root.py",
+        "config/pages-upload-classification.txt",
     ):
         result = cs.select([path], "pull_request", manifest)
         assert result.get("surfaces"), (
@@ -723,10 +730,14 @@ EXPECTED_CLASSIFICATION = {
     "SUPABASE_ANON_KEY": ("required", ["production"]),
     "SUPABASE_SERVICE_ROLE_KEY": ("required", ["production"]),
     "OPENROUTER_API_KEY": ("required", ["production"]),
-    # recommended: correct in-source default, or no caller yet
+    # recommended: correct in-source default
     "APP_ORIGIN": ("recommended", ["production"]),
     "AUTH_CALLBACK_URL": ("recommended", ["production"]),
-    "API_ORIGIN": ("recommended", ["production"]),
+    # required: SET in production+preview, and website/functions/api/v1/[[path]].ts
+    # answers `503 proxy_not_configured` without it (verified live: after it was
+    # set, /api/v1/teams returns 401 not_signed_in instead). The old
+    # `recommended` note said "the moment a client calls it" — that is now.
+    "API_ORIGIN": ("required", ["production"]),
     # recommended: cloudflare-purge.ts is best-effort and fail-open by design
     "CF_API_TOKEN": ("recommended", ["production"]),
     "CF_ZONE_ID": ("recommended", ["production"]),
@@ -1072,24 +1083,50 @@ _WEBSITE_FIXTURE = (
     "2479-re-auth-implementation-plan.md",
 )
 
-#: Entries that MUST survive into the staged upload root. The first four are the
-#: ones an allowlist forgets (#3620: they fail SILENTLY).
-_STAGED_MUST_EXIST = (
-    "functions/_middleware.ts",
-    "functions/auth/start.ts",
-    "functions/api/session.ts",
-    "_redirects",
-    "_headers",
-    "admin/index.html",
-    "admin/assets/index-abc.js",
-    "index.html",
-    "product.html",
-    "privacy.html",
-    "404.html",
-    "robots.txt",
-    "assets/app.css",
-    "blog/blog.js",
-)
+def _expected_public(rels) -> set[str]:
+    """The public set the REVIEWED classification implies for `rels`.
+
+    `rels` are paths RELATIVE to `website/` — the synthetic `_WEBSITE_FIXTURE`
+    tuple and `git ls-files website` differ only by that prefix. A path is public
+    iff its top-level entry is classified `public` and it is not caught by a
+    non-top-level rule the deploy step applies (`*.md` and `node_modules/` at any
+    depth).
+
+    This is derived from the tree + the reviewed table, NOT a hand-written sample
+    of "load-bearing" entries. The previous 14-of-26 sample (`_STAGED_MUST_EXIST`)
+    is exactly why `--exclude='consent.js'` (M22) and `--exclude='*.xml'` (M23)
+    could drop a public file with the whole suite green.
+    """
+    expected: set[str] = set()
+    for rel in rels:
+        if _WEBSITE_TOP_LEVEL_STAGED.get(rel.split("/", 1)[0]) is not True:
+            continue
+        if rel.endswith(".md") or "node_modules" in rel.split("/"):
+            continue
+        expected.add(rel)
+    return expected
+
+
+def _assert_stage_matches(actual: set[str], expected: set[str], out: str) -> None:
+    """Assert the stage is EXACTLY the classified public set, both directions.
+
+    `admin/` is generated into the upload root by the blog-admin build step and is
+    not tracked, so it is absent from the classified tree; its PRESENCE is
+    required and it is never counted as an extra.
+    """
+    assert any(a == "admin" or a.startswith("admin/") for a in actual), (
+        "the generated admin/ tree is missing from the stage"
+    )
+    actual_tracked = {a for a in actual if not a.startswith("admin/")}
+    missing = sorted(expected - actual_tracked)
+    added = sorted(actual_tracked - expected)
+    assert not missing, (
+        "PUBLIC files were dropped by the denylist staging — the leak probe "
+        f"asserts 404s only, so it can never notice this (#3620): {missing}\n{out}"
+    )
+    assert not added, (
+        f"internal files were staged for public upload (#3620): {added}\n{out}"
+    )
 
 #: Entries that MUST NOT be staged — the live-verified #3620 leak.
 _STAGED_MUST_NOT_EXIST = (
@@ -1228,8 +1265,8 @@ def test_the_deploy_stages_a_controlled_upload_set(tmp_path) -> None:
     rc, out, stage, site = _run_deploy(tmp_path)
     assert rc == 0, f"the shipped deploy step failed:\n{out}"
 
-    missing = [rel for rel in _STAGED_MUST_EXIST if not (stage / rel).exists()]
-    assert not missing, f"load-bearing entries did not survive staging: {missing}\n{out}"
+    actual = {p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file()}
+    _assert_stage_matches(actual, _expected_public(_WEBSITE_FIXTURE), out)
 
     # Non-vacuity: the source tree really did contain each internal path, so the
     # exclusion (not a missing fixture file) is what kept it out of the stage.
@@ -1237,6 +1274,89 @@ def test_the_deploy_stages_a_controlled_upload_set(tmp_path) -> None:
         assert (site / rel).exists(), f"fixture is missing {rel} — assertion vacuous"
     leaked = [rel for rel in _STAGED_MUST_NOT_EXIST if (stage / rel).exists()]
     assert not leaked, f"internal paths were staged for public upload: {leaked}\n{out}"
+
+
+def test_the_deploy_clears_a_stale_stage_directory(tmp_path) -> None:
+    """`rm -rf "$STAGE"` is load-bearing: a stale file in `$RUNNER_TEMP/pages-upload`
+    would otherwise survive `mkdir -p` + rsync and be uploaded.
+
+    `$RUNNER_TEMP` is fresh on a hosted runner, but the step must not depend on
+    that — a local rerun and a self-hosted runner both reuse it. Before this test
+    the `rm -rf` was pinned by nothing.
+    """
+    stale = tmp_path / "pages-upload" / "stale-internal.txt"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("stale\n", encoding="utf-8")
+    rc, out, stage, _site = _run_deploy(tmp_path)
+    assert rc == 0, out
+    assert not (stage / "stale-internal.txt").exists(), (
+        'a stale file survived into the upload root — `rm -rf "$STAGE"` is gone'
+    )
+
+
+def _tracked_website_files() -> list[str]:
+    """Every tracked path under `website/`, RELATIVE to `website/`."""
+    out = subprocess.run(
+        ["git", "ls-files", "website"], cwd=REPO, capture_output=True, text=True, check=True
+    ).stdout.split()
+    return [p[len("website/") :] for p in out if p.startswith("website/")]
+
+
+def _copy_tracked_website(root: Path) -> None:
+    """Reproduce the CI checkout for the staging step: every TRACKED file under
+    `website/` (copying the `git ls-files` list, so untracked local artifacts stay
+    out of the comparison) plus the generated `admin/` tree the blog-admin build
+    step creates just before the deploy."""
+    for rel in _tracked_website_files():
+        src = REPO / "website" / rel
+        dst = root / "website" / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    admin = root / "website" / "admin"
+    (admin / "assets").mkdir(parents=True, exist_ok=True)
+    (admin / "index.html").write_text("x\n", encoding="utf-8")
+    (admin / "assets" / "index-abc.js").write_text("x\n", encoding="utf-8")
+
+
+def test_the_staged_upload_root_equals_the_classified_public_tree(tmp_path) -> None:
+    """COMPLETENESS over the REAL tree, not a sample: run the shipped staging step
+    and assert the stage is EXACTLY `tracked(website) − classified_excluded`.
+
+    Both directions must hold:
+      * a PUBLIC file missing from the stage is a silent 404 the leak probe can
+        never see (it asserts 404s only). A 14-of-26 sampled hand-list let
+        `--exclude='consent.js'` (M22) drop the consent banner + PostHog init,
+        and `--exclude='*.xml'` (M23) drop both public sitemaps — with the whole
+        suite green;
+      * an INTERNAL file present in the stage is the #3620 leak itself.
+
+    The expected set is derived from `git ls-files website` and the reviewed
+    classification, so it grows and shrinks with the real tree rather than needing
+    a hand-list edit.
+    """
+    _copy_tracked_website(tmp_path)
+    bin_dir = _stub_bin(tmp_path, "npx", STUB_NPX)
+    script = tmp_path / "deploy.sh"
+    script.write_text(_step_code(DEPLOY), encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "RUNNER_TEMP": str(tmp_path),
+    }
+    r = subprocess.run(
+        ["bash", "-e", str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+    )
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, f"the shipped deploy step failed on the real tree:\n{out}"
+
+    stage = tmp_path / "pages-upload"
+    actual = {p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file()}
+    _assert_stage_matches(actual, _expected_public(_tracked_website_files()), out)
 
 
 def test_the_deploy_uploads_the_staged_directory_not_website(tmp_path) -> None:
@@ -1482,8 +1602,7 @@ def test_the_leak_probe_harness_exercises_the_retry_bound() -> None:
     """
     import inspect
 
-    step = next(s for s in _deploy_steps() if s.get("name") == LEAK_PROBE)
-    assert "MAX_ATTEMPTS=10" in step["run"], (
+    assert "MAX_ATTEMPTS=10" in _step_code(LEAK_PROBE), (
         "the shipped retry bound changed shape — update _leak_script and this test"
     )
     src = inspect.getsource(_leak_script)
@@ -1491,95 +1610,130 @@ def test_the_leak_probe_harness_exercises_the_retry_bound() -> None:
     assert "sleep 15" in src and "sleep 0" in src
 
 
-#: Every top-level entry under `website/` and whether it is STAGED for the Pages
-#: upload. This is the #3620 enumeration made executable: the deploy step applies
-#: a DENYLIST to a staged copy, so a top-level entry that is NOT excluded is
-#: silently uploaded — the residual risk the workflow comment documents. A new
-#: entry therefore fails this test until someone classifies it.
+#: Every top-level entry under `website/` and whether the Pages upload STAGES it.
+#: Single-sourced from `config/pages-upload-classification.txt` — the SAME table
+#: the deploy job's pre-upload preflight reads (`tools/check_pages_upload_root.py`)
+#: — so the test's expectations and the deploy gate cannot drift.
 #:
-#: `admin/` is absent by design: it is generated into the upload root by the
-#: blog-admin build step and is not tracked, so it never appears here; its
-#: presence in the stage is pinned by `_STAGED_MUST_EXIST` instead.
-_WEBSITE_TOP_LEVEL_STAGED = {
-    "_headers": True,
-    "_redirects": True,
-    "404.html": True,
-    "assets": True,
-    "aviso-privacidad.html": True,
-    "blog": True,
-    "consent.js": True,
-    "docs.html": True,
-    "dpa.html": True,
-    "faq.html": True,
-    "functions": True,
-    "index.html": True,
-    "invite-accept.html": True,
-    "license.html": True,
-    "logo.png": True,
-    "privacy.html": True,
-    "product.html": True,
-    "robots.txt": True,
-    "security.html": True,
-    "self-hosted.html": True,
-    "signin.html": True,
-    "signup.html": True,
-    "sitemap-company.xml": True,
-    "sitemap-product.xml": True,
-    "tos.html": True,
-    "welcome.html": True,
-    # Excluded by the deploy step's denylist — internal, never public.
-    "2479-re-auth-implementation-plan.md": False,
-    "README.md": False,
-    "apps": False,
-    "migrations": False,
-    "website_architecture.md": False,
-}
+#: `admin/` is deliberately absent: it is generated into `website/` by the
+#: blog-admin build step and is not tracked, so it never appears in
+#: `git ls-files website`; its presence in the stage is asserted by
+#: `_assert_stage_matches`.
+_WEBSITE_TOP_LEVEL_STAGED = cpur.load_classification(UPLOAD_CLASSIFICATION_PATH)
+
+
+def _rsync_exclude_patterns(code: str) -> list[str]:
+    """Every `--exclude='…'` value in a shipped shell run block."""
+    return re.findall(r"--exclude='([^']*)'", code)
+
+
+def _rsync_pattern_matches(pattern: str, name: str, is_dir: bool) -> bool:
+    """rsync exclude semantics for a TOP-LEVEL entry.
+
+    The rules that matter for this step's patterns:
+      * a trailing `/` matches directories only;
+      * a leading `/` anchors the pattern to the transfer root, so `/apps/` does
+        NOT match a nested `x/apps/`;
+      * a pattern with NO internal `/` matches the BASENAME at any depth, so
+        `*.md` and `node_modules/` match top-level entries too.
+
+    Matching the anchored literal only — the old probe — misses an unanchored
+    `--exclude='consent.js'`, which rsync DOES apply and which drops the consent
+    banner + PostHog init (M22), and `--exclude='*.xml'`, which drops both public
+    sitemaps (M23).
+    """
+    dir_only = pattern.endswith("/")
+    pat = pattern.rstrip("/")
+    if dir_only and not is_dir:
+        return False
+    if pat.startswith("/"):
+        # Anchored at the transfer root: only a root-level entry can match, and a
+        # remaining `/` would be a sub-path this helper does not model.
+        return "/" not in pat[1:] and fnmatch.fnmatchcase(name, pat[1:])
+    return fnmatch.fnmatchcase(name, pat)
 
 
 def test_every_top_level_entry_under_website_is_classified() -> None:
     """The enumeration acceptance criterion, made executable.
 
     #3620 required the publicly served set to be *decided*, not inherited. The
-    deploy step decides it with a DENYLIST, which means a new top-level entry is
-    uploaded unless it is excluded. This test makes that decision forced instead
-    of silent: adding `website/internal/` fails here until it is either
-    classified public or excluded in the step. (A new `*.md` is caught by the
-    exclude pattern AND still fails here — the classification is the record.)
+    deploy step decides it with a DENYLIST, so a new top-level entry is uploaded
+    unless it is excluded. This test makes the decision forced instead of silent:
+    adding `website/internal/` fails here until it is classified. The table is
+    single-sourced from `config/pages-upload-classification.txt` — the same file
+    the deploy preflight reads.
     """
-    out = subprocess.run(
-        ["git", "ls-files", "website"], cwd=REPO, capture_output=True, text=True, check=True
-    ).stdout.split()
-    top = {
-        p.split("/", 1)[1].split("/", 1)[0] for p in out if p.startswith("website/")
-    }
-    assert top == set(_WEBSITE_TOP_LEVEL_STAGED), (
-        "a top-level entry under website/ was added or removed without being "
-        "classified — an unclassified entry is staged for public upload unless "
-        "the deploy step excludes it (#3620)"
+    unclassified, stale = cpur.compare(
+        cpur.tracked_top_level(), _WEBSITE_TOP_LEVEL_STAGED
+    )
+    assert not unclassified, (
+        "a top-level entry under website/ is not classified — an unclassified "
+        "entry is staged for public upload unless the deploy step excludes it "
+        f"(#3620): {unclassified}"
+    )
+    assert not stale, (
+        f"a classification row names a path that no longer exists (#3620): {stale}"
     )
 
     # Non-vacuity: the table must carry both answers, or it pins nothing.
     assert any(_WEBSITE_TOP_LEVEL_STAGED.values()), "no entry is classified public"
     assert not all(_WEBSITE_TOP_LEVEL_STAGED.values()), "no entry is classified excluded"
 
-    # Every entry classified as NOT staged must actually be excluded by the
-    # shipped step, and every entry classified public must NOT be — otherwise
-    # this table is a claim, not a pin. (Both directions: a blanket
-    # `--exclude='/signup.html'` would otherwise pass.)
-    code = _step_code(DEPLOY)
+    # Every entry classified NOT staged must actually be matched by a shipped
+    # `--exclude`, and every public entry must NOT be — otherwise this table is a
+    # claim, not a pin. Patterns are evaluated with rsync semantics (basename
+    # match when unanchored), not an anchored-substring probe: an unanchored
+    # `--exclude='consent.js'` or `--exclude='*.xml'` really does drop the file.
+    patterns = _rsync_exclude_patterns(_step_code(DEPLOY))
     for name, staged in _WEBSITE_TOP_LEVEL_STAGED.items():
-        if name.endswith(".md"):
-            # A `.md` is public only when the `*.md` blanket rule is absent.
-            assert staged == ("--exclude='*.md'" not in code), (
-                f"{name} is classified {'public' if staged else 'excluded'} but the "
-                "workflow's *.md rule says otherwise"
-            )
-            continue
-        excluded = f"--exclude='/{name}'" in code or f"--exclude='/{name}/'" in code
+        is_dir = (REPO / "website" / name).is_dir()
+        excluded = any(_rsync_pattern_matches(p, name, is_dir) for p in patterns)
         assert excluded != staged, (
             f"{name} is classified {'public' if staged else 'excluded'} but the "
-            f"deploy step {'excludes' if staged else 'does not exclude'} it"
+            f"deploy step {'excludes' if excluded else 'does not exclude'} it "
+            f"(patterns: {patterns})"
         )
+
+
+def test_the_upload_root_preflight_runs_before_the_deploy() -> None:
+    """The deploy job must RUN the classification check before it stages/upload.
+
+    Without this step the ratchet is only a post-merge detector: a push adding an
+    unclassified top-level entry would publish it and only red afterwards (#3620).
+    """
+    steps = _deploy_steps()
+    names = [s.get("name", "") for s in steps]
+    check = next(
+        (s for s in steps if "check_pages_upload_root.py" in (s.get("run") or "")), None
+    )
+    assert check is not None, (
+        "the deploy job does not run tools/check_pages_upload_root.py — an "
+        "unclassified top-level entry would be uploaded on a green deploy (#3620)"
+    )
+    assert names.index(check["name"]) < names.index(DEPLOY), (
+        "the classification check must run BEFORE the upload"
+    )
+
+
+def test_the_upload_root_preflight_reports_an_unclassified_entry() -> None:
+    """The deploy gate must red on a new entry, and not on a known one."""
+    table = cpur.load_classification(UPLOAD_CLASSIFICATION_PATH)
+    tracked = cpur.tracked_top_level()
+    unclassified, stale = cpur.compare(tracked | {"brand-new-internal"}, table)
+    assert unclassified == ["brand-new-internal"]
+    assert stale == []
+    # A row whose path no longer exists on disk is stale and must fail too.
+    _unclassified, stale = cpur.compare(tracked - {"consent.js"}, table)
+    assert stale == ["consent.js"]
+
+
+def test_the_upload_root_preflight_fails_closed_on_a_malformed_table(tmp_path) -> None:
+    """A malformed row is a configuration error, not an unclassified path — it
+    must raise rather than be silently skipped into a vacuous comparison."""
+    bad = tmp_path / "bad.txt"
+    bad.write_text("maybe thing\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="expected"):
+        cpur.load_classification(bad)
 
 
 def test_the_inert_wranglerignore_is_gone() -> None:

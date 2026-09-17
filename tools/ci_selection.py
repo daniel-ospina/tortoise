@@ -104,7 +104,14 @@ SOURCE_PATTERNS = {
                    # it. That is the #3616 pattern one level up: the thing that
                    # decides whether the gate works would not itself be gated.
                    "tools/check_pages_bindings.py",
-                   "config/required-bindings.yml"),
+                   "config/required-bindings.yml",
+                   # #3620: the Pages UPLOAD-ROOT gate is a pair too — the
+                   # preflight checker and the reviewed classification it reads.
+                   # A PR that adds a top-level entry under website/ (or edits
+                   # the checker) must select this surface, or the ratchet that
+                   # classifies the new entry never runs on the PR that owns it.
+                   "tools/check_pages_upload_root.py",
+                   "config/pages-upload-classification.txt"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail

@@ -872,13 +872,15 @@ durations:
   # both EXECUTED against stubbed `npx`/`curl`, not string-matched).
   #
   # DURATION IS HIGH-VARIANCE — do not trust a single sample. Observed across
-  # runs: ~6-45s warm (58 test functions / 89 collected cases; three warm samples
-  # on one machine were 41.3s / 41.1s / 34.3s), and 86s on a cold conftest import
-  # (the repo's heavy tests/conftest.py graph dominates; the tests themselves are
-  # millisecond-scale). A first draft recorded 85.0 from the cold run, which was
-  # ~40x the warm cost and would over-weight the LPT packing. 10.0 is a
-  # deliberately loose middle. Re-measure rather than trusting it.
-  test_pages_bindings.py: 10.0
+  # runs: ~30-45s warm (63 test functions / 94 collected cases; three warm samples
+  # on one machine were 42.7s / 34.8s / 29.7s), and up to ~86s on a cold conftest
+  # import (the repo's heavy tests/conftest.py graph dominates; the tests
+  # themselves are millisecond-scale). 40.0 is inside the measured warm range.
+  # (#3620 review: this value was 10.0 while the comment called it "a deliberately
+  # loose middle" — it was below the ENTIRE measured range, so split_fast_gate's
+  # LPT packing under-weighted this file ~4x. Comment and value now agree.)
+  # Re-measure rather than trusting it.
+  test_pages_bindings.py: 40.0
   test_oauth_token_fault.py: 100.0  # #2863: fault matrix + real-seam HTTPServer (measured ~100s locally)
   test_2199_decide_calibration.py: 8.5
   test_2952_degraded_read.py: 70.0   # #2952 (B)+(C): docker-lane warm-up/degraded-read suite
