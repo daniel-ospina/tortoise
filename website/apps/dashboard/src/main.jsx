@@ -1099,8 +1099,9 @@ function claimIntentInFlight() {
   // carries the failure so the gate resolves 'error' (a retryable state, still
   // no mint); `keysLoadSlow` bounds a request that never settles at all (a hang
   // never reaches loadAll's catch), degrading the wait to that same retry.
-  // `keysLoadNonce` re-arms the bound on an explicit retry: `keysLoaded` stays
-  // false across a retry, so the flag alone would not restart the clock.
+  // `keysLoadNonce` re-arms the bound on every event that starts a fresh read:
+  // `keysLoaded` stays false across a retry AND across a team switch, so the
+  // flag alone would not restart the clock (see resetKeysLoadUnresolved below).
   const [keysLoadError, setKeysLoadError] = React.useState('')
   const [keysLoadSlow, setKeysLoadSlow] = React.useState(false)
   const [keysLoadNonce, setKeysLoadNonce] = React.useState(0)
@@ -1109,6 +1110,23 @@ function claimIntentInFlight() {
     const t = setTimeout(() => setKeysLoadSlow(true), KEYS_LOAD_SLOW_MS)
     return () => clearTimeout(t)
   }, [keysLoaded, keysLoadNonce])
+  // #3783 (review P2, second pass): clear the unresolved keys-read state AND
+  // re-arm the wait bound, for EVERY event that starts a fresh read (logout, a
+  // team switch, the wizard's retry). `keysLoaded` is false both while a read is
+  // IN FLIGHT and after it FAILED (it flips on success only), so a caller
+  // cannot restart the effect's timer by touching that flag: the deps stay
+  // Object.is-equal, the effect does not re-run, and no timer is scheduled. The
+  // nonce is the re-arm trigger. Without it a team switch cleared `keysLoadSlow`
+  // while leaving the deps untouched — the new team's `loadAll('')` could then
+  // hang with the bound already spent and nothing left to fire, so the wait
+  // state had no action forever (the same dead wait this bound exists to
+  // prevent). Shared with the retry so the two cannot drift. The behaviour is
+  // EXECUTED by keysLoadRearmExec.test.js (the effect, these deps, this body).
+  function resetKeysLoadUnresolved() {
+    setKeysLoadError('')
+    setKeysLoadSlow(false)
+    setKeysLoadNonce((n) => n + 1)
+  }
   const [sessions, setSessions] = React.useState([])
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -4254,8 +4272,9 @@ function claimIntentInFlight() {
     setKeysLoaded(false)
     // #3783 (review P2): the failed/stalled read's state is per-user — never
     // let one session's keys-read error (or a fired wait bound) land on the next.
-    setKeysLoadError('')
-    setKeysLoadSlow(false)
+    // The helper also RE-ARMS the bound: logout leaves `keysLoaded` false, so
+    // clearing the flags alone would let the next session's read hang unbounded.
+    resetKeysLoadUnresolved()
     setSessions([])
     setNewKey(null)
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
@@ -4779,9 +4798,7 @@ function claimIntentInFlight() {
   // forces a page reload. Clearing the error flips the affordance back to the
   // wait state (the retry's own feedback); the nonce re-arms the wait bound.
   function wizardRetryKeysLoad() {
-    setKeysLoadError('')
-    setKeysLoadSlow(false)
-    setKeysLoadNonce((n) => n + 1)
+    resetKeysLoadUnresolved()
     loadAll('').catch(() => {})
   }
 
@@ -4905,9 +4922,15 @@ function claimIntentInFlight() {
     setKeys([])
     setKeysLoaded(false)
     // #3783 (review P2): the previous team's keys-read failure (or a fired wait
-    // bound) must not render as the NEW team's state before its loadAll lands.
-    setKeysLoadError('')
-    setKeysLoadSlow(false)
+    // bound) must not render as the NEW team's state before its loadAll lands —
+    // and the bound must be RE-ARMED for that new read. `keysLoaded` is already
+    // false here, so clearing the flags alone leaves the effect's deps
+    // Object.is-equal: no re-run, no timer, and a hanging `loadAll('')` below
+    // would sit on the wait state with the action forever unavailable (reachable
+    // when the previous read already fired the bound, then the user switches
+    // without retrying). The helper bumps the nonce, which is what makes the
+    // effect below re-run and schedule a fresh timer.
+    resetKeysLoadUnresolved()
     setSessions([])
     clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
     setSessionDeletingId(null)

@@ -1474,6 +1474,11 @@ test('#3783 (review P2): a FAILED or stalled rows read is ACTIONABLE — a retry
   // the wait is bounded, and BOTH unresolved states route to a retryable
   // affordance that still withholds the mint (offering one re-opens the
   // slot burn #3783 fixed).
+  //
+  // The BOUND's re-arm (the effect, its deps, the nonce bump) is NOT pinned
+  // here: the second pass pinned it as source text and a reviewer showed the
+  // pin survives reverting the deps array to `[keysLoaded]` — it reports a
+  // spelling, not a behaviour. It is EXECUTED in keysLoadRearmExec.test.js.
   const src = stripBlockAndWholeLineComments(mainJsx)
   // (1) the failure is RECORDED where the gate can see it, and cleared on a
   // later success (a stale failure must not survive a successful retry).
@@ -1481,11 +1486,14 @@ test('#3783 (review P2): a FAILED or stalled rows read is ACTIONABLE — a retry
     'a failed keys read records its error (the gate resolves the retryable error state)')
   assert.match(src, /setKeysLoaded\(true\)\n\s*setKeysLoadError\(''\)/,
     'a successful keys read clears the recorded failure')
-  assert.equal((src.match(/setKeysLoadError\(''\)/g) || []).length, 4,
-    'every reset that clears keysLoaded also clears the failure (logout, team switch, ' +
-    'success, retry) — a stale failure must never render as the new state')
+  assert.match(src, /function resetKeysLoadUnresolved\(\) \{\n\s*setKeysLoadError\(''\)/,
+    'ONE shared reset clears the failure for every fresh read (logout, team switch, retry)')
+  assert.equal((src.match(/setKeysLoadError\(''\)/g) || []).length, 2,
+    'the only clears are the shared reset helper and a successful read — a stale failure ' +
+    'must never render as the new state (a hand-rolled clear elsewhere would also lose the re-arm)')
   // (2) the wait is BOUNDED — a request that never settles produces no
   // rejection, so the timer is the only thing that turns a hang into a retry.
+  // (Its RE-ARM is executed in keysLoadRearmExec.test.js.)
   assert.match(src, /const t = setTimeout\(\(\) => setKeysLoadSlow\(true\), KEYS_LOAD_SLOW_MS\)/,
     'an unresolved keys read is bounded — a hang degrades to the retryable state')
   assert.match(src, /const KEYS_LOAD_SLOW_MS = \d+/,
@@ -1498,9 +1506,11 @@ test('#3783 (review P2): a FAILED or stalled rows read is ACTIONABLE — a retry
     'the unresolved state offers the in-place retry (the dead end had no action at all)')
   assert.doesNotMatch(unavailable, /wizardMintDurableKey/,
     'the unresolved state must NOT offer the mint — an unread inventory is not "no key" (#3783)')
-  // (4) the retry re-issues the load the mount used.
-  assert.match(src, /function wizardRetryKeysLoad\(\) \{\n\s*setKeysLoadError\(''\)\n\s*setKeysLoadSlow\(false\)\n\s*setKeysLoadNonce\(\(n\) => n \+ 1\)\n\s*loadAll\(''\)\.catch/,
-    'the retry clears the failure, re-arms the wait bound, and re-issues loadAll')
+  // (4) the retry re-issues the load the mount used, through the shared reset
+  // (which clears the failure, RE-ARMS the wait bound, and is executed in
+  // keysLoadRearmExec.test.js).
+  assert.match(src, /function wizardRetryKeysLoad\(\) \{\n\s*resetKeysLoadUnresolved\(\)\n\s*loadAll\(''\)\.catch/,
+    'the retry re-arms the wait bound and re-issues loadAll')
 })
 
 test('#3783: the API Keys table names the auto-provisioned key instead of rendering it as —', () => {
