@@ -1370,11 +1370,11 @@ def test_hosted_capture_emits_that_session_s_measured_cost_row(
         "conversation": _conv(), "harness": "pi",
         "session_id": "sess-b7-attrib"})
     assert resp.status_code == 200, resp.text
-    # the extractor really ran the three stages we are measuring
-    # (ORDER-AGNOSTIC on purpose: stage invocation order/count is
-    # extractor_v2's chunking property, not the emission contract this test
-    # pins — expected_props already tolerates any call sequence)
-    assert sorted(c[0] for c in model.calls) == ["s1", "s2", "s4"]
+    # the extractor really ran all three stages we are measuring (the call
+    # COUNT/order is extractor_v2's chunking property, not the emission
+    # contract this test pins — expected_props tolerates any call sequence,
+    # so only the stage SET is asserted here)
+    assert set(c[0] for c in model.calls) == {"s1", "s2", "s4"}
     assert resp.json()["stats"]["llm"]["calls"] == 3   # telemetry present
 
     cost_rows = [r for r in _b7_rows(tmp_path)
@@ -1444,13 +1444,14 @@ def test_report_cli_aggregates_retries_per_session_before_percentiling(
                 "created_at": "2026-09-16T12:00:00+00:00",
                 "properties": {
                     "session_id": session_id, "calls": 1,
+                    "retries": 0,
                     "calls_without_cost": 0, "calls_without_usage": 0,
                     "deadline_aborts": 0, "prompt_tokens": 100,
                     "completion_tokens": 10, "cost_usd": cost,
                     "by_stage": {"s1": {_PROVIDER: {_MODEL: {
                         "calls": 1, "prompt_tokens": 100,
                         "completion_tokens": 10, "cost_usd": cost,
-                        "usage_present": True,
+                        "usage_present": True, "calls_without_cost": 0,
                         "calls_without_usage": 0}}}}}}
 
     rows = [emit("sess-retried", 0.002), emit("sess-retried", 0.003),
@@ -1497,9 +1498,15 @@ def test_emission_write_is_handed_off_the_event_loop(
     ``_track_analytics_event`` POSTs synchronously and the API runs a single
     uvicorn worker, so an inline call stalls every concurrent request for the
     duration of the Supabase round-trip (the #2988/#3498 class). Asserted
-    BEHAVIOURALLY — the handler thread and the writer thread must differ —
+    BEHAVIOURALLY — the loop thread and the writer thread must differ —
     because inlining the call leaves every other emission test green (with
-    Supabase unset the write is a fast local append)."""
+    Supabase unset the write is a fast local append).
+
+    The loop thread is sampled INDEPENDENTLY of the props build (via the
+    awaited ``_async_audit`` seam), so a future refactor that moves the whole
+    emission — props build AND write — into one ``to_thread`` closure still
+    passes: the guarded property is "the write is off the loop", not "the
+    write is on a different thread from the props build"."""
     import threading
 
     from tortoise import hosted_api as ha
@@ -1510,6 +1517,10 @@ def test_emission_write_is_handed_off_the_event_loop(
     real_props = ha._capture_cost_props
     seen: dict = {}
 
+    async def _record_audit(*args, **kwargs):
+        # awaited inline by the handler → this IS the event-loop thread
+        seen["loop_thread"] = threading.get_ident()
+
     def _record_props(*args, **kwargs):
         seen["handler_thread"] = threading.get_ident()
         return real_props(*args, **kwargs)
@@ -1517,6 +1528,7 @@ def test_emission_write_is_handed_off_the_event_loop(
     def _record_emit(*args, **kwargs):
         seen["emit_thread"] = threading.get_ident()
 
+    monkeypatch.setattr(ha, "_async_audit", _record_audit)
     monkeypatch.setattr(ha, "_capture_cost_props", _record_props)
     monkeypatch.setattr(ha, "_track_analytics_event", _record_emit)
 
@@ -1524,7 +1536,9 @@ def test_emission_write_is_handed_off_the_event_loop(
         "conversation": _conv(), "harness": "pi",
         "session_id": "sess-b7-offloop"})
     assert resp.status_code == 200, resp.text
+    assert "loop_thread" in seen and "handler_thread" in seen, (
+        "the handler never ran — the probe is not measuring anything")
     assert "emit_thread" in seen, "the emit never reached the writer"
-    assert seen["emit_thread"] != seen["handler_thread"], (
+    assert seen["emit_thread"] != seen["loop_thread"], (
         "the analytics write ran ON the event-loop thread — it must be "
         "handed off via asyncio.to_thread")
