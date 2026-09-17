@@ -268,9 +268,11 @@
   };
 
   // #3503 (review P2, round 7): the legacy localStorage copies ONLY — never the
-  // shared parent-domain cookie. /auth's `readValidSession()` falls back to the
-  // tortoise-origin key, but a sign-out requested by a URL must not be able to
-  // clear the cookie every product surface shares (a one-link forced logout).
+  // shared parent-domain cookie. Split out of `clearStoredSession()` so the two
+  // blast radii stay separable: /auth's `readValidSession()` falls back to the
+  // tortoise-origin key, while the cookie is shared by every product surface.
+  // (Not exported on `window`: round 8 switched /auth to the full clear behind
+  // its marker, so there is no external caller — see review P3, round 9.)
   var clearLegacySessions = function () {
     for (var i = 0; i < LEGACY_KEYS.length; i++) {
       try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) {}
@@ -414,5 +416,4 @@
   window.setLastAuthMethod = setLastAuthMethod;
   window.bounceToAuth = bounceToAuth;
   window.storeSession = storeSession;
-  window.clearLegacySessions = clearLegacySessions;
 })();

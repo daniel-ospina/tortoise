@@ -621,15 +621,22 @@ async function runDashboardScenario(kind) {
     // cookie is seeded to prove it survives) and `signout_slow` (the dashboard's
     // bridge never loaded, or the 120s marker TTL elapsed — the cookie the
     // dashboard could not clear is still there and /auth must clear it).
-    const keepsCookie = kind === 'signout_forged' || kind === 'signout_slow';
+    const keepsCookie = kind === 'signout_forged' || kind === 'signout_slow' ||
+      kind === 'signout_bridge_blocked';
     if (kind !== 'no_session' && (keepsCookie || kind !== 'signout')) {
       opts.preseed = oldCookie(expiresAt);
     }
     // #3503 (review P2, round 6): the dashboard cannot clear THIS origin's
     // legacy localStorage session, and readValidSession() falls back to it.
     // `?signout=1` is how the refusal card asks this page to clear its own.
-    if (kind === 'signout' || kind === 'signout_forged' || kind === 'signout_slow') {
-      opts.search = '?next=%2Fadmin%2F&signout=1';
+    if (kind === 'signout' || kind === 'signout_forged' || kind === 'signout_slow' ||
+        kind === 'signout_with_error' || kind === 'signout_bridge_blocked') {
+      // Round 9: the dashboard's OAuth-error bounce forwards `?error=…` verbatim
+      // and signOutSearch() copies the whole query, so `/auth?error=…&signout=1`
+      // is one URL-shape away.
+      opts.search = kind === 'signout_with_error'
+        ? '?next=%2Fadmin%2F&error=access_denied&signout=1'
+        : '?next=%2Fadmin%2F&signout=1';
       opts.hash = '';
       opts.legacyLocalStorage = {};
       opts.legacyLocalStorage['sb-ybetwichurajbfswfeqa-auth-token'] =
@@ -647,7 +654,11 @@ async function runDashboardScenario(kind) {
     const legacyAtLoad = !!env.sandbox.localStorage.getItem(
       'sb-ybetwichurajbfswfeqa-auth-token');
     const cookieAtLoad = env.jar.has(COOKIE_NAME);
-    vm.runInContext(src, env.sandbox, { filename: bridgePath });
+    // Round 9: a visitor whose /auth load could not fetch /assets/supabase-session.js
+    // (404/blocked). The sign-out must NOT spend its authorisation in that state.
+    if (kind !== 'signout_bridge_blocked') {
+      vm.runInContext(src, env.sandbox, { filename: bridgePath });
+    }
     const hashAfterBridge = env.sandbox.window.location.hash;
 
     const html = fs.readFileSync(authPagePath, 'utf8');
@@ -689,7 +700,7 @@ async function runDashboardScenario(kind) {
     // A completed sign-out leaves nothing for getSession() to resolve — the
     // real flow, since the gate cleared the cookie above.
     const asyncSession = ['no_session', 'signout', 'signout_forged',
-      'signout_slow'].includes(kind) ? null : {
+      'signout_slow', 'signout_with_error', 'signout_bridge_blocked'].includes(kind) ? null : {
       access_token: 'OLD-ACCESS-TOKEN', refresh_token: 'old-refresh',
       expires_at: expiresAt, expires_in: 3600, token_type: 'bearer',
     };
@@ -710,6 +721,7 @@ async function runDashboardScenario(kind) {
           'sb-ybetwichurajbfswfeqa-auth-token'),
         cookie_at_load: cookieAtLoad,
         cookie_present: env.jar.has(COOKIE_NAME),
+        marker_present: env.jar.has('tt_signout'),
         errors: env.logs.filter((l) => l.level === 'error').map((l) => l.text),
       },
     });
@@ -806,6 +818,10 @@ async function runE2EIngestScenario(kind) {
       await safeAsync(() => runAuthPageScenario('signout_forged'));
     out.auth_page_signout_slow =
       await safeAsync(() => runAuthPageScenario('signout_slow'));
+    out.auth_page_signout_with_error =
+      await safeAsync(() => runAuthPageScenario('signout_with_error'));
+    out.auth_page_signout_bridge_blocked =
+      await safeAsync(() => runAuthPageScenario('signout_bridge_blocked'));
   } else if (mode === 'consent_page') {
     out.consent_page_oversized = await safeAsync(() => runConsentPageScenario('oversized'));
     out.consent_page_small = await safeAsync(() => runConsentPageScenario('small'));
@@ -1621,8 +1637,11 @@ def test_auth_page_ignores_a_forged_signout_request(auth_page_report: dict) -> N
     link to /auth?signout=1 would force-log-out the visitor. Clearing the SHARED
     parent-domain cookie would take the dashboard with it — the same one-link
     forced logout the `?stale=1` branch in this file explicitly refuses. The
-    clear is therefore gated on a marker only the dashboard origin can write, and
-    touches only /auth's own legacy localStorage session."""
+    clear is therefore gated on a marker no origin outside the .premiselabs.co
+    cookie trust boundary can write (a sibling subdomain can, and already holds
+    the shared cookie — see the branch comment), and behind that gate it is the
+    full clear: /auth's own legacy key, plus the shared cookie when the
+    dashboard's own clear did not run."""
     forged = _scenario(auth_page_report, "auth_page_signout_forged")
     assert forged["legacy_key_at_load"] is True, "harness precondition"
     assert forged["cookie_at_load"] is True, "harness precondition"
@@ -1662,6 +1681,49 @@ def test_auth_page_ignores_a_forged_signout_request(auth_page_report: dict) -> N
     )
 
 
+def test_signout_runs_even_when_the_url_also_carries_an_oauth_error(
+        auth_page_report: dict) -> None:
+    """#3503 (review P3, round 9). The head gate returns early on `?error=…`, and
+    the dashboard's own OAuth-error bounce forwards `?error=…` verbatim while
+    signOutSearch() copies the whole query — so `/auth?error=…&signout=1` is one
+    URL-shape away, and the early return would skip the sign-out entirely: the
+    shared cookie survives and the parameter stays in the address bar. The
+    sign-out needs no navigation, so it must run first."""
+    r = _scenario(auth_page_report, "auth_page_signout_with_error")
+    assert r["cookie_at_load"] is True, "harness precondition"
+    assert r["marker_present"] is False, (
+        "the marker must be consumed once the clear has run"
+    )
+    assert r["cookie_present"] is False, (
+        "an OAuth error in the same URL skipped the sign-out — the shared cookie "
+        "survives and the visitor is still signed in on the dashboard"
+    )
+    assert r["legacy_key_present"] is False
+    assert r["navigated"] is False
+
+
+def test_a_blocked_bridge_does_not_burn_the_signout_authorisation(
+        auth_page_report: dict) -> None:
+    """#3503 (review P3, round 9). If /assets/supabase-session.js never loaded,
+    `clearStoredSession` is undefined and nothing is cleared — so the marker must
+    survive (and the parameter stay put) for a reload to finish the sign-out.
+    Consuming it there silently converts the sign-out into a no-op with the OLD
+    account still authenticating on the dashboard."""
+    r = _scenario(auth_page_report, "auth_page_signout_bridge_blocked")
+    assert r["cookie_at_load"] is True, "harness precondition"
+    assert r["marker_present"] is True, (
+        "the sign-out authorisation was spent without clearing anything — the "
+        "only way to finish the sign-out is now gone"
+    )
+    assert r["replace_state_calls"] == 0, (
+        "...and the URL must stay a working retry, i.e. the parameter is not "
+        "stripped either"
+    )
+    assert r["navigated"] is False, (
+        "nor may a page without the bridge forward anywhere"
+    )
+
+
 def test_signout_is_origin_proven_and_clears_only_behind_the_marker() -> None:
     """Static pin for the policy: /auth's sign-out branch must require the
     origin-proven marker BEFORE it clears anything, and must clear nothing at
@@ -1675,12 +1737,15 @@ def test_signout_is_origin_proven_and_clears_only_behind_the_marker() -> None:
     other origin, so the full clear is safe behind it."""
     html = SIGNUP.read_text(encoding="utf-8")
     signout = html.index('p.get("signout") === "1"')
-    branch = html[signout:signout + 1200]
+    # The branch runs to the OAuth-error early-return that now follows it (round
+    # 9) — a stable end anchor, unlike a character window that a comment edit
+    # silently truncates.
+    branch = html[signout:html.index('if (p.get("error") || p.get("error_code")', signout)]
     marker = branch.index("tt_signout=1")
-    assert branch.count("clearStoredSession") == 1, (
+    assert branch.count("window.clearStoredSession();") == 1, (
         "the sign-out branch must clear the session exactly once"
     )
-    assert branch.index("clearStoredSession") > marker, (
+    assert branch.index("window.clearStoredSession();") > marker, (
         "the clear must sit BEHIND the origin-proven marker check — a clear "
         "reachable without it is the one-link forced logout (#3503 review P2)"
     )
@@ -1698,10 +1763,12 @@ def test_signout_is_origin_proven_and_clears_only_behind_the_marker() -> None:
     )
 
 
-def test_bridge_exposes_a_legacy_only_clear() -> None:
-    """`clearLegacySessions()` removes LEGACY_KEYS and nothing else — the seam
-    `clearStoredSession()` delegates to, and the blast radius a future caller
-    that must not touch the shared cookie would need."""
+def test_bridge_keeps_the_legacy_only_clear_separate_and_internal() -> None:
+    """`clearLegacySessions()` removes LEGACY_KEYS and nothing else, and is the
+    seam `clearStoredSession()` delegates to — so the two blast radii stay
+    separable. It is deliberately NOT on `window`: round 8 switched /auth to the
+    full clear behind its marker, so an exported legacy-only clear would be an
+    unreachable API (review P3, round 9)."""
     for label, path in (("website/assets/supabase-session.js", SHARED),
                         ("website/apps/dashboard/public/assets/supabase-session.js",
                          REPO_ROOT / "website" / "apps" / "dashboard" / "public"
@@ -1710,8 +1777,12 @@ def test_bridge_exposes_a_legacy_only_clear() -> None:
         assert "var clearLegacySessions = function ()" in text, (
             f"{label}: missing the legacy-only clear helper"
         )
-        assert "window.clearLegacySessions = clearLegacySessions" in text, (
-            f"{label}: the helper must be exposed for the /auth gate"
+        assert "clearLegacySessions();" in text, (
+            f"{label}: clearStoredSession() must delegate to it"
+        )
+        assert "window.clearLegacySessions" not in text, (
+            f"{label}: the legacy-only clear has no production caller — "
+            "exporting it would advertise an API nobody may use"
         )
 
 

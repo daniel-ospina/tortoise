@@ -5922,12 +5922,14 @@ function claimIntentInFlight() {
                         // immediately forwards back to the app root — the user
                         // would land on the OLD account again, which is the
                         // opposite of what "Sign in again" promises.
-                        // `signout=1` additionally makes /auth clear ITS OWN
-                        // origin's legacy localStorage session (main.jsx cannot
-                        // reach another origin's storage) — round 6: that key is
-                        // what readValidSession() falls back to when the cookie
-                        // copy was refused, so without it this button still hands
-                        // the user back to the OLD account.
+                        // `signout=1` additionally makes /auth clear the full
+                        // session behind the marker this button sets — including
+                        // the legacy localStorage key THIS origin cannot reach
+                        // (round 6: that key is what readValidSession() falls
+                        // back to when the cookie copy was refused, so without it
+                        // this button still hands the user back to the OLD
+                        // account), and the shared cookie if this origin's own
+                        // clear above did not run (round 8).
                         if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
                         setSignOutMarker()
                         const signOutSearch = (() => {

@@ -84,7 +84,6 @@
         // FRAGMENT (#error=…) — read both surfaces or a denied round-trip
         // bounces a signed-in visitor past the banner that explains it.
         var h = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-        if (p.get("error") || p.get("error_code") || h.get("error") || h.get("error_code")) return;
         // #3503 (review P2, round 6): an explicit sign-out requested by the
         // dashboard's refused-fragment card (?signout=1). The dashboard cannot
         // clear THIS origin's legacy localStorage session, and readValidSession()
@@ -92,34 +91,56 @@
         // when the cookie copy is refused (the over-cap case this card exists
         // for). Without this the visitor is forwarded straight back to the app as
         // the OLD account, or into an /auth ↔ dashboard replace loop.
+        //
+        // Round 9: this runs ABOVE the error early-return. `/auth?error=…&signout=1`
+        // is one URL-shape away — the dashboard's OAuth-error bounce forwards
+        // `?error=…` verbatim and signOutSearch() copies the whole query — and the
+        // early return skipped the sign-out entirely, leaving the shared cookie
+        // alive and the parameter in the address bar. Nothing here navigates, so
+        // running it ahead of the banner path is safe.
         if (p.get("signout") === "1") {
-          // #3503 (review P2 round 7, P3 round 8): ORIGIN-PROVEN sign-out only.
-          // A bare ?signout=1 is forgeable — a third-party link would force-log-
-          // out the visitor, and clearing the SHARED parent-domain cookie would
-          // take the dashboard with it (exactly the one-link forced logout the
-          // ?stale=1 branch below refuses). Only the dashboard can set a cookie
-          // on .premiselabs.co, so require that marker; the clear it authorises
-          // is then the same full clear the dashboard itself performs.
+          // #3503 (review P2 round 7, P3 round 8/9): the sign-out is gated on a
+          // parent-domain marker cookie, because a bare ?signout=1 is forgeable:
+          // a third-party link could force a logout, and clearing the SHARED
+          // cookie would take the dashboard with it (exactly the one-link forced
+          // logout the ?stale=1 branch below refuses).
+          //
+          // The bound is the parent-domain cookie trust boundary, NOT "this
+          // origin": any *.premiselabs.co page (or a preview deploy on the same
+          // registrable domain) can set `tt_signout`, so a sibling-subdomain
+          // foothold can trip this clear. Accepted: such a foothold already holds
+          // the shared session cookie and can clear it directly. The marker's job
+          // is to exclude every origin OUTSIDE that boundary, which no
+          // third-party site can cross.
           if (/(?:^|; )tt_signout=1(?:;|$)/.test(document.cookie)) {
-            // The marker proves the request came from the dashboard, so the FULL
-            // clear is safe here — and necessary: the dashboard skips its own
-            // clear whenever its bridge failed to load, and /auth must not then
-            // forward the visitor back to the app as the OLD account (the
-            // #3503 symptom). Without a bridge there is no readValidSession()
-            // either, so the gate cannot forward a session at all.
-            if (typeof window.clearStoredSession === "function") window.clearStoredSession();
-            // Consume the marker. Both attribute forms are attempted: the
-            // dashboard omits Domain on localhost/preview origins.
-            document.cookie = "tt_signout=; Domain=.premiselabs.co; Path=/; Max-Age=0";
-            document.cookie = "tt_signout=; Path=/; Max-Age=0";
+            // Behind that gate the clear is the SAME full clear the dashboard
+            // itself performs — the legacy key this origin alone can reach, and
+            // the shared cookie the dashboard may not have cleared (its bridge
+            // failed to load, or the marker TTL elapsed mid-navigation). Without
+            // it, readValidSession() below still resolves the surviving session
+            // and the gate forwards the visitor back as the OLD account — the
+            // #3503 symptom this whole branch exists to prevent.
+            if (typeof window.clearStoredSession === "function") {
+              window.clearStoredSession();
+              // Consume the marker ONLY now. If the bridge never loaded the
+              // clear did not happen, and spending the authorisation would burn
+              // the sign-out: the visitor stays signed in with no retry short of
+              // going back to the dashboard. Both attribute forms are attempted
+              // — the dashboard omits Domain on localhost/preview origins.
+              document.cookie = "tt_signout=; Domain=.premiselabs.co; Path=/; Max-Age=0";
+              document.cookie = "tt_signout=; Path=/; Max-Age=0";
+              // Strip the parameter only once the sign-out ran, so an
+              // unperformed one stays retryable by reload.
+              p.delete("signout");
+              var qs = p.toString();
+              try {
+                window.history.replaceState(null, "",
+                  window.location.pathname + (qs ? "?" + qs : "") + window.location.hash);
+              } catch (e) { /* the sign-out itself already happened */ }
+            }
           }
-          p.delete("signout");
-          var qs = p.toString();
-          try {
-            window.history.replaceState(null, "",
-              window.location.pathname + (qs ? "?" + qs : "") + window.location.hash);
-          } catch (e) { /* the sign-out itself already happened */ }
         }
+        if (p.get("error") || p.get("error_code") || h.get("error") || h.get("error_code")) return;
         // #3080: the /admin gate bounced us with the LOCAL session intact but
         // server-refused (expired/revoked token, or Supabase unreachable — the
         // gate fails closed). Trusting the local cookie here would replace
