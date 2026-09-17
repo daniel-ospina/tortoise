@@ -563,3 +563,112 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
     tags = result["evidence"].split("[session ")[1:]
     assert list(dict.fromkeys(t.split("]")[0] for t in tags)) == \
         [SID_B, SID_A], result["evidence"]
+
+
+# ── 8. The MCP HANDLER surfaces carry the identity (not just the SDK seam) ─
+
+@pytest.fixture
+def mcp_surface(monkeypatch):
+    """The REAL MCP handler surface for ``tortoise_search`` / ``tortoise_recall``.
+
+    ``mcp_server.sdk`` is the module-level test-swap override read by
+    ``_get_sdk()`` → ``_get_org_sdk()`` INSIDE the handler body, so the handler
+    runs for real — its argument mapping, the ``_safe`` transport gate, and its
+    result shape — never a stub. Stdio transport mode is set so that gate is
+    satisfied, and the dev-mode API key is cleared so it is deterministic
+    regardless of the ambient shell.
+    """
+    import tortoise.mcp_server as mcp_mod
+    from tortoise.mcp_auth import _transport_mode
+
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    token = _transport_mode.set("stdio")
+    try:
+        yield mcp_mod
+    finally:
+        _transport_mode.reset(token)
+        mcp_mod.sdk = None
+
+
+def test_search_handler_carries_the_captured_session(mcp_surface, monkeypatch):
+    """``tortoise_search`` — the MCP/agent entry point — must NAME the session
+    of a captured turn on its wire ``sessionId``.
+
+    The seeded turn Points carry NO ``sessionId`` prop (the real capture loop
+    writes neither ``sessionId`` nor ``eventId`` on turn Points), so the only
+    source is the ``(:Session)-[:CONTAINS]->(:Point)`` edge the shared point
+    fetch reads. Asserted on the VALUE the handler returns.
+    """
+    sdk = _new_sdk()
+    turn_id = _seed_captured_session(sdk, SID_A, TURNS_A)
+    monkeypatch.setattr(mcp_surface, "sdk", sdk)
+
+    hits = mcp_surface.tortoise_search("gym schedule", limit=40)
+
+    assert isinstance(hits, list), hits
+    assert [h["id"] for h in hits] == [turn_id, f"{SID_A}_t1"], (
+        "precondition: the handler must return both captured turns — got "
+        f"{[h.get('id') for h in hits]!r}")
+    for h in hits:
+        assert h["sessionId"] == SID_A, h
+
+
+def test_recall_handler_carries_the_captured_session(mcp_surface, monkeypatch):
+    """``tortoise_recall`` (mode='state') must carry the same identity through
+    its confidence re-rank and its ``{"mode", "results"}`` wrapper.
+
+    The state lane rebuilds its result list from the shared point fetch, so
+    this pins that the identity survives the recall lane and is not dropped by
+    the StateRanker / result assembly. Asserted on the VALUE returned.
+    """
+    sdk = _new_sdk()
+    turn_id = _seed_captured_session(sdk, SID_A, TURNS_A)
+    monkeypatch.setattr(mcp_surface, "sdk", sdk)
+
+    out = mcp_surface.tortoise_recall("gym schedule", mode="state", limit=10)
+
+    assert out.get("mode") == "state", out
+    results = out["results"]
+    points = [r for r in results if r.get("entity_type") == "point"]
+    assert [r["id"] for r in points] == [turn_id, f"{SID_A}_t1"], (
+        "precondition: recall must surface both captured turns — got "
+        f"{[r.get('id') for r in results]!r}")
+    for r in points:
+        assert r["sessionId"] == SID_A, r
+
+
+def test_handler_identity_is_derived_from_the_contains_edge(mcp_surface,
+                                                            monkeypatch):
+    """MUTATION PROOF for the two handler assertions above — the ``sessionId``
+    the handlers return is derived from the ``(:Session)-[:CONTAINS]`` edge,
+    not from an incidental field.
+
+    Deleting that edge is the graph-level form of removing the point-branch
+    population in the shared fetch: the handler must then report ``""``
+    (absent, never a guess). The turn id keeps its ``{sid}_t{i}`` prefix, so a
+    handler that inferred the identity from the id shape would still name the
+    session here and this assertion would fail.
+    """
+    sdk = _new_sdk()
+    turn_id = _seed_captured_session(sdk, SID_A, TURNS_A)
+    monkeypatch.setattr(mcp_surface, "sdk", sdk)
+
+    green = mcp_surface.tortoise_search("gym schedule", limit=40)
+    assert [h["id"] for h in green] == [turn_id, f"{SID_A}_t1"], green
+    assert [h["sessionId"] for h in green] == [SID_A, SID_A], green
+
+    # MUTATION — drop the ONLY derivation source (the CONTAINS edge).
+    sdk._get_proj().g.query(
+        "MATCH (:Session {id:$sid})-[r:CONTAINS]->(:Point) DELETE r",
+        params={"sid": SID_A},
+    )
+
+    mutated = mcp_surface.tortoise_search("gym schedule", limit=40)
+    assert [h["id"] for h in mutated] == [turn_id, f"{SID_A}_t1"], (
+        "precondition: the turns must survive the edge delete — got "
+        f"{[h.get('id') for h in mutated]!r}")
+    assert [h["sessionId"] for h in mutated] == ["", ""], (
+        "the CONTAINS edge is gone but the handler still names a session — "
+        "the identity is not derived from that edge: "
+        f"{[h.get('sessionId') for h in mutated]!r}")
+
