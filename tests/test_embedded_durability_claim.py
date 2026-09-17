@@ -19,7 +19,6 @@ The fix corrected the claim and documented the flag. This test pins the
 """
 from __future__ import annotations
 
-import contextlib
 from pathlib import Path
 
 import pytest
@@ -35,19 +34,15 @@ def _aof_artifact_written(tmp: Path, *, enabled: bool, monkeypatch) -> bool:
     else:
         monkeypatch.delenv("TORTOISE_EMBEDDED_AOF", raising=False)
 
-    from tortoise.projection import FalkorProjection
+    from tests._embedded import fresh_embedded_proj
 
-    db = tmp / "graph.db"
-    proj = FalkorProjection(
-        path=str(db), allow_nonstandard_path=True, skip_health_check=True
-    )
-    try:
+    # Function-scoped seam (#3769): a FRESH server per call, so the
+    # construction-time flag above is honoured per case. A session-scoped
+    # server would freeze it at the first case and this helper would then
+    # report the same verdict for `default-off` and `opt-in-on`.
+    with fresh_embedded_proj(tmp) as proj:
         # A write makes the journaling decision observable, not just the config.
         proj._upsert({"id": "durability-probe", "content": "x", "context": "y"})
-    finally:
-        with contextlib.suppress(Exception):
-            # pragma: no cover - teardown must never mask the assertion
-            proj.close()
     return any(p.name.endswith("-appendonlydir") for p in tmp.iterdir())
 
 

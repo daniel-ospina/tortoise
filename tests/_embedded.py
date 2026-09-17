@@ -16,6 +16,7 @@ RAW_EMBEDDED_ALLOWLIST in test_embedded_lifecycle.py.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -1079,3 +1080,40 @@ def shared_proj():
     proj = FalkorProjection(db_path, graph_name="test")
     yield proj
     proj.close()
+
+
+@contextlib.contextmanager
+def fresh_embedded_proj(db_dir, *, graph_name: str | None = None, **kwargs):
+    """Function-scoped sanctioned embedded construction (#3769).
+
+    The per-test counterpart to ``shared_proj``. ``shared_proj`` is
+    ``scope="session"``, so its single server is built **once** and anything
+    read at construction time — including ``TORTOISE_EMBEDDED_AOF`` — is frozen
+    at the first case's value. A parametrised test would then observe the first
+    case's server, and its assertion would be vacuous **in exactly the way it
+    exists to prevent** (#3624 review: the default-off and opt-in-on cases must
+    not be able to see one another).
+
+    Constructs a FRESH server per call, on an explicit path inside the caller's
+    own directory, so construction-time flags are honoured per call and the
+    caller can inspect that directory for on-disk artifacts.
+
+    The raw construction lives HERE, at the seam — which is precisely the
+    rationale ``RAW_EMBEDDED_ALLOWLIST`` records for allowlisting
+    ``_embedded.py`` ("seam/helper — raw constructions ARE the
+    embedded-under-test input"). A consumer test therefore never needs an
+    allowlist entry of its own (#3769).
+
+    Teardown never masks the caller's assertion.
+    """
+    db_path = os.path.join(str(db_dir), "graph.db")
+    kwargs.setdefault("allow_nonstandard_path", True)
+    kwargs.setdefault("skip_health_check", True)
+    if graph_name is not None:
+        kwargs["graph_name"] = graph_name
+    proj = FalkorProjection(path=db_path, **kwargs)
+    try:
+        yield proj
+    finally:
+        with contextlib.suppress(Exception):
+            proj.close()
