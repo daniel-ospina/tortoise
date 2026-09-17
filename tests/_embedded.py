@@ -157,6 +157,10 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_backup_e2e",
     "test_config",
     "test_embedded_concurrency",
+    # #2879: the embedded AOF durability drift pin measures an on-disk
+    # `<db>-appendonlydir` artifact — under the docker redirect it would
+    # construct against the server and see none (the opt-in half reds).
+    "test_embedded_durability_claim",
     "test_embedded_lifecycle",
     "test_embedded_lifecycle_fast_close",
     "test_eval_ingest_retry",
