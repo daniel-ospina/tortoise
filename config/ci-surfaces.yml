@@ -69,6 +69,7 @@ surfaces:
   - test_commit_endpoint.py
   - test_commit_schema.py
   - test_cross_subdomain_cookie_sync.py
+  - test_cursor_mcp_exit_evidence.py  # B2(c) #3657/#3497: Cursor MCP connect -> per-harness capture receipt end-to-end (hermetic; drives real OAuth AS + mounted MCP)
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
@@ -94,6 +95,12 @@ surfaces:
   # and a hosted_backup.py-only change select it (the #2938 precedent).
   - test_graphcopy_boolean_index_3154.py
   - test_hosted_api.py
+  # #3359: per-session provider-cost measurement — the hosted emit path
+  # (_capture_cost_props + the analytics allowlist) is api-owned, so the
+  # acceptance test is dual-registered (also under `core` for the extractor
+  # roll-up it drives). Same #2938 dual-membership convention as
+  # test_graphcopy_boolean_index_3154.py.
+  - test_capture_cost_measurement.py
   - test_hosted_auth.py
   - test_hosted_backup.py
   - test_import_endpoint.py
@@ -276,6 +283,7 @@ surfaces:
   - test_battery_validation_real.py
   - test_battery_write_channel.py
   core:
+  - test_capture_cost_measurement.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -333,6 +341,11 @@ surfaces:
   - test_e2e9_point_in_time.py
   - test_e2e_journey.py
   - test_embedded_concurrency.py
+  # #2879: embedded AOF durability drift pin — measures an on-disk
+  # `<db>-appendonlydir`, so it belongs in the URI-unset carve-out lane
+  # (under the docker redirect it constructs against the server and the
+  # opt-in half reds). Registered in `core` (the projection surface).
+  - test_embedded_durability_claim.py
   - test_embedded_lifecycle.py
   - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
@@ -460,6 +473,7 @@ surfaces:
   - test_projection.py
   - test_projection_embedded_socket_timeout.py  # #3350: embedded lane socket timeout + bounded retry (carve-out)
   - test_projection_lifecycle.py
+  - test_projection_maxmemory_message.py  # #2981: a full-but-healthy DB is not corrupt — maxmemory write-refusal gets its own error, never the rebuild advice
   - test_projection_version_gate.py
   - test_query_suggestions.py
   - test_reaper.py
@@ -718,6 +732,7 @@ surfaces:
   - bench/test_roundrobin.py
   - bench/test_smoke_embedded.py
   - test_2952_degraded_read.py  # #2952: embeddings.py selects the eval surface — dual-registered so the (B) warm-up is covered there too
+  - test_capture_cost_measurement.py  # #3359: the report reprices from the eval-owned PRICING_MAP (tools/longmem_eval/costing.py), so a pricing-map change must run it — dual-registered with `api`/`core`
   - eval/retrieval/test_1348.py
   - eval/retrieval/test_bootstrap.py
   - eval/retrieval/test_gate_1349.py
@@ -844,6 +859,7 @@ carve_out:
 - test_backup_e2e.py
 - test_config.py
 - test_embedded_concurrency.py
+- test_embedded_durability_claim.py  # #2879: embedded AOF durability drift pin (on-disk appendonlydir measurement)
 - test_embedded_lifecycle.py
 - test_embedded_lifecycle_fast_close.py
 - test_flip_gate.py

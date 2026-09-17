@@ -254,6 +254,29 @@ class _GuardedGraph:
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS  # noqa: E402, I001
 from tortoise.live import _live_only, _terminal_excluded  # noqa: E402
+
+# #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
+# `noeviction` REFUSES WRITES while the graph is perfectly intact. The reply
+# text is the only signal that separates "full" from "corrupt", so it is
+# matched case-insensitively against the server's own wording. Reported as
+# corruption, it sends an operator to `rebuild` — i.e. toward destroying
+# healthy data — which is strictly worse than a vague error would be.
+_WRITE_REFUSAL_MARKERS = (
+    "used memory >",            # redis: "... used memory > 'maxmemory'"
+    "oom command not allowed",  # redis 7 wording
+    "out of memory",            # generic engine wording
+)
+
+
+def _fmt_bytes(n: int) -> str:
+    """Human byte size for an operator-facing message."""
+    step = 1024.0
+    val = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if val < step or unit == "TiB":
+            return f"{val:.0f} B" if unit == "B" else f"{val:.1f} {unit}"
+        val /= step
+    return f"{val:.1f} TiB"
 from tortoise.embedded_lifecycle import (  # noqa: E402
     atexit_fast_close,  # #1371: registers the batch flush
     register_atexit_close,
@@ -1133,6 +1156,7 @@ class FalkorProjection(
             raise ValueError("Either path or host must be provided")
 
         self.g = _GuardedGraph(self.db.select_graph(graph_name), self)
+        self._probe_error: BaseException | None = None
         self.graph_name = graph_name
         self._graph_name = graph_name
         self._skip_guard = False
@@ -1200,12 +1224,76 @@ class FalkorProjection(
     # ── Ops safety (#428): health check + transparent recovery ────────────
 
     def _probe_ok(self) -> bool:
-        """Cheap connectivity probe — does the graph answer queries?"""
+        """Cheap connectivity probe — does the graph answer queries?
+
+        The failure REASON is retained on ``self._probe_error``. A
+        full-but-healthy server refuses writes with an ``OOM``/``maxmemory``
+        reply, and that reply must not be reported as corruption (#2981) —
+        which requires keeping it rather than collapsing it to a bool.
+        """
+        self._probe_error = None
         try:
             self.g.query("MATCH (n) RETURN count(n) LIMIT 1")
             return True
-        except Exception:
+        except Exception as exc:
+            self._probe_error = exc
             return False
+
+    def _memory_pressure(self) -> tuple[int, int] | None:
+        """``(used_memory, maxmemory)`` in bytes, or ``None`` if unreadable.
+
+        Best-effort and fully guarded: the falkordb client exposes ``.info()``
+        only on some versions and the raw redis connection only on others, so
+        both paths are tried. An unreadable value must never change the error
+        CLASS — only how rich its message is.
+        """
+        info = None
+        try:
+            conn = getattr(self.db, "connection", None)
+            if conn is not None:
+                info = conn.info("memory")
+            elif hasattr(self.db, "info"):
+                info = self.db.info()
+        except Exception:
+            return None
+        if not isinstance(info, dict):
+            return None
+        try:
+            used = int(info.get("used_memory", 0) or 0)
+            cap = int(info.get("maxmemory", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return (used, cap) if cap > 0 else None
+
+    def _write_refusal_message(self, exc: BaseException | None) -> str | None:
+        """The DISTINCT error for a ``maxmemory`` write-refusal, else ``None``.
+
+        Returns ``None`` when the probe failed for any other reason — real
+        corruption included — so the rebuild advice still applies there. That
+        second direction is what keeps this branch honest: it NARROWS the
+        remedy, it does not remove it.
+        """
+        if exc is None:
+            return None
+        text = str(exc).lower()
+        if not any(marker in text for marker in _WRITE_REFUSAL_MARKERS):
+            return None
+        pressure = self._memory_pressure()
+        if pressure is None:
+            detail = ("server reports a maxmemory write-refusal "
+                      "(used_memory/maxmemory unreadable)")
+        else:
+            used, cap = pressure
+            detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
+                      f"{_fmt_bytes(cap)}")
+        return (
+            "DB refused writes on open: the graph is INTACT but the server "
+            f"has reached its memory ceiling ({detail}). This is NOT "
+            "corruption — do NOT rebuild. Free memory first: delete "
+            "ephemeral test graphs (GRAPH.LIST, then GRAPH.DELETE test_*), "
+            "or raise / relieve the container's --maxmemory. See #2981 for "
+            "the shared-lane form of this."
+        )
 
     def _find_local_jsonl_dir(self) -> str | None:
         """Adjacent JSONL event-log dir (same directory as the embedded DB).
@@ -1245,6 +1333,11 @@ class FalkorProjection(
         is_prod = bool(os.environ.get("FLY_APP_NAME"))
 
         if not self._probe_ok():
+            # Full-but-healthy is NOT corrupt: a maxmemory write-refusal gets
+            # its own error and must never be sent down the rebuild path.
+            refusal = self._write_refusal_message(self._probe_error)
+            if refusal is not None:
+                raise RuntimeError(refusal)
             if is_prod or not self._is_embedded:
                 raise RuntimeError(
                     "DB health check failed on open (server/production mode). "
