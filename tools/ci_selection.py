@@ -133,6 +133,7 @@ SOURCE_PATTERNS = {
             # tests/test_ask_retrieval_levers.py pins the `_retrieve_pipeline`
             # it mirrors, so a bench-only PR must select `sdk` rather than
             # drop to tier-1 smoke with that guard test never running.
+            # Refs #2089, whose criterion 1 this entry satisfies.
             "tools/ask_recall_bench.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",

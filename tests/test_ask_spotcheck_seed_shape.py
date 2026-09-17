@@ -124,18 +124,22 @@ def _wire(sdk: TortoiseSDK, query: str, *, want: set[str],
 
 
 def _ask(sdk: TortoiseSDK, query: str, *, want_evidence: str,
-         attempts: int = 3) -> dict:
+         want_ids: set[str] | None = None, attempts: int = 3) -> dict:
     """``sdk.ask`` on the local lane, retried (same flake class as
-    ``_wire``) until the reader's context actually carries the seeded text.
+    ``_wire``) until the reader's context carries the seeded text AND — when
+    ``want_ids`` is given — the identity set under test.
 
-    The retry exists so an EMPTY pool fails the precondition loudly instead
-    of reading as "the identity is genuinely gone" on the mutated leg — a
-    vacuous pass — or as a false RED on the green leg.
+    Retrying on the ASSERTED value matters in both directions: a PARTIAL
+    pool (one strategy down, others continue) would otherwise read as a
+    false RED on the green leg, and an EMPTY pool would read as "the
+    identity is genuinely gone" on the mutated leg — a vacuous pass.
     """
-    result = {"evidence": "", "retrieved_session_ids": []}
+    result: dict = {"evidence": "", "retrieved_session_ids": []}
     for _ in range(attempts):
         result = sdk.ask(query, question_date="2023-05-22")
-        if want_evidence in result.get("evidence", ""):
+        ids = set(result.get("retrieved_session_ids") or [])
+        if want_evidence in result.get("evidence", "") and (
+                want_ids is None or ids == want_ids):
             return result
     return result
 
@@ -198,7 +202,8 @@ def test_identity_resolves_from_the_edge_and_vanishes_without_it(seeded,
     seeded_text = "the gym schedule is Monday and Wednesday"
 
     # GREEN — the seeded shape resolves the identity on both read paths.
-    result = _ask(seeded, question, want_evidence=seeded_text)
+    result = _ask(seeded, question, want_evidence=seeded_text,
+                  want_ids={SID_0, SID_1})
     assert seeded_text in result["evidence"], (
         "precondition: the reader's context must carry the seeded turn — "
         f"got {result['evidence']!r}")

@@ -147,7 +147,7 @@ The four recorded failures decompose cleanly into two classes (verified against 
 - `tools/embedder_probe.py` — `PROBE_MODELS` (minilm/arctic-xs/arctic-s/bge-small, all 384-dim), `DEFAULT_MODEL_ID`, injection seam (the measurement surface for the 384-dim vector-leg question).
 - `tools/longmem_eval/retrieve.py` — `hybrid_search` (:420+), `retrieve_for_question` (:520+, R6 rerank knobs, C2 boost wiring, TR stack), `_recall_metrics` (:300+), pool-depth diagnostics.
 - `tools/longmem_eval/rerank.py` — `CrossEncoderScorer` (:66+), `mmr_select` (:93+), `rerank_hits` (:260+), scorer cache/TTL degrade (:150+).
-- `tools/ask_spotcheck.py` — seeds capture-shaped episodic turn Points (deterministic `{sid}_t{i}` ids + a real `(:Session)-[:CONTAINS]->(:Point)` edge, NO `sessionId`/`eventId` prop — #3910) per turn, no embeddings in the degraded env; containment judge.
+- `tools/ask_spotcheck.py` — seeds capture-shaped episodic turn Points (deterministic `{sid}_t{i}` ids + a real `(:Session)-[:CONTAINS]->(:Point)` edge, NO `sessionId`/`eventId` prop — #3910) per windowed turn of a session that passes the shared blank gate; turn Points carry no `embedding` (raw turn-store write, never `create_point`) and the run is the degraded lane, so there is no vector leg; containment judge.
 - `pyproject.toml:42` — `embeddings` extra.
 - Tests: `tests/test_retrieval.py` (retrieval primitives — the home for new gold-turn-inclusion/cap fixtures), `tests/test_ask_sdk.py` (ask-lane pipeline — the home for ask-lane retrieval-knob tests), `tests/test_longmem_rerank.py` (eval rerank — the degrade-path tests to port), `tests/test_sparse.py` (if exists — numeric-token policy), `tests/test_ask_regression_llm.py` (product-lane LLM fixtures).
 

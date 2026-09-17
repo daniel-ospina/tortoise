@@ -3338,7 +3338,8 @@ class TortoiseSDK:
         # seed the QA spot-check fixture. It deliberately omits
         # embeddings/Source/extraction, but the turn write itself must stay
         # identical, or the fixture teaches a shape capture no longer
-        # produces (#3910).
+        # produces (#3910). #3551 tracks collapsing all three onto one
+        # shared primitive.
         for i, turn in enumerate(windowed):
             # #721: _normalize_turn_role is the isinstance-first pattern — an
             # `or "unknown"` fallback only fixes falsy roles, but TRUTHY

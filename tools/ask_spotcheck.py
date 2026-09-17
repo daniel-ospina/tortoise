@@ -40,10 +40,12 @@ VENICE_API_KEY for the reader AND the judge provider key
 ``OPENAI_API_KEY``) for grading. Seeding (``_seed_memory``, #3910)
 reproduces the memory the question was asked about in the CAPTURE shape a
 captured session's turn store actually has: one episodic turn Point per
-haystack turn
+windowed turn of every session that passes the shared blank gate (a session
+with no extractable line writes nothing — capture's pre-mutation gate)
 (deterministic ``f"{sid}_t{i}"`` id, ``pointKind='event'``,
 ``is_episodic=true``, ``speaker``, no ``sessionId``/``eventId`` prop) wired
-to its ``:Session`` (id = the fixture's own ``haystack_session_ids[i]``) by
+to its ``:Session`` (id = the fixture's own ``haystack_session_ids[i]``, or
+the synthetic ``sess-{i}`` placeholder when the fixture carries none) by
 the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance mechanism the
 shipping read resolves identity from — plus the per-session ``:Event``
 (startedAt from haystack_dates), retained but not joined to the turns.
@@ -105,10 +107,11 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
       * a ``(:Session {id})`` node, id = the question's own
         ``haystack_session_ids[i]``. A fixture with NO id list (or a blank
         entry) falls back to the synthetic ``sess-{i}``: that value is a
-        PLACEHOLDER, not capture data — capture always has the client's own
-        id — so an identity comparison against gold ids is only meaningful
-        for fixtures that carry ``haystack_session_ids``, and a misaligned
-        (short) id list is silently padded with placeholders;
+        PLACEHOLDER, not a capture id — capture's session id is either the
+        client's own or the server-minted ``session_<hex12>`` form — so an
+        identity comparison against gold ids is only meaningful for fixtures
+        that carry ``haystack_session_ids``, and a misaligned (short) id list
+        is silently padded with placeholders;
       * ONE episodic turn ``:Point`` PER windowed turn — no blank skip,
         exactly as capture — with the deterministic id ``f"{sid}_t{i}"``,
         ``pointKind='event'``, ``is_episodic=true``, ``is_operator=false``,
@@ -123,9 +126,11 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     two primitives both capture surfaces use — so coercion, the 5000-char
     cap and the "a blank session writes NOTHING" gate are structural rather
     than hand-copied. The ``[role] <content>`` framing and the node/edge
-    write below are still a THIRD copy of capture's per-turn store; the pin
-    at ``tortoise/sdk.py`` names this file, so an edit to one is an edit to
-    all three.
+    write below are still a THIRD copy of capture's per-turn store (with the
+    two live ``_capture_session_impl`` copies). The NOTE at
+    ``tortoise/sdk.py`` / ``tortoise/hosted_api.py`` names this file — it is
+    a comment, not an enforced check; #3551 tracks collapsing all three onto
+    one shared primitive — so an edit to one is an edit to all three.
 
     Pre-#3910 this seeder instead made plain ``statement`` Points and wrote
     ``p.sessionId`` / ``p.eventId`` PROPS with NO edge — a graph the capture
