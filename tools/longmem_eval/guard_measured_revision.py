@@ -30,6 +30,15 @@ third was reproduced against the committed form and is what forced the rewrite.
   regular file replaced by a symlink of the same bytes, executes differently
   while the content compare passes. The tracked mode and the on-disk file type
   are compared too.
+* **Excused executable bytecode** (demonstrated by the cycle-10 pass on #3577,
+  filed as #3712, closed in this change). The untracked allowlist excused
+  ``.pyc`` as cache noise, but CPython runs a ``.pyc`` in preference to the
+  ``.py`` beside it, and a forged byte-cache's mtime/size header matches its
+  source **by construction** — so header validation cannot separate it. One
+  crafted ``__pycache__/evilmod.cpython-3xx.pyc`` executed different code while
+  this check printed "no executable change". Byte-caches are now REFUSED by
+  default: the byte-code-free requirement is enforced, not assumed
+  (``--allow-bytecode`` is the loud, explicit opt-out).
 
 CONTRACT (declared surface — EVERY numbered class below has a test in
 ``tests/test_guard_measured_revision.py``; the PR-body marker's ``threats=N``
@@ -56,7 +65,14 @@ is this list's length):
 14. a surface ``.py`` cannot be decoded or parsed.
 15. a tracked surface path is neither a regular file nor a symlink (a FIFO would
     block the read forever).
-16. ``--strict-bytecode`` is set and a byte-cache exists under the surface.
+16. a byte-cache (``.pyc``/``.pyo``) exists under the surface. REFUSED BY
+    DEFAULT (#3712): a ``.pyc`` is executable code that CPython runs in
+    preference to the ``.py`` beside it, and a forged byte-cache's header
+    matches its source *by construction*, so no header/stat validation can
+    separate it from a legitimate one. A sourceless ``pkg/__init__.pyc`` (no
+    ``.py`` beside it) is refused the same way — ``python -B`` /
+    ``PYTHONDONTWRITEBYTECODE=1`` stop bytecode being WRITTEN, not READ, so
+    refusing every byte-cache is what closes the READ case too.
 
 Declarations (asserted, not refusals):
 
@@ -64,23 +80,29 @@ Declarations (asserted, not refusals):
 18. a file ADDED after ``<rev>`` is REPORTED, not refused (it did not exist
     during the run, so it cannot be what ran);
 19. untracked files are excused by SUFFIX only (``NOISE_SUFFIXES``) — never by
-    directory — and the excused set includes executable bytecode, which is
-    covered by the STATED LIMIT below;
+    directory — and no byte-cache is excused unless the caller passes the
+    explicit ``--allow-bytecode`` opt-out (declaration 21);
 20. the optional paths argument defaults to ``DEFAULT_PATHS`` (both the function
-    default and the CLI default).
+    default and the CLI default);
+21. ``--allow-bytecode`` (the opt-out) and ``--strict-bytecode`` (a no-op alias
+    for the default, retained so commands written against the old default keep
+    their meaning) are mutually exclusive at the CLI, and every run that takes
+    the opt-out says so loudly in its own output — its attestation explicitly
+    does NOT cover bytecode.
 
 Untracked scanning deliberately does **not** honour ``.gitignore``: an ignore
 rule is a way to hide a file from the check. The only files excused are those
 whose name ends in ``NOISE_SUFFIXES`` — excused by SUFFIX, never by directory, so
 a stray ``__pycache__/evil.py`` refuses. Excused files are reported in the output
-rather than silently accepted. Those are editor/VCS droppings **plus byte-caches** — and a ``.pyc``
-IS executable code that CPython will run in preference to the ``.py`` beside it,
-so this check does NOT cover it. That is a deliberate, stated limit:
-``--strict-bytecode`` refuses any ``.pyc`` under the surface for callers who want
-that enforced rather than assumed. Note what a byte-code-free run does NOT fix:
-``python -B`` / ``PYTHONDONTWRITEBYTECODE=1`` stop bytecode being WRITTEN, not
-READ, so a sourceless ``pkg/__init__.pyc`` (no ``.py`` beside it) is still
-imported in preference to a package — file #3712.
+rather than silently accepted.
+
+Byte-caches are the one member of that set that is executable, so they are NOT
+excused by default: the guard REFUSES while any ``.pyc``/``.pyo`` exists under
+the surface. The measured run is therefore required to be byte-code-free —
+``tools/longmem_eval/run_protocol.py`` launches every run step with ``-B`` and
+``PYTHONDONTWRITEBYTECODE=1`` — and ``--allow-bytecode`` is the documented,
+loud opt-out for a caller who knowingly accepts the weaker claim (e.g.
+re-checking a historical tree measured before this default existed).
 
 ``--paths`` that matches nothing is refused rather than reported as clean: an
 empty surface must not read as a passing check.
@@ -113,10 +135,11 @@ from typing import NamedTuple
 DEFAULT_PATHS = ("tortoise/", "tools/")
 
 #: Suffixes excused from the untracked refusal: editor/VCS droppings, and
-#: byte-caches. NOTE: byte-caches ARE executed code — excused here only because a
-#: normal working tree is full of them; see ``--strict-bytecode``. Nothing else
-#: is excused, not even inside ``__pycache__/`` (a stray ``.py`` or ``.so``
-#: there used to ride the directory match).
+#: byte-caches. NOTE: byte-caches ARE executed code, so they are excused ONLY
+#: under the explicit ``--allow-bytecode`` opt-out and are REFUSED by default
+#: (#3712) — being listed here is what gives the opt-out its specific message
+#: and scope. Nothing else is excused, not even inside ``__pycache__/`` (a
+#: stray ``.py`` or ``.so`` there used to ride the directory match).
 NOISE_SUFFIXES = (
     ".pyc",
     ".pyo",
@@ -341,9 +364,14 @@ def guard(
     rev: str,
     paths: tuple[str, ...] = DEFAULT_PATHS,
     *,
-    allow_bytecode: bool = True,
+    allow_bytecode: bool = False,
 ) -> Scan:
-    """Return a :class:`Scan`, or raise :class:`GuardRefused` on drift."""
+    """Return a :class:`Scan`, or raise :class:`GuardRefused` on drift.
+
+    A byte-cache under the surface is REFUSED by default (#3712);
+    ``allow_bytecode=True`` is the explicit opt-out and weakens the
+    attestation — the caller must say so in the receipt it writes.
+    """
     worktree = Path(worktree)
     # ``<rev>:path`` is a TOPLEVEL-relative lookup. Resolving the root here is
     # what stops a subdirectory from being inspected against the wrong blob
@@ -410,8 +438,11 @@ def guard(
             raise GuardRefused(
                 f"guard: {len(pyc)} byte-cache file(s) under the surface "
                 f"(e.g. {pyc[:3]}) — a .pyc is executable code that this "
-                "content compare does not verify; re-run the measurement "
-                "byte-code-free (python -B / PYTHONDONTWRITEBYTECODE=1)"
+                "content compare does not verify, and a forged byte-cache's "
+                "header matches its source by construction; re-run the "
+                "measurement byte-code-free (python -B / "
+                "PYTHONDONTWRITEBYTECODE=1), or pass --allow-bytecode to "
+                "accept the weaker attestation explicitly"
             )
     hidden = [f for f in untracked if not _is_noise(f)]
     for base in paths:
@@ -484,11 +515,24 @@ def main(argv: list[str] | None = None) -> int:
         default=list(DEFAULT_PATHS),
         help=f"measured surface (default: {' '.join(DEFAULT_PATHS)})",
     )
-    ap.add_argument(
+    # Refusing byte-caches is the DEFAULT (#3712); --strict-bytecode is kept as
+    # an accepted no-op so commands written against the old default keep their
+    # meaning, and the two are mutually exclusive so a contradictory invocation
+    # cannot silently resolve to the weaker of the pair.
+    bytecode = ap.add_mutually_exclusive_group()
+    bytecode.add_argument(
+        "--allow-bytecode",
+        action="store_true",
+        help="EXPLICIT opt-out: excuse .pyc/.pyo under the surface instead of "
+        "refusing them. A .pyc is executable, so a tree attested this way "
+        "does NOT cover bytecode — prefer a byte-code-free measured run "
+        "(python -B / PYTHONDONTWRITEBYTECODE=1)",
+    )
+    bytecode.add_argument(
         "--strict-bytecode",
         action="store_true",
-        help="refuse any .pyc under the surface instead of excusing it "
-        "(a .pyc is executable and is not content-verified)",
+        help="accepted for compatibility and now a no-op: refusing byte-caches "
+        "is the default since #3712",
     )
     args = ap.parse_args(argv)
     try:
@@ -496,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
             args.worktree,
             args.rev,
             tuple(args.paths),
-            allow_bytecode=not args.strict_bytecode,
+            allow_bytecode=args.allow_bytecode,
         )
     except GuardRefused as exc:
         print(str(exc), file=sys.stderr)
@@ -510,9 +554,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  added after that revision (cannot have been executed): {scan.added or '(none)'}")
     # Byte-caches are the expected noise and would drown the signal; anything
     # else excused by the allowlist is worth naming.
+    bc = [f for f in scan.noise if f.endswith((".pyc", ".pyo"))]
     odd = [f for f in scan.noise if not f.endswith((".pyc", ".pyo"))]
     print(f"  cache/editor noise excused: {len(scan.noise)} file(s)"
           + (f" — unusual: {odd}" if odd else ""))
+    if bc:
+        # Declaration 21: an opt-out run must not read like a full attestation.
+        print(
+            f"  \u26a0 BYTECODE EXCUSED under the explicit --allow-bytecode "
+            f"opt-out: {len(bc)} file(s) — this attestation does NOT cover "
+            "executable bytecode"
+        )
     return 0
 
 

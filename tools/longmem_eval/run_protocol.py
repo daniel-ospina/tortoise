@@ -26,6 +26,14 @@ the runner with flags that exist on the base, and the gate checks (integrity
 block, M7 report shape) are asserted by the operator from the produced report.
 The harness lanes add the mechanics; this lane adds the protocol.
 
+Every run step is launched **byte-code-free** (#3712): the measured-revision
+guard (`tools/longmem_eval/guard_measured_revision.py`) refuses any `.pyc`
+under the measured surface by default — a byte-cache is executable code and
+CPython runs it in preference to the `.py` beside it. `_run_cmd` / `_cell_cmd`
+pass `-B`, and `_run_env` sets `PYTHONDONTWRITEBYTECODE=1` for the runner and
+for anything it spawns, so the surface the guard inspects is free of bytecode
+by construction rather than by assumption.
+
 Usage::
 
     python -m tools.longmem_eval.run_protocol status
@@ -300,11 +308,21 @@ class ProtocolState:
 # ── Runner wiring (executes the underlying LongMemEval runner) ──────────────
 
 def _run_cmd(base: list[str]) -> list[str]:
-    return [sys.executable, "-m", "tools.longmem_eval.run", *base]
+    # -B (#3712): the measured run must be byte-code-free, or the guard refuses
+    # the byte-caches it would leave under the surface.
+    return [sys.executable, "-B", "-m", "tools.longmem_eval.run", *base]
 
 
 def _cell_cmd(base: list[str]) -> list[str]:
-    return [sys.executable, "-m", "tools.longmem_eval.full_context", *base]
+    # -B: same byte-code-free requirement as _run_cmd.
+    return [sys.executable, "-B", "-m", "tools.longmem_eval.full_context", *base]
+
+
+def _run_env() -> dict[str, str]:
+    """Environment for a run step (#3712): `-B` stops THIS interpreter writing
+    bytecode, `PYTHONDONTWRITEBYTECODE=1` stops the children it spawns from
+    doing so — the measured surface must hold no `.pyc` for the guard to attest."""
+    return {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
 
 
 def _default_checkpoint(kind: str) -> Path:
@@ -805,7 +823,7 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         expected_direction=args.expected_direction if step.runner == "confirm" else None,
         resume_quality=resume_quality,
     )
-    rc = subprocess.run(cmd, env=os.environ.copy())
+    rc = subprocess.run(cmd, env=_run_env())
     if rc.returncode != 0:
         state.fail_gate(step.number, f"run exited {rc.returncode}")
         raise SystemExit(f"run exited {rc.returncode} — fix (M4) and re-run")
@@ -827,7 +845,7 @@ def cmd_smoke(state: ProtocolState, args: argparse.Namespace) -> None:
     if args.dry_run:
         print("[dry-run] not executing")
         return
-    rc = subprocess.run(cmd, env=os.environ.copy())
+    rc = subprocess.run(cmd, env=_run_env())
     if rc.returncode != 0:
         raise SystemExit(f"smoke failed (exit {rc.returncode})")
     print(f"\nsmoke report: {out}")
@@ -854,7 +872,7 @@ def cmd_full_context(state: ProtocolState, args: argparse.Namespace) -> None:
     if args.dry_run:
         print("[dry-run] not executing")
         return
-    rc = subprocess.run(cmd, env=os.environ.copy())
+    rc = subprocess.run(cmd, env=_run_env())
     if rc.returncode != 0:
         raise SystemExit(f"full-context cell failed (exit {rc.returncode})")
     print(f"\nfull-context cell report: {out}")

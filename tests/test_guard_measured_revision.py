@@ -19,8 +19,9 @@ that fails means the class is open again:
   6. the check's own failure modes: unresolvable revision, git failure,
      an empty declared surface
   7. the declared exemptions: comment/docstring-only edits and files added
-     after ``<rev>`` are reported, not refused; byte-caches are excused by
-     default and refused under ``--strict-bytecode``
+     after ``<rev>`` are reported, not refused; byte-caches are REFUSED by
+     default (#3712) and excused only under the explicit ``--allow-bytecode``
+     opt-out, which says so loudly in its own output
 
 Out of scope by declaration (not tested because not claimed): *reachability* —
 the guard proves absence of executable change on the declared paths, never that
@@ -91,6 +92,72 @@ class Repo:
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-q", "-m", message)
         return _git(self.root, "rev-parse", "HEAD")
+
+
+def _forge_shadowed_bytecode(repo: Repo, module: str, payload: str) -> Path:
+    """Write a REAL forged ``.pyc`` shadowing ``tortoise/<module>.py``.
+
+    The header (magic + PEP 552 flags + source mtime + source size) is the one
+    CPython itself writes for that exact source, so the interpreter must not
+    recompile and must execute the marshalled payload instead. That is the
+    #3712 bypass as an artifact — the tests below assert the payload really
+    runs before they assert the guard refuses it.
+    """
+    import marshal
+    import py_compile
+
+    source = repo.path(f"tortoise/{module}.py")
+    cache = source.parent / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    forged = cache / f"{module}.{sys.implementation.cache_tag}.pyc"
+    py_compile.compile(str(source), cfile=str(forged), doraise=True)
+    real = forged.read_bytes()
+    # PEP 552 header: 4-byte magic + 4-byte flags + (mtime+size) or 8-byte hash
+    # — always 16 bytes on Python 3.7+.
+    header_size = 16
+    assert len(real) > header_size, "not a byte-cache"
+    forged.write_bytes(
+        real[:header_size] + marshal.dumps(compile(payload, str(source), "exec"))
+    )
+    return forged
+
+
+def _prove_the_forgery_executes(repo: Repo, module: str) -> None:
+    """Import the forged module and assert the payload ran.
+
+    The test's own negative control: if the header did not match the source,
+    CPython would recompile and the payload would be absent — so a test that
+    only checked "a .pyc exists" could pass on a blob that is not the bypass
+    at all.
+    """
+    cp = subprocess.run(
+        [sys.executable, "-c",
+         f"import {module}; print(getattr({module}, 'PWNED', 'NOT-FORGED'))"],
+        capture_output=True,
+        text=True,
+        cwd=str(repo.path("tortoise")),
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin",
+             "HOME": str(repo.root.parent),
+             "PYTHONDONTWRITEBYTECODE": "1"},
+        timeout=60,
+    )
+    assert cp.stdout.strip() == "PWNED", f"forgery did not execute: {cp.stderr}"
+
+
+def _guard_cli(repo: Repo, *extra: str) -> subprocess.CompletedProcess:
+    """Execute the guard as the CLI and return the process.
+
+    The refusal is asserted on the process's EXIT CODE and OUTPUT — never on
+    the guard's source bytes (spelling is not behaviour).
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "tools.longmem_eval.guard_measured_revision",
+         "--rev", repo.rev, "--worktree", str(repo.root), *extra],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_PARENT),
+        timeout=60,
+    )
 
 
 @pytest.fixture
@@ -310,14 +377,50 @@ def test_file_added_after_rev_is_reported_not_refused(repo: Repo) -> None:
     assert scan.comment_only == []
 
 
-def test_bytecode_is_excused_by_default_and_refused_under_strict(repo: Repo) -> None:
-    cache = repo.path("tortoise/__pycache__")
-    cache.mkdir()
-    (cache / "a.cpython-312.pyc").write_bytes(b"\x00\x00\x00\x00")
-    scan = _scan(repo)
-    assert scan.noise == ["tortoise/__pycache__/a.cpython-312.pyc"]
-    with pytest.raises(GuardRefused, match="byte-cache"):
-        guard(repo.root, repo.rev, SURFACE, allow_bytecode=False)
+def test_forged_bytecode_refuses_by_default(repo: Repo) -> None:
+    """#3712, both directions in one test: a ``.pyc`` whose header matches its
+    source really executes different code, and the guard REFUSES it by default.
+
+    RED mutation: revert the fix (``guard(..., allow_bytecode=True)`` — the
+    pre-#3712 default) → the CLI prints ``guard OK`` and exits 0.
+    """
+    forged = _forge_shadowed_bytecode(repo, "a", 'PWNED = "PWNED"\n')
+    _prove_the_forgery_executes(repo, "a")       # the artifact IS the bypass
+    cp = _guard_cli(repo)                        # ...and the guard refuses it
+    assert cp.returncode == 1, cp.stdout
+    assert "byte-cache" in cp.stderr
+    assert str(forged.relative_to(repo.root)) in cp.stderr
+
+
+def test_clean_surface_without_bytecode_passes(repo: Repo) -> None:
+    """The legitimate form: no ``.pyc`` present → rc=0 and a real OK."""
+    cp = _guard_cli(repo)
+    assert cp.returncode == 0, cp.stderr
+    assert "guard OK" in cp.stdout
+    assert _scan(repo).noise == []
+
+
+def test_allow_bytecode_is_an_explicit_loud_opt_out(repo: Repo) -> None:
+    """Declaration 21: the opt-out is the ONLY way a byte-cache is excused, and
+    a run that takes it states that its attestation does not cover bytecode."""
+    forged = _forge_shadowed_bytecode(repo, "a", 'PWNED = "PWNED"\n')
+    cp = _guard_cli(repo, "--allow-bytecode")
+    assert cp.returncode == 0, cp.stderr
+    assert "guard OK" in cp.stdout
+    assert "BYTECODE EXCUSED" in cp.stdout and "does NOT cover" in cp.stdout
+    scan = guard(repo.root, repo.rev, SURFACE, allow_bytecode=True)
+    assert scan.noise == [str(forged.relative_to(repo.root))]
+
+
+def test_strict_bytecode_flag_is_a_no_op_and_conflicts_with_the_opt_out(
+    repo: Repo,
+) -> None:
+    """The old flag keeps its meaning (the new default) but cannot be combined
+    with the opt-out to resolve to the weaker of the pair."""
+    _forge_shadowed_bytecode(repo, "a", 'PWNED = "PWNED"\n')
+    assert _guard_cli(repo, "--strict-bytecode").returncode == 1
+    combined = _guard_cli(repo, "--strict-bytecode", "--allow-bytecode")
+    assert combined.returncode == 2  # argparse mutual exclusion — fail closed
 
 
 def test_default_surface_is_the_declared_one(repo: Repo, capsys) -> None:
@@ -568,10 +671,11 @@ def test_unparseable_surface_file_refuses_with_a_reason(repo: Repo) -> None:
 
 # ── declared-but-untested residuals (recorded, not chased) ────────────────
 #
-# known_residual: a `.pyc` whose forged header matches its source executes in
-# preference to the `.py` and this check does not verify it. Stated as a limit
-# in the guard docstring and the receipt; `--strict-bytecode` is the refusal
-# option. A byte-cache pin per measured run is a follow-up, not this lane.
+# closed (#3712): a `.pyc` whose forged header matches its source executes in
+# preference to the `.py` beside it. The guard now REFUSES any byte-cache by
+# default; `test_forged_bytecode_refuses_by_default` proves the artifact really
+# executes differently and that the guard refuses it, and `--allow-bytecode` is
+# the loud opt-out.
 #
 # known_residual: the declared surface is `tortoise/` + `tools/`; the measured
 # command also imports `tests/model_adapters.py` for a non-default ingest mode,
