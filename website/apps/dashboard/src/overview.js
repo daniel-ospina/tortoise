@@ -50,7 +50,12 @@ export function overviewConnection(state) {
   return {
     kind: 'disconnected',
     value: 'Not connected',
-    detail: 'Run the setup command from Settings → Setup guide — your agent confirms the connection there, and you mark it connected in the wizard.',
+    // #3428/#2937 (lane B3, review cycle 1 P2-3): the trailing clause ("and you
+    // mark it connected in the wizard") described the DELETED human writer —
+    // the connect step's Continue used to checkpoint `harness-connected`. The
+    // wizard now reports only what the server observed, so there is nothing
+    // left for the user to mark.
+    detail: 'Run the setup command from Settings → Setup guide — your agent confirms the connection there.',
   }
 }
 
