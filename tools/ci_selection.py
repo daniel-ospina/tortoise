@@ -885,11 +885,20 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
                           for f in fs)
                    for h, fs in halves.items()}
         lo, hi = min(weights.values()), max(weights.values())
-        if lo <= 0 or hi / lo > HALF_DURATION_IMBALANCE_RATIO:
+        # P2 (#3407 review): compute the ratio BEFORE the f-string. `lo <= 0`
+        # short-circuits the comparison but the message still evaluated
+        # `hi / lo`, so the one branch written to CATCH a zero-weight half died
+        # with ZeroDivisionError while formatting its own diagnosis. A
+        # single-sided pack is reachable (a 1-file pool, or an all-zero
+        # measured map) and this is the only check that catches it —
+        # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both
+        # pass when one half is empty.
+        ratio = float("inf") if lo <= 0 else hi / lo
+        if lo <= 0 or ratio > HALF_DURATION_IMBALANCE_RATIO:
             issues.append(
                 f"matrix halves duration-imbalanced: "
                 f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
-                f"(ratio {hi / lo:.2f}x, tolerance "
+                f"(ratio {ratio:.2f}x, tolerance "
                 f"{HALF_DURATION_IMBALANCE_RATIO:.2f}x) — rebalance the "
                 f"durations map (#3400)")
     elif abs(counts.get("a", 0) - counts.get("b", 0)) > HALF_IMBALANCE_TOLERANCE:
@@ -955,6 +964,15 @@ def duration_issues(manifest: dict) -> list[str]:
             issues.append(f"durations key {name} is a slow file (must be fast-gate)")
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
+        # P2 (#3407 review): validate the VALUE, not just the key. Both guards
+        # iterated keys only, so a hand-edit typo in a now-505-line map passed
+        # `--integrity` silently and then crashed `push_legs` with a TypeError
+        # inside `split_fast_gate`'s sort key — the gate's whole job is to name
+        # the bad entry instead of tracebacking on it. `bool` is excluded
+        # explicitly: it is an `int` subclass and would slip through.
+        v = durations[name]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            issues.append(f"durations value for {name} is not numeric: {v!r}")
     return issues
 
 

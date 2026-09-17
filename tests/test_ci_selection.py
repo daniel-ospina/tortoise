@@ -2083,3 +2083,38 @@ def test_real_manifest_has_no_duplicate_entries():
     # registration is deliberate and must stay allowed).
     dupes = duplicate_entries(load_manifest())
     assert dupes == [], f"duplicate manifest entries: {dupes}"
+
+
+def test_halves_guard_reports_single_sided_pack_without_crashing():
+    # #3407 review P2: the branch written to CATCH a zero-weight half died with
+    # ZeroDivisionError while formatting its own diagnosis — `hi / lo` was
+    # evaluated inside the f-string after `lo <= 0` had short-circuited the
+    # comparison. A single-sided pack is reachable (a 1-file pool, or an
+    # all-zero measured map), and this is the only check that catches it:
+    # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both pass
+    # when one half is empty.
+    from tools.ci_selection import workflow_halves_issues
+    m = {"surfaces": {"core": ["test_only.py"]}, "tier1": [], "slow_files": [],
+         "durations": {"test_only.py": 5.0}}
+    issues = workflow_halves_issues(m, {"a": {"test_only.py"}, "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_halves_guard_reports_all_zero_map_without_crashing():
+    from tools.ci_selection import workflow_halves_issues
+    files = ["test_a.py", "test_b.py", "test_c.py"]
+    m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+         "durations": {f: 0.0 for f in files}}
+    issues = workflow_halves_issues(m, {"a": set(files), "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_duration_issues_flags_non_numeric_value():
+    # #3407 review P2: the guards iterated KEYS only, so a hand-edit typo in the
+    # now-505-line map passed `--integrity` silently and then crashed
+    # `push_legs` with a TypeError inside `split_fast_gate`'s sort key.
+    from tools.ci_selection import duration_issues
+    m = {"surfaces": {"core": ["test_crypto.py"]}, "tier1": [], "slow_files": [],
+         "durations": {"test_crypto.py": "fast"}}
+    issues = duration_issues(m)
+    assert any("not numeric" in i for i in issues), issues
