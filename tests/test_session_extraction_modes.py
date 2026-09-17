@@ -357,6 +357,9 @@ def test_cmd_session_capture_mode_error_exits_1(tmp_path, monkeypatch):
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3615: capture requires explicit consent — the credential alone is not it.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+
     f = tmp_path / "transcript.txt"
     f.write_text("User: we decided to ship it\nAssistant: agreed\n")
     assert _parse_transcript(f.read_text()), "transcript must parse to turns"
@@ -388,6 +391,10 @@ def test_cmd_session_capture_mode_empty_exits_1(tmp_path, monkeypatch):
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3615: without the opt-in the function returns 1 for a DIFFERENT reason —
+    # this test must exercise the extraction-mode branch, so ask for capture.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+
     f = tmp_path / "transcript.txt"
     f.write_text("User: we decided to ship it\nAssistant: agreed\n")
     assert _parse_transcript(f.read_text())
@@ -418,6 +425,9 @@ def test_cmd_session_capture_success_still_returns_0(tmp_path, monkeypatch, caps
     import json
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
+
+    # #3615: capture requires explicit consent — the credential alone is not it.
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
 
     f = tmp_path / "transcript.txt"
     f.write_text("User: we decided to ship it\nAssistant: agreed\n")
