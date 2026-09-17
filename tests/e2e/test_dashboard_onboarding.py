@@ -15,7 +15,10 @@ to the SHIPPED post-#2698 UI and added the owner/admin connect branch:
     WizardPromptCard with its own Copy control;
   - an owner/admin who lands on the connect step with no in-memory key gets an
     in-flow mint CTA (never-expiring) + a paste escape, and leaving the wizard
-    must NOT pop the shared key-create modal (either exit path);
+    must NOT pop the shared key-create modal (either exit path); #3783: when the
+    org ALREADY holds a usable durable key (its plaintext is shown once and is
+    not in memory), the step offers that existing key instead of the mint CTA —
+    minting a second there spent the free tier's whole key allowance;
   - #2865: the connect chooser is no longer owner/admin-only — a member with
     no key reaches the key-less OAuth Claude Desktop/Web leaves (asserted in
     `test_member_without_key_reaches_keyless_claude_connectors`); on a KEYED
@@ -570,12 +573,19 @@ def test_owner_wizard_complete_exit_after_mint_is_modal_free(page: Page) -> None
 
 def test_owner_connect_step_paste_toggle_reaches_prompt_card(page: Page) -> None:
     """#2710: the owner/admin paste escape — an owner who holds a durable key's
-    plaintext can paste it without leaving the wizard."""
+    plaintext can paste it without leaving the wizard. #3783: an org that
+    ALREADY has a usable durable row must be offered that key, not a mint CTA
+    that would spend the free tier's last key slot."""
     _seed_cookie(page, "u-owner2")
     cap = _wire(page, role="admin", key_rows=[DURABLE_ROW])
     _walk_to_connect(page)
-    # No in-memory key → the mint CTA + the paste toggle are both offered.
-    expect(page.get_by_role("button", name="Create an API key")).to_be_visible()
+    # No in-memory key + a usable durable row → the EXISTING-key affordance.
+    # (Pre-#3783 this rendered the mint CTA, which is the reported defect.)
+    assert page.get_by_role("button", name="Create an API key").count() == 0, \
+        "#3783: an existing usable key must not present the mint CTA"
+    expect(page.get_by_role("button", name="Use an existing key")).to_be_visible()
+    assert "already has an API key" in page.locator("body").inner_text(), \
+        "#3783: the step must name the key that already exists"
     page.get_by_role("button", name="I already have a key — paste it instead").click()
     expect(page.locator("#wizard-paste-row")).to_be_visible(timeout=5_000)
     page.get_by_label("Paste an API key").fill(PASTED_KEY)
@@ -689,7 +699,7 @@ def test_build_fork_key_row_has_no_horizontal_overflow(page: Page) -> None:
     page.get_by_role("button", name=re.compile("Build an application on top")).click()
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
-    page.get_by_role("button", name=re.compile("Create an API key for")).click()
+    page.get_by_role("button", name="Create an API key", exact=True).click()
     expect(page.locator("code", has_text="tt_")).to_be_visible(timeout=10_000)
     m = _measure_key_row(page)
     assert m["scrollWidth"] == m["clientWidth"], \
