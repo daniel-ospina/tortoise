@@ -457,18 +457,35 @@ def test_env_spelling_of_the_shared_tempdir_is_blocked():
     """
     from tests import _tmpdir_isolation as iso
 
-    # The string branch must recognise every spelling it advertises. Whether
-    # the RAW fallback (`/tmp` when `$TMPDIR` is unset — the GitHub-runner case)
-    # is among them is pinned non-vacuously by
+    # The string branch must recognise every spelling it advertises — and
+    # every one's PARENT (an ancestor is in scope for the argv layer too, and
+    # macOS spells the same ancestor two ways, #3752 review cycle 7). Whether
+    # the RAW fallback (`/tmp` when `$TMPDIR` is unset — the GitHub-runner
+    # case) is among them is pinned non-vacuously by
     # test_spelling_list_is_not_vacuous, which re-imports in a subprocess with
     # TMPDIR='' rather than reading the tuple it asserts about.
     if iso._ENV_TMPDIR_AT_IMPORT:
         assert iso._ENV_TMPDIR_AT_IMPORT in iso._TMPDIR_SPELLINGS
         assert os.path.realpath(iso._ENV_TMPDIR_AT_IMPORT) \
             in iso._TMPDIR_SPELLINGS
+        assert os.path.dirname(iso._ENV_TMPDIR_AT_IMPORT) \
+            in iso._TMPDIR_SPELLINGS, \
+            "the RAW ancestor is missing — the same dir's realpath parent is "\
+            "not enough on macOS"
     for spelling in iso._TMPDIR_SPELLINGS:
         assert iso._command_touches_host_tempdir(f"find {spelling}") is not None, \
             f"spelling {spelling!r} is not recognised by the string branch"
+    # An ancestor reached through the RAW spelling must be blocked in the
+    # string form too, not only in argv.
+    for value in (iso.HOST_TMPDIR, iso._ENV_TMPDIR_AT_IMPORT,
+                  tempfile.gettempdir()):
+        if not value:
+            continue
+        raw_parent = os.path.dirname(value.rstrip(os.sep))
+        if raw_parent and raw_parent != os.sep:
+            assert iso._command_touches_host_tempdir(
+                f"find {raw_parent} -maxdepth 1") is not None, \
+                f"raw ancestor {raw_parent!r} is not recognised"
 
     spellings = ([iso._ENV_TMPDIR_AT_IMPORT] if iso._ENV_TMPDIR_AT_IMPORT
                  else ["/tmp", os.path.realpath("/tmp")])
@@ -486,21 +503,30 @@ def test_env_spelling_of_the_shared_tempdir_is_blocked():
     assert iso._command_touches_host_tempdir(f"find {scan_root()}") is None
 
 
-def test_spelling_list_is_not_vacuous(monkeypatch):
-    """#3752 review cycle 6: the loop above iterates the tuple under test, so
+def test_spelling_list_is_not_vacuous():
+    """#3752 review cycle 6/7: the loop above iterates the tuple under test, so
     it passes for ANY contents. This pins the raw-fallback entry from OUTSIDE:
-    a subprocess with `TMPDIR=""` must advertise both `/tmp` and its realpath.
+    a subprocess with `TMPDIR=''` must advertise whatever its own
+    `tempfile.gettempdir()` resolves to (and recognise it in the string layer).
+
+    The child derives the spelling ITSELF — its argv must never contain a bare
+    temp-dir token, or the audit hook (correctly) refuses to spawn it when
+    `$TMPDIR` is unset and the host temp dir IS `/tmp` (cycle-7 P1).
     """
     code = (
-        "import sys; sys.path.insert(0, '.');"
+        "import sys, tempfile; sys.path.insert(0, '.');"
         "from tests import _tmpdir_isolation as iso;"
-        "assert '/tmp' in iso._TMPDIR_SPELLINGS, iso._TMPDIR_SPELLINGS;"
-        "assert iso._command_touches_host_tempdir('find /tmp -maxdepth 2');"
-        "print('OK')"
+        "sp = tempfile.gettempdir();"
+        "assert sp in iso._TMPDIR_SPELLINGS, (sp, iso._TMPDIR_SPELLINGS);"
+        "assert iso._command_touches_host_tempdir('find ' + sp), sp;"
+        "print('OK', sp)"
     )
-    env = dict(os.environ, TMPDIR="", TORTOISE_TEST_CARVE_OUT="1")
+    env = dict(os.environ, TORTOISE_TEST_CARVE_OUT="1")
+    env["TMPDIR"] = ""
+    env.pop("TEMP", None)   # tempfile falls back TEMP/TMP before /tmp, so a
+    env.pop("TMP", None)    # leftover value would make the child diverge
     out = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                         text=True, env=env, cwd=str(Path.cwd()))
+                         text=True, env=env, cwd=str(_TESTS_DIR.parent))
     assert out.returncode == 0, (
         f"raw-fallback spelling not recognised with TMPDIR unset:\n"
         f"stdout={out.stdout!r}\nstderr={out.stderr[-2000:]}")

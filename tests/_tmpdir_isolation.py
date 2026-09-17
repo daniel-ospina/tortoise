@@ -63,26 +63,32 @@ import tempfile
 # cheap substring pre-filter's needles.
 _ENV_TMPDIR_AT_IMPORT = (os.environ.get("TMPDIR") or "").rstrip(os.sep)
 HOST_TMPDIR = os.path.realpath(tempfile.gettempdir())
-_TMPDIR_SPELLINGS = tuple(dict.fromkeys(
-    s for s in (HOST_TMPDIR,
-                # The RAW gettempdir() too: with $TMPDIR unset the fallback is
-                # /tmp on macOS while its realpath is /private/tmp, so a list
-                # seeded only from the env var AND realpaths would miss the
-                # string form entirely (#3752 review cycles 5-6, and $TMPDIR
-                # is UNSET on GitHub's ubuntu runners).
-                tempfile.gettempdir(),
-                os.path.realpath(tempfile.gettempdir()),
-                _ENV_TMPDIR_AT_IMPORT,
-                os.path.realpath(_ENV_TMPDIR_AT_IMPORT)
-                if _ENV_TMPDIR_AT_IMPORT else "",
-                # The PARENT too, so a shell string naming an ancestor of the
-                # temp dir reaches the per-token realpath check instead of
-                # short-circuiting here. On Linux this is "/", which makes the
-                # pre-filter always run — harmless (a bare "/" token is
-                # blocked by the argv path too) and it keeps the string layer
-                # as opinionated as the argv layer.
-                os.path.dirname(HOST_TMPDIR)) if s
-))
+
+def _tmpdir_spellings() -> tuple[str, ...]:
+    """Every spelling a command STRING might name the shared temp dir with,
+    plus each one's PARENT (an ancestor of the temp dir is in scope too).
+
+    The raw `tempfile.gettempdir()` matters because with `$TMPDIR` unset the
+    fallback is `/tmp` on macOS while its realpath is `/private/tmp` — and
+    `$TMPDIR` IS unset on GitHub's ubuntu runners. The parents matter because
+    macOS spells the same directory `/var/folders/...` and
+    `/private/var/folders/...`, so carrying only the realpath's parent left the
+    raw ancestor form failing open (#3752 review cycle 7).
+    """
+    spellings: list[str] = []
+    for value in (HOST_TMPDIR, tempfile.gettempdir(),
+                  os.path.realpath(tempfile.gettempdir()),
+                  _ENV_TMPDIR_AT_IMPORT,
+                  os.path.realpath(_ENV_TMPDIR_AT_IMPORT)
+                  if _ENV_TMPDIR_AT_IMPORT else ""):
+        if not value:
+            continue
+        spellings.append(value)
+        spellings.append(os.path.dirname(value))
+    return tuple(dict.fromkeys(s for s in spellings if s))
+
+
+_TMPDIR_SPELLINGS = _tmpdir_spellings()
 
 # Marker file written inside the root so a SIGKILLed run's root is
 # attributable and reclaimable by the next run (sweep_stale_session_roots),
