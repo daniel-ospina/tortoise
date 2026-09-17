@@ -495,7 +495,10 @@ class _InMemoryEventLog:
 # #1529 P1 (E3 owner note): whitelist of point properties that pass through
 # the capture response's `props` superset — E3 writes source_turn_id /
 # search_keys / when / quote via the v2 payload point dict / the M2 folded
-# statement dict; capture must never drop or overwrite them. Deliberately a
+# statement dict; capture must never silently drop or overwrite them on a
+# WRITE. #2949: on a dedup HIT the seam writes nothing, so the response
+# reports the canonical's STORED props instead (a field the node does not
+# hold is omitted, never echoed from the payload). Deliberately a
 # WHITELIST (not a blacklist): folded statement dicts carry internal
 # projection state (provenance run_id/source, status, createdAt, operator,
 # speaker) that must never leak into the public capture response. E3 (#1535)
@@ -4138,12 +4141,16 @@ class TortoiseSDK:
                                  zip(_CAPTURE_PASSTHROUGH_READ_ORDER, _rows[0],
                                      strict=True)
                                  if v is not None}
-                # P1 #1529 (D8/E3): the whitelisted props dict — E3's
-                # source_turn_id (arriving on the payload point dict) must
-                # never be dropped or rebuilt into a reduced {id, kind, text}
-                # shape. #2813/#2949: a create reports the SAME dict it passed
-                # to create_point; a dedup hit reports the stored props read
-                # back above — response and node never diverge.
+                # P1 #1529 (D8/E3): E3's source_turn_id / search_keys / when /
+                # quote (arriving on the payload point dict) must never be
+                # silently dropped or rebuilt into a reduced {id, kind, text}
+                # shape. #2813/#2949: the response never advertises a
+                # passthrough prop the resolved node does not hold. A create
+                # rides the payload's raw values (search_keys stays the
+                # payload LIST while create_point stores the flattened string
+                # via _flatten_search_keys_prop — presence agrees, the list /
+                # flat-string representation deliberately does not); a dedup
+                # hit reports the canonical's STORED props read back above.
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
                     "props": props, "dedup": dedup})

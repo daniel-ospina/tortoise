@@ -226,9 +226,12 @@ def test_capture_dedup_hit_reports_stored_props_not_payload(sdk, monkeypatch):
     of them, so the seam must report the STORED state (the same principle as
     step 2's "never report a phantom id").
 
-    MUTATION THAT REDS THIS TEST: make the read-back unconditional/remove it
+    MUTATION THAT REDS THIS TEST: remove the read-back
     (``if not created_here:`` → ``if False:``) — the response then echoes the
-    payload and advertises props the node does not have."""
+    payload and advertises props the node does not have. An UNCONDITIONAL
+    read-back (``→ if True:``) does NOT red this test — it still yields the
+    canonical's empty stored props here; it reds the create-path
+    ``test_capture_v2_persists_passthrough_props_on_node`` instead."""
     content = "the auth dead-end is the top issue"
     # Pre-existing canonical with NO passthrough props (pre-#2813 shape).
     canonical = sdk.create_point("statement", content)
