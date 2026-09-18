@@ -6,6 +6,7 @@ unknown old-settings dirname protection, client-count via CLIENT LIST.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import shutil
@@ -19,6 +20,12 @@ from pathlib import Path
 
 import pytest
 
+# #3752: discovery must target the PRIVATE per-session temp root, never the
+# shared system temp dir. `scan_root()` asserts the isolation is installed and
+# refuses to hand back the shared tree, so the delta-sweep fixtures below can
+# no longer silently degrade into an O(whole-host) scan that also matches
+# another test's (or another session's) redis.socket / redis.pid.
+from tests._tmpdir_isolation import scan_root
 from tortoise.embedded_reaper import (
     _parse_min_uptime,
     discover,
@@ -58,7 +65,7 @@ def _clean_redislite_residue():
         except Exception:
             pass
         dirs: set[str] = set()
-        tmp = tempfile.gettempdir()
+        tmp = scan_root()  # #3752: private root, never the shared temp dir
         try:
             for entry in os.scandir(tmp):
                 if entry.is_dir() and (
@@ -110,7 +117,7 @@ def _sweep_stale_residue():
     definition (crashed run, killed server) — remove it so later tests in
     this module see the same clean state a fresh CI runner would.
     """
-    tmp = tempfile.gettempdir()
+    tmp = scan_root()  # #3752: private root, never the shared temp dir
     try:
         for entry in os.scandir(tmp):
             if not entry.is_dir():
@@ -657,9 +664,7 @@ def test_reap_kill_removes_socket_dir_and_ephemeral_data_dir(monkeypatch):
         sock_dir = base / "redislite_x"
         sock_dir.mkdir()
         sp = sock_dir / "redis.socket"
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(sp))
-        s.close()
+        _bind_unix_socket(sp).close()
         (sock_dir / "redis.pid").write_text("99999999\n")
         data_dir = base / "tortoise_test_y"
         data_dir.mkdir()
@@ -697,9 +702,7 @@ def test_reap_kill_preserves_non_ephemeral_data_dir(monkeypatch):
         sock_dir = base / "redislite_x"
         sock_dir.mkdir()
         sp = sock_dir / "redis.socket"
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(sp))
-        s.close()
+        _bind_unix_socket(sp).close()
         user_dir = Path(tempfile.gettempdir()) / \
             f"reaper-user-data-test-{os.getpid()}"  # non-ephemeral name
         user_dir.mkdir()
@@ -1418,6 +1421,42 @@ def test_pid_alive_live_and_dead_unchanged():
 
 # ── #1383: classification honesty — dead-pid → stale_socket (plan Task 2) ─
 
+_BIND_SEQ = itertools.count()
+
+
+def _bind_unix_socket(path) -> socket.socket:
+    """Bind an AF_UNIX socket at ``path``, returning the (unlistened) socket.
+
+    Works around macOS' ~104-byte sun_path limit, which the #3752 private
+    session temp root makes reachable for ordinary scratch paths (host temp
+    dir 56 + ``/tt_<8>`` + ``/tt_<8>`` + ``/<dir>`` + ``/redis.socket``
+    already exceeds it for a 12-char dir name). When the path does not fit,
+    the socket is bound at a SHORT path inside the temp dir and its file is
+    RENAMED onto ``path``: the kernel resolves a unix socket by inode, so a
+    client connecting to the final path still reaches this listener. Callers
+    that want a DEAD socket close it after the bind (the file persists); that
+    is also why a renamed socket probes as 'dead' rather than 'missing'.
+
+    Renaming the inode is exactly the situation several reaper tests simulate
+    (a server "moved with its dir"), so this is a faithful fixture, not a
+    concession.
+    """
+    target = str(path)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    budget = 104  # the kernel cap on macOS: the bind path must stay UNDER it
+    if len(target.encode("utf-8", "surrogateescape")) < budget:
+        s.bind(target)
+        return s
+    short = os.path.join(tempfile.gettempdir(),
+                         f".tl{os.getpid():x}{next(_BIND_SEQ):x}")
+    assert len(short.encode("utf-8", "surrogateescape")) < budget, (
+        f"the short bind path {short!r} does not fit either — the private "
+        f"session temp root is too deep for AF_UNIX (#3752)")
+    s.bind(short)
+    os.rename(short, target)
+    return s
+
+
 def _make_dead_pid_dir(base=None, name="tmp"):
     """Synthetic leftover dir with a real dead socket + registry pointing at
     a provably-dead pid. Uses a SHORT base dir: macOS AF_UNIX sun_path is
@@ -1428,9 +1467,7 @@ def _make_dead_pid_dir(base=None, name="tmp"):
     dbdir = base / name
     dbdir.mkdir(exist_ok=True)
     sp = dbdir / "redis.socket"
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.bind(str(sp))
-    s.close()  # real dead socket file (persists)
+    _bind_unix_socket(sp).close()  # real dead socket file (persists)
     (dbdir / "redis.pid").write_text("99999999\n")  # > pid_max everywhere
     (dbdir / "x.settings").write_text(json.dumps({
         "pidfile": str(dbdir / "redis.pid"),
@@ -1512,9 +1549,7 @@ def test_classify_live_never_stale_socket_for_path_based_server(monkeypatch):
         dbdir = base / "redislite_pb"
         dbdir.mkdir()
         sp = dbdir / "redis.socket"
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(sp))
-        s.close()
+        _bind_unix_socket(sp).close()
         (dbdir / "redis.pid").write_text("99999999\n")  # stale/dead owner
         # Path-based registry: user dir OUTSIDE the ephemeral tempdir +
         # user dbfilename (Signal 1 + Signal 2 both say "protected class").
@@ -1968,8 +2003,7 @@ def test_run_sweep_live_quarantine_not_killed():
         # A live listener bound on the moved socket (server moved with the dir)
         moved_sock = os.path.join(q, "redis.socket")
         os.remove(moved_sock)  # macOS bind() refuses to overwrite a stale file
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(moved_sock)
+        srv = _bind_unix_socket(moved_sock)
         srv.listen(1)
         try:
             acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True,
@@ -1997,8 +2031,7 @@ def test_run_sweep_pass1_live_server_in_quarantine_not_killed(monkeypatch):
         # A live listener on the MOVED socket (server moved with its dir)
         moved_sock = os.path.join(q, "redis.socket")
         os.remove(moved_sock)  # macOS bind() refuses to overwrite a stale file
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(moved_sock)
+        srv = _bind_unix_socket(moved_sock)
         srv.listen(1)
         live_pid = 42424242
         # Make ONLY the fake live pid 'alive' (all real pids report dead).
@@ -2106,17 +2139,22 @@ def test_sweep_quarantine_dirs_removes_dead_leftover():
 
 
 def test_sweep_quarantine_dirs_keeps_live_leftover():
-    """A quarantine whose socket is live is WARNed and kept (forensic)."""
+    """A quarantine whose socket is live is WARNed and kept (forensic).
+
+    The listener is bound at a SHORT path and then MOVED onto the quarantined
+    socket name. Binding at the quarantined path is impossible: under the
+    #3752 private session temp root the quarantined path exceeds macOS' ~104-
+    byte AF_UNIX sun_path limit. Moving the inode is the faithful simulation
+    anyway — a real server moved with its dir keeps its socket inode, which is
+    what makes the reaper's re-probe authoritative (#1383)."""
     from tortoise.embedded_reaper import _sweep_quarantine_dirs
     with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-456"
         os.rename(dbdir, q)
         _mark_quarantine(q)
-        _mark_quarantine(q)
         moved_sock = os.path.join(q, "redis.socket")
         os.remove(moved_sock)  # macOS bind() refuses to overwrite a stale file
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(moved_sock)
+        srv = _bind_unix_socket(moved_sock)
         srv.listen(1)
         try:
             removed = _sweep_quarantine_dirs(dry_run=False)
@@ -2671,12 +2709,19 @@ def test_mark_orphan_confirmation_recycled_pid_restarts_window(
 
 
 def test_lock_is_tempdir_scoped_not_home_scoped():
-    """#1658: the sweep lock must be TEMPDIR-scoped (machine-global), not
-    HOME-scoped. Two sweepers with different $HOME on a shared box each flock
-    a different inode if the lock lives under ~/.tortoise — both acquire and
-    run overlapping sweeps (reaping each other's live sockets). The lock
-    must live under the real gettempdir, the same convention as
-    ACTIVE_SUITES_DIR."""
+    """#1658: the sweep lock must be TEMPDIR-scoped, not HOME-scoped. Two
+    sweepers with different $HOME on a shared box each flock a different
+    inode if the lock lives under ~/.tortoise — both acquire and run
+    overlapping sweeps (reaping each other's live sockets).
+
+    #3752 refines *which* temp dir. The lock must live under the temp dir the
+    SWEEP TARGETS — call it the sweep domain — because mutual exclusion is
+    only meaningful between sweeps that share one. ACTIVE_SUITES_DIR is a
+    different animal: it is HOST-pinned so a production/cron sweep can still
+    see a live suite whose scratch space is the private per-session root
+    (tests/_tmpdir_isolation.py). Under the suite they are deliberately NOT
+    siblings; in a production process, where nothing redirects the temp dir,
+    they coincide exactly as before."""
     import tempfile as _tf
 
     import tortoise.embedded_reaper as er
@@ -2687,9 +2732,29 @@ def test_lock_is_tempdir_scoped_not_home_scoped():
         f"_LOCK_PATH {lock_path!r} must be tempdir-scoped (was ~/.tortoise)"
     assert os.path.expanduser("~") not in lock_path, \
         f"_LOCK_PATH {lock_path!r} must not be HOME-scoped"
-    # It lives in the same <tempdir>/.tortoise/ dir as ACTIVE_SUITES_DIR.
-    assert os.path.dirname(lock_path) == os.path.dirname(er.ACTIVE_SUITES_DIR), \
-        "lock and active-suites dir must share the tempdir/.tortoise root"
+    # #1658: <sweep-domain tempdir>/.tortoise/.reaper.lock — the lock's scope
+    # follows the sweep target, whatever that resolves to.
+    assert lock_path == os.path.join(
+        os.path.realpath(_tf.gettempdir()), ".tortoise", ".reaper.lock"), \
+        f"_LOCK_PATH {lock_path!r} must be <sweep-domain tempdir>/.tortoise/"
+    # #3752: ACTIVE_SUITES_DIR is HOST-pinned — it shares the .tortoise root
+    # with the lock only when the sweep domain IS the host temp dir.
+    coordination_root = os.path.dirname(er.ACTIVE_SUITES_DIR)
+    assert coordination_root == os.path.join(
+        er._host_coordination_tmpdir(), ".tortoise"), \
+        "ACTIVE_SUITES_DIR must stay host-scoped (#3752)"
+    if os.path.realpath(_tf.gettempdir()) == er._host_coordination_tmpdir():
+        assert os.path.dirname(lock_path) == coordination_root, \
+            "unredirected process: lock and markers share <tempdir>/.tortoise"
+    else:
+        # A harness redirected the temp dir (the suite does, #3752). Assert
+        # the split is INTENTIONAL so a future refactor that silently makes
+        # the lock host-scoped fails here and forces the decision again.
+        assert os.path.dirname(lock_path) != coordination_root, \
+            "under a private temp root the lock must follow the sweep domain, " \
+            "not the host coordination dir"
+        assert os.environ.get("TORTOISE_HOST_TMPDIR") == \
+            er._host_coordination_tmpdir()
 
 
 def test_cross_home_sweepers_share_one_lock():

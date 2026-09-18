@@ -542,6 +542,7 @@ surfaces:
   - test_supabase_control.py
   - test_suspension_parity.py
   - test_taxonomy.py
+  - test_tmpdir_isolation.py
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
