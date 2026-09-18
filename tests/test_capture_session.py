@@ -1,9 +1,12 @@
 """SDK capture_session tests (#312 delta 4 + delta 5 speaker tagging, #822).
 
 #822: LLM extraction is the default (and only) capture extraction — the regex
-loop was removed as a product path and no-key fails closed. These tests run
-against the offline MockModel extractor (TORTOISE_SESSION_LLM_MOCK=1 seam) so
-no provider key or network is needed.
+loop was removed as a product path. #3892 (owner ruling 2026-09-18) changed
+what a MISSING key means: the capture itself is unconditional — the session's
+turns are always STORED (and are keylessly searchable) — and the key gates
+ONLY the LLM extraction into memory points (receipt ``extraction_mode``
+``"no-provider"``). These tests run against the offline MockModel extractor
+(TORTOISE_SESSION_LLM_MOCK=1 seam) so no provider key or network is needed.
 """
 import json
 import logging
@@ -69,7 +72,7 @@ def llm_extraction_provider(monkeypatch):
     """Install the offline MockModel session extractor (#822) — the M2 LLM
     pipeline runs with zero network regardless of ambient provider keys
     (the dev shell has real OPENROUTER/DEEPSEEK keys). Any test that needs
-    the no-key fail-closed path clears the seam itself."""
+    the keyless path clears the seam AND the provider keys itself."""
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
@@ -314,21 +317,258 @@ def test_capture_session_idempotent(sdk):
     assert turns[0][0] == 3, "re-capture must not duplicate turn points"
 
 
-def test_capture_session_no_provider_fails_closed(sdk, monkeypatch):
-    """#822: no provider key (and no mock seam) → ValueError — the regex
-    fallback is gone, capture requires an LLM provider."""
+def test_capture_session_no_provider_stores_turns(sdk, monkeypatch):
+    """#3892 (owner ruling 2026-09-18): no provider key NO LONGER refuses the
+    capture — the key gates EXTRACTION, not storage. The full keyless write
+    behaviour is pinned by
+    ``test_keyless_capture_stores_turns_and_stays_searchable``; this test
+    keeps the PRE-WRITE contract: an EMPTY conversation stores nothing (no
+    Session stub) and is still reported through the structured #1529 empty
+    receipt (ok=False), never a raise and never a silent 0.
+
+    Supersedes the pre-#3892 ``..._fails_closed`` expectation (ValueError
+    before any write), which the owner's ruling reversed."""
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
               "GEMINI_API_KEY"):
         monkeypatch.delenv(k, raising=False)
-    with pytest.raises(ValueError, match="LLM provider key"):
-        sdk.capture_session(CONV)
-    # P1 #1529: the no-extractor check precedes the empty gate — an EMPTY
-    # conversation with no key raises the SAME ValueError (fail-closed
-    # exception, hosted 503-first precedent; never the structured empty
-    # response, which would mask a misconfigured deploy).
-    with pytest.raises(ValueError, match="LLM provider key"):
-        sdk.capture_session([])
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True
+    assert res["extraction_mode"] == "no-provider"
+    # P1 #1529: the empty/blank gate still precedes every write — an EMPTY
+    # conversation keylessly stores NOTHING (turns=0, no Session stub) and
+    # returns the structured empty receipt rather than raising.
+    empty = sdk.capture_session([])
+    assert empty["ok"] is False
+    assert empty["extraction_mode"] == "empty"
+    assert empty["turns"] == 0
+    assert empty["errors"]
+    sessions = sdk._get_proj().g.query(
+        "MATCH (s:Session) RETURN count(s)").result_set[0][0]
+    assert sessions == 1, "the empty gate must not write a Session stub"
+
+
+def test_keyless_capture_stores_turns_and_stays_searchable(sdk, monkeypatch):
+    """#3892: with ALL provider keys absent, a capture still STORES its turns
+    — the Session is merged and the mechanical turn Points (+ CONTAINS edges)
+    are written by the unchanged loop — ONLY the LLM extraction into memory
+    points is skipped, the receipt says so truthfully, and the stored turns
+    are then surfaced by a KEYLESS search.
+
+    Before #3892 this call raised ``ValueError`` BEFORE any write, so the
+    session existed nowhere but the harness JSONL and no retrieval could ever
+    return it (the local capture lane was write-only by construction).
+
+    NO LLM runs anywhere in this test: every provider key is absent AND the
+    mock seam is cleared, so any extraction attempt would fail loudly rather
+    than quietly serve a mock."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    # Guard the test's own premise: no extractor can be built at all.
+    from tortoise.sdk import _build_session_llm_extractor
+    assert _build_session_llm_extractor() is None, "keys leaked into the test"
+
+    sid = "sess-3892-keyless"
+    res = sdk.capture_session(CONV, session_id=sid)
+
+    # ── (4) the receipt is truthful ─────────────────────────────────────
+    assert res["session_id"] == sid
+    assert res["ok"] is True, res
+    assert res["turns"] == len(CONV)
+    assert res["extracted"] == 0
+    assert res["points"] == []
+    assert res["extraction_mode"] == "no-provider", res["extraction_mode"]
+    assert res["errors"] == []
+    assert res["warnings"], "a keyless capture must never be silent"
+    assert any("provider key" in w for w in res["warnings"]), res["warnings"]
+
+    proj = sdk._get_proj()
+
+    # ── (1) the Session exists and N turn Points carry the right shape ──
+    n_sessions = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN count(s)",
+        params={"sid": sid}).result_set[0][0]
+    assert n_sessions == 1
+    turns = proj.g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH $p "
+        "RETURN t.id, t.pointKind, t.is_episodic, t.status "
+        "ORDER BY t.id",
+        params={"p": f"{sid}_t"}).result_set
+    assert [r[0] for r in turns] == [f"{sid}_t{i}" for i in range(len(CONV))]
+    for pid, kind, episodic, status in turns:
+        assert kind == "event", (pid, kind)
+        assert episodic is True, (pid, episodic)
+        assert status == "draft", (pid, status)
+
+    # ── (2) N CONTAINS edges ────────────────────────────────────────────
+    edges = proj.g.query(
+        "MATCH (:Session {id:$sid})-[:CONTAINS]->(t:Point) RETURN count(t)",
+        params={"sid": sid}).result_set[0][0]
+    assert edges == len(CONV)
+
+    # ── (3) a KEYLESS search returns them ───────────────────────────────
+    # Same shared point fetch the /v1/search payload uses. Retried: the
+    # embedded engine degrades PER STRATEGY (one leg down, the others
+    # continue), so a partial pool is the known flake class — the assertion
+    # is on the REQUIRED id, never merely on a non-empty pool.
+    want = f"{sid}_t0"
+    hits: list[dict] = []
+    for _ in range(3):
+        hits = sdk.tortoise_fts_query("auth dead-end", limit=40,
+                                      include_terminal=True)
+        if want in {str(h.get("id")) for h in hits}:
+            break
+    assert want in {str(h.get("id")) for h in hits}, \
+        f"keyless search did not surface the stored turn: {hits}"
+
+
+def test_keyless_capture_is_extraction_upgradable_with_a_key(sdk, monkeypatch):
+    """#3892/#3996: a keyless capture must NOT block the later extraction of
+    the same session once a key exists.
+
+    The keyless attempt records ``capture_ok=False`` + ``capture_extractor=
+    "none"`` — no extraction lane ran — which is exactly what the #2335
+    TRUE-retry gate consumes, so adding a key and re-capturing the same
+    ``session_id`` EXTRACTS instead of silently replaying. (Had the keyless
+    attempt recorded ``capture_ok=True`` / lane ``v2``,
+    ``retry_failed_capture`` would be False and the re-capture would report
+    ``extracted: 0`` with ``extraction_mode: "replayed"`` — leaving the stored
+    session permanently points-less.)
+
+    No network and no real provider: the "key appearing" is the offline
+    MockModel seam appearing."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    sid = "sess-3892-upgrade"
+    first = sdk.capture_session(CONV, session_id=sid)
+    assert first["extraction_mode"] == "no-provider"
+    assert first["extracted"] == 0
+
+    proj = sdk._get_proj()
+    prior_ok, prior_lane = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": sid}).result_set[0]
+    assert prior_ok is False, f"a keyless capture must not record success: {prior_ok!r}"
+    assert prior_lane == "none", prior_lane
+
+    # The key appears (offline seam — still no LLM, no network).
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    second = sdk.capture_session(CONV, session_id=sid)
+    assert second["extraction_mode"] == "llm:mock", second["extraction_mode"]
+    assert second["extracted"] >= 1, second
+    # The re-attempt is convergent: the deterministic turn ids are reused,
+    # so no duplicate turn Points land (#1727/#2335 partial-write policy).
+    turns = proj.g.query(
+        "MATCH (t:Point) WHERE t.id STARTS WITH $p RETURN count(t)",
+        params={"p": f"{sid}_t"}).result_set[0][0]
+    assert turns == len(CONV), turns
+
+
+def test_m2_lane_refuses_the_keyless_retry_and_says_so(sdk, monkeypatch):
+    """#3892 (review cycles 2/4/5): the #2335 retry gate's m2 exclusion is
+    KEPT for a keyless prior. M2 dedups per-capture only, and a claim minted
+    by a crashed or concurrent attempt is not yet ``:CONTAINS``-wired, so no
+    post-hoc graph read can prove a session claim-free — the safety argument
+    for admitting the m2 retry was unverifiable (review cycle 5 reproduced
+    duplicate claim nodes under it).
+
+    What must NOT happen is a silent, misleading replay: the receipt carries
+    an additive warning naming the keyless-pending state and the remedy."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    sid = "sess-3892-m2-refused"
+    first = sdk.capture_session(CONV, session_id=sid)
+    assert first["extraction_mode"] == "no-provider"
+    assert first["extracted"] == 0
+
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    second = sdk.capture_session(CONV, session_id=sid)
+    assert second["extraction_mode"] == "replayed", second["extraction_mode"]
+    assert second["extracted"] == 0
+    assert any("TORTOISE_SESSION_EXTRACTOR=m2" in w
+               for w in second["warnings"]), second["warnings"]
+    assert any("stored WITHOUT a provider key" in w
+               for w in second["warnings"]), second["warnings"]
+    # The refused retry minted no non-episodic claim.
+    claims = sdk._get_proj().g.query(
+        "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.is_episodic IS NULL OR p.is_episodic = false "
+        "RETURN count(p)", params={"sid": sid}).result_set[0][0]
+    assert claims == 0, claims
+
+
+def test_keyless_recapture_does_not_remint_the_session_event(sdk, monkeypatch):
+    """#3892 (review cycle 2, P3): a keyless RE-capture extracts nothing, so
+    there is nothing to stamp — it must NOT re-run the sessionCaptured Event
+    mint (which re-journals EventRecorded and refreshes startedAt per call).
+    The Event count stays 1 across repeated keyless captures."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    sid = "sess-3892-remint"
+    sdk.capture_session(CONV, session_id=sid)
+    proj = sdk._get_proj()
+    first_started = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.startedAt"
+    ).result_set[0][0]
+    sdk.capture_session(CONV, session_id=sid)
+    sdk.capture_session(CONV, session_id=sid)
+    rows = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) "
+        "RETURN count(e), collect(e.startedAt)").result_set[0]
+    assert rows[0] == 1, f"keyless re-captures re-minted the Event: {rows}"
+    assert rows[1] == [first_started], (
+        f"keyless re-capture refreshed startedAt: {rows[1]}")
+
+
+def test_keyless_recapture_never_clobbers_a_recorded_lane(sdk, monkeypatch):
+    """#3892 (review cycle 3, P2): a keyless re-capture of a session whose
+    prior KEYED attempt FAILED must record NOTHING — the prior lane is the
+    evidence the #2473 M2 exclusion reads ("live content-addressed claims a
+    non-convergent M2 re-run must not touch"). Overwriting it with "none"
+    would re-admit exactly that re-run.
+
+    No LLM runs: the keyless legs are keyless, and the final M2-lane leg is
+    the offline MockModel seam (a REPLAY, so no extraction happens at all)."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    sid = "sess-3892-lane-preserve"
+    sdk.capture_session(CONV, session_id=sid)
+    proj = sdk._get_proj()
+    # Simulate the prior attempt: a FAILED v2 capture (live claims, lane v2).
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) "
+        "SET s.capture_ok=false, s.capture_extractor='v2'",
+        params={"sid": sid})
+
+    # A keyless re-capture must NOT rewrite that record.
+    res = sdk.capture_session(CONV, session_id=sid)
+    assert res["extraction_mode"] == "no-provider"
+    ok, lane = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": sid}).result_set[0]
+    assert (ok, lane) == (False, "v2"), (ok, lane)
+
+    # ... therefore the M2 exclusion still holds: a keyed M2 re-capture
+    # REPLAYS instead of re-running the non-convergent lane over the prior
+    # attempt's claims.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    again = sdk.capture_session(CONV, session_id=sid)
+    assert again["extraction_mode"] == "replayed", again["extraction_mode"]
+    assert again["extracted"] == 0
 
 
 def test_capture_session_llm_points_fresh_per_capture(sdk, monkeypatch):
