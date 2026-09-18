@@ -1426,6 +1426,10 @@ _CONSENT_HTML = r"""<!DOCTYPE html>
   // storage, so an ingested OAuth/email session must persist to the cookie
   // or the sign-in fallback loops. detectSessionInUrl stays true so the
   // provider redirect back with #access_token is ingested.
+  // #3503: this page is the ONE place it stays true — it does NOT load
+  // website/assets/supabase-session.js (that file's factory sets it false,
+  // because its load-time IIFE is the fragment consumer there), so this
+  // inline client is the sole consumer of the hash and must ingest it.
   const COOKIE_NAME = "sb-tortoise-auth-token";
   // #1704: parent-domain cookie storage — a faithful port of the
   // dashboard's supabaseStorage (website/assets/supabase-session.js):
