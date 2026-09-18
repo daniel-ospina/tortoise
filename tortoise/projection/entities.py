@@ -546,13 +546,14 @@ class _EntityHandlers:
         `is_episodic` only. A journal-only `rebuild()` has no Session record to
         replay (the live loop never journaled it), so `capture_ok`,
         `turn_count` and `created_at` come back absent. For `rebuild_all` the
-        pre-wipe `:Session` snapshot restores the full property set, so this
-        stub is overwritten; for `rebuild()` the props stay missing and a
+        durable pre-wipe `:Session` snapshot restores the full property set, so
+        this stub is overwritten; for `rebuild()` the props stay missing and a
         later capture may read `capture_ok=None` as the legacy
-        "presumed captured" case (#2335) instead of retrying. Carrying the
-        Session record durably is the `SessionRecorded` work already open as
-        #3722/#2296 — deliberately NOT re-invented here. See the residual
-        note in the #3947 PR body.
+        "presumed captured" case (#2335) instead of retrying. So the durability
+        split is: `rebuild_all` carries the container (and its CONTAINS links)
+        via the pre-wipe sidecar; the JOURNAL carrier is the `SessionRecorded`
+        work already open as #3722/#2296; `rebuild()` alone still yields the
+        stub. See the residual note in the #3947 PR body.
         """
         self.g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",

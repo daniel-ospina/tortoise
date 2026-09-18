@@ -49,7 +49,6 @@ import pytest
 
 from tortoise.log import EventLog
 from tortoise.projection import (
-    FalkorProjection,
     RebuildDroppedEpisodicPoints,
     _write_prewipe_snapshot,
     prewipe_snapshot_path,
@@ -273,25 +272,22 @@ def test_every_node_creating_journal_type_counts_as_recreatable(tmp_path):
         sdk.close()
 
 
-def test_snapshot_coverage_is_derived_from_what_replay_stages(tmp_path):
-    """#3947 review (cycle 2, category A): the proof's coverage must never be
-    larger than what the replay will actually stage.
+def test_capture_gate_refuses_before_the_coverage_proof(tmp_path):
+    """#3010 `capture_failed` gate regression, NOT a coverage-derivation pin.
 
-    The #548 snapshot block is best-effort (`except Exception: pass`). If an
-    error lands AFTER the id read but BEFORE/INSIDE the synthetic-event build,
-    an id-derived coverage set would still claim those ids are covered, the
-    proof would GREEN, the wipe would run, and every graph-only Point would be
-    gone with success reported — the exact false PASS this PR exists to
-    remove. A non-object line in the journal is enough to trip it (the
-    snapshot loop calls `ev.get` unguarded).
+    On this input the #3010 `capture_failed` gate refuses FIRST (a non-object
+    journal line trips the #548 snapshot loop), so the proof's
+    coverage-derivation is never reached: replacing the
+    ``_journal_recreated_ids(synthetic_events)`` call with ``pass`` leaves this
+    test GREEN. The name therefore states what the test actually detects. The
+    cycle-2 "coverage comes from the staged artifact" property has no direct
+    assertion here — pinning it would require bypassing the #3010 gate, which
+    is strictly stronger on this input (it refuses even with no episodic
+    Point at all, so the silent-capture-failure class cannot reach the proof's
+    coverage).
 
-    #3947 × #3010 (rebase): on this input the refusal now comes from #3010's
-    `capture_failed` gate — a failed capture refuses BEFORE the wipe — so the
-    assertion is on the shared contract (`RuntimeError`, whose
-    `RebuildDroppedEpisodicPoints` is a subclass) plus the untouched store,
-    not on which of the two pre-wipe refusals speaks first. #3010's gate is
-    strictly stronger here: it refuses even with no episodic Point at all, so
-    the silent-capture-failure class cannot reach the proof's coverage at all.
+    The assertion is on the shared contract (`RuntimeError`, whose
+    `RebuildDroppedEpisodicPoints` is a subclass) plus the untouched store.
     """
     tmp = tmp_path / "events"
     tmp.mkdir()
@@ -501,51 +497,6 @@ def _episodic_point_entry(pid, content="[user] hi"):
     }
 
 
-def test_sidecar_recovery_proof_roster_comes_from_the_snapshot(tmp_path):
-    """The re-point: on the sidecar-recovery path the proof's ROSTER is the
-    recovered snapshot's episodic population, not the (empty) live graph.
-
-    Mutation-proofed — revert the `episodic_before | recovered_episodic` union
-    at the proof call site and this test fails: `before` arrives empty, which
-    is the short-circuit that disarms the guard here.
-    """
-    tmp = tmp_path / "events"
-    tmp.mkdir()
-    turn = SESSION_ID + "_t0"
-    # The journal has NO creation record for the turn — only an unrelated
-    # event. The sidecar is the sole record of what existed pre-wipe.
-    (tmp / "sdk.jsonl").write_text(json.dumps({
-        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
-        "type": "IngestStarted"}) + "\n", encoding="utf-8")
-    _pending_sidecar(tmp, [_episodic_point_entry(turn)])
-
-    seen: dict = {}
-    real = FalkorProjection._assert_episodic_points_recreatable
-
-    def spy(self, before, events, snapshot_ids=()):
-        seen["before"] = set(before)
-        return real(self, before, events, snapshot_ids=snapshot_ids)
-
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
-    try:
-        proj = sdk._get_proj()
-        proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
-        with mock.patch.object(FalkorProjection,
-                               "_assert_episodic_points_recreatable", spy):
-            proj.rebuild_all(str(tmp))  # must not short-circuit the proof
-        assert turn in seen.get("before", set()), (
-            "the proof's roster must come from the recovered snapshot: the "
-            "live graph is empty here, so an empty `before` IS the "
-            "short-circuit that disarms the guard on this path")
-        # The recovery itself is non-destructive: the turn comes back as a
-        # TURN (the sidecar carries the is_episodic marker).
-        assert proj.g.query(
-            "MATCH (p:Point {id:$id}) RETURN p.is_episodic",
-            params={"id": turn}).result_set[0][0] is True
-    finally:
-        sdk.close()
-
-
 def test_sidecar_recovery_with_a_consistent_journal_proceeds(tmp_path):
     """Healthy-recovery control: the sidecar and the journal agree, so every
     recovered episodic point IS recreatable and the rebuild must complete —
@@ -585,11 +536,15 @@ def test_sidecar_recovery_refuses_a_turn_the_replay_cannot_recreate(tmp_path):
     wipe instead of wiping and reporting success.
 
     This is the *reachable* RED the roster re-point exists for: the recovered
-    roster (leg (b) — the episodic session's CONTAINS link) contains T while
-    ``covered`` (journal ∪ synthetic snapshot) cannot. Before the roster
-    re-point ``before`` arrived empty and the guard short-circuited at
-    ``if not before``; before the sidecar session sections landed, leg (b)
+    roster (the episodic session's CONTAINS leg, ``recovered_session_turns``)
+    contains T while ``covered`` (journal ∪ synthetic snapshot) cannot. Before
+    the roster re-point ``before`` arrived empty and the guard short-circuited
+    at ``if not before``; before the sidecar session sections landed, that leg
     read an empty live graph — either way the guard never fired here.
+
+    The refusal is proven PRE-wipe the hard way: an empty graph makes
+    ``count(n) == 0`` true whether the proof ran before or after
+    ``DETACH DELETE``, so a SENTINEL the wipe would destroy is seeded first.
     """
     tmp = tmp_path / "events"
     tmp.mkdir()
@@ -608,14 +563,26 @@ def test_sidecar_recovery_refuses_a_turn_the_replay_cannot_recreate(tmp_path):
     try:
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
+        # #3947 review F6: seed a SENTINEL the wipe WOULD destroy. Without it
+        # the old `count(n) == 0` assertion holds whether the proof ran before
+        # or after `DETACH DELETE` — a vacuous pre-wipe claim. This Point is
+        # not episodic and not session-linked, so it stays out of the roster.
+        sentinel = "sentinel_3947_not_a_turn"
+        proj.g.query(
+            "CREATE (s:Point {id:$id}) SET s.content='sentinel', "
+            "s.pointKind='note', s.status='live'",
+            params={"id": sentinel})
         with pytest.raises(RebuildDroppedEpisodicPoints) as ei:
             proj.rebuild_all(str(tmp))
         assert turn in str(ei.value)
         assert "NOT touched" in str(ei.value)
-        # #2943 "No loss without proof": the proof is PRE-wipe, so the store is
-        # exactly as empty as it was — nothing was destroyed to learn this.
+        # #2943 "No loss without proof": the proof is PRE-wipe, so the
+        # sentinel the wipe would have destroyed must still be here.
         assert proj.g.query(
-            "MATCH (n) RETURN count(n)").result_set[0][0] == 0
+            "MATCH (n:Point {id:$id}) RETURN count(n)",
+            params={"id": sentinel}).result_set[0][0] == 1, (
+            "the refusal must run BEFORE `DETACH DELETE` — a post-wipe raise "
+            "would have destroyed the sentinel")
     finally:
         sdk.close()
 
@@ -665,5 +632,144 @@ def test_sidecar_recovery_restores_the_session_container_and_link(tmp_path):
             "as capture_ok=None (#2335 legacy presumed-captured)")
         assert not os.path.exists(prewipe_snapshot_path(str(tmp))), (
             "a completed recovery must retire the sidecar")
+    finally:
+        sdk.close()
+
+
+def test_non_episodic_session_links_do_not_enter_the_roster(tmp_path):
+    """#3947 review F8: the containment leg of the roster is gated on the
+    ``:Session`` container's OWN ``is_episodic`` flag.
+
+    The extractor CONTAINS-wires Points into sessions, so a NON-episodic
+    session's links name Points that are not turns. Requiring those to be
+    recreatable would refuse healthy recoveries as #2943 false blocks.
+
+    Mutation pin: delete `and s.get("is_episodic")` from the
+    ``episodic_session_ids`` comprehension and this test FAILS — the rebuild
+    refuses on a link the journal never recorded.
+    """
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    linked = "sess_3947_nonepisodic_member"
+    (tmp / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+    _pending_sidecar(
+        tmp, [],
+        session_snapshot=[{"id": SESSION_ID, "is_episodic": False}],
+        session_point_links=[(SESSION_ID, linked)])
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
+        counts = proj.rebuild_all(str(tmp))        # must NOT raise
+        assert counts["nodes"] >= 0
+        # The container is still restored from the sidecar, non-episodic.
+        rows = proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.is_episodic",
+            params={"sid": SESSION_ID}).result_set
+        assert rows and rows[0][0] is False
+    finally:
+        sdk.close()
+
+
+def test_prewipe_writer_refuses_an_over_cap_payload_without_wiping(
+        tmp_path, monkeypatch):
+    """#3947 review F4: writer output ⊆ loader-acceptable.
+
+    The loader hard-refuses a sidecar over ``_PREWIPE_SNAPSHOT_MAX_BYTES``.
+    Without a writer-side guard a session-bearing store (the sidecar now grows
+    with captured turns) could emit a rescue file the loader will never accept
+    — and after an interrupted rebuild that file is the ONLY record of what
+    the wipe destroyed, so it would be permanently unloadable and the
+    operator's only exit would be to delete it and lose the graph-only
+    population. The writer serializes first and refuses over-cap BEFORE the
+    atomic replace, hence before the wipe.
+
+    The cap is shrunk so a just-over payload is cheap; the invariant is the
+    same one the 64 MiB loader enforces.
+    """
+    monkeypatch.setattr(
+        "tortoise.projection._PREWIPE_SNAPSHOT_MAX_BYTES", 1024)
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    pid = SESSION_ID + "_t0"
+    (tmp / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+    # The writer itself refuses a payload over the cap …
+    with pytest.raises(ValueError, match="over the"):
+        _write_prewipe_snapshot(prewipe_snapshot_path(str(tmp)), {
+            "version": 1,
+            "synthetic_events": [
+                {"type": "PointAdded", "projection_version": 2,
+                 "point": {"id": pid, "content": "x" * 4000,
+                           "pointKind": "event", "status": "live"}}],
+            "batch_snapshot": [], "batch_point_links": [],
+            "session_snapshot": [], "session_point_links": []})
+    assert not os.path.exists(prewipe_snapshot_path(str(tmp))), (
+        "the refusal must land BEFORE the atomic replace")
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.g.query(
+            "CREATE (t:Point {id:$id}) SET t.content=$c, "
+            "t.pointKind='event', t.is_episodic=true, t.status='live'",
+            params={"id": pid, "c": "x" * 4000})
+
+        with pytest.raises(RuntimeError) as ei:
+            proj.rebuild_all(str(tmp))
+        assert "aborted BEFORE the graph wipe" in str(ei.value)
+        assert "over the" in str(ei.value)
+        # … and rebuild_all turns that into a refusal that wipes NOTHING and
+        # leaves no unloadable rescue file behind.
+        assert proj.g.query("MATCH (n:Point {id:$id}) RETURN count(n)",
+                            params={"id": pid}).result_set[0][0] == 1
+        assert not os.path.exists(prewipe_snapshot_path(str(tmp)))
+    finally:
+        sdk.close()
+
+
+def test_session_only_sidecar_write_failure_does_not_abort(tmp_path):
+    """#3947 review F5: a session-only sidecar write failure must NOT abort.
+
+    Post-#3947 every turn rides the journal and `_link_session` recreates the
+    container + CONTAINS edge on replay, so the sidecar's session sections only
+    preserve the RICH properties (`capture_ok` / `turn_count` / `created_at`)
+    across a crash — no turn is at risk. Making the log dir a REQUIRED write
+    target for every session-bearing store would abort (exit 1) a
+    fully-journalled rebuild on a read-only log dir where the same rebuild
+    previously succeeded. A non-session payload still aborts (see
+    `test_prewipe_snapshot_write_failure_aborts_before_wipe`).
+    """
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    turn = SESSION_ID + "_t0"
+    (tmp / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z", "type": "PointAdded",
+        "initiated_by": "sdk", "projection_version": 2,
+        "contains_session": SESSION_ID,
+        "point": {"id": turn, "content": "[user] hi", "pointKind": "event",
+                  "speaker": "user", "is_episodic": True, "status": "draft"},
+    }) + "\n", encoding="utf-8")
+    _pending_sidecar(
+        tmp, [],
+        session_snapshot=[{"id": SESSION_ID, "is_episodic": True,
+                           "capture_ok": True, "turn_count": 3}],
+        session_point_links=[(SESSION_ID, turn)])
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
+        with mock.patch("tortoise.projection._write_prewipe_snapshot",
+                        side_effect=OSError("read-only log dir")):
+            counts = proj.rebuild_all(str(tmp))    # must NOT raise
+        assert counts["nodes"] >= 1
+        assert _turn_ids(proj) == [turn]
+        assert set(_turn_ids(proj)) <= set(_contains(proj))
     finally:
         sdk.close()
