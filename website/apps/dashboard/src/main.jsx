@@ -8406,9 +8406,25 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
+          // #3832 (D5): connected-and-genuinely-empty. The copy is the owner's
+          // APPROVED string, built verbatim from `d5-copy-v2.md` (③) — do not
+          // reword. Its two owner-named actions are HELD, not shipped:
+          //   [Tortoise Decide] — no in-product destination exists (decide is
+          //     an agent/CLI skill; the owner is choosing its target).
+          //   [Integrations]  — the LIVE wizard has NO integrations step
+          //     (WIZARD_STEPS is org-create → fork → connect → done); the
+          //     'Memory sources' step survives only in the ARCHIVED legacy
+          //     wizard (LEGACY_WIZARD_ARCHIVED = false). So the affordance
+          //     cannot be confirmed to land on a wizard integrations step and
+          //     the button is held too. The pre-existing action below is left
+          //     untouched so the state keeps a live destination.
           <section className="overview empty-state">
-            <h2>Welcome to your Tortoise graph</h2>
-            <p className="dim">Connect your agent so it remembers why, not just what — the decisions and findings it saves land here as memories.</p>
+            <h2>No memories yet</h2>
+            <p className="dim">
+              Your memory is connected — there's nothing in it yet. There are two ways to add
+              memory: <strong>Integrations</strong> (that's where the agent-session recorder
+              lives), or <strong>Tortoise Decide</strong>.
+            </p>
             <div className="empty-actions">
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
