@@ -4896,8 +4896,12 @@ class TortoiseSDK:
         # resolution branch's. `_covers` gates on `vf is not None`, so a
         # falsey-but-PRESENT stored value is a REAL window start there: `0`
         # keys as the parseable epoch-0 instant, and `""` keys as an
-        # unparseable start that covers NOTHING (`_created_sort_key("")` =
-        # `(1, "")`, and `(1, x) > (0, y)` is always True). The resolution
+        # unparseable start that covers no PARSEABLE instant
+        # (`_created_sort_key("")` = `(1, "")`, and `(1, x) > (0, y)` is
+        # always True) — an unparseable QUERY instant also keys as
+        # `(1, <text>)` and IS covered by it, so `""` only hides the successor
+        # from parseable queries, which land in the predecessor's window end
+        # instead. The resolution
         # branch below gates on TRUTHINESS instead (`elif stored_vf:`), so for
         # those two values it falls through to `createdAt`. The guard follows
         # `_covers`: with a kwarg present it refuses rather than allow an

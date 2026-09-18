@@ -233,7 +233,7 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     ``validFrom`` — carry an explicit time and offset, so nothing depends on the
     host timezone. (The predecessors' date-only ``validFrom`` above is never
     passed to the guard; date-only parses as LOCAL midnight, the #3982
-    behaviour, so it is deliberately kept out of the comparison.) Three
+    behaviour, so it is deliberately kept out of the comparison.) Four
     properties, and the file needs all of them:
 
       * same day, different instant → REFUSED. Without this, a guard weakened
@@ -249,8 +249,12 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
         smallest gap it pins otherwise is 12 hours.
       * disagreement of ONE MICROSECOND → also REFUSED (case (e)), and a zero
         difference with a DIFFERENT fractional encoding → accepted (case (f)).
-        Together they pin exactness rather than a tolerance: case (c) alone
-        leaves any tolerance below 0.8 s alive.
+        Together they pin exactness rather than a tolerance down to the 1 µs
+        ISO floor: case (c) alone leaves any tolerance below 0.8 s alive, and
+        case (e) any tolerance of 1 µs or more. The floor BELOW 1 µs — which
+        ISO literals cannot express, since ``datetime.fromisoformat`` truncates
+        beyond 6 fractional digits — is pinned by
+        ``test_supersede_valid_from_below_microsecond_disagreement_refused``.
       * same instant, DIFFERENT non-zero offsets → ACCEPTED, and the value the
         caller passed is what gets persisted (``str(valid_from)``, not the
         stored form). Cases (b) and (d) exercise ``_created_sort_key``'s offset
@@ -307,6 +311,33 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     assert _props(sdk, old4["id"])["validTo"] == "2026-06-10T12:00:00+00:00"
 
 
+def test_supersede_valid_from_below_microsecond_disagreement_refused(sdk):
+    """Pins the comparison BELOW the microsecond floor that ISO pairs cannot
+    reach.
+
+    Every other case in this file constructs its disagreement from ISO-8601
+    literals, and ``datetime.fromisoformat`` truncates beyond 6 fractional
+    digits — so the smallest distinguishable separation any ISO case can build
+    is one microsecond (float delta 9.5367431640625e-07 s). A tolerance-based
+    equality therefore survives all of them: replacing the guard's
+    ``k_kwarg[1] == k_stored[1]`` with ``abs(k_kwarg[1] - k_stored[1]) < 1e-9``
+    leaves the whole file green without this case.
+
+    The stored start is consequently a NUMERIC epoch, ``validFrom=5e-10``
+    (keyed ``(0, 5e-10)``), compared against an ISO kwarg at the epoch
+    (``"1970-01-01T00:00:00+00:00"`` → ``(0, 0.0)``). The real guard refuses it
+    (``5e-10 != 0.0``); a sub-nanosecond tolerance accepts it.
+    """
+    old = _make_point(sdk, content="claim v9", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v10", validFrom=5e-10)
+    assert _props(sdk, new["id"])["validFrom"] == 5e-10
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"],
+                            valid_from="1970-01-01T00:00:00+00:00")
+    # fail-closed: nothing written
+    assert "validTo" not in _props(sdk, old["id"])
+
+
 def test_supersede_numeric_epoch_kwarg_refused(sdk):
     """The guard keys the value the write PERSISTS (``str(valid_from)``), not
     the caller's object.
@@ -341,10 +372,13 @@ def test_supersede_falsey_but_present_stored_valid_from_refused(sdk):
         successor's ``[epoch-0, ∞)`` window ⇒ ``ambiguous`` (the overlap this
         guard exists to prevent).
       * ``""`` — the read path treats the start as present but unorderable, so
-        the successor covers NOTHING at any instant; trusting the kwarg leaves
-        the successor permanently unreachable rather than visibly overlapping.
-        Refused fail-closed because the write path and ``_covers`` would
-        silently diverge on it — not because of an overlap.
+        the successor covers no PARSEABLE query instant (every such instant
+        lands in the predecessor's window end instead), and trusting the kwarg
+        leaves the successor unreachable for those queries rather than
+        visibly overlapping. An unparseable query instant, by contrast, keys
+        as ``(1, <text>)`` and IS covered by it. Refused fail-closed because
+        the write path and ``_covers`` would silently diverge on it — not
+        because of an overlap.
     """
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     # epoch-0: present AND parseable to the read path
@@ -575,9 +609,12 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
         ``(-∞, ∞)``, and still return ``ambiguous``); part (b) does.
       * successor ``validFrom = ""`` — unparseable to ``_created_sort_key``
         (``(1, "")``) and never ordered below a parseable key ⇒ the successor
-        covers NOTHING. That distinguishes presence from truthiness: under a
-        truthiness predicate ``""`` would be skipped and the successor WOULD
-        cover, flipping the verdict to ``ambiguous``.
+        covers no PARSEABLE query instant (``2026-06-15`` lands in the
+        predecessor instead). Presence still bites: under a truthiness
+        predicate ``""`` would be skipped and the successor WOULD cover that
+        parseable instant too, flipping the verdict to ``ambiguous``. An
+        unparseable query instant is covered either way — it keys as
+        ``(1, <text>)``, which ``(1, "")`` is never greater than.
     """
     # (a) validFrom = 0 → a real window start ⇒ overlap ⇒ ambiguous
     old = _make_point(sdk, content="zero v1", validFrom="2026-06-01")
@@ -593,7 +630,7 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
     assert out.get("ambiguous") is True
     assert len(out["candidates"]) == 2
 
-    # (b) validFrom = "" → present but unorderable ⇒ covers NOTHING
+    # (b) validFrom = "" → present but unorderable ⇒ covers no PARSEABLE instant
     old2 = _make_point(sdk, content="empty v1", validFrom="2026-06-01")
     new_empty = _make_point(sdk, content="empty v2", validFrom="")
     sdk._get_proj().g.query(
@@ -607,6 +644,13 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
     assert out2.get("ambiguous") is not True
     assert out2["found"] is True
     assert out2["valid_point"]["id"] == old2["id"]
+    # … but only for PARSEABLE instants: an unparseable query keys as
+    # `(1, <text>)`, which the successor's `(1, "")` is NOT greater than, so
+    # the `""` successor itself DOES cover it.
+    out2b = sdk.restore_point_at(new_empty["id"], "zzz")
+    assert out2b.get("ambiguous") is not True
+    assert out2b["found"] is True
+    assert out2b["valid_point"]["id"] == new_empty["id"]
 
 
 def test_restore_missing_point(sdk):
