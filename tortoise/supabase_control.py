@@ -316,10 +316,14 @@ class SupabaseControlPlane:
         (value None → ``col=is.null``), ``gt``, ``gte``, ``lt``, ``lte``.
         Raises RuntimeError on any failure.
 
-        Two conditions on the SAME column are combined into one PostgREST
-        ``and=(...)`` group (see ``_LOGIC_TREE_RESERVED``) — a flat query string
+        Filters may repeat a column. TWO OR MORE conditions on the same column
+        are combined into one PostgREST ``and=(...)`` group — a flat query string
         carries one operator per column, so a second condition would otherwise
-        silently REPLACE the first.
+        silently REPLACE the first. A single condition keeps the plain flat form,
+        so existing callers' requests are unchanged. A filter whose column is
+        literally ``"and"`` raises ``ValueError``: it would collide with the
+        logic-tree key this method writes. Values inside the group that carry a
+        reserved character are quoted (see ``_LOGIC_TREE_RESERVED``).
 
         ``timeout`` (#2850/#2988): an optional PER-REQUEST override for the
         httpx call. ``None`` (the default) keeps the client-level timeout —

@@ -98,12 +98,17 @@ def _stub_graph(monkeypatch, *, created_at="2026-09-16T01:00:00+00:00",
     subject is elsewhere.
 
     ``first_memory_at`` models the lifetime row and defaults to
-    ``created_at``. It must NOT be conflated with the funnel rows: those come
-    from ``FUNNEL_QUERY``, whose ``>= $since AND < $until`` predicate cannot
-    return a NULL-``created_at`` Session, so a NULL funnel row is an impossible
-    shape. ``first_memory_at=None`` gives the shape that IS real — (NULL,
-    positive count): memory exists, its timestamp is missing — which must read
+    ``created_at``. It is kept separate from the funnel rows because the two
+    shapes are different questions: ``first_memory_at=None`` gives (NULL,
+    positive count) — memory exists, its timestamp is missing — which must read
     as ``unavailable``/``first_memory_at_missing``, never "never produced".
+
+    (A NULL-``created_at`` funnel row is not a shape this helper should produce
+    either — ``FUNNEL_QUERY``'s range predicate excludes NULL — but note it is
+    NOT impossible: the module's measured failure mode 1 is that predicate being
+    absorbed into the ``OPTIONAL MATCH``, and that is exactly the case
+    ``stage_counts``' Python re-check exists to catch. Do not "tidy away" the
+    NULL handling on the strength of this helper.)
 
     ``extracted=0`` means the org has produced no memory at all, so the
     lifetime query returns nothing (a distinct, load-bearing state).
@@ -394,27 +399,38 @@ def test_analytics_leg_interval_matches_the_graph_legs(client, monkeypatch):
 
     monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
-    # Collect EVERY call's filters rather than "last call wins". The read path
-    # makes ONE `get_control_plane().query(...)` call — the narrow and wide
-    # allowlists are two in-memory passes over those same rows, not two queries
-    # (review cycle 6, F1: the earlier comment claimed otherwise) — but a bare
-    # overwritten dict made the assertion depend on incidental call order and
-    # could fail with `conds == []`.
-    calls: list[dict] = []
+    # The read path makes ONE `get_control_plane().query(...)` call — narrow and
+    # wide are two in-memory passes over those same rows, not two queries — but
+    # collect every call anyway rather than let a single overwritten dict make
+    # the assertion depend on incidental call order.
+    #
+    # ⚠️ NOT every call to the control plane comes from this test's subject. The
+    # app's lifespan starts background boot sweeps on a daemon thread
+    # (`_sweep_events` -> `_iter_registered_orgs` -> `query("organizations", …)`,
+    # plus `_purge_deleted_orgs`), and `_sweep_events` tests `is_supabase_enabled()`
+    # at RUN time — so once this test sets the Supabase env, a sweep that happens
+    # to land in the test body adds a window-less call. Selecting on the table AND
+    # on the presence of a `created_at` bound keeps background traffic out
+    # (review cycle 7: this made the test intermittently red).
+    calls: list[tuple[str, dict]] = []
 
     class _CP:
         def query(self, table, **kw):
-            calls.append(kw)
+            calls.append((table, kw))
             return []
 
     monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
     body = client.get("/v1/activation/scorecard", params=WINDOW).json()
-    assert calls, "the analytics leg was never queried"
+    windowed = [kw for table, kw in calls
+                if table == "analytics_events"
+                and any(col == "created_at" for col, _, _ in kw["filters"])]
+    assert windowed, (f"no windowed analytics query was made; calls="
+                      f"{[(t, [c for c, _, _ in k['filters']]) for t, k in calls]}")
     windows = {
-        tuple((op, v) for col, op, v in c["filters"] if col == "created_at")
-        for c in calls
+        tuple((op, v) for col, op, v in kw["filters"] if col == "created_at")
+        for kw in windowed
     }
-    # Every analytics query must carry exactly one half-open [since, until).
+    # Every windowed analytics query carries exactly one half-open [since, until).
     assert windows == {(("gte", body["window"]["since"]),
                         ("lt", body["window"]["until"]))}, windows
     assert body["stages"]["recall_attempted"]["state"] == "measured", body

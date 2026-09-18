@@ -1616,18 +1616,50 @@ class TestFakeControlPlane:
             {"c": "2026-09-16T00:00:00+00:00"}]
 
     def test_matches_helper_agrees_with_the_get_path(self):
-        """`_matches` (the PATCH/DELETE path) must mirror the GET semantics —
-        the same two-operator window, same boundary rules."""
-        cp = FakeControlPlane({"e": [
-            {"c": "2026-09-15T00:00:00+00:00"},
-            {"c": "2026-09-16T00:00:00+00:00"},
-            {"c": "2026-09-17T00:00:00+00:00"},
-        ]})
-        got = cp.query("e", method="PATCH", json_body={"seen": True}, filters=[
-            ("c", "gte", "2026-09-16T00:00:00+00:00"),
-            ("c", "lt", "2026-09-17T00:00:00+00:00")])
-        assert [r["c"] for r in cp.tables["e"] if r.get("seen")] == [
-            "2026-09-16T00:00:00+00:00"], (cp.tables["e"], got)
+        """`_matches` (the PATCH/DELETE path) must mirror the GET semantics.
+
+        This test used to be named for an agreement it never checked: it issued
+        no GET at all. It now runs the SAME filter set through both paths, over
+        a fixture that includes a NULL-valued row, and asserts the two select
+        the same rows — which is the property the name claims (review cycle 7,
+        P3-1/P3-2). The NULL row matters: `gte` over NULL must be "no match"
+        (SQL semantics), not a TypeError.
+        """
+        rows = [
+            {"c": "2026-09-15T00:00:00+00:00", "n": 1},
+            {"c": "2026-09-16T00:00:00+00:00", "n": 2},
+            {"c": "2026-09-17T00:00:00+00:00", "n": 3},
+            {"c": None, "n": 4},
+        ]
+        window = [("c", "gte", "2026-09-16T00:00:00+00:00"),
+                  ("c", "lt", "2026-09-17T00:00:00+00:00")]
+
+        get_cp = FakeControlPlane({"e": [dict(r) for r in rows]})
+        got_get = get_cp.query("e", filters=window)
+
+        patch_cp = FakeControlPlane({"e": [dict(r) for r in rows]})
+        patch_cp.query("e", method="PATCH", json_body={"seen": True},
+                       filters=window)
+        got_patch = [r for r in patch_cp.tables["e"] if r.get("seen")]
+
+        assert got_get == [{"c": "2026-09-16T00:00:00+00:00", "n": 2}], got_get
+        # The two paths must AGREE — this is the assertion the name promised.
+        assert [r["n"] for r in got_get] == [r["n"] for r in got_patch], (
+            got_get, got_patch)
+        # ...and neither may match the NULL row (SQL: NULL never compares).
+        assert 4 not in [r["n"] for r in got_get], got_get
+        assert 4 not in [r["n"] for r in got_patch], got_patch
+
+    def test_matches_gte_excludes_a_null_row(self):
+        """Isolated so the NULL rule on the PATCH/DELETE path is pinned on its
+        own: removing it raised TypeError instead of excluding the row, and the
+        whole `TestFakeControlPlane` class still passed (review cycle 7, P3-1)."""
+        cp = FakeControlPlane({"e": [{"c": None, "n": 1},
+                                     {"c": "2026-09-16T00:00:00+00:00", "n": 2}]})
+        cp.query("e", method="PATCH", json_body={"seen": True},
+                 filters=[("c", "gte", "2026-09-16T00:00:00+00:00")])
+        marked = [r["n"] for r in cp.tables["e"] if r.get("seen")]
+        assert marked == [2], cp.tables["e"]
 
     def test_patch_and_post(self):
         cp = FakeControlPlane({"t": [{"id": "k1", "x": None}]})
