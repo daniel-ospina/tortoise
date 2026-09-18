@@ -22,7 +22,9 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import subprocess
+import sys
 import threading
 import types
 
@@ -82,7 +84,33 @@ def _upload(store: MemoryStorage, *, org_id: str, graph_name: str,
     return f"{prefix}/dump.enc"
 
 
+# Budget for the harness waits below. The property under test is *whether* the
+# child is titled / reaped, never how quickly a loaded runner gets there — so the
+# budget is generous rather than tight (#4056: the previous 5.0 s window left no
+# margin on a busy runner). It is a deadline, never a licence to pass: an
+# untitled child still fails (TestTitleWaitIsStillStrict pins that).
+_CHILD_WAIT_S = 30.0
+
+
 def _ps_command(pid: int) -> str:
+    """The argv of ``pid``.
+
+    Prefers ``/proc/<pid>/cmdline``: the previous body forked a ``ps`` process
+    on *every* poll — up to ~250 forks per wait, each with its own 5 s timeout,
+    so one slow ``ps`` could eat the entire budget and fail the wait for a
+    reason that has nothing to do with the child. The ``ps`` fallback keeps
+    macOS (and any /proc-less host) working.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        pass
+    else:
+        # /proc answered, so trust it — including an empty read (a zombie's
+        # cmdline is empty). Falling through to `ps` here would restore the
+        # fork-per-poll storm this branch exists to avoid.
+        return " ".join(p.decode("utf-8", "replace") for p in raw.split(b"\0") if p)
     try:
         return subprocess.run(
             ["ps", "-o", "command=", "-p", str(pid)],
@@ -95,28 +123,56 @@ def _ps_command(pid: int) -> str:
 def _spawn_titled_child(title: str, socket_path: str) -> subprocess.Popen:
     """A REAL process whose ``ps`` title is ``title`` and argv names ``socket_path``.
 
-    ``exec -a`` gives the single ``sleep`` process the exact title Redis sets on
-    a forked GRAPH.COPY child (``redis-module-fork unixsocket:<path>``) while
-    keeping it a lone process — a shell wrapping ``sleep`` would orphan the
-    sleep when the shell is killed. The reaper thread is the ``waitpid`` Redis
-    does: without it a SIGKILLed child is a zombie and would never disappear.
+    The title is ``argv[0]`` — exactly what Redis sets on a forked GRAPH.COPY
+    child (``redis-module-fork unixsocket:<path>``) and exactly what ``ps``
+    reports. It is set by exec'ing ``sleep`` with that ``argv[0]``, which keeps
+    the child a LONE process (a shell wrapping ``sleep`` would orphan the sleep
+    when the shell is killed) and replaces the interpreter in place, so the pid
+    stays valid. The reaper thread is the ``waitpid`` Redis does: without it a
+    SIGKILLed child is a zombie and would never disappear.
+
+    Why not ``/bin/sh -c 'exec -a "<title>" /bin/sleep 300'`` (the previous
+    body): ``/bin/sh`` is dash on CI, dash has no ``exec -a`` (``/bin/sh: 1:
+    exec: -a: not found``, rc 127), so no child is ever created and no wait
+    deadline of any length can succeed — these tests could not pass on Linux;
+    they only ever passed under a macOS ``/bin/sh`` (bash). The shell also
+    interpolated ``socket_path`` inside double quotes, breaking on any
+    ``tmp_path`` containing a space.
     """
     import time
 
+    # The title travels via the environment on purpose: handed over as an argv
+    # element it would land in the interpreter's OWN command line, which a
+    # substring match would accept as the title (the wait would then pass with
+    # the exec never having happened). `startswith` is the real guard — this
+    # keeps the helper honest on top of it.
+    env = {**os.environ, "_FORK_TITLE": f"{title} unixsocket:{socket_path}"}
     proc = subprocess.Popen([
-        "/bin/sh", "-c",
-        f'exec -a "{title} unixsocket:{socket_path}" /bin/sleep 300',
-    ])
+        sys.executable, "-c",
+        "import os; os.execv('/bin/sleep', [os.environ['_FORK_TITLE'], '300'])",
+    ], env=env)
     threading.Thread(target=proc.wait, daemon=True).start()
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + _CHILD_WAIT_S
     while time.monotonic() < deadline:
-        if title in _ps_command(proc.pid):
+        # ``startswith``, not ``in``: the title has to BE argv[0]. A substring
+        # check would also accept a command line that merely mentions it — the
+        # shape that let an earlier cut of this fix "pass" without its exec ever
+        # happening.
+        if _ps_command(proc.pid).startswith(title):
             return proc
-        time.sleep(0.02)
-    raise AssertionError(f"child {proc.pid} never took the title {title!r}")
+        time.sleep(0.05)
+    # Report enough to tell a timing miss from a dead child, and do not leave the
+    # child behind for the runner's teardown to reap.
+    seen, was_alive = _ps_command(proc.pid), proc.poll() is None
+    with contextlib.suppress(Exception):
+        proc.kill()
+    raise AssertionError(
+        f"child {proc.pid} never took the title {title!r} within "
+        f"{_CHILD_WAIT_S:.0f}s (alive={was_alive}, argv={seen!r})"
+    )
 
 
-def _drain_until(proc: subprocess.Popen, *, alive: bool, timeout_s: float = 5.0) -> bool:
+def _drain_until(proc: subprocess.Popen, *, alive: bool, timeout_s: float = _CHILD_WAIT_S) -> bool:
     import time
 
     deadline = time.monotonic() + timeout_s
@@ -356,3 +412,63 @@ class TestRestoreSurvivesWedge:
             )
         # Observable: the promotion never issued a single write (no CREATE).
         assert not [q for q in g.queries if "CREATE" in q]
+
+
+class TestTitleWaitIsStillStrict:
+    """The generous budget is a deadline, never a licence to pass (#4056)."""
+
+    def test_an_untitled_child_still_fails_the_wait(self, monkeypatch, tmp_path):
+        import time
+
+        mod = sys.modules[__name__]
+        monkeypatch.setattr(mod, "_CHILD_WAIT_S", 0.3)
+        # The title never becomes visible — exactly the shape of a real
+        # regression the gate exists to catch.
+        monkeypatch.setattr(mod, "_ps_command", lambda pid: "")
+        started = time.monotonic()
+        proc = None
+        try:
+            with pytest.raises(AssertionError) as err:
+                proc = _spawn_titled_child("redis-module-fork", str(tmp_path / "x.socket"))
+        finally:
+            # `_spawn_titled_child` only kills the child on its own failure path;
+            # if a mutation makes the wait return, this call succeeds and hands
+            # back a LIVE titled child. Own the kill either way.
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+        elapsed = time.monotonic() - started
+        msg = str(err.value)
+        assert "never took the title" in msg
+        # The message must distinguish a timing miss from a dead child.
+        assert "alive=" in msg and "argv=" in msg
+        # ... and the budget really is the bound (no silent infinite wait).
+        assert elapsed < 10.0, f"wait ignored its budget: {elapsed:.1f}s"
+
+    def test_a_command_line_that_only_mentions_the_title_does_not_pass(
+            self, monkeypatch, tmp_path):
+        """argv[0] fidelity: the title must BE argv[0], not merely appear (#4056).
+
+        A substring match is what lets a helper that leaks the title into its own
+        interpreter command line "titled" — the wait would pass with no exec.
+        """
+        import time
+
+        mod = sys.modules[__name__]
+        monkeypatch.setattr(mod, "_CHILD_WAIT_S", 0.3)
+        def _mentions_the_title(pid: int) -> str:
+            # The leak shape: the interpreter's own command line NAMES the title
+            # as an argument, so the title appears in it without being argv[0].
+            return " ".join(["/usr/bin/python3", "-c", "os.execv(...)",
+                             "redis-module-fork unixsocket:/x"])
+
+        monkeypatch.setattr(mod, "_ps_command", _mentions_the_title)
+        started = time.monotonic()
+        proc = None
+        try:
+            with pytest.raises(AssertionError, match="never took the title"):
+                proc = _spawn_titled_child("redis-module-fork", str(tmp_path / "x.socket"))
+        finally:
+            # See the sibling test: a returning wait must not leave a live child.
+            if proc is not None and proc.poll() is None:
+                proc.kill()
+        assert time.monotonic() - started < 10.0
