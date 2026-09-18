@@ -27,7 +27,12 @@ Design (ponytail):
 - One file, no dependencies outside stdlib + TortoiseSDK
 - CLI via argparse subcommands, one function per §6.3 contract
 - JSON in/out for agent tool consumption
-- Graceful degradation when Tortoise not installed: prints "tortoise unavailable" + exits 0
+- Graceful degradation when Tortoise not installed: prints "tortoise unavailable"
+  (or "not_configured" for a set-up gap) and exits with a DISTINCT code.
+  #3832 (D5) supersedes the original "+ exits 0" clause FOR THE CLI PROBE ONLY:
+  the library still never raises and still returns the status payload, so
+  script callers keep skipping cleanly; the process exit code is the reporting
+  concern of the surface a human or an agent harness actually checks.
 """
 from __future__ import annotations
 
@@ -53,7 +58,9 @@ if str(_TORTOISE_ROOT) not in sys.path:
 # a real unreachable docker:// URI surfaces as redis.exceptions.ConnectionError;
 # + sqlite3.OperationalError for embedded lock contention / DB-state failures).
 # These degrade gracefully — the client's contract is "tortoise unavailable"
-# + exit 0, never a traceback (issue #343).
+# (or "not_configured" for a set-up gap), never a traceback (issue #343).
+# #3832 (D5) supersedes the original "+ exit 0" clause FOR THE CLI PROBE ONLY
+# — see the _STATUS_EXIT_CODES block below; the library still never raises.
 _UNAVAILABLE_ERRORS = (
     ImportError, ValueError, RuntimeError, ConnectionError, OSError, sqlite3.OperationalError,
 )
@@ -68,6 +75,36 @@ _UNAVAILABLE_MESSAGE = (
     "Tortoise SDK unavailable — TORTOISE_DB_URI not set or DB unreachable. "
     "Run `tortoise init` or set the env var."
 )
+
+# The never-configured arm gets its OWN prose (#3832 D5): the payload word is
+# not the only thing that must stop collapsing — a set-up gap must not blame the
+# service, and an outage must not read as a set-up gap. (This is the agent-facing
+# `message` field; the _UNAVAILABLE_MESSAGE above is retained verbatim for the
+# can't-reach-it arm and for every stderr warning.)
+_NOT_CONFIGURED_MESSAGE = (
+    "Tortoise is not set up — the SDK could not be constructed from the current "
+    "configuration. Run `tortoise init` or set TORTOISE_DB_URI."
+)
+
+# ── #3832 (D5): the three machine-readable driver states ────────────────
+#
+# #343's crash fix made EVERY failure report one graceful value, so a client
+# that was never set up (the SDK cannot be constructed from the current
+# configuration) was indistinguishable from one whose daemon is down. D5
+# removes that collapse in the PAYLOAD while leaving the contract alone: the
+# driver still never raises, and a DOWN / unreachable daemon still reports
+# `tortoise_unavailable` — only the never-configured case gains its own word.
+STATUS_OK = "ok"
+STATUS_UNAVAILABLE = "tortoise_unavailable"
+STATUS_NOT_CONFIGURED = "not_configured"
+
+# The status word of the most recent degradation in THIS process (None when the
+# last command was clean). Set by _log_unavailable; reset by main(). Lets the
+# CLI report the degraded exit code without probing a second time — a second
+# probe would re-run the construction failure and emit a SECOND stderr warning
+# for a single command, which an agent parsing one JSON line per run reads as
+# two failures.
+_LAST_DEGRADATION: str | None = None
 
 
 # ── #1562: one SDK per process (module-level lazy singleton) ────────────
@@ -178,7 +215,9 @@ def _get_sdk() -> "TortoiseSDK":  # noqa: F821, UP037
             _SDK_CACHE = TortoiseSDK()  # uses TORTOISE_DB_URI from env
             return _SDK_CACHE
         except _UNAVAILABLE_ERRORS as e:
-            _log_unavailable(reason=e)
+            # Construction failed from the current configuration — the
+            # never-set-up arm (#3832 D5), not an outage.
+            _log_unavailable(reason=e, status=STATUS_NOT_CONFIGURED)
             _SDK_CACHE = None
             return None
 
@@ -302,7 +341,10 @@ def write_claim(content: str, kind: str = "statement", *,
     """Write a single claim Point to the epistemic graph."""
     sdk = _get_sdk()
     if sdk is None:
-        return {"error": "tortoise_unavailable", "id": "", "written": False}
+        # Never set up: the SDK cannot be constructed from the current
+        # configuration — a set-up gap, NOT an outage (#3832 D5). Keeping this
+        # distinct from the down-daemon value is the whole point of the unit.
+        return {"error": STATUS_NOT_CONFIGURED, "id": "", "written": False}
     props: dict = {}
     if authored_by:
         props["authoredBy"] = authored_by
@@ -311,28 +353,45 @@ def write_claim(content: str, kind: str = "statement", *,
     try:
         return sdk.create_point(kind, content, **props)
     except _UNAVAILABLE_ERRORS as e:
+        # Constructed, but the DB is unreachable — a down daemon still reports
+        # `tortoise_unavailable` (#3832: this arm is unchanged on purpose).
         _log_unavailable(reason=e)
-        return {"error": "tortoise_unavailable", "id": "", "written": False}
+        return {"error": STATUS_UNAVAILABLE, "id": "", "written": False}
 
 
 # ── Status ──────────────────────────────────────────────
 
 def status() -> dict:
-    """Report whether Tortoise is available and basic graph stats."""
+    """Report whether Tortoise is available and basic graph stats.
+
+    `status` carries the machine-readable driver state (#3832 D5):
+    `ok` | `tortoise_unavailable` (constructed, can't reach it) |
+    `not_configured` (never set up). Never raises.
+    """
     sdk = _get_sdk()
     if sdk is None:
-        return {"available": False, "message": _UNAVAILABLE_MESSAGE}
+        return {
+            "available": False,
+            "status": STATUS_NOT_CONFIGURED,
+            "message": _NOT_CONFIGURED_MESSAGE,
+        }
     try:
         chain = sdk.summarize_structure()
     except _UNAVAILABLE_ERRORS as e:
         # SDK constructed but the DB is unreachable on first use — report
-        # unavailability instead of masking it as available (#343).
+        # unavailability instead of masking it as available (#343). This is the
+        # CAN'T-REACH-IT arm: it keeps `tortoise_unavailable` (#3832).
         _log_unavailable(reason=e)
-        return {"available": False, "message": _UNAVAILABLE_MESSAGE}
+        return {
+            "available": False,
+            "status": STATUS_UNAVAILABLE,
+            "message": _UNAVAILABLE_MESSAGE,
+        }
     except Exception:
         chain = {"error": "query failed"}
     return {
         "available": True,
+        "status": STATUS_OK,
         "db_uri": os.environ.get("TORTOISE_DB_URI") or os.environ.get("TORTOISE_DB_PATH", "not set"),
         "chain_status": chain,
     }
@@ -372,8 +431,15 @@ def _create_with_retry(sdk, kind: str, content: str, **props) -> dict:
     raise RuntimeError("unreachable")
 
 
-def _log_unavailable(reason: Exception) -> None:
-    """Emit the graceful-degradation warning (JSON on stderr, exit stays 0)."""
+def _log_unavailable(reason: Exception, status: str = STATUS_UNAVAILABLE) -> None:
+    """Emit the graceful-degradation warning and record its state.
+
+    The stderr JSON is unchanged (single line, agent-parseable). `status`
+    records WHICH degraded state this was (#3832 D5) so the CLI can report the
+    matching exit code without a second probe that would log twice.
+    """
+    global _LAST_DEGRADATION
+    _LAST_DEGRADATION = status
     warning = (
         "tortoise unavailable — TORTOISE_DB_URI not set or DB unreachable. "
         "Run `tortoise init` or set the env var "
@@ -385,6 +451,37 @@ def _log_unavailable(reason: Exception) -> None:
 def _to_json(data) -> str:
     """Serialize to JSON for agent consumption."""
     return json.dumps(data, indent=2, default=str)
+
+
+# ── CLI exit codes (#3832 / D5) ─────────────────────────
+#
+# This SUPERSEDES #526's "exit 0 on degradation" clause FOR THE CLI PROBE
+# ONLY. The library contract is unchanged: probes still never raise and still
+# return the status payload, so script callers keep skipping cleanly. The exit
+# code is the reporting concern of the surface a human or an agent harness
+# actually checks, so a degraded probe must stop looking like success there.
+#   0 = ok · 3 = configured but can't reach it · 4 = never set up (#3832)
+#   1 = a query/input that genuinely fails (kept, never widened)
+#   2 = argparse usage errors (argparse owns it)
+_EXIT_OK = 0
+_EXIT_QUERY_FAILED = 1
+_EXIT_UNAVAILABLE = 3
+_EXIT_NOT_CONFIGURED = 4
+
+_STATUS_EXIT_CODES = {
+    STATUS_OK: _EXIT_OK,
+    STATUS_UNAVAILABLE: _EXIT_UNAVAILABLE,
+    STATUS_NOT_CONFIGURED: _EXIT_NOT_CONFIGURED,
+}
+
+
+def _exit_code(word: str | None) -> int:
+    """Map the driver's machine-readable state to the CLI exit code (#3832).
+
+    An unknown word degrades to the `tortoise_unavailable` code — fail loud,
+    never silently report success for a state we do not recognise.
+    """
+    return _STATUS_EXIT_CODES.get(word, _EXIT_UNAVAILABLE)
 
 
 # ── CLI ─────────────────────────────────────────────────
@@ -422,7 +519,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main():
+def main() -> int:
+    global _LAST_DEGRADATION
+    _LAST_DEGRADATION = None  # per-invocation: a prior command's state must not leak
     parser = _build_parser()
     args = parser.parse_args()
 
@@ -443,14 +542,14 @@ def main():
             points = json.loads(args.points_json)
         except json.JSONDecodeError as e:
             print(_to_json({"error": "invalid-json", "detail": str(e)}), file=sys.stderr)
-            sys.exit(1)
+            sys.exit(_EXIT_QUERY_FAILED)
         try:
             results = write_strategy_points(points, kind=args.kind)
         except (KeyError, TypeError, ValueError) as e:
             # Input errors (bad confidence, missing content) surface as JSON
             # + exit 1 — never a raw traceback (agent-facing contract, #343).
             print(_to_json({"error": "invalid-input", "detail": str(e)}), file=sys.stderr)
-            sys.exit(1)
+            sys.exit(_EXIT_QUERY_FAILED)
         print(_to_json({"written": len(results), "results": results}))
 
     elif args.command == "write-claim":
@@ -461,16 +560,26 @@ def main():
             )
         except (KeyError, TypeError, ValueError) as e:
             print(_to_json({"error": "invalid-input", "detail": str(e)}), file=sys.stderr)
-            sys.exit(1)
+            sys.exit(_EXIT_QUERY_FAILED)
         print(_to_json(result))
 
     elif args.command == "status":
-        print(_to_json(status()))
+        result = status()
+        print(_to_json(result))
+        return _exit_code(result.get("status"))
 
     else:
         parser.print_help()
-        sys.exit(1)
+        sys.exit(_EXIT_QUERY_FAILED)
+
+    # The command logs any degradation it hit (exactly once). A second probe
+    # here would emit a SECOND stderr warning for a single command AND could
+    # fail a command that already succeeded (its payload says written: true
+    # while the exit code says unavailable) — so the record is the only source.
+    # No degradation logged means the command completed against a reachable
+    # graph: `ok`. (The `status` command returned above with its own probe.)
+    return _exit_code(_LAST_DEGRADATION or STATUS_OK)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

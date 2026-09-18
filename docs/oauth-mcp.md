@@ -2,10 +2,13 @@
 title: "OAuth 2.1 for Remote MCP Auth (hosted)"
 type: engineering
 subjects.team: epistemic-team
+ownedBy: epistemic-team
+aboutSubjects: tortoise
+aboutObjects: tortoise-oauth-mcp
 domain: platform
 doc_status: live
 created: 2026-08-15
-updated: 2026-09-10
+updated: 2026-09-11
 ---
 
 # OAuth 2.1 for Remote MCP Auth (hosted)
@@ -41,6 +44,21 @@ needs no client_id paste.
 2. Client opens `/oauth/authorize` with `response_type=code`,
    `code_challenge` (PKCE, S256 only), `redirect_uri`, and an optional
    RFC 8707 `resource`.
+
+   **`redirect_uri` matching (#2846).** For **loopback** redirect URIs the port
+   is ignored when matching the registered value (RFC 8252 §7.3 — a native
+   client binds an ephemeral port at request time and cannot know it at
+   registration; Claude Code CLI depends on this). Scheme, host, path, params,
+   query, fragment and userinfo must still match exactly, and every **non-loopback**
+   URI keeps strict exact-string matching. Host is never relaxed:
+   `localhost` and `127.0.0.1` are different hosts. A URI containing a raw
+   backslash is refused at registration **and** at validation: WHATWG ends the
+   authority at a backslash for special schemes but `urlsplit` does not, so the
+   two parsers disagree about the host, and the code is delivered by navigating
+   the browser to the raw string. Control characters are refused too, as defence
+   in depth rather than because they are differential — `urlsplit` strips
+   `\t`/`\r`/`\n` just as a browser does, and a browser refuses, percent-encodes,
+   or (at the input's leading/trailing edge) strips the others.
 3. The branded consent page (D2 — one custom HTML page reusing the
    signup/signin pattern) signs the user in via supabase-js and confirms.
    The browser session JWT is verified server-side with the **existing JWKS
@@ -61,9 +79,9 @@ by an explicit user choice on the consent page for resource-less clients
 | Resource | Team |
 |---|---|
 | `https://api.premiselabs.co/mcp` (or omitted, or the AS origin root `https://api.premiselabs.co`) | the user's **sole** active team; several active teams → the consent page shows a **team chooser** (ChatGPT etc. cannot declare an RFC 8707 resource); 0 active teams → error |
-| `https://api.premiselabs.co/mcp/teams/{team_id}` | that team (must be an active membership, not suspended) |
+| `https://api.premiselabs.co/mcp/organizations/{org_id}` | that team (must be an active membership, not suspended) |
 
-The token row stores the bound `team_id`; the MCP boundary introspects it
+The token row stores the bound `org_id`; the MCP boundary introspects it
 directly (D6 — OAuth tokens are self-sufficient, no `tt_` key minting; the
 session→key bridge stays for dashboard flows).
 
@@ -104,4 +122,215 @@ still rejected (RFC 8707 §2).
 - OAuth is hosted-only: in registry/selfhost mode the functional endpoints
   fail closed with 503; metadata endpoints still serve static JSON.
 - Env knobs: `TORTOISE_OAUTH_ACCESS_TTL` (3600s), `TORTOISE_OAUTH_REFRESH_TTL`
-  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s), `TORTOISE_OAUTH_DCR_PER_HOUR` (20/IP).
+  (30d), `TORTOISE_OAUTH_CODE_TTL` (600s).
+
+## Client identity: CIMD (#2847)
+
+Before this change the only client-identity path was Dynamic Client
+Registration, which Anthropic calls *per fresh connection* on hosted Claude
+surfaces — so the `oauth_clients` table grew with connections, not with
+clients. The authorization-server metadata now also advertises **Client ID
+Metadata Documents** (`draft-ietf-oauth-client-id-metadata-document-00`):
+
+```json
+"client_id_metadata_document_supported": true,
+"token_endpoint_auth_methods_supported": ["none", "client_secret_post"]
+```
+
+Both values are required, not just the flag: Claude selects CIMD **only** when
+the flag and `"none"` are both present (its CIMD client authenticates as a
+public client at the token endpoint). If either is missing it falls back to
+DCR. The flag is read at request time, so `TORTOISE_OAUTH_CIMD=0` reverts the
+metadata and the fetch path in one env change — no deployment.
+
+With CIMD the `client_id` **is** an HTTPS URL that the authorization server
+fetches. It is fetched from `/oauth/authorize` *before* the user is
+authenticated, and — because `resolve_client` is the one resolver shared with
+the token path — also from `/oauth/consent` and from `/oauth/token` (both
+grants) when the presented `client_id` does not resolve in the registry. That
+is a server-side request forgery surface, so the fetch lives in
+`tortoise/cimd.py` behind six controls, each with a test in
+`tests/test_cimd_ssrf.py`:
+
+| # | Control | Implementation |
+|---|---|---|
+| 1 | URL validation | https, absolute, path present, no userinfo, no fragment, no literal *or* percent-encoded `.`/`..` segments, length + control-char caps |
+| 2 | Host validation | every resolved address must be globally routable (no private / loopback / link-local / CGNAT / multicast / reserved / unspecified / NAT64) **and the socket connects to the vetted address** — see below |
+| 3 | Redirects | never followed; a 3xx is a hard failure |
+| 4 | Size + timeout | 64 KiB body cap, 3 s connect/read |
+| 5 | Cache | successes only, 300 s TTL, LRU cap 128; errors and malformed documents are **never** cached (§4.3) |
+| 6 | Rate limit | per-host 60/hr + aggregate 600/hr + live-store cap 256 |
+
+Control 2 is closed against **DNS rebinding** rather than narrowed: a custom
+`httpcore` `NetworkBackend` resolves the host, refuses the whole resolution if
+*any* address is non-public, and then connects the TCP socket to the vetted
+address while TLS SNI and the `Host` header stay on the hostname (`httpcore`
+passes `server_hostname=origin.host` to `start_tls`). A design that resolves,
+validates, and then hands the *name* to the HTTP client leaves a TOCTOU window
+in which the name re-resolves to an internal address between the two; pinning
+removes the window. A proxy is deliberately not honoured (it would move egress
+off the pinned socket), and unix sockets are refused.
+
+Anthropic's rules beyond SSRF are applied too: the document must be
+**self-referential** (its `client_id` must equal the URL it was served from),
+`token_endpoint_auth_method` must be `none` (no shared secret can be
+established), non-loopback `redirect_uris` must be same-origin with the
+`client_id` URL, and the consent screen shows the client_id **host** — never
+the document's self-asserted `client_name`, which would be a phishing surface.
+The host must also be **ASCII (punycode)**: a non-ASCII host would render as a
+homograph on the consent screen (`сlaude.ai` with a Cyrillic с), so the A-label
+form is required. Loopback `redirect_uris` are exempt from the same-origin rule
+(native clients declare an ephemeral port listener against a hosted client_id
+URL; the port-agnostic match is #2846's `_redirect_uri_matches`).
+
+### `oauth_clients` growth bound
+
+| Identity path | Rows created | Bound |
+|---|---|---|
+| DCR (`POST /register`) | one per fresh connection | **O(connections)** — unbounded; gated by the #2866 limiter |
+| CIMD | one per distinct `client_id` URL, deduplicated | **O(distinct URLs)** — a handful for a real client population |
+| Operator-issued / `oauth_anthropic_creds` | one per issued credential | O(1) |
+
+The CIMD row exists only because `oauth_codes` / `oauth_access_tokens` /
+`oauth_refresh_tokens` carry a `REFERENCES oauth_clients(id)` foreign key, and
+it is written **once per distinct URL**: three connections from the same
+`client_id` URL produce exactly one row, however many times they connect —
+which is the whole point of the change, and the property DCR lacks.
+
+⚠️ **The "handful" bound is a property of honest clients, not a hard cap.** CIMD
+changes the growth *driver* from connections to distinct `client_id` URLs; it
+does not itself cap row growth, because anyone can mint a URL. The reachable
+rate is bounded by the **CIMD fetch** limiter above (600/hr aggregate,
+in-process) — **not** by the DCR limiter, which CIMD never touches. Pruning for
+the pre-existing DCR-generated rows remains owned by **#2853 / #1677 (owner
+@daniel-ospina, dated 2026-10-15)**; CIMD adds one row per client
+implementation in normal operation but does add to that backlog under abuse.
+
+Idempotency under concurrency rests on the schema's `id text PRIMARY KEY`
+(`supabase/migrations/0016_oauth.sql`): two simultaneous first authorizations of
+the same URL race, and the loser's insert raises while the row is present, which
+is not an error. Note the in-memory `FakeControlPlane` used by the tests does
+**not** enforce the PK (its `POST` appends), so that claim is verified by
+inspection against the migration rather than by a test.
+
+### Knobs
+
+| Knob | Default | Notes |
+|---|---|---|
+| `TORTOISE_OAUTH_CIMD` | `1` | `0`/`false`/`no`/`off` disables both the metadata flag and the fetch path |
+| `TORTOISE_OAUTH_CIMD_SAME_ORIGIN` | `1` | `0` relaxes "non-loopback `redirect_uris` must be same-origin with the client_id URL" — the single lever if a future client's document legitimately spans hosts |
+
+### Limitations (deliberate)
+
+- The rate-limit and fetch-cache stores are in-process, so the real bound is
+  `limit × running machines` and resets on restart — the same accepted
+  limitation as `_OAUTH_DCR_BUCKETS` (#2866; the shared primitive is #3124).
+- The fetch is **synchronous**, matching this path's existing control-plane
+  style (`cp.query` is a blocking PostgREST call made from the same async
+  handler). Control 4 bounds ONE fetch (3 s connect/read); it does NOT bound the
+  event-loop time the aggregate can consume, and `Dockerfile.hosted` runs a
+  single `uvicorn` process with no `--workers`. Distinct `client_id` URLs share
+  one aggregate budget (600/hr), so a flood of attacker-authored URLs can
+  occupy up to the whole window and starve a legitimate CIMD client to
+  `invalid_client` once the aggregate is spent. Filed as **#3669**; moving the
+  fetch off the event loop (or bounding total occupancy rather than fetch count)
+  is the fix — it is not an SSRF bypass.
+- The `authorize` error path resolves a CIMD client through the same resolver,
+  so an in-document `redirect_uri` is honoured on error responses too — but a
+  *refused* fetch there degrades to a JSON error rather than a redirect, which
+  is the conservative direction.
+- **Revocation:** the CIMD resolver re-reads through the revoked-filtered
+  accessor, so a revoked `client_id` URL is refused at `/oauth/authorize` and
+  `/oauth/consent` exactly as a revoked DCR client is (found in review; the
+  provisioning insert's duplicate re-read used the raw row and would otherwise
+  have resurrected it). Re-adding a revoked CIMD client requires clearing
+  `revoked_at`, same as any other client.
+- **Failure cost:** on a *failed* CIMD resolution the `/oauth/authorize` error
+  path resolves a second time (it needs the client's registered
+  `redirect_uris` to decide between a redirect and a JSON error). The success
+  path pays nothing extra — the cache absorbs the re-resolve — but a failing
+  request can cost two fetch attempts and two rate-limit charges. Conservative
+  (the limiter bites sooner) and bounded by the aggregate; tracked with #3669.
+- `oauth_anthropic_creds` (Anthropic-held credentials) remains the ops-side
+  alternative and is **not** implemented here: it needs no Tortoise code, only
+  an email to `mcp-review@anthropic.com` with a `client_id`/`client_secret`.
+  CIMD is preferred because it is self-serve, works against any authorization
+  server, and needs no vendor round-trip.
+
+## DCR capacity policy (#2866)
+
+`POST /register` (RFC 7591) is an unauthenticated write surface that Anthropic
+calls *per fresh connection*, so it needs a stated, testable capacity policy
+rather than an implicit one. The stated policy, enforced by
+`_check_oauth_dcr_rate_limit` in `tortoise/hosted_api.py`:
+
+| Dimension | Default | Knob |
+|---|---|---|
+| Per bucket (per client IP; per `/64` for IPv6) | 20/hr | `TORTOISE_OAUTH_DCR_PER_HOUR` |
+| Anonymous global aggregate (all non-exempt IPs) | 600/hr | `TORTOISE_OAUTH_DCR_ANON_AGGREGATE_PER_HOUR` |
+| Trusted-CIDR aggregate (per trusted network) | 1200/hr | `TORTOISE_OAUTH_DCR_TRUSTED_PER_HOUR` |
+| Live-bucket store cap | 256 | `TORTOISE_OAUTH_DCR_STORE_CAP` |
+| IPv6 store-key prefix | `/64` | `TORTOISE_OAUTH_DCR_IPV6_PREFIX` |
+| Trusted CIDRs (comma-separated) | `160.79.104.0/21` | `TORTOISE_OAUTH_DCR_TRUSTED_CIDRS` |
+| Sliding window | 3600 s | fixed |
+
+Dimension membership: **trusted ⇒ per-CIDR aggregate only** (no per-key bucket,
+no shared overflow, no anonymous aggregate); **anonymous ⇒ per-key bucket (or
+shared overflow) AND the anonymous global aggregate**. The trusted carve-out is
+evaluated *before* any per-key/overflow path, so the exemption is reachable
+even under an anonymous flood.
+
+Bounded store. A bucket is *active* iff it holds an in-window entry. Reclaim
+pops inactive LRU-head buckets (store order is last-charge), so an active key
+can never be evicted and a tracked key's charge stays O(1) — lookups do not
+scan the store. When the cap is still full, a new key is denied its own bucket
+and charged to one shared overflow bucket (cap = `PER_HOUR`) **and** the
+anonymous aggregate. A 429 charges nothing and inserts nothing (all dimensions
+are evaluated before any insert/charge).
+
+Derived ceiling. The distinct-new-anonymous-key rate is bounded by
+`STORE_CAP + PER_HOUR = 276/hr` at defaults (256 live keys + 20 overflow
+charges). This is a *burst/concurrent-live* bound, derived from the constants
+above — not a bound tested at shipped scale.
+
+The default trusted CIDR `160.79.104.0/21` is Anthropic's published
+outbound/MCP egress range (`platform.claude.com/docs/en/api/ip-addresses`).
+`TORTOISE_OAUTH_DCR_TRUSTED_CIDRS` is read verbatim when set: an **empty value
+means an empty trusted set** (the documented lever to disable the exemption) —
+never the default. A malformed entry is skipped without aborting the list.
+
+Scope vectors. `SCOPES_SUPPORTED` (`["mcp"]`) stays the client-facing default
+and the RFC 9728 PRM document; `SCOPES_ACCEPTED` (`["mcp",
+"offline_access"]`) is what the DCR gate and the RFC 8414 AS metadata accept, so
+Claude's `offline_access` request no longer 400s.
+
+Accepted limitations (see the code comment for the full list):
+
+- The stores are **in-process**, so real capacity is `limit × machines` and
+  resets on restart. Out-of-process limiting is #1677.
+- `oauth_clients` row pruning is **not** part of this policy — #2853 owns it
+  (owner @daniel-ospina, review date 2026-10-15); #3124 tracks the still
+  unbounded shared per-IP bucket primitive.
+- The limiter runs **before body parsing**, so an invalid-JSON or oversized
+  POST still consumes budget (charges ≤ 600/hr anonymous + 1200/hr trusted);
+  row writes are not bounded by it.
+- **Charging doctrine:** the limiter charges at **check** time, not at the
+  terminal outcome (unlike #1719's `defer_charge=True` callers). A
+  control-plane 5xx from `register_client` therefore still consumes the
+  caller's budget, and a post-recovery retry can meet a spurious 429 that
+  masks the underlying failure — the #2051 failure class, which does not
+  currently list DCR. Tracked, not silent.
+- The **trusted aggregate (1200/hr) and anonymous aggregate (600/hr) are not
+  measured against production volume** — the pre-#2866 model was
+  `20/hr × distinct Anthropic egress IPs`, so 1200/hr could be either a large
+  increase or a new single point of failure for the traffic the policy exists
+  to protect. #3134 owns the dated measurement (owner @daniel-ospina,
+  2026-11-15).
+- `/register` also passes the generic `RateLimitMiddleware` (100/min, whose
+  bucket store has no hard key cap — #3124).
+- The exemption rests on the Fly edge overwriting any client-supplied
+  `Fly-Client-IP`; #3126 is the dated re-verification (owner
+  @daniel-ospina, 2026-11-15) and carries the operator recipe.
+- Trusted traffic is not charged to the anonymous aggregate; unrelated
+  protocol gaps found en route are filed as #3125 (`_check_claim_rate_limit`
+  proxy-IP keying) and #3128 (unvalidated authorize/consent scope).

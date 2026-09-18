@@ -101,7 +101,7 @@ def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
 
 # ── Mocked-session tests (welcome page v2 success state) ────────────
 # Intercept the Supabase REST calls the page makes and drive the
-# provisioning flow: auth.getSession → team_memberships poll →
+# provisioning flow: auth.getSession → org_memberships poll →
 # reveal_api_key RPC → success state with harness tabs + artifacts.
 
 
@@ -182,7 +182,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     succeed, and the intercepted navigation still proves the redirect fired.
 
     Teardown deletes the created auth user via the Admin API (best-effort;
-    the FK cascade removes the placeholder team_memberships row)."""
+    the FK cascade removes the placeholder org_memberships row)."""
     signup = {"status": None, "body": ""}
     token = {"status": None}
 
@@ -212,7 +212,6 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     password = f"E2eLivePass-{uuid.uuid4().hex[:8]}!"
     try:
-        page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
         page.goto(
             "https://tortoise.premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000
         )

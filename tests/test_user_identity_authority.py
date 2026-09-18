@@ -365,7 +365,7 @@ def test_audit_rows_written(client, monkeypatch, fake):
 
     import httpx
     audit = []
-    async def _capture_audit(request, team_id, operation, **kw):
+    async def _capture_audit(request, org_id, operation, **kw):
         audit.append((operation, kw.get("detail")))
     monkeypatch.setattr(ha_mod, "_async_audit", _capture_audit)
 
@@ -505,12 +505,12 @@ def test_rate_limit_429(client, monkeypatch):
 
 # ── code-review regression tests (P0 + token-log hygiene) ──────────────────
 def test_oauth_quota_fields_no_nameerror():
-    """#1765 review P0: _quota_fields must not NameError on cp/team_id — the
+    """#1765 review P0: _quota_fields must not NameError on cp/org_id — the
     OAuth MCP auth boundary crashes without this."""
     import tortoise.oauth as oa
     from tests.fake_control_plane import FakeControlPlane
     cp = FakeControlPlane()
-    cp.seed("teams", [{"id": "t-1", "email": "owner@x.com", "tier": "free"}])
+    cp.seed("organizations", [{"id": "t-1", "email": "owner@x.com", "tier": "free"}])
     row = {"id": "t-1", "tier": "free", "email": "owner@x.com"}
     out = oa._quota_fields(cp, row)
     assert out["email"] == "owner@x.com"  # or None via fallback — never NameError

@@ -32,7 +32,7 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 # dict[file, dict[literal, disposition]]. Dispositions:
 #   "prod-coupled"     — the literal is the canonical namespace PROD code
 #                        resolves (quota.py/metering.py/hosted_api.py
-#                        `_make_sdk(namespace="registry")`, team_graph_name).
+#                        `_make_sdk(namespace="registry")`, org_graph_name).
 #                        Renaming would break the seed→resolution coupling
 #                        (VERIFIED this task: the rename makes the test's
 #                        seed land on a verbatim test_* graph while prod
@@ -121,7 +121,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                                   "team-strip-2600": "team-identity",   # :468 — the registry seed, the contextvar and the read-back all key off this team id
                                   "team-sweep-2600": "team-identity"},  # :530/:550 — the sweep fixture's own seeded team id is its graph
     "test_attribution_machine_model.py": {"registry": "prod-coupled"},   # :178 — _make_sdk(namespace="registry") mirrors the hosted_api registry resolve
-    "test_oauth_mcp.py": {"team-free-001": "team-identity"},   # :1342 — the OAuth token's team_id IS the graph namespace the journal assert reads
+    "test_oauth_mcp.py": {"team-free-001": "team-identity"},   # :1342 — the OAuth token's org_id IS the graph namespace the journal assert reads
     # e2e-900 (cycle-4 P2-7 / cycle-5 P1-5): the SHARED non-test team_e2e-900
     # graph of the index suite — routed by REDIRECT DERIVATION, not rename:
     # the SDK maps the literal to team_e2e-900, the redirect derives
@@ -142,14 +142,17 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
 #   "unit-mock"              — MagicMock/param — no live graph.
 #   "endpoint-constrained"   — the WRITE target's name is production-shape by
 #                              CONTRACT (the DR drill endpoint resolves
-#                              team_{team_id} from the registry; the backup
+#                              org_{org_id} from the registry; the backup
 #                              endpoint dumps teams.graph_name). Renaming
 #                              breaks the endpoint contract (VERIFIED this
 #                              task) — declared, never silent.
 ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     "test_dr_endpoints.py": {
-        'f"team_{team_id}"': "endpoint-constrained",  # seed write — drill/backup resolve team_{id}
-        '"team_team_x"': "read-only",                  # post-drill count assert
+        'f"org_{org_id}"': "endpoint-constrained",  # seed write — drill/backup resolve org_{id}
+        # #2823 Supabase-lane sweep seed — the DATA plane stays FalkorDB in
+        # both lanes; the endpoint resolves graph_name from organizations.graph_name
+        'f"org_{tid}"': "endpoint-constrained",  # Supabase-lane sweep seed write
+        '"org_team_x"': "read-only",                  # post-drill count assert
         # #2313 custom-graph drill seeds (per-graph sweep/restore E2E); the
         # server-lane _clean_team_graphs fixture drops team_* graphs per test
         '"team_team_x_g_c1"': "endpoint-constrained",  # custom drill seed write
@@ -159,27 +162,41 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         '"team_team_x_g_dead"': "endpoint-constrained",  # custom drill seed write
     },
     "test_eval_ingest_cache.py": {
-        'f"team_{namespace}"': "endpoint-constrained",  # #2626 regression — own-graph cleanup delete (namespace=icache-<tag>-<uuid>, docker lane)
+        'f"org_{namespace}"': "endpoint-constrained",  # #2626 regression — own-graph cleanup delete (namespace=icache-<tag>-<uuid>, docker lane)
     },
     "test_writer_inventory.py": {
         '"team_myapp"': "endpoint-constrained",  # seed write — backup dumps teams.graph_name
-        # #1903 graph_name-parity sites: raw select_graph(f"team_{team_id}")
+        # #1903 graph_name-parity sites: raw select_graph(f"org_{org_id}")
         # seed + restore probes on the test team's own graph (#2025 merge
         # freshness — main added the literals without routing; gate reds
         # otherwise, #1970 main hygiene).
-        'f"team_{team_id}"': "endpoint-constrained",
+        'f"org_{org_id}"': "endpoint-constrained",
     },
     "test_mcp_server_auth_modes.py": {
         # #2657 TestAskConnectedAssemblyExposure finally-cleanup — deletes the
         # team_selfhost graph seeded by the auth_mode="none" ask fixture.
-        '"team_selfhost"': "endpoint-constrained",  # fixture's own seeded graph delete
+        '"org_selfhost"': "endpoint-constrained",  # fixture's own seeded graph delete
     },
     "test_onboarding_state_split.py": {
-        'f"team_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
-        'f"team_{team_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
+        'f"org_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
+        'f"org_{org_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
     },
     "test_pack_state.py": {
         "legacy_graph": "read-only",  # variable — legacy-graph PackInstall assert
+    },
+    # #3845 fork-slot wedge: the harness builds its OWN dedicated graphs — one
+    # per round (wedge / nofork / retry) — because the defect being reproduced
+    # is a GRAPH.COPY module fork, so the round must own the live destination
+    # the fork child was told to copy. The names are test-constructed, not
+    # production-shape: nothing outside the harness resolves them, and they
+    # must stay byte-for-byte because the reap is keyed to THIS daemon's socket
+    # prefix and each round's assertions read back the same graph it seeded.
+    # Renaming would not break a prod contract, it would silently turn a
+    # wedge round into a no-op against an empty graph.
+    "test_fork_slot_wedge_3845.py": {
+        '"org_wedge"': "test-constructed",    # round 1 — the graph the fork copies
+        '"org_nofork"': "test-constructed",   # rounds 2-3 — control + post-copy read
+        '"org_retry"': "test-constructed",    # round 4 — retry-after-reap target
     },
     "test_navigation.py": {
         "name (MagicMock param)": "unit-mock",
@@ -243,7 +260,7 @@ def _select_graph_literals():
     """Yield (file_name, line_number, arg) for every select_graph(...) call
     whose first argument is a team_/registry_-prefixed literal or f-string in
     a scanned (migrated) test file (review P2: f-strings like
-    f"team_{team_id}" must be caught — the historical write site
+    f"org_{org_id}" must be caught — the historical write site
     test_dr_endpoints L106 is exactly that shape; an un-routed new one reds)."""
     from tests._embedded import TEST_NO_REDIRECT_STEMS
     exempt = _GUARD_EXEMPT_FILES | set(TEST_NO_REDIRECT_STEMS)
@@ -261,7 +278,7 @@ def _select_graph_literals():
             if end < 0 or end > 80:
                 continue  # malformed/opaque — not a static literal
             literal = body[:end]
-            if literal.startswith(("team_", "registry_")):
+            if literal.startswith(("org_", "registry_")):
                 line = src.count("\n", 0, m.start()) + 1
                 rendered = f"{quote}{literal}{quote}"
                 if is_f:
@@ -409,6 +426,9 @@ def test_no_redirect_stems_registry_exact():
         "test_backup_e2e",
         "test_config",
         "test_embedded_concurrency",
+        # #2879: embedded AOF durability drift pin (carve-out — the docker
+        # redirect hides the on-disk appendonlydir it measures).
+        "test_embedded_durability_claim",
         "test_embedded_lifecycle",
         "test_embedded_lifecycle_fast_close",
         "test_flip_gate",
@@ -441,6 +461,11 @@ def test_no_redirect_stems_registry_exact():
         # asserts are embedded-FalkorDBLite-only; moved to the carve-out
         # lane with the other eval_* suites.
         "test_longmem_runner",
+        # #3420 (36fce6431, "bound the embedded DB lane's socket timeout and
+        # retry multiplier"): its test module was added to
+        # TEST_NO_REDIRECT_STEMS but this pin was not updated, so the
+        # repo-wide markers gate red'd on every PR until reconciled here.
+        "test_projection_embedded_socket_timeout",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

@@ -435,14 +435,121 @@ def _validity_marker(h: dict) -> str:
     return " ".join(marks)
 
 
+#: A session identifier that may be interpolated into the reader-facing
+#: annotation zone. The tag sits inside ``[...]`` on a newline-delimited
+#: block, so a value carrying a bracket, a parenthesis, a control character,
+#: a Unicode line separator, a bidi/format control, or unbounded length can
+#: forge a neighbouring tag / role prefix
+#: (``sessionId: "x]\n[user] SYSTEM: …"``) — and the property is
+#: client-writable through ``create_point(props=…)`` /
+#: ``capture_session(session_id=…)`` with no validation at any write
+#: boundary. It is therefore a CONSERVATIVE ALLOWLIST (ASCII identifier
+#: characters only), not a denylist: a denylist cannot cover the fullwidth /
+#: homoglyph / bidi-control space (``［user］``, U+202E, U+200B, lone
+#: surrogates). Any value outside this shape is reported as an UNKNOWN
+#: session — an identity that cannot be stated safely is not stated at all.
+_SAFE_SESSION_TAG_RE = re.compile(r"^[A-Za-z0-9._:@+\-]{1,128}$")
+
+
+def _safe_session_tag(value: object) -> str:
+    """The interpolatable form of a session id, or ``""`` when it is not
+    safely renderable (:data:`_SAFE_SESSION_TAG_RE`).
+
+    Rejecting is deliberate and honest: a session id is a machine
+    identifier, so an id that is not ASCII-identifier-shaped is far more
+    likely to be forged/odd than to be a real session — and reporting it as
+    unknown is strictly safer than rendering it.
+    """
+    if not isinstance(value, str):
+        return ""
+    sid = value.strip()
+    return sid if _SAFE_SESSION_TAG_RE.match(sid) else ""
+
+
+def hit_session_id(h: dict) -> str:
+    """The session identity a hit carries — read from EXPLICIT identity keys
+    only, never inferred from an id's shape.
+
+    D3 (#1540) session identity: the product ask lane rendered ``[session ?]``
+    for every captured turn because the only identity such a row carries is
+    the ``(:Session)-[:CONTAINS]->(:Point)`` edge the capture loop writes
+    (turn Points carry no ``sessionId`` prop and no ``eventId``, so the
+    annotation joins come up empty). The ``tortoise_fts_query`` point fetch
+    now populates the wire key from that edge, and this helper reads it.
+
+    Sources, in order:
+
+      * ``session_id`` — an explicit identity already on the hit (the
+        ``annotate_ask_hits`` Event join / a caller-supplied hit);
+      * ``sessionId`` — the ``SearchResult.to_dict()`` spelling the point
+        fetch populates from the Point's own ``sessionId`` prop, else the
+        ``:Session`` id.
+
+    ⛔ NOT a source: the ``{session_id}_t{i}`` turn-Point id prefix. It is
+    unverifiable — ANY caller id ending in ``_t<digits>`` would be read as a
+    session (``create_point`` accepts explicit ids; the shape of an id is
+    not evidence that a capture happened), and two adversarial review
+    cycles reproduced identity fabrication from exactly that inference. Per
+    the D3 contract, an identity that cannot be DERIVED is left absent
+    rather than guessed. An orphaned turn with no ``:Session`` edge is
+    therefore honestly unnamed.
+
+    Every source is filtered through :func:`_safe_session_tag`, so a value
+    that would break out of the bracketed annotation zone is reported as
+    absent. Absent everywhere ⇒ ``""``.
+    """
+    for key in ("session_id", "sessionId"):
+        sid = _safe_session_tag(h.get(key))
+        if sid:
+            return sid
+    return ""
+
+
+def _distinct_session_ids(hits: list[dict]) -> list[str]:
+    """The DISTINCT derived session ids of a hit list, in list order (D3).
+
+    ``hit_session_id`` per hit, blanks dropped, first-occurrence order
+    preserved (the list's own order — the ask lane's post-dedup/post-boost
+    ranking order, NOT raw RRF once ``apply_evidence_boost``/rerank ran).
+    A hit whose identity cannot be derived
+    contributes nothing — the field never guesses. Built from the SAME list
+    the evidence is rendered from, in the same order, so the field and the
+    evidence cover the same hits; the TAG they show can still differ when a
+    hit carries ``lme_session_index`` (the eval lane's index tag wins there —
+    see ``_render_block``).
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for h in hits:
+        sid = hit_session_id(h)
+        if sid and sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
+
+
 def _render_block(h: dict) -> str:
     """One hit's rendered context block — the SINGLE implementation shared
     by ``render_context`` and the token budget (factored out of
     ``render_context``, R1 #1540). ``question_date`` never appears here: it
     only prepends the ``Current Date:`` header once in ``render_context``.
-    Per-hit dates come from the hit's own ``session_date``."""
-    idx = h.get("lme_session_index")
-    prefix = f"[session {idx}]" if idx is not None and idx >= 0 else "[session ?]"
+    Per-hit dates come from the hit's own ``session_date``.
+
+    Session tag precedence (D3 identity): a hit that HAS the
+    ``lme_session_index`` key keeps its historical rendering — ``>= 0`` is
+    ``[session N]``, anything else (including an explicit ``None``, the
+    connected-assembly spine's spelling) is ``[session ?]`` — so the eval /
+    assembly lanes are byte-identical. Only a hit with the key ABSENT (the
+    product ask/search case) is tagged with the derived session id
+    (:func:`hit_session_id`), falling back to ``[session ?]`` when the
+    identity is unknown."""
+    if "lme_session_index" in h:
+        idx = h["lme_session_index"]
+        prefix = (f"[session {idx}]"
+                  if idx is not None and idx >= 0 else "[session ?]")
+    else:
+        sid = hit_session_id(h)
+        prefix = f"[session {sid}]" if sid else "[session ?]"
     sdate = h.get("session_date")
     if sdate:
         prefix = f"{prefix} (session date {sdate})"
@@ -466,6 +573,27 @@ def _render_block(h: dict) -> str:
         # extra wrap.
         prefix = f"{prefix} {marker}"
     return f"{prefix} {h.get('content', '')}"
+
+
+def _has_claim_text(h: dict) -> bool:
+    """True when a hit renders reader-visible CLAIM text (#2978).
+
+    ``_render_block`` contributes exactly TWO claim-text sources beyond the
+    ``[session N]`` / session-date / speaker decorations: the hit's
+    ``content`` and the supersession/validity marker text
+    (``_validity_marker`` — e.g. ``[SUPERSEDED BY: <snippet>]``, whose text
+    comes from ``superseded_by.content_snippet`` / ``supersedes`` and is
+    INDEPENDENT of ``content``). A hit with neither source renders
+    decorations only and carries nothing for the reader. Gating the #2978
+    skip on this predicate (not on ``content`` alone) keeps it aligned with
+    what actually reaches the reader.
+
+    Keep in sync with ``_render_block``: any NEW claim-text source added
+    there must be reflected here, or the skip would silently drop it.
+    """
+    if str(h.get("content") or "").strip():
+        return True
+    return bool(_validity_marker(h))
 
 
 def assemble_context(
@@ -507,6 +635,21 @@ def assemble_context(
     estimate_tokens(render_context(...))`` holds exactly (no per-block
     ``int()`` drift). Oversized hits are SKIPPED (continue), never starving
     the rest of the context.
+
+    Claim-text-less hits (#2978) consume NO item slot and NO budget. A hit
+    that renders ONLY decorations (``[session N]`` / session date / speaker
+    — no ``content`` AND no supersession/validity marker text) carries
+    nothing for the reader — e.g. an epistemic operator node:
+    ``is_operator=true``, ``op_type`` IMPL/NAND, which ``create_operator``
+    writes with no ``content`` property. Admitting such a hit burned an item
+    slot and left the reader window mostly empty (measured 61.3% of slots);
+    it is now SKIPPED like an oversized hit (skip-not-starve), so later real
+    hits are admitted up to the cap. The decision is
+    :func:`_has_claim_text`, NOT ``content`` alone: a content-less hit that
+    still carries a supersession snippet DOES render claim text and is
+    KEPT. Skipped hits are absent from the returned list, so
+    ``render_context`` never renders them and the accounting invariant
+    above is unaffected.
     """
     if max_context_tokens < 1:
         raise ValueError("max_context_tokens must be >= 1, got "
@@ -532,6 +675,16 @@ def assemble_context(
     for h in pool:
         if len(selected) >= item_bound:
             break
+        # #2978: a hit rendering ONLY decorations (no content AND no
+        # supersession/validity marker text) carries nothing for the reader,
+        # so it must not consume an item slot or budget. Skipping it leaves
+        # the RELATIVE ORDER of the admitted real hits unchanged, but frees
+        # BOTH the empty hit's item slot AND its words/bytes budget, so
+        # later real hits may additionally be ADMITTED up to the cap (the
+        # admitted set can grow, not just shift). Same skip-not-starve
+        # semantics as the oversized-hit path below.
+        if not _has_claim_text(h):
+            continue
         block = _render_block(h)
         cost = len(block.split())
         if int((words + cost) * 1.1) > max_context_tokens:

@@ -11,8 +11,10 @@ Covers:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
+import threading
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -26,26 +28,35 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 from tortoise.hosted_api import (  # noqa: I001
     app,
-    get_current_team,
+    get_current_org,
     get_current_user,
     ForwardedProtoMiddleware,
 )
 from tortoise.sdk import TortoiseSDK
 
+# The autouse ``_reset_health_probe`` fixture replaces
+# ``hosted_api._health_probe_interval`` with a near-infinite lambda for EVERY
+# test in this module (so the background refresher cannot overwrite a test's
+# patched verdict). Clamp assertions must use the REAL resolver, captured here
+# before any fixture runs.
+import tortoise.hosted_api as _ha_mod
+
+_REAL_HEALTH_PROBE_INTERVAL = _ha_mod._health_probe_interval
+
 
 # ── Test constants ───────────────────────────────────────────────────────────
 
-TEST_TEAM_ID = "team-001"
-# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+TEST_ORG_ID = "team-001"
+# #1719 (Task 3): org_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible
 # (FakeControlPlane fidelity raises HTTP 400 on them).
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
 _U2 = "9f2c1a40-0000-4a00-8000-000000000002"
 _U9 = "9f2c1a40-0000-4a00-8000-000000000009"
 _U_INTRUDER = "9f2c1a40-0000-4a00-8000-00000000000d"
-  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
+  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while org_graph_name resolves team_team-001 (backup dump divergence)
 TEST_TEAM = {
-    "team_id": TEST_TEAM_ID,
+    "org_id": TEST_ORG_ID,
     "key_id": "test-key-001",
     "tier": "free",
     # C1/C2 tenancy fields (the resolution dict a tt_ legacy key would
@@ -55,7 +66,7 @@ TEST_TEAM = {
     "legacy_full_access": True,
     "delegation_depth": None,
     "created_by_key_id": None,
-    # get_current_team always resolves the full limits dict — test stubs must
+    # get_current_org always resolves the full limits dict — test stubs must
     # match, or fail-closed quota enforcement 500s instead of passing (#310).
     "max_users": 1,
     "max_graphs": 1,
@@ -70,7 +81,7 @@ TEST_TEAM = {
 
 def _count_about_edges(point_id: str, object_id: str) -> int:
     import tortoise.hosted_api as ha
-    sdk = ha._make_sdk(namespace=TEST_TEAM["team_id"])
+    sdk = ha._make_sdk(namespace=TEST_TEAM["org_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (p:Point {id:$pid})-[:aboutObject]->(o {id:$oid}) RETURN count(*)",
@@ -81,7 +92,7 @@ def _count_about_edges(point_id: str, object_id: str) -> int:
 
 def _count_stub_nodes() -> int:
     import tortoise.hosted_api as ha
-    sdk = ha._make_sdk(namespace=TEST_TEAM["team_id"])
+    sdk = ha._make_sdk(namespace=TEST_TEAM["org_id"])
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (n) WHERE (n:Point OR n:Subject OR n:Operator) "
@@ -179,7 +190,7 @@ def client():
         db_path = os.path.join(tmpdir, "test.db")
 
         # Override auth — skip API key lookup
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
 
         # Patch SDK to use temp DB file
         _orig_init = _patch_tortoise_sdk_init(db_path)
@@ -195,15 +206,15 @@ def client():
         # session-capture tests run deterministically.
         ha_mod._make_sdk(namespace="registry")._get_registry().query(
             "CREATE (t:Team {id:$id, onboarding_state:$st})",
-            params={"id": TEST_TEAM_ID, "st": "{}"},
+            params={"id": TEST_ORG_ID, "st": "{}"},
         )
         state = ha_mod._update_onboarding_state(
-            TEST_TEAM_ID, session_recording=True)
+            TEST_ORG_ID, session_recording=True)
         # #1950: self-verify the consent seed — if the write silently no-ops,
         # every session-capture test 403s downstream; fail loud HERE with the
         # actual persisted state instead.
         assert state.get("session_recording") is True, state
-        assert ha_mod._get_onboarding_state(TEST_TEAM_ID).get(
+        assert ha_mod._get_onboarding_state(TEST_ORG_ID).get(
             "session_recording") is True, \
             "consent seed not visible to the gate read"
 
@@ -253,6 +264,54 @@ def llm_extraction_provider(monkeypatch):
 # Health Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
 
+@pytest.fixture(autouse=True)
+def _reset_health_probe(monkeypatch):
+    """#2850: /health and /health/ready share a module-level single-flight probe
+    coordinator. The hang tests below deliberately wedge it; without this
+    reset the wedge would leak into every later test in this file.
+
+    The background refresher is also stretched to a near-infinite interval for
+    the module: it would otherwise re-probe behind a test's back and overwrite
+    a deliberately patched verdict. The refresher's own behavior is covered by
+    ``test_health_probe_loop_refreshes_the_coordinator``.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 3600.0)
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    # Round-2 review: reset the process-global SDK CACHE too, not just the
+    # coordinators. A probe worker left over from a previous test can rebuild
+    # ``_probe_sdk`` with the previous env key after this fixture has run, which
+    # is what made ``test_probe_connection_is_reused_not_rebuilt_per_call``
+    # count 2 builds (green in the docker lane, red in the embedded lane).
+    ha_mod._probe_sdk_reset()
+    yield
+    ha_mod._HEALTH_PROBE.reset()
+    ha_mod._READY_PROBE.reset()
+    ha_mod._CONTROL_PLANE_PROBE.reset()
+    ha_mod._probe_sdk_reset()
+
+
+def _force_probe_refresh(ha_mod, timeout: float = 10.0) -> dict:
+    """Make /health's in-memory verdict deterministic for a test (#2850).
+
+    ``/health`` is now PURE IN-MEMORY — it never runs the probe itself, so
+    monkeypatching ``_probe_db`` and immediately GETting ``/health`` would race
+    the background refresher (and could report a verdict produced by the
+    unpatched probe). Reset the single-flight coordinator and run it once
+    synchronously so the next ``/health`` reports exactly this result.
+
+    This is the seam that replaced request-driven probing: the request path no
+    longer does I/O, so a test that wants a specific DB verdict has to state it
+    (patch ``_probe_db``) and then force the refresh.
+    """
+    probe = ha_mod._HEALTH_PROBE
+    probe.reset()
+    return probe.wait(timeout)
+
+
 class TestHealthEndpoints:
     """GET /health and GET /health/security."""
 
@@ -260,12 +319,38 @@ class TestHealthEndpoints:
         """Liveness — process up. Deep DB check (#1384) rides along in `db`
         but never gates liveness (the DB gate is /health/ready, #338 follow-up
         — a DB-coupled /health caused cold-start deploy failures)."""
+        import tortoise.hosted_api as ha_mod
+
+        # #2850: /health reads memory only; force the refresher's first
+        # completed verdict so the assertion is not racing it.
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "ok"
         assert body["db"]["ok"] is True
         assert isinstance(body["db"]["latency_ms"], (int, float))
+
+    def test_health_probe_passes_no_setup_allowance(self, client, monkeypatch):
+        """#3143 review: the hosted liveness gate must keep the tight shared
+        budget. ``_probe_db()`` is the hosted leg of the platform `/health`
+        direct callers and is NOT covered by the selfhost pin; a regression
+        threading the MCP cold-start allowance into it would silently turn the
+        documented ~1.5s bound (#1384) into setup + 1.5s."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as mon
+
+        seen = {}
+        real_probe_db = mon.probe_db
+
+        def _spy_probe_db(sdk, setup_timeout=None):
+            seen["setup_timeout"] = setup_timeout
+            return real_probe_db(sdk, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
+        result = ha_mod._probe_db()
+        assert seen["setup_timeout"] is None, seen
+        assert "ok" in result
 
     def test_health_degraded_when_db_down(self, client, monkeypatch):
         """#1384: a stopped FalkorDB flips /health to degraded — 200, never
@@ -277,6 +362,7 @@ class TestHealthEndpoints:
             lambda: {"ok": False, "latency_ms": 12.3,
                      "error": "ConnectionError: NXDOMAIN"},
         )
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
@@ -292,6 +378,7 @@ class TestHealthEndpoints:
             raise RuntimeError("probe exploded")
 
         monkeypatch.setattr(ha_mod, "_probe_db", _boom)
+        _force_probe_refresh(ha_mod)
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
@@ -305,6 +392,316 @@ class TestHealthEndpoints:
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "db": "connected"}
 
+    # ── #2850 P0: liveness must survive a black-holed FalkorDB ──────────
+
+    def test_health_returns_bounded_when_probe_hangs_forever(self, client, monkeypatch):
+        """The 2026-09-10 incident: a stalled FalkorDB made Fly's http_check
+        (15s) fail while the process was still serving. A probe that NEVER
+        returns must not stop /health from answering — the handler reads the
+        hard-bounded coordinator, never the shared asyncio default executor."""
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        started = threading.Event()
+
+        def _hang():
+            started.set()
+            time.sleep(600)  # black-holed connect: never returns
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._HEALTH_PROBE, "_timeout", 0.3)
+        # #2850: /health reads memory only — start the (hanging) probe through
+        # the coordinator so the assertion races nothing.
+        _force_probe_refresh(ha_mod, timeout=0.1)
+
+        start = time.monotonic()
+        r = client.get("/health")
+        elapsed = time.monotonic() - start
+
+        assert r.status_code == 200
+        assert elapsed < 5.0, f"/health took {elapsed:.2f}s with a hung probe"
+        assert started.is_set()
+        body = r.json()
+        assert body["status"] == "degraded"
+        assert body["db"]["ok"] is False
+        # The stall is observable — not a fossil "ok".
+        assert body["probe"]["in_flight"] is True
+
+    def test_health_repeated_hung_checks_do_not_accumulate(self, client, monkeypatch):
+        """A 15s-interval checker hitting a wedged DB must not spawn a probe
+        thread per check: concurrent/repeated reads coalesce onto the one
+        in-flight probe."""
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        calls = {"n": 0}
+
+        def _hang():
+            calls["n"] += 1
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._HEALTH_PROBE, "_timeout", 0.05)
+        _force_probe_refresh(ha_mod, timeout=0.05)
+
+        before = sum(1 for t in threading.enumerate() if t.is_alive())
+        for _ in range(6):
+            r = client.get("/health")
+            assert r.status_code == 200
+        after = sum(1 for t in threading.enumerate() if t.is_alive())
+
+        assert calls["n"] == 1, f"probe ran {calls['n']}x — reads were not coalesced"
+        assert after - before <= 1, f"{after - before} probe threads accumulated"
+
+    def test_health_ready_fails_closed_when_probe_hangs(self, client, monkeypatch):
+        """Readiness stays fail-closed (503) — but DROPPING the old unbounded
+        on-loop ``_get_proj().g.query()`` means a hung DB can no longer block
+        the event loop for every other request. Readiness reads its OWN
+        coordinator (``_READY_PROBE``), so it probes LIVE rather than joining
+        the liveness refresher's in-flight probe."""
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        def _hang():
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+
+        r = client.get("/health/ready")
+        assert r.status_code == 503
+
+    def test_health_ready_never_serves_a_pre_outage_verdict(self, client, monkeypatch):
+        """#2850 review P1: readiness must not answer 200 from a completed probe.
+
+        Readiness records ``{ok: True}``; the plane then dies; the next probe
+        cannot finish before ``run()``'s deadline. Pre-fix, ``run()`` returned
+        ``_view_locked()`` — the stale completed verdict, still inside the 30s
+        ``stale_after`` window — so /health/ready answered 200 "connected" for
+        ~5s while the plane was dead (which matters because deploy-hosted.yml
+        asserts readiness LAST). The autouse ``_reset_health_probe`` fixture
+        resets the coordinators before every test, which is why priming has to
+        happen INSIDE the test and the old suite missed this.
+        """
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        # Prime the readiness coordinator with a completed OK.
+        monkeypatch.setattr(
+            ha_mod, "_probe_db",
+            lambda: {"ok": True, "latency_ms": 0.5, "error": None})
+        ha_mod._READY_PROBE.reset()
+        assert ha_mod._READY_PROBE.wait(timeout=2.0)["ok"] is True
+
+        # The plane dies and the probe wedges; the read budget expires.
+        def _hang():
+            time.sleep(600)
+            return {"ok": True, "latency_ms": 0.0, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _hang)
+        monkeypatch.setattr(ha_mod._READY_PROBE, "_timeout", 0.2)
+
+        r = client.get("/health/ready")
+        assert r.status_code == 503, (
+            "readiness answered from a completed pre-outage probe")
+
+    def test_in_flight_gauge_tracks_requests_and_releases(self):
+        """#2850 review P0: the watchdog's idle gate is fed by this gauge.
+
+        Two halves: a request is counted WHILE it is in flight (so a loop
+        blocked serving it is never mistaken for a wedge), and the slot is
+        released exactly once, including on an exception — a leaked count
+        would permanently disarm the kill.
+        """
+        import asyncio
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        seen = {}
+
+        async def _inner(scope, receive, send):
+            seen["during"] = monitoring.workload_in_flight()
+
+        async def _drive():
+            await ha_mod.InFlightMiddleware(_inner)({"type": "http"}, None, None)
+
+        assert monitoring.workload_in_flight() == 0
+        asyncio.run(_drive())
+        assert seen["during"] == 1
+        assert monitoring.workload_in_flight() == 0
+
+        async def _boom(scope, receive, send):
+            raise RuntimeError("handler exploded")
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(
+                ha_mod.InFlightMiddleware(_boom)({"type": "http"}, None, None))
+        assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
+
+    def test_in_flight_gauge_is_wired_into_the_real_app(self, client, monkeypatch):
+        """#2850 round-2 review: the class-level test above proves
+        ``InFlightMiddleware`` WORKS, not that it is INSTALLED. Deleting
+        ``app.add_middleware(InFlightMiddleware)`` would leave every other test
+        green while the watchdog's idle predicate silently read 0 forever — and
+        the kill would then fire mid-request, which is the P0 this whole issue
+        exists to remove.
+        """
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as monitoring
+
+        # (a) registered, and OUTERMOST. Starlette's add_middleware INSERTS at
+        # index 0, so the LAST-registered middleware is first in the list.
+        classes = [m.cls for m in ha_mod.app.user_middleware]
+        assert ha_mod.InFlightMiddleware in classes, (
+            "InFlightMiddleware is not installed — the idle gate always reads 0")
+        assert classes[0] is ha_mod.InFlightMiddleware, (
+            f"the gauge must wrap everything (registered last): {classes!r}")
+
+        # (b) a REAL request through the module-level app: the gauge is >= 1
+        # WHILE the handler runs, and released afterwards. ``/health`` is read
+        # from memory only, so spying on this seam does not perturb timing.
+        seen = {}
+        real = ha_mod.loop_heartbeat_info
+
+        def _spy():
+            seen["during"] = monitoring.workload_in_flight()
+            return real()
+
+        monkeypatch.setattr(ha_mod, "loop_heartbeat_info", _spy)
+        assert monitoring.workload_in_flight() == 0
+        r = client.get("/health")
+        assert r.status_code == 200
+        assert seen.get("during", 0) >= 1, (
+            "the wired gauge did not count a real request in flight")
+        assert monitoring.workload_in_flight() == 0, "in-flight slot leaked"
+
+    def test_health_probe_interval_is_clamped_below_the_stale_window(self, monkeypatch):
+        """A refresh period above PROBE_STALE_AFTER reports a HEALTHY DB as
+        degraded and then fails the deploy gate (review P2)."""
+        import tortoise.hosted_api as ha_mod
+        from tortoise.monitoring import PROBE_STALE_AFTER
+
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "3600")
+        assert _REAL_HEALTH_PROBE_INTERVAL() <= PROBE_STALE_AFTER / 2.0
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "5")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == 5.0
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "-3")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == ha_mod.HEALTH_PROBE_REFRESH_S
+
+    def test_non_finite_health_probe_interval_falls_back_to_default(
+            self, monkeypatch, caplog):
+        """Round-2 review P2: ``float()`` accepts ``nan``/``inf`` and neither
+        is caught by ``v <= 0`` (``nan <= 0`` is False) nor by the ``v > cap``
+        clamp (``nan > cap`` is False). A nan period flows into
+        ``asyncio.sleep(nan)``, which returns almost immediately — the refresher
+        becomes a busy loop hammering the DB probe and the event loop; an
+        infinite period means the probe never refreshes, so a healthy DB reads
+        stale forever. Both must fall back to the default, at ERROR.
+        """
+        import logging
+
+        import tortoise.hosted_api as ha_mod
+
+        for raw in ("nan", "NaN", "inf", "Infinity", "-inf"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
+            with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
+                period = _REAL_HEALTH_PROBE_INTERVAL()
+            assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
+            assert any(r.levelno >= logging.ERROR for r in caplog.records), raw
+
+    def test_sub_floor_health_probe_interval_falls_back_to_default(
+            self, monkeypatch, caplog):
+        """Round-3 review P2: a finite but tiny period busy-loops the probe
+        exactly as ``nan`` did — ``1e-9`` is ~50 generations/s, each spawning a
+        daemon thread and issuing a DB round trip. The upper clamp was
+        one-sided; a floor is required too."""
+        import logging
+
+        import tortoise.hosted_api as ha_mod
+
+        for raw in ("1e-9", "0.001", "0.49"):
+            caplog.clear()
+            monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", raw)
+            with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+                period = _REAL_HEALTH_PROBE_INTERVAL()
+            assert period == ha_mod.HEALTH_PROBE_REFRESH_S, (raw, period)
+            assert any(r.levelno >= logging.WARNING for r in caplog.records), raw
+        # At/above the floor is honoured.
+        monkeypatch.setenv("TORTOISE_HEALTH_PROBE_INTERVAL", "0.5")
+        assert _REAL_HEALTH_PROBE_INTERVAL() == 0.5
+
+    def test_probe_connection_is_reused_not_rebuilt_per_call(self, monkeypatch):
+        """The probe must own ONE bounded DB connection, not build+leak a
+        fresh SDK on every check (the connection half of the #2850 leak).
+
+        Round-2 review: the old form asserted ``calls["n"] == 1`` and raced a
+        PROCESS-GLOBAL SDK cache — a leftover probe thread from a previous test
+        can rebuild ``_probe_sdk`` (computing the PREVIOUS env key before our
+        ``monkeypatch.setenv`` lands) after our reset, making the count 2 (green
+        in the docker lane, red in the embedded one). ``HealthProbe.reset()``
+        nulls its ``_worker`` handle, so the leftover thread cannot be joined.
+        Fixed by counting only the builds made on THIS test's thread, and by
+        pinning ``_probe_sdk_key`` so no thread can compute a mismatching key.
+        The autouse fixture also resets the SDK cache, not just the probe
+        coordinators.
+        """
+        from unittest.mock import MagicMock
+
+        import tortoise.hosted_api as ha_mod
+
+        own_thread = threading.current_thread().name
+        calls = {"all": 0, "own": 0}
+
+        def _factory(*, namespace=None, graph_name=None):
+            # Only builds made by THIS test's two ``_probe_db()`` calls count.
+            # Leftover ``tortoise-health-probe`` threads from earlier tests
+            # share the process-global cache (and cannot be joined —
+            # ``HealthProbe.reset()`` drops its ``_worker`` handle), so
+            # counting them is what made the old assertion flaky.
+            calls["all"] += 1
+            if threading.current_thread().name == own_thread:
+                calls["own"] += 1
+            sdk = MagicMock()
+            sdk._get_proj.return_value.g.query.return_value = MagicMock()
+            return sdk
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _factory)
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/tortoise-probe-reuse-test.db")
+        # Also pin the cache key so a leftover thread cannot churn the cache
+        # with a pre-setenv key while we hold the two handles we compare.
+        monkeypatch.setattr(ha_mod, "_probe_sdk_key",
+                            lambda: ("pinned", "reuse-test"))
+
+        ha_mod._probe_sdk_reset()
+        try:
+            first = ha_mod._probe_db()
+            first_sdk = ha_mod._PROBE_SDK_CACHE["sdk"]
+            assert first_sdk is not None
+            second = ha_mod._probe_db()
+            second_sdk = ha_mod._PROBE_SDK_CACHE["sdk"]
+        finally:
+            ha_mod._probe_sdk_reset()
+
+        assert first["ok"] is True and second["ok"] is True
+        assert first_sdk is second_sdk, (
+            "the probe rebuilt its connection between two consecutive checks")
+        # Our TWO checks may build at most ONE SDK (a per-call rebuild needs 2).
+        # Zero is possible when a still-running probe from an earlier test won
+        # the race and warmed the cache first — that does not weaken the point.
+        assert calls["own"] <= 1, (
+            f"the two checks built the SDK {calls['own']}x — not reused")
+
     def test_health_security_returns_posture(self, client):
         r = client.get("/health/security")
         assert r.status_code == 200
@@ -314,6 +711,223 @@ class TestHealthEndpoints:
         assert body["hashing"] == "pbkdf2_hmac_sha256"
         assert "api_auth_enforced" in body
         assert isinstance(body["api_auth_enforced"], bool)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #2850 / #2953 — liveness/readiness decouple + bind-before-boot-sweeps
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _free_tcp_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+class TestLivenessDecouple:
+    """#2850: the "am I alive?" answer must not share fate with the work."""
+
+    def test_health_returns_instantly_with_a_saturated_shared_executor(self, monkeypatch):
+        """THE regression test for the 2026-09-10 outage.
+
+        ``/health`` used to be ``await asyncio.to_thread(_probe_db)`` — a
+        submission to the event loop's DEFAULT ThreadPoolExecutor, shared with
+        ~89 other ``to_thread`` call sites whose queue wait has NO timeout.
+        Fill that pool with blocked DB calls and the pre-fix handler could not
+        answer at all. The handler must now return from pure in-memory state,
+        so a saturated pool is irrelevant to it.
+        """
+        import asyncio
+        import concurrent.futures
+        import threading
+        import time
+
+        import tortoise.hosted_api as ha_mod
+
+        async def _run() -> tuple[float, dict]:
+            loop = asyncio.get_running_loop()
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            loop.set_default_executor(pool)
+            gate = threading.Event()
+            # 8 submissions onto a 1-worker pool: 1 runs, 7 queue forever.
+            for _ in range(8):
+                loop.run_in_executor(None, gate.wait, 30)
+            await asyncio.sleep(0.05)
+            started = time.monotonic()
+            try:
+                body = await ha_mod.health()
+            finally:
+                gate.set()
+                pool.shutdown(wait=False)
+            return time.monotonic() - started, body
+
+        elapsed, body = asyncio.run(_run())
+        assert elapsed < 0.5, (
+            f"/health took {elapsed:.2f}s behind a saturated shared executor — "
+            "the handler is still doing a thread hand-off")
+        assert body["status"] in ("ok", "degraded")
+        assert "db" in body
+
+    def test_health_probe_loop_refreshes_the_coordinator(self, monkeypatch):
+        """The refresher is what keeps /health's memory honest — if it dies or
+        stops, the DB verdict freezes (and goes stale → degraded). Run it for a
+        couple of short cycles and prove it lands a fresh verdict with no
+        request at all."""
+        import asyncio
+        import contextlib
+
+        import tortoise.hosted_api as ha_mod
+
+        calls = {"n": 0}
+
+        def _probe():
+            calls["n"] += 1
+            return {"ok": True, "latency_ms": 0.5, "error": None}
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _probe)
+        monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 0.05)
+        ha_mod._HEALTH_PROBE.reset()
+
+        async def _run():
+            task = asyncio.get_running_loop().create_task(ha_mod._health_probe_loop())
+            await asyncio.sleep(0.4)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(_run())
+        assert calls["n"] >= 1, "the refresher never probed"
+        view = ha_mod._HEALTH_PROBE.snapshot()
+        assert view["ok"] is True, view
+
+    def test_health_probe_refresh_budget_tracks_the_resolved_interval(
+            self, monkeypatch):
+        """Round-4 review P2: the ``/health`` self-heal gate must equal the
+        refresher's RESOLVED period, not the hardcoded ``HEALTH_PROBE_REFRESH_S``
+        (10s). With an operator period in 0.5-15s, a frozen 10s gate let
+        ``/health`` start a duplicate DB probe once per cycle while the
+        refresher was still healthy."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_health_probe_interval", lambda: 12.5)
+        assert ha_mod._HEALTH_PROBE._refresh_budget_now() == 12.5, (
+            "the /health self-heal gate is frozen at the hardcoded default, "
+            "not the resolved refresher period")
+
+    def test_health_shape_is_backwards_compatible(self, client):
+        """The dashboard and the deploy workflow read this shape; the #2850
+        fields are additive and status stays 200 either way."""
+        r = client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body) >= {"status", "db"}
+        assert body["status"] in ("ok", "degraded")
+        assert set(body["db"]) >= {"ok", "latency_ms", "error"}
+        assert "loop_stale_ms" in body
+
+    def test_health_reports_a_live_loop_heartbeat(self, client):
+        """The lifespan arms the heartbeat, so a serving app reports a fresh
+        loop (the whole point of the /healthz signal)."""
+        import tortoise.monitoring as monitoring
+
+        body = client.get("/health").json()
+        assert body["loop_stale_ms"] is not None
+        assert body["loop_stale_ms"] < monitoring.LOOP_STALE_AFTER * 1000
+
+    def test_lifespan_starts_the_dedicated_healthz_listener(self, client):
+        """#2850 item 4: the app start-up must bind the dedicated port, and it
+        must answer 200 while the loop is healthy."""
+        import urllib.request
+
+        import tortoise.hosted_api as ha_mod
+
+        server = getattr(ha_mod.app.state, "_healthz_server", None)
+        assert server is not None, "lifespan did not start the /healthz listener"
+        port = server.server_address[1]
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as r:
+            assert r.status == 200
+            payload = r.read()
+        assert b"\"status\": \"ok\"" in payload or b'"status":"ok"' in payload
+
+
+class TestBootOrder:
+    """#2953: uvicorn binds the listening socket only AFTER
+    ``lifespan.startup()`` returns, so nothing in the startup half may await
+    real work — the boot sweeps used to."""
+
+    def test_port_accepts_connections_while_boot_sweeps_block(self, monkeypatch):
+        """The regression test for #2953.
+
+        Patch the event sweep to block on an event. Pre-fix, ``_lifespan``
+        awaited it during startup, so ``loop.create_server`` was never reached
+        and the machine accepted NOTHING for the sweep's whole duration (every
+        deploy and restart). Post-fix the sweep runs as a background task: the
+        socket is already bound while the sweep is still blocked inside.
+        """
+        import socket
+        import threading
+        import time
+
+        import uvicorn
+        from fastapi import FastAPI
+
+        import tortoise.hosted_api as ha_mod
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_sweep() -> None:
+            entered.set()
+            release.wait(60)
+
+        monkeypatch.setattr(ha_mod, "_sweep_events", _blocking_sweep)
+        monkeypatch.setattr(ha_mod, '_purge_deleted_orgs', lambda: None)
+        monkeypatch.setenv("TORTOISE_LOOP_STALL_EXIT_S", "0")
+        monkeypatch.setenv("TORTOISE_HEALTHZ_PORT", str(_free_tcp_port()))
+
+        # A bare app wired to the REAL lifespan: this test is about startup
+        # ordering, not about any route.
+        app_under_test = FastAPI(lifespan=ha_mod._lifespan)
+        server = uvicorn.Server(uvicorn.Config(
+            app_under_test, host="127.0.0.1", port=0, log_level="error"))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        try:
+            port = None
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                if server.started and server.servers:
+                    port = server.servers[0].sockets[0].getsockname()[1]
+                    break
+                time.sleep(0.05)
+            assert port is not None, "server never started"
+            with socket.create_connection(("127.0.0.1", port), timeout=2.0):
+                pass  # bound AND accepting while the sweep is still blocked
+            # The listener the lifespan started is on app_under_test.state.
+            assert app_under_test.state._healthz_server is not None
+            wait_until = time.monotonic() + 5.0
+            while not entered.is_set() and time.monotonic() < wait_until:
+                time.sleep(0.02)
+            assert entered.is_set(), (
+                "the boot sweep never ran — the assertion above is vacuous")
+            assert not release.is_set(), (
+                "the sweep finished before we connected — cannot distinguish "
+                "blocking startup from a background task")
+        finally:
+            # Shut down WITHOUT releasing the sweep: the lifecycle must not
+            # wait for a blocked sweep thread (cancellation is delivered at the
+            # await, the abandoned worker keeps running as a daemon).
+            server.should_exit = True
+            thread.join(timeout=20)
+            shutdown_was_prompt = not thread.is_alive()
+            release.set()
+            import tortoise.monitoring as monitoring
+
+            monitoring.stop_health_listener(
+                getattr(app_under_test.state, "_healthz_server", None))
+        assert shutdown_was_prompt, "shutdown hung on the blocked boot sweep"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -435,11 +1049,11 @@ class TestLastUsedAtTracking:
     """API key last_used_at is set on successful authentication."""
 
     def test_last_used_at_set_on_successful_auth(self):
-        """#685: get_current_team updates key.last_used_at on valid auth."""
+        """#685: get_current_org updates key.last_used_at on valid auth."""
         import asyncio  # noqa: I001
         from unittest.mock import MagicMock
         from tortoise.auth import hash_api_key
-        from tortoise.hosted_api import _make_sdk, get_current_team
+        from tortoise.hosted_api import _make_sdk, get_current_org
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -447,7 +1061,7 @@ class TestLastUsedAtTracking:
             try:
                 sdk = _make_sdk(namespace="registry")
 
-                # Seed a Team node (get_current_team queries Team after auth)
+                # Seed a Team node (get_current_org queries Team after auth)
                 sdk._get_registry().query(
                     "CREATE (t:Team {id: $id, tier: 'free'})",
                     params={"id": "test-team-lua"},
@@ -457,7 +1071,7 @@ class TestLastUsedAtTracking:
                 key_token = "tt_testkey_last_used_at_000000001"
                 key_hash = hash_api_key(key_token)
                 sdk._get_registry().query(
-                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
                     "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
                     params={
                         "id": "test-key-lua",
@@ -474,9 +1088,9 @@ class TestLastUsedAtTracking:
                 request.headers = {"Authorization": f"Bearer {key_token}"}
                 request.state = MagicMock()
 
-                result = asyncio.run(get_current_team(request))
+                result = asyncio.run(get_current_org(request))
 
-                assert result["team_id"] == "test-team-lua"
+                assert result["org_id"] == "test-team-lua"
                 assert result["key_id"] == "test-key-lua"
 
                 # Verify last_used_at was written — a parseable recent ISO-8601
@@ -505,7 +1119,7 @@ class TestLastUsedAtTracking:
         import asyncio  # noqa: I001
         from unittest.mock import MagicMock
         from tortoise.auth import hash_api_key
-        from tortoise.hosted_api import _make_sdk, get_current_team
+        from tortoise.hosted_api import _make_sdk, get_current_org
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
@@ -520,7 +1134,7 @@ class TestLastUsedAtTracking:
                 # Legacy key: no tenancy props (pre-C1 node)
                 legacy_token = "tt_legacy_key_c1_000000001"
                 sdk._get_registry().query(
-                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
                     "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
                     params={
                         "id": "legacy-key", "tid": "legacy-team",
@@ -533,8 +1147,8 @@ class TestLastUsedAtTracking:
                 request.headers = {
                     "Authorization": f"Bearer {legacy_token}"}
                 request.state = MagicMock()
-                result = asyncio.run(get_current_team(request))
-                assert result["team_id"] == "legacy-team"
+                result = asyncio.run(get_current_org(request))
+                assert result["org_id"] == "legacy-team"
                 assert result["graph_id"] is None
                 assert result["graph_namespace"] == "team_legacy-team"  # default
                 assert result["scopes"] == []
@@ -545,7 +1159,7 @@ class TestLastUsedAtTracking:
                 # Minted key: scopes + deleg=0 → NOT legacy
                 minted_token = "tt_minted_key_c1_000000001"
                 sdk._get_registry().query(
-                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
                     "key_hash: $kh, key_prefix: $kp, created_by: $cb, "
                     "graph_id: 'g_abc123def4567890', "
                     "scopes: ['graphs:read', 'graphs:write'], "
@@ -559,12 +1173,12 @@ class TestLastUsedAtTracking:
                 )
                 sdk._get_registry().query(
                     "CREATE (g:Graph {id: 'g_abc123def4567890', "
-                    "team_id: 'legacy-team', name: 'prod', "
+                    "org_id: 'legacy-team', name: 'prod', "
                     "kind: 'custom', namespace: 'team_legacy-team_g_g_abc123def4567890'})",
                 )
                 request.headers = {
                     "Authorization": f"Bearer {minted_token}"}
-                result2 = asyncio.run(get_current_team(request))
+                result2 = asyncio.run(get_current_org(request))
                 assert result2["graph_id"] == "g_abc123def4567890"
                 assert result2["graph_namespace"] == \
                     "team_legacy-team_g_g_abc123def4567890"
@@ -577,7 +1191,7 @@ class TestLastUsedAtTracking:
                 # (never widen onto the default graph; security review P1)
                 orphan_token = "tt_orphan_key_c1_000000001"
                 sdk._get_registry().query(
-                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "CREATE (k:APIKey {id: $id, org_id: $tid, "
                     "key_hash: $kh, key_prefix: $kp, created_by: $cb, "
                     "graph_id: 'g_ghost000000000000', delegation_depth: 0})",
                     params={
@@ -588,25 +1202,25 @@ class TestLastUsedAtTracking:
                 )
                 request.headers = {
                     "Authorization": f"Bearer {orphan_token}"}
-                result3 = asyncio.run(get_current_team(request))
+                result3 = asyncio.run(get_current_org(request))
                 assert result3["graph_id"] == "g_ghost000000000000"
                 assert result3["graph_namespace"] is None  # fail-closed
                 assert result3["legacy_full_access"] is False
 
                 # provision_tenant-shaped Team node (NO graph_name prop):
-                # team-wide key falls back to team_{team_id} convention
+                # team-wide key falls back to org_{org_id} convention
                 sdk._get_registry().query(
                     "CREATE (t:Team {id: 'pt-team', tier: 'free'})",
                 )
                 pt_token = "tt_pt_key_c1_000000000001"
                 sdk._get_registry().query(
-                    "CREATE (k:APIKey {id: 'pt-key', team_id: 'pt-team', "
+                    "CREATE (k:APIKey {id: 'pt-key', org_id: 'pt-team', "
                     "key_hash: $kh, key_prefix: $kp, created_by: 'x'})",
                     params={"kh": hash_api_key(pt_token), "kp": pt_token[:10]},
                 )
                 request.headers = {"Authorization": f"Bearer {pt_token}"}
-                result4 = asyncio.run(get_current_team(request))
-                assert result4["graph_namespace"] == "team_pt-team"  # derived
+                result4 = asyncio.run(get_current_org(request))
+                assert result4["graph_namespace"] == "org_pt-team"  # derived
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 
@@ -627,15 +1241,38 @@ class TestPointsCreate:
         assert body["content"] == "hello world"
         assert body["kind"] == "statement"
 
-    def test_create_point_enqueues_dream(self, client):
-        """#85: create_point triggers the per-tenant dream queue."""
+    def test_create_point_enqueues_dream(self, client, monkeypatch):
+        """#85: create_point triggers the per-tenant dream queue.
+
+        #2850: this used to read ``_DREAM_QUEUES`` from the TEST thread right
+        after the request while the worker's debounce (``_DREAM_DEBOUNCE_S``)
+        drains and evicts that same queue on the LOOP thread. The assertion
+        only passes when the response is delivered inside that window, and the
+        window is lost deterministically once boot maintenance shares the GIL
+        with the worker's blocking ``sdk.dream()`` — which is now the normal
+        case, because the #2953 boot sweeps no longer run before the bind.
+        Spy on the enqueue instead: the call site is what this test is about,
+        it is recorded synchronously inside the request, and it pins the
+        PAYLOAD (the new point's id as the dirty root) — so the assertion no
+        longer depends on cross-thread timing and covers strictly more.
+        """
         import tortoise.hosted_api as ha
+
+        calls: list[tuple[str, list[str]]] = []
+        real_enqueue = ha._enqueue_dream
+
+        def _spy(org_id, dirty_roots, **kwargs):
+            calls.append((org_id, list(dirty_roots)))
+            return real_enqueue(org_id, dirty_roots, **kwargs)
+
+        monkeypatch.setattr(ha, "_enqueue_dream", _spy)
         # Fresh queue state for this test.
-        ha._DREAM_QUEUES.pop(TEST_TEAM_ID, None)
+        ha._DREAM_QUEUES.pop(TEST_ORG_ID, None)
         r = client.post("/v1/points", json={"content": "dream trigger"})
         assert r.status_code == 200, r.text
-        assert TEST_TEAM_ID in ha._DREAM_QUEUES
-        assert not ha._DREAM_QUEUES[TEST_TEAM_ID].empty()
+        assert [c[0] for c in calls] == [TEST_ORG_ID]
+        assert calls[0][1] == [r.json()["id"]], \
+            "the created point must be the enqueued dirty root"
 
     def test_create_point_with_explicit_kind(self, client):
         r = client.post(
@@ -763,13 +1400,13 @@ class TestTeamInfo:
         r = client.get("/v1/team")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["team_id"] == TEST_TEAM_ID
+        assert body["org_id"] == TEST_ORG_ID
         assert body["tier"] == "free"
         assert body["max_users"] == 1
         assert body["max_graphs"] == 1
         # max_teams removed (D1): multi-team is a user capability, not a tier
         # field — the response omits it (None) rather than a pre-existing 500.
-        assert body["max_teams"] is None
+        assert body["max_orgs"] is None
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
 
@@ -1228,9 +1865,9 @@ class TestKeysRename:
         import tortoise.hosted_api as ha
         sdk = ha._make_sdk(namespace="registry")
         sdk._get_registry().query(
-            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "MERGE (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
             "SET m.role='owner'",
-            params={"uid": _U1, "tid": TEST_TEAM_ID},
+            params={"uid": _U1, "tid": TEST_ORG_ID},
         )
 
     def _override_non_owner(self):
@@ -1314,14 +1951,14 @@ class TestKeysRename:
         """#1709: the registry-lane agent_signup mint now WRITES created_via/
         expires_at props (parity with the Supabase lane) — the list endpoint
         round-trips them (no longer None). The client fixture overrides
-        get_current_team → TEST_TEAM, so re-point the override at the minted
+        get_current_org → TEST_TEAM, so re-point the override at the minted
         team before GET (list_api_keys is team-scoped; the signup key lives
-        under its own fresh team_id)."""
+        under its own fresh org_id)."""
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         r = client.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
-        signup_team = r.json()["team_id"]
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, team_id=signup_team)
+        signup_team = r.json()["org_id"]
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id=signup_team)
         r = client.get("/v1/team/keys")
         keys = r.json()["keys"]
         assert keys, "signup team should have exactly one key"
@@ -1345,7 +1982,7 @@ class TestKeysRename:
 
 
 class TestListApiKeysSupabase:
-    """#1708 D7: Supabase lane — team_api_keys reads created_via/expires_at
+    """#1708 D7: Supabase lane — org_api_keys reads created_via/expires_at
     through the seam; real-key auth pins the disabled/expired → 401 contract
     the CLI reuse path (401 → re-mint) depends on. Reuses the client fixture
     (lifespan/MCP-mount + SDK-init patch + _FALLBACK_KEEPALIVE hygiene)."""
@@ -1360,13 +1997,13 @@ class TestListApiKeysSupabase:
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-listkeys")
         fake = FakeControlPlane()
         fake.seed("api_keys", [{
-            "id": "k1", "team_id": "team-001", "key_prefix": "tt_abcdef1234",
+            "id": "k1", "org_id": "team-001", "key_prefix": "tt_abcdef1234",
             "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
             "revoked_at": None, "enabled": True,
             "created_via": "bootstrap", "expires_at": "2026-08-02T00:00:00Z",
         }])
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, team_id="team-001")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, org_id="team-001")
         yield fake
         app.dependency_overrides.clear()
 
@@ -1384,35 +2021,35 @@ class TestListApiKeysSupabase:
         (enabled column absent), the drift-tolerant seam re-authenticates a
         disabled key — accepted degrade window, documented in the PR body."""
         fake = _supabase_env
-        app.dependency_overrides.pop(get_current_team, None)  # real key auth
+        app.dependency_overrides.pop(get_current_org, None)  # real key auth
         from tortoise.auth import lookup_hash
         token = "tt_disabled_0000000000000000001"
         fake.seed("api_keys", [{
-            "id": "k-disabled", "team_id": "team-001",
+            "id": "k-disabled", "org_id": "team-001",
             "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
             "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
             "revoked_at": None, "enabled": False,
             "created_via": "provisioned", "expires_at": None,
         }])
-        fake.seed("teams", [{"id": "team-001", "name": "T", "tier": "free"}])
+        fake.seed("organizations", [{"id": "team-001", "name": "T", "tier": "free"}])
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 401, r.text
 
     def test_expired_key_401_on_team(self, client, _supabase_env, monkeypatch):
         """Same contract pin for past-expires_at keys (24h bootstrap expiry)."""
         fake = _supabase_env
-        app.dependency_overrides.pop(get_current_team, None)  # real key auth
+        app.dependency_overrides.pop(get_current_org, None)  # real key auth
         from tortoise.auth import lookup_hash
         token = "tt_expired_00000000000000000001"
         fake.seed("api_keys", [{
-            "id": "k-expired", "team_id": "team-001",
+            "id": "k-expired", "org_id": "team-001",
             "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
             "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
             "revoked_at": None, "enabled": True,
             "created_via": "bootstrap",
             "expires_at": "2026-08-02T00:00:00Z",  # in the past
         }])
-        fake.seed("teams", [{"id": "team-001", "name": "T", "tier": "free"}])
+        fake.seed("organizations", [{"id": "team-001", "name": "T", "tier": "free"}])
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 401, r.text
 
@@ -1522,7 +2159,7 @@ class TestSessionCapture:
         assert r.status_code == 422, r.text
         assert "extractable content" in r.json()["detail"]
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         sessions = sdk._get_proj().g.query(
             "MATCH (s:Session) RETURN count(s)").result_set
         assert sessions[0][0] == 0, \
@@ -1559,7 +2196,7 @@ class TestSessionCapture:
         # containing PostgreSQL + 1 LLM point (extraction ran once — the
         # re-POST skipped it).
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         r = proj.g.query(
             "MATCH (p:Point) WHERE p.content CONTAINS 'PostgreSQL' RETURN count(p)"
@@ -1599,7 +2236,7 @@ class TestSessionCapture:
         assert r1.status_code == 200 and r2.status_code == 200
 
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         # "ok" triggers no decision/claim extraction → only turn Points exist.
         # Two distinct sessions (auto-generated ids) must yield TWO turn
@@ -1622,7 +2259,7 @@ class TestSessionCapture:
             assert r.status_code == 200, r.text
 
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         r = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
@@ -1669,7 +2306,7 @@ class TestSessionCapture:
         assert any("provider returned 500" in e for e in body["errors"])
         assert body["warnings"] == [], "failure carries errors, never warnings"
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         turns = proj.g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN count(t)").result_set
@@ -1704,7 +2341,7 @@ class TestSessionCapture:
         assert any("RuntimeError" in e for e in body["errors"])
         assert body["warnings"] == [], "failure carries errors, never warnings"
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         wired = proj.g.query(
             "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
@@ -1758,7 +2395,7 @@ class TestSessionCapture:
             assert r.status_code == 200, (content, r.text)
             assert r.json()["turns"] == 1
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         expected = {"coerce-s1": "[user] {'text': 'we decided to ship v2'}",
                     "coerce-s2": "[user] 12345",
                     "coerce-s4": "[user] False",
@@ -1790,7 +2427,7 @@ class TestSessionCapture:
         shared test projection so the raw-graph query patch is in the write
         path (same embedded DB either way)."""
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         _raw = proj.g._g
         _real_query = _raw.query  # _GuardedGraph.query is a read-only slot method
@@ -1808,7 +2445,7 @@ class TestSessionCapture:
         # registry graph the fixture seed can't reach) — patch the gate read
         # directly so this stamping-behavior test reaches the stamping block.
         monkeypatch.setattr(ha_mod, "_get_onboarding_state",
-                            lambda team_id: {"session_recording": True})
+                            lambda org_id: {"session_recording": True})
         r = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r.status_code == 200, r.text
@@ -1850,10 +2487,10 @@ class TestSessionCapture:
         422 — the assertion discriminates; non-blank → 2+est > 1 → 402 either
         order (control)."""
         import tortoise.hosted_api as ha_mod
-        from tortoise.hosted_api import app, get_current_team
-        app.dependency_overrides[get_current_team] = lambda: {
+        from tortoise.hosted_api import app, get_current_org
+        app.dependency_overrides[get_current_org] = lambda: {
             **TEST_TEAM, "max_points": 1}
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         sdk.create_point(kind="statement", content="pre-existing non-episodic point 1")
         sdk.create_point(kind="statement", content="pre-existing non-episodic point 2")
         r = client.post("/v1/sessions", json={"conversation": []})
@@ -1945,7 +2582,7 @@ class TestSessionCaptureWriteVerb:
         import tortoise.hosted_api as ha_mod
         ids = [p["id"] for p in body["points"]]
         if ids:
-            rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+            rows = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj().g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
                 "RETURN n.source_harness",
                 params={"ids": ids},
@@ -1964,7 +2601,7 @@ class TestSessionCaptureWriteVerb:
         ids = [p["id"] for p in body["points"]]
         assert ids, "mock extraction produced no points"
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
@@ -2017,7 +2654,7 @@ class TestSessionCaptureWriteVerb:
             assert p["status"] == "live", p
             assert p["ep_updated"] is True, p
         import tortoise.hosted_api as ha_mod
-        proj = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj()
+        proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
         cal = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids AND "
             "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
@@ -2058,7 +2695,7 @@ class TestSessionCaptureWriteVerb:
         a malformed payload."""
         import tortoise.hosted_api as ha_mod
         ha_mod._update_onboarding_state(
-            TEST_TEAM_ID, session_recording=False)
+            TEST_ORG_ID, session_recording=False)
         r = client.post("/v1/sessions", json={
             "conversation": self.CONVERSATION,
             "harness": "not-a-real-harness",  # boundary failure
@@ -2071,13 +2708,13 @@ class TestSessionCaptureWriteVerb:
         write, no receipt."""
         import tortoise.hosted_api as ha_mod
         ha_mod._update_onboarding_state(
-            TEST_TEAM_ID, session_recording=False)
+            TEST_ORG_ID, session_recording=False)
         r = client.post("/v1/sessions", json={
             "conversation": self.CONVERSATION,
             "session_id": "w5-recording-off-session",
         })
         assert r.status_code == 409, r.text
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         rows = sdk._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN count(s)",
             params={"sid": "w5-recording-off-session"},
@@ -2131,7 +2768,7 @@ class TestSessionCaptureWriteVerb:
         # capture_ok now True on the Session node
         import tortoise.hosted_api as ha_mod
         rows = ha_mod.TortoiseSDK(
-            namespace=TEST_TEAM_ID)._get_proj().g.query(
+            namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.capture_ok",
             params={"sid": "h-retry-2335"}).result_set
         assert rows and rows[0][0] is True, rows
@@ -2168,7 +2805,7 @@ class TestSessionCaptureWriteVerb:
         assert r2.json()["extraction_mode"] == "replayed", r2.json()
         assert calls["n"] == 1, "m2 failed session must not re-extract"
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         row = proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, "
@@ -2334,7 +2971,7 @@ class TestSessionDetail:
         namespaces isolate graphs — a session written to namespace
         ``test_hosted_other_team_999_<uuid>`` (epic #1647 T7 per-test
         namespace) is invisible to the endpoint which resolves
-        ``TEST_TEAM_ID`` (``team-001``).
+        ``TEST_ORG_ID`` (``team-001``).
         """
         from datetime import datetime  # noqa: I001
         from tortoise.hosted_api import _make_sdk
@@ -2371,7 +3008,7 @@ class TestSessionDetail:
         from datetime import datetime  # noqa: I001
         from tortoise.hosted_api import _make_sdk
 
-        sdk = _make_sdk(namespace=TEST_TEAM_ID)
+        sdk = _make_sdk(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
@@ -2487,7 +3124,7 @@ def internal_client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
 
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         _orig_init = _patch_tortoise_sdk_init(db_path)
         # C3 (#2112): seed the Team node the auth override bypasses — the
         # registry mint path (sdk.apikey_create) validates the team exists
@@ -2497,7 +3134,7 @@ def internal_client():
         import tortoise.hosted_api as ha_mod2
         ha_mod2._make_sdk(namespace="registry")._get_registry().query(
             "CREATE (t:Team {id:$id})",
-            params={"id": TEST_TEAM_ID},
+            params={"id": TEST_ORG_ID},
         )
 
         try:
@@ -2536,7 +3173,7 @@ def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     gn = body["graph_name"]
-    assert gn.startswith("team_")
+    assert gn.startswith("org_")
     assert gn in _read_journal_file(str(journal)), \
         "register_user mint must be journaled (#1686)"
 
@@ -2548,8 +3185,8 @@ class TestInternalProvision:
 
     def test_provision_valid_returns_200(self, internal_client):
         payload = {
-            "team_id": "provisioned-team-1",
-            "team_name": "Provisioned Team",
+            "org_id": "provisioned-team-1",
+            "org_name": "Provisioned Team",
             "api_key_hash": "abc123hash",
             "created_by": "user-001",
         }
@@ -2557,7 +3194,7 @@ class TestInternalProvision:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "provisioned"
-        assert body["team_id"] == "provisioned-team-1"
+        assert body["org_id"] == "provisioned-team-1"
         assert "graph_name" in body
 
 
@@ -2569,8 +3206,8 @@ class TestInternalProvision:
         journal = tmp_path / "provision.graphs.jsonl"
         monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
         payload = {
-            "team_id": "provisioned-team-9",
-            "team_name": "Provisioned Team 9",
+            "org_id": "provisioned-team-9",
+            "org_name": "Provisioned Team 9",
             "api_key_hash": "abc123hash",
             "created_by": "user-009",
         }
@@ -2578,7 +3215,7 @@ class TestInternalProvision:
                                  headers=self.INTERNAL_HEADERS)
         assert r.status_code == 200, r.text
         gn = r.json()["graph_name"]
-        assert gn.startswith("team_")
+        assert gn.startswith("org_")
         assert gn in _read_journal_file(str(journal)), \
             "tenant_provision mint must be journaled (#1686)"
 
@@ -2589,7 +3226,7 @@ class TestInternalProvision:
     def test_provision_wrong_internal_key_returns_401(self, internal_client):
         r = internal_client.post(
             "/internal/provision",
-            json={"team_id": "t1", "team_name": "n", "api_key_hash": "h", "created_by": "u"},
+            json={"org_id": "t1", "org_name": "n", "api_key_hash": "h", "created_by": "u"},
             headers={"Authorization": "Bearer wrong-key"},
         )
         assert r.status_code == 401, r.text
@@ -2597,7 +3234,7 @@ class TestInternalProvision:
     def test_provision_missing_auth_returns_401(self, internal_client):
         r = internal_client.post(
             "/internal/provision",
-            json={"team_id": "t1", "team_name": "n", "api_key_hash": "h", "created_by": "u"},
+            json={"org_id": "t1", "org_name": "n", "api_key_hash": "h", "created_by": "u"},
         )
         assert r.status_code == 401, r.text
 
@@ -2610,19 +3247,19 @@ class TestInternalDemo:
     def test_demo_valid_returns_200(self, internal_client):
         r = internal_client.post(
             "/internal/demo",
-            json={"team_id": "demo-team-1"},
+            json={"org_id": "demo-team-1"},
             headers=self.INTERNAL_HEADERS,
         )
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["status"] == "demo_created"
-        assert body["team_id"] == "demo-team-1"
+        assert body["org_id"] == "demo-team-1"
         assert "session_id" in body
         assert body["points"] > 0
         assert "layers" in body
 
     def test_demo_idempotent_second_call_returns_already_seeded(self, internal_client):
-        payload = {"team_id": "demo-team-2"}
+        payload = {"org_id": "demo-team-2"}
         h = self.INTERNAL_HEADERS
 
         r1 = internal_client.post("/internal/demo", json=payload, headers=h)
@@ -2633,7 +3270,7 @@ class TestInternalDemo:
         assert r2.status_code == 200, r2.text
         assert r2.json()["status"] == "already_seeded"
 
-    def test_demo_missing_team_id_returns_400(self, internal_client):
+    def test_demo_missing_org_id_returns_400(self, internal_client):
         r = internal_client.post(
             "/internal/demo", json={}, headers=self.INTERNAL_HEADERS
         )
@@ -2642,13 +3279,13 @@ class TestInternalDemo:
     def test_demo_wrong_internal_key_returns_401(self, internal_client):
         r = internal_client.post(
             "/internal/demo",
-            json={"team_id": "t1"},
+            json={"org_id": "t1"},
             headers={"Authorization": "Bearer wrong-key"},
         )
         assert r.status_code == 401, r.text
 
     def test_demo_missing_auth_returns_401(self, internal_client):
-        r = internal_client.post("/internal/demo", json={"team_id": "t1"})
+        r = internal_client.post("/internal/demo", json={"org_id": "t1"})
         assert r.status_code == 401, r.text
 
 
@@ -2693,13 +3330,13 @@ class TestCrossTenantIsolation:
 
     def test_team_isolation(self, client, internal_client):
         # Provision two teams
-        for team_id in ("iso-team-a", "iso-team-b"):
+        for org_id in ("iso-team-a", "iso-team-b"):
             r = internal_client.post(
                 "/internal/provision",
                 json={
-                    "team_id": team_id,
-                    "team_name": f"Team {team_id}",
-                    "api_key_hash": f"hash-{team_id}",
+                    "org_id": org_id,
+                    "org_name": f"Team {org_id}",
+                    "api_key_hash": f"hash-{org_id}",
                     "created_by": "tester",
                 },
                 headers={"Authorization": f"Bearer {_INTERNAL_KEY}"},
@@ -2748,7 +3385,7 @@ class TestIssueInsightAPI:
         from tortoise.hosted_api import _make_sdk
 
         # Team A indexes repo acme/app in ITS namespace.
-        sdk_a = _make_sdk(namespace=TEST_TEAM_ID)
+        sdk_a = _make_sdk(namespace=TEST_ORG_ID)
         sdk_a.create_point(
             kind="observation", content="acme/app #1: login bug on iOS",
             source="github", github_repo="acme/app", github_number=1, github_state="open",
@@ -2761,9 +3398,9 @@ class TestIssueInsightAPI:
             "repo": "acme/app", "prior_issues": 1, "open": 1,
         }
 
-        # Team B: different team_id -> different namespace, same DB file.
-        app.dependency_overrides[get_current_team] = lambda: dict(
-            TEST_TEAM, team_id="team-002")
+        # Team B: different org_id -> different namespace, same DB file.
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, org_id="team-002")
         sdk_b = _make_sdk(namespace="team-002")
         sdk_b.create_point(
             kind="observation", content="b-corp/web #3: unrelated styling tweak",
@@ -2901,7 +3538,7 @@ class TestSessionEventAlignment:
 
         # The client fixture patched TortoiseSDK.__init__ to use the temp DB,
         # so constructing an SDK inside the test reads the same graph.
-        sdk = TortoiseSDK(namespace=TEST_TEAM_ID)
+        sdk = TortoiseSDK(namespace=TEST_ORG_ID)
         proj = sdk._get_proj()
 
         # The :Session node exists
@@ -2987,21 +3624,21 @@ class TestBackupEndpoints:
         monkeypatch.setattr(
             _pricing, "hourly_backups_enabled", lambda tier: tier == "pro"
         )
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM, tier="pro")
         # Epic #1647 (docker lane): the backup/restore seam resolves the team
-        # graph via team_graph_name() → "team_{id}" — but on the server lane
+        # graph via org_graph_name() → "org_{id}" — but on the server lane
         # the team SDK writes to the REDIRECT-derived guard-passing graph
         # (test_<stem>_<hash12(session+path+name)>). Without a seam, restore's
         # live_name ("team_team-001") is empty on the server → the
         # empty-backup-over-live 409 guard sees 0 live nodes and restore
         # succeeds over live data (the #1635 guard is DEFEATED). Route
-        # team_graph_name to the SDK's actual graph in BOTH lanes (embedded:
+        # org_graph_name to the SDK's actual graph in BOTH lanes (embedded:
         # the fixture-patched db_path SDK resolves team_team-001 verbatim;
         # server: the derived graph). The registry-source arg is unused by the
         # seam (the registry stamp is the historical literal either way).
         import tortoise.backup_sweep as _bs
-        _sdk_graph = _ha._make_sdk(namespace=TEST_TEAM_ID)._get_proj().graph_name
-        monkeypatch.setattr(_bs, "team_graph_name",
+        _sdk_graph = _ha._make_sdk(namespace=TEST_ORG_ID)._get_proj().graph_name
+        monkeypatch.setattr(_bs, "org_graph_name",
                             lambda source, tid: _sdk_graph)
         yield client
         app.dependency_overrides.clear()
@@ -3019,7 +3656,7 @@ class TestBackupEndpoints:
         Regression test for #656 — the old gate blocked only (None, 'free'),
         so a solo-tier team would have slipped past the backups gate.
         """
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, tier="solo"
         )
         try:
@@ -3057,7 +3694,7 @@ class TestBackupEndpoints:
         ]
         # Every tier in pricing.json behaves per its hourly_backups flag.
         for tier in expected_allowed:
-            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+            app.dependency_overrides[get_current_org] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
             )
             try:
@@ -3068,7 +3705,7 @@ class TestBackupEndpoints:
             finally:
                 app.dependency_overrides.clear()
         for tier in expected_blocked:
-            app.dependency_overrides[get_current_team] = lambda t=tier: dict(
+            app.dependency_overrides[get_current_org] = lambda t=tier: dict(
                 TEST_TEAM, tier=t
             )
             try:
@@ -3080,7 +3717,7 @@ class TestBackupEndpoints:
                 app.dependency_overrides.clear()
 
         # Unknown tier → 402 (falls back to free limits).
-        app.dependency_overrides[get_current_team] = lambda: dict(
+        app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, tier="enterprise"
         )
         try:
@@ -3094,9 +3731,9 @@ class TestBackupEndpoints:
         r = pro_client.post("/backups")
         assert r.status_code == 201, r.text
         manifest = r.json()
-        assert manifest["team_id"] == TEST_TEAM_ID
+        assert manifest["org_id"] == TEST_ORG_ID
         assert manifest["node_count"] == 0
-        assert manifest["backup_id"].startswith(TEST_TEAM_ID + "/")
+        assert manifest["backup_id"].startswith(TEST_ORG_ID + "/")
 
         r = pro_client.get("/backups")
         assert r.status_code == 200
@@ -3123,7 +3760,7 @@ class TestBackupEndpoints:
         """Nonexistent backup object → clean 400, not 500."""
         r = pro_client.post(
             "/backups/restore",
-            json={"backup_key": f"backups/{TEST_TEAM_ID}/20260101T000000Z/dump.enc", "confirm": True},
+            json={"backup_key": f"backups/{TEST_ORG_ID}/20260101T000000Z/dump.enc", "confirm": True},
         )
         assert r.status_code == 400
         assert "not found" in r.json()["detail"]
@@ -3180,6 +3817,36 @@ class TestSessionFloodGate:
         assert hits, "the turn-cap refusal must emit a structured record"
         assert str(MAX_SESSION_TURNS + 1) in hits[0], hits[0]
         assert str(MAX_SESSION_TURNS) in hits[0], hits[0]
+
+    def test_backfill_window_lands_below_the_handler_cap(self, client):
+        """#3575 P1-A: the backfill window must land at/below the HANDLER cap
+        (`MAX_SESSION_TURNS`), not the Pydantic `max_length` — a 1005-turn
+        session windowed to 1000 still 400s THIS route and writes NO receipt.
+
+        Posting the real windowed payload through the app (not merely
+        `SessionRequest(...)`) is the only assertion that bites: the Pydantic
+        boundary (1000) silently accepts a payload the handler then rejects.
+        """
+        from tortoise.quota import MAX_SESSION_TURNS
+        from tortoise.session_import import window_turns
+
+        conversation = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+            for i in range(1005)
+        ]
+        windowed, dropped = window_turns(conversation)
+        assert dropped == 1005 - len(windowed)
+        # Hit the REAL route first: the Pydantic boundary (max_length=1000)
+        # accepts `windowed`, so only the handler's own cap rejects it.
+        r = client.post("/v1/sessions", json={
+            "session_id": "backfill-window-over-cap",
+            "conversation": windowed,
+        })
+        assert r.status_code == 200, (
+            f"window kept {len(windowed)} turns; handler cap is "
+            f"{MAX_SESSION_TURNS} — the real route refused and the receipt "
+            f"is never written: {r.status_code} {r.text}"
+        )
 
     def test_capture_observation_line_hosted(self, client, caplog):
         """#2335 WI-1d: the hosted capture emits the observation line with
@@ -3239,9 +3906,9 @@ class TestSessionFloodGate:
         })
         assert r.status_code == 402, r.text[:300]
         # Zero growth: no Session node created (check the TEAM graph — the
-        # session writes go to namespace team_{team_id})
+        # session writes go to namespace org_{org_id})
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN count(s)",
             params={"sid": "dense-session"},
         ).result_set
@@ -3270,7 +3937,7 @@ class TestSessionFloodGate:
         })
         assert r.status_code == 200, r.text[:200]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        proj = _HASDK(namespace=TEST_TEAM_ID)._get_proj()
+        proj = _HASDK(namespace=TEST_ORG_ID)._get_proj()
         rows = proj.g.query(
             "MATCH (p:Point) WHERE (p.is_episodic IS NULL OR p.is_episodic = false) "
             "AND p.pointKind <> 'event' RETURN count(p)",
@@ -3285,7 +3952,7 @@ class TestDreamBudget:
         rejects after MAX_DREAM_FULL_PER_HOUR (accumulation path, not seeding)."""
         import tortoise.hosted_api as ha
         from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
-        ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+        ha._DREAM_FULL_BUCKETS.pop(TEST_ORG_ID, None)
         try:
             for _ in range(MAX_DREAM_FULL_PER_HOUR):
                 r = client.post("/v1/dream?full=true", json={})
@@ -3293,16 +3960,16 @@ class TestDreamBudget:
             r = client.post("/v1/dream?full=true", json={})
             assert r.status_code == 429, f"expected 429, got {r.status_code}: {r.text[:200]}"
         finally:
-            ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+            ha._DREAM_FULL_BUCKETS.pop(TEST_ORG_ID, None)
 
     def test_full_dream_within_budget_ok(self, client):
         import tortoise.hosted_api as ha
-        ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+        ha._DREAM_FULL_BUCKETS.pop(TEST_ORG_ID, None)
         try:
             r = client.post("/v1/dream?full=true", json={})
             assert r.status_code == 200, r.text[:200]
         finally:
-            ha._DREAM_FULL_BUCKETS.pop(TEST_TEAM_ID, None)
+            ha._DREAM_FULL_BUCKETS.pop(TEST_ORG_ID, None)
 
 
 # ── #686: fail-closed quota enforcement at HTTP layer ──
@@ -3311,7 +3978,7 @@ class TestQuotaFailClosed:
     """Verify that quota check failures surface as 500, never silently pass."""
 
     def test_quota_check_error_returns_500(self, client, monkeypatch):
-        """When enforce_team_limit raises QuotaCheckError, the endpoint
+        """When enforce_org_limit raises QuotaCheckError, the endpoint
         returns 500 with a descriptive detail — fail-closed, never silent."""
         from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
@@ -3319,7 +3986,7 @@ class TestQuotaFailClosed:
         def _fail_count(_limits, _resource, sdk=None):
             raise QuotaCheckError("simulated count query failure")
 
-        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_count)
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_count)
 
         r = client.post("/v1/points", json={"content": "should fail"})
         assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text[:200]}"
@@ -3329,7 +3996,7 @@ class TestQuotaFailClosed:
         )
 
     def test_quota_exceeded_returns_402(self, client, monkeypatch):
-        """When enforce_team_limit raises QuotaExceededError, the endpoint
+        """When enforce_org_limit raises QuotaExceededError, the endpoint
         returns 402 (payment required) — normal over-limit behavior."""
         from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
@@ -3337,7 +4004,7 @@ class TestQuotaFailClosed:
         def _fail_exceeded(_limits, _resource, sdk=None):
             raise QuotaExceededError("Team points limit reached (1000)")
 
-        monkeypatch.setattr(quota_mod, "enforce_team_limit", _fail_exceeded)
+        monkeypatch.setattr(quota_mod, "enforce_org_limit", _fail_exceeded)
 
         r = client.post("/v1/points", json={"content": "should be over limit"})
         assert r.status_code == 402, f"expected 402, got {r.status_code}: {r.text[:200]}"
@@ -3436,8 +4103,8 @@ class TestEventReplay:
 
     def test_tenant_cannot_see_other_team_events(self, client):
         """Team A cannot see team B's events — trust boundary.
-        #432: team scoping is via graph namespace, not a team_id property."""
-        # Team A (TEST_TEAM_ID) queries events — must be empty.
+        #432: team scoping is via graph namespace, not a org_id property."""
+        # Team A (TEST_ORG_ID) queries events — must be empty.
         r = client.get("/v1/events")
         assert r.status_code == 200, r.text[:200]
         body = r.json()
@@ -3581,7 +4248,7 @@ class TestEventReplay:
 
     def test_event_has_required_fields(self, client):
         """Every event has seq, ts, type, event_id, payload.
-        #432: no team_id property — scoping is via graph namespace."""
+        #432: no org_id property — scoping is via graph namespace."""
         r = client.post("/v1/points", json={
             "content": "Structure check",
             "kind": "statement",
@@ -3668,7 +4335,7 @@ class TestInviteEndpointsRegistry:
             params={"id": "team-inv-001", "name": "invite-team"},
         )
         reg.query(
-            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "CREATE (m:Membership {user_id: $uid, org_id: $tid, "
             "role: 'owner', status: 'active'})",
             params={"uid": _U1, "tid": "team-inv-001"},
         )
@@ -3676,7 +4343,7 @@ class TestInviteEndpointsRegistry:
 
     @pytest.fixture
     def session_user(self):
-        """JWT session user (get_current_user is NOT the get_current_team
+        """JWT session user (get_current_user is NOT the get_current_org
         override the client fixture applies)."""
 
         def _set(user_id: str, email: str | None = None):
@@ -3693,7 +4360,7 @@ class TestInviteEndpointsRegistry:
         tc, sdk = registry_env
         session_user(_U1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-inv-001", "email": "bob@example.com",
+            "org_id": "team-inv-001", "email": "bob@example.com",
             "role": "admin"})
         assert r.status_code == 200, r.text
         body = r.json()
@@ -3704,10 +4371,10 @@ class TestInviteEndpointsRegistry:
         session_user(_U2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 200, r.text
-        assert r.json() == {"team_id": "team-inv-001", "role": "admin"}
+        assert r.json() == {"org_id": "team-inv-001", "role": "admin"}
 
         rows = sdk._get_registry().query(
-            "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) "
+            "MATCH (m:Membership {org_id:$tid, user_id:$uid, status:'active'}) "
             "RETURN m.role",
             params={"tid": "team-inv-001", "uid": _U2},
         ).result_set
@@ -3721,13 +4388,13 @@ class TestInviteEndpointsRegistry:
         """The owner/admin gate must hold on the registry path too."""
         tc, sdk = registry_env
         sdk._get_registry().query(
-            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "CREATE (m:Membership {user_id: $uid, org_id: $tid, "
             "role: 'member', status: 'active'})",
             params={"uid": _U9, "tid": "team-inv-001"},
         )
         session_user(_U9)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-inv-001", "email": "bob@example.com",
+            "org_id": "team-inv-001", "email": "bob@example.com",
             "role": "member"})
         assert r.status_code == 403
 
@@ -3735,7 +4402,7 @@ class TestInviteEndpointsRegistry:
                                               session_user):
         tc, sdk = registry_env
         session_user(_U1)
-        payload = {"team_id": "team-inv-001", "email": "bob@example.com",
+        payload = {"org_id": "team-inv-001", "email": "bob@example.com",
                    "role": "member"}
         assert tc.post("/v1/invites", json=payload).status_code == 200
         assert tc.post("/v1/invites", json=payload).status_code == 409
@@ -3746,12 +4413,12 @@ class TestInviteEndpointsRegistry:
             params={"id": "team-free-002", "name": "free-team"},
         )
         sdk._get_registry().query(
-            "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
+            "CREATE (m:Membership {user_id: $uid, org_id: $tid, "
             "role: 'owner', status: 'active'})",
             params={"uid": _U1, "tid": "team-free-002"},
         )
         r = tc.post("/v1/invites", json={
-            "team_id": "team-free-002", "email": "x@example.com",
+            "org_id": "team-free-002", "email": "x@example.com",
             "role": "member"})
         assert r.status_code == 402
 
@@ -3759,20 +4426,20 @@ class TestInviteEndpointsRegistry:
         tc, sdk = registry_env  # noqa: RUF059
         session_user(_U1)
         r = tc.post("/v1/invites", json={
-            "team_id": "team-inv-001", "email": "bob@example.com",
+            "org_id": "team-inv-001", "email": "bob@example.com",
             "role": "member"})
         invite_id = r.json()["invite_id"]
         token = r.json()["token"]
 
-        r = tc.get("/v1/invites?team_id=team-inv-001")
+        r = tc.get("/v1/invites?org_id=team-inv-001")
         assert r.status_code == 200
         assert [i["id"] for i in r.json()] == [invite_id]
 
-        r = tc.delete(f"/v1/invites/{invite_id}?team_id=team-inv-001")
+        r = tc.delete(f"/v1/invites/{invite_id}?org_id=team-inv-001")
         assert r.status_code == 200, r.text
         assert r.json()["revoked"] is True
 
-        r = tc.get("/v1/invites?team_id=team-inv-001")
+        r = tc.get("/v1/invites?org_id=team-inv-001")
         assert r.status_code == 200
         assert r.json() == []  # revoked no longer pending
 
@@ -4521,7 +5188,7 @@ class TestCaptureSpeakerParity:
         })
         assert r.status_code == 200, r.text[:200]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
         ).result_set
         assert rows and rows[0][0] == "user", rows
@@ -4533,7 +5200,7 @@ class TestCaptureSpeakerParity:
             "session_id": "sp-none", "conversation": [{"role": None, "content": "short sentence here."}]})
         assert r.status_code == 200, r.text[:200]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
         ).result_set
         assert rows and rows[0][0] == "unknown", rows
@@ -4545,7 +5212,7 @@ class TestCaptureSpeakerParity:
             "session_id": "sp-123", "conversation": [{"role": 123, "content": "short sentence here."}]})
         assert r.status_code == 200, r.text[:200]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
         ).result_set
         assert rows and rows[0][0] == "123", rows
@@ -4561,7 +5228,7 @@ class TestCaptureSpeakerParity:
             "conversation": [{"role": "user", "content": content}]})
         assert r.status_code == 200, r.text[:300]
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
         ).result_set
         assert rows and rows[0][0] == "[user] " + content[:5000], rows
@@ -4581,7 +5248,7 @@ class TestCaptureStoredTurnParity:
         r = client.post("/v1/sessions", json={
             "session_id": "byte-same", "conversation": conv})
         assert r.status_code == 200, r.text[:200]
-        hosted_turns = _stored_turns(_HASDK(namespace=TEST_TEAM_ID))
+        hosted_turns = _stored_turns(_HASDK(namespace=TEST_ORG_ID))
         # sdk capture of the same conversation + session_id
         sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
         sdk.capture_session(conv, session_id="byte-same")
@@ -4605,7 +5272,7 @@ class TestV2SessionFloodGate:
         assert r.status_code == 402, r.text[:300]
         # Zero growth: no Session node created (pre-write gate).
         from tortoise.hosted_api import TortoiseSDK as _HASDK
-        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+        rows = _HASDK(namespace=TEST_ORG_ID)._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN count(s)",
             params={"sid": "dense-v2-session"}).result_set
         assert rows[0][0] == 0
@@ -4613,7 +5280,7 @@ class TestV2SessionFloodGate:
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # #2600 (Phase 1, Task 2) — Session.actor_user_id stamp via the REAL registry
-# auth face. POST /v1/sessions is key-only (get_current_team_gated) — on the
+# auth face. POST /v1/sessions is key-only (get_current_org_gated) — on the
 # docker lane (registry CP) the two "members" are registry-seeded keys with
 # distinct UUID creators (sdk.apikey_create(created_by=<uuid>)), authenticated
 # with the real tt_ keys (NO DI override — an override dict bypasses the
@@ -4629,23 +5296,23 @@ class TestSessionActorStamp2600:
     backfill, asserted via DIRECT graph read (list_sessions does not expose
     actor_user_id until Task 5)."""
 
-    def _data_sdk(self, team_id: str):
+    def _data_sdk(self, org_id: str):
 
         """Open the TEAM data graph directly (Session nodes live in the
-        namespace team_{tid} — NOT the registry projection the mint SDK
+        namespace org_{tid} — NOT the registry projection the mint SDK
         returns)."""
         import tortoise.hosted_api as ha_mod
-        return ha_mod._make_sdk(namespace=team_id)
+        return ha_mod._make_sdk(namespace=org_id)
 
-    def _session_actor(self, team_id: str, session_id: str):
-        rows = self._data_sdk(team_id)._get_proj().g.query(
+    def _session_actor(self, org_id: str, session_id: str):
+        rows = self._data_sdk(org_id)._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
             params={"sid": session_id}).result_set
         return rows[0][0] if rows else None
 
     def _setup(self, tmp_path):
         """Temp registry + seeded pro team + real-auth TestClient (no DI
-        override). Returns (sdk, team_id, client)."""
+        override). Returns (sdk, org_id, client)."""
         import tortoise.hosted_api as ha_mod
         db_path = os.path.join(tmp_path, "stamp.db")
         _orig = _patch_tortoise_sdk_init(db_path)
@@ -4994,7 +5661,7 @@ class TestSearchOffloadConcurrency:
                 # before the gather's worker threads construct their SDKs — a
                 # raced constructor would spawn a second daemon (split-brain)
                 # or hit the socket before it appears.
-                pre = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+                pre = ha_mod._make_sdk(namespace=TEST_ORG_ID)
                 pre._get_proj()  # eager: ensure the daemon socket is up
                 # Install the stub AFTER the pre-warm so the pre-warm doesn't
                 # consume/break the shared barrier.
@@ -5005,8 +5672,8 @@ class TestSearchOffloadConcurrency:
                     from tortoise.hosted_api import search
                     t0 = time.monotonic()
                     await asyncio.wait_for(asyncio.gather(
-                        search("falkordb traversal", limit=10, team=TEST_TEAM),
-                        search("graph performance", limit=10, team=TEST_TEAM),
+                        search("falkordb traversal", limit=10, org=TEST_TEAM),
+                        search("graph performance", limit=10, org=TEST_TEAM),
                     ), timeout=15)
                     return time.monotonic() - t0
 
@@ -5031,12 +5698,12 @@ class TestSearchOffloadConcurrency:
             db_path = os.path.join(tmpdir, "test.db")
             _orig_init = _patch_tortoise_sdk_init(db_path)
             try:
-                ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+                ha_mod._make_sdk(namespace=TEST_ORG_ID)
                 monkeypatch.setattr(EmbeddingModel, "get", lambda: None)
 
                 from tortoise.hosted_api import search
                 result = asyncio.run(search("anything", limit=10,
-                                            team=TEST_TEAM))
+                                            org=TEST_TEAM))
                 # Empty temp DB -> FTS finds nothing; the meaningful assert is
                 # 200-shaped (no HTTPException) + count == 0.
                 assert result == {"results": [], "count": 0}
@@ -5054,12 +5721,12 @@ class TestSearchOffloadConcurrency:
             db_path = os.path.join(tmpdir, "test.db")
             _orig_init = _patch_tortoise_sdk_init(db_path)
             try:
-                ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+                ha_mod._make_sdk(namespace=TEST_ORG_ID)
 
                 from tortoise.hosted_api import topic_summary
                 result = asyncio.run(topic_summary(
                     "some topic", max_seeds=50, max_hops=1,
-                    include_relationships=True, team=TEST_TEAM))
+                    include_relationships=True, org=TEST_TEAM))
                 # Empty DB -> empty-but-shaped summary (no 500).
                 assert isinstance(result, dict)
                 assert result.get("topic") == "some topic"
@@ -5181,7 +5848,7 @@ class TestBodySweepCaps:
 # C2 (#2111): provisioning service + graph lifecycle
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _seed_team_graphs(sdk, team_id: str, tier: str, max_graphs,
+def _seed_team_graphs(sdk, org_id: str, tier: str, max_graphs,
                       max_api_keys: int = 20) -> None:
     """Seed a Team node with the C1/C2 quota columns (registry mode) PLUS
     the kind='default' Graph node (team_create creates it in production —
@@ -5190,17 +5857,17 @@ def _seed_team_graphs(sdk, team_id: str, tier: str, max_graphs,
     sdk._get_registry().query(
         "CREATE (t:Team {id:$id, tier:$tier, max_graphs:$mg, "
         "max_api_keys:$mak, graph_name: $gn})",
-        params={"id": team_id, "tier": tier, "mg": max_graphs,
-                "mak": max_api_keys, "gn": f"team_{team_id}"},
+        params={"id": org_id, "tier": tier, "mg": max_graphs,
+                "mak": max_api_keys, "gn": f"org_{org_id}"},
     )
-    sdk._graph_create(team_id, "default", kind="default")
+    sdk._graph_create(org_id, "default", kind="default")
 
 
-def _mint_caller_key(sdk, team_id: str, *, scopes: list | None,
+def _mint_caller_key(sdk, org_id: str, *, scopes: list | None,
                      deleg: int | None = None) -> dict:
     """Mint an OWNER-level caller key (deleg NULL) with the given scopes —
     the provisioning endpoint's caller credential."""
-    return sdk.apikey_create(team_id, "owner-test", scopes=scopes,
+    return sdk.apikey_create(org_id, "owner-test", scopes=scopes,
                              delegation_depth=deleg)
 
 
@@ -5208,7 +5875,7 @@ class TestProvisioningService:
     """The ONE provisioning service (E2E-1/3/7) — key-driven + session alias."""
 
     def _setup(self, tmp_path, tier, max_graphs, max_api_keys=20):
-        """Temp registry + seeded team. Returns (sdk, team_id, client)."""
+        """Temp registry + seeded team. Returns (sdk, org_id, client)."""
         import tortoise.hosted_api as ha_mod
         db_path = os.path.join(tmp_path, "test.db")
         _orig = _patch_tortoise_sdk_init(db_path)
@@ -5230,7 +5897,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/teams/{tid}/graphs",
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
                         json={"name": "acme-prod",
                               "scopes": ["graphs:read", "graphs:write"]},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
@@ -5277,7 +5944,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/teams/{tid}/graphs",
+            r = tc.post(f"/v1/organizations/{tid}/graphs",
                         json={"name": "g1",
                               "scopes": ["graphs:read", "graphs:create",
                                          "keys:manage"]},
@@ -5298,9 +5965,9 @@ class TestProvisioningService:
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
             hdr = {"Authorization": f"Bearer {key['api_key']}"}
-            assert tc.post(f"/v1/teams/{tid}/graphs", json={"name": "dup"},
+            assert tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "dup"},
                            headers=hdr).status_code == 201
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "dup"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "dup"},
                         headers=hdr)
             assert r.status_code == 409, r.text
             assert "already exists" in r.json()["detail"]
@@ -5313,7 +5980,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "x"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 402, r.text
             assert "Upgrade" in r.json()["detail"]
@@ -5329,10 +5996,10 @@ class TestProvisioningService:
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
             hdr = {"Authorization": f"Bearer {key['api_key']}"}
-            r1 = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "c1"},
+            r1 = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "c1"},
                          headers=hdr)
             assert r1.status_code == 201, r1.text
-            r2 = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "c2"},
+            r2 = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "c2"},
                          headers=hdr)
             assert r2.status_code == 409, r2.text  # 2 of 2 reached
             assert r2.headers.get("X-Graph-Quota") == "2/2"
@@ -5340,13 +6007,13 @@ class TestProvisioningService:
             gen.close()
 
     def test_cross_team_key_404(self, tmp_path):
-        """P1 #6: a team-A key hitting /v1/teams/B/graphs → 404 (no
+        """P1 #6: a team-A key hitting /v1/organizations/B/graphs → 404 (no
         existence oracle, no privilege confusion)."""
         gen = self._setup(tmp_path, "pro", None)
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post("/v1/teams/team-other-000/graphs",
+            r = tc.post("/v1/organizations/team-other-000/graphs",
                         json={"name": "x"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 404, r.text
@@ -5366,13 +6033,13 @@ class TestProvisioningService:
             from tortoise.auth import hash_api_key
             token = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
-                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:'x', graph_id:'g_x', "
                 "scopes:['graphs:create'], delegation_depth:0})",
                 params={"id": "minted-key", "tid": tid,
                         "kh": hash_api_key(token), "kp": token[:10]},
             )
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "x"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
                         headers={"Authorization": f"Bearer {token}"})
             assert r.status_code == 403, r.text
         finally:
@@ -5390,7 +6057,7 @@ class TestProvisioningService:
             from tortoise.auth import hash_api_key
             token = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
-                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:'x', graph_id:'g_x', "
                 "scopes:['graphs:read'], delegation_depth:0})",
                 params={"id": "minted-key2", "tid": tid,
@@ -5399,7 +6066,7 @@ class TestProvisioningService:
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {token}"})
             assert r.status_code == 403, r.text
-            # The centralized deleg gate in get_current_team_session fires
+            # The centralized deleg gate in get_current_org_session fires
             # (KEY_NOT_USER_MINTED) — minted keys cannot manage the team.
             detail = r.json()["detail"]
             if isinstance(detail, dict):
@@ -5433,7 +6100,7 @@ class TestProvisioningService:
             sdk.create_point("default-only", content="default only")
             token = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
-                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:'x', graph_id:$gid, "
                 "scopes:['graphs:read'], delegation_depth:0})",
                 params={"id": "minted-active", "tid": tid,
@@ -5463,7 +6130,7 @@ class TestProvisioningService:
             #    never widens onto the default) .
             dead = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
-                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:'x', graph_id:'g_ghost', "
                 "scopes:['graphs:read'], delegation_depth:0})",
                 params={"id": "minted-ghost", "tid": tid,
@@ -5475,7 +6142,7 @@ class TestProvisioningService:
             # 4) a deleg=0 key with NO data scope stays dormant on data.
             nodata = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
-                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:'x', graph_id:$gid, "
                 "scopes:['keys:manage'], delegation_depth:0})",
                 params={"id": "minted-nodata", "tid": tid,
@@ -5503,13 +6170,13 @@ class TestProvisioningService:
             app.dependency_overrides[ha_mod.get_current_user] = \
                 lambda: {"user_id": "session-owner", "email": "o@x.com"}
             sdk._get_registry().query(
-                "MERGE (m:Membership {user_id:'session-owner', team_id:$tid, "
+                "MERGE (m:Membership {user_id:'session-owner', org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"tid": tid},
             )
             try:
                 r = tc.post("/v1/graphs",
-                            json={"team_id": tid, "name": "from-dash"})
+                            json={"org_id": tid, "name": "from-dash"})
                 assert r.status_code == 201, r.text
                 assert r.json()["key_plaintext"].startswith("tk_")
                 assert r.json()["revealed_once"] is True
@@ -5543,7 +6210,7 @@ class TestProvisioningService:
         os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
         os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
         fake = FakeControlPlane({
-            "teams": [], "api_keys": [], "team_memberships": [],
+            "organizations": [], "api_keys": [], "org_memberships": [],
             "invitations": [],
         })
         # #2670: dashboard_key_login now DEFAULTS to false for human-created
@@ -5551,12 +6218,12 @@ class TestProvisioningService:
         # and the minted-key guard below is the guard actually under test.
         # (Without this, the exchange 403s dashboard_login_disabled first and
         # the P1-2 minted-key property is never exercised.)
-        fake.seed("teams", [dict(FREE_TEAM, dashboard_key_login=True)])
-        fake.seed("team_memberships",
-                  [_membership_row(user_id=_U1, team_id="team-free-001")])
+        fake.seed("organizations", [dict(FREE_TEAM, dashboard_key_login=True)])
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_U1, org_id="team-free-001")])
         token = "tk_" + uuid.uuid4().hex
         fake.seed("api_keys", [{
-            "id": "mk-1", "team_id": "team-free-001",
+            "id": "mk-1", "org_id": "team-free-001",
             "lookup_hash": _lh(token), "key_prefix": token[:10],
             "created_via": "provisioned",
             "created_by": _U1,  # the minting session user (owner)
@@ -5590,7 +6257,7 @@ class TestProvisioningService:
         sdk, tid, tc = next(gen)
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "orphan-test"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "orphan-test"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 409, r.text
             graphs = sdk.graph_list(tid)
@@ -5606,7 +6273,7 @@ class TestProvisioningService:
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
             sdk.apikey_revoke(key["id"])
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "x"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "x"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code in (401, 403), r.text
         finally:
@@ -5634,17 +6301,17 @@ class TestProvisioningService:
             # real write THEN raise.
             orig = ha_mod.TortoiseSDK.apikey_create
 
-            def _failing_mint(self, team_id, created_by, **kw):
+            def _failing_mint(self, org_id, created_by, **kw):
                 # Do the REAL mint (node + edge land), then raise —
                 # simulating an exception between the key write and the
                 # helper's return.
-                orig(self, team_id, created_by, **kw)  # real mint lands first
+                orig(self, org_id, created_by, **kw)  # real mint lands first
                 raise RuntimeError("simulated post-write mint failure")
 
             monkeypatch.setattr(ha_mod.TortoiseSDK, "apikey_create",
                                 _failing_mint)
             try:
-                r = tc.post(f"/v1/teams/{tid}/graphs",
+                r = tc.post(f"/v1/organizations/{tid}/graphs",
                             json={"name": "doomed"},
                             headers={"Authorization":
                                      f"Bearer {key['api_key']}"})
@@ -5675,7 +6342,7 @@ class TestGraphLifecycle:
     + default-guard; GET /v1/graphs status/key_count."""
 
     def _provision(self, tc, tid, key, name):
-        return tc.post(f"/v1/teams/{tid}/graphs", json={"name": name},
+        return tc.post(f"/v1/organizations/{tid}/graphs", json={"name": name},
                        headers={"Authorization": f"Bearer {key['api_key']}"})
 
     def test_delete_cascade_release_reuse(self, tmp_path):
@@ -5695,7 +6362,7 @@ class TestGraphLifecycle:
             assert r.json()["key"]["id"] in listed
             # Delete with a graphs:delete-scoped key
             delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])
-            r = tc.delete(f"/v1/graphs/{gid}?team_id={tid}",
+            r = tc.delete(f"/v1/graphs/{gid}?org_id={tid}",
                           headers={"Authorization":
                                    f"Bearer {delkey['api_key']}"})
             assert r.status_code == 204, r.text
@@ -5712,14 +6379,14 @@ class TestGraphLifecycle:
             gid2 = r.json()["graph"]["id"]
             assert gid2 != gid  # recreate = new node (tombstone kept)
             # Delete the RECREATED graph → slot freed → new-name provision
-            r = tc.delete(f"/v1/graphs/{gid2}?team_id={tid}",
+            r = tc.delete(f"/v1/graphs/{gid2}?org_id={tid}",
                           headers={"Authorization":
                                    f"Bearer {delkey['api_key']}"})
             assert r.status_code == 204, r.text
             r = self._provision(tc, tid, key, "g2")
             assert r.status_code == 201, r.text
             # Default graph delete → 403
-            r = tc.delete(f"/v1/graphs/default?team_id={tid}",
+            r = tc.delete(f"/v1/graphs/default?org_id={tid}",
                           headers={"Authorization":
                                    f"Bearer {delkey['api_key']}"})
             assert r.status_code == 403, r.text
@@ -5736,13 +6403,13 @@ class TestGraphLifecycle:
             delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])
             default = next(g for g in sdk.graph_list(tid)
                            if g["kind"] == "default")
-            r = tc.delete(f"/v1/graphs/{default['graph_id']}?team_id={tid}",
+            r = tc.delete(f"/v1/graphs/{default['graph_id']}?org_id={tid}",
                           headers={"Authorization":
                                    f"Bearer {delkey['api_key']}"})
             assert r.status_code == 403, r.text
             # Unknown gid → 404
             r = tc.delete(f"/v1/graphs/g_ghost{abs(hash('x'))%1000000}?"
-                          f"team_id={tid}",
+                          f"org_id={tid}",
                           headers={"Authorization":
                                    f"Bearer {delkey['api_key']}"})
             assert r.status_code == 404, r.text
@@ -5759,7 +6426,7 @@ class TestGraphLifecycle:
             app.dependency_overrides[ha_mod.get_current_user] = \
                 lambda: {"user_id": "list-owner", "email": "o@x.com"}
             sdk._get_registry().query(
-                "MERGE (m:Membership {user_id:'list-owner', team_id:$tid, "
+                "MERGE (m:Membership {user_id:'list-owner', org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"tid": tid},
             )
@@ -5767,7 +6434,7 @@ class TestGraphLifecycle:
                 key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
                 r = self._provision(tc, tid, key, "listed")
                 assert r.status_code == 201, r.text
-                r = tc.get(f"/v1/graphs?team_id={tid}")
+                r = tc.get(f"/v1/graphs?org_id={tid}")
                 assert r.status_code == 200, r.text
                 rows = r.json()
                 assert rows[0]["kind"] == "default"  # default first
@@ -5789,7 +6456,7 @@ class TestGraphLifecycle:
             r = self._provision(tc, tid, key, "g1")
             gid = r.json()["graph"]["id"]
             readkey = _mint_caller_key(sdk, tid, scopes=["graphs:read"])
-            r = tc.delete(f"/v1/graphs/{gid}?team_id={tid}",
+            r = tc.delete(f"/v1/graphs/{gid}?org_id={tid}",
                           headers={"Authorization":
                                    f"Bearer {readkey['api_key']}"})
             assert r.status_code == 403, r.text
@@ -5821,10 +6488,10 @@ class TestGraphLifecycle:
         try:
             app.dependency_overrides[ha_mod.get_current_user] = \
                 lambda: {"user_id": "list-owner", "email": "o@x.com"}
-            app.dependency_overrides[get_current_team] = \
-                lambda: dict(TEST_TEAM, team_id=tid)
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM, org_id=tid)
             sdk._get_registry().query(
-                "MERGE (m:Membership {user_id:'list-owner', team_id:$tid, "
+                "MERGE (m:Membership {user_id:'list-owner', org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"tid": tid},
             )
@@ -5835,12 +6502,12 @@ class TestGraphLifecycle:
             token = "tt_bd_" + _uuid.uuid4().hex[:16]
             kid = "bd-key-" + _uuid.uuid4().hex[:12]
             sdk._get_registry().query(
-                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:'legacy', graph_id:$gid})",
                 params={"id": kid, "tid": tid, "kh": hash_api_key(token),
                         "kp": token[:10], "gid": default["graph_id"]},
             )
-            r = tc.get(f"/v1/graphs?team_id={tid}")
+            r = tc.get(f"/v1/graphs?org_id={tid}")
             assert r.status_code == 200, r.text
             rows = r.json()
             dflt = next(x for x in rows if x["kind"] == "default")
@@ -5850,25 +6517,25 @@ class TestGraphLifecycle:
             r = self._provision(tc, tid, key, "metered")
             assert r.status_code == 201, r.text
             custom_gid = r.json()["graph"]["id"]
-            r = tc.get(f"/v1/graphs?team_id={tid}")
+            r = tc.get(f"/v1/graphs?org_id={tid}")
             custom = next(x for x in r.json() if x["graph_id"] == custom_gid)
             assert custom["key_count"] == 1
             # Manageability: the bound-default key appears on the UNFILTERED
             # key list (the API-Keys tab's read)…
-            kr = tc.get(f"/v1/team/keys?team_id={tid}")
+            kr = tc.get(f"/v1/team/keys?org_id={tid}")
             assert kr.status_code == 200, kr.text
             listed = [k for k in kr.json()["keys"]
                       if k.get("graph_id") == default["graph_id"]]
             assert [k["id"] for k in listed] == [kid]
             # …and revoking it by id from the API-Keys tab works (no
             # default-row dead end).
-            dr = tc.delete(f"/v1/team/keys/{kid}?team_id={tid}")
+            dr = tc.delete(f"/v1/team/keys/{kid}?org_id={tid}")
             assert dr.status_code == 200, dr.text
             assert dr.json()["revoked"] is True
             assert dr.json()["key_id"] == kid
         finally:
             app.dependency_overrides.pop(ha_mod.get_current_user, None)
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             gen.close()
 
 
@@ -5885,7 +6552,7 @@ class TestProvisioningConcurrency:
 
         def _mint(i):
             return tc.post(
-                f"/v1/teams/{tid}/graphs", json={"name": f"c{i}"},
+                f"/v1/organizations/{tid}/graphs", json={"name": f"c{i}"},
                 headers={"Authorization": f"Bearer {key['api_key']}"})
 
         with ThreadPoolExecutor(max_workers=n) as ex:
@@ -5901,7 +6568,7 @@ class TestProvisioningConcurrency:
         try:
             key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
             # Fill the free slot: 1st custom (2 of 2)
-            r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "full"},
+            r = tc.post(f"/v1/organizations/{tid}/graphs", json={"name": "full"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code == 201, r.text
 
@@ -5959,7 +6626,7 @@ class TestC3KeyLifecycle:
             _restore_tortoise_sdk_init(_orig)
             # C3 hygiene: this class bypasses the module client fixture, so
             # nothing else clears dependency_overrides — a leaked
-            # get_current_user/get_current_team override would bleed into the
+            # get_current_user/get_current_org override would bleed into the
             # NEXT test file in the same pytest process (dashboard_login's
             # Supabase-mode owner check 403s on the stale user).
             app.dependency_overrides.clear()
@@ -5968,14 +6635,14 @@ class TestC3KeyLifecycle:
         """Session-face mint: the client fixture override supplies the team
         dict with key_id REMOVED (a session JWT face — key_id None →
         owner-class session mint; TEST_TEAM carries a key_id by default)."""
-        team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
-        team_dict.pop("key_id", None)
-        team_dict.pop("delegation_depth", None)
-        app.dependency_overrides[get_current_team] = lambda: team_dict
+        org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+        org_dict.pop("key_id", None)
+        org_dict.pop("delegation_depth", None)
+        app.dependency_overrides[get_current_org] = lambda: org_dict
         import tortoise.hosted_api as ha_mod
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
-            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "MERGE (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
             "SET m.role='owner'",
             params={"uid": _U1, "tid": tid},
         )
@@ -6029,7 +6696,7 @@ class TestC3KeyLifecycle:
             owner = sdk.apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
-            app.dependency_overrides.pop(get_current_team, None)  # real key auth
+            app.dependency_overrides.pop(get_current_org, None)  # real key auth
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {owner}"},
                         json={"scopes": ["graphs:read", "graphs:write"]})
@@ -6058,7 +6725,7 @@ class TestC3KeyLifecycle:
             owner = sdk.apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {owner}"},
                         json={"scopes": ["graphs:read", "keys:manage"]})
@@ -6075,7 +6742,7 @@ class TestC3KeyLifecycle:
             reader = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"],
             )["api_key"]
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {reader}"},
                         json={"scopes": ["graphs:read"]})
@@ -6150,13 +6817,13 @@ class TestC3KeyLifecycle:
             # Custom graph + two keys (one bound to it).
             g = sdk._graph_create(tid, "acme", kind="custom")
             gid = g["graph_id"]
-            app.dependency_overrides[get_current_team] = \
-                lambda: dict(TEST_TEAM, team_id=tid, session_user_id=_U1, key_id=None)
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM, org_id=tid, session_user_id=_U1, key_id=None)
             # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
             # owner Membership (pre-#2297 the mint had no role check, so this
             # override never needed it; same pattern as _session_mint).
             sdk._get_registry().query(
-                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"uid": _U1, "tid": tid},
             )
@@ -6187,11 +6854,11 @@ class TestC3KeyLifecycle:
         gen = self._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides[get_current_team] = \
-                lambda: dict(TEST_TEAM, team_id=tid, session_user_id=_U1, key_id=None)
+            app.dependency_overrides[get_current_org] = \
+                lambda: dict(TEST_TEAM, org_id=tid, session_user_id=_U1, key_id=None)
             import tortoise.hosted_api as ha_mod
             ha_mod._make_sdk(namespace="registry")._get_registry().query(
-                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"uid": _U1, "tid": tid},
             )
@@ -6221,7 +6888,7 @@ class TestC3KeyLifecycle:
 
     def test_minted_deleg0_key_cannot_manage_403(self, tmp_path):
         """E2E-4 half: a deleg=0 child key hitting mint/revoke → 403 (the
-        central deleg gate in get_current_team_session fires first). Shrink
+        central deleg gate in get_current_org_session fires first). Shrink
         is session-gated (E2E-12 surface — get_current_user dep), so a key
         face 401s there rather than reaching the deleg gate; E2E-4's
         management set is create/delete/mint/revoke — shrink is not in it."""
@@ -6231,7 +6898,7 @@ class TestC3KeyLifecycle:
             owner = sdk.apikey_create(
                 tid, "owner-test", scopes=["keys:manage", "graphs:read"],
             )["api_key"]
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             child = tc.post("/v1/team/keys",
                             headers={"Authorization": f"Bearer {owner}"},
                             json={"scopes": ["graphs:read"]}).json()["key"]
@@ -6262,14 +6929,14 @@ class TestC3KeyCapAndEscalationBackstop:
         try:
             # One key already exists (fills the cap of 1).
             sdk.apikey_create(tid, "owner-test")
-            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
-            team_dict.pop("key_id", None)
-            app.dependency_overrides[get_current_team] = lambda: team_dict
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+            org_dict.pop("key_id", None)
+            app.dependency_overrides[get_current_org] = lambda: org_dict
             # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
             # owner Membership (pre-#2297 the mint had no role check, so this
             # override never needed it; same pattern as _session_mint).
             sdk._get_registry().query(
-                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"uid": _U1, "tid": tid},
             )
@@ -6310,7 +6977,7 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             # Reader key (graphs:read only) → {} mint 403 (no mint capability).
             reader = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])["api_key"]
@@ -6349,7 +7016,7 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             legacy = sdk.apikey_create(tid, "owner-test")  # {} default = legacy
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {legacy['api_key']}"},
@@ -6369,7 +7036,7 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             legacy = sdk.apikey_create(tid, "owner-test")
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {legacy['api_key']}"},
@@ -6397,18 +7064,18 @@ class TestC3KeyCapAndEscalationBackstop:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             # deleg-NULL scoped owner key.
             scoped = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read", "graphs:write"])
             # shrink to [] via session face (owner admin).
-            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: org_dict
             app.dependency_overrides[get_current_user] = lambda: {
                 "user_id": _U1, "email": "owner@example.com"}
             sdk._get_registry().query(
-                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"uid": _U1, "tid": tid},
             )
@@ -6432,14 +7099,14 @@ class TestC3KeyCapAndEscalationBackstop:
         sdk, tid, tc = next(gen)
         try:
             sdk.apikey_create(tid, "owner-test")  # fill cap
-            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: org_dict
             # #2297 POLICY A: the SESSION face is owner/admin-gated — seed the
             # owner Membership (pre-#2297 the mint had no role check, so this
             # override never needed it; same pattern as _session_mint).
             sdk._get_registry().query(
-                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"uid": _U1, "tid": tid},
             )
@@ -6462,7 +7129,7 @@ class TestC3ReviewGatePins:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            app.dependency_overrides.pop(get_current_org, None)  # key auth
             owner = sdk.apikey_create(tid, "owner-test")  # legacy full-access
             reader = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])["api_key"]
@@ -6506,17 +7173,17 @@ class TestC3ReviewGatePins:
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
-            app.dependency_overrides.pop(get_current_team, None)
+            app.dependency_overrides.pop(get_current_org, None)
             scoped = sdk.apikey_create(
                 tid, "owner-test", scopes=["graphs:read"])
             # session face owner
-            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+            org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1,
                              key_id=None)
-            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_org] = lambda: org_dict
             app.dependency_overrides[get_current_user] = lambda: {
                 "user_id": _U1, "email": "owner@example.com"}
             sdk._get_registry().query(
-                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "MERGE (m:Membership {user_id:$uid, org_id:$tid, "
                 "status:'active'}) SET m.role='owner'",
                 params={"uid": _U1, "tid": tid},
             )
@@ -6551,12 +7218,12 @@ class TestC3ReviewGatePins:
 
     def _session_mint_owner(self, tc, tid, body):
         import tortoise.hosted_api as ha_mod
-        team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
-        team_dict.pop("key_id", None)
-        app.dependency_overrides[get_current_team] = lambda: team_dict
+        org_dict = dict(TEST_TEAM, org_id=tid, session_user_id=_U1)
+        org_dict.pop("key_id", None)
+        app.dependency_overrides[get_current_org] = lambda: org_dict
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
-            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "MERGE (m:Membership {user_id:$uid, org_id:$tid, status:'active'}) "
             "SET m.role='owner'",
             params={"uid": _U1, "tid": tid},
         )
@@ -6636,12 +7303,12 @@ class TestEmbeddedRegistryPathDivergence:
                 "CREATE (t:Team {id:$id, name:$name, deleted_at:null})",
                 params={"id": "", "name": "Falsy"},
             )
-            teams = ha_mod._iter_registered_teams()
+            teams = ha_mod._iter_registered_orgs()
             writer.close()
         finally:
             _close_keepalive_anchors(ha_mod)
-        assert {"team_id": "2251-team-1", "name": "T2251"} in teams, teams
-        assert all(t["team_id"] for t in teams), teams
+        assert {"org_id": "2251-team-1", "name": "T2251"} in teams, teams
+        assert all(t["org_id"] for t in teams), teams
 
     def test_graph_has_team_namespace_probes_writer_db(
             self, monkeypatch, tmp_path):
@@ -6670,11 +7337,11 @@ class TestEmbeddedRegistryPathDivergence:
             assert records, "writer seam constructed nothing"
             writer_records = list(records)
             records.clear()
-            ha_mod._iter_registered_teams()
+            ha_mod._iter_registered_orgs()
             sweep_records = list(records)
             assert sweep_records, "_iter_registered_teams constructed nothing"
             records.clear()
-            ha_mod._graph_has_team_namespace("team-2251-x")
+            ha_mod._graph_has_org_namespace("team-2251-x")
             probe_records = list(records)
             assert probe_records, "_graph_has_team_namespace constructed nothing"
         finally:
@@ -6716,11 +7383,11 @@ class TestEmbeddedRegistryPathDivergence:
             raise RuntimeError("embedded store busy")
 
         monkeypatch.setattr(ha_mod, "_make_sdk", _busy)
-        assert ha_mod._iter_registered_teams() == []
+        assert ha_mod._iter_registered_orgs() == []
 
     def test_graph_has_team_namespace_real_verdict(self, monkeypatch, tmp_path):
         """Consumer-visible verdict on a REAL embedded store: a minted
-        team_{tid} graph on the anchored/writer store → True; an unminted id
+        org_{tid} graph on the anchored/writer store → True; an unminted id
         → False. Pre-fix the bare construction probed resolve_db_path()'s
         default store (pointed at a tmp home here for hermeticity) → False
         for the present graph (acceptance (e)(ii) re-enables the FLOW leg)."""
@@ -6752,8 +7419,8 @@ class TestEmbeddedRegistryPathDivergence:
             # Post-fix: both sites resolve the SAME anchored store → True for
             # a present graph, False for an absent one. Pre-fix this probed
             # the (empty) default store → False for the present graph.
-            assert ha_mod._graph_has_team_namespace(tid) is True
-            assert ha_mod._graph_has_team_namespace("team-absent-999") is False
+            assert ha_mod._graph_has_org_namespace(tid) is True
+            assert ha_mod._graph_has_org_namespace("team-absent-999") is False
         finally:
             # Close every anchor minted (registry + the team graph) — the
             # #1950 close-then-drop pattern.
@@ -6776,7 +7443,7 @@ class TestEmbeddedRegistryPathDivergence:
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
         ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
-            teams = ha_mod._iter_registered_teams()
+            teams = ha_mod._iter_registered_orgs()
         finally:
             ha_mod._FALLBACK_KEEPALIVE.clear()
         # URI-branch _make_sdk returns a fresh TortoiseSDK(namespace="registry")
@@ -6797,16 +7464,16 @@ class TestEmbeddedRegistryPathDivergence:
         monkeypatch.setenv("SUPABASE_URL", "https://2251.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-2251")
         fake = FakeControlPlane()
-        fake.seed("teams", [{"id": "supa-team-1", "name": "Supa T",
+        fake.seed("organizations", [{"id": "supa-team-1", "name": "Supa T",
                              "deleted_at": None}])
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
         ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
-            teams = ha_mod._iter_registered_teams()
+            teams = ha_mod._iter_registered_orgs()
         finally:
             ha_mod._FALLBACK_KEEPALIVE.clear()
-        assert teams == [{"team_id": "supa-team-1", "name": "Supa T"}], teams
+        assert teams == [{"org_id": "supa-team-1", "name": "Supa T"}], teams
         assert records == [], f"Supabase mode constructed {len(records)} SDKs"
 
     def test_iter_registered_teams_supabase_query_failure_returns_empty(
@@ -6829,7 +7496,7 @@ class TestEmbeddedRegistryPathDivergence:
         monkeypatch.setattr(fake, "query", _query_boom)
         monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
-        assert ha_mod._iter_registered_teams() == []
+        assert ha_mod._iter_registered_orgs() == []
         assert records == [], "registry SDK must never be built in Supabase mode"
 
     def test_graph_has_team_namespace_uri_mode_parity(
@@ -6846,7 +7513,7 @@ class TestEmbeddedRegistryPathDivergence:
         records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
         ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
-            ha_mod._graph_has_team_namespace("team-2251-uri")
+            ha_mod._graph_has_org_namespace("team-2251-uri")
             # The no-anchor URI contract the docstring claims: URI mode must
             # never populate the keepalive dict.
             assert ha_mod._FALLBACK_KEEPALIVE.get("registry") is None
@@ -6857,6 +7524,71 @@ class TestEmbeddedRegistryPathDivergence:
         # except returns True deterministically (the success path is
         # unreachable with a stub) — assert the exact construction record.
         assert records == [(None, "registry", None)], records
+
+
+class TestOrgGraphNameRoundTrip:
+    """#3543 code review (P1) — a stored graph name must round-trip to the
+    SAME graph.
+
+    `_org_namespace` returned a prefix-STRIPPED namespace for
+    `_make_sdk(namespace=...)` to re-prefix. When #3543 changed the SDK's
+    namespace rule from `team_{ns}` to `org_{ns}`, a stored `team_{x}` stripped
+    to `x` and was re-prefixed into `org_{x}` — a different, ABSENT graph, i.e.
+    an empty dump with HTTP 200, the exact #873 failure the stored-name rule
+    exists to prevent. And `_graph_has_org_namespace` returning True on a
+    `team_*` hit while its caller opened `org_*` minted a spurious empty graph
+    — the pin-4 read-path write. Both are pinned here.
+    """
+
+    def test_stored_name_is_returned_verbatim(self):
+        import tortoise.hosted_api as ha_mod
+
+        assert ha_mod._org_graph_name({"graph_name": "team_x"}, "o1") == "team_x"
+        assert ha_mod._org_graph_name({"graph_name": "org_x"}, "o1") == "org_x"
+        # custom sub-graph: the full `org_{tid}_{gid}` must survive too
+        assert ha_mod._org_graph_name(
+            {"graph_name": "org_t1_g9"}, "o1") == "org_t1_g9"
+        # fallback only when nothing is stored
+        assert ha_mod._org_graph_name({}, "o1") == "org_o1"
+        assert ha_mod._org_graph_name({"graph_name": None}, "o1") == "org_o1"
+
+    def test_open_org_graph_sdk_addresses_the_listed_name(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"org_o1", "team_o2"})
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda **kw: ("sdk", kw))
+        # canonical → the namespace form is preserved (embedded keepalive key
+        # and every downstream sdk._namespace consumer stay identical)
+        assert ha_mod._open_org_graph_sdk("o1") == ("sdk", {"namespace": "o1"})
+        # legacy → the FULL name, verbatim. Opening `namespace="o2"` here
+        # would resolve to `org_o2`: a different graph, minted on read.
+        assert ha_mod._open_org_graph_sdk("o2") == (
+            "sdk", {"graph_name": "team_o2"})
+        # neither listed → None (caller keeps its inline fallback)
+        assert ha_mod._open_org_graph_sdk("o3") is None
+        # probe failed → also None; the caller's `or _make_sdk(namespace=)`
+        # restores the fail-open read that ends in 'unavailable' markers
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs", lambda: None)
+        assert ha_mod._open_org_graph_sdk("o1") is None
+
+    def test_has_org_namespace_accepts_both_and_fails_open(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"team_o9"})
+        assert ha_mod._graph_has_org_namespace("o9") is True
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: {"org_o9"})
+        assert ha_mod._graph_has_org_namespace("o9") is True
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs",
+                            lambda: set())
+        assert ha_mod._graph_has_org_namespace("o9") is False
+        # graph-up-unknown stays fail-open (never-raise contract, #2251)
+        monkeypatch.setattr(ha_mod, "_registry_existing_graphs", lambda: None)
+        assert ha_mod._graph_has_org_namespace("o9") is True
 
 
 class TestResolveEmbeddedDbPath:
@@ -6938,7 +7670,7 @@ def _raise_file_exists(path, **kw):
 class TestRegistryExistingGraphs:
     """_registry_existing_graphs probe-before-purge helper (#2251 review P2).
 
-    The retention sweep must not purge an ABSENT team_{tid} graph (an orphan
+    The retention sweep must not purge an ABSENT org_{tid} graph (an orphan
     registry row from a partial provision) — the purge query would
     materialize an empty graph. The helper lists the server-wide existing
     graphs via the registry seam and returns None on probe failure so the
@@ -6946,7 +7678,7 @@ class TestRegistryExistingGraphs:
 
     def test_success_returns_set_of_graph_names(self, monkeypatch):
         """A successful probe returns the graph names as a set — the sweep
-        gate then skips teams whose team_{tid} graph was never minted."""
+        gate then skips teams whose org_{tid} graph was never minted."""
         import tortoise.hosted_api as ha_mod
 
         class _FakeDb:
@@ -7062,7 +7794,7 @@ class TestGraphHasTeamNamespaceExceptionPath:
         monkeypatch.setattr(
             ha_mod, "_make_sdk",
             lambda namespace=None, graph_name=None: _Sdk())
-        assert ha_mod._graph_has_team_namespace("team-leak") is True
+        assert ha_mod._graph_has_org_namespace("team-leak") is True
         assert closed == [True], "close() must run on the exception path"
 
     def test_construction_raise_keeps_fail_open(self, monkeypatch, tmp_path):
@@ -7076,7 +7808,7 @@ class TestGraphHasTeamNamespaceExceptionPath:
             raise RuntimeError("embedded store busy")
 
         monkeypatch.setattr(ha_mod, "_make_sdk", _boom)
-        assert ha_mod._graph_has_team_namespace("team-busy") is True
+        assert ha_mod._graph_has_org_namespace("team-busy") is True
 
 
 class TestSupabaseLaneV2AcceptErrorShape:
@@ -7187,7 +7919,7 @@ class TestCreatePointForgedActorSilentlyDropped:
         })
         assert r.status_code == 200, r.text
         pid = r.json()["id"]
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         rows = sdk._get_proj().g.query(
             "MATCH (p:Point {id:$id}) RETURN p.actor_user_id, p.owner",
             params={"id": pid}).result_set
@@ -7204,7 +7936,7 @@ class TestCreatePointForgedActorSilentlyDropped:
         })
         assert r.status_code == 200, r.text
         pid = r.json()["id"]
-        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
         rows = sdk._get_proj().g.query(
             "MATCH (p:Point {id:$id}) RETURN count(p)",
             params={"id": pid}).result_set
@@ -7229,13 +7961,13 @@ class TestSessionActorReadPath2600:
     regression; one _actor_display_map call per request, zero when every
     row is legacy."""
 
-    def _data_sdk(self, team_id: str):
+    def _data_sdk(self, org_id: str):
         import tortoise.hosted_api as ha_mod
-        return ha_mod._make_sdk(namespace=team_id)
+        return ha_mod._make_sdk(namespace=org_id)
 
     def _setup(self, tmp_path, tag: str):
         """Temp registry + seeded pro team + real-auth TestClient. Returns
-        (sdk, team_id, client, proj) with a FRESH team per call."""
+        (sdk, org_id, client, proj) with a FRESH team per call."""
         import tortoise.hosted_api as ha_mod
         db_path = os.path.join(tmp_path, f"rd_{tag}.db")
         _orig = _patch_tortoise_sdk_init(db_path)
@@ -7371,9 +8103,9 @@ class TestSessionActorReadPath2600:
             calls: list[list[str]] = []
             _orig = ha_mod._actor_display_map
 
-            def _spy(actor_ids, team_id):
+            def _spy(actor_ids, org_id):
                 calls.append(list(actor_ids))
-                return _orig(actor_ids, team_id)
+                return _orig(actor_ids, org_id)
 
             monkeypatch.setattr(ha_mod, "_actor_display_map", _spy)
             for i, uid in enumerate((_2600_UUID_A, _2600_UUID_B, third)):
@@ -7401,8 +8133,8 @@ class TestSessionActorReadPath2600:
             _orig = ha_mod._actor_display_map
             monkeypatch.setattr(
                 ha_mod, "_actor_display_map",
-                lambda actor_ids, team_id: (
-                    calls.append(list(actor_ids)), _orig(actor_ids, team_id))[1])
+                lambda actor_ids, org_id: (
+                    calls.append(list(actor_ids)), _orig(actor_ids, org_id))[1])
             for i in range(2):
                 self._seed_session(proj, f"s-rd-legall-{i}", actor=None,
                                    created_at=f"2026-09-09T1{i}:00:00.000000+00:00")
@@ -7437,8 +8169,8 @@ class TestSessionActorReadPath2600:
             _orig = ha_mod._actor_display_map
             monkeypatch.setattr(
                 ha_mod, "_actor_display_map",
-                lambda actor_ids, team_id: (
-                    calls.append(list(actor_ids)), _orig(actor_ids, team_id))[1])
+                lambda actor_ids, org_id: (
+                    calls.append(list(actor_ids)), _orig(actor_ids, org_id))[1])
             ra = tc.get("/v1/sessions/s-rd-det-a", headers=h)
             assert ra.status_code == 200, ra.text
             body = ra.json()
@@ -7514,7 +8246,7 @@ class TestSessionActorReadPath2600:
             gid = "g_gate2600000000000000000000000"
             gtoken = "tk_gatebound_26000000001"
             sdk._get_registry().query(
-                "CREATE (k:APIKey {id:$kid, team_id:$tid, key_hash:$kh, "
+                "CREATE (k:APIKey {id:$kid, org_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:$cb, graph_id:$gid, "
                 "scopes:['graphs:read'], created_via:'provisioned'})",
                 params={"kid": "k-gate2600", "tid": tid,
@@ -7522,16 +8254,16 @@ class TestSessionActorReadPath2600:
                         "kp": gtoken[:10], "cb": _2600_UUID_A,
                         "gid": gid})
             sdk._get_registry().query(
-                "CREATE (g:Graph {id:$gid, team_id:$tid, name:'default', "
+                "CREATE (g:Graph {id:$gid, org_id:$tid, name:'default', "
                 "kind:'default', namespace:$ns})",
                 params={"gid": gid, "tid": tid,
-                        "ns": f"team_{tid}"})
+                        "ns": f"org_{tid}"})
             calls: list[list[str]] = []
             _orig = ha_mod._actor_display_map
 
-            def _spy(actor_ids, team_id_arg):
+            def _spy(actor_ids, org_id_arg):
                 calls.append(list(actor_ids))
-                return _orig(actor_ids, team_id_arg)
+                return _orig(actor_ids, org_id_arg)
 
             monkeypatch.setattr(ha_mod, "_actor_display_map", _spy)
             # graph-bound key → list_sessions must NOT fire the email lookup
@@ -7556,7 +8288,7 @@ class TestActorDisplayMap2600:
     """Direct unit coverage of the SHARED _actor_display_map helper — the
     registry-lane HTTP tests above exercise only the raw-id branch (docker
     CP has no membership email). These pin the SUPABASE email seam against
-    FakeControlPlane rows of the REAL team_members output shape, the
+    FakeControlPlane rows of the REAL org_members output shape, the
     any-actor gate, and full fail-soft — without an HTTP round trip."""
 
     def test_registry_lane_returns_empty(self, monkeypatch):
@@ -7578,7 +8310,7 @@ class TestActorDisplayMap2600:
         assert ha_mod._actor_display_map([], "team-x") == {}
 
     def test_supabase_email_seam_real_shape(self, monkeypatch):
-        """FakeControlPlane rows of the REAL team_members output shape:
+        """FakeControlPlane rows of the REAL org_members output shape:
         accepted-invite ACTIVE row that retained invited_email → email
         shown; active row WITHOUT invited_email → not in map (raw id);
         invite-pending row (user_id None) → filtered (raw id); unknown id →
@@ -7587,13 +8319,13 @@ class TestActorDisplayMap2600:
         import tortoise.supabase_control as sc_mod
         from tests.fake_control_plane import FakeControlPlane
         fake = FakeControlPlane()
-        fake.seed("team_memberships", [
-            {"team_id": "team-x", "user_id": _2600_UUID_A, "identity": None,
+        fake.seed("org_memberships", [
+            {"org_id": "team-x", "user_id": _2600_UUID_A, "identity": None,
              "role": "owner", "status": "active",
              "invited_email": "ada@example.com"},
-            {"team_id": "team-x", "user_id": _2600_UUID_B, "identity": None,
+            {"org_id": "team-x", "user_id": _2600_UUID_B, "identity": None,
              "role": "member", "status": "active", "invited_email": None},
-            {"team_id": "team-x", "user_id": None, "identity": "anon-1",
+            {"org_id": "team-x", "user_id": None, "identity": "anon-1",
              "role": "agent", "status": "invited",
              "invited_email": "pending@example.com"},
         ])
@@ -7606,7 +8338,7 @@ class TestActorDisplayMap2600:
         # B (no email) + unknown id absent → caller falls back to raw id
 
     def test_fail_soft_members_fetch_raising(self, monkeypatch):
-        """team_members raising (CP outage) → {} (never a doomed call, never
+        """org_members raising (CP outage) → {} (never a doomed call, never
         a 500) → caller falls back to raw id."""
         import tortoise.hosted_api as ha_mod
         import tortoise.supabase_control as sc_mod
@@ -7639,12 +8371,12 @@ class TestRestAttributionE2E2600:
     actor claim in the raw JSON body is silently dropped (Pydantic
     extra="ignore") — never stored, never a 422 (E2E-3 negative REST leg)."""
 
-    def _graph_point_added(self, team_id: str):
+    def _graph_point_added(self, org_id: str):
         """Read :GraphEvent PointAdded payloads from the team data graph."""
         import json
 
         import tortoise.hosted_api as ha_mod
-        sdk = ha_mod._make_sdk(namespace=team_id)
+        sdk = ha_mod._make_sdk(namespace=org_id)
         rows = sdk._get_proj().g.query(
             "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload "
             "ORDER BY e.seq").result_set
@@ -7715,16 +8447,16 @@ class TestRestAttributionE2E2600:
         monkeypatch.setenv("SUPABASE_URL", "https://e24b1.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-e24b1")
         fake = FakeControlPlane({
-            "teams": [], "api_keys": [], "team_memberships": [],
+            "organizations": [], "api_keys": [], "org_memberships": [],
             "invitations": [],
         })
-        fake.seed("teams", [dict(FREE_TEAM)])
-        fake.seed("team_memberships",
+        fake.seed("organizations", [dict(FREE_TEAM)])
+        fake.seed("org_memberships",
                   [_membership_row(user_id=_2600_UUID_A,
-                                   team_id="team-free-001")])
+                                   org_id="team-free-001")])
         token = "tt_" + _uuid.uuid4().hex
         fake.seed("api_keys", [{
-            "id": "k-e24b1", "team_id": "team-free-001",
+            "id": "k-e24b1", "org_id": "team-free-001",
             "lookup_hash": _lh(token), "key_prefix": token[:10],
             "created_via": "provisioned", "created_by": _2600_UUID_A,
             "created_at": "2026-09-02T00:00:00Z", "revoked_at": None,
@@ -7812,9 +8544,9 @@ class TestRestAttributionE2E2600:
 # identical write returns the canonical and emits nothing).
 
 class TestE2E5TwoActorDedup2600:
-    def _data_sdk(self, team_id: str):
+    def _data_sdk(self, org_id: str):
         import tortoise.hosted_api as ha_mod
-        return ha_mod._make_sdk(namespace=team_id)
+        return ha_mod._make_sdk(namespace=org_id)
 
     def _setup(self, tmp_path, tag: str):
         import tortoise.hosted_api as ha_mod
@@ -7832,15 +8564,15 @@ class TestE2E5TwoActorDedup2600:
             os.environ.pop("TORTOISE_DB_PATH", None)
             _restore_tortoise_sdk_init(_orig)
 
-    def _session_actor(self, team_id: str, session_id: str):
-        rows = self._data_sdk(team_id)._get_proj().g.query(
+    def _session_actor(self, org_id: str, session_id: str):
+        rows = self._data_sdk(org_id)._get_proj().g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.actor_user_id",
             params={"sid": session_id}).result_set
         return rows[0][0] if rows else None
 
-    def _point_added_events(self, team_id: str):
+    def _point_added_events(self, org_id: str):
         import json
-        rows = self._data_sdk(team_id)._get_proj().g.query(
+        rows = self._data_sdk(org_id)._get_proj().g.query(
             "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload "
             "ORDER BY e.seq").result_set
         return [json.loads(r[0]) for r in rows]
@@ -7908,14 +8640,14 @@ class TestE2E5TwoActorDedup2600:
 # the email case is structurally impossible there). Drives list_sessions +
 # get_session_detail through the REAL supabase auth face (FakeControlPlane
 # + a real tt_ key minted in api_keys) and seeds Sessions directly in the
-# team graph. The email seam shape is the REAL one team_members produces:
+# team graph. The email seam shape is the REAL one org_members produces:
 # an accepted-invite ACTIVE row that retained invited_email → email shown;
 # a row without invited_email / an unknown id → raw id; legacy null-actor →
 # actor_display null.
 
 class TestE2E10ReadPathDisplaySupabase2600:
     def _setup_supabase(self, tmp_path, monkeypatch, *, members,
-                        key_creator=_2600_UUID_A, team_id="team-2600-e10",
+                        key_creator=_2600_UUID_A, org_id="team-2600-e10",
                         seed_sessions=None):
         """Supabase-mode env + FakeControlPlane (team + membership rows +
         api_keys with a UUID creator) + real-auth TestClient. Sessions are
@@ -7936,15 +8668,15 @@ class TestE2E10ReadPathDisplaySupabase2600:
         monkeypatch.setenv("SUPABASE_URL", "https://e10.supabase.co")
         monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-e10")
         fake = FakeControlPlane({
-            "teams": [], "api_keys": [], "team_memberships": [],
+            "organizations": [], "api_keys": [], "org_memberships": [],
             "invitations": [],
         })
-        fake.seed("teams", [{"id": team_id, "name": "E10", "tier": "pro",
+        fake.seed("organizations", [{"id": org_id, "name": "E10", "tier": "pro",
                              "deleted_at": None}])
-        fake.seed("team_memberships", members)
+        fake.seed("org_memberships", members)
         token = "tt_" + _uuid.uuid4().hex
         fake.seed("api_keys", [{
-            "id": "k-e10", "team_id": team_id,
+            "id": "k-e10", "org_id": org_id,
             "lookup_hash": _lh(token), "key_prefix": token[:10],
             "created_via": "provisioned", "created_by": key_creator,
             "created_at": "2026-09-02T00:00:00Z", "revoked_at": None,
@@ -7955,7 +8687,7 @@ class TestE2E10ReadPathDisplaySupabase2600:
         try:
             with TestClient(ha_mod.app,
                             raise_server_exceptions=False) as tc:
-                yield team_id, token, tc
+                yield org_id, token, tc
         finally:
             os.environ.pop("TORTOISE_DB_PATH", None)
             monkeypatch.delenv("TORTOISE_CONTROL_PLANE", raising=False)
@@ -7972,7 +8704,7 @@ class TestE2E10ReadPathDisplaySupabase2600:
         import tortoise.hosted_api as ha_mod
         gen = self._setup_supabase(
             tmp_path, monkeypatch,
-            members=[{"team_id": "team-2600-e10", "user_id": _2600_UUID_A,
+            members=[{"org_id": "team-2600-e10", "user_id": _2600_UUID_A,
                       "identity": None, "role": "owner", "status": "active",
                       "invited_email": "ada@example.com"}])
         tid, token, tc = next(gen)
@@ -8006,7 +8738,7 @@ class TestE2E10ReadPathDisplaySupabase2600:
         import tortoise.hosted_api as ha_mod
         gen = self._setup_supabase(
             tmp_path, monkeypatch,
-            members=[{"team_id": "team-2600-e10", "user_id": _2600_UUID_B,
+            members=[{"org_id": "team-2600-e10", "user_id": _2600_UUID_B,
                       "identity": None, "role": "member", "status": "active",
                       "invited_email": None}],
             key_creator=_2600_UUID_B)
@@ -8037,7 +8769,7 @@ class TestE2E10ReadPathDisplaySupabase2600:
         import tortoise.hosted_api as ha_mod
         gen = self._setup_supabase(
             tmp_path, monkeypatch,
-            members=[{"team_id": "team-2600-e10", "user_id": _2600_UUID_A,
+            members=[{"org_id": "team-2600-e10", "user_id": _2600_UUID_A,
                       "identity": None, "role": "owner", "status": "active",
                       "invited_email": "ada@example.com"}])
         tid, token, tc = next(gen)
@@ -8059,3 +8791,353 @@ class TestE2E10ReadPathDisplaySupabase2600:
             assert rd.json()["actor_display"] is None, rd.json()
         finally:
             gen.close()
+
+
+class _StubProbe:
+    """Minimal ``HealthProbe`` stand-in.
+
+    Needs ``reset()`` because the autouse probe fixture resets the three real
+    coordinators at teardown (``_HEALTH_PROBE`` / ``_READY_PROBE`` /
+    ``_CONTROL_PLANE_PROBE``) and cannot tell that this one was swapped in.
+    """
+
+    def __init__(self, result=None, exc: Exception | None = None):
+        self.result = result if result is not None else {
+            "ok": True, "latency_ms": 1.0, "error": None}
+        self.exc = exc
+        self.calls = 0
+
+    async def run(self):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+    def reset(self) -> None:
+        pass
+
+
+class TestFirstContactPrewarm:
+    """#3284 Move A + the HTTP-level bound on the cold-start first request.
+
+    ``session_auth`` owns the JWKS cache and its hard fetch bound; this class
+    pins the two things ``hosted_api`` owes it: the warm-up is SCHEDULED (as a
+    background task, behind the listener) and the bounded failure reaches the
+    client as a real HTTP response — JSON body + ``Retry-After`` — never a
+    zero-byte hang.
+    """
+
+    def test_lifespan_schedules_the_prewarm_as_a_task(self, client):
+        """The task must exist on app.state (it is a task because uvicorn
+        binds only after the startup half returns — #2953)."""
+        import tortoise.hosted_api as ha_mod
+
+        task = getattr(ha_mod.app.state, "_first_contact_task", None)
+        assert task is not None, "lifespan did not schedule the first-contact pre-warm"
+
+    def test_prewarm_warms_jwks_and_the_control_plane_in_supabase_mode(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        calls = {"jwks": 0, "control": 0}
+
+        async def _fake_fetch() -> bytes:
+            calls["jwks"] += 1
+            return b'{"keys": [{"kid": "kid-1", "kty": "EC"}]}'
+
+        class _Probe(_StubProbe):
+            pass
+
+        probe = _Probe()
+        monkeypatch.setattr(sa, "_fetch_jwks", _fake_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", probe)
+
+        asyncio.run(ha_mod._first_contact_prewarm())
+
+        assert calls["jwks"] == 1
+        assert probe.calls == 1
+        assert sa._jwks._keys == {"kid-1": {"kid": "kid-1", "kty": "EC"}}
+
+    def test_prewarm_is_inert_in_registry_mode(self, monkeypatch):
+        """No Supabase session auth / no control plane → no network at boot.
+        The FalkorDB plane is already pre-paid by the health refresher."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        calls = {"jwks": 0}
+
+        async def _fake_fetch() -> bytes:
+            calls["jwks"] += 1
+            return b'{"keys": []}'
+
+        probe = _StubProbe(exc=AssertionError(
+            "control plane probed in registry mode"))
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _fake_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", probe)
+
+        asyncio.run(ha_mod._first_contact_prewarm())
+        assert calls["jwks"] == 0
+        assert probe.calls == 0
+        assert sa._jwks._keys is None
+
+    def test_prewarm_never_raises_when_the_probe_explodes(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise RuntimeError("jwks unreachable")
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE",
+                            _StubProbe(exc=RuntimeError("control plane unreachable")))
+
+        asyncio.run(ha_mod._first_contact_prewarm())  # must not raise
+
+    def test_empty_key_set_prewarm_log_is_not_a_transport_503(
+            self, monkeypatch, caplog):
+        """#2922: an empty 200 body must not be logged as a transport 503.
+
+        The reviewer's probe: a 200 with ``{"keys": []}`` was logged as
+        "pre-warm failed (None) — the first request will answer a bounded 503",
+        which is wrong twice over (the reason was None, and the request
+        actually answers 401 "Unknown signing key").
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _empty_fetch() -> bytes:
+            return b'{"keys": []}'
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _empty_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "EMPTY key set" in text, text
+        assert "NOT a transport outage" in text, text
+        assert "bounded 503" not in text, (
+            "an empty key body answers 401, not 503: " + text)
+        assert sa._jwks._last_failure_at is None
+
+    def test_stale_serve_prewarm_log_is_not_ready(self, monkeypatch, caplog):
+        """#2922: a warm-up that served last-good keys must not log "ready".
+
+        With last-good keys cached, a raising fetch makes ``get()`` log
+        "serving stale" and return the OLD set, so the pre-fix empty-check is
+        false and the boot log said "JWKS pre-warm ready … (N keys)" for a down
+        upstream. The log must say the warm-up did NOT refresh.
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise OSError("jwks unreachable")
+
+        cache = sa._JWKSCache()
+        cache._keys = {"kid-1": {"kid": "kid-1", "kty": "EC"}}
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "JWKS pre-warm ready" not in text, (
+            "a stale serve must not be logged as ready: " + text)
+        assert "did NOT refresh" in text, text
+        assert "last-good" in text, text
+        assert "jwks unreachable" in text, text
+
+    def test_empty_cache_transport_error_prewarm_log_is_not_an_empty_rotation(
+            self, monkeypatch, caplog):
+        """#2922/#3144: a RAISING fetch with an EMPTY cache is not a rotation.
+
+        ``_jwks`` is a module global that is NOT reset per lifespan, so a
+        previous empty 200 (or previous lifespan) leaves ``_keys == {}``. A
+        transport failure then takes the raise path — which returns the empty
+        set PLUS the real reason. Keyed off ``if not keys`` first, the report
+        said ``outcome="empty"`` and the boot log told the operator "NOT a
+        transport outage" during a real transport outage: the exact misreport
+        #2922 exists to prevent.
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise OSError("network down")
+
+        cache = sa._JWKSCache()
+        cache._keys = {}  # NOT cold (None): what a prior empty 200 leaves behind
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "NOT a transport outage" not in text, text
+        assert "EMPTY key set" not in text, text
+        assert "network down" in text, text
+        # An EMPTY (not cold) cache answers 401, never 503: the log must not
+        # promise a 503-only outcome for a keyless set.
+        assert "401 'Unknown signing key' from an empty cached set" in text, text
+        assert cache._last_failure_at is None
+
+    @pytest.mark.parametrize(
+        "cached_keys", [None, {}], ids=["cold-cache", "empty-cache"])
+    def test_cooldown_blocked_prewarm_log_does_not_promise_a_fetch_attempt(
+            self, monkeypatch, caplog, cached_keys):
+        """#3284 P2: with a cooldown ALREADY armed, "the first request will
+        make its own bounded fetch attempt" is FALSE — the request path is
+        answered from the cooldown with ZERO fetches.
+
+        ``_jwks._last_failure_at`` is a module global that survives across
+        lifespans, so a boot warm-up can meet a cooldown armed by an EARLIER
+        lifespan (the warm-up's own ``arm_cooldown=False`` stops it ARMING the
+        cooldown, it does not stop it READING one). The boot log asserted a
+        request-path fetch that the cooldown short-circuits. The report's
+        ``error`` already carries the real reason verbatim; only the sentence
+        overpromised.
+        """
+        import logging as _logging
+        import time as _time
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        fetches = {"n": 0}
+
+        async def _boom() -> bytes:
+            fetches["n"] += 1
+            raise OSError("network down")
+
+        cache = sa._JWKSCache()
+        cache._keys = cached_keys
+        # Armed by an EARLIER lifespan, before this boot warm-up runs.
+        cache._last_failure_at = _time.monotonic()
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "JWKS pre-warm failed" in text, text
+        assert "cooldown" in text, (
+            "the sentence must state the cooldown that blocks the attempt: "
+            + text)
+        # ``error`` is never ``None`` on the ``else`` (transport_error) branch:
+        # the cold case reports the bounded-503 HTTPException, the empty case
+        # the cooldown reason. Check the real reason is present, not a bare
+        # ``(None)``.
+        expected_reason = (
+            "HTTPException 503" if cached_keys is None
+            else "refetch not attempted")
+        assert expected_reason in text, text
+        assert "(None)" not in text, text
+        assert "will make its own bounded fetch attempt" not in text, (
+            "an armed cooldown short-circuits the request-path fetch, so this "
+            "claim is false: " + text)
+        assert fetches["n"] == 0, "the boot warm-up was blocked by the cooldown"
+
+        # Prove the claim was false ON THE FIRST REQUEST: the request path
+        # (kid miss -> the force path ``verify_session_jwt`` takes) is answered
+        # from the cooldown with no fetch at all. Cold cache -> bounded 503;
+        # empty cache -> the keyless 401 path.
+        from fastapi import HTTPException
+        if cached_keys is None:
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(cache.get(force=True, kid="kid-1"))
+            assert ei.value.status_code == 503, ei.value
+        else:
+            assert asyncio.run(cache.get(force=True, kid="kid-1")) == {}, (
+                "an empty cached set is served as-is")
+        assert fetches["n"] == 0, (
+            "the first request DID fetch — the cooldown short-circuit the log "
+            "omitted would not have happened")
+
+    def test_slow_dead_jwks_still_yields_a_bounded_503_with_retry_after(
+            self, unauth_client, monkeypatch):
+        """The #3284 regression on the REAL HTTP surface.
+
+        A session-authenticated request (``Bearer eyJ…`` → the session-auth
+        lane) against a JWKS endpoint that outlives its budget must come back
+        as a bounded 503 carrying a JSON body and ``Retry-After`` — the exact
+        contract the issue asks for, and the one a client with a 10s budget can
+        act on. Pre-fix the request waited the fetch out (unbounded).
+        """
+        import time as _time
+
+        import tortoise.session_auth as sa
+        from tests import _session_jwt_utils as _jwt
+
+        # raising=False: pre-fix the knob does not exist, so this test fails on
+        # the BEHAVIOUR (the request waits the fetch out, and the 503 carries
+        # no Retry-After) rather than on a missing attribute.
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", 0.25, raising=False)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+
+        async def _slow_dead_fetch() -> bytes:
+            await asyncio.sleep(5.0)  # far past every budget
+            raise OSError("jwks unreachable")
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _slow_dead_fetch)
+        priv, _pub = _jwt.make_ec_keypair()
+        token = _jwt.mint_es256_token(priv, "kid-1", {
+            "sub": "user-3144", "aud": "authenticated", "email": "u@example.com",
+            "exp": int(_time.time()) + 600, "iat": int(_time.time()),
+        })
+
+        t0 = _time.monotonic()
+        r = unauth_client.get(
+            "/v1/onboarding/state",
+            headers={
+                "Authorization": f"Bearer {token}",
+                # A browser origin: the dashboard must be able to READ the
+                # Retry-After header. It is not CORS-safelisted, so the
+                # response needs Access-Control-Expose-Headers (#3284 P2).
+                "Origin": "https://app.premiselabs.co",
+            })
+        elapsed = _time.monotonic() - t0
+
+        assert r.status_code == 503, r.text[:300]
+        assert elapsed < 1.0, f"cold request took {elapsed:.3f}s — not bounded"
+        assert r.content, "zero-byte response body"
+        assert r.json().get("detail"), r.text[:200]
+        assert int(r.headers["Retry-After"]) >= 1
+        assert r.headers["access-control-allow-origin"] == "https://app.premiselabs.co"
+        exposed = r.headers.get("access-control-expose-headers", "")
+        assert "Retry-After" in exposed, (
+            "a browser client cannot read Retry-After without "
+            f"Access-Control-Expose-Headers (got {exposed!r})")

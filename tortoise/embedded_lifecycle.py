@@ -29,15 +29,50 @@ Scope (deliberately narrow — the safety boundary):
 - Explicit `close()` / `__exit__` keep redislite's exact semantics (SAVE).
 - A client that fails the gating (or a send failure) falls through to the
   normal close (never skip close — the #1005 hygiene contract).
+
+#3653 — a LIVE co-tenant must never be torn down. redislite decides
+"last client" from its own `_connection_count()`, which is **0** whenever
+`_is_redis_running()` is False — and that is exactly what happens once the
+shared `<dbdir>/<dbname>.settings` registry file is removed by an earlier
+close. `0 <= 1` then reads as "last client", so the close SHUTDOWNs the live
+server and `shutil.rmtree`s its socket dir out from under every live
+co-tenant (the observed `redis.socket. No such file or directory` /
+`FATAL CONFIG FILE ERROR ... 'dir '/tmp/tmpXXXX''`). The guard below is the
+registry-INDEPENDENT co-tenant test used by every teardown seam, and it is
+fail-CLOSED in every ambiguous case.
+
+Residual limits (declared, not silently carried):
+- Two processes that begin exiting at the SAME instant can each still see
+the other as a live owner and both decline the shutdown, orphaning the
+server (and its dir). The reaper + owner records are the backstop; this is
+the same window redislite's own count has.
+- A SIGKILLed (or OOM-killed, or crashed) process runs no teardown at all —
+its owner record reads as a provably dead owner and the reaper reclaims the
+server and its dir. The in-process seams cannot run for a process that is
+gone.
+- An uninstrumented peer (a raw redislite client that never went through the
+guarded `tortoise.FalkorDB` constructor) has no owner record; the guard
+fails closed on a missing record dir, but a peer that attaches AFTER the
+record dir is dropped is caught only by the CLIENT LIST probe.
+- `RedisMixin.__init__` starts the embedded server BEFORE it builds its
+redis-py `ConnectionPool`. If that window fails (a vanished `<db>.settings`
+parent), the client is left with a live pidfile and no pool; redislite's
+own atexit `_cleanup`/`__del__` then abort and leak one server each. Those
+clients never reach a `tortoise.FalkorDB` close seam, so redislite's own
+`_cleanup` is guarded too (`_install_partial_init_cleanup_guard`) — it
+reclaims the orphan over the raw socket instead of raising.
 """
 from __future__ import annotations  # noqa: I001
 
 import os
+import contextlib
 
+import shutil
+import signal
 import socket
 import tempfile
 
-from tortoise.embedded_reaper import _is_ephemeral_dir
+from tortoise.embedded_reaper import OWNERS_DIRNAME, _is_ephemeral_dir
 
 
 def _is_ephemeral_test_server(client) -> bool:
@@ -65,16 +100,20 @@ def atexit_fast_close(client) -> bool:
     Gating (all three must hold):
       1. TORTOISE_FAST_ATEXIT=1 (opt-in flag).
       2. Ephemeral test-tree dbdir.
-      3. This client is the last connection to the server (replicating
-         redislite's own `_cleanup` guard; a failed probe is treated as
-         last-client — the fire-and-forget then fails fast on a dead socket
-         and the no-op is safe).
+      3. NO live co-tenant — decided by `cotenant_holds_server()`, NOT by
+         redislite's registry-based `_connection_count()` (#3653). A failed
+         probe falls through to the normal close (safe direction): the old
+         `_connection_count() > 1` test read 0 as "last client" the moment
+         the shared registry file was gone, and this CI-default path then
+         sent SHUTDOWN NOSAVE to a peer's live server.
 
     The close itself is a fire-and-forget `SHUTDOWN NOSAVE` over the unix
     socket (~0.00s send; the server exits in ~0.05s). We do NOT wait for a
     response — that wait (plus redislite's serialized per-server polls) is
     the 3-4s/server cost this module eliminates. redislite's own atexit
-    `_cleanup` then finds the server dead and no-ops fast.
+    `_cleanup` then finds the server dead and no-ops fast; the ephemeral
+    socket dir is reclaimed here because redislite only rmtrees it from
+    inside `if self.pid:` and never touches a dead server's dir (#3653 F3).
     """
     if os.environ.get("TORTOISE_FAST_ATEXIT") != "1":
         return False
@@ -88,18 +127,28 @@ def atexit_fast_close(client) -> bool:
     if getattr(client, "_tortoise_fast_closed", False):
         return True
 
-    # Other clients still connected -> redislite's fast disconnect path
-    # (no shutdown). The last of this server's clients does the shutdown.
+    # #3653 F2: a live co-tenant must never be SHUTDOWN. Use the
+    # registry-independent co-tenant test instead of redislite's own
+    # registry-based `_connection_count() > 1`; a probe failure falls through
+    # to the normal close rather than assuming "last client".
     try:
-        if client._connection_count() > 1:
-            try:  # noqa: SIM105
-                client.connection_pool.disconnect()
-            except Exception:
-                pass
+        if cotenant_holds_server(client):
+            # #3653 F1: this path is only one of redislite's teardown seams.
+            # Neutralize the atexit-registered `_cleanup` and `__del__` too,
+            # or they rmtree the live co-tenant's dir / stop the daemon at
+            # our exit even though this seam declined the shutdown.
+            # `cotenant_holds_server` may return True from its in-process
+            # refcount / owner-record branches WITHOUT touching the pool, so
+            # disconnect here unconditionally — a stale connection left open
+            # would otherwise be seen as a "peer" by the LAST client's close
+            # and the server would never shut down.
+            disconnect_only(client)
+            _neutralize_redislite_cleanup(client)
             return True
     except Exception:
-        pass  # probe failed -> assume last client (fail toward fast path)
+        return False  # cannot reason about sharing -> normal close
 
+    rdir = getattr(client, "redis_dir", None)
     sock_path = getattr(client, "socket_file", None)
     if not sock_path:
         return False  # cannot reach the server socket -> normal close
@@ -121,6 +170,11 @@ def atexit_fast_close(client) -> bool:
             client.connection_pool.disconnect()
         except Exception:
             pass
+        # #3653 F3: reclaim the ephemeral dir only when the socket is
+        # provably gone (a connect TIMEOUT means the server may still be
+        # alive — never unlink a live server's socket dir).
+        if not os.path.exists(sock_path):
+            _remove_ephemeral_socket_dir(rdir, sock_path)
         return True
 
     # Fire-and-forget: the server exits in ~0.05s. Do NOT send SIGTERM —
@@ -128,7 +182,7 @@ def atexit_fast_close(client) -> bool:
     # reintroduce the slow per-server save we are eliminating.
     # Neutralize redislite's atexit _cleanup: it would otherwise see the
     # (now-dying) server's pidfile and poll the zombie for up to 10s per
-    # server. Nulling pidfile makes `pid = self.pid` return None and the
+    # server. Nulling pidfile makes `pid = self.pid` return 0 and the
     # whole cleanup block skip.
     client._tortoise_fast_closed = True
     _neutralize_redislite_cleanup(client)
@@ -136,6 +190,11 @@ def atexit_fast_close(client) -> bool:
         client.connection_pool.disconnect()
     except Exception:
         pass
+    # #3653 F3: we are the last client and just sent SHUTDOWN NOSAVE, so
+    # redislite's dead-pid `_cleanup` will never rmtree this dir. Reclaim it
+    # here — this is the CI-default path and the source of the measured
+    # 10,711 orphaned tempdirs.
+    _remove_ephemeral_socket_dir(rdir, sock_path)
     return True
 
 
@@ -143,14 +202,275 @@ def _neutralize_redislite_cleanup(client) -> None:
     """Make redislite's own atexit `_cleanup` a fast no-op for this client.
 
     `_cleanup` reads `self.pid` (a property over `self.pidfile`); with the
-    pidfile gone it returns None and skips the shutdown + zombie poll that
-    would otherwise cost ~3-10s per server at interpreter exit. The server
-    is already dead (NOSAVE) — this only prevents the redundant slow path.
+    pidfile gone it returns 0 and skips the ENTIRE destructive block — the
+    shutdown, the zombie poll, and the `shutil.rmtree(self.redis_dir)`.
+    Two uses:
+      - the fast path (server already NOSAVEd — skip the redundant slow
+        shutdown + zombie poll), and
+      - #3653 F1: a SHARED server this client declined to tear down. The
+        guard lives in the close seam we patched; redislite's OWN
+        atexit-registered `_cleanup` and `__del__` still run, and with the
+        shared registry file gone `_connection_count()` reads 0 -> they
+        would stop the live server and delete its socket dir from under a
+        live co-tenant. Nulling the pidfile makes both no-ops.
+
+    Idempotent and safe to call repeatedly (setting `pidfile = None` twice
+    is a no-op): every teardown seam,
+    `_reclaim_partial_init_server`, and the guarded redislite `_cleanup` may
+    each call it for the same client.
     """
     try:  # noqa: SIM105
         client.pidfile = None
     except Exception:
         pass
+
+
+def _server_pid(client) -> int:
+    """The client's server pid, or 0 when it cannot be read (dead/unknown).
+
+    redislite's ``pid`` property is a pidfile read; it returns 0 for a dead
+    process and may raise on a mid-write pidfile. Wrapped so teardown paths
+    can use it as a plain boolean.
+    """
+    try:
+        return int(getattr(client, "pid", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _remove_ephemeral_socket_dir(redis_dir, socket_file=None) -> bool:
+    """#3653 F3: reclaim the ephemeral socket dir of a server we stopped.
+
+    redislite's `_cleanup` only rmtrees `self.redis_dir` INSIDE
+    `if self.pid:` — and `self.pid` is 0 once the server is dead. So every
+    server that dies BEFORE `_cleanup` runs (the #1371 fire-and-forget
+    NOSAVE path, an externally killed server, a crash) strands its socket
+    dir forever. Measured on this box: 10,834 embedded tempdirs, 10,711 of
+    them dead/orphaned, oldest ~2h — the "left for the reaper" claim was
+    false in practice.
+
+    Both the dir the creator made (`redis_dir`) and the dir the socket
+    actually lives in are considered: a co-tenant loaded from the registry
+    has `redis_dir is None` but still knows the shared socket path, and the
+    LAST client of a shared server owns that dir's reclamation.
+
+    The deletion is gated on the SAME ephemeral-temp-tree classification the
+    fast-close gate and the reaper use, so a user-path server is never
+    touched. Never raises.
+    """
+    tmpdir = os.path.realpath(tempfile.gettempdir())
+    candidates = []
+    if redis_dir:
+        candidates.append(redis_dir)
+    if socket_file:
+        candidates.append(os.path.dirname(os.path.abspath(socket_file)))
+    removed = False
+    for d in candidates:
+        try:
+            real = os.path.realpath(d)
+            if not _is_ephemeral_dir(real, tmpdir):
+                continue
+            shutil.rmtree(real, ignore_errors=True)
+            removed = True
+        except Exception:
+            continue
+    return removed
+
+
+def disconnect_only(client) -> None:
+    """Drop THIS client's connection without touching the shared server.
+
+    The safe half of redislite's teardown — exactly its own shared-server
+    branch (``client.py`` `_cleanup`'s ``else``: connection_pool.disconnect()),
+    with none of the kill/rmtree.
+    """
+    try:  # noqa: SIM105
+        client.connection_pool.disconnect()
+    except Exception:
+        pass
+
+
+def cotenant_holds_server(client) -> bool:
+    """True when another live client still shares this embedded server (#3653).
+
+    redislite's ``RedisMixin._cleanup()`` deletes the server's socket dir
+    (``shutil.rmtree(self.redis_dir)``) whenever its own
+    ``_connection_count() <= 1`` — and that returns **0** the moment
+    ``_is_redis_running()`` is False, i.e. once the shared ``.settings``
+    registry file is missing (a previous close removes it: ``_cleanup`` does
+    ``os.remove(self.settingregistryfile)``), and also for a client built with
+    an explicit ``unix_socket_path``. Zero is then read as "last client", so
+    closing ONE client tears the server down and deletes its socket dir out
+    from under every live co-tenant — mid-test, surfacing as
+    ``Error 2 connecting to /tmp/tmpXXXX/redis.socket. No such file or
+    directory`` / ``FATAL CONFIG FILE ERROR ... 'dir '/tmp/tmpXXXX''``.
+
+    This is the registry-INDEPENDENT co-tenant test that decision needs
+    (fail CLOSED in every ambiguous case — the cost is a socket dir left for
+    the reaper, the cost of failing open is the #3653 data loss):
+
+    - in-process: the #3599 per-process owner refcount counts THIS process's
+      live clients on the socket (recorded at construction, released at every
+      close seam). ``> 1`` -> the process itself holds a co-tenant.
+    - cross-process: the #3599 per-server owner RECORDS name every owning
+      process; ``live_owners > 1`` -> another process holds a co-tenant.
+    - an uninstrumented spawn (no owner-record dir) cannot be reasoned about
+      -> co-tenant.
+    - finally, a raw non-destructive ``CLIENT LIST`` on the socket
+      (``embedded_reaper._client_list`` — never builds a redislite client,
+      #849) catches an unrecorded live client; a probe failure falls back to
+      the raw socket verdict and only a provably dead/missing socket lets
+      the teardown proceed.
+
+    #3653 F4: this probe is AGE-INDEPENDENT. The previous cut used
+    ``embedded_reaper._active_client_count``, whose SKIPME heuristic counts
+    only connections older than 2s (or named) — a peer that attached in the
+    last two seconds, or carries no name, was MISSED and the teardown then
+    proceeded against a live co-tenant. Instead we disconnect THIS client's
+    pool first, so the only connection we still own is the transient probe
+    itself: a CLIENT LIST of more than one entry is a live co-tenant of ANY
+    age.
+
+    NOTE (caller contract): the in-process refcount and owner-record branches
+    return WITHOUT disconnecting this client's pool (they prove sharing and
+    stop). Every caller must still call ``disconnect_only(client)`` on the
+    shared path; leaving a stale connection open makes the LAST client's
+    probe see a phantom "peer" and the server is then never shut down.
+    """
+    sock = getattr(client, "socket_file", None)
+    if not sock:
+        return False  # server mode / :memory: — no child socket dir to delete
+    key = os.path.abspath(sock)
+    try:
+        if _owner_refcounts.get(key, 0) > 1:
+            return True  # an in-process co-tenant holds the server
+    except Exception:
+        return True  # cannot reason about sharing -> fail closed
+    from tortoise.embedded_reaper import (
+        _client_list,
+        _owner_records,
+        _probe_socket_any,
+    )
+    try:
+        owners = _owner_records(key)
+    except Exception:
+        return True
+    if owners is None:
+        return True  # uninstrumented spawn -> cannot prove last client
+    live_owners, _total = owners
+    if live_owners > 1:
+        return True  # another PROCESS holds a co-tenant
+    # #3653 F4: decide from the SERVER, not from ages. redislite's own count
+    # and `embedded_reaper._active_client_count` both parse CLIENT LIST and
+    # deliberately exclude connections younger than an age floor — a peer
+    # that attached in the last two seconds (or carries no name) is MISSED,
+    # and the teardown then proceeds against a live co-tenant. Detect it
+    # without an age heuristic: drop THIS client's pool first, then a raw
+    # CLIENT LIST sees exactly one connection of our own (the transient
+    # probe). More than one means a live co-tenant of ANY age.
+    disconnect_only(client)
+    try:
+        clients = _client_list(key)
+    except Exception:
+        return True
+    if clients:
+        return len(clients) > 1
+    # The probe failed, or reported zero clients while accepting our own
+    # connection (the server is going down). Fall back to a raw socket
+    # verdict: only a provably dead/missing socket means nothing live is
+    # left to protect.
+    try:
+        verdict = _probe_socket_any(key)
+    except Exception:
+        return True
+    return verdict not in ("dead", "missing")
+
+
+# ── #3653: reclaim a partially-initialized client's orphaned server ────────
+#
+# `RedisMixin.__init__` starts the embedded server (and writes its pidfile)
+# BEFORE it constructs the redis-py `ConnectionPool` (redislite `client.py`:
+# `_start_redis()` runs ahead of `super().__init__()`, which is what sets
+# `self.connection_pool`). If anything in that window fails — the
+# `<db>.settings` parent vanished under the tempdir race, a registry read
+# lost its file — the object is left with a live pidfile and NO
+# `connection_pool`. redislite's own atexit-registered `_cleanup` and its
+# `__del__` then both run it and abort at `self.shutdown(...)` with
+# ``AttributeError: 'Redis' object has no attribute 'connection_pool'``, so
+# the server is never stopped: one orphan per aborted `__del__` (CI measured
+# 43).
+#
+# These objects never pass through any `tortoise.FalkorDB` close seam (the
+# wrapper registers its handlers only AFTER `super().__init__()` returns),
+# so per-seam neutralization cannot reach them. Cover redislite's own
+# teardown seam instead: reclaim the orphan and make the
+# connection-pool-dependent body a no-op.
+_ORIGINAL_REDISLITE_CLEANUP = None
+
+
+def _reclaim_partial_init_server(client) -> None:
+    """#3653: reap a server whose `Redis.__init__` aborted after start.
+
+    A partial client knows `socket_file`/`redis_dir`/`pidfile` but has no
+    `connection_pool`, so redislite's destructive teardown cannot run. Stop
+    the server over the raw unix socket (the same #1371 fire-and-forget
+    `SHUTDOWN NOSAVE` — no pool needed), fall back to `SIGTERM` on the
+    readable pid, neuter the client's own atexit/`__del__`, and reclaim the
+    ephemeral socket dir. Idempotent; never raises.
+    """
+    sock = getattr(client, "socket_file", None)
+    pid = _server_pid(client)
+    if sock:
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect(sock)
+            s.sendall(b"*2\r\n$8\r\nSHUTDOWN\r\n$6\r\nNOSAVE\r\n")
+            s.close()
+        except OSError:
+            pass
+    if pid:
+        try:  # noqa: SIM105
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    rdir = getattr(client, "redis_dir", None)
+    _neutralize_redislite_cleanup(client)
+    _remove_ephemeral_socket_dir(rdir, sock)
+
+
+def _install_partial_init_cleanup_guard() -> None:
+    """#3653: make redislite's `_cleanup` safe for partial clients (once).
+
+    A client with no `connection_pool` cannot run redislite's teardown (it
+    raises before reaching the server), so the guard reclaims its orphaned
+    server instead. Every complete client delegates to the original
+    `_cleanup` unchanged.
+    """
+    global _ORIGINAL_REDISLITE_CLEANUP
+    try:
+        from redislite.client import RedisMixin
+    except Exception:  # redislite absent — nothing to guard
+        return
+    if getattr(RedisMixin, "_tortoise_partial_init_guard", False):
+        return
+    original = RedisMixin._cleanup
+    _ORIGINAL_REDISLITE_CLEANUP = original
+
+    def _cleanup(self, *args, **kwargs):
+        if not hasattr(self, "connection_pool"):
+            _reclaim_partial_init_server(self)
+            return None
+        return original(self, *args, **kwargs)
+
+    RedisMixin._cleanup = _cleanup
+    RedisMixin._tortoise_partial_init_guard = True
+
+
+# Installed at import (before any client is constructed). Redislite's own
+# `atexit.register(self._cleanup, ...)` resolves `self._cleanup` through the
+# class, so both its atexit seam and `__del__` pick up the guarded version.
+_install_partial_init_cleanup_guard()
 
 
 # ── Issue #1475: deterministic close-on-GC (lifecycle finalize) ────────────
@@ -256,27 +576,74 @@ def _gc_close(db_ref) -> None:
         return  # already fast-closed by an earlier seam (NOSAVE)
     if getattr(client, "socket_file", None) is None:
         return  # server already shut down
-    # Probe the server's client count BEFORE touching the pool.
+    # #3653: redislite's own count is registry-based and reads 0 once the
+    # shared registry file is gone — a GC-time close would then SHUTDOWN the
+    # live server and delete its socket dir under a live co-tenant. Use the
+    # registry-independent co-tenant test instead (strictly stronger: it also
+    # covers an unrecorded/uninstrumented peer, fail closed).
     try:
-        count = client._connection_count()
+        shared = cotenant_holds_server(client)
     except Exception:
         return  # cannot determine sharing -> leave the server alone
-    if count > 1:
+    if shared:
         # Other clients (this process or another) share the server — drop
         # our connection only; the last owner's close/GC/exit shuts it down.
-        try:  # noqa: SIM105
-            client.connection_pool.disconnect()
-        except Exception:
-            pass
+        disconnect_only(client)
+        # #3653 F1: redislite's OWN atexit `_cleanup` + `__del__` are not
+        # covered by this seam; neutralise them so our exit cannot stop the
+        # live co-tenant's server (the registry-based `_connection_count`
+        # reads 0 once the shared registry file is gone).
+        _neutralize_redislite_cleanup(client)
+        # #3599: release THIS client's owner-record claim. A shared server
+        # would otherwise keep the record (and the per-process refcount)
+        # until process exit, so a later construct/close on the same socket
+        # path could never drive the refcount to 0 and drop the record.
+        _release_owner_quietly(db)
         return
+    rdir = getattr(client, "redis_dir", None)
+    sock_path = getattr(client, "socket_file", None)
+    pid_before = _server_pid(client)
     try:
         if atexit_fast_close(client):
+            _release_owner_quietly(db)
             return
     except Exception:
         pass  # probe/gating failure -> fall through to the normal close
     try:  # noqa: SIM105
         client._cleanup()
     except Exception:
+        pass
+    # #3653: `cotenant_holds_server()` above already dropped this client's
+    # pool (its F4 probe). A `_cleanup()` that aborts (a partially-created
+    # redislite client with no `connection_pool`, a vanished socket dir)
+    # leaves the live pidfile in place, and redislite's own atexit
+    # `_cleanup` + `__del__` then run it again and throw. Neutralize every
+    # such client here so it reaches `__del__` already neutralized
+    # (idempotent — a no-op when `_cleanup` succeeded).
+    # #3653 F3: redislite's `_cleanup` only rmtrees inside `if self.pid:`,
+    # so a server that was already dead (pid 0) strands its dir. Reclaim it
+    # here — the fast path above already does this for the CI-default case,
+    # this covers the flag-off / non-ephemeral fall-through.
+    _neutralize_redislite_cleanup(client)
+    if not pid_before:
+        _remove_ephemeral_socket_dir(rdir, sock_path)
+    _release_owner_quietly(db)
+
+
+def _release_owner_quietly(db) -> None:
+    """#3599: release a client's owner claim from GC/**non-raising** contexts.
+
+    Prefers the guarded wrapper's idempotent ``_t_release_owner``; a raw
+    redislite client has no such method and falls back to a direct
+    ``forget_owner`` on its own socket path.
+    """
+    try:
+        release = getattr(db, "_t_release_owner", None)
+        if release is not None:
+            release()
+            return
+        forget_owner(owner_socket_of(db))
+    except Exception:  # GC/teardown context: never raise
         pass
 
 
@@ -394,6 +761,7 @@ def close_embedded_clients() -> int:
         try:
             if atexit_fast_close(inner):
                 closed += 1
+                _release_owner(client, inner)
                 continue
         except Exception:
             pass  # probe/gating failure -> fall through to the normal close
@@ -403,6 +771,7 @@ def close_embedded_clients() -> int:
                 t_close()
             except Exception:
                 pass  # teardown context: never raise
+            _release_owner(client, inner)
             closed += 1
             continue
         cleanup = getattr(client, "_cleanup", None)
@@ -411,8 +780,30 @@ def close_embedded_clients() -> int:
                 cleanup()
             except Exception:
                 pass
+            # #3653: same contract as `_gc_close` — a raw client whose
+            # `_cleanup` aborted must not re-run it from `__del__`.
+            _neutralize_redislite_cleanup(inner)
             closed += 1
+        _release_owner(client, inner)
     return closed
+
+
+def _release_owner(client, inner) -> None:
+    """#3599: release a client's owner-record claim (never raises).
+
+    Prefers the guarded wrapper's idempotent ``_t_release_owner`` (which
+    also handles the refcount when one process holds several clients on a
+    shared server); a raw redislite client has no such method and falls
+    back to a direct ``forget_owner``.
+    """
+    try:
+        release = getattr(client, "_t_release_owner", None)
+        if release is not None:
+            release()
+            return
+        forget_owner(owner_socket_of(inner) if inner is not None else None)
+    except Exception:  # teardown context: never raise
+        pass
 
 
 def _embedded_term_handler(signum, _frame) -> None:
@@ -486,3 +877,168 @@ def install_embedded_signal_cleanup() -> bool:
         pass
     _signal_guard_installed = True
     return replaced
+
+
+# ── #3599: per-server owner records ────────────────────────────────────
+# The reaper's only_safe mode could not distinguish a SIGKILLed suite's
+# orphan from a live suite's between-tests idle server on pid/detachment
+# alone (#1557 — every redislite server daemonizes to ppid=1), so #1642
+# gated orphan confirmation on a GLOBAL condition (`not suites_active`).
+# On a host running a fleet of concurrent sessions that condition is never
+# true, so `_orphan_confirmed` was never set and the only_safe reaper
+# (launchd cron + the conftest end-sweep) was permanently a no-op — every
+# SIGKILLed lane left its servers behind (#3599: 527 orphans, load 98 on
+# 10 CPUs).
+#
+# Fix: record the OWNERS of each server — one file per owning process, in
+# the server's OWN socket dir — so orphanhood becomes a per-server
+# question ("does this server still have a live owner?") that needs no
+# reference to any other suite. A shared server is safe by construction:
+# every constructor writes its own record, so a co-tenant that attaches
+# after the creator has exited keeps its own live entry and the server is
+# never confirmed.
+#
+# The reaper owns the format and the constant (OWNERS_DIRNAME); this module
+# is the only writer. Identity is (pid, process start time) — the #1642
+# FIX 5 recycled-pid defence — so a record left behind by a SIGKILLed owner
+# reads as provably dead instead of aliasing a later process.
+
+
+def owner_record_dir(socket_file: str) -> str:
+    """Dir holding the owner records for the server at ``socket_file``."""
+    return os.path.join(os.path.dirname(os.path.abspath(socket_file)),
+                        OWNERS_DIRNAME)
+
+
+#: Per-process refcount of live clients per socket path (see record_owner/
+#: forget_owner — several clients in ONE process share a single record, so a
+#: record is only dropped when the last of them closes).
+_owner_refcounts: dict[str, int] = {}
+
+
+def _adopt_owner_records_after_fork() -> None:
+    """Re-establish owner records for inherited clients in a forked child.
+
+    #3599 adversarial review (fail-open): `_owner_refcounts` is inherited
+    across `fork()` but the child is a DIFFERENT process, so the parent's
+    record does not name it. Without this hook the child's `record_owner`
+    would short-circuit on the inherited count and write no
+    `<child-pid>-<start>` file; when the parent was then SIGKILLed (no
+    `forget_owner` runs) the child — a live owner holding the inherited
+    connection — would be invisible, `_owner_records` would report 0 live
+    owners, and the reaper would kill the server out from under it.
+
+    So in the child: drop the parent's counts and re-record every socket the
+    parent had claimed, making the child an explicit owner in its own right.
+
+    RESIDUAL (narrower, documented): the child cannot know HOW MANY clients
+    it inherited, so the re-adopted refcount is 1 per socket. Closing one of
+    two inherited clients would drop the record while the other is still
+    live. The load-bearing property — a parent SIGKILL cannot make a forked
+    child's live server look orphaned — does hold.
+    """
+    inherited = list(_owner_refcounts)
+    _owner_refcounts.clear()
+    for sock in inherited:
+        with contextlib.suppress(Exception):
+            record_owner(sock)
+
+
+if hasattr(os, "register_at_fork"):  # POSIX; absent on Windows
+    os.register_at_fork(after_in_child=_adopt_owner_records_after_fork)
+
+
+def owner_socket_of(client) -> str | None:
+    """Socket path of the redislite server a client owns, or None.
+
+    Accepts EITHER shape so record/forget stay symmetric: the guarded
+    ``tortoise.FalkorDB`` wrapper (whose redislite server lives on the INNER
+    client at ``.client``) and a raw redislite client (which owns
+    ``socket_file`` directly). Host/port (server-mode) constructions have no
+    ``socket_file`` and correctly yield None — there is no child to reap.
+    """
+    inner = getattr(client, "client", None) or client
+    sock = getattr(inner, "socket_file", None)
+    return sock if isinstance(sock, str) and sock else None
+
+
+def record_owner(socket_file: str | None) -> bool:
+    """Record THIS process as a live owner of the server at ``socket_file``.
+
+    Called from the guarded ``tortoise.FalkorDB`` constructor (the single
+    embedded choke-point). Reference-counted PER PROCESS: several clients
+    in one process share one record, so closing the first of two clients on
+    a shared server must not drop the record that still protects the
+    second (that would let the reaper kill a live co-tenant's server).
+    Returns True when a record was created. Never raises — an unwritable
+    socket dir simply leaves the server uninstrumented, and the reaper
+    falls back to its global gate (fail closed).
+    """
+    if not socket_file:
+        return False
+    key = os.path.abspath(socket_file)
+    if _owner_refcounts.get(key, 0) > 0:
+        _owner_refcounts[key] += 1  # this process already owns the record
+        return False
+    try:
+        os.makedirs(owner_record_dir(socket_file), exist_ok=True)
+    except OSError:
+        return False
+    # Import at call time: `_process_start_time` shells out to `ps`, and the
+    # reaper module is already a module-level import here — this keeps the
+    # acquisition localized and skippable.
+    from tortoise.embedded_reaper import _process_start_time
+    try:
+        start = _process_start_time(os.getpid())
+    except Exception:
+        start = None
+    # An undeterminable start time is stamped 'unknown'; _owner_records
+    # treats that as LIVE (fail closed) — never as a dead owner.
+    stamp = f"{os.getpid()}-{'unknown' if start is None else int(start)}"
+    try:
+        fd = os.open(os.path.join(owner_record_dir(socket_file), stamp),
+                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        pass  # already recorded by this process' first client
+    except OSError:
+        return False
+    _owner_refcounts[key] = _owner_refcounts.get(key, 0) + 1
+    return True
+
+
+def forget_owner(socket_file: str | None) -> bool:
+    """Release one client's claim on this process's owner record.
+
+    Idempotent per client at the CALLER (the guarded wrapper's
+    ``_t_release_owner``); here it decrements the per-process refcount and
+    removes the record only when the LAST client on that server releases
+    it. A shared server keeps the records of its other owner PROCESSES, so
+    forgetting one never orphans it.
+    """
+    if not socket_file:
+        return False
+    key = os.path.abspath(socket_file)
+    held = _owner_refcounts.get(key, 0)
+    if held > 1:
+        _owner_refcounts[key] = held - 1
+        return False  # another client in this process still owns it
+    _owner_refcounts.pop(key, None)
+    d = owner_record_dir(socket_file)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return False
+    prefix = f"{os.getpid()}-"
+    removed = False
+    for n in names:
+        if not n.startswith(prefix):
+            continue  # '123-' never matches '1234-...' — the dash is the guard
+        with contextlib.suppress(OSError):
+            os.unlink(os.path.join(d, n))
+            removed = True
+    # server-scoped dir: drop it once the last owner is gone (another
+    # owner's records may remain, so a failure here is expected).
+    with contextlib.suppress(OSError):
+        os.rmdir(d)
+    return removed

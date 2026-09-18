@@ -6,9 +6,11 @@ Covers plan checks #1-#10 (T7 of docs/plans/2026-08-08-657-legal-pages-plan.md):
   #2  /tos 200 + negation-safe block + eligibility + carve-outs + dollar guard
       (== 1, the "$5M" AUG) + fees keywords + Pricing Page hyperlink
   #3  /license + /dpa 200 (both REQUIRED — G-gate ③/⑨ LOCKED)
-  #4  footer legal links on product/welcome/signup/signin/self-hosted
-      (BASE_URL half unconditional; TORTISE_HOST half gated on TORTISE_HOST_CHECK)
-  #5  company-host copies of the 12 tortoise-only pages 301 → the exact
+  #4  footer legal links on auth/signup/signin/self-hosted/faq
+      (the FOOTER_PAGES tuple; BASE_URL half unconditional, TORTISE_HOST half
+      gated on TORTISE_HOST_CHECK; product.html's footer is covered by the
+      tortoise-host half only)
+  #5  company-host copies of the 14 tortoise-only pages 301 → the exact
       tortoise host URL (canonical consolidation, 2026-08-17); tortoise-host
       copies 200 (gated)
   #6  middleware root rewrites — tortoise.* → product marker,
@@ -84,6 +86,13 @@ if (BASE_URL.startswith("https://") or TORTISE_HOST.startswith("https://")) and 
         allow_module_level=True,
     )
 
+# Imported here rather than with the stdlib block above ON PURPOSE: the two opt-in
+# skips immediately above are this module's pinned harness contract ("FIRST
+# executable statement"), so bare collection must reach them before anything that
+# could fail to import. The helper is pure stdlib today, but the contract is what
+# keeps collection error-free in every lane, so it does not depend on that.
+from tests._html_links import blog_entry_hrefs  # noqa: E402
+
 # ── Signup-flow mode discrimination (#1190) ────────────────────────────────
 # The deployed form is SERVER-FIRST on the hosted site (#801) but runs the
 # LEGACY client-side auth/signUp flow on local/dev previews (isLocal in
@@ -102,7 +111,7 @@ _CORS_PREFLIGHT = {
 
 # Browser-level network log noise from deliberately-failed requests (real
 # 401s from the /welcome bridge boot after the mocked sign-in redirect in
-# prod mode — rest/v1/team_memberships, /v1/onboarding/state fire ~100-500ms
+# prod mode — rest/v1/org_memberships, /v1/onboarding/state fire ~100-500ms
 # after commit; review P1 c60) — NOT page JS errors; the zero-console-errors
 # assertion in the mocked-signup test filters it (same filter the signup
 # safety suite uses).
@@ -190,10 +199,10 @@ FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # with NO pricing content — the id="pricing-section" anchor exists only in
 # product.html (served at '/' on the tortoise host via the middleware rewrite).
 PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
-FOOTER_PAGES = ("/welcome", "/auth", "/signup", "/signin", "/self-hosted.html")
+FOOTER_PAGES = ("/auth", "/signup", "/signin", "/self-hosted.html", "/faq")
 CRAWL_PAGES = (
     "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
-    "/privacy", "/tos", "/license", "/dpa", "/security",
+    "/privacy", "/tos", "/license", "/dpa", "/security", "/faq",
 )
 
 # ── Pinned canonical sentences (T1/T2 Step 2 — the authoritative set; ──────
@@ -407,7 +416,16 @@ def _scan_instrumentation_markers() -> list[str]:
 
 
 def _goto(page: Page, url: str, status: int = 200) -> str:
+    """Fetch ``url`` and assert its status, retrying once on a mismatch.
+
+    This suite runs against LIVE production post-deploy, where a transient 5xx or a
+    stale edge response is not a defect — the external-crawl check below retries for
+    the same reason. Without this, the two unconditional production assertions added
+    for #3950 could redden the post-deploy job on a blip (review finding, #3962).
+    """
     resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    if resp is None or resp.status != status:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     assert resp is not None, f"{url} produced no response"
     assert resp.status == status, f"{url} returned {resp.status} (expected {status})"
     return page.content()
@@ -422,6 +440,29 @@ def _footer_links_present(content: str) -> None:
     legal/security hrefs appear in the served document."""
     for href in FOOTER_LINK_HREFS:
         assert href in content, f"footer link {href} missing"
+
+
+def _has_blog_entry(content: str) -> bool:
+    """True when the served HTML carries an ANCHOR into the blog (#3950).
+
+    Uses the SAME rule the static guard uses — `blog_entry_hrefs`, which is
+    `extract_anchor_hrefs` plus `is_blog_entry`, both in `tests/_html_links.py`.
+    That is not a stylistic preference: an earlier revision of this helper
+    scanned the raw document, so a commented-out or `<script>`-only anchor
+    satisfied the production check while the static guard correctly reported the
+    link as lost — and no test could catch the divergence, because importing this
+    module runs its module-level `pytest.skip`. The PREDICATE is shared for the
+    same reason: while each layer owned a copy, the two could disagree about
+    which hrefs count, with the same undetectability.
+
+    `href="/blog"` (the index) and `/blog/<slug>` (a post — its own nav links
+    back) both count. A root-relative href is accepted as written; an absolute
+    one must name a host the site owns, so `premiselabs.co/blog` (which 301s to
+    the tortoise host) counts while a typo'd or third-party host does not. And
+    because the extractor reads anchors, a `<link rel="prefetch">` is not a way
+    in.
+    """
+    return bool(blog_entry_hrefs(content))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -570,10 +611,12 @@ def test_license_and_dpa_serve_200(page: Page) -> None:
 
 def test_footer_legal_links_on_all_site_pages(page: Page) -> None:
     """UNCONDITIONAL half: the five legal/security links are present in the
-    FOOTER element on product.html, welcome.html, signup.html, signin.html,
-    self-hosted.html (G-gate ⑨ link set: Privacy · Terms · License · DPA ·
+    FOOTER element on every page in FOOTER_PAGES (auth, signup, signin,
+    self-hosted, faq) (G-gate ⑨ link set: Privacy · Terms · License · DPA ·
     Security — all five ship, no conditional). Scoped to the footer element
     via a real locator (footer, .legal-footer, .footer) — not page-wide
+    (#3501 dropped /welcome from this set: it redirects to /auth, which is
+    already here, so including it only re-tested /auth's footer).
     substring checks (reviewer P3-5a)."""
     for path in FOOTER_PAGES:
         _goto(page, BASE_URL + path)
@@ -600,25 +643,71 @@ def test_tortoise_host_footer_half(page: Page) -> None:
     _footer_links_present(body)
 
 
+# ── #3950: the blog is live but was unreachable — pin the SERVED entry points ──
+# These belong here (not only in the static guard) because the tortoise root is
+# served by `functions/_middleware.ts`, which fetches `/product.html`: the served
+# markup is Function-produced, so a repo-side assertion cannot prove what a
+# visitor receives. This suite runs against production post-deploy.
+
+
+def test_company_root_links_to_the_blog(page: Page) -> None:
+    """UNCONDITIONAL half (#3950): the company root must offer the blog.
+
+    `premiselabs.co/` serves `index.html`, which had no blog link at all. Asserted
+    on the SERVED page — "the link exists in the repo" is not the property; the
+    property is that a visitor can reach it.
+    """
+    body = _goto(page, BASE_URL + "/")
+    assert _has_blog_entry(body), (
+        "premiselabs.co/ carries no /blog entry point (#3950): the blog is live but "
+        "unreachable when nothing links it. Add the absolute "
+        "https://tortoise.premiselabs.co/blog to index.html's footer bar."
+    )
+
+
+@TORTOISE_HOST_SKIP
+def test_tortoise_root_links_to_the_blog(page: Page) -> None:
+    """TORTISE-HOST half (#3950): the page the owner actually complained about.
+
+    The middleware rewrites `/` to `product.html`, so this is the served landing
+    page. Gated by TORTISE_HOST_CHECK exactly like the footer half — a stale-DNS
+    run skips (green-with-annotation), never reddens.
+    """
+    host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
+    spoof = host if host.startswith("tortoise.") else "tortoise.premiselabs.co"
+    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
+    assert resp.status == 200, f"tortoise host root returned {resp.status}"
+    body = resp.text()
+    assert PRODUCT_ROOT_MARKER in body, "tortoise root does not serve product.html"
+    assert _has_blog_entry(body), (
+        "tortoise.premiselabs.co/ carries no /blog entry point (#3950) — this is the "
+        "exact page the owner reported as unreachable. It must offer the blog in the "
+        "hero's secondary-link row (above the fold) and in the footer."
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # #5 cross-host
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
-    """UNCONDITIONAL consolidation half (#5, 2026-08-17): all 12 tortoise-only
-    pages (docs, security, self-hosted, the 5 legal pages, signup/signin,
-    welcome, invite-accept) are canonical on tortoise.premiselabs.co; the
+    """UNCONDITIONAL consolidation half (#5, 2026-08-17): all 14 tortoise-only
+    pages (docs, FAQ, security, self-hosted, the 5 legal pages, auth,
+    signup/signin, welcome, invite-accept) are canonical on
+    tortoise.premiselabs.co; the
     middleware 301s their copies on the exact premiselabs.co hostname
     (redirect target is a constant, so this is safe on stale-DNS runs).
     Local dev / *.pages.dev previews pass through with 200 — not indexed,
     and the E2E suite runs against a dev server — so the 301 half is
-    asserted only against the production company host."""
+    asserted only against the production company host. Two exceptions are
+    redirect-by-design on every host: /signin (consolidation → /auth) and
+    /welcome (#3501: a pure server redirect, so it never serves a 200 body)."""
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     # The full company-host consolidation surface of the middleware
     # TORTOISE_ONLY set (extensionless forms; .html/trailing-slash variants
     # normalize onto these canonicals).
-    for path in ("/docs", "/security", "/self-hosted", "/privacy", "/tos",
+    for path in ("/docs", "/faq", "/security", "/self-hosted", "/privacy", "/tos",
                  "/license", "/dpa", "/aviso-privacidad", "/auth", "/signup", "/signin",
                  "/welcome", "/invite-accept"):
         r = page.request.get(BASE_URL + path, timeout=15_000, max_redirects=0)
@@ -638,10 +727,32 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
             # Dev/preview pass-through: most tortoise-only pages serve
             # 200; the auth consolidation 301s apply on EVERY host, so
             # /signin → /auth here too (single auth page).
-            expected_dev = 301 if path == "/signin" else 200
+            #
+            # /welcome is 302 by design since #3501: `functions/welcome.ts` is a
+            # pure server redirect (signed-in → the app origin, anonymous →
+            # /auth). It has no HTML to serve, so a 200 here would mean the
+            # redirect was REMOVED and the page has silently become a rendered
+            # page again — the exact regression this asserts against.
+            expected_dev = {
+                "/signin": 301,
+                "/welcome": 302,
+            }.get(path, 200)
             assert r.status == expected_dev, (
                 f"{path} on {BASE_URL} → {r.status} (expected {expected_dev} dev pass-through)"
             )
+            if path == "/welcome":
+                # urlsplit rather than startswith("/"): a protocol-relative
+                # `//evil.example/auth` satisfies BOTH startswith("/") and a
+                # naive "/auth" substring test, so the weaker form did not
+                # actually pin the same-origin property it claimed to.
+                location = r.headers.get("location") or ""
+                parsed_loc = urlsplit(location)
+                assert parsed_loc.netloc == "", (
+                    f"/welcome must stay same-origin in dev, got {location!r}"
+                )
+                assert parsed_loc.path == "/auth", (
+                    f"anonymous /welcome must redirect to /auth, got {location!r}"
+                )
 
 
 @TORTOISE_HOST_SKIP
@@ -803,7 +914,7 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     console_errors: list[str] = []
     # _RESOURCE_LOG_RE filter (review P1 c60): in prod mode the /welcome
     # redirect loads the REAL welcome page, whose boot fetches
-    # (rest/v1/team_memberships, /v1/onboarding/state) fire real 401 network
+    # (rest/v1/org_memberships, /v1/onboarding/state) fire real 401 network
     # errors ~100-500ms after commit — the mock session has no live team row.
     # Those are network noise, not page JS errors; the raw == [] assertion
     # raced them. pageerror is still captured unfiltered.
@@ -887,7 +998,6 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
     page.route("**/auth/v1/token*", handle)
-    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     _goto(page, BASE_URL + "/signup")
     expect(page.locator(".legal-accept")).to_be_visible()
 
@@ -947,7 +1057,6 @@ def test_mock_github_oauth_fires(page: Page) -> None:
         route.continue_()
 
     page.route("**/auth/v1/authorize*", handle)
-    page.add_init_script("localStorage.setItem('tortoise_beta_access','1');")  # TEMP beta-gate unlock (#beta-gate)
     _goto(page, BASE_URL + "/signup")
     expect(page.locator(".legal-accept")).to_be_visible()
 
@@ -1056,13 +1165,20 @@ def test_docs_html_contact_is_mailto(page: Page) -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/privacy", "/tos", "/welcome", "/signup", "/docs.html", "/security"]
+    "path", ["/privacy", "/tos", "/signup", "/docs.html", "/security", "/faq"]
 )
 def test_mobile_render_no_horizontal_scroll(page: Page, path: str) -> None:
     """At 375px the page must render without horizontal scroll (S8).
     NOTE: product.html was removed from this set (PR #840) — the product
     page now lives only on the tortoise host and raw page.request fetches
-    can't compute layout; its mobile rendering is unchanged by this PR."""
+    can't compute layout; its mobile rendering is unchanged by this PR.
+
+    NOTE: /welcome was removed by #3501. It is a pure server redirect, so the
+    browser lands on /auth and this test would silently measure /auth's layout
+    under a /welcome label. The one case where /welcome DOES render is
+    `?reset=1` for a signed-in user, which needs a session this suite does not
+    establish — so it is uncovered here rather than mislabelled, and the reset
+    panel's own behaviour is pinned by tests/e2e/auth/test_welcome_and_password.py."""
     page.set_viewport_size({"width": 375, "height": 667})
     _goto(page, BASE_URL + path)
     dims = page.evaluate(
@@ -1181,7 +1297,10 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
     assert "__META_PIXEL_ID__" in js, \
         "consent.js missing the dormant Meta Pixel stub (placeholder ID, fail-safe)"
 
-    for path in ("/auth", "/signup", "/signin", "/welcome"):
+    # /welcome is excluded: since #3501 it is a pure server redirect, so this
+    # request would follow it to /auth (already in this tuple) and re-assert
+    # /auth's consent tag under a /welcome label.
+    for path in ("/auth", "/signup", "/signin"):
         raw = page.request.get(BASE_URL + path, timeout=15_000).text()
         assert re.search(r'<script[^>]+src="/consent\.js"[^>]*>', raw, re.I), \
             f"{path}: missing consent.js script tag"

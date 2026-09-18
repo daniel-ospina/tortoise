@@ -3,12 +3,12 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js'
+import { captureStatusForHarness, captureClaimForHarness, lastErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
@@ -16,7 +16,7 @@ import { setupGuide } from './setupGuide.js'
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -30,10 +30,12 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 // session mode; durableConnectKey + usableDurableRows resolve the connect
 // step's gate from the keys-table rows (Never-keys-only embed policy, #2426
 // decision 2).
-import { isManagedKey, durableConnectKey } from './sessionKey.js'
+import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from './sessionKey.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
+  graphBackupCellState,
+  graphBackupSummary,
   graphCanDelete,
   graphKeyPanelEmptyLine,
   graphKeysSuppressed,
@@ -104,6 +106,11 @@ const _MS_PER_DAY = 86400000
 // #2479 code-review fix P2: named constant for max re-auth attempts (spec: 1)
 const MAX_REAUTH_ATTEMPTS = 1
 const REAUTH_EXCEEDED_MESSAGE = 'Re-authentication failed — try again later or contact support.'
+// #3783 (review P2): how long the connect step waits on GET /v1/team/keys before
+// its wait state becomes actionable. A request that never settles produces no
+// rejection, so this bound is the only thing that turns a hang into a retry
+// instead of an infinite "Checking…" (the dead end the failed-read fix closes).
+const KEYS_LOAD_SLOW_MS = 12000
 
 // #2426: Custom date (YYYY-MM-DD) → whole days until that date, clamped to
 // 1..366. Null when missing/invalid/out-of-range — the + New key button stays
@@ -864,20 +871,33 @@ const SKEL_LABEL = { width: '45%', height: '1.2em' }
 // require the container to stay a control, which is the violation itself.
 function WizardPromptCard({ text, label }) {
   const [copied, setCopied] = React.useState(false)
+  // #2912 (PR-gate a11y): the scroll region must have a UNIQUE accessible name
+  // per card — the 2-card surfaces (Pi, Cursor) render two `role="region"`
+  // landmarks, and a shared "Setup prompt" name made them
+  // indistinguishable to a screen-reader user navigating by landmark
+  // (axe `landmark-unique`). Derive it from the button's own label, which is
+  // already per-card ("Copy step 1 prompt" → "step 1 prompt").
+  // #3218: the labels no longer carry their own numbering — the numbered
+  // circles above them own the order, so the button/region names describe the
+  // PROMPT instead ("Copy the connect prompt" → "the connect prompt").
+  const regionLabel = label ? label.replace(/^Copy\s+/i, '') : 'Setup prompt'
   const doCopy = React.useCallback(() => {
     navigator.clipboard.writeText(text)
     setCopied(true)
     setTimeout(() => setCopied(false), 1600)
   }, [text])
   return (
-    <div className="wizard-prompt-card"
-      style={{ position: 'relative', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word', maxWidth: '100%', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, padding: '12px 14px', fontFamily: 'var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace)', fontSize: 14, lineHeight: 1.6, color: 'var(--text,#e2e8f0)' }}>
-      {text}
+    <div className="wizard-prompt-card">
+      {/* #2912 (review cycle 2): the long prompts scroll, so the <pre> is a
+          scroll REGION — it must be reachable by keyboard (WCAG 2.1.1 /
+          axe `scrollable-region-focusable`). The copy control stays OUTSIDE
+          the scroll container so it never scrolls away. */}
+      <pre className="wizard-prompt-text" tabIndex={0} role="region" aria-label={regionLabel}>{text}</pre>
       {/* #2827 (round-2 P2): the button's own label flips to 'Copied ✓' for
           1.6s — a sighted-only signal. This live region announces the copy
           outcome to screen readers. */}
       <span className="sr-only" role="status" aria-live="polite">{copied ? 'Copied to clipboard' : ''}</span>
-      <div style={{ marginTop: '0.6rem', display: 'flex', justifyContent: 'center' }}>
+      <div className="wizard-prompt-actions">
         <button type="button" className={copied ? 'ghost small' : 'btn-primary small'}
           onClick={doCopy}>
           {copied ? 'Copied ✓' : (label || 'Copy')}
@@ -887,8 +907,39 @@ function WizardPromptCard({ text, label }) {
   )
 }
 
+// #3218: ONE statement of when the connect-step plaintext stops being visible
+// and how to get another one — shared by the shared key row, the Codex Desktop
+// block and the build-fork SDK block so the three surfaces cannot drift. NOT
+// "shown once": the plaintext is React state that stays visible for the whole
+// connect step (a Back/Continue round trip keeps it), is never persisted to
+// localStorage, and is dropped by wizardComplete, any wizard exit, or the key
+// row's revoke/rotate.
+const KEY_VISIBILITY_NOTE = `Visible while you're on this step — we can't show it again after you leave setup. Need another? Create one from the API Keys page; rotating replaces this key, so your agent would need the new one.`
+
+// #2912: one numbered block of the connect step ("1 Get your API key" →
+// "2 Set up Claude Code"). Before this the step was a flat run of captions,
+// cards and buttons with ad-hoc margins, so nothing communicated ORDER.
+// The block owns its own spacing + rule; the step body just stacks blocks.
+function WizardBlock({ step, title, children }) {
+  return (
+    <section className="wizard-block">
+      {/* #3218 (a11y): the ordinal badge is aria-hidden (it is decoration for
+          sighted users), so the ordering has to reach assistive tech another
+          way — the heading's accessible name carries it. */}
+      <h2 className="wizard-block-title" aria-label={step != null ? `Step ${step}: ${title}` : undefined}>
+        {step != null && <span className="wizard-block-step" aria-hidden="true">{step}</span>}
+        {title}
+      </h2>
+      <div className="wizard-block-body">{children}</div>
+    </section>
+  )
+}
+
 function wizardPromptText(harness, step, key, mode) {
-  const url = 'https://api.premiselabs.co/mcp/'
+  // #2865: the keyed URL comes from harnesses.js — a third hardcoded copy
+  // here would re-create exactly the drift the MCP_URL/CANONICAL_MCP_URL
+  // split exists to prevent.
+  const url = MCP_URL
   const docs = 'Docs: https://tortoise.premiselabs.co/docs'
   const keyLine = mode === 'included' ? `Key: ${key}` : 'I\'ll give you the API key when you need it.'
   const twoStepNote = 'Tell me when to restart'
@@ -898,11 +949,15 @@ function wizardPromptText(harness, step, key, mode) {
   // heading the user reads ("Give this prompt…", "Restart X…") is the JSX
   // caption above the card — the SINGLE place that sentence may appear.
   if (harness === 'pi') {
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\n${twoStepNote} Pi.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${docs}`
+    // #3218: MCP config → skills install → restart. The restart note used to
+    // sit BEFORE the skills line, so an agent following the prompt in order
+    // would restart Pi (loading the skills directory) and only then install
+    // the skills — requiring a second reload for them to appear.
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (~/.zshrc).\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${twoStepNote} Pi.\n${docs}`
     if (step === 2) return step2Text
   }
   if (harness === 'cursor') {
-    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\n${twoStepNote} Cursor.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${docs}`
+    if (step === 1) return `Add Tortoise MCP at ${url}.\n${keyLine}\nSave it to my shell profile (export TORTOISE_API_KEY=…) so Cursor can read it from its env.\nThen install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding + tortoise-onboarding) from ${SKILLS_INSTALL_URL}.\n${twoStepNote} Cursor.\n${docs}`
     if (step === 2) return step2Text
   }
   if (harness === 'claude') {
@@ -1031,6 +1086,47 @@ function claimIntentInFlight() {
   const [mountError, setMountError] = React.useState('')
   const [team, setTeam] = React.useState(null)
   const [keys, setKeys] = React.useState([])
+  // #3783 (review P2): `keys` initialises to [] — indistinguishable from a
+  // loaded-but-empty org. This flag marks whether the rows payload has actually
+  // ARRIVED, so the connect gate can render a wait state instead of a mint CTA
+  // in the window where a slow/failed GET /v1/team/keys would otherwise resolve
+  // 'mint' and can burn the plan's last key slot.
+  const [keysLoaded, setKeysLoaded] = React.useState(false)
+  // #3783 (review P2): `keysLoaded` flips on SUCCESS only, so it cannot tell
+  // "still in flight" from "the GET failed". The connect gate's 'loading' arm
+  // therefore had no failure exit — a failed or hanging keys read left the
+  // wizard on a dead wait (no mint, no action, reload-only). `keysLoadError`
+  // carries the failure so the gate resolves 'error' (a retryable state, still
+  // no mint); `keysLoadSlow` bounds a request that never settles at all (a hang
+  // never reaches loadAll's catch), degrading the wait to that same retry.
+  // `keysLoadNonce` re-arms the bound on every event that starts a fresh read:
+  // `keysLoaded` stays false across a retry AND across a team switch, so the
+  // flag alone would not restart the clock (see resetKeysLoadUnresolved below).
+  const [keysLoadError, setKeysLoadError] = React.useState('')
+  const [keysLoadSlow, setKeysLoadSlow] = React.useState(false)
+  const [keysLoadNonce, setKeysLoadNonce] = React.useState(0)
+  React.useEffect(() => {
+    if (keysLoaded) { setKeysLoadSlow(false); return undefined }
+    const t = setTimeout(() => setKeysLoadSlow(true), KEYS_LOAD_SLOW_MS)
+    return () => clearTimeout(t)
+  }, [keysLoaded, keysLoadNonce])
+  // #3783 (review P2, second pass): clear the unresolved keys-read state AND
+  // re-arm the wait bound, for EVERY event that starts a fresh read (logout, a
+  // team switch, the wizard's retry). `keysLoaded` is false both while a read is
+  // IN FLIGHT and after it FAILED (it flips on success only), so a caller
+  // cannot restart the effect's timer by touching that flag: the deps stay
+  // Object.is-equal, the effect does not re-run, and no timer is scheduled. The
+  // nonce is the re-arm trigger. Without it a team switch cleared `keysLoadSlow`
+  // while leaving the deps untouched — the new team's `loadAll('')` could then
+  // hang with the bound already spent and nothing left to fire, so the wait
+  // state had no action forever (the same dead wait this bound exists to
+  // prevent). Shared with the retry so the two cannot drift. The behaviour is
+  // EXECUTED by keysLoadRearmExec.test.js (the effect, these deps, this body).
+  function resetKeysLoadUnresolved() {
+    setKeysLoadError('')
+    setKeysLoadSlow(false)
+    setKeysLoadNonce((n) => n + 1)
+  }
   const [sessions, setSessions] = React.useState([])
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -1081,7 +1177,7 @@ function claimIntentInFlight() {
   -H "Authorization: Bearer ${snippetKey}" \
   -H "Content-Type: application/json" \
   -d '{"content":"hello graph","kind":"statement"}'`
-  const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
+  const [welcomeOrgName, setWelcomeOrgName] = React.useState('')
   const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
   // #2323 (Option B): name-first first-run — the org is provisioned on the
@@ -1100,7 +1196,9 @@ function claimIntentInFlight() {
 
   // Wizard connect step: reset persisted 'chatgpt' value (legacy default) to a valid tab
   React.useEffect(() => {
-    if (!['pi', 'cursor', 'claude', 'codex', 'claude-desktop', 'claude-web'].includes(wizardHarness)) {
+    // #2912: 'codexDesktop' is a first-class leaf now (the Codex chooser's
+    // Desktop surface), so it is a valid persisted value too.
+    if (!['pi', 'cursor', 'claude', 'codex', 'codexDesktop', 'claude-desktop', 'claude-web'].includes(wizardHarness)) {
       setWizardHarness('pi')
     }
   }, [])
@@ -1123,10 +1221,11 @@ function claimIntentInFlight() {
   // error prescribes a manual ⌘/Ctrl-C copy, so the manual-Continue affordance
   // appears ONLY after a failure (the user explicitly asserts the copy).
   const [wizardCopyFailed, setWizardCopyFailed] = React.useState(false)
-  // #2328: Codex has two surfaces — CLI (shell) and Desktop (GUI app, NO
-  // terminal, does not inherit shell exports). The connect step toggles so a
-  // Desktop user never faces an export-command they cannot run.
-  const [wizardCodexDesktop, setWizardCodexDesktop] = React.useState(false)
+  // #2328/#2912: Codex has two surfaces — CLI (shell) and Desktop (GUI app,
+  // NO terminal, does not inherit shell exports). Since #2912 the SURFACE is
+  // the leaf `wizardHarness` value ('codex' vs 'codexDesktop') chosen by the
+  // two-level harness chooser, so the old parallel `wizardCodexDesktop`
+  // boolean (a second place a surface choice could get stuck) is gone.
   const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false, org: null })
   const wizardGithubPollRef = React.useRef(null)  // #1643 review P1: the status poll handle (hoisted so Cancel/unmount can stop it)
   // #1728 Slice 3: the Memory-sources surface (wizard step-1 + Overview
@@ -1160,11 +1259,11 @@ function claimIntentInFlight() {
   // #1893: persist source-scope selections as allowlisted onboarding_state
   // keys (github_issues_scope / github_docs_scope). scopeReadyRef gates the
   // persist path — nothing persists until the initial GET resolves + the
-  // one-shot hydration below has seeded. hydratedTeamIdRef keys hydration
+  // one-shot hydration below has seeded. hydratedOrgIdRef keys hydration
   // to ONE pass per team session: refreshOnboarding() re-fires after every
   // reindex/docs run + finishWelcomeLoads, so seeding inside it would
   // clobber newer selections with the stale server value.
-  const hydratedTeamIdRef = React.useRef(null)
+  const hydratedOrgIdRef = React.useRef(null)
   const scopeReadyRef = React.useRef(false)
   // #1893 (code-review P1): onboarding state is TEAM-scoped — during a team
   // switch the `onboarding` object is momentarily the PREVIOUS team's. This
@@ -1172,6 +1271,15 @@ function claimIntentInFlight() {
   // blocks the scope hydration effect until the new team's state lands, so
   // the new team never seeds from (or persists over) the old team's scope.
   const onboardingStaleRef = React.useRef(false)
+  // #3428/#2937 (lane B3, review cycle 5 item 3): monotonic guard for
+  // refreshOnboarding. `Promise.race` abandons the 15 s refresh but does not
+  // CANCEL it, so a refresh started before a connection landed could resolve
+  // AFTER a newer refresh that observed it and apply the OLDER projection —
+  // flipping serverHarnessConnected true → false (the connected screen reverted
+  // to "Not connected yet", and the poll charged a failure although a refresh
+  // HAD applied). Every call takes a sequence number here; a response whose
+  // request was superseded by a NEWER issued request is dropped, never applied.
+  const onboardingRefreshSeqRef = React.useRef(0)
   // #1893 (scope-verify P1): PER-KEY pre-hydration touch tracking — a touch
   // on ONE key must never suppress seeding of the OTHER, and must never
   // persist the other key's un-seeded default over its stored server value.
@@ -1191,15 +1299,15 @@ function claimIntentInFlight() {
   // #1893 (code-review P1): ALL onboarding-state / github / index calls pin
   // the SELECTED team (the server defaults to memberships[0] without it) — a
   // multi-membership user must read/write the team the scope surface shows.
-  // teamIdRef mirrors currentTeamId but is set synchronously in switchTeam
+  // orgIdRef mirrors currentOrgId but is set synchronously in switchTeam
   // (no render closure race). ONE helper for every call site keeps the
   // surface consistent — a partially-pinned surface makes toggles write one
   // team and read another (review P1: toggleSessionRecording wrote
   // memberships[0] while its follow-up refreshOnboarding read the selected
-  // team). Only called post-render (handlers/effects), so the teamIdRef
+  // team). Only called post-render (handlers/effects), so the orgIdRef
   // binding below is always initialized.
   function onboardingTeamQ(sep = '?') {
-    return teamIdRef.current ? `${sep}team_id=${encodeURIComponent(teamIdRef.current)}` : ''
+    return orgIdRef.current ? `${sep}org_id=${encodeURIComponent(orgIdRef.current)}` : ''
   }
 
   function persistScope(payload) {
@@ -1280,15 +1388,32 @@ function claimIntentInFlight() {
   // claim an agent is taking over.
   const [wizardPaused, setWizardPaused] = React.useState(false)
   const wizardCardRef = React.useRef(null)
-  // #2361 review-r4 (P2): connectedOnceRef is session-local — a re-opener
-  // whose org ALREADY connected (server checkpoint) must not see the paused
-  // 'not connected yet' copy when they skip. Read the projection the client
-  // already holds; refreshOnboarding at wizard-open + step-4 keeps it fresh.
-  // ⚠️ MUST be declared BEFORE effectivelyPaused (TDZ fix, #2621):
-  const connectedOnceRef = React.useRef(false)
+  // #3428/#2937 (lane B3, owner-approved charter comment 5703012625):
+  // `connectedOnceRef` — the session-local "the user told us it's connected"
+  // flag — is DELETED. It existed only so the connect step's Continue button
+  // could manufacture a connected state, which made the done step claim an
+  // agent was taking over on the strength of a click. That is precisely the
+  // false `harness-connected` claim this lane removes (#3428 keyed, #2937
+  // keyless — one handler, two leaves).
+  //
+  // `serverHarnessConnected` is now the ONLY source, read straight from the
+  // server projection (refreshOnboarding at wizard-open + the step-3 landing
+  // refresh keep it fresh).
   const serverHarnessConnected = Array.isArray(onboarding && onboarding.completed_steps) &&
     onboarding.completed_steps.includes('harness-connected')
-  const effectivelyPaused = wizardPaused && !connectedOnceRef.current && !serverHarnessConnected
+  // `wizardPaused` is set ONLY by the connect step's THREE live "Skip for now"
+  // escapes — the keyless/owner nav, the cap-remedy nav, and the main
+  // per-harness nav (`setWizardPaused(true)` has exactly three call sites) — so
+  // it now means exactly "the user skipped the connect step" — no session-local
+  // assertion can suppress it any more. (review cycle 1 P2-7: the count was
+  // stated as two, which made the invariant unauditable.)
+  const effectivelyPaused = wizardPaused && !serverHarnessConnected
+  // #3428 (lane B3, option (a)): the success screen's capture sentence is
+  // DERIVED, never asserted — 'present' | 'future' | 'install-pending' | 'none'
+  // (#3782 added the pending state: nothing observed is not a promise). Computed
+  // here so the derivation is a plain value (unit-testable without a React
+  // harness, which this repo does not have).
+  const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
   const onboardingRefreshedAtDoneRef = React.useRef(false)
@@ -1302,10 +1427,179 @@ function claimIntentInFlight() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, welcomeMode, authed])
+  // #3428/#2937 (lane B3, review cycle 1 P1-4, cycle 2 P1-1): the
+  // not-connected body promises the connection "shows up here the moment it
+  // does" — so this refresh must live as long as that promise can still come
+  // true. It used to be a bounded poll (`maxTries = 5`, ~24 s), after which
+  // nothing on the page refetched onboarding: a user who read the promise,
+  // switched to their terminal, and filed a memory a minute later came back to
+  // a screen frozen on "not connected" FOREVER while the copy claimed the
+  // opposite. The effect's own guard is the only stop condition it needs — it
+  // ends when the connection lands (`serverHarnessConnected`), the user leaves
+  // step 3, or the wizard unmounts — so the try cap was the one thing making
+  // the sentence false. `refreshOnboarding` owns the team-identity guard, so
+  // every attempt is pinned to the org on screen.
+  // review cycle 3 (P2-8): that promise also cannot be kept by a failing
+  // refresh, and the old loop retried every 4 s forever with no counter, no
+  // backoff and no surface (the global error banner does not render in welcome
+  // mode). Consecutive failures now back off exponentially, and past a small
+  // threshold a quiet line states that we cannot check right now.
+  // review cycle 3 (P2-9): a HIDDEN tab throttles setInterval to ~1/min, so a
+  // user who tabs to their terminal and back can face a stale not-connected
+  // body even though the state already changed. Ticks are skipped while the
+  // document is hidden, and the document becoming visible again (or regaining
+  // focus) fires one immediate refresh.
+  const wizardConnectPollRef = React.useRef(null)
+  const wizardConnectPollFailsRef = React.useRef(0)
+  const wizardConnectPollSuccessesRef = React.useRef(0)
+  const wizardConnectPollNextAtRef = React.useRef(0)
+  const wizardConnectPollInFlightRef = React.useRef(false)
+  const [wizardConnectPollStalled, setWizardConnectPollStalled] = React.useState(false)
+  React.useEffect(() => {
+    if (!(welcomeMode && authed) || wizardStep !== 3 || serverHarnessConnected) return
+    // review cycle 4 (item 9): the failure/stall state was NEVER reset, so it
+    // out-lived the effect that produced it. Reachable false state: a user sees
+    // ≥3 failed checks, presses Back, re-enters step 3, and the connection
+    // lands via a NON-poll refresh (the step-3 landing refresh) — the effect
+    // tears down with nothing polling, yet the CONNECTED screen still printed
+    // "we'll keep trying". The stale `nextAt` also delayed the first re-entry
+    // check by up to 60 s. Reset every ref/flag on setup; the render also gates
+    // the notice on `!serverHarnessConnected` (belt and braces).
+    wizardConnectPollFailsRef.current = 0
+    wizardConnectPollSuccessesRef.current = 0
+    wizardConnectPollNextAtRef.current = 0
+    wizardConnectPollInFlightRef.current = false
+    setWizardConnectPollStalled(false)
+    // review cycle 5 (items 2 + 3): this effect's async work must be
+    // CANCELLABLE. `active` is flipped false in the cleanup and every callback
+    // returns on it; `connectTimeout` is the 15 s race timer, now CLEARED on
+    // teardown. Before this the timer always fired — after teardown it could
+    // clear a LATER generation's in-flight guard (starting a concurrent check,
+    // breaking single-flight) and render the stall notice on a healthy poll.
+    let active = true
+    let connectTimeout = null
+    const wizardConnectTick = (force = false) => {
+      // #3428/#2937 (lane B3, review cycle 7 item 2): the tick is a QUEUED
+      // interval callback — clearing the handle in the cleanup cannot recall an
+      // invocation the timer already queued. That stale tick used to set the
+      // SHARED in-flight ref, arm its own closure timer and fire a real request,
+      // then hit `if (!active) return` in its `.then` BEFORE releasing the ref —
+      // so the next generation's every tick returned at the in-flight guard and
+      // the poll died silently while the screen kept asserting a live update.
+      // The teardown guard is the tick's FIRST statement, before any ref write.
+      if (!active) return
+      if (document.hidden) return
+      // review cycle 5 (item 9): `force` — the visibility/focus handler —
+      // bypasses the schedule below, so a landing connection still surfaces
+      // immediately even while the not-connected success backoff is holding.
+      if (!force && Date.now() < wizardConnectPollNextAtRef.current) return
+      // review cycle 4 (item 10): with no in-flight guard every 4 s tick stacked
+      // another refresh behind a slow/hung response, and with no timeout a
+      // request that never settled left the failure counter untouched — so
+      // neither the backoff nor the stall notice ever ran while the screen kept
+      // promising the connection "shows up here the moment it does". One check
+      // at a time, and a 15 s ceiling that counts as a failed check.
+      if (wizardConnectPollInFlightRef.current) return
+      wizardConnectPollInFlightRef.current = true
+      // review cycle 6 (item 5): the PREVIOUS check's race timer may still be
+      // pending — a check that settled through `refreshOnboarding()` never
+      // cleared it, so the next tick overwrote the handle and the cleanup could
+      // only ever clear the newest one. Drop the stale handle BEFORE arming.
+      if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+      const wizardConnectCheck = Promise.race([
+        refreshOnboarding(),
+        new Promise((resolve) => { connectTimeout = setTimeout(() => resolve(false), 15000) }),
+      ]).catch(() => false)  // a rejection must clear the in-flight guard, not freeze the poll
+      wizardConnectCheck.then((outcome) => {
+        // review cycle 6 (item 5): clear THIS check's timer the moment it
+        // settles, whichever arm won — the cleanup alone only saw the last handle.
+        if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+        if (!active) return  // review cycle 5 (item 2): a torn-down generation must not mutate a later poll
+        wizardConnectPollInFlightRef.current = false
+        // review cycle 6 (item 4): a SUPERSEDED response is NEUTRAL — it did not
+        // land, so it must not bank a success, and it did not fail, so it must
+        // not charge a failure. Either charge makes the stall signal lie: a
+        // genuinely failing endpoint could have its notice suppressed by a
+        // concurrent refresh (a step-3 landing refresh, a job `onDone`, a
+        // toggle) that superseded the poll's own check.
+        if (outcome && outcome.superseded) return
+        const landed = !!(outcome && outcome.applied)
+        if (landed) {
+          wizardConnectPollFailsRef.current = 0
+          setWizardConnectPollStalled(false)
+          // review cycle 5 (item 9): `landed` means the projection was APPLIED
+          // — while this effect is still mounted it therefore observed NO
+          // connection. A flat 4 s cadence is ~900 GETs/hour for a user parked
+          // on the done step, so after a few consecutive not-connected
+          // successes ease off (capped like the failure arm). A forced tick
+          // (tab focus/visibility) still checks immediately.
+          // review cycle 6 (item 7): the success cap is 20 s, not 60 s. The body
+          // on this screen makes a STANDING promise ("it shows up here the
+          // moment it does") and the stall flag is false here, so the softened
+          // branch never renders; `force` fires only on focus/visibility, which
+          // does NOT fire for a user who keeps the dashboard visible on a second
+          // monitor and works in a terminal. A 60 s cap let the screen assert
+          // immediacy for a whole minute.
+          const successes = wizardConnectPollSuccessesRef.current + 1
+          wizardConnectPollSuccessesRef.current = successes
+          wizardConnectPollNextAtRef.current = successes >= 3
+            ? Date.now() + Math.min(4000 * 2 ** (successes - 2), 20000)
+            : 0
+          return
+        }
+        wizardConnectPollSuccessesRef.current = 0
+        const fails = wizardConnectPollFailsRef.current + 1
+        wizardConnectPollFailsRef.current = fails
+        wizardConnectPollNextAtRef.current = Date.now() + Math.min(4000 * 2 ** (fails - 1), 60000)
+        if (fails >= 3) setWizardConnectPollStalled(true)
+      })
+    }
+    wizardConnectPollRef.current = setInterval(wizardConnectTick, 4000)
+    const onWizardConnectVisible = () => { if (!active) return; if (!document.hidden) wizardConnectTick(true) }
+    document.addEventListener('visibilitychange', onWizardConnectVisible)
+    window.addEventListener('focus', onWizardConnectVisible)
+    return () => {
+      active = false
+      if (connectTimeout) clearTimeout(connectTimeout)
+      if (wizardConnectPollRef.current) {
+        clearInterval(wizardConnectPollRef.current)
+        wizardConnectPollRef.current = null
+      }
+      document.removeEventListener('visibilitychange', onWizardConnectVisible)
+      window.removeEventListener('focus', onWizardConnectVisible)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizardStep, welcomeMode, authed, serverHarnessConnected])
+  // #3428/#2937 (lane B3, review cycle 8 item 5): the stall flag was reset ONLY
+  // inside the poll effect's setup, which early-returns when `wizardStep !== 3`.
+  // Leaving step 3 after a stall therefore kept the flag set, and re-entering
+  // committed ONE paint frame with the live region already containing the
+  // message (not announced — the a11y reason the region is mounted up front)
+  // and the body rendering the softened clause the poll was about to retract.
+  // Clear it where the step is LEFT, so re-entry starts from the not-stalled
+  // state and the frame cannot render a withdrawn promise.
+  React.useEffect(() => {
+    if (wizardStep !== 3) setWizardConnectPollStalled(false)
+  }, [wizardStep])
   // #2361 review-r3 (P2-2): wizardPaused must not out-live a real connection —
   // connect → Back → Skip must still show 'connected', not 'paused'.
-  // (connectedOnceRef declaration moved up for TDZ fix, #2621)
+  // #3428/#2937: the declared-before-use ordering #2621's TDZ fix required is
+  // gone with connectedOnceRef — `effectivelyPaused` now reads the projection
+  // only, so there is no ref to hoist.
   const [wizardStepAnnounce, setWizardStepAnnounce] = React.useState('')
+
+  // #3428/#2937 (lane B3, review cycle 5 item 4): `wizardForkChosen` and the
+  // `wizardFork` / `isBuildFork` derivation are HOISTED above the step
+  // announcement effect so `isBuildFork` can be a DEP. It was previously read in
+  // the effect BODY only (a later-declared const cannot sit in a deps array
+  // without the #2426/#2621/#2709 TDZ white-screen), so when `onboarding.fork`
+  // flipped to 'build' while the user sat on step 3 the <h1> re-rendered to "No
+  // connection observed yet" while the sr-only announcement kept "Not connected
+  // yet" — none of the effect's other deps change on that flip. Both surfaces
+  // must share the one derivation; declaring the consts here makes the dep legal.
+  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
+  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
+  const isBuildFork = wizardFork === 'build'
 
   // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
   // Step 1 (org input) and step 3 (paste field / copy button) carry their own
@@ -1314,9 +1608,12 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
-    const label = (wizardStep === 3 && effectivelyPaused)
-      ? 'Setup paused — your agent is not connected yet'
-      : (wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label)
+    // review cycle 5 (item 4): `isBuildFork` is derived ABOVE this effect and
+    // IS a dep (see the dep list), so an `onboarding.fork` flip to 'build' while
+    // the user sits on step 3 re-runs the announcement with the SAME arm the
+    // <h1> just rendered. It used to be body-only (a later-declared const in a
+    // deps array is the #2426 TDZ white-screen), which let the two disagree.
+    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })
     setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
     // #2361 review-r4 (P3): focus ONLY on step changes — toggling the paste
@@ -1331,7 +1628,20 @@ function claimIntentInFlight() {
     if (wizardStep === 0 && !welcomeHasOrg) return
     if (wizardCardRef.current) wizardCardRef.current.focus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wizardStep, welcomeMode, authed, wizardPaused])
+    // #2912 (PR-gate follow-up): `effectivelyPaused` (declared above this
+    // effect, so no TDZ) must be a dep. It also depends on
+    // `serverHarnessConnected`, which the step-3 landing refresh flips —
+    // without it the announcement keeps saying "Setup paused…" while the <h1>
+    // and body have already flipped to "You're all set", re-creating the
+    // h1/announcement disagreement the shared helper exists to prevent.
+    // #3428/#2937 (lane B3): `serverHarnessConnected` must ALSO be a dep now.
+    // `effectivelyPaused` is `wizardPaused && !serverHarnessConnected`, so it
+    // only tracks the projection while `wizardPaused` is true — a user who did
+    // NOT skip can have the connection land (the step-3 landing refresh) with
+    // `effectivelyPaused` unchanged, which would leave the announcement saying
+    // "Not connected yet" beneath a <h1> that had already flipped to "You're
+    // all set": the same disagreement this dep list exists to prevent.
+  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork])
   // ⛔ #2426 e2e catch (P0): welcomeHasOrg (~line 4890) and wizardShowPaste
   // (~1832) are declared LATER in this giant component — a hook dep array
   // evaluates eagerly DURING render, so listing either here threw "Cannot
@@ -1387,14 +1697,14 @@ function claimIntentInFlight() {
   async function mintKey(activeKey, name, expiresInDays) {
     // #2167 rule 4: session-mode durable-key CREATE (shared by createKey +
     // #2211's wizardMintDurableKey + regenerateKey's rotate mint) rides the
-    // session JWT + pins ?team_id=<selected> (multi-membership correctness —
+    // session JWT + pins ?org_id=<selected> (multi-membership correctness —
     // server honors it membership-checked with a suspension 403, zero server
     // changes) and NEVER merges a key-preference header (a held key must not
     // shadow the session). #2246 (ADR-010): every mintKey call site passes ''
     // for activeKey — no key-mode/claim caller exists (that surface never
     // calls api()); the activeKey param is vestigial (kept for signature
     // stability).
-    const q = (sessionTokenRef.current && currentTeamId) ? `?team_id=${encodeURIComponent(currentTeamId)}` : ''
+    const q = (sessionTokenRef.current && currentOrgId) ? `?org_id=${encodeURIComponent(currentOrgId)}` : ''
     const payload = {}
     if (name) payload.name = name
     if (expiresInDays != null && !Number.isNaN(expiresInDays)) payload.expires_in = expiresInDays
@@ -1450,9 +1760,9 @@ function claimIntentInFlight() {
       if (res.ok) {
         const t = await res.json()
         // P2 (review): MERGE, don't replace — the PATCH returns only
-        // {team_id, dashboard_key_login}; a full replace would wipe
+        // {org_id, dashboard_key_login}; a full replace would wipe
         // tier/points/anon/checkout_price_id until reload.
-        if (t && t.team_id) setTeam((prev) => ({ ...prev, ...t }))
+        if (t && t.org_id) setTeam((prev) => ({ ...prev, ...t }))
       } else {
         let msg = `Couldn't update (HTTP ${res.status}).`
         try {
@@ -1546,13 +1856,13 @@ function claimIntentInFlight() {
   const sessionMetaRef = React.useRef(null)
   const [teams, setTeams] = React.useState([])
   const [graphs, setGraphs] = React.useState([])
-  const [currentTeamId, setCurrentTeamId] = React.useState(null)
+  const [currentOrgId, setCurrentOrgId] = React.useState(null)
   // #1893 one-shot hydration: reconcile the persisted scope against the
   // live org repo list, exactly once per team session. Gated on the pure
   // shouldHydrate predicate (reposLoaded && onboarding && !reposLoadFailed
-  // && currentTeamId && not-yet-hydrated) — never seeds the default empty
+  // && currentOrgId && not-yet-hydrated) — never seeds the default empty
   // before the GET resolves, never prunes on a failed repos fetch, and
-  // NEVER dead-paths on a null team: currentTeamId is STATE (populated by
+  // NEVER dead-paths on a null team: currentOrgId is STATE (populated by
   // the mount gate / team switcher), so the effect re-fires the moment the
   // team resolves. PER-KEY seeding: a key the user touched pre-hydration is
   // NOT seeded (their choice wins) and is persisted now; a key they did NOT
@@ -1567,8 +1877,8 @@ function claimIntentInFlight() {
     // over) the old team's scope.
     if (onboardingStaleRef.current) return
     if (!shouldHydrate({ reposLoaded, onboarding, reposLoadFailed,
-        currentTeamId, hydratedTeamId: hydratedTeamIdRef.current })) return
-    hydratedTeamIdRef.current = currentTeamId
+        currentOrgId, hydratedOrgId: hydratedOrgIdRef.current })) return
+    hydratedOrgIdRef.current = currentOrgId
     if (!scopeTouchedRef.current.issues) {
       const seeded = reconcileIssuesScope(onboarding.github_issues_scope, reposList)
       setIssuesScope(seeded)
@@ -1595,24 +1905,24 @@ function claimIntentInFlight() {
     scopeTouchedRef.current = { issues: false, docs: false }
     scopeReadyRef.current = true
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reposLoaded, onboarding, reposList, currentTeamId, reposLoadFailed])
+  }, [reposLoaded, onboarding, reposList, currentOrgId, reposLoadFailed])
 
   const [accountMenuOpen, setAccountMenuOpen] = React.useState(false) // #1148-ux: account blob dropdown
   // #1877: create-team dialog state (gated-on-click upgrade UX)
   const [createTeamOpen, setCreateTeamOpen] = React.useState(false)
-  const [createTeamName, setCreateTeamName] = React.useState('')
+  const [createOrgName, setCreateOrgName] = React.useState('')
   const [createTeamBusy, setCreateTeamBusy] = React.useState(false)
   const [createTeamError, setCreateTeamError] = React.useState('')
   // #2789: the dialog has three modes — 'name' (free create, when the user is
   // under the cap), 'limit' (the one-free-org gate: Cancel · Upgrade current
   // organization · Purchase subscription for a new organization) and
   // 'purchase' (name + plan → checkout for an org that does not exist yet).
-  // `createTeamLimitTeamId` is the owned free org "Upgrade current
+  // `createTeamLimitOrgId` is the owned free org "Upgrade current
   // organization" targets — from the client pre-check, or the server's
   // structured 402 detail.
   const [createTeamMode, setCreateTeamMode] = React.useState('name')
   const [createTeamPlan, setCreateTeamPlan] = React.useState('')
-  const [createTeamLimitTeamId, setCreateTeamLimitTeamId] = React.useState('')
+  const [createTeamLimitOrgId, setCreateTeamLimitOrgId] = React.useState('')
   // #2392 (a11y): focus-restore holder for the create-team dialog — the
   // blob trigger button is captured when '+ Create new organization' is
   // clicked (the menu item itself unmounts when the account menu closes
@@ -1660,9 +1970,9 @@ function claimIntentInFlight() {
   }, [accountMenuOpen])
   // #1148-ux: current team name for the account blob (derived from the
   // teams list; falls back to the team row name).
-  const currentTeamName =
-    teams.find((t) => t.team_id === currentTeamId)?.team_name
-    || team?.team_name
+  const currentOrgName =
+    teams.find((t) => t.org_id === currentOrgId)?.org_name
+    || team?.org_name
     || ''
 
 
@@ -1728,7 +2038,7 @@ function claimIntentInFlight() {
     setCreateTeamOpen(false)
     setCreateTeamMode('name')
     setCreateTeamPlan('')
-    setCreateTeamLimitTeamId('')
+    setCreateTeamLimitOrgId('')
     restoreFocus(createTeamRestoreRef)
   }
   // NOTE: the logout/team-switch revealKey clears (below) deliberately do NOT
@@ -1738,7 +2048,7 @@ function claimIntentInFlight() {
     setRevealKey(null)
     restoreFocus(revealRestoreRef)
   }
-  const teamIdRef = React.useRef(null)
+  const orgIdRef = React.useRef(null)
   const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
   // #2789 review P2/P1: the set of orgs that existed BEFORE the new-org
@@ -1754,7 +2064,7 @@ function claimIntentInFlight() {
   function snapshotKnownOrgIds() {
     try {
       window.localStorage.setItem(NEW_ORG_KNOWN_IDS_KEY, JSON.stringify(
-        (teams || []).map((t) => t && t.team_id).filter(Boolean)))
+        (teams || []).map((t) => t && t.org_id).filter(Boolean)))
     } catch { /* private mode — the poll falls back to its list snapshot */ }
   }
 
@@ -1764,7 +2074,7 @@ function claimIntentInFlight() {
       const ids = raw ? JSON.parse(raw) : null
       if (Array.isArray(ids)) return new Set(ids)
     } catch { /* unreadable — fall through */ }
-    return new Set((teams || []).map((t) => t && t.team_id).filter(Boolean))
+    return new Set((teams || []).map((t) => t && t.org_id).filter(Boolean))
   }
 
   const checkoutResetTimerRef = React.useRef(null) // Round-16: popup-flow fallback reset
@@ -1841,7 +2151,7 @@ function claimIntentInFlight() {
       // #2789: a STRUCTURED detail (object with `code`) is surfaced on the
       // Error so callers branch on the machine-readable code and never on the
       // message text — the one-free-org dialog is driven by
-      // `one_free_org_limit`, and `team_id` names the org its "Upgrade current
+      // `one_free_org_limit`, and `org_id` names the org its "Upgrade current
       // organization" action must target.
       const detail = body.detail
       const sus = suspendedFromDetail(detail)
@@ -1854,7 +2164,7 @@ function claimIntentInFlight() {
       err.status = res.status
       if (sus) err.suspended = sus
       if (coded && typeof coded.code === 'string') err.code = coded.code
-      if (coded && typeof coded.team_id === 'string') err.teamId = coded.team_id
+      if (coded && typeof coded.org_id === 'string') err.orgId = coded.org_id
       throw err
     }
     return res.json()
@@ -2190,7 +2500,7 @@ function claimIntentInFlight() {
   // Supabase lane decides on `subscription_status` alone, so a paid-tier row
   // without an active status is counted free there and this pre-check would
   // open the NAME dialog: harmless, because the server stays authoritative and
-  // its structured 402 flips the same dialog to limit mode. /v1/teams carries
+  // its structured 402 flips the same dialog to limit mode. /v1/organizations carries
   // role + tier + subscription_status on every row, so this needs no extra
   // request — advisory UX only.
   const ownedFreeOrgs = (teams || []).filter((t) => t && t.role === 'owner'
@@ -2275,7 +2585,7 @@ function claimIntentInFlight() {
   // #2789: the paid-new-org flow returns to
   // ?session_id=...&new_org=<id>&new_org_name=<name> — the org does not exist
   // until the webhook provisions it, so the loop waits for it to appear in
-  // /v1/teams and then switches to it (instead of polling the CURRENT org's
+  // /v1/organizations and then switches to it (instead of polling the CURRENT org's
   // subscription_status, which is a different org). It matches the id OR the
   // intended name because the pre-minted id is not always the real id: on the
   // registry (selfhost) lane `team_create` mints its own.
@@ -2300,7 +2610,7 @@ function claimIntentInFlight() {
       // Round-13 (P2): a mid-poll team switch must not let a tick land the
       // OLD team's data under the NEW team's switcher — capture the team at
       // poll start and bail when it changes.
-      const teamAtPollStart = teamIdRef.current
+      const teamAtPollStart = orgIdRef.current
       // #2789 review P2: the orgs that already existed when this purchase
       // STARTED (a tree-shared snapshot — see NEW_ORG_KNOWN_IDS_KEY). The
       // prefix arm below is a heuristic, so it must never match one of THESE
@@ -2319,18 +2629,18 @@ function claimIntentInFlight() {
             // user is wrongly told provisioning is slow.
             const newOrgNamePrefix = newOrgName
               ? `${String(newOrgName).slice(0, 55).trimEnd()} ` : ''
-            const match = (list || []).find((t) => t && (t.team_id === newOrgId
-              || (newOrgName && t.team_name === newOrgName)
+            const match = (list || []).find((t) => t && (t.org_id === newOrgId
+              || (newOrgName && t.org_name === newOrgName)
               // #2789 review P2: the prefix arm is a HEURISTIC, so it must only
               // consider orgs that did not exist when the poll started —
               // otherwise buying "Beta" while owning "Beta Corp" (or re-buying
               // "Acme" when "Acme <id>" already exists from a prior collision)
               // would switch the user to that OLD org and suppress the notice.
-              || (newOrgNamePrefix && !knownOrgIds.has(t.team_id)
-                && String(t.team_name || '').startsWith(newOrgNamePrefix))))
+              || (newOrgNamePrefix && !knownOrgIds.has(t.org_id)
+                && String(t.org_name || '').startsWith(newOrgNamePrefix))))
             if (match) {
               switches += 1
-              if (switches === 1) switchTeam(match.team_id)
+              if (switches === 1) switchTeam(match.org_id)
               tries = 5
             }
           } else {
@@ -2375,7 +2685,19 @@ function claimIntentInFlight() {
     // switchTeam during the in-flight GET must not land team A's onboarding
     // under team B, and must not clear the switch-stale flag for a stale
     // team). Mirrors the Round-10 _teamAtCall pattern in loadAll/loadGraphs.
-    const _teamAtCall = teamIdRef.current
+    const _teamAtCall = orgIdRef.current
+    // #3428/#2937 (lane B3, review cycle 5 item 3): this call's monotonic
+    // sequence number — captured before the await so a response can be told
+    // apart from one issued LATER (see the apply guard below).
+    const _seq = ++onboardingRefreshSeqRef.current
+    // #3428/#2937 (lane B3, review cycle 8 item 1): `_superseded` is
+    // FUNCTION-scoped, declared before the try. Declared inside the try (cycle 7
+    // item 3) it was in the TDZ at the early no-session exit and completely
+    // UNBOUND in the `catch` (a try-scoped `const` is not in scope there), so
+    // EVERY error path threw `ReferenceError` instead of returning the
+    // discriminated outcome. It is assigned after each await, immediately before
+    // each use, so it always reflects the latest issued sequence.
+    let _superseded = false
     try {
       if (!sessionTokenRef.current) {
         // Mount race (#1838): the onboarding-state GET rides the session JWT —
@@ -2391,38 +2713,75 @@ function claimIntentInFlight() {
           const { data } = await supabaseClient.auth.getSession()
           session = (data && data.session) || null
         }
+        _superseded = _seq < onboardingRefreshSeqRef.current
         // P2 (review): strict validity check — a non-expired JWT is required,
         // otherwise fall through to the loading-off return below.
         if (session && session.access_token && session.expires_at && session.expires_at * 1000 > Date.now()) {
           sessionTokenRef.current = session.access_token
         } else {
-          setOnboardingLoading(false)
-          return
+          // #3428/#2937 (lane B3, review cycle 7 item 3): this exit and the two
+          // below return the SAME discriminated outcome as the success path —
+          // the poll consumes the shape, and a bare `false` also cleared the
+          // loading flag for a response a newer refresh already superseded.
+          if (!_superseded) setOnboardingLoading(false)
+          return { applied: false, superseded: _superseded }
         }
       }
       // #1893 (code-review P1): pin the SELECTED team so multi-membership
       // users read/write the team the scope surface shows (the server
-      // defaults to memberships[0] without it). teamIdRef mirrors
-      // currentTeamId but is set synchronously in switchTeam (no render
+      // defaults to memberships[0] without it). orgIdRef mirrors
+      // currentOrgId but is set synchronously in switchTeam (no render
       // closure race).
       const st = await api(`/v1/onboarding/state${onboardingTeamQ()}`, { useSession: true })
       // #1893 (code-review P1): apply ONLY a team-pinned response. The mount
-      // `[]`-effect GET fires before the mount gate sets teamIdRef (captured
+      // `[]`-effect GET fires before the mount gate sets orgIdRef (captured
       // _teamAtCall = null) — applying it would seed memberships[0]'s scope
       // under the selected team (wrong for multi-membership users) and let
-      // hydration latch the wrong team's data before the currentTeamId
+      // hydration latch the wrong team's data before the currentOrgId
       // effect's pinned refetch lands. The pinned refetch is authoritative;
       // the unpinned mount GET is discarded (harmless — the refetch corrects
       // onboarding, and the first-timer 403-swallow path is unaffected).
-      if (st && st.onboarding && _teamAtCall && teamIdRef.current === _teamAtCall) {
+      // review cycle 4 (item 11): `applied` — a refresh is 'landed' only when
+      // its projection was actually APPLIED below. The unconditional `return
+      // true` reported success for a DISCARDED response (the team-identity guard
+      // skipped `setOnboarding`, and a body without `st.onboarding` fell through
+      // both), so the poll reset its failure counter and cleared the stall
+      // notice while the projection never moved.
+      let applied = false
+      // #3428/#2937 (lane B3, review cycle 5 item 3): a SUPERSEDED response is
+      // never applied. If a newer request was issued while this one was in
+      // flight, this one is stale by definition and is dropped; `_superseded`
+      // is returned as a success below so the poll does not count it as a
+      // failed check.
+      _superseded = _seq < onboardingRefreshSeqRef.current
+      if (st && st.onboarding && _teamAtCall && orgIdRef.current === _teamAtCall && !_superseded) {
         // code-review P1: this response is for the CURRENT team (the team
         // did not move while the GET was in flight) — clear the switch-stale
         // flag so hydration can proceed.
         onboardingStaleRef.current = false
         setOnboarding(st.onboarding)
         if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
+        applied = true
       }
-      setOnboardingLoading(false)
+      // review cycle 6 (item 3): the loading flag belongs to THIS request. A
+      // superseded response must not flip it while the newer request is still in
+      // flight — it was the one mutation the monotonic apply guard did not cover.
+      if (!_superseded) setOnboardingLoading(false)
+      // #3428/#2937 (lane B3, review cycle 3 P2-8): the step-3 poll has to be
+      // able to tell a landed refresh from a failed one, and this function
+      // swallows its own errors (the swallow is deliberate — see the catch
+      // below), so it RETURNS the outcome instead. Callers that only fire and
+      // forget keep working unchanged; the poll counts the `false`s.
+      // review cycle 5 (item 3): a SUPERSEDED response is not a failure of THIS
+      // check, and a newer refresh owns the truth.
+      // review cycle 6 (item 4): it is not a SUCCESS either. The outcome is
+      // DISCRIMINATED — `{ applied, superseded }` — so the poll banks a success
+      // only on `applied` and treats `superseded` as neutral. The old
+      // `applied || _superseded` reported a DISCARDED response as landed
+      // (cycle 4 item 11's defect in a new form): it reset the failure counter,
+      // cleared the stall notice and advanced the success backoff for a
+      // projection that never moved.
+      return { applied, superseded: _superseded }
     } catch (e) {
       // #1847/#2323 (Option B): first-timer org-create race — the mount-time
       // refreshOnboarding() fires BEFORE the org exists (a teamless first-
@@ -2431,20 +2790,28 @@ function claimIntentInFlight() {
       // membership' and the MemorySources panel would render its error card
       // until reload. Swallow ONLY that exact no-team 403, discriminated by
       // ref (Round-11: status-based checks read e.status / refs, not message
-      // content): teamIdRef is provably null at swallow time for the
+      // content): orgIdRef is provably null at swallow time for the
       // first-timer pre-org-create case (provisionInApp never sets it; the
-      // currentTeamId effect only fires post-provision), and being a ref it
+      // currentOrgId effect only fires post-provision), and being a ref it
       // has no stale-closure trap (the mount effect closes over the
       // first-render [], so teamsList.length would wrongly swallow cross-team
       // 403s for returning users). Suspended teams return a dict detail →
-      // e.suspended is set, and a successful /v1/teams with a still-403
-      // onboarding leaves teamIdRef set — both fall through to the normal
+      // e.suspended is set, and a successful /v1/organizations with a still-403
+      // onboarding leaves orgIdRef set — both fall through to the normal
       // error state (honest, retryable card) below: keeping the loading
       // state leaves the panel in its initial state;
       // finishWelcomeLoads() re-fires this after org-create + provisioning
       // and is the authoritative load.
-      if (e && e.status === 403 && !e.suspended && !teamIdRef.current) return
-      setOnboardingLoading(false)  // best-effort — the surface renders its error state
+      // review cycle 8 item 1: re-read the sequence AFTER the rejection (the
+      // awaited call never resolved, so no post-await assignment ran) — reading
+      // an unbound identifier here was the ReferenceError the P0 fixes.
+      _superseded = _seq < onboardingRefreshSeqRef.current
+      if (e && e.status === 403 && !e.suspended && !orgIdRef.current) return { applied: false, superseded: _superseded }
+      // #3428/#2937 (lane B3, review cycle 7 item 3): a superseded REJECTION is
+      // superseded-aware too — the newer in-flight refresh owns the loading
+      // flag (cycle 6's side-effect-free claim covered only the response path).
+      if (!_superseded) setOnboardingLoading(false)  // best-effort — the surface renders its error state
+      return { applied: false, superseded: _superseded }
     }
   }
   React.useEffect(() => { refreshOnboarding() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -2467,9 +2834,14 @@ function claimIntentInFlight() {
   const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
-  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
-  // #1998 (W2): connect-consent state — the harness-connected checkpoint
-  // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
+  // `wizardForkChosen` is declared ABOVE the step-announcement effect (review
+  // cycle 5 item 4) so `isBuildFork` can be a DEP of it without a TDZ.
+  // #1998 (W2) / #3428 (lane B3): connect-step busy state. The advance no
+  // longer WRITES the harness-connected checkpoint — that click-writer was
+  // deleted, so this flag covers the refresh that sharpens the done step's read
+  // of the server projection. review cycle 4 (item 7): `wizardConnectError` is
+  // CLEARED by that advance (`setWizardConnectError('')`) and never given a
+  // message there; the only writer of a message is the copy-failure path.
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
   const [wizardConnectError, setWizardConnectError] = React.useState('')
   const [wizardKeyMode, setWizardKeyMode] = React.useState('included')
@@ -2494,6 +2866,11 @@ function claimIntentInFlight() {
 
   const [wizardDurableBusy, setWizardDurableBusy] = React.useState(false)
   const [wizardDurableError, setWizardDurableError] = React.useState('')
+  // #3428/#2937 (lane B3, review cycle 3 P2-7): the wizard's OWN mint 402. It
+  // is a different signal from `capNotice` (set only by the Keys-tab
+  // create/rotate 402s), so an owner who hits the cap inside the wizard needs
+  // this flag to stop the done step promising "running it creates a fresh key".
+  const [wizardDurableCapped, setWizardDurableCapped] = React.useState(false)
   // #1998 fold-in: optional paste-your-own-durable-key fallback (closes the
   // 402-cap loop — a user at max_api_keys regenerates in the API Keys tab and
   // pastes the shown-once replacement here instead of dead-ending).
@@ -2513,7 +2890,7 @@ function claimIntentInFlight() {
   const catalogMarkedRef = React.useRef({})
   React.useEffect(() => {
     if (wizardStep !== 2) return
-    const teamKey = teamIdRef.current || 'default'
+    const teamKey = orgIdRef.current || 'default'
     const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
     if (buildFork && !catalogMarkedRef.current[teamKey]) {
       catalogMarkedRef.current[teamKey] = true
@@ -2592,11 +2969,11 @@ function claimIntentInFlight() {
   // does NOT copy the old github connect poll's dangling-timer anti-pattern.
   function startBoundedPoll(ref, { url, interval = 3000, maxTries = 40, isTerminal, onStatus, onDone }) {
     if (ref.current) { clearInterval(ref.current); ref.current = null }
-    const teamAtStart = teamIdRef.current
+    const teamAtStart = orgIdRef.current
     let tries = 0
     const tick = async () => {
       tries += 1
-      if (teamIdRef.current !== teamAtStart) { stopBoundedPoll(ref); return }  // per-team staleness guard
+      if (orgIdRef.current !== teamAtStart) { stopBoundedPoll(ref); return }  // per-team staleness guard
       try {
         const job = await api(url, { useSession: true })
         if (onStatus) onStatus(job)
@@ -2620,10 +2997,10 @@ function claimIntentInFlight() {
   // ── #1845: load the connected org's repo names for the scope selectors ──
   async function loadRepos() {
     // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
-    const _teamAtCall = teamIdRef.current
+    const _teamAtCall = orgIdRef.current
     try {
       const res = await api(`/v1/onboarding/github/repos${onboardingTeamQ()}`, { useSession: true })
-      if (teamIdRef.current !== _teamAtCall) return  // stale switch response
+      if (orgIdRef.current !== _teamAtCall) return  // stale switch response
       setReposList(res && Array.isArray(res.repos) ? res.repos : [])
       // #1893 (code-review P1): a server-side resolve failure returns 200
       // with an EMPTY list + resolve_error:true (never a 500) — that is
@@ -2631,11 +3008,11 @@ function claimIntentInFlight() {
       // a transport failure (pruning on it would clobber the stored scope).
       setReposLoadFailed(!!(res && res.resolve_error))
     } catch {
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       setReposList([])  // best-effort — the selector still shows "All repos"
       setReposLoadFailed(true)
     } finally {
-      if (teamIdRef.current === _teamAtCall) setReposLoaded(true)
+      if (orgIdRef.current === _teamAtCall) setReposLoaded(true)
     }
   }
   // #1845: lazily load a repo's branch list for the docs per-repo branch
@@ -2645,19 +3022,23 @@ function claimIntentInFlight() {
   // neither main nor master.
   async function loadBranches(repo) {
     if (Object.prototype.hasOwnProperty.call(branchLists, repo)) return  // already loaded
+    // #3687: declared at FUNCTION scope (mirrors loadRepos) so the `catch` below
+    // can read it. A try-scoped binding is not in scope in the catch, so every
+    // failed branch load threw ReferenceError instead of degrading to the
+    // best-effort empty list.
+    const _teamAtCall = orgIdRef.current
     try {
       const q = encodeURIComponent(repo)
       // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
-      // The URL already carries ?repo= — join team_id with & (a second `?`
+      // The URL already carries ?repo= — join org_id with & (a second `?`
       // would corrupt the repo value and silently unpin the team).
-      const _teamAtCall = teamIdRef.current
       const res = await api(`/v1/onboarding/github/branches?repo=${q}${onboardingTeamQ('&')}`, { useSession: true })
-      if (teamIdRef.current !== _teamAtCall) return  // stale switch response
+      if (orgIdRef.current !== _teamAtCall) return  // stale switch response
       const branches = res && Array.isArray(res.branches) ? res.branches : []
       const defaultBranch = (res && res.default_branch) || ''
       setBranchLists((prev) => ({ ...prev, [repo]: { branches, defaultBranch } }))
     } catch {
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       setBranchLists((prev) => ({ ...prev, [repo]: { branches: [], defaultBranch: '' } }))
     }
   }
@@ -2722,17 +3103,17 @@ function claimIntentInFlight() {
       loadRepos()
     }
     prevConnectedRef.current = githubConnected
-    // #1893 (code-review P2, round-4): currentTeamId in deps — a team switch
+    // #1893 (code-review P2, round-4): currentOrgId in deps — a team switch
     // while the PREVIOUS team's repos fetch is in-flight leaves the reset in
     // switchTeam a no-op (reposLoaded/reposLoadFailed already false) and the
     // stale response is dropped by the identity guard, so without the team dep
     // the effect never re-fires and the NEW team's selectors stay empty (every
     // toggle silently fails to persist). The team dep re-fires loadRepos with
-    // teamIdRef already updated to the new team; githubConnected (stale until
+    // orgIdRef already updated to the new team; githubConnected (stale until
     // refreshOnboarding resolves) keeps the transient fetch gated to the
     // connected surface, and the _teamAtCall guard drops any stale response.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [githubConnected, reposLoaded, reposLoadFailed, currentTeamId])
+  }, [githubConnected, reposLoaded, reposLoadFailed, currentOrgId])
   // #1893 (code-review P2): a repos-fetch failure must not permanently close
   // the persist gate — once onboarding resolves, the user's REAL toggles
   // should still persist (only PRUNING stays gated on reposLoadFailed via
@@ -2746,10 +3127,10 @@ function claimIntentInFlight() {
     // during a team switch, onboarding is still the OLD team's object and
     // opening the persist gate would persist a selection built against the
     // un-seeded default under the NEW team's id.
-    if (onboarding && currentTeamId && reposLoadFailed && !scopeReadyRef.current && !onboardingStaleRef.current) {
+    if (onboarding && currentOrgId && reposLoadFailed && !scopeReadyRef.current && !onboardingStaleRef.current) {
       scopeReadyRef.current = true
     }
-  }, [onboarding, currentTeamId, reposLoadFailed]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onboarding, currentOrgId, reposLoadFailed]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function toggleSessionRecording(next) {
     if (memoryBusy) return
@@ -2948,7 +3329,7 @@ function claimIntentInFlight() {
       const meta = sessionMetaRef.current || {}
       const s = meta.display_name || (meta.email ? meta.email.split('@')[0] : '') || 'me'
       setWizardSubject(s)
-      setWizardProject(welcomeTeamName || currentTeamName || 'my-project')
+      setWizardProject(welcomeOrgName || currentOrgName || 'my-project')
     }
   }, [wizardStep]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2995,21 +3376,21 @@ function claimIntentInFlight() {
   // #1842 P1 (re-review): the post-welcome load sequence, shared by
   // wizardComplete AND the welcome header's "Open my dashboard →" button
   // (which previously only setWelcomeMode(false), bypassing the loads —
-  // currentTeamId stayed null, the currentTeamId effect never fired
+  // currentOrgId stayed null, the currentOrgId effect never fired
   // loadMembers/loadGraphs, and Graphs/Users/Backups shimmered forever on
-  // the first-timer path). loadTeams' Round-8 fallback pins currentTeamId
+  // the first-timer path). loadTeams' Round-8 fallback pins currentOrgId
   // (firing that effect); AWAIT it first so loadBackups' staleness guard
-  // (teamIdRef at call time) matches, then load the key-scoped backups with
+  // (orgIdRef at call time) matches, then load the key-scoped backups with
   // the just-revealed key. Idempotent: the Round-8 pin guards on
-  // teamIdRef.current, so a call when currentTeamId is already set never
-  // re-fires the currentTeamId effect (no duplicated members/graphs loads);
+  // orgIdRef.current, so a call when currentOrgId is already set never
+  // re-fires the currentOrgId effect (no duplicated members/graphs loads);
   // the setTeams refresh + loadBackups re-fetch are harmless.
   async function finishWelcomeLoads(tabOverride) {
     await loadTeams().catch(() => {})
     loadBackups('').catch(() => {})
     // #1906: the first-timer path never ran loadAll (keys+sessions) — the
     // Overview 'API Keys' card stayed 0 until reload. loadTeams just
-    // pinned currentTeamId (Round-8), so loadAll's ?team_id= targets the
+    // pinned currentOrgId (Round-8), so loadAll's ?org_id= targets the
     // new team. Fire-and-forget like completeLogin's card loads; each
     // loader carries its own staleness guard.
     loadAll('').catch(() => {})
@@ -3040,7 +3421,6 @@ function claimIntentInFlight() {
   async function wizardComplete() {
     setWizardDone(true)
     setWizardPaused(false)
-    connectedOnceRef.current = false
     // #2195/#2246 (durable connect key): the done step ends the connect flow —
     // the minted/pasted durable plaintext was shown once in the command; drop
     // it so a later re-entry re-gates (a revoked/regenerated key never
@@ -3049,6 +3429,10 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // review cycle 5 (item 8): the wizard's OWN mint-402 flag must not out-live
+    // the wizard — an owner who hit the cap, left, and re-entered without a
+    // fresh mint attempt permanently lost the fresh-key clause.
+    setWizardDurableCapped(false)
     setWizardShowPaste(false)    // #2361 review-r2: welcomeKey is the first-timer provisioned plaintext
     // #2710: the wizard never owns the shared key-create modal — clear any
     // queued flag on the way out so it cannot surface on the dashboard. The two
@@ -3073,8 +3457,8 @@ function claimIntentInFlight() {
     setWelcomeMode(false)
     // #1842 P1-1: the first-timer flow (org-create provision → welcome
     // wizard → wizardComplete) never ran loadTeams/loadBackups — those fired
-    // only in completeLogin/switchTeam (returning users). currentTeamId
-    // stayed null → the currentTeamId effect never fired loadMembers/
+    // only in completeLogin/switchTeam (returning users). currentOrgId
+    // stayed null → the currentOrgId effect never fired loadMembers/
     // loadGraphs → Graphs/
     // Users/Backups shimmered forever after "Open my dashboard →".
     await finishWelcomeLoads()
@@ -3085,7 +3469,7 @@ function claimIntentInFlight() {
   // membership row + the key are created here. The raw tt_ key NEVER leaves
   // the app origin (#1082) — it is revealed here exactly once (atomic
   // reveal+null, A13) and shown in the welcome card.
-  async function provisionInApp(session, teamName = '') {
+  async function provisionInApp(session, orgName = '') {
     setWelcomeProvisioning(true)
     setWelcomeProvisionError('')
     // #2323 (code-review P2): use the LIVE session — the org-create submit
@@ -3128,7 +3512,7 @@ function claimIntentInFlight() {
           // #2323 (Option B): name-first — the wizard-typed org name. The
           // edge fn validates it (same regex as the server) and falls back to
           // display-name derivation when absent (older callers).
-          ...(teamName ? { team_name: teamName } : {}),
+          ...(orgName ? { org_name: orgName } : {}),
         }),
       })
       // Attempt 1 + exactly ONE retry (a second mint = a second team).
@@ -3162,25 +3546,25 @@ function claimIntentInFlight() {
         try {
           for (let attempt = 0; attempt < 3; attempt++) {
             // #1566 (review P2): port the welcome.html poll shape — status
-            // filter + newest row, so placeholder (team_id='') and M:N rows
+            // filter + newest row, so placeholder (org_id='') and M:N rows
             // can't error the poll (PGRST116).
             const { data, error } = await supabaseClient
-              .from('team_memberships')
-              .select('team_id, team_name, graph_name, status')
+              .from('org_memberships')
+              .select('org_id, org_name, graph_name, status')
               .eq('user_id', userId)
               .eq('status', 'active')
               .order('created_at', { ascending: false })
               .limit(1)
               .maybeSingle()
-            if (!error && data && data.status === 'active' && data.team_id) {
+            if (!error && data && data.status === 'active' && data.org_id) {
               const { data: key, error: rErr } = await supabaseClient
-                .rpc('reveal_api_key', { p_user_id: userId, p_team_id: data.team_id })
+                .rpc('reveal_api_key', { p_user_id: userId, p_org_id: data.org_id })
               if (rErr) return null
               if (!key || key === 'pending') {
                 // Already consumed (a prior reveal elsewhere) — no re-reveal.
-                return { api_key: '', team_name: data.team_name, graph_name: data.graph_name }
+                return { api_key: '', org_name: data.org_name, graph_name: data.graph_name }
               }
-              return { api_key: key, team_name: data.team_name, graph_name: data.graph_name }
+              return { api_key: key, org_name: data.org_name, graph_name: data.graph_name }
             }
             await new Promise(r => setTimeout(r, 1000))
           }
@@ -3193,8 +3577,8 @@ function claimIntentInFlight() {
         // the only other copy of the plaintext.
         try {
           const body = await response.json()
-          if (body && body.api_key && body.team_name) {
-            return { api_key: body.api_key, team_name: body.team_name, graph_name: body.graph_name || '' }
+          if (body && body.api_key && body.org_name) {
+            return { api_key: body.api_key, org_name: body.org_name, graph_name: body.graph_name || '' }
           }
         } catch { /* fall through */ }
         return null
@@ -3415,11 +3799,11 @@ function claimIntentInFlight() {
         }
 
         // List memberships up front so the mint targets a concrete team
-        // (P1: multi-membership users cannot mint without team_id).
+        // (P1: multi-membership users cannot mint without org_id).
         let teamsList = []
         let teamsSuspendDetail = null
         try {
-          const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
+          const teamsRes = await fetch(`${API_BASE}/v1/organizations`, {
             headers: { Authorization: `Bearer ${session.access_token}` },
           })
           if (teamsRes.ok) {
@@ -3485,7 +3869,7 @@ function claimIntentInFlight() {
         // before the user names anything (the two-org confusion this fix
         // removes). The wizard's org-create step IS the provisioning door:
         // its submit calls tenant-provision with the typed name (deterministic
-        // team_id), and the welcome key + demo seed land on that one org.
+        // org_id), and the welcome key + demo seed land on that one org.
         if (!teamsList.length) {
           if (sessionTokenRef.current === session.access_token) {
             // The welcome card must render: leave the checking state + mark
@@ -3515,17 +3899,17 @@ function claimIntentInFlight() {
         // rides the session JWT (#1828/#2167), and keys are MANAGED (create /
         // rotate / revoke / toggle from the API Keys table) but never held.
         // #1912: pin the first HEALTHY team BEFORE completeLogin so its team
-        // reads go out pinned (q = '?team_id=...') — without the pin a
+        // reads go out pinned (q = '?org_id=...') — without the pin a
         // multi-membership user whose FIRST membership is suspended would 403
         // into the error card on every reload (the old 5b-adopt also pinned).
-        // An ALL-suspended session 403s the /v1/teams fetch itself and renders
+        // An ALL-suspended session 403s the /v1/organizations fetch itself and renders
         // the appeal card there (round-2 reviewer F1) — the teams-fetch catch
         // above is that mechanism; no probe belt is needed.
-        if (!teamIdRef.current && teamsList.length) {
+        if (!orgIdRef.current && teamsList.length) {
           const firstHealthy = teamsList.find((t) => !t.suspended_at) || teamsList[0]
           if (firstHealthy) {
-            setCurrentTeamId(firstHealthy.team_id)
-            teamIdRef.current = firstHealthy.team_id
+            setCurrentOrgId(firstHealthy.org_id)
+            orgIdRef.current = firstHealthy.org_id
           }
         }
         // Round-9: a SIGNED_OUT during the mount must not complete the login
@@ -3549,32 +3933,32 @@ function claimIntentInFlight() {
     })()
   }, [])
 
-  async function refreshTeam(key, expectedTeamId, seq) {
+  async function refreshTeam(key, expectedOrgId, seq) {
     // P1 (code-review): extracted team refetch — the success-return poll loop
     // used an undefined `jl` (dead code); this is the real refetch.
     // P2 (code-review): key param so the refetch targets the selected team —
     // the overview cards + header tier badge read /v1/team, which resolves
-    // the team from the session + pinned ?team_id=.
+    // the team from the session + pinned ?org_id=.
     // #2246 (ADR-010): the read rides the SESSION JWT (dual-auth
-    // get_current_team_session) + pinned ?team_id= so multi-membership users
+    // get_current_org_session) + pinned ?org_id= so multi-membership users
     // resolve the SELECTED team, not the first membership. The key param is
     // unused in session mode — the key-only fallback callers (stored-key
     // reuse / switchTeam with a fresh mint) were deleted with the held key;
     // all call sites pass '' (kept for signature stability).
-    const _teamAtCall = expectedTeamId || teamIdRef.current
-    const q = _teamAtCall ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+    const _teamAtCall = expectedOrgId || orgIdRef.current
+    const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     const t = await api(`/v1/team${q}`, sessionTokenRef.current
       ? { useSession: true }
       : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
     // Round-13/14 (P2): never land a team's data under a different team's
     // selection. Two guards:
-    //  - expectedTeamId (checkout poll pin): null on Stripe-return loads
-    //    (poll effect runs before bootstrap sets teamIdRef), so also...
-    //  - response-identity: t.team_id vs teamIdRef.current — catches the
+    //  - expectedOrgId (checkout poll pin): null on Stripe-return loads
+    //    (poll effect runs before bootstrap sets orgIdRef), so also...
+    //  - response-identity: t.org_id vs orgIdRef.current — catches the
     //    null-pin case AND a stale closure key (poll captured team A's key,
     //    user switched to B → /v1/team with A's key returns A's data).
-    if (expectedTeamId != null && teamIdRef.current !== expectedTeamId) return t
-    if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return t
+    if (expectedOrgId != null && orgIdRef.current !== expectedOrgId) return t
+    if (t?.org_id && orgIdRef.current && t.org_id !== orgIdRef.current) return t
     // #1906 (code-review P2): optional monotonic seq — welcome-path callers
     // that must win over concurrent refreshes (the post-seed refire) tag
     // their call; a response tagged with a stale seq is dropped so a
@@ -3590,7 +3974,7 @@ function claimIntentInFlight() {
     const tok = sessionTokenRef.current
     if (!tok || !tid) return
     try {
-      const res = await fetch(`${API_BASE}/v1/team/alerts?team_id=${encodeURIComponent(tid)}`, {
+      const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
       if (res.ok) {
@@ -3602,15 +3986,15 @@ function claimIntentInFlight() {
 
   async function completeLogin(key) {
     setError('')
-    const teamAtCompleteLogin = teamIdRef.current
+    const teamAtCompleteLogin = orgIdRef.current
     // #1841: fire the overview card loads in PARALLEL with the /v1/team
     // gate — the old code awaited /v1/team FIRST (waterfall: team → keys/
-    // sessions/teams/backups → members/graphs via the currentTeamId
+    // sessions/teams/backups → members/graphs via the currentOrgId
     // effect), so every card sat blank during the team round-trip. Each
-    // loader carries its own teamIdRef staleness guard, so racing them
+    // loader carries its own orgIdRef staleness guard, so racing them
     // against the team fetch is safe; /v1/team still owns setTeam +
     // setAuthed (the section gate) below. (loadGraphs/loadMembers ride
-    // the currentTeamId effect, fired by the mount pin of the session-only
+    // the currentOrgId effect, fired by the mount pin of the session-only
     // landing — #1912 first-healthy pin before completeLogin('') — and by
     // switchTeam.)
     const cardLoads = Promise.all([
@@ -3621,11 +4005,11 @@ function claimIntentInFlight() {
     try {
       // #1828 (review) / #2246 (ADR-010): session-driven Team card — the
       // session-only landing's #1912 first-healthy pin fed completeLogin(''),
-      // so the read goes out pinned ?team_id=<selected> and resolves the
+      // so the read goes out pinned ?org_id=<selected> and resolves the
       // SELECTED team, not the first membership (multi-membership users).
       // api() useSession is the only auth leg — no key fallback exists in
       // session mode (the held-key/stored-key callers are deleted).
-      const q = teamAtCompleteLogin ? `?team_id=${encodeURIComponent(teamAtCompleteLogin)}` : ''
+      const q = teamAtCompleteLogin ? `?org_id=${encodeURIComponent(teamAtCompleteLogin)}` : ''
       const t = await api(`/v1/team${q}`, sessionTokenRef.current
         ? { useSession: true }
         : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
@@ -3634,10 +4018,10 @@ function claimIntentInFlight() {
       // selection (the refreshTeam response-identity guard, applied here).
       // The in-flight cardLoads land only where their own staleness guards
       // allow (the switch's loaders own the data under the new selection).
-      if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return
+      if (t?.org_id && orgIdRef.current && t.org_id !== orgIdRef.current) return
       setTeam(t)
       setAuthed(true)
-      loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
+      loadAlerts(t?.org_id)  // fire-and-forget (#308 R7)
       await cardLoads
     } catch (e) {
       // #1856 P0: bail on staleness FIRST — a mid-flight team switch means
@@ -3649,7 +4033,7 @@ function claimIntentInFlight() {
       // return, so the busy/checking cleanup is preserved. Bails before
       // setSuspended too — a stale team's suspension must not stick to the
       // switched session.
-      if (teamAtCompleteLogin !== null && teamIdRef.current !== teamAtCompleteLogin) return
+      if (teamAtCompleteLogin !== null && orgIdRef.current !== teamAtCompleteLogin) return
       if (e && e.suspended) setSuspended(e.suspended)  // #308
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
       setAuthed(false)
@@ -3660,7 +4044,7 @@ function claimIntentInFlight() {
       // #1719 (Task 6): 5xx → the honest unavailable copy (never a raw
       // "Internal server error" string).
       // #1842 P2-4: the #1830 null-key path captures teamAtCompleteLogin ===
-      // null — loadTeams' Round-8 fallback can pin teamIdRef while /v1/team
+      // null — loadTeams' Round-8 fallback can pin orgIdRef while /v1/team
       // is in flight, and the old `!==` guard then saw list[0] !== null and
       // bailed silently (stranded on the redirect shell). Only a REAL
       // mid-load switch (a non-null capture that moved) bails now.
@@ -3885,6 +4269,12 @@ function claimIntentInFlight() {
     setTeam(null)
     setStaleFired(false) // #1858: null→null when logging out from the terminal '—' state — the reset effect won't fire, so clear the per-load latch directly; the next session's skeleton must get a fresh floor
     setKeys([])
+    setKeysLoaded(false)
+    // #3783 (review P2): the failed/stalled read's state is per-user — never
+    // let one session's keys-read error (or a fired wait bound) land on the next.
+    // The helper also RE-ARMS the bound: logout leaves `keysLoaded` false, so
+    // clearing the flags alone would let the next session's read hang unbounded.
+    resetKeysLoadUnresolved()
     setSessions([])
     setNewKey(null)
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
@@ -3904,6 +4294,10 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // #3428/#2937 (lane B3, review cycle 7 item 4): logout is the one connect
+    // exit that missed the mint-402 cap flag; a fresh session must not inherit
+    // it (the flag is session/team-scoped, like the key state beside it).
+    setWizardDurableCapped(false)
     setWizardShowPaste(false)
     // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
     // session-scoped; drop it with the other key state on logout.
@@ -3911,7 +4305,7 @@ function claimIntentInFlight() {
     // #2323 (code-review): the first-run provisioning labels are session-
     // scoped too — a logout must not leak the previous session's org name
     // into the next login's welcome header/step-1 summary.
-    setWelcomeTeamName('')
+    setWelcomeOrgName('')
     setWelcomeGraphName('')
     setWelcomeTeamReady(false)
     // C7 #2116 (R1): the one-time reveal is session-scoped — a logout must
@@ -3921,14 +4315,14 @@ function claimIntentInFlight() {
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
     setMembersStatus('loading')
-    setCurrentTeamId(null)
+    setCurrentOrgId(null)
     setTeams([])                       // Round-4: drop the previous session's teams
     // #1893 (code-review P2): a fresh login is a NEW team session — reset
     // the hydration latch + persist gate + scope state so the next session
     // re-hydrates from the server (a change made on another device must be
     // picked up; the stale in-memory scope must never overwrite the server
     // value on the first toggle).
-    hydratedTeamIdRef.current = null
+    hydratedOrgIdRef.current = null
     scopeReadyRef.current = false
     scopeTouchedRef.current = { issues: false, docs: false }
     issuesScopeRef.current = { repos: [] }
@@ -3944,7 +4338,7 @@ function claimIntentInFlight() {
     setError('')                        // Round-4: stale error banner must not survive
     setBackupInfo(null)                 // Round-5: no cross-session backup data leak
     setBackupsStatus('loading')         // #1923: mirror the backupInfo reset
-    teamIdRef.current = null            // Round-5: hygiene (inert, but consistent)
+    orgIdRef.current = null            // Round-5: hygiene (inert, but consistent)
     setCheckoutPending(false)           // Round-6: no stuck 'Opening checkout…' for the next user
     setInviteEmail('')                  // Round-9: no half-typed invite from the previous user
     setInviteRole('member')
@@ -3966,27 +4360,29 @@ function claimIntentInFlight() {
   }
 
   async function loadAll(key) {
-    const _teamAtCall = teamIdRef.current // Round-10: staleness guard — a rapid
+    const _teamAtCall = orgIdRef.current // Round-10: staleness guard — a rapid
                                           // A→B→C switch must not land B's data
                                           // under team C's header
-    // #1828: overview reads ride the SESSION JWT (get_current_team_session
+    // #1828: overview reads ride the SESSION JWT (get_current_org_session
     // dual-auth) instead of the freshly-minted bootstrap key — the Team /
     // Keys / Sessions cards render without a key mint, and the review-P1
     // ungated reads keep tt_ keys working on flag-off teams, so the
     // 3-active bootstrap cap + max_api_keys deadlock no longer blocks the
     // overview itself (the mint still matters for agent keys + management
-    // writes). Multi-team: pin ?team_id= so the cards track the team
+    // writes). Multi-team: pin ?org_id= so the cards track the team
     // switcher (session resolution defaults to the first membership).
     // #2246 (ADR-010): the key param is unused in session mode — all call
     // sites pass '' (kept for signature stability only).
-    const q = _teamAtCall ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+    const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
       const [k, s] = await Promise.all([
         api(`/v1/team/keys${q}`, { useSession: true }),
         api(`/v1/sessions${q}`, { useSession: true }),
       ])
-      if (teamIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
+      if (orgIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
       setKeys(Array.isArray(k) ? k : k.keys || [])
+      setKeysLoaded(true)
+      setKeysLoadError('')
       // #2246 (ADR-010): the rule-5/7 held-key classification hook is DELETED
       // — no held key exists to classify in session mode (apiKey state is ''
       // and the KEY_STORAGE slot was purged at session resolution). keys[]
@@ -3996,19 +4392,28 @@ function claimIntentInFlight() {
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
-      if (teamIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) {
+        setError(e.message)
+        // #3783 (review P2): Promise.all rejects both reads together, so a
+        // failure here means the keys payload never landed. Record it, so the
+        // connect gate resolves 'error' (retryable) instead of waiting on a
+        // read that has already failed — the 'loading' arm has no failure exit,
+        // which trapped the wizard until a full page reload.
+        setKeysLoadError(
+          (e && e.message) || 'Could not load your organization\u2019s API keys.')
+      }
     }
   }
 
   // ── E6/E7: team + graph switcher (session JWT authed) ──
   // #2789: returns the loaded list (or null when not loaded) so the
   // paid-new-org success-return poll can wait for the webhook-provisioned org
-  // to appear without a second /v1/teams fetch.
+  // to appear without a second /v1/organizations fetch.
   async function loadTeams() {
     const tok = sessionTokenRef.current
     if (!tok) return null
     try {
-      const res = await fetch(`${API_BASE}/v1/teams`, {
+      const res = await fetch(`${API_BASE}/v1/organizations`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
       if (res.ok) {
@@ -4017,7 +4422,7 @@ function claimIntentInFlight() {
         // not resurrect the previous user's team list after logout's setTeams([]).
         if (sessionTokenRef.current !== tok) return null
         setTeams(list)
-        // Round-8: guard on teamIdRef (sync write, no render-closure race) —
+        // Round-8: guard on orgIdRef (sync write, no render-closure race) —
         // the session-only landing's #1912 first-healthy pin (set before
         // completeLogin('')) / switchTeam / finishWelcomeLoads already set it,
         // so a multi-team reload must NOT clobber it with the first team.
@@ -4025,9 +4430,9 @@ function claimIntentInFlight() {
         // membership must not become the default team (healthy teams stay
         // selectable).
         const firstSelectable = list.find((t) => !t.suspended_at)
-        if (firstSelectable && !teamIdRef.current) {
-          setCurrentTeamId(firstSelectable.team_id)
-          teamIdRef.current = firstSelectable.team_id
+        if (firstSelectable && !orgIdRef.current) {
+          setCurrentOrgId(firstSelectable.org_id)
+          orgIdRef.current = firstSelectable.org_id
         }
         return list
       }
@@ -4056,7 +4461,7 @@ function claimIntentInFlight() {
       })
       setPendingInvites((prev) => (prev || []).filter((x) => x.invitation_id !== inv.invitation_id))
       setAccountMenuOpen(false)
-      if (res?.team_id) { await loadTeams(); switchTeam(res.team_id) }
+      if (res?.org_id) { await loadTeams(); switchTeam(res.org_id) }
     } catch (e) {
       // #1875 review P2-1: a failed accept (free-cap / at-capacity / expired)
       // keeps the invite in the list and surfaces the API detail — it must
@@ -4081,7 +4486,7 @@ function claimIntentInFlight() {
 
   // #2789: open the create dialog in the RIGHT mode. The account-menu item
   // pre-checks the entitlement from the teams list (role + subscription_status
-  // ride every /v1/teams row), so a user already at the cap sees the
+  // ride every /v1/organizations row), so a user already at the cap sees the
   // three-option dialog IMMEDIATELY — never after typing a name and being
   // rejected (the pre-#2789 gate-on-submit flow). A user with no owned free org
   // (including a pure collaborator) gets the ordinary name dialog.
@@ -4091,10 +4496,10 @@ function claimIntentInFlight() {
     // focus to the always-mounted blob trigger button instead.
     rememberRestoreTarget(createTeamRestoreRef, accountBlobBtnRef.current)
     const capped = ownedFreeOrgs[0] || null
-    setCreateTeamName('')
+    setCreateOrgName('')
     setCreateTeamError('')
     setCreateTeamPlan(newOrgDefaultPrice(team))
-    setCreateTeamLimitTeamId(capped ? capped.team_id : '')
+    setCreateTeamLimitOrgId(capped ? capped.org_id : '')
     setCreateTeamMode(capped ? 'limit' : 'name')
     setCreateTeamOpen(true)
     setAccountMenuOpen(false)
@@ -4102,11 +4507,11 @@ function claimIntentInFlight() {
 
   // #2789: "Upgrade current organization" — land on the Billing tab of the
   // owned free org the entitlement is about (the client pre-check's org, or the
-  // server's `team_id`). Switch first when the user is on a different org.
+  // server's `org_id`). Switch first when the user is on a different org.
   function upgradeCurrentOrg() {
-    const target = createTeamLimitTeamId
+    const target = createTeamLimitOrgId
     closeCreateTeam()
-    if (target && target !== teamIdRef.current) switchTeam(target)
+    if (target && target !== orgIdRef.current) switchTeam(target)
     setTab('billing')
   }
 
@@ -4117,7 +4522,7 @@ function claimIntentInFlight() {
   // provisions it. An abandoned checkout leaves nothing behind and does not
   // consume the free-org allowance (nothing is created until payment).
   async function startNewOrgCheckout() {
-    const name = createTeamName.trim()
+    const name = createOrgName.trim()
     if (!name) { setCreateTeamError('Organization name required'); return }
     if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(name)) {
       setCreateTeamError('Invalid organization name — letters, numbers, space, dash, underscore only')
@@ -4151,7 +4556,7 @@ function claimIntentInFlight() {
         // Defensive: the paid path is never entitlement-gated server-side; if a
         // future gate returns the structured code, show the gate rather than a
         // dead-end error.
-        setCreateTeamLimitTeamId(e.teamId || '')
+        setCreateTeamLimitOrgId(e.orgId || '')
         setCreateTeamMode('limit')
       }
       setCreateTeamError(e?.message || 'Could not start checkout')
@@ -4161,27 +4566,32 @@ function claimIntentInFlight() {
   }
 
   async function handleCreateTeam() {
-    // #1877: create-team dialog submit — validation mirrors POST /v1/teams
-    // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
-    // upgrade UX (the dialog explains "upgrade a team, then create" — the
-    // new team doesn't exist until the gate passes).
-    const name = createTeamName.trim()
+    // #1877: create-team dialog submit — validation mirrors POST /v1/organizations
+    // (≤64 chars, free text — spaces and dashes are fine). The organization's
+    // ID is minted opaquely server-side and never derived from this name, so
+    // there is nothing to slug: the name is display-only and renameable.
+    // Keep this pattern identical to the sibling checkout path above and to
+    // the server (`hosted_api.py` `_name_pattern`), or the two surfaces drift
+    // and one of them rejects names the other accepts (#2779).
+    // 402 → gated-on-click upgrade UX (the dialog explains "upgrade a team,
+    // then create" — the new team doesn't exist until the gate passes).
+    const name = createOrgName.trim()
     if (!name) { setCreateTeamError('Organization name required'); return }
-    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
-      setCreateTeamError('Invalid organization name — letters, numbers, dash, underscore only')
+    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_ -]{0,63}$/.test(name)) {
+      setCreateTeamError('Invalid organization name — letters, numbers, space, dash, underscore only')
       return
     }
     setCreateTeamBusy(true)
     setCreateTeamError('')
     try {
-      const res = await api('/v1/teams', {
+      const res = await api('/v1/organizations', {
         method: 'POST', useSession: true,
         body: JSON.stringify({ name }),
       })
       closeCreateTeam() // #2392 (a11y): also hands focus back to the blob trigger
-      setCreateTeamName('')
+      setCreateOrgName('')
       await loadTeams()
-      if (res?.team_id) switchTeam(res.team_id)
+      if (res?.org_id) switchTeam(res.org_id)
     } catch (e) {
       if (e?.code === 'one_free_org_limit' || e?.status === 402) {
         // #2789: the server gate is authoritative and returns a STRUCTURED
@@ -4189,7 +4599,7 @@ function claimIntentInFlight() {
         // the code — never by string-matching the detail. The 402 fallback
         // keeps older servers (bare string detail) working.
         setCreateTeamMode('limit')
-        setCreateTeamLimitTeamId(e?.teamId || (ownedFreeOrgs[0]?.team_id ?? ''))
+        setCreateTeamLimitOrgId(e?.orgId || (ownedFreeOrgs[0]?.org_id ?? ''))
         setCreateTeamError(e?.code === 'one_free_org_limit' ? '' : (e?.message || ''))
         if (e?.code === 'one_free_org_limit') await loadTeams()
       } else {
@@ -4202,7 +4612,7 @@ function claimIntentInFlight() {
 
   // #2323 (Option B): org-create step handler — the FIRST-org door. For a
   // teamless first-timer the submit PROVISIONS the org name-first via
-  // tenant-provision (deterministic team_id, welcome key + demo seed land on
+  // tenant-provision (deterministic org_id, welcome key + demo seed land on
   // that one org — POST /v1/onboarding/team is no longer called for first
   // orgs; it stays as the entitlement-gated second-org lane). Accounts that
   // already hold an org never mint here (the step renders read-only). Name
@@ -4238,7 +4648,7 @@ function claimIntentInFlight() {
       // loses it and the connect step re-gates via the rows.
       setWizardOrgName('')
       setWelcomeKey(provisioned.api_key || '')
-      setWelcomeTeamName(provisioned.team_name || name)
+      setWelcomeOrgName(provisioned.org_name || name)
       setWelcomeGraphName(provisioned.graph_name || '')
       setWelcomeTeamReady(true)
       // Pin the new org so fork/connect checkpoints + key mint target it, and
@@ -4246,7 +4656,7 @@ function claimIntentInFlight() {
       // branch, #1860).
       await loadTeams().catch(() => {})
       refreshTeam('', undefined, teamRefreshSeqRef.current)
-        .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
+        .then((t) => { if (t && t.org_id) loadAlerts(t.org_id) })
         .catch(() => {})
       setWizardStep(1)
     } catch (e) {
@@ -4299,7 +4709,7 @@ function claimIntentInFlight() {
       // sees what they can build on before continuing) — the Continue button
       // appears once a fork is chosen; self picks advance.
       if (forkId === 'build') {
-        const teamKey = teamIdRef.current || 'default'
+        const teamKey = orgIdRef.current || 'default'
         if (!catalogMarkedRef.current[teamKey]) {
           catalogMarkedRef.current[teamKey] = true
           api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
@@ -4327,36 +4737,47 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1998 (W2): connect-consent Continue — the harness-connected checkpoint
-  // (surface 5/6 contract; W1's plan table left it "W2 owns"). The agent-side
-  // tortoise-onboarding skill writes it after tortoise_health passes (CLI
-  // harnesses via REST); Claude Desktop/Web have NO REST/curl surface, so the
-  // human's Continue writes it (session dual-auth — the checkpoint endpoint
-  // accepts session OR tt_ key). FWW keyed-MERGE → replay is a 200 no-op, so
-  // the agent write + this write (and repeat clicks) can all fire safely.
-  // Mirror handleWizardFork's failure handling: busy/disable, stay on step on
-  // 503/error (a fire-and-forget would strand Desktop/Web's gate with no
-  // retry affordance), advance on 2xx only.
+  // #3428 + #2937 (lane B3, owner-approved design 2026-09-14): the connect
+  // step's advance NO LONGER WRITES the harness-connected checkpoint.
+  //
+  // The old handler POSTed `{step:'harness-connected'}` and then raised a
+  // session-local "connected" flag, so the done step's connected copy was
+  // produced by the CLICK and not by the graph. `harness-connected` therefore
+  // carried two incompatible meanings: a fact the server observed, and a
+  // user's assertion. The click could not distinguish "my agent is running and
+  // has filed something" from "I pasted a command and hoped" — nor, on a
+  // keyless leaf (#2937), from "I clicked with no key at all". Same defect
+  // class this lane exists to kill: a gate that reports success without
+  // running.
+  //
+  // There is now exactly ONE writer class — server-observed:
+  //   - the agent-side tortoise-onboarding skill checkpoints it after
+  //     tortoise_health passes (CLI harnesses, via REST), and
+  //   - `_maybe_onboarding_auto_complete()` flips it server-side on the
+  //     harness's first successful graph write — which is what covers Claude
+  //     Desktop/Web, the REST-less group the human writer used to stand in for.
+  //
+  // The advance still ADVANCES: the user can always reach the dashboard, and
+  // the done step now REPORTS what the server observed
+  // (`serverHarnessConnected`) instead of what the click asserted. A
+  // not-yet-connected user is therefore not trapped — they are told the truth,
+  // pointed at the Setup guide, and the state resolves by itself the moment
+  // their agent files its first memory.
+  //
+  // The refresh is what makes the honest branch report the freshest truth: a
+  // user whose agent already checkpointed during the connect step (the normal
+  // happy path) lands on the connected screen, because the refresh reads the
+  // checkpoint the AGENT wrote.
   async function wizardHarnessContinue() {
     setWizardConnectBusy(true)
     setWizardConnectError('')
-    try {
-      await api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ step: 'harness-connected' }),
-      })
-      setWizardPaused(false)
-      connectedOnceRef.current = true
-      setWizardStep(3)
-    } catch (e) {
-      if (e?.status === 503) {
-        setWizardConnectError('The graph is temporarily unavailable — try again in a moment.')
-      } else {
-        setWizardConnectError(e?.message || 'Could not save your progress — try again.')
-      }
-    } finally {
-      setWizardConnectBusy(false)
-    }
+    // Best-effort, matching every other refreshOnboarding call site: it only
+    // sharpens the done step's reading of the server projection, and the write
+    // that used to justify a blocking error is gone.
+    await refreshOnboarding().catch(() => {})
+    setWizardPaused(false)
+    setWizardStep(3)
+    setWizardConnectBusy(false)
   }
 
   // #1998 fold-in (PR #2161 finding): the connect step must source a DURABLE
@@ -4364,23 +4785,34 @@ function claimIntentInFlight() {
   // Mints via POST /v1/team/keys (the same endpoint the API Keys tab's create
   // uses — created_via 'provisioned', durable, counts vs max_api_keys).
   // #2246 (ADR-010): the mint rides the session JWT (rule 4 — mintKey sends
-  // NO key header + pins ?team_id=); the session IS the authenticator — no
+  // NO key header + pins ?org_id=); the session IS the authenticator — no
   // browser-held key is involved. #2297 POLICY A: the server POST
   // /v1/team/keys session lane IS owner/admin-gated (_require_owner_admin,
   // same as PATCH toggle since #1148) — this affordance renders only for
   // owner/admin, matching the server contract. The plaintext is shown ONCE —
   // the connect command embeds it (the reveal); afterwards the key is
   // managed/regenerable from the API Keys tab.
+  // #3783 (review P2): the connect step's in-wizard recovery for an unresolved
+  // keys read (a failed GET, or a wait that exceeded KEYS_LOAD_SLOW_MS). It
+  // re-issues the same load the mount used, so a transient failure no longer
+  // forces a page reload. Clearing the error flips the affordance back to the
+  // wait state (the retry's own feedback); the nonce re-arms the wait bound.
+  function wizardRetryKeysLoad() {
+    resetKeysLoadUnresolved()
+    loadAll('').catch(() => {})
+  }
+
   async function wizardMintDurableKey() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
     setWizardDurableError('')
+    setWizardDurableCapped(false)  // a retry re-reads the cap rather than trusting the last 402
     try {
       // Round-15 (P2) team pin (createKey pattern): resolve the ACTIVE team
       // explicitly so the mint lands on the onboarding org — a session JWT
       // alone resolves the first membership, wrong team for multi-team users.
       // #2246: mintKey rides the session JWT (rule 4) — no held key involved.
-      const _teamAtCall = currentTeamId
+      const _teamAtCall = currentOrgId
       // #2325/#2333: name the mint org + date so every connect key is a
       // DISTINGUISHABLE row (the old fixed 'Setup command' label made
       // rotate/regenerate rows identical under the free cap of 2). The org
@@ -4388,10 +4820,10 @@ function claimIntentInFlight() {
       // provision → pinned team → first membership) so the row name always
       // agrees with the org the key actually lands on (code-review P3).
       const orgForKey =
-        (welcomeTeamReady && welcomeTeamName) ||
-        (team && team.team_name) ||
+        (welcomeTeamReady && welcomeOrgName) ||
+        (team && team.org_name) ||
         (Array.isArray(teams) && teams.length
-          ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
+          ? ((teams.find((t) => t.org_id === orgIdRef.current) || teams[0] || {}).org_name || '')
           : '') || ''
       const keyName = durableKeyName(orgForKey, new Date(), (Array.isArray(keys) ? keys : []).map((k) => k && k.name))
       // #2426: the connect-step mint is the embed surface — the wizard stays
@@ -4401,9 +4833,9 @@ function claimIntentInFlight() {
       // #2326: a team switch during the POST must NOT silently swallow the
       // mint — surface it so the user isn't left believing connect produced
       // a usable key. The key was created on the PREVIOUS org (mintKey pinned
-      // ?team_id= at call time); refresh the list so it shows there when the
+      // ?org_id= at call time); refresh the list so it shows there when the
       // user switches back, and re-gate this step.
-      if (teamIdRef.current !== _teamAtCall) {
+      if (orgIdRef.current !== _teamAtCall) {
         // #2326 (code-review): a loadAll('') here would fetch the NEW team's
         // keys — the mint landed on the PREVIOUS org, which reloads its own
         // keys when the user switches back. Surface the error and re-gate.
@@ -4428,8 +4860,14 @@ function claimIntentInFlight() {
       // box, which for owner/admin sits behind the disclosure (#2325 review
       // P2) — open it so the error's "paste it below" lands on a visible field.
       if (e?.status === 402) {
+        setWizardDurableCapped(true)  // this session's mint is capped (P2-7)
         setWizardShowPaste(true)
-        setWizardDurableError('You\'ve reached your plan\'s limit of API keys — revoke or regenerate one in the API Keys tab (shown once there), then paste a key below.')
+        setWizardDurableError(isBuildFork
+          // #3218: the remedy must name only affordances THIS branch renders —
+          // the build fork has no paste row, so "paste a key below" dead-ended
+          // (review cycle 1, P2).
+          ? 'You\'ve reached your plan\'s limit of API keys — free a slot in the API Keys tab, then create a key here.'
+          : 'You\'ve reached your plan\'s limit of API keys — revoke or regenerate one in the API Keys tab (copy the new key there), then paste a key below.')
       } else {
         // #2246 (review) + #2297 POLICY A: reachable mint failures here are
         // the 402 cap above, a suspension 403, or transport — the server POST
@@ -4444,12 +4882,12 @@ function claimIntentInFlight() {
     }
   }
 
-  async function switchTeam(teamId) {
+  async function switchTeam(orgId) {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
     // requested team as current for staleness guards.
     setCapNotice('') // #1147: a cap banner from the previous team must not stick
-    const prevTeamId = currentTeamId
+    const prevOrgId = currentOrgId
     const tok = sessionTokenRef.current
     if (!tok) return // Round-3: guard BEFORE wiping state — logout→apikey
                      // login must not blank the dashboard on a stale pick
@@ -4482,6 +4920,17 @@ function claimIntentInFlight() {
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
+    setKeysLoaded(false)
+    // #3783 (review P2): the previous team's keys-read failure (or a fired wait
+    // bound) must not render as the NEW team's state before its loadAll lands —
+    // and the bound must be RE-ARMED for that new read. `keysLoaded` is already
+    // false here, so clearing the flags alone leaves the effect's deps
+    // Object.is-equal: no re-run, no timer, and a hanging `loadAll('')` below
+    // would sit on the wait state with the action forever unavailable (reachable
+    // when the previous read already fired the bound, then the user switches
+    // without retrying). The helper bumps the nonce, which is what makes the
+    // effect below re-run and schedule a fresh timer.
+    resetKeysLoadUnresolved()
     setSessions([])
     clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
     setSessionDeletingId(null)
@@ -4503,6 +4952,7 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardDurableCapped(false)  // review cycle 5 (item 8): the mint-402 flag is team-scoped too
     setWizardShowPaste(false)
     // #2246 (review, P1): welcomeKey is TEAM-scoped shown-once plaintext — a
     // switch must not leak the previous team's plaintext into the new team's
@@ -4511,14 +4961,14 @@ function claimIntentInFlight() {
     // wizardDurableKey drop above.
     setWelcomeKey('')
     // #2323 (code-review): drop the first-run labels with the team switch —
-    // welcomeTeamName must never label a DIFFERENT team's header/step-1
+    // welcomeOrgName must never label a DIFFERENT team's header/step-1
     // summary after the user switches.
-    setWelcomeTeamName('')
+    setWelcomeOrgName('')
     setWelcomeGraphName('')
     setWelcomeTeamReady(false)
     setError('')
-    setCurrentTeamId(teamId)
-    teamIdRef.current = teamId
+    setCurrentOrgId(orgId)
+    orgIdRef.current = orgId
     // #1893 (code-review P1): onboarding state is TEAM-scoped — the switch
     // must re-hydrate the NEW team's persisted scope, never the old team's.
     // The stale flag blocks the hydration effect until refreshOnboarding
@@ -4526,7 +4976,7 @@ function claimIntentInFlight() {
     // the new team's repos load fresh (connected-flip effect below re-fires
     // loadRepos when reposLoadFailed/reposLoaded reset).
     onboardingStaleRef.current = true
-    hydratedTeamIdRef.current = null
+    hydratedOrgIdRef.current = null
     scopeReadyRef.current = false
     scopeTouchedRef.current = { issues: false, docs: false }
     issuesScopeRef.current = { repos: [] }
@@ -4546,7 +4996,7 @@ function claimIntentInFlight() {
       // holds a per-team durable (teamKeysRef was deleted). Every team's reads
       // ride the session JWT; apiKey/apiKeyRef stay '' across switches so no
       // team-scoped snippet surface leaks a previous team's key material.
-      if (teamIdRef.current !== teamId) return // stale — user switched again
+      if (orgIdRef.current !== orgId) return // stale — user switched again
       try {
         await refreshTeam('')
       } catch (e) {
@@ -4556,7 +5006,7 @@ function claimIntentInFlight() {
         // team (session-only on it; no key material to restore).
         throw e
       }
-      if (teamIdRef.current !== teamId) return
+      if (orgIdRef.current !== orgId) return
       await Promise.all([loadAll(''), loadBackups('')])
       // #1893 (code-review P1): re-fetch the new team's onboarding state —
       // the stale flag set above clears only when refreshOnboarding resolves
@@ -4569,19 +5019,19 @@ function claimIntentInFlight() {
       // in-session instead of until the next reload.
       if (onboardingStaleRef.current) {
         await new Promise((r) => setTimeout(r, 1500))
-        if (teamIdRef.current === teamId) await refreshOnboarding().catch(() => {})
+        if (orgIdRef.current === orgId) await refreshOnboarding().catch(() => {})
       }
-      // members + graphs load via the currentTeamId effect (JWT team-scoped;
+      // members + graphs load via the currentOrgId effect (JWT team-scoped;
       // both loaders carry their own staleness guard).
     } catch (e) {
-      if (teamIdRef.current === teamId) {
+      if (orgIdRef.current === orgId) {
         // #2167/#2246 (revert re-frame): a failed switch never mints and
         // never blocks. Re-attach the PREVIOUS team session-only — no key
         // material exists to restore (the browser never holds keys), and the
         // slot is never rewritten by a switch.
-        if (prevTeamId) {
-          setCurrentTeamId(prevTeamId)
-          teamIdRef.current = prevTeamId
+        if (prevOrgId) {
+          setCurrentOrgId(prevOrgId)
+          orgIdRef.current = prevOrgId
           setTeam(null)
           setStaleFired(false) // #1858: the revert re-attaches the previous team — clear the latch so the restored team's skeleton gets a fresh floor (team is already null here, so the reset effect won't fire)
           // #1893 (code-review P1): the revert re-attaches the PREVIOUS
@@ -4602,26 +5052,26 @@ function claimIntentInFlight() {
 
   // ── #300: graphs + members + backups (session JWT authed) ──
   function myRole() {
-    const t = teams.find((x) => x.team_id === currentTeamId)
+    const t = teams.find((x) => x.org_id === currentOrgId)
     return t ? t.role : ''
   }
   const isOwnerAdmin = myRole() === 'owner' || myRole() === 'admin'
 
-  async function loadGraphs(teamId) {
+  async function loadGraphs(orgId) {
     const tok = sessionTokenRef.current
-    if (!tok || !teamId) return
+    if (!tok || !orgId) return
     try {
-      const res = await fetch(`${API_BASE}/v1/graphs?team_id=${teamId}`, {
+      const res = await fetch(`${API_BASE}/v1/graphs?org_id=${orgId}`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
       // #1842 P2-1: terminal state on failure — a non-200 (or a transport
       // error below) must not leave graphsStatus 'loading' forever.
       if (!res.ok) {
-        if (teamIdRef.current === teamId) setGraphsStatus('error')
+        if (orgIdRef.current === orgId) setGraphsStatus('error')
         return
       }
       const list = await res.json()
-      if (teamIdRef.current === teamId) {
+      if (orgIdRef.current === orgId) {
         setGraphs(list)
         setGraphsLoaded(true) // Round-26
         setGraphsStatus('ok')
@@ -4638,12 +5088,12 @@ function claimIntentInFlight() {
       }
     } catch {
       // #1842 P2-1: transport/parse failure → terminal 'error', never eternal shimmer
-      if (teamIdRef.current === teamId) setGraphsStatus('error')
+      if (orgIdRef.current === orgId) setGraphsStatus('error')
     }
   }
 
   async function createGraph() {
-    const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
+    const _teamAtCall = currentOrgId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (busy || !newGraphName.trim()) return
     // #2392 (a11y): capture the mint trigger (+ Create button, or the name
     // input when Enter submits) while it still owns focus — setBusy below
@@ -4658,7 +5108,7 @@ function claimIntentInFlight() {
       const res = await fetch(`${API_BASE}/v1/graphs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-        body: JSON.stringify({ team_id: currentTeamId, name: newGraphName.trim() }),
+        body: JSON.stringify({ org_id: currentOrgId, name: newGraphName.trim() }),
       })
       const b = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -4687,13 +5137,13 @@ function claimIntentInFlight() {
         })
       }
       setNewGraphName('')
-      await Promise.all([loadGraphs(currentTeamId), loadTeams()])
+      await Promise.all([loadGraphs(currentOrgId), loadTeams()])
       // Round-16: bail if the user switched teams mid-flight
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
 
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (teamIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
     }
@@ -4710,14 +5160,14 @@ function claimIntentInFlight() {
     setPanelKeys(null)
     setGraphMsg('')
     setGraphKeyName('')
-    const _teamAtCall = currentTeamId
+    const _teamAtCall = currentOrgId
     try {
-      const rows = await graphKeysFor(currentTeamId, graphId)
-      if (graphPanelReqRef.current !== seq || teamIdRef.current !== _teamAtCall) return // stale open/team
+      const rows = await graphKeysFor(currentOrgId, graphId)
+      if (graphPanelReqRef.current !== seq || orgIdRef.current !== _teamAtCall) return // stale open/team
       setPanelKeys(rows)
       setPanelKeysStatus('ok')
     } catch {
-      if (graphPanelReqRef.current === seq && teamIdRef.current === _teamAtCall) setPanelKeysStatus('error')
+      if (graphPanelReqRef.current === seq && orgIdRef.current === _teamAtCall) setPanelKeysStatus('error')
     }
   }
 
@@ -4729,11 +5179,11 @@ function claimIntentInFlight() {
     setGraphKeyName('')
   }
 
-  // GET /v1/team/keys?team_id=…&graph_id=… (the server-side per-graph filter
+  // GET /v1/team/keys?org_id=…&graph_id=… (the server-side per-graph filter
   // — C3 #2112). Mirrors loadKeys' api() call shape.
-  async function graphKeysFor(teamId, graphId) {
-    if (!teamId || !graphId) return []
-    const q = `?team_id=${encodeURIComponent(teamId)}&graph_id=${encodeURIComponent(graphId)}`
+  async function graphKeysFor(orgId, graphId) {
+    if (!orgId || !graphId) return []
+    const q = `?org_id=${encodeURIComponent(orgId)}&graph_id=${encodeURIComponent(graphId)}`
     const data = await api(`/v1/team/keys${q}`, { useSession: true })
     const rows = Array.isArray(data) ? data : (data && data.keys) || []
     return rows
@@ -4756,9 +5206,9 @@ function claimIntentInFlight() {
     const seq = graphPanelReqRef.current
     setGraphBusy(true)
     setGraphMsg('')
-    const _teamAtCall = currentTeamId
+    const _teamAtCall = currentOrgId
     try {
-      const q = `?team_id=${encodeURIComponent(currentTeamId)}`
+      const q = `?org_id=${encodeURIComponent(currentOrgId)}`
       const resp = await api(`/v1/team/keys${q}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4767,12 +5217,12 @@ function claimIntentInFlight() {
       })
       const plaintext = resp && (resp.key || resp.api_key)
       if (!plaintext) throw new Error('Mint response did not include a key')
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       setGraphKeyName('')
       setRevealKey({ plaintext, title: `Key for ${graphNameFor(gid) || 'graph'} created` })
       await refreshPanelAndCounts(gid, seq)
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) {
+      if (orgIdRef.current === _teamAtCall) {
         const detail = e && e.detail ? e.detail : (e && e.message)
         setGraphMsg(detail || 'Could not mint key — try again.')
       }
@@ -4786,11 +5236,11 @@ function claimIntentInFlight() {
     // refresh must not clobber a NEWER panel open. seq is captured at the
     // OPERATION start (mint/revoke), so a panel open during the mutation
     // await also invalidates this refresh's write. Guard team + seq.
-    const _teamAtCall = currentTeamId
-    const rows = await graphKeysFor(currentTeamId, gid).catch(() => null)
-    if (graphPanelReqRef.current !== seq || teamIdRef.current !== _teamAtCall) return
+    const _teamAtCall = currentOrgId
+    const rows = await graphKeysFor(currentOrgId, gid).catch(() => null)
+    if (graphPanelReqRef.current !== seq || orgIdRef.current !== _teamAtCall) return
     if (rows) { setPanelKeys(rows); setPanelKeysStatus('ok') }
-    loadGraphs(currentTeamId) // key_count column refresh
+    loadGraphs(currentOrgId) // key_count column refresh
   }
 
   function graphNameFor(gid) {
@@ -4807,7 +5257,7 @@ function claimIntentInFlight() {
     // that stops working (mirrors the API-Keys revokeKey UX).
     if (!confirm(`Revoke ${keyRowDisclosure(row, 'this graph key')}? Applications using it will stop working.`)) return
     setGraphMsg('')
-    const _teamAtCall = currentTeamId
+    const _teamAtCall = currentOrgId
     try {
       // #2230: pin the SELECTED team on the panel revoke (session mode) —
       // the panel lives on the Graphs tab whose keys are per-graph rows of
@@ -4815,12 +5265,12 @@ function claimIntentInFlight() {
       // team from memberships[0], so a multi-membership user on a non-first
       // team 403s revoking their own panel key (same shape revokeKey had —
       // #2230). Key-mode (no session JWT) stays unpinned.
-      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
       await api(`/v1/team/keys/${keyId}${q}`, { method: 'DELETE', useSession: true })
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       await refreshPanelAndCounts(panelGraphId, seq)
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) {
+      if (orgIdRef.current === _teamAtCall) {
         const detail = e && e.detail ? e.detail : (e && e.message)
         setGraphMsg(detail || 'Could not revoke key — try again.')
       }
@@ -4836,7 +5286,7 @@ function claimIntentInFlight() {
   // team's row nor land the error under the wrong header). Server: session
   // owner/admin or a team:manage key; 409 on a live-name conflict.
   async function renameGraph(graphId, name) {
-    const _teamAtCall = currentTeamId
+    const _teamAtCall = currentOrgId
     setEditingGraphId(null)
     setError('')
     const next = (name || '').trim()
@@ -4851,14 +5301,14 @@ function claimIntentInFlight() {
     const prev = cur.name || ''
     setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, name: next } : x))
     try {
-      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
       const updated = await api(`/v1/graphs/${encodeURIComponent(graphId)}${q}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true, // rename is owner/admin-managed (session JWT — mirror key management)
         body: JSON.stringify({ name: next }),
       })
-      if (teamIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
       if (updated && (updated.graph_id || updated.name)) {
         // Reconcile with the server echo (it strips the name) — the row's
         // sort position updates via sortedGraphRows at render.
@@ -4867,7 +5317,7 @@ function claimIntentInFlight() {
           : x))
       }
     } catch (e) {
-      if (teamIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
       setGraphs((gs) => gs.map((x) => x.graph_id === graphId ? { ...x, name: prev } : x))
       setError((e && e.message) || 'Couldn\'t rename the graph — try again.')
     }
@@ -4879,8 +5329,8 @@ function claimIntentInFlight() {
   // type-to-confirm modal (deleteConfirmTyped must equal the literal word
   // "delete" — the destructive gate); confirmDeleteId = the modal-open row.
   async function deleteGraphRow(graphId) {
-    const _teamAtCall = currentTeamId
-    if (!graphId || !currentTeamId) return
+    const _teamAtCall = currentOrgId
+    if (!graphId || !currentOrgId) return
     setGraphBusy(true)
     // #2301: delete errors surface PAGE-LEVEL. graphMsg renders only inside
     // the open key panel (mint/revoke — panel-bound actions), so a failed
@@ -4893,7 +5343,7 @@ function claimIntentInFlight() {
       if (!tok) throw new Error('No session')
       // Raw fetch, not api(): DELETE /v1/graphs returns 204 no-body and
       // api() always calls res.json() (would throw on the empty body).
-      const q = `?team_id=${encodeURIComponent(currentTeamId)}`
+      const q = `?org_id=${encodeURIComponent(currentOrgId)}`
       const res = await fetch(`${API_BASE}/v1/graphs/${encodeURIComponent(graphId)}${q}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${tok}` },
@@ -4902,17 +5352,17 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       setConfirmDeleteId(null)
       setDeleteConfirmTyped('')
       if (panelGraphId === graphId) closeGraphPanel()
-      await Promise.all([loadGraphs(currentTeamId), loadTeams()]) // count meter refresh
-      if (isOwnerAdmin) await loadTrash(currentTeamId) // the row just entered the trash
+      await Promise.all([loadGraphs(currentOrgId), loadTeams()]) // count meter refresh
+      if (isOwnerAdmin) await loadTrash(currentOrgId) // the row just entered the trash
     } catch (e) {
       // #2301: failure keeps the row ARMED (Delete/Cancel = retry/escape)
       // and lands the reason in the page-level banner — visible with the
       // key panel open or closed.
-      if (teamIdRef.current === _teamAtCall) setError(e.message || 'Could not delete graph — try again.')
+      if (orgIdRef.current === _teamAtCall) setError(e.message || 'Could not delete graph — try again.')
     } finally {
       setGraphBusy(false)
     }
@@ -4921,39 +5371,39 @@ function claimIntentInFlight() {
   // #2304: team trash (owner/admin). GET /v1/graphs/trash — the recovery
   // window surface. Non-owner members never call it (server 403s); the
   // section only renders for isOwnerAdmin.
-  async function loadTrash(teamId) {
+  async function loadTrash(orgId) {
     const tok = sessionTokenRef.current
-    if (!tok || !teamId || !isOwnerAdmin) return
+    if (!tok || !orgId || !isOwnerAdmin) return
     setTrashStatus('loading')
     try {
-      const res = await fetch(`${API_BASE}/v1/graphs/trash?team_id=${teamId}`, {
+      const res = await fetch(`${API_BASE}/v1/graphs/trash?org_id=${orgId}`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
       if (!res.ok) {
-        if (teamIdRef.current === teamId) setTrashStatus('error')
+        if (orgIdRef.current === orgId) setTrashStatus('error')
         return
       }
       const list = await res.json()
-      if (teamIdRef.current === teamId) {
+      if (orgIdRef.current === orgId) {
         setTrash(Array.isArray(list) ? list : [])
         setTrashStatus('ok')
       }
     } catch {
-      if (teamIdRef.current === teamId) setTrashStatus('error')
+      if (orgIdRef.current === orgId) setTrashStatus('error')
     }
   }
 
   // Full restore (owner/admin). 409 (live name conflict) and 410 (purged)
   // ride the server detail straight to the inline notice.
   async function restoreTrashRow(graphId) {
-    const _teamAtCall = currentTeamId
-    if (!graphId || !currentTeamId) return
+    const _teamAtCall = currentOrgId
+    if (!graphId || !currentOrgId) return
     setGraphBusy(true)
     setTrashMsg('')
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
-      const q = `?team_id=${encodeURIComponent(currentTeamId)}`
+      const q = `?org_id=${encodeURIComponent(currentOrgId)}`
       const res = await fetch(`${API_BASE}/v1/graphs/trash/${encodeURIComponent(graphId)}/restore${q}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${tok}` },
@@ -4962,15 +5412,15 @@ function claimIntentInFlight() {
       if (!res.ok) {
         throw new Error(body.detail || `HTTP ${res.status}`)
       }
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       const name = body.name || 'graph'
       setConfirmRestoreId(null)
       setTrashInspectId(null)
       setTrashInspect(null)
       setTrashMsg(`"${name}" restored. Mint fresh keys for it under Keys.`)
-      await Promise.all([loadGraphs(currentTeamId), loadTrash(currentTeamId)])
+      await Promise.all([loadGraphs(currentOrgId), loadTrash(currentOrgId)])
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) setTrashMsg(e.message || 'Could not restore graph — try again.')
+      if (orgIdRef.current === _teamAtCall) setTrashMsg(e.message || 'Could not restore graph — try again.')
     } finally {
       setGraphBusy(false)
     }
@@ -4979,14 +5429,14 @@ function claimIntentInFlight() {
   // Read-only rescue view (owner/admin): artifact-side metadata for one
   // trash row — never touches the quarantined namespace.
   async function inspectTrashRow(graphId) {
-    const _teamAtCall = currentTeamId
-    if (!graphId || !currentTeamId) return
+    const _teamAtCall = currentOrgId
+    if (!graphId || !currentOrgId) return
     setGraphBusy(true)
     setTrashMsg('')
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
-      const q = `?team_id=${encodeURIComponent(currentTeamId)}`
+      const q = `?org_id=${encodeURIComponent(currentOrgId)}`
       const res = await fetch(`${API_BASE}/v1/graphs/trash/${encodeURIComponent(graphId)}/points${q}`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
@@ -4994,11 +5444,11 @@ function claimIntentInFlight() {
       if (!res.ok) {
         throw new Error(body.detail || `HTTP ${res.status}`)
       }
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       setTrashInspectId(graphId)
       setTrashInspect(body)
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) {
+      if (orgIdRef.current === _teamAtCall) {
         // A failed re-inspect (e.g. the graph was purged → 410) must not
         // leave a stale rescue panel open next to the error banner.
         if (trashInspectId === graphId) {
@@ -5012,21 +5462,21 @@ function claimIntentInFlight() {
     }
   }
 
-  async function loadMembers(teamId) {
+  async function loadMembers(orgId) {
     const tok = sessionTokenRef.current
-    if (!tok || !teamId) return
+    if (!tok || !orgId) return
     try {
-      const res = await fetch(`${API_BASE}/v1/teams/${teamId}/members`, {
+      const res = await fetch(`${API_BASE}/v1/organizations/${orgId}/members`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
       // P3 (code-review): staleness guard — a newer team switch may have
       // landed while this request was in flight.
-      if (teamIdRef.current !== teamId) return
+      if (orgIdRef.current !== orgId) return
       if (res.ok) {
         const data = await res.json()
         // Round-13: re-check after the parse — a switch landing between the
         // guard and the json resolution must not write the old team's members.
-        if (teamIdRef.current !== teamId) return
+        if (orgIdRef.current !== orgId) return
         setMembers(data)
         setMembersStatus('ok')
       } else if (res.status === 403) {
@@ -5036,12 +5486,12 @@ function claimIntentInFlight() {
         setMembersStatus('error')
       }
     } catch {
-      if (teamIdRef.current === teamId) setMembersStatus('error')
+      if (orgIdRef.current === orgId) setMembersStatus('error')
     }
   }
 
   async function inviteMember() {
-    const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
+    const _teamAtCall = currentOrgId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (busy) return // Round-27: in-function double-click guard (disabled attr is click-path only)
     if (!inviteEmail.includes('@')) return
     setBusy(true)
@@ -5052,7 +5502,7 @@ function claimIntentInFlight() {
       const res = await fetch(`${API_BASE}/v1/invites`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-        body: JSON.stringify({ team_id: currentTeamId, email: inviteEmail.trim(), role: inviteRole }),
+        body: JSON.stringify({ org_id: currentOrgId, email: inviteEmail.trim(), role: inviteRole }),
       })
       if (!res.ok) {
         const b = await res.json().catch(() => ({}))
@@ -5065,20 +5515,20 @@ function claimIntentInFlight() {
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
       setInviteEmail('')
-      await loadMembers(currentTeamId)
+      await loadMembers(currentOrgId)
       // Round-16: bail if the user switched teams mid-flight
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
 
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (teamIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
     }
   }
 
   async function removeMember(userId) {
-    const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
+    const _teamAtCall = currentOrgId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (busy) return // Round-24/25: double-click guard BEFORE confirm (a second click must not re-pop the dialog)
     if (!confirm('Remove this member from the organization?')) return
     setBusy(true)
@@ -5086,7 +5536,7 @@ function claimIntentInFlight() {
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
-      const res = await fetch(`${API_BASE}/v1/teams/${currentTeamId}/members/${userId}`, {
+      const res = await fetch(`${API_BASE}/v1/organizations/${currentOrgId}/members/${userId}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${tok}` },
       })
@@ -5094,27 +5544,27 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
-      await loadMembers(currentTeamId)
+      await loadMembers(currentOrgId)
       // Round-16: bail if the user switched teams mid-flight
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
 
     } catch (e) {
       // Round-19: stale DELETE error must not land under the new team
-      if (teamIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
     }
   }
 
   async function changeRole(userId, role) {
-    const _teamAtCall = currentTeamId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
+    const _teamAtCall = currentOrgId // Round-16: mutation identity guard — a switch mid-flight must not act on the previous team
     if (busy) return // Round-24: double-click guard
     setBusy(true)
     setError('')
     try {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
-      const res = await fetch(`${API_BASE}/v1/teams/${currentTeamId}/members/${userId}`, {
+      const res = await fetch(`${API_BASE}/v1/organizations/${currentOrgId}/members/${userId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
         body: JSON.stringify({ role }),
@@ -5123,46 +5573,59 @@ function claimIntentInFlight() {
         const b = await res.json().catch(() => ({}))
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
-      await loadMembers(currentTeamId)
+      await loadMembers(currentOrgId)
       // Round-16: bail if the user switched teams mid-flight
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
 
     } catch (e) {
       // Round-19: stale PATCH error must not land under the new team
-      if (teamIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
     }
   }
 
   async function loadBackups(key) {
-    const _teamAtCall = teamIdRef.current // Round-10: staleness guard
-    // #2167 (rule 2): session-mode /backups pins ?team_id=<selected> and
+    const _teamAtCall = orgIdRef.current // Round-10: staleness guard
+    // #2167 (rule 2): session-mode /backups pins ?org_id=<selected> and
     // sends NO key header — the old shape team-scoped by the KEY header
     // (a zero-key session whose selected team ≠ first membership rendered
     // the first membership's backups: /backups is ungated server-side, so
-    // _session_user_team resolves memberships[0] without the param).
+    // _session_user_org resolves memberships[0] without the param).
     // Key-mode (authMode 'apikey' — no session JWT exists there) keeps the
     // key header as its authenticator.
-    // #1842 P1-2: /backups is session-dual-auth (get_current_team_session_ungated).
-    const q = _teamAtCall ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+    // #1842 P1-2: /backups is session-dual-auth (get_current_org_session_ungated).
+    const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
       const b = await api(`/backups${q}`, sessionTokenRef.current
         ? { useSession: true }
         : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
-      if (teamIdRef.current !== _teamAtCall) return // stale switch response
+      if (orgIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
-      setBackupInfo(list.length ? { latest: list[0], count: list.length } : { count: 0 })
+      // #2784: retain the whole array — the Graphs tab derives a per-graph
+      // "last backup" from it. Held INSIDE backupInfo so the team-switch and
+      // logout wipes clear it with the rest of the state: a separate state
+      // would leak the previous team's default row, whose bucket key is the
+      // literal 'default' in every team. `count` semantics are untouched
+      // (the API-Keys card still reads it).
+      setBackupInfo(list.length
+        ? { latest: list[0], count: list.length, backups: list }
+        : { count: 0, backups: [] })
       setBackupsStatus('ok')
     } catch {
-      // #1923: a transient 503/network failure is TERMINAL — the Backups card
-      // flips to '—' immediately (no eternal skeleton) and the Overview loaded
-      // announce still fires. Guard on the at-call team: a stale failure from a
-      // previous team must not land under the new one. Clear any stale data too
-      // — the '—' card must never read as a previous team's count.
-      if (teamIdRef.current === _teamAtCall) {
-        setBackupInfo(null)
-        setBackupsStatus('error')
+      // #1923: a transient 503/network failure is TERMINAL on a first load —
+      // the Backups card flips to '—' immediately (no eternal skeleton) and the
+      // Overview loaded announce still fires. Guard on the at-call team: a
+      // stale failure from a previous team must not land under the new one.
+      // #2784 review: but a FAILED REFRESH must not destroy a payload we
+      // already hold — the Graphs-tab refetch can 503 after a good load, and
+      // blanking here would flip the Last-backup column AND the untouched
+      // API-Keys card to '—' on a blip. So the error transition only applies
+      // when nothing successful is held (switchTeam/logout already wipe first,
+      // so their '—' behaviour is unchanged).
+      if (orgIdRef.current === _teamAtCall) {
+        setBackupsStatus((s) => (s === 'ok' ? s : 'error'))
+        setBackupInfo((prev) => (prev && prev.backups ? prev : null))
       }
     }
   }
@@ -5170,26 +5633,26 @@ function claimIntentInFlight() {
   // Load team-scoped data whenever the active team changes. Members + graphs
   // are JWT team-scoped; the overview data (team/keys/sessions/backups) is
   // reloaded in switchTeam/completeLogin pinned to the selected team — every
-  // read rides the session JWT + ?team_id= (#2246: no held key exists).
+  // read rides the session JWT + ?org_id= (#2246: no held key exists).
   React.useEffect(() => {
-    if (currentTeamId) {
-      teamIdRef.current = currentTeamId
+    if (currentOrgId) {
+      orgIdRef.current = currentOrgId
       // #1893 (code-review P1): the mount-time refreshOnboarding() fired
       // BEFORE the team resolved (unpinned — server resolves memberships[0],
       // which is the WRONG team for a multi-membership user whose SELECTED
       // team is not the first membership). Re-fetch now that the team is
       // known, so onboarding (and the scope surface) track the selected
-      // team. teamIdRef is set above, so the pinned GET targets the right
+      // team. orgIdRef is set above, so the pinned GET targets the right
       // team. This also recovers a switch whose onboarding refetch failed
       // (the switchTeam catch swallowed it — the stale flag would otherwise
       // stay set and block hydration forever).
       refreshOnboarding().catch(() => {})
-      loadMembers(currentTeamId)
-      loadGraphs(currentTeamId)
-      loadTrash(currentTeamId) // #2304 owner/admin trash section (no-op for members)
+      loadMembers(currentOrgId)
+      loadGraphs(currentOrgId)
+      loadTrash(currentOrgId) // #2304 owner/admin trash section (no-op for members)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTeamId])
+  }, [currentOrgId])
 
   // #1842 P2-3: the role=status cue must announce the loading→loaded
   // transition exactly ONCE — keying on `team` alone announced while the
@@ -5216,7 +5679,7 @@ function claimIntentInFlight() {
 
   // #1842 P1 (re-review, b): eternal-skeleton floor — if ANY overview
   // skeleton has been showing for > STALE_LOADING_MS (e.g. loadTeams
-  // silently no-oped on !tok or a fetch failure, so currentTeamId never
+  // silently no-oped on !tok or a fetch failure, so currentOrgId never
   // pinned and loadMembers/loadGraphs/loadBackups never ran), the card
   // render flips the shimmer to '—' instead of spinning forever.
   // frameStartRef records when the skeleton window began; a 1s interval
@@ -5309,10 +5772,10 @@ function claimIntentInFlight() {
 
   async function createKey() {
     // Round-17 (P3): capture the team AT CALL TIME — the previous guard compared
-    // teamIdRef.current to currentTeamId, which are always written together and
+    // orgIdRef.current to currentOrgId, which are always written together and
     // can never diverge, so it was dead code. Capture to a local and compare
     // against the ref after the await (the round-16 mutation pattern).
-    const _teamAtCall = currentTeamId
+    const _teamAtCall = currentOrgId
     if (busy) return // Round-27: in-function double-click guard (disabled attr is click-path only)
     // #2426: a Custom-date preset with no valid in-range date must not mint
     // — the button is also disabled, but Enter-to-create needs the same gate
@@ -5323,7 +5786,7 @@ function claimIntentInFlight() {
     setBusy(true)
     try {
       // #2246 (ADR-010): mintKey rides the session JWT (rule 4) + pins
-      // ?team_id= — no held key is involved in session-mode create.
+      // ?org_id= — no held key is involved in session-mode create.
       // #2426: preset → expires_in days (Never → null → no param).
       const days = newKeyExpiryPreset === 'never' ? null
         : (newKeyExpiryPreset === 'custom' ? expiryDaysFromDate(newKeyExpiryDate)
@@ -5332,7 +5795,7 @@ function claimIntentInFlight() {
       // Identity guard BEFORE any UI write: a team switch during the POST must
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       setNewKey((mk && (mk.key || mk.api_key)) || '')
       // #2426: the show-once card states the key's expiry — the authoritative
       // server echo (absent on a Never mint → null → 'never expires').
@@ -5342,7 +5805,7 @@ function claimIntentInFlight() {
       await loadAll('')
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (teamIdRef.current === _teamAtCall) {
+      if (orgIdRef.current === _teamAtCall) {
         // #1147: a tier-cap 402 (hosted_api._check_team_limit) is a LIMIT,
         // not an error — surface the upgrade prompt with the real cap.
         if (e.status === 402) {
@@ -5387,7 +5850,7 @@ function claimIntentInFlight() {
     setError('')
     setBusy(true)
     try {
-      const _teamAtCall = currentTeamId
+      const _teamAtCall = currentOrgId
       // #2229: label carry-over — the row may leave the closure list mid-
       // flight (switch/refresh) — degrade to an unlabeled mint.
       const oldRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
@@ -5400,9 +5863,9 @@ function claimIntentInFlight() {
       // (the old row may not belong to the now-selected team). The minted
       // replacement stays as a visible team-A durable (same accepted orphan
       // semantics as createKey's identity guard).
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       await revokeKey(keyId, { skipConfirm: true })
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       // #2246: no held install — the replacement is shown once and managed
       // from the table like any other durable. #2735: its OWN reveal state
       // (rotatedKey), never the create modal's newKey — the create modal's
@@ -5411,7 +5874,7 @@ function claimIntentInFlight() {
       setRotatedKey({ plaintext: (mk && (mk.key || mk.api_key)) || '', expiresAt: (mk && mk.expires_at) || null })
       await loadAll('')
     } catch (e) {
-      if (teamIdRef.current === currentTeamId) {
+      if (orgIdRef.current === currentOrgId) {
         if (e.status === 402) {
           // #2229: rotate-specific cap copy — see rotateCapNoticeFrom.
           setCapNotice(rotateCapNoticeFrom(e.message, team))
@@ -5435,29 +5898,29 @@ function claimIntentInFlight() {
     const next = !currentEnabled
     // Round-20: capture the team at call — a mid-flight switch must not land
     // the response/error under the new team's header (mirrors renameKey).
-    const _teamAtCall = currentTeamId
+    const _teamAtCall = currentOrgId
     setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: next } : k))
     try {
       // #2230: session-mode key-management PATCH pins the SELECTED team —
-      // the server PATCH honors ?team_id= membership-checked (fail-closed on
+      // the server PATCH honors ?org_id= membership-checked (fail-closed on
       // a key outside the pinned team), so a multi-membership user on a
       // non-first team toggles the key their table shows, never the default
       // membership's (mirrors #2167 rule-4 create-side pin). The endpoint is
       // session-only (#1148 — a raw key 401s here), so the session-gated
       // pin covers the only reachable auth surface.
-      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
       const updated = await api(`/v1/team/keys/${keyId}${q}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true,  // #1148: management → session JWT when signed in
         body: JSON.stringify({ enabled: next }),
       })
-      if (teamIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
       if (updated && (updated.id || updated.key_id)) {
         setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: updated.enabled !== false } : k))
       }
     } catch (e) {
-      if (teamIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
       setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: currentEnabled } : k))
       setError((e && e.message) || `Couldn't toggle the key — try again.`)
     }
@@ -5472,7 +5935,7 @@ function claimIntentInFlight() {
     // snapshot could silently re-enable a key disabled in another session/
     // tab (rename must never touch auth state). Round-20: capture the team at
     // call; a stale rename's error must not land under the new team's header.
-    const _teamAtCall = currentTeamId
+    const _teamAtCall = currentOrgId
     setEditingKeyId(null)
     setError('')
     const next = (name || '').trim().slice(0, 64) || null
@@ -5487,19 +5950,19 @@ function claimIntentInFlight() {
       // the URL is built from the at-call team so a mid-flight switch can
       // never target the new team's key nor the default membership's (the
       // post-await staleness guard below then drops the stale response).
-      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
       const updated = await api(`/v1/team/keys/${keyId}${q}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true,  // #1148: management → session JWT when signed in
         body: JSON.stringify({ name: next }),
       })
-      if (teamIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
       if (updated && (updated.id || updated.key_id)) {
         setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: next } : k))
       }
     } catch (e) {
-      if (teamIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
+      if (orgIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
       setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: prevName } : k))
       setError((e && e.message) || `Couldn't rename the key — try again.`)
     }
@@ -5508,7 +5971,7 @@ function claimIntentInFlight() {
   async function revokeKey(keyId, opts = {}) {
     // Round-20 (P2): capture team at call — a mid-flight switch must not land
     // the old team's key table under the new header.
-    const _teamAtCall = currentTeamId
+    const _teamAtCall = currentOrgId
     const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
     // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
     // one-click trash never silently kills an agent key the user cannot
@@ -5527,11 +5990,11 @@ function claimIntentInFlight() {
       // revoking their own key (mirrors #2167 rule-4 create-side pin + the
       // toggle/rename PATCH pins; the session lane honors it
       // membership-checked). Key-mode (no session JWT) stays unpinned.
-      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
       await api(`/v1/team/keys/${keyId}${q}`, { method: 'DELETE', useSession: true })
       // Round-20: bail after the DELETE — a switch already reloaded the new
       // team's state; skip the stale loadAll entirely.
-      if (teamIdRef.current !== _teamAtCall) return
+      if (orgIdRef.current !== _teamAtCall) return
       // #2246 (review, P2): revoke-to-empty clears the matching in-memory
       // plaintext BEFORE the reload. loadAll landing keys=[] must read as
       // "not loaded" to the row-truth effect below (it gates on
@@ -5551,7 +6014,7 @@ function claimIntentInFlight() {
       await loadAll()
     } catch (e) {
       // Round-18/20: a stale revoke's error must not land under the new team
-      if (!_teamAtCall || teamIdRef.current === _teamAtCall) setError(e.message)
+      if (!_teamAtCall || orgIdRef.current === _teamAtCall) setError(e.message)
     }
   }
 
@@ -5610,7 +6073,7 @@ function claimIntentInFlight() {
     try {
       // #2002 (W6): the Settings transcript View (DE2E-11) reads on the
       // session JWT + the selected team (multi-membership parity with
-      // list_sessions' ?team_id= pin — a stale team's detail must never
+      // list_sessions' ?org_id= pin — a stale team's detail must never
       // land under the current team's Settings home).
       const detail = await api(`/v1/sessions/${encodeURIComponent(sessionId)}${onboardingTeamQ()}`, { useSession: true })
       if (detail && detail.session === null) {
@@ -5668,6 +6131,27 @@ function claimIntentInFlight() {
       return iso
     }
   }
+
+  // #2784: group the backup pool once per payload (O(pool)), not per row.
+  // Declared before App's first early return (:5734) so the hook runs on
+  // every render — hooks may not be skipped by a conditional return.
+  const graphBackups = React.useMemo(
+    () => graphBackupSummary(backupInfo && backupInfo.backups), [backupInfo])
+
+  // #2784: entering the Graphs tab refreshes the pool, so the Last-backup
+  // column is not stale from login. Fires on the tab TRANSITION only — two
+  // reasons this is not keyed on `[tab, currentOrgId]` (review): (1) a team
+  // switch while this tab is open would otherwise fire a second concurrent
+  // /backups read alongside switchTeam's own load, and the two same-team
+  // responses can land out of order; (2) loadBackups is re-created every
+  // render, so listing it in the deps would refetch after its own setState —
+  // an infinite loop. The team is read from the ref at call time.
+  const prevTabForBackupsRef = React.useRef(tab)
+  React.useEffect(() => {
+    const entered = prevTabForBackupsRef.current !== 'graphs' && tab === 'graphs'
+    prevTabForBackupsRef.current = tab
+    if (entered && orgIdRef.current) loadBackups('').catch(() => {})
+  }, [tab])
 
   if (checking) {
     return (
@@ -5925,29 +6409,105 @@ function claimIntentInFlight() {
   // create/rotate/paste ('rows-durable' when a usable durable exists, 'none'
   // when not).
   const durableConnect = durableConnectKey(welcomeKey, '', keys)
+  // #3783: the connect step's source-aware key gate. `durableConnect.source`
+  // already distinguishes 'rows-durable' (a usable row exists; its plaintext
+  // is not held) from 'none' (no key at all) — the wizard used to collapse
+  // both into the mint CTA, so an org whose key was provisioned at creation
+  // got a SECOND key minted here, spending the free tier's 2-key allowance on
+  // a key the user never chose to create, while the Overview (reading this
+  // same source) said an existing key was usable. Consumed by
+  // `wizardKeyAffordance` below.
+  const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
   // (re-entry / invite-held paths). Drives the welcome exit gate + heading.
   const welcomeHasOrg = welcomeTeamReady || (Array.isArray(teams) && teams.length > 0)
   // The org name shown in the welcome header/step-1 summary is the CURRENT
-  // team's name — welcomeTeamName (the first-run provision) only wins right
+  // team's name — welcomeOrgName (the first-run provision) only wins right
   // after creation, before loadTeams pins `team` (code-review P2: a stale
-  // welcomeTeamName across a team switch must never label the wrong org).
+  // welcomeOrgName across a team switch must never label the wrong org).
   const shownOrgName =
-    (welcomeTeamReady && welcomeTeamName) ||
-    (team && team.team_name) ||
+    (welcomeTeamReady && welcomeOrgName) ||
+    (team && team.org_name) ||
     (Array.isArray(teams)
-      ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
+      ? ((teams.find((t) => t.org_id === orgIdRef.current) || teams[0] || {}).org_name || '')
       : '') || ''
-  // #2328: the Codex connect step renders one of two surfaces — 'codex'
-  // (CLI) or 'codexDesktop' (GUI). Other harnesses pass through unchanged.
-  const wizardConnectHarness = (wizardHarness === 'codex' && wizardCodexDesktop) ? 'codexDesktop' : wizardHarness
+  // #2328/#2912: the connect step renders one of two Codex surfaces — 'codex'
+  // (CLI) or 'codexDesktop' (GUI). The surface IS the leaf harness value now,
+  // so this is an identity mapping kept as the single read-point for every
+  // per-harness lookup below (the old boolean derivation is gone).
+  const wizardConnectHarness = wizardHarness
   // #1998 fork-aware connect: the fork choice determines what the connect step
   // shows — 'build' users see API key + SDK code; 'self' users see harness
-  // picker + setup command.
-  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
-  const isBuildFork = wizardFork === 'build'
+  // picker + setup command. `wizardFork` / `isBuildFork` are derived ONCE,
+  // above the step-announcement effect (review cycle 5 item 4), so the <h1>,
+  // the announcement and this render all share ONE derivation.
+  // #3428/#2937 (lane B3, review cycle 3 P1-A): the done step may name a
+  // harness — and print a per-harness capture sentence — ONLY when the connect
+  // step actually offered the chooser that sets `wizardHarness`. Two paths
+  // reach step 3 without one: the 'unsure' fork answer (handleWizardFork
+  // advances straight to step 3, so step 2's chooser never rendered) and the
+  // capped owner/admin re-entry (capNotice replaces the chooser with the
+  // mint-cap remedy). On both, `wizardHarness` still holds its untouched
+  // 'claude' default, so naming Claude there is the same defect class the build
+  // fork was fixed for: "names a harness the branch never offered". A pick is
+  // ESTABLISHED only when a self fork was chosen or persisted AND no cap remedy
+  // is standing in for the chooser.
+  const harnessPickEstablished = wizardFork === 'self' && !capNotice
+  // Both done-step claims key on that gate: the name falls back to the neutral
+  // 'your agent', and the capture claim falls to 'none' (silence) rather than
+  // asserting a harness-specific capability for a branch that never ran it.
+  const doneHarnessName = harnessPickEstablished
+    ? (knownHarnessName(wizardHarness) || 'your agent')
+    : 'your agent'
+  const doneCaptureClaim = harnessPickEstablished ? harnessCaptureClaim : 'none'
+  // #3428/#2937 (lane B3, review cycle 2 P2-4 / cycle 3 P1-D + P2-7): the
+  // not-connected body's remedy clause is DERIVED, the same way the capture
+  // claim is. "(running it creates a fresh key)" is true only where the user
+  // can actually mint a fresh key for a KEYED harness: false on the key-less
+  // OAuth leaves (no key is involved at all — the connector recipe has no
+  // command with a key) and false for any non-owner/admin (a member has no key
+  // and cannot mint one, so pointing them at the Setup guide's command is a
+  // dead end — the one action they have is asking an owner/admin).
+  // `wizardDurableCapped` is the wizard's OWN mint 402 (`capNotice` is set only
+  // by the Keys-tab create/rotate 402s), so an owner who hit the cap inside the
+  // wizard is not promised a fresh key either. Where the clause is false it is
+  // dropped rather than asserted.
+  // review cycle 4 (item 12): the remedy derives from the harness ONLY where a
+  // pick was established. `wizardHarness` keeps its untouched 'claude' default
+  // on the 'unsure' fork and the capped re-entry, so with no pick the arms below
+  // would tell a member to ask for an API key for a surface the branch never
+  // showed them, and promise an owner a fresh key for a recipe that may have no
+  // command at all. Without an established pick the neutral arm names the one
+  // surface every branch can reach.
+  const doneHarnessForRemedy = harnessPickEstablished ? wizardHarness : null
+  const doneKeylessLeaf = doneHarnessForRemedy !== null && HARNESS_OAUTH.includes(doneHarnessForRemedy)
+  const doneCanMintFresh = isOwnerAdmin && !capNotice && !wizardDurableCapped
+  // review cycle 9 (UX F1 + code F4): the Setup guide renders "Resume setup →"
+  // ONLY while it can render the active checklist — the card returns a skeleton
+  // while loading, an error card when the projection never landed, an
+  // "Unavailable" card when the server reports FLOW unavailable, and a
+  // collapsed card once complete; the button sits inside the active branch
+  // (SetupGuideCard: `onResume && g.status === 'active'`). Naming a control
+  // that is not on screen is the same defect class as naming a harness the
+  // branch never offered — and it is REACHABLE: a failed onboarding GET leaves
+  // `onboarding === null`, so this remedy's minting arm would point at a card
+  // that is concurrently rendering "Couldn't load setup status — refresh to
+  // retry." Derive the clause from the SAME predicate the card uses. The mint
+  // clause is true only when reopening would mint: a key already resolved
+  // (minted this session, or matching a durable row) is reused, not re-minted.
+  const guideCanResume = !!onboarding && !onboardingLoading && setupGuide(onboarding).status === 'active'
+  const doneReopenClause = guideCanResume
+    ? 'reopen it from Settings → Setup guide (Resume setup)'
+    : 'the steps are in Settings → Setup guide'
+  const doneSetupRemedy = (!harnessPickEstablished || doneKeylessLeaf)
+    ? 'the steps are in Settings → Setup guide'
+    : (!isOwnerAdmin
+        ? 'ask an owner or admin for an API key'
+        : (doneCanMintFresh && !harnessKey
+            ? `${doneReopenClause} — the connect step mints a fresh key`
+            : doneReopenClause))
 
   // #2710: the wizard's paste escape (shared verbatim with the member/capped
   // branch below — same markup, same validation, no copy or IA change). The
@@ -5997,24 +6557,13 @@ function claimIntentInFlight() {
     </>
   )
 
-  // #2711: a shown-once key token is an unbreakable `tt_…` string. This one
-  // style is shared by all three key rows (the agent-driven "separate" row +
-  // claude-desktop + claude-web) so the row can shrink and the token can break
+  // #2711: a shown-once key token is an unbreakable `tt_…` string. One shared
+  // `.key-row` style carries every raw-key row (the step-1 key block for each
+  // leaf except Codex Desktop, whose key lives in the config block) so the row
+  // can shrink and the token can break
   // — without `minWidth: 0` the flex item's min-content width is the whole
   // token and the Copy button is pushed off-screen at 390px.
   const wizardKeyCodeStyle = { flex: 1, minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all', padding: '0.4rem 0.6rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 6, fontSize: 13 }
-
-  // #2827 (round-2 P2): the connector request-header literal is ONE breakable
-  // token on the Claude Desktop/Web tabs. It used to be split across two
-  // <code> elements joined by `=` — wrong punctuation (`:` is what the
-  // connector field expects) and impossible to copy in one gesture.
-  const wizardHeaderCodeStyle = { minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-all' }
-
-  // #2827: ONE step-label style for every connect tab. The tabs used to
-  // hand-roll inline <p className="dim small"> captions that drifted in size,
-  // weight and alignment (some centred, some left). The wizard tabs are
-  // ordered procedures, so the numbering is part of the label.
-  const wizardStepLabelStyle = { margin: '0 0 0.5rem', fontWeight: 600, fontSize: 13, lineHeight: 1.6, color: 'var(--text,#e2e8f0)' }
 
   // #2710: the connect step's no-key affordance. The copy already promised
   // "Create an API key to see the setup prompt." but shipped no button, so an
@@ -6023,9 +6572,14 @@ function claimIntentInFlight() {
   // Never-expiring mint the build fork uses (mintKey with NO expires_in → the
   // key never expires, matching the step's own hint and the Never-only embed
   // contract #2426 decision 2). The paste row covers "I already have one".
+  // #2865: the mint is owner/admin-only (POST /v1/team/keys is
+  // _require_owner_admin), so members get the paste row alone — their keyed-leaf
+  // no-key branch never offers a button that would 403.
   const wizardNoKeyAffordance = (
     <>
-      <p className="dim small">Create an API key to see the setup prompt.</p>
+      <p className="dim small">{isBuildFork
+        ? 'Create an API key to call the SDK from your application.'
+        : 'Create an API key to see the setup prompt.'}</p>
       <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
         <button type="button" className="btn-primary small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
           {wizardDurableBusy ? 'Creating…' : 'Create an API key'}
@@ -6049,6 +6603,105 @@ function claimIntentInFlight() {
     </>
   )
 
+  // #3783: the connect step's EXISTING-key affordance. `connectKeyGate` returns
+  // mode 'existing' when a usable durable row exists but its plaintext is not
+  // in this browser (keys are shown once). The step used to fall straight
+  // through to the mint CTA here, so an organization provisioned with a key at
+  // creation (created_via 'provisioned', name null) had a SECOND key minted at
+  // connect — burning the free tier's 2-key allowance on a key the user never
+  // chose to create — while the Overview banner read the same 'rows-durable'
+  // source and said an existing key was usable. Route to the existing key
+  // (rotating replaces it in place, without growing the count) and demote the
+  // fresh mint to an explicit choice whose cost is named. Owner/admin only
+  // (POST /v1/team/keys is _require_owner_admin); members keep the paste row.
+  const wizardExistingKeyAffordance = (
+    <>
+      <p className="dim small">
+        Your organization already has an API key
+        {connectGate.existing && connectGate.existing.key_prefix
+          ? <> (<code>{connectGate.existing.key_prefix}</code>, created {fmtTime(connectGate.existing.created_at)})</>
+          : null}{' '}
+        — its value can&apos;t be shown here: keys are displayed once, when they are created.
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        {/* Every connect-step exit clears the in-memory plaintext + cap state
+            (pinned by wizardConnectTripwire #3218/#3428) and lands on the tab
+            where the existing key can be rotated. */}
+        <button type="button" className="btn-primary small"
+          onClick={() => { setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardDurableCapped(false); setWizardShowPaste(false); setTab('keys') }}>
+          Use an existing key →
+        </button>
+        <button type="button" className="ghost small" aria-expanded={wizardShowPaste}
+          aria-controls={wizardShowPaste ? 'wizard-paste-row' : undefined}
+          onClick={() => setWizardShowPaste((v) => !v)}>
+          I already have a key — paste it instead
+        </button>
+        <button type="button" className="ghost small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+          {wizardDurableBusy ? 'Creating…' : 'Create a new key instead'}
+        </button>
+      </div>
+      <p className="wizard-note">
+        Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it
+        without adding a key. Creating a new key here spends another of your plan&apos;s key slots.
+      </p>
+      {wizardShowPaste && wizardPasteRow}
+      {!wizardShowPaste && wizardDurableError && (
+        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
+      )}
+    </>
+  )
+
+  // #3783 (review P2): the 'loading' mode offers NEITHER the mint nor the
+  // paste row — the rows GET has not landed, so "no key" is not a resolved
+  // answer and a mint CTA could burn a slot while an unloaded row already
+  // exists. The gate re-renders the moment `keysLoaded` flips.
+  const wizardLoadingKeyAffordance = (
+    <p className="dim small" aria-live="polite">Checking your organization&apos;s API keys…</p>
+  )
+
+  // #3783 (review P2 — the dead end this closes): the wait state above had no
+  // exit. `keysLoaded` flips on SUCCESS only, so a FAILED (or hanging) keys read
+  // left the connect step waiting forever: the mint was correctly withheld, but
+  // nothing replaced it, and the only recovery was a full page reload. An
+  // unresolved read is still NOT "no key" (offering a mint there re-opens the
+  // slot burn #3783 fixed), so this state keeps the mint withheld and adds the
+  // one honest action — retry the read in place. A failed read is ACTIONABLE,
+  // never a terminal wait.
+  const wizardKeysUnavailableKeyAffordance = (
+    <>
+      <p className="dim small" role="status">
+        {keysLoadError
+          ? `We couldn’t check your organization’s API keys — ${keysLoadError}`
+          : 'We still can’t see your organization’s API keys.'}
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        <button type="button" className="btn-primary small" onClick={wizardRetryKeysLoad}>
+          Try again
+        </button>
+      </div>
+      <p className="wizard-note">
+        We don&apos;t create a key until we can read the keys your organization already has — creating
+        one now could spend a plan slot on a key you already hold.
+      </p>
+    </>
+  )
+
+  // #3783: ONE role- and source-aware derivation for every keyed leaf, so the
+  // source-aware branch cannot drift between the shared, Codex Desktop and
+  // build-fork arms. Minting is offered ONLY when `connectGate.mode === 'mint'`
+  // (no usable key exists at all); 'existing' routes to the reuse path above;
+  // an unresolved read ('error', or a 'loading' that has exceeded the wait
+  // bound) shows the retryable state and NO mint; a read still in flight shows
+  // the wait state, also with no action.
+  const wizardKeyAffordance = connectGate.mode === 'error'
+    || (connectGate.mode === 'loading' && keysLoadSlow)
+    ? wizardKeysUnavailableKeyAffordance
+    : connectGate.mode === 'loading'
+      ? wizardLoadingKeyAffordance
+      : isOwnerAdmin
+        ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
+        : wizardPasteRow
+
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
     // W1 wizard, never the key. There is NO mount provisioning (#1566's
@@ -6065,14 +6718,14 @@ function claimIntentInFlight() {
           <nav />
           {/* #1906 (code-review P1): disabled while provisioning OR on the
               terminal error/claim cards — exiting fires finishWelcomeLoads
-              against nothing (no teamIdRef pin → loadAll 403 → 'API Keys 0'
+              against nothing (no orgIdRef pin → loadAll 403 → 'API Keys 0'
               + a false error banner until reload). The spinner window is
               transient; the error/claim cards' own CTAs (Try again / Go
               claim my team) own the recovery. */}
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); connectedOnceRef.current = false; if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardDurableCapped(false); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -6105,11 +6758,85 @@ function claimIntentInFlight() {
               </>
             ) : (
               <>
-                <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-                  {welcomeHasOrg
-                    ? (shownOrgName ? `${shownOrgName} is set up` : 'Your organization is set up')
-                    : 'Welcome to Tortoise'}
-                </h1>
+                {/* #2912: the header names the STAGE ("Connect your agent"),
+                    not the org's status ("<org> is set up") — the old heading was
+                    a receipt for step 0 sitting above every later step, so it
+                    said nothing about what the user was doing. The org stays
+                    visible as a small eyebrow, and the step's own sub moves up
+                    here so the card body starts at the controls. */}
+                <div className="welcome-head">
+                  {welcomeHasOrg && shownOrgName && (
+                    <p className="welcome-eyebrow">{shownOrgName}</p>
+                  )}
+                  <h1 className="welcome-title">
+                    {wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })}
+                  </h1>
+                  {(() => {
+                    // Step 0 on an org-holding account is a read-only summary
+                    // whose body already says "You're set up in <org>…" — a
+                    // second line here would repeat it. Same for step 3 without
+                    // an observed connection: its <h1> already names the state
+                    // (wizardStageLabel's paused / not-connected arms) and
+                    // the body carries the recovery (PR-gate UX: the old paused
+                    // lede restated both). Review cycle 1 P1-1: keying this on
+                    // `effectivelyPaused` left the DIRECT Continue path
+                    // (`wizardPaused` false) rendering the lede "Your agent takes
+                    // over from here." beneath a "Not connected yet" <h1> — the
+                    // #2364/#2912 heading-vs-body contradiction, reassembled. It
+                    // is now keyed on the same derived flag the <h1> uses.
+                    if (wizardStep === 0 && welcomeHasOrg) return null
+                    if (wizardStep === 3 && !serverHarnessConnected) return null
+                    // #2912 (review cycle 2): WIZARD_STEPS[2].sub is the harness
+                    // pick's copy, but step 2 has THREE bodies — only the
+                    // owner/self branch is a harness pick.
+                    if (wizardStep === 2) {
+                      // #2912 (review cycle 4 P1): the role/cap check runs FIRST.
+                      // A member of a build-fork org gets the SDK-lede body
+                      // ("Only owners and admins can create API keys"), so
+                      // promising them a key here reproduced the exact defect
+                      // class #2912 was filed for.
+                      // PR-gate follow-up: the member/capped copy is ALSO
+                      // fork-aware — the build-fork member body offers no paste
+                      // affordance at all (its only actions are "ask an owner or
+                      // admin" and "Manage API keys →"), so the self-fork line
+                      // would instruct an action that branch does not offer.
+                      // PR-gate follow-up 2: capNotice is set ONLY by an
+                      // owner/admin mint, so the capped arm must not tell the
+                      // user to ask an owner — they are the owner. The build
+                      // fork has no paste escape, so its honest action is
+                      // freeing a slot in the API Keys tab.
+                      // PR-gate follow-up 3: a build-fork user who ALREADY holds a
+                      // key sees that key + the curl in the body, so any key-getting
+                      // copy contradicts the card. This is the first arm: the key
+                      // state is a fact, the role/fork branches are about who can
+                      // mint one.
+                      if (isBuildFork && harnessKey) {
+                        return <p className="welcome-lede">Copy your key and call the Tortoise SDK from your app.</p>
+                      }
+                      // #2865: the two Claude connector leaves are key-less OAuth
+                      // (HARNESS_OAUTH), so every key-centric arm below would
+                      // promise a credential their surface never asks for. The
+                      // build fork keeps its own SDK body (no chooser renders
+                      // there), so this arm is scoped to the connector step.
+                      if (!isBuildFork && HARNESS_OAUTH.includes(wizardHarness)) {
+                        return <p className="welcome-lede">Add Tortoise as a custom connector — Claude signs in to Tortoise, so no API key is needed.</p>
+                      }
+                      if (!isOwnerAdmin) {
+                        return <p className="welcome-lede">{isBuildFork
+                          ? 'Ask an owner or admin for an API key, then call the Tortoise SDK.'
+                          : 'Paste an API key to connect your agent.'}</p>
+                      }
+                      if (capNotice) {
+                        return <p className="welcome-lede">{isBuildFork
+                          ? 'Free a key slot in the API Keys tab, then call the Tortoise SDK.'
+                          : 'Paste an API key to connect your agent.'}</p>
+                      }
+                      if (isBuildFork) return <p className="welcome-lede">Create an API key and call the Tortoise SDK from your app.</p>
+                    }
+                    const sub = WIZARD_STEPS[wizardStep].sub
+                    return <p className="welcome-lede">{sub}</p>
+                  })()}
+                </div>
                 <span className="sr-only" role="status" aria-live="polite">
                   {welcomeProvisioning ? 'Creating your organization' : (welcomeHasOrg && shownOrgName ? `${shownOrgName} is set up` : '')}
                 </span>
@@ -6126,22 +6853,15 @@ function claimIntentInFlight() {
                       <span key={s.id} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
                     ))}
                   </div>
-                  {/* #2364 round-1: org-holder resume/re-entry must never re-read
-                      the org-create TITLE — an account that already holds an org
-                      walks step 0 as a READ-ONLY summary (never a second mint,
-                      #2323). Branch the visible title to the same label the
-                      sr-only announce uses (#2361 r2) — title + announce never
-                      diverge. The body copy below already branches (#2323 Option
-                      B): 'You're set up in <org>' + Continue, never a create
-                      form. W9/#2005 owns the fork-aware step-MAPPED resume. */}
-                  <p className="wizard-title">{wizardStep === 0 && welcomeHasOrg ? 'Your Organization' : WIZARD_STEPS[wizardStep].label}</p>
-                  {wizardStep !== 0 && (
-                    <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                      {(wizardStep === 3 && effectivelyPaused)
-                        ? "You're set up, but your agent isn't connected yet. Reconnect any time from Settings → Setup guide."
-                        : WIZARD_STEPS[wizardStep].sub}
-                    </p>
-                  )}
+                  {/* #2487/#2364 resolved into #2912's header: the visible title
+                      and sub moved into `.welcome-head` above (stage <h1> through
+                      the shared `wizardStageLabel`, which branches step 0 on
+                      `welcomeHasOrg` to 'Your Organization' AND drives the sr-only
+                      announce — the never-diverge invariant #2364 round-1 wanted),
+                      so no in-card `.wizard-title`/`.wizard-sub` may come back
+                      here: that duplication is exactly what #2912's defect 5
+                      removed. The setup-guide resume copy from #2487 is
+                      untouched. */}
 
                   {wizardStep === 0 && (
                     <div className="org-create">
@@ -6161,7 +6881,7 @@ function claimIntentInFlight() {
                       ) : (
                         // #2323 (Option B): the first-run provisioning door —
                         // the typed name creates the ONE org (tenant-provision,
-                        // deterministic team_id). #2324: value is state-only —
+                        // deterministic org_id). #2324: value is state-only —
                         // no prefill fallback chain that resurrects text on
                         // delete, and no phantom org name to fight.
                         <>
@@ -6202,7 +6922,7 @@ function claimIntentInFlight() {
                             <p className="dim small" role="alert">{pendingInvites[0]._loadError}</p>
                           ) : pendingInvites.map((inv) => (
                             <div key={inv.invitation_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                              <span className="small">{inv.team_name || 'Invitation'}</span>
+                              <span className="small">{inv.org_name || 'Invitation'}</span>
                               {inv.error && <span className="account-invite-error small" role="alert">{inv.error}</span>}
                               <div style={{ display: 'flex', gap: '0.4rem' }}>
                                 <button type="button" className="ghost small" onClick={() => acceptPendingInvite(inv)} disabled={pendingInvitesBusy !== ''}>
@@ -6224,12 +6944,12 @@ function claimIntentInFlight() {
                       )}
                       {onboarding && onboarding.fork && (
                         <p className="dim" style={{ marginBottom: '0.9rem' }}>
-                          This Organization is set to <strong>{onboarding.fork === 'build' ? 'build an application on top' : 'use Tortoise for your own agents'}</strong>.
+                          This Organization is set to <strong>{onboarding.fork === 'build' ? 'build an application on top' : 'use Tortoise for internal setup'}</strong>.
                         </p>
                       )}
                       {onboarding && !onboarding.fork && onboarding.fork_unsure_at && (
                         <p className="dim" style={{ marginBottom: '0.9rem' }}>
-                          You told us you're <strong>not sure yet</strong> — nothing is locked in. Pick an option now, or answer any time from Settings → Setup guide.
+                          You told us you're <strong>not sure yet</strong> — pick an option now, or continue without choosing.
                         </p>
                       )}
                       <div className="fork-options" style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1rem' }}>
@@ -6274,39 +6994,58 @@ function claimIntentInFlight() {
 
 {wizardStep === 2 && (isBuildFork ? (
                     <div className="connect-build">
-                      {!harnessKey ? (
-                        <>
-                          {isOwnerAdmin ? (
-                            <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}
-                              style={{ marginBottom: '0.75rem' }}>
-                              {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
-                            </button>
-                          ) : (
-                            <p className="dim" style={{ marginBottom: '0.75rem' }}>
-                              Only owners and admins can create API keys. Ask an owner or admin to create one.
+                      {/* #2912 (PR-gate UX): the build fork used to keep the old
+                          ad-hoc layout (0.4rem captions, inline margins) while
+                          its sibling owner path got h1 → numbered h2 blocks, so
+                          the same step looked like two different products. Same
+                          block structure here: 1 = key, 2 = the SDK call. */}
+                      <WizardBlock step={1} title={harnessKey ? 'Your API key' : 'Get your API key'}>
+                        {harnessKey ? (
+                          <>
+                            <p className="dim small" style={{ marginBottom: '0.4rem' }}>
+                              Copy your API key now.
                             </p>
-                          )}
-                          <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads('keys') }}>
-                            Manage API keys →
-                          </button>
-                        </>
-                      ) : (
-                        <>
-                          <p className="dim small" style={{ marginBottom: '0.4rem' }}>
-                            Your API key is shown once — copy it now.
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                              <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, wordBreak: 'break-all' }}>
+                                {harnessKey}
+                              </code>
+                              <button type="button" className="btn-primary" onClick={() => navigator.clipboard?.writeText(harnessKey)}>
+                                Copy
+                              </button>
+                            </div>
+                            <p className="wizard-note">{KEY_VISIBILITY_NOTE}</p>
+                          </>
+                        ) : (
+                          <>
+                            {wizardKeyAffordance}
+                            <div style={{ marginTop: '0.6rem' }}>
+                              {/* #3218: this arm is the NO-KEY branch (no
+                                  plaintext is on screen here), so the clears
+                                  below are belt-and-braces. The exits that
+                                  actually hold a key are wizardComplete and the
+                                  header escape — both of which also drop
+                                  welcomeKey. This handler is kept in step with
+                                  them so the `wizardDurable*` state can never
+                                  outlive the step on any path. review cycle 6 (item 6): that contract includes
+                                  `wizardDurableCapped` — this was the one exit cycle 5
+                                  missed, so a capped build-fork owner who left via
+                                  this link and re-entered without a fresh mint
+                                  attempt kept the done screen's "(running it
+                                  creates a fresh key)" clause suppressed. */}
+                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardDurableCapped(false); setTab('keys'); finishWelcomeLoads('keys') }}>
+                                Manage API keys →
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </WizardBlock>
+
+                      {harnessKey && (
+                        <WizardBlock step={2} title="Call the SDK">
+                          <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
+                            Run this to verify your API key and file your first memory — it creates your graph.
                           </p>
-                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '1.25rem' }}>
-                            <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, wordBreak: 'break-all' }}>
-                              {harnessKey}
-                            </code>
-                            <button type="button" className="btn-primary" onClick={() => navigator.clipboard?.writeText(harnessKey)}>
-                              Copy
-                            </button>
-                          </div>
-                          <p className="dim" style={{ marginBottom: '0.75rem', lineHeight: 1.6 }}>
-                            Run this to verify your API key and file your first memory — it creates your graph and connects your project.
-                          </p>
-                          <pre className="snippet" style={{ marginBottom: '0.75rem' }}>
+                          <pre className="snippet" style={{ margin: 0 }}>
 {`curl https://api.premiselabs.co/v1/points \\
   -H "Authorization: Bearer ${harnessKey}" \\
   -H "Content-Type: application/json" \\
@@ -6314,226 +7053,327 @@ function claimIntentInFlight() {
                           </pre>
                           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                              {wizardConnectBusy ? 'Saving…' : "I've set it up — Continue →"}
+                              {wizardConnectBusy ? 'Checking…' : "I've set it up — Continue →"}
                             </button>
                             <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">
                               SDK documentation →
                             </a>
                           </div>
-                        </>
+                        </WizardBlock>
                       )}
-                      {wizardDurableError && (
-                        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
-                      )}
-                      <div className="wizard-nav" style={{ marginTop: '0.75rem' }}>
+
+                      <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                         </div>
                       </div>
                     </div>
-                  ) : (isOwnerAdmin && !capNotice ? (
-                    <div className="harness">
-                      <div className="harness-tabs">
-                        {HARNESS_ORDER.filter(h => h !== 'chatgpt').map((h) => (
-                          <button key={h} type="button"
-                            className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
-                            aria-pressed={wizardHarness === h}
-                            onClick={() => { setWizardHarness(h); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError(''); if (h !== 'codex') setWizardCodexDesktop(false) }}>
-                            {HARNESS_NAMES[h]}
-                          </button>
-                        ))}
-                      </div>
-                      {['pi', 'cursor', 'claude', 'codex'].includes(wizardHarness) && wizardConnectHarness !== 'codexDesktop' && (
-                        /* #2710: pills are pure display-mode toggles. They used to
-                           also `setKeyModalOpen(true)` when no key existed — a no-op
-                           during the wizard (the modal renders only in the dashboard
-                           tree) that queued the stray post-exit pop-up. The no-key
-                           state now renders wizardNoKeyAffordance directly below, so
-                           the mint affordance is always visible and the modal is never
-                           queued. */
-                        <div className="key-pills">
-                          <button type="button" className={wizardKeyMode === 'included' ? 'active' : ''}
-                            aria-pressed={wizardKeyMode === 'included'}
-                            onClick={() => setWizardKeyMode('included')}>
-                            <strong>Key included in prompt</strong>
-                            <span>Simple — easiest</span>
-                          </button>
-                          <button type="button" className={wizardKeyMode === 'separate' ? 'active' : ''}
-                            aria-pressed={wizardKeyMode === 'separate'}
-                            onClick={() => setWizardKeyMode('separate')}>
-                            <strong>Key separate from prompt</strong>
-                            <span>Manual — more secure</span>
-                          </button>
+                  ) : (!capNotice ? (
+                    (() => {
+                      // #2912: two-level chooser — the FAMILY (Claude/Codex/
+                      // Cursor/Pi) then the SURFACE (Claude Code/Desktop/Web;
+                      // Codex CLI/Desktop). `wizardHarness` stays the leaf id
+                      // every payload lookup already keys on.
+                      const activeFamily = harnessFamilyOf(wizardHarness) || HARNESS_FAMILIES[0]
+                      const surfaces = activeFamily.surfaces
+                      const displayName = harnessDisplayName(wizardConnectHarness)
+                      const agentDriven2Step = ['pi', 'cursor']
+                      // 'codexDesktop' is the Codex GUI leaf — same payload shape
+                      // as the CLI (a config block instead of an agent prompt).
+                      const agentDriven1Step = ['claude', 'codex', 'codexDesktop']
+                      // #2710: pills are pure display-mode toggles — they must
+                      // never queue the shared create modal (it renders only in
+                      // the dashboard tree, so it would pop after exit).
+                      const keyModeToggleable = ['pi', 'cursor', 'claude', 'codex'].includes(wizardHarness)
+                      /* #2756 (code-review P1): the Codex DESKTOP surface embeds
+                         the key in the config block by construction, so there is
+                         no separate key row there. Manual harnesses (no mode
+                         choice) always show the key — it is what the user pastes
+                         into the connector. */
+                      const keyRowVisible = harnessKey && wizardConnectHarness !== 'codexDesktop'
+                        && (wizardKeyMode === 'separate' || !keyModeToggleable)
+                      const keyDisplayRow = keyRowVisible ? (
+                        <div className="key-row">
+                          <p className="dim small">Your API key:</p>
+                          <code style={wizardKeyCodeStyle}>{harnessKey}</code>
+                          <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
                         </div>
-                      )}
-                      {(() => {
-                        const agentDriven2Step = ['pi', 'cursor']
-                        const agentDriven1Step = ['claude', 'codex']
-                        /* #2756 (code-review P1): the key-mode pills are hidden on the
-                           Codex DESKTOP surface — UNIVERSAL_COMMAND.codexDesktop embeds
-                           the key in the config block by construction, so honoring
-                           "separate" there is impossible and showing the separate key
-                           row beside an embedded-key block would contradict the mode.
-                           The pills render again on the CLI surface. */
-                        const keyDisplayRow = harnessKey && wizardKeyMode === 'separate' && wizardConnectHarness !== 'codexDesktop' ? (
-                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
-                            <p className="dim small">Your API key (shown once):</p>
-                            <code style={wizardKeyCodeStyle}>{harnessKey}</code>
-                            <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
-                          </div>
-                        ) : null
+                      ) : null
 
-                        if (agentDriven2Step.includes(wizardHarness)) return (
-                          <div>
-                            <p style={wizardStepLabelStyle}>1. Give this prompt to your agent to connect Tortoise</p>
-                            {harnessKey ? (
-                              <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy step 1 prompt" />
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                            {keyDisplayRow}
-                            {/* #2827 (round-2 P1): step 2 is ONE unit. The label
-                                used to render in the no-key state above an empty
-                                slot, leaving an orphaned "2." with nothing under
-                                it — both label and card are now gated together. */}
-                            {harnessKey && (
-                              <>
-                                <p style={{ ...wizardStepLabelStyle, margin: '0.9rem 0 0.5rem' }}>2. Restart {HARNESS_NAMES[wizardHarness]}, then give it this prompt to verify and file your first memory</p>
-                                <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy step 2 prompt" />
-                              </>
-                            )}
-                          </div>
+                      // ── step 2 body: the harness's own connect procedure ──
+                      // #3218: procedures with TWO user-visible parts render the
+                      // second one as its own numbered WizardBlock (step 3)
+                      // instead of a bare caption buried inside step 2 — the
+                      // step count has to match the parts the user actually
+                      // performs (key → set up → restart/verify, or
+                      // key → connector → prompt).
+                      // #2865: a key-less OAuth leaf (the two Claude connectors)
+                      // renders its recipe with no credential step at all — and
+                      // keeps #3218's numbered prompt block on top of it.
+                      const wizardKeyless = HARNESS_OAUTH.includes(wizardHarness)
+                      let procedureTitle = `Set up ${displayName}`
+                      let procedure = null
+                      let procedureTailTitle = ''
+                      let procedureTail = null
+                      if (agentDriven2Step.includes(wizardHarness)) {
+                        procedure = (
+                          <>
+                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 1, harnessKey, wizardKeyMode)} label="Copy the connect prompt" />
+                          </>
                         )
-                        if (agentDriven1Step.includes(wizardHarness)) return (
-                          <div>
-                            {/* #2827 (round-2 P1): the Codex Desktop surface
-                                shows a ~/.codex/config.toml block the HUMAN
-                                pastes, so the agent-prompt caption lied there.
-                                Single-step tabs also drop the leading "1." —
-                                they are not truncated procedures. */}
-                            <p style={wizardStepLabelStyle}>{wizardConnectHarness === 'codexDesktop' ? 'Add this block to your Codex config file' : 'Give this prompt to your agent to connect Tortoise'}</p>
-                            {/* #2756: Codex has two surfaces — CLI (shell) and Desktop
-                                (GUI app with no terminal; it does not inherit shell
-                                exports). The #2328 toggle was dropped by the #2698
-                                rewrite while its state and the wizardConnectHarness
-                                derivation were kept (the plan's tab handler still resets
-                                it), so a Codex Desktop user was handed the CLI
-                                command. Restored and wired through below. */}
-                            {wizardHarness === 'codex' && (
-                              <div role="group" aria-label="Codex setup surface"
-                                style={{ marginBottom: '0.75rem', display: 'inline-flex', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflow: 'hidden' }}>
-                                <button type="button" className="ghost small" aria-pressed={!wizardCodexDesktop}
-                                  style={wizardCodexDesktop ? {} : { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' }}
-                                  onClick={() => { setWizardCodexDesktop(false); setWizardCopied('') }}>CLI (terminal)</button>
-                                <button type="button" className="ghost small" aria-pressed={wizardCodexDesktop}
-                                  style={wizardCodexDesktop ? { background: 'rgba(6,182,212,0.12)', color: 'var(--accent,#06b6d4)' } : {}}
-                                  onClick={() => { setWizardCodexDesktop(true); setWizardCopied('') }}>Desktop (no terminal)</button>
+                        procedureTailTitle = `Restart ${HARNESS_NAMES[wizardHarness]} and verify`
+                        procedureTail = (
+                          <>
+                            <p className="wizard-caption">Then give it this prompt to verify the connection and file your first memory:</p>
+                            <WizardPromptCard text={wizardPromptText(wizardHarness, 2, harnessKey, wizardKeyMode)} label="Copy the verify prompt" />
+                          </>
+                        )
+                      } else if (agentDriven1Step.includes(wizardHarness)) {
+                        // #2827: the Codex Desktop surface configures a TOML file
+                        // the HUMAN pastes, so the "give your agent this prompt"
+                        // caption would lie there.
+                        procedure = wizardConnectHarness === 'codexDesktop' ? (
+                          <>
+                            <p className="wizard-caption">{HARNESS_INTRO.codexDesktop}</p>
+                            <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop} />
+                          </>
+                        ) : (
+                          <>
+                            <p className="wizard-caption">Give this prompt to your agent to connect Tortoise:</p>
+                            <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
+                          </>
+                        )
+                      } else if (wizardKeyless) {
+                        // #2865: Claude Desktop/Web connect over OAuth. This
+                        // replaces the old key recipe entirely — the old branch
+                        // rendered `Authorization: Bearer <key>` plus a beta
+                        // caveat that diverted users whose account lacks
+                        // Anthropic's "Request headers" field, which is exactly
+                        // the population #2865 exists for. The shape is lifted
+                        // from the shipped chatgpt recipe (server URL → sign-in →
+                        // Authorize → org chooser) and needs NO key, so it
+                        // renders for members as well as owner/admins.
+                        const web = wizardHarness === 'claude-web'
+                        procedureTitle = `Add the ${displayName} connector`
+                        procedure = (
+                          <>
+                            <p className="wizard-caption">
+                              Open {web ? 'claude.ai' : 'Claude Desktop'} → Settings → Connectors → <em>Add custom connector</em>, then enter:
+                            </p>
+                            <ul className="wizard-fields">
+                              <li>Name: <strong>Tortoise</strong></li>
+                              <li>Server URL: <code>{CANONICAL_MCP_URL}</code>
+                                <button type="button" className="ghost small" style={{ marginLeft: '0.5rem' }}
+                                  onClick={() => navigator.clipboard?.writeText(CANONICAL_MCP_URL)}>Copy URL</button>
+                              </li>
+                            </ul>
+                            <p className="wizard-caption">
+                              Leave <strong>Request headers</strong> empty — no API key is needed.
+                            </p>
+                            <ol className="wizard-fields">
+                              <li>{web ? 'Claude' : 'Claude Desktop'} opens Tortoise&apos;s sign-in page on the first connection — sign in.</li>
+                              <li>Click <strong>Authorize</strong>.</li>
+                              <li>Pick the Organization you&apos;re onboarding.</li>
+                            </ol>
+                            <p className="wizard-note">
+                              The <code>tortoise_*</code> tools appear once you authorize. The authorization belongs to your Tortoise account — remove the Tortoise connector any time in {web ? 'claude.ai' : 'Claude Desktop'} → Settings → Connectors.{web ? ' Claude connects from Anthropic\u2019s cloud — nothing is stored on a local machine.' : ''}
+                            </p>
+                          </>
+                        )
+                        // #3218: pasting the prompt is the SECOND half of the
+                        // manual connector flow (the connector exists first) —
+                        // it gets its own numbered block, on BOTH manual
+                        // surfaces (Claude Web and Claude Desktop).
+                        procedureTailTitle = 'Give Claude the Tortoise workflows'
+                        procedureTail = (
+                          <>
+                            <p className="wizard-caption">Start a new chat and paste this prompt:</p>
+                            {/* #2865: composed KEY-LESS — a connector surface
+                                never carries a key. */}
+                            <WizardPromptCard text={wizardWorkflowsText('', 'included')} label="Copy the workflows prompt" />
+                          </>
+                        )
+                      }
+
+                      return (
+                        <div className="harness-connect">
+                          <div className="harness-chooser">
+                            <p className="wizard-field-label">Your harness</p>
+                            <div className="harness-families" role="group" aria-label="Harness">
+                              {HARNESS_FAMILIES.map((f) => (
+                                <button key={f.id} type="button"
+                                  className={'harness-family' + (activeFamily.id === f.id ? ' active' : '')}
+                                  aria-pressed={activeFamily.id === f.id}
+                                  onClick={() => { setWizardHarness((cur) => preferredSurface(f, cur)); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError('') }}>
+                                  {f.name}
+                                </button>
+                              ))}
+                            </div>
+                            {surfaces.length > 0 && (
+                              <div className="harness-surfaces" role="group" aria-label={`${activeFamily.name} surface`}>
+                                {surfaces.map((s) => (
+                                  <button key={s.id} type="button"
+                                    className={'harness-surface' + (wizardHarness === s.id ? ' active' : '')}
+                                    aria-pressed={wizardHarness === s.id}
+                                    onClick={() => { setWizardHarness(s.id); setWizardCopied(''); setWizardConnectError(''); setWizardDurableError('') }}>
+                                    <span className="harness-surface-name">{s.name}</span>
+                                    {s.hint && <span className="harness-surface-hint">{s.hint}</span>}
+                                  </button>
+                                ))}
                               </div>
                             )}
-                            {harnessKey ? (
-                              wizardConnectHarness === 'codexDesktop' ? (
+                          </div>
+
+                          {/* #2912: KEY FIRST. The step used to caption "Give
+                              this prompt…" and then, with no key, replace the
+                              prompt with the mint CTA — telling the user to
+                              copy something that did not exist and putting the
+                              key instructions after the promise. The block
+                              order now matches the real dependency:
+                              key → procedure.
+                              PR-gate UX: the Codex Desktop surface is a SINGLE
+                              step (its key lives inside the config block), and
+                              an empty "1 Get your API key" would promise an
+                              action that does not exist there; with no key there
+                              is no procedure block to show either. */}
+                          {wizardKeyless ? (
+                            /* #2865: a key-less OAuth leaf renders NO "1 Get
+                               your API key" block — its recipe needs no
+                               credential, so that step would promise an action
+                               that does not exist on these surfaces. #3218's
+                               numbered prompt block stays: the leaf's step
+                               count still matches its two parts
+                               (connector → prompt). */
+                            <>
+                              <WizardBlock step={1} title={procedureTitle}>
+                                {procedure}
+                              </WizardBlock>
+                              {procedureTail && (
+                                <WizardBlock step={2} title={procedureTailTitle}>
+                                  {procedureTail}
+                                </WizardBlock>
+                              )}
+                            </>
+                          ) : wizardConnectHarness === 'codexDesktop' ? (
+                            <WizardBlock step={1} title={harnessKey ? procedureTitle : 'Get your API key'}>
+                              {harnessKey ? (
                                 <>
-                                  <p className="dim small" style={{ margin: '0 0 0.5rem', lineHeight: 1.6 }}>{HARNESS_INTRO.codexDesktop}</p>
-                                  <WizardPromptCard text={UNIVERSAL_COMMAND.codexDesktop(harnessKey)} label={HARNESS_COPY_LABEL.codexDesktop} />
+                                  {/* PR-gate follow-up: the merged block dropped
+                                      the only unrecoverable-key cue this surface
+                                      had — nothing else on it says the key is
+                                      unrecoverable after you leave. */}
+                                  <p className="wizard-caption">Your API key is inside the block below — keep it private.</p>
+                                  {/* #3218: same visibility + recovery statement
+                                      as the shared key row (this surface has no
+                                      row — its key IS the config block). */}
+                                  <p className="wizard-note">{KEY_VISIBILITY_NOTE}</p>
+                                  {procedure}
                                 </>
-                              ) : (
-                                <WizardPromptCard text={wizardPromptText(wizardConnectHarness, 1, harnessKey, wizardKeyMode)} label="Copy prompt" />
-                              )
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                            {keyDisplayRow}
+                              ) : wizardKeyAffordance}
+                            </WizardBlock>
+                          ) : (
+                            <>
+                              <WizardBlock step={1} title="Get your API key">
+                                {harnessKey ? (
+                                  <>
+                                    <p className="wizard-caption">
+                                      This key connects {displayName} to {shownOrgName || 'your Organization'}. Keep it private.
+                                    </p>
+                                    {keyModeToggleable && (
+                                      <div className="key-pills">
+                                        <button type="button" className={wizardKeyMode === 'included' ? 'active' : ''}
+                                          aria-pressed={wizardKeyMode === 'included'}
+                                          onClick={() => setWizardKeyMode('included')}>
+                                          <strong>Key included in prompt</strong>
+                                          <span>Simple — easiest</span>
+                                        </button>
+                                        <button type="button" className={wizardKeyMode === 'separate' ? 'active' : ''}
+                                          aria-pressed={wizardKeyMode === 'separate'}
+                                          onClick={() => setWizardKeyMode('separate')}>
+                                          <strong>Key separate from prompt</strong>
+                                          <span>Manual — more secure</span>
+                                        </button>
+                                      </div>
+                                    )}
+                                    {keyDisplayRow}
+                                    {/* #3218: the visibility window + the
+                                        recovery path — the parenthetical that
+                                        used to sit beside the token ("shown
+                                        once") both misstated the behavior and
+                                        was too long for the row. Rendered for
+                                        EVERY mode, not only the separate-key
+                                        row: in the default 'included' mode the
+                                        key rides inside the step-2 prompt card,
+                                        so a note gated on the row would leave
+                                        the commonest path with no cue at all
+                                        (review cycle 1, P1). */}
+                                    <p className="wizard-note">{KEY_VISIBILITY_NOTE}</p>
+                                  </>
+                                ) : (
+                                  /* #2865: only an owner/admin can mint
+                                     (POST /v1/team/keys is owner/admin-gated).
+                                     A member on a keyed leaf keeps the paste
+                                     escape they have today — never a mint CTA
+                                     that would 403. #3783: the same derivation
+                                     also routes an owner/admin who already has
+                                     a usable durable key to the existing-key
+                                     path instead of minting a second (which
+                                     spends the free tier's allowance). */
+                                  wizardKeyAffordance
+                                )}
+                              </WizardBlock>
+
+                              {harnessKey && (
+                                <>
+                                  <WizardBlock step={2} title={procedureTitle}>
+                                    {procedure}
+                                  </WizardBlock>
+                                  {/* #3218: the tail renders ONLY for the
+                                      procedures that really have a third part
+                                      (Pi/Cursor restart-and-verify; Claude
+                                      Desktop/Web hand Claude the workflows).
+                                      Claude Code / Codex / Codex Desktop stay
+                                      1–2 blocks — a numbered heading with
+                                      nothing under it is the #2912 defect. */}
+                                  {procedureTail && (
+                                    <WizardBlock step={3} title={procedureTailTitle}>
+                                      {procedureTail}
+                                    </WizardBlock>
+                                  )}
+                                </>
+                              )}
+                            </>
+                          )}
+
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
+                              <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
+                                {wizardConnectBusy ? 'Checking…' : (wizardKeyless
+                                  ? (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've connected it — Continue →")
+                                  : (['pi','cursor'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →"))}
+                              </button>
+                              <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
+                            </div>
                           </div>
-                        )
-                        if (wizardHarness === 'claude-desktop') return (
-                          <div>
-                            {/* #2710 (code-review P1): this branch used to render the
-                                snippet with a `YOUR_API_KEY` placeholder plus a Copy
-                                button that wrote an EMPTY string to the clipboard — the
-                                same no-key dead-end as the agent-driven blocks, for one
-                                of six tabs. The affordance is the no-key branch here
-                                too (round-2 review P2: the lead-in sentence and the
-                                trailing "this prompt" line are gated with the block
-                                they introduce, so the no-key state reads as one
-                                coherent ask). */}
-                            {harnessKey ? (
-                              <>
-                                <p style={wizardStepLabelStyle}>1. Connect Tortoise: Open Claude Desktop → Settings → Connectors → <em>Add custom connector</em>, then enter:</p>
-                                <ul className="dim small" style={{ lineHeight: 1.8, paddingLeft: '1.2rem', margin: '0 0 0.75rem' }}>
-                                  <li>Name: <strong>Tortoise</strong></li>
-                                  <li>Server URL: <code>https://api.premiselabs.co/mcp/</code></li>
-                                  <li>Request headers: <code style={wizardHeaderCodeStyle}>{'Authorization: Bearer ' + harnessKey}</code></li>
-                                </ul>
-                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
-                                  <p className="dim small" style={{ margin: 0 }}>Your API key (shown once):</p>
-                                  <code style={wizardKeyCodeStyle}>{harnessKey}</code>
-                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
-                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(`Authorization: Bearer ${harnessKey}`)}>Copy header value</button>
-                                </div>
-                                <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.6 }}>
-                                  Note: <strong>Request headers</strong> is still rolling out in Anthropic&apos;s beta and may not appear for every account. If Request headers isn&apos;t available on your account yet, use the Claude Code or Cursor tab instead — those paths work on every account.
-                                </p>
-                                <p style={wizardStepLabelStyle}>2. Start a new chat and paste this prompt — it tells Claude how to use Tortoise in this chat:</p>
-                                <WizardPromptCard text={wizardWorkflowsText(harnessKey, wizardKeyMode)} label="Copy prompt" />
-                              </>
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                          </div>
-                        )
-                        if (wizardHarness === 'claude-web') return (
-                          <div>
-                            {/* #2710 (code-review P1): same no-key dead-end as
-                                claude-desktop — the header line used a
-                                `YOUR_API_KEY` placeholder and the Copy button wrote
-                                an empty string. The affordance is the no-key branch;
-                                the lead-in sentence is gated with the block it
-                                introduces (round-2 review P2). */}
-                            {harnessKey ? (
-                              <>
-                                <p style={wizardStepLabelStyle}>1. Connect Tortoise: Open claude.ai → Settings → Connectors → <em>Add custom connector</em>, then enter:</p>
-                                <ul className="dim small" style={{ lineHeight: 1.8, paddingLeft: '1.2rem', margin: '0 0 0.75rem' }}>
-                                  <li>Name: <strong>Tortoise</strong></li>
-                                  <li>Server URL: <code>https://api.premiselabs.co/mcp/</code></li>
-                                  <li>Request headers (advanced): <code style={wizardHeaderCodeStyle}>{'Authorization: Bearer ' + harnessKey}</code></li>
-                                </ul>
-                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.75rem' }}>
-                                  <p className="dim small" style={{ margin: 0 }}>Your API key (shown once):</p>
-                                  <code style={wizardKeyCodeStyle}>{harnessKey}</code>
-                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(harnessKey)}>Copy</button>
-                                  <button type="button" className="btn-primary small" onClick={() => navigator.clipboard?.writeText(`Authorization: Bearer ${harnessKey}`)}>Copy header value</button>
-                                </div>
-                                <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.6 }}>
-                                  Note: <strong>Request headers</strong> is still rolling out in Anthropic&apos;s beta and may not appear for every account. If Request headers isn&apos;t available on your account yet, use the Claude Code or Cursor tab instead — those paths work on every account. Claude connects from Anthropic&apos;s cloud, so your key is stored by Anthropic — keep the chat and the key private.
-                                </p>
-                                <p style={wizardStepLabelStyle}>2. Start a new chat and paste this prompt — it teaches Claude the Tortoise workflows:</p>
-                                <WizardPromptCard text={wizardWorkflowsText(harnessKey, wizardKeyMode)} label="Copy prompt" />
-                              </>
-                            ) : (
-                              wizardNoKeyAffordance
-                            )}
-                          </div>
-                        )
-                        return null
-                      })()}
-                      <div className="wizard-nav" style={{ marginTop: '1rem' }}>
-                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
-                        <div className="wizard-nav-actions">
-                          {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
-                          <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                            {wizardConnectBusy ? 'Saving…' : (['pi','cursor','claude-desktop','claude-web'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →")}
-                          </button>
-                          <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
                         </div>
-                      </div>
-                    </div>
+                      )
+                    })()
                   ) : (
                     <div className="harness">
+                      {/* #2865: the ONLY remaining body here is the mint-cap
+                          remedy (capNotice is set only by the Keys-tab
+                          create/rotate 402s, both owner/admin-only — the
+                          wizard mint's 402 sets wizardDurableError, not
+                          this), so the pre-#2865 member arm —
+                          "Only owners and admins can create API keys…" above a
+                          paste row — is gone: members now reach the chooser
+                          above and get the paste escape on a keyed leaf. */}
                       <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                        {!isOwnerAdmin
-                          ? 'Only owners and admins can create API keys in this dashboard. Paste an API key below from your agent or an owner/admin.'
-                          : capNotice}
+                        {capNotice}
                       </p>
                       {wizardPasteRow}
                       <div className="wizard-nav" style={{ marginTop: '0.75rem' }}>
@@ -6541,7 +7381,7 @@ function claimIntentInFlight() {
                         <div className="wizard-nav-actions">
                           {wizardDurableKey && (
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                              {wizardConnectBusy ? 'Saving…' : 'Continue to dashboard'}
+                              {wizardConnectBusy ? 'Checking…' : 'Continue to dashboard'}
                             </button>
                           )}
                           <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
@@ -6552,17 +7392,157 @@ function claimIntentInFlight() {
 
                   {wizardStep === 3 && (
                     <div className="done">
-                      {effectivelyPaused ? (
-                        <p className="dim">You're set up, but your agent isn't connected yet — nothing was installed on the connect step. Open Settings → Setup guide to follow what happens next — the setup command there creates a fresh key when you do.</p>
+                      {isBuildFork ? (
+                        // #3428/#2937 (lane B3, review cycle 2 P1-2): the build
+                        // fork never offers a harness — its step 2 is the SDK
+                        // call (`POST /v1/points`). That write files a point but
+                        // files NO onboarding step: no REST route reaches
+                        // `_maybe_onboarding_auto_complete()` (only the MCP tools
+                        // do — verified 2026-09-16, and reported to the lane
+                        // orchestrator as its own defect). The self-fork body is
+                        // therefore false twice here: "hasn't filed anything" is
+                        // false the moment the user runs the wizard's own curl,
+                        // and the harness name is the untouched 'claude' default
+                        // on a branch that never offered Claude. This body names
+                        // the SDK call the user actually has, asserts nothing
+                        // about filing, and ties the live update to the agent
+                        // tools that CAN file the step.
+                        serverHarnessConnected ? (
+                          <>
+                            <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
+                            <p style={{ fontWeight: 600, margin: '0 0 0.5rem' }}>Connected</p>
+                            <p className="dim" style={{ lineHeight: 1.6 }}>
+                              You can query your project's graph, use it to make decisions, and embed it in your workflows.
+                            </p>
+                            <p className="dim" style={{ fontWeight: 600, margin: '0.9rem 0 0' }}>
+                              Keep calling the SDK from your app.
+                            </p>
+                          </>
+                        ) : (
+                          // review cycle 6 (item 1): the stall notice below renders
+                          // on THIS screen too — it keys on the poll, not on the
+                          // fork — so the build arm's standing promise must soften
+                          // exactly as the self arm's does. Two sentences on one
+                          // screen cannot both be true (cycle 5 keyed only the
+                          // self arm).
+                          <p className="dim" style={{ lineHeight: 1.6 }}>
+                            Your project's graph is set up, but we can't tell it's connected yet — Tortoise
+                            marks a project connected when a write arrives through its agent tools, not
+                            through the <code>/v1/points</code> REST call. Connect an agent to Tortoise
+                            and {wizardConnectPollStalled
+                              ? "we'll show it as soon as we can check"
+                              : 'it shows up here on its own'}.
+                          </p>
+                        )
                       ) : (
-                        <p className="dim">Your agent is connected — it files your decisions and findings to this Organization's graph from here on. Open Settings → Setup guide to follow what happens next.</p>
+                        <>
+                          {serverHarnessConnected ? (
+                            // #3428/#2937 (lane B3, charter 5703012625): the
+                            // owner-approved success screen (2026-09-14). Reachable
+                            // ONLY on a server-observed `harness-connected` — the
+                            // deleted human writer can no longer produce it from a
+                            // click, and neither can a keyless one (#2937).
+                            <>
+                              <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
+                              <p style={{ fontWeight: 600, margin: '0 0 0.5rem' }}>Connected</p>
+                              <p className="dim" style={{ lineHeight: 1.6 }}>
+                                {/* Lane B3, option (a) / review cycle 3 P1-A,
+                                    corrected in cycle 4 (item 8), and #3782: the
+                                    sentence printed follows the server's
+                                    OBSERVATION, not the capability flag.
+                                    'present' prints only on an observed
+                                    per-harness RECEIPT; 'future' only once an
+                                    install PROBE was observed (the install is
+                                    confirmed server-side, capture has not fired);
+                                    'install-pending' — recording on, nothing
+                                    observed for this harness — prints the SAME
+                                    "not installed yet" string Settings renders
+                                    for the identical state, instead of promising
+                                    a capture the server never saw (#3782: live,
+                                    probe AND receipt were null while Settings
+                                    said "not installed yet"). The capability
+                                    flag still decides whether ANY sentence may
+                                    print ('none' for no install path, recording
+                                    off, or NO HARNESS PICKER offered). A true
+                                    flag with no installed seam (#3575, lane B1)
+                                    is still a separate defect this screen cannot
+                                    detect. */}
+                                {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
+                                {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
+                                {doneCaptureClaim === 'install-pending' && `Session capture is ${HARNESS_CAPTURE_STATUS_LABEL['install-pending']}. `}
+                                You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
+                              </p>
+                              {/* The redirect is PROSE, not a control: we cannot open
+                                  the user's terminal, so a "Go to your agent"
+                                  button would be a control that does nothing. */}
+                              <p className="dim" style={{ fontWeight: 600, margin: '0.9rem 0 0' }}>
+                                Head back to {doneHarnessName}.
+                              </p>
+                            </>
+                          ) : (
+                            // Not observed — either the user skipped the step, or
+                            // they finished it and their agent has not filed its
+                            // first memory yet. ONE body, true in BOTH cases: it
+                            // asserts nothing about the install and names the two
+                            // real next actions. Deliberately does not claim the
+                            // connection is absent forever, nor that it succeeded.
+                            // review cycle 2 (P2-4): the remedy is the derived
+                            // `doneSetupRemedy`, so this sentence never promises a
+                            // fresh key on a key-less leaf or to a non-minting role.
+                            // review cycle 3 (P1-A): the name is the derived
+                            // `doneHarnessName` (neutral when no picker was offered).
+                            // review cycle 5 (item 6): the body may only state what
+                            // was OBSERVED. "hasn't filed anything to this
+                            // Organization's graph yet" was false for a user whose
+                            // CAPTURED SESSION had already written Session nodes and
+                            // extracted points (that path files only the
+                            // `capture-disclosed` checkpoint, never
+                            // `harness-connected`), while Settings → Captured
+                            // sessions listed the session. State the missing
+                            // observation instead of the graph fact.
+                            // review cycle 5 (item 7): the live-update promise is
+                            // keyed on the stall flag — while the poll cannot check,
+                            // the body must not keep asserting the very promise the
+                            // stall notice below withdraws.
+                            <p className="dim" style={{ lineHeight: 1.6 }}>
+                              We haven't seen your agent's first write through its Tortoise tools yet — so we can't
+                              tell it's connected. If you haven't finished the setup, {doneSetupRemedy}. If you have,
+                              head back to {doneHarnessName} and ask it to file a memory; {wizardConnectPollStalled
+                                ? "we'll show it as soon as we can check"
+                                : 'it shows up here the moment it does'}.
+                            </p>
+                          )}
+                        </>
+                      )}
+                      {/* #3428/#2937 (lane B3, review cycle 3 P2-8): the poll
+                          backs off after consecutive failures; past its threshold
+                          the live-update promise can no longer be kept, so say so
+                          quietly instead of leaving the screen asserting it. */}
+                      {!serverHarnessConnected && (
+                        <p className="dim small" role="status" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                          {wizardConnectPollStalled
+                            ? "We haven't been able to check for your connection for a moment — we'll keep trying. If this persists, reload the page."
+                            : ''}
+                        </p>
                       )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                       </div>
                       <div className="wizard-actions">
-                        <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
-                        <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
+                        {/* #3428 (lane B3): the only real control is deliberately
+                            demoted — nothing on this screen IS the next step
+                            (the next step happens in another application), so
+                            the dashboard exit is a quiet text link: no fill, no
+                            border, and no arrow (an arrow means "advance", and
+                            this link is explicitly not the advance path).
+                            Owner-approved 2026-09-14. Lane B3 review cycle 1
+                            P2-2: the approved screen has exactly ONE control
+                            beneath the redirect (the design decision names this
+                            dashboard link as "the only real control"), so the
+                            docs link is dropped HERE to match it — it remains
+                            on the header/legacy surfaces. Spec fidelity, not a
+                            deletion. */}
+                        <button type="button" className="done-link" onClick={wizardComplete}>Go to dashboard</button>
                       </div>
                     </div>
                   )}
@@ -6825,7 +7805,7 @@ function claimIntentInFlight() {
                                   {p.tier === 'free' ? (
                                     // #1856: same as the header "Open my dashboard →" button — this
                                     // first-timer exit (completeLogin never runs) must still fire
-                                    // finishWelcomeLoads() or currentTeamId/teams/apiKey stay unset
+                                    // finishWelcomeLoads() or currentOrgId/teams/apiKey stay unset
                                     // (account blob "No team", Members "Loading…" forever). The plans
                                     // block only renders with welcomeKey set, so it reads the revealed
                                     // key. Fire-and-forget: finishWelcomeLoads never rejects.
@@ -6933,12 +7913,12 @@ function claimIntentInFlight() {
             }}
             onKeyDown={(e) => { if (e.key === 'Escape') setAccountMenuOpen(false) }}
             aria-expanded={accountMenuOpen}
-            aria-label={`Account menu — ${currentTeamName || 'No organization'}`}
+            aria-label={`Account menu — ${currentOrgName || 'No organization'}`}
           >
             <span className="account-avatar" aria-hidden="true">
-              {(currentTeamName || 'O').charAt(0).toUpperCase()}
+              {(currentOrgName || 'O').charAt(0).toUpperCase()}
             </span>
-            <span className="account-name">{currentTeamName || 'No organization'}</span>
+            <span className="account-name">{currentOrgName || 'No organization'}</span>
             <span className="account-chevron" aria-hidden="true">▾</span>
           </button>
           <ReauthDialog
@@ -7034,13 +8014,13 @@ function claimIntentInFlight() {
                 <span className="account-avatar" aria-hidden="true">
                   {(sessionMetaRef.current?.display_name ||
                     (sessionMetaRef.current?.email ? sessionMetaRef.current.email.split('@')[0] : '') ||
-                    currentTeamName || 'O').charAt(0).toUpperCase()}
+                    currentOrgName || 'O').charAt(0).toUpperCase()}
                 </span>
                 <div className="account-identity-text">
                   <span className="account-identity-name">
                     {sessionMetaRef.current?.display_name ||
                       (sessionMetaRef.current?.email ? sessionMetaRef.current.email.split('@')[0] : '') ||
-                      currentTeamName || 'No organization'}
+                      currentOrgName || 'No organization'}
                   </span>
                   {sessionMetaRef.current?.email && (
                     <span className="account-identity-email">{sessionMetaRef.current.email}</span>
@@ -7063,9 +8043,9 @@ function claimIntentInFlight() {
                 {/* #2494: org context row — static; tier badge lives here. */}
                 <div className="account-menu-org">
                   <span className="account-avatar small" aria-hidden="true">
-                    {(currentTeamName || 'O').charAt(0).toUpperCase()}
+                    {(currentOrgName || 'O').charAt(0).toUpperCase()}
                   </span>
-                  <span className="account-org-name">{currentTeamName || 'No organization'}</span>
+                  <span className="account-org-name">{currentOrgName || 'No organization'}</span>
                   {team?.tier && <span className="tier-badge">{team.tier}</span>}
                 </div>
                 {teams.length > 1 && (
@@ -7073,19 +8053,19 @@ function claimIntentInFlight() {
                     <div className="account-menu-label">Switch organization</div>
                     {teams.map((t) => (
                       <button
-                        key={t.team_id}
-                        className={t.team_id === currentTeamId ? 'active' : ''}
-                        aria-current={t.team_id === currentTeamId ? 'true' : undefined}
+                        key={t.org_id}
+                        className={t.org_id === currentOrgId ? 'active' : ''}
+                        aria-current={t.org_id === currentOrgId ? 'true' : undefined}
                         onClick={() => {
-                          if (t.team_id !== currentTeamId) switchTeam(t.team_id)
+                          if (t.org_id !== currentOrgId) switchTeam(t.org_id)
                           setAccountMenuOpen(false)
                         }}
                       >
                         <span className="account-avatar small" aria-hidden="true">
-                          {(t.team_name || 'T').charAt(0).toUpperCase()}
+                          {(t.org_name || 'T').charAt(0).toUpperCase()}
                         </span>
-                        <span>{t.team_name}</span>
-                        {t.team_id === currentTeamId && <span className="account-check" aria-hidden="true">✓</span>}
+                        <span>{t.org_name}</span>
+                        {t.org_id === currentOrgId && <span className="account-check" aria-hidden="true">✓</span>}
                       </button>
                     ))}
                   </>
@@ -7103,7 +8083,7 @@ function claimIntentInFlight() {
                     {pendingInvites.map((inv) => (
                       <div key={inv.invitation_id} className="account-invite">
                         <div className="account-invite-text">
-                          <span className="account-invite-team">{inv.team_name}</span>
+                          <span className="account-invite-team">{inv.org_name}</span>
                           <span className="dim small">{inv.inviter_email ? `by ${inv.inviter_email}` : ''}</span>
                           {inv.error && <span className="account-invite-error" role="alert">{inv.error}</span>}
                         </div>
@@ -7185,8 +8165,8 @@ function claimIntentInFlight() {
                     aria-label="Organization name"
                     placeholder="Organization name"
                     autoFocus
-                    value={createTeamName}
-                    onChange={(e) => setCreateTeamName(e.target.value)}
+                    value={createOrgName}
+                    onChange={(e) => setCreateOrgName(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !createTeamBusy) startNewOrgCheckout() }}
                   />
                   <div className="row" style={{ marginTop: 8 }} role="group" aria-label="Plan">
@@ -7219,8 +8199,8 @@ function claimIntentInFlight() {
                     aria-label="Organization name"
                     placeholder="Organization name"
                     autoFocus
-                    value={createTeamName}
-                    onChange={(e) => setCreateTeamName(e.target.value)}
+                    value={createOrgName}
+                    onChange={(e) => setCreateOrgName(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !createTeamBusy) handleCreateTeam() }}
                   />
                   {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
@@ -7350,7 +8330,7 @@ function claimIntentInFlight() {
                 wizard end): members can't create keys, and a fresh owner
                 create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {snippetKey || durableConnect.source === 'rows-durable'
+              {snippetKey || connectGate.mode === 'existing'
                 ? (isOwnerAdmin
                     ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
                     : "You're in — finish the setup below to connect your agent (paste the key an owner or admin shared with you).")
@@ -7359,7 +8339,7 @@ function claimIntentInFlight() {
                     : "Your Organization is live — finish the setup below to connect your agent. You'll need an API key: ask an owner or admin to share one, then paste it on the connect step.")}
             </p>
             <div className="empty-actions">
-              <button className="btn-primary" onClick={() => { connectedOnceRef.current = false; setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
+              <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
               {!snippetKey && (
@@ -7409,7 +8389,7 @@ function claimIntentInFlight() {
               // one click away for owners (their only first-party surface).
               <p className="dim">
                 {isOwnerAdmin
-                  ? (durableConnect.source === 'rows-durable'
+                  ? (connectGate.mode === 'existing'
                       ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
                       : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
                   : "Your Organization is live — connect your agent below. You'll need an API key to paste: ask an owner or admin to share one."}
@@ -7426,9 +8406,25 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
+          // #3832 (D5): connected-and-genuinely-empty. The copy is the owner's
+          // APPROVED string, built verbatim from `d5-copy-v2.md` (③) — do not
+          // reword. Its two owner-named actions are HELD, not shipped:
+          //   [Tortoise Decide] — no in-product destination exists (decide is
+          //     an agent/CLI skill; the owner is choosing its target).
+          //   [Integrations]  — the LIVE wizard has NO integrations step
+          //     (WIZARD_STEPS is org-create → fork → connect → done); the
+          //     'Memory sources' step survives only in the ARCHIVED legacy
+          //     wizard (LEGACY_WIZARD_ARCHIVED = false). So the affordance
+          //     cannot be confirmed to land on a wizard integrations step and
+          //     the button is held too. The pre-existing action below is left
+          //     untouched so the state keeps a live destination.
           <section className="overview empty-state">
-            <h2>Welcome to your Tortoise graph</h2>
-            <p className="dim">Connect your agent so it remembers why, not just what — the decisions and findings it saves land here as memories.</p>
+            <h2>No memories yet</h2>
+            <p className="dim">
+              Your memory is connected — there's nothing in it yet. There are two ways to add
+              memory: <strong>Integrations</strong> (that's where the agent-session recorder
+              lives), or <strong>Tortoise Decide</strong>.
+            </p>
             <div className="empty-actions">
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
@@ -7683,7 +8679,7 @@ function claimIntentInFlight() {
                         />
                       ) : (
                         <span className="key-name">
-                          {k.name ? k.name : <span className="dim">—</span>}
+                          {keyDisplayName(k) ? keyDisplayName(k) : <span className="dim">—</span>}
                           {!k.revoked_at && isOwnerAdmin && (
                             <button
                               className="ghost small key-rename"
@@ -7827,13 +8823,14 @@ function claimIntentInFlight() {
                 {graphsMeter(sortedGraphRows(graphs), team && team.max_graphs).label}
               </p>
             )}
+            <div className="graphs-table-wrap">
             <table>
-              <thead><tr><th>Name</th><th>Kind</th><th>Status</th><th>Keys</th><th><span className="sr-only">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Kind</th><th scope="col">Status</th><th scope="col">Keys</th><th scope="col">Last backup</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="5" className="dim">Loading graphs…</td></tr>}
-                {graphsStatus === 'denied' && <tr><td colSpan="5" className="dim">Graph list is only visible to members.</td></tr>}
-                {graphsStatus === 'error' && <tr><td colSpan="5" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
-                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="5" className="dim">No graphs yet — create your first one above.</td></tr>}
+                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="6" className="dim">Loading graphs…</td></tr>}
+                {graphsStatus === 'denied' && <tr><td colSpan="6" className="dim">Graph list is only visible to members.</td></tr>}
+                {graphsStatus === 'error' && <tr><td colSpan="6" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
+                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="6" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
                   <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
                     <td>
@@ -7898,6 +8895,7 @@ function claimIntentInFlight() {
                         g.key_count != null ? g.key_count : '—'
                       )}
                     </td>
+                    <GraphBackupCell g={g} summary={graphBackups} status={backupsStatus} />
                     <td className="graph-actions">
                       {canManageGraphKeys(g) && (
                         <button
@@ -7947,6 +8945,7 @@ function claimIntentInFlight() {
                 ))}
               </tbody>
             </table>
+            </div>
             {/* #2701: type-to-confirm delete modal. Open only for a
                 deletable (custom) row — the default graph's 🗑 is disabled.
                 The gate is the literal word 'delete' typed by hand
@@ -8298,18 +9297,18 @@ function claimIntentInFlight() {
         {tab === 'billing' && team && (
           <section className="billing">
             <div className="row">
-              <h2>Billing — {currentTeamName || 'this organization'}</h2>
+              <h2>Billing — {currentOrgName || 'this organization'}</h2>
               {/* #1876: per-tenant billing — in-section context selector
                   (reuses switchTeam; single-team users get the name only). */}
               {teams.length > 1 && (
                 <select
                   className="billing-team-select"
                   aria-label="Billing organization"
-                  value={currentTeamId || ''}
+                  value={currentOrgId || ''}
                   onChange={(e) => { switchTeam(e.target.value); setTab('billing') }}
                 >
                   {teams.map((t) => (
-                    <option key={t.team_id} value={t.team_id}>{t.team_name}</option>
+                    <option key={t.org_id} value={t.org_id}>{t.org_name}</option>
                   ))}
                 </select>
               )}
@@ -8415,6 +9414,29 @@ function claimIntentInFlight() {
 
               </main>
     </div>
+  )
+}
+
+// #2784: per-graph "last backup". Its own 30s ticker (the #1894 pattern)
+// keeps the relative label true on a long-lived session; never an App-scope
+// interval — App already declares `now`, and a second interval there would
+// re-render the whole dashboard every 30s. The label text comes only from
+// graphBackupCellState: this component never invents a state claim. The cell
+// carries its own aria-label because the state's full explanation lives in the
+// tooltip, which is unreachable for keyboard/AT users on a non-focusable cell.
+function GraphBackupCell({ g, summary, status }) {
+  const [now, setNow] = React.useState(Date.now())
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000)
+    return () => clearInterval(t)
+  }, [])
+  const state = graphBackupCellState(g, summary, status, now)
+  return (
+    <td className="graph-backup" title={state.title} aria-label={state.title}>
+      <span className={state.kind === 'ok' || state.kind === 'none' ? 'small' : 'dim small'}>
+        {state.label}
+      </span>
+    </td>
   )
 }
 
@@ -8705,8 +9727,18 @@ function MemorySources(props) {
             {HARNESS_ORDER.map((h) => {
               const st = status(h)
               const supported = !!HARNESS_CAPTURE_SUPPORT[h]
+              const isCurrent = wizardHarness && h === wizardHarness
+              // #2912 (review cycle 4 P2): a `wizardHarness === 'codexDesktop'`
+              // alias used to live here, aliasing the Codex Desktop surface onto
+              // the 'codex' row. It was unreachable: HARNESS_ORDER has no
+              // codexDesktop row, the Settings call site passes
+              // `wizardHarness: null` on purpose, and the only other call site is
+              // the LEGACY_WIZARD_ARCHIVED rollback block, which is fed solely by
+              // HARNESS_ORDER leaves. If a surface leaf ever reaches this row,
+              // wire the alias through a unit-tested helper instead of a
+              // source-grep tripwire.
               return (
-                <div key={h} className={`harness-status status-${st}${wizardHarness && h === wizardHarness ? ' current' : ''}`}>
+                <div key={h} className={`harness-status status-${st}${isCurrent ? ' current' : ''}`}>
                   <div className="harness-status-head">
                     <strong>{HARNESS_NAMES[h]}</strong>
                     {/* review P2-5: aria-live lives on the PILL (the state word

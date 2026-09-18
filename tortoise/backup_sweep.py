@@ -1,36 +1,36 @@
-"""Backup sweep — enumerate teams and back up each team's knowledge GRAPHS
+"""Backup sweep — enumerate orgs and back up each org's knowledge GRAPHS
 (default + custom, #2313).
 
 The sweep is the driver's core action. It is decoupled from the alert store:
 conditions that need an operator's attention (size-guard abort, data-loss
-candidate, P0-guard failure, team-universe shrink) are RETURNED as incidents;
+candidate, P0-guard failure, org-universe shrink) are RETURNED as incidents;
 the caller (the internal endpoint, Task 7) routes them to the alert store.
 
-Team enumeration is the seam for the #669 control-plane migration: the
+Org enumeration is the seam for the #669 control-plane migration: the
 source is an adapter exposing ``query()`` — the FalkorDB registry graph
 handle (``registry_control_plane``, pre-#669) or the Supabase control plane
 (``teams`` table, post-#669). The dialect is auto-detected; a CI fake
 (``tests.fake_control_plane.FakeControlPlane``) implements the same
 interface so the #596 suite runs with zero network. Fail-closed: an
-enumeration failure is NEVER classified as the chronic NO_TEAMS state.
+enumeration failure is NEVER classified as the chronic NO_ORGS state.
 
 Per-graph protection (all guards from the reviewed plan; each guard is
 per-GRAPH — state, dumps, and retention are graph-scoped, #2313):
 - Size guard: abort before dump if the graph exceeds the configured max nodes.
 - P0 guard: ``manifest.graph_name`` must equal the seam-derived graph name
-  (``team_{id}`` from the registry, ``teams.graph_name`` post-#669 —
+  (``org_{id}`` from the registry, ``teams.graph_name`` post-#669 —
   independent of the dump projection) AND ``node_count >= 1`` — a backup
   of the wrong/empty graph never stands; the just-uploaded objects are deleted.
 - Empty-content transition guard: DATA_LOSS_CANDIDATE fires only on a
-  transition (>0 → 0 nodes, or >50% drop vs the team's prior persisted count);
+  transition (>0 → 0 nodes, or >50% drop vs the org's prior persisted count);
   steady-0 is a signal, not an incident. On fire, state.json is NOT written.
 - Label-level drift guard (#661): per-label node-count checks with
   absolute-count-aware thresholds — a <50% wipe of a low-count label
   (e.g. Invitation) that passes the overall >50% guard still fires
   DATA_LOSS_CANDIDATE.
-- Enumeration-delta guard: a prior team count > 0 → 0 fires an incident (a
-  wiped enumeration source must not degrade silently to chronic NO_TEAMS).
-- Per-team serialization via the caller's lock factory.
+- Enumeration-delta guard: a prior org count > 0 → 0 fires an incident (a
+  wiped enumeration source must not degrade silently to chronic NO_ORGS).
+- Per-org serialization via the caller's lock factory.
 """
 
 from __future__ import annotations
@@ -45,30 +45,36 @@ from types import SimpleNamespace
 from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
-from .hosted_backup import _is_supabase_source, create_backup, mirror_backup, prune_backups
+from .hosted_backup import (
+    _is_supabase_source,
+    create_backup,
+    mirror_backup,
+    prune_backups,
+    source_dialect,
+)
 
-# #2562 (re-audit P3): the sweep/purge per-team acquisitions are TIMED too
+# #2562 (re-audit P3): the sweep/purge per-org acquisitions are TIMED too
 # — a stuck holder (a restore whose locked body wedged) must not block that
-# team's pass forever. Same horizon as the restore wait (#2470).
-_TEAM_LOCK_TIMEOUT_S = 300
+# org's pass forever. Same horizon as the restore wait (#2470).
+_ORG_LOCK_TIMEOUT_S = 300
 
 
-def _team_lock_ctx(lock_for: Callable[[str], Any] | None, team_id: str):
-    """#2562: acquire the per-team lock for a sweep/purge with a TIMEOUT.
-    Returns (ctx, acquired). A lock held past the horizon skips the team
+def _org_lock_ctx(lock_for: Callable[[str], Any] | None, org_id: str):
+    """#2562: acquire the per-org lock for a sweep/purge with a TIMEOUT.
+    Returns (ctx, acquired). A lock held past the horizon skips the org
     (the caller records an error and moves on — never wedges the pass); a
     timeout never leaves the lock held. lock_for may also return a
     contextmanager (legacy seam) — used as-is, untimed."""
     if lock_for is None:
         return nullcontext(), True
-    lock = lock_for(team_id)
+    lock = lock_for(org_id)
     # Duck-type: threading.Lock is a factory function (not a type) on
     # Python < 3.13, so isinstance is unusable — a lock-shaped object
     # (acquire/release) gets the timed path; anything else (a
     # contextmanager seam) is used as-is, untimed.
     if not (hasattr(lock, "acquire") and hasattr(lock, "release")):
         return lock, True
-    got = lock.acquire(timeout=_TEAM_LOCK_TIMEOUT_S)
+    got = lock.acquire(timeout=_ORG_LOCK_TIMEOUT_S)
     if not got:
         return nullcontext(), False
 
@@ -120,7 +126,7 @@ def _enum_delta_suppressed() -> bool:
     """#669 flip window (P3-4, #771): suppression flag for ENUM_DELTA.
 
     At the flip the FalkorDB control-plane registry is deleted while Supabase
-    (still empty at zero data) becomes the enumeration source — the team
+    (still empty at zero data) becomes the enumeration source — the org
     universe legitimately drops to 0, and the enumeration-delta guard would
     otherwise file a spurious incident ("wiped enumeration source"). The
     operator sets ``TORTOISE_SUPPRESS_ENUM_DELTA=1`` for the flip window
@@ -177,22 +183,60 @@ def _check_per_label_drift(
     return breaches or None
 
 
-def enumerate_teams(source) -> list[str]:
-    """Seam: list Team ids from the control-plane source (#669).
+def _refuse_wrong_dialect(source) -> None:
+    """#2823 fail-closed: the enumeration source must match the CONFIGURED lane.
+
+    A Supabase control-plane deployment handed a registry-dialect source is a
+    MISCONFIGURATION, not an empty deployment: post-#669 the registry graph is
+    deleted, so the Cypher branch returns 0 rows forever and the caller reports
+    the chronic NO_ORGS state this seam's docstring promises to prevent. That
+    is exactly the production defect behind #2823 (sweep: `no_teams`, 0 orgs
+    backed up for 31 days) and #2340 (acl-reconcile: `{"teams": 0}` no-op).
+    Raise instead so the caller surfaces `enum_failed` — which the driver does
+    NOT self-heal as a healthy run.
+
+    Deliberately ONE-DIRECTIONAL: a Supabase-dialect source under registry mode
+    (selfhost under test, CI fakes) is legitimate and never refused. A genuinely
+    empty read FROM THE CORRECT LANE stays ``[]`` (confirmed-empty, per the
+    docstring): a fresh deployment has no orgs, and the regression signal for a
+    deployment that HAD orgs is the ENUM_DELTA guard on the >0 → 0 transition
+    (#2821 filed correctly from production on 2026-09-10).
+    """
+    if _is_supabase_source(source):
+        return
+    try:
+        from .supabase_control import is_supabase_enabled
+    except Exception:  # import guard — never fail the read on it
+        return
+    if is_supabase_enabled():
+        raise RuntimeError(
+            "control-plane dialect mismatch: the Supabase lane is configured "
+            "but the enumeration source is the FalkorDB registry handle "
+            "(deleted/empty post-#669) — resolve the source via the shared "
+            "dialect-aware seam"
+        )
+
+
+def enumerate_orgs(source) -> list[str]:
+    """Seam: list Org ids from the control-plane source (#669).
 
     ``source`` is an adapter exposing ``query()``: the FalkorDB registry
     graph handle (pre-#669) or the Supabase control plane (post-#669) — the
     single swap point for the migration, dialect auto-detected. Supabase
     mode selects ``graph_name`` alongside ``id``: the sweep reads the graph
-    name from ``teams`` (the column is the source of truth — SDK team
-    creation names graphs ``team_{name}``, not ``team_{id}``; see #770).
+    name from ``teams`` (the column is the source of truth — SDK org
+    creation names graphs ``org_{name}``, not ``org_{id}``; see #770).
 
     Confirmed-empty returns []; a query failure raises RuntimeError
-    (fail-closed — never chronic NO_TEAMS).
+    (fail-closed — never chronic NO_ORGS). #2823 extends that contract to the
+    source itself: a registry-dialect source under a configured Supabase lane
+    is refused loudly (``_refuse_wrong_dialect``) instead of being
+    indistinguishable from an empty deployment.
     """
     try:
+        _refuse_wrong_dialect(source)
         if _is_supabase_source(source):
-            rows = source.query("teams", select=["id", "graph_name"])
+            rows = source.query("organizations", select=["id", "graph_name"])
             return [str(r["id"]) for r in rows if r.get("id")]
         rows = source.query("MATCH (t:Team) RETURN t.id").result_set
         return [str(r[0]) for r in rows if r and r[0]]
@@ -200,20 +244,21 @@ def enumerate_teams(source) -> list[str]:
         raise RuntimeError(f"team enumeration failed: {e}") from e
 
 
-def enumerate_eligible_teams(source) -> list[str]:
-    """List Pro teams eligible for hosted backup (#655).
+def enumerate_eligible_orgs(source) -> list[str]:
+    """List Pro orgs eligible for hosted backup (#655).
 
     Eligibility: tier != 'free' AND backup_enabled = true — registry Cypher
     or Supabase ``teams`` filters, dialect auto-detected (same seam as
-    ``enumerate_teams``).
+    ``enumerate_orgs``).
 
     Fail-closed: a query failure raises RuntimeError (same contract as
-    ``enumerate_teams``).
+    ``enumerate_orgs``, including the #2823 dialect-mismatch refusal).
     """
     try:
+        _refuse_wrong_dialect(source)
         if _is_supabase_source(source):
             rows = source.query(
-                "teams",
+                "organizations",
                 select=["id", "graph_name"],
                 filters=[("tier", "neq", "free"), ("backup_enabled", "eq", True)],
             )
@@ -226,17 +271,17 @@ def enumerate_eligible_teams(source) -> list[str]:
         raise RuntimeError(f"eligible-team enumeration failed: {e}") from e
 
 
-def team_graph_name(source, team_id: str) -> str:
-    """Graph name for a team, read from the seam source (#669).
+def org_graph_name(source, org_id: str) -> str:
+    """Graph name for an org, read from the seam source (#669).
 
-    Registry mode: deterministic ``team_{id}`` (the registry stores no graph
-    name — provision writes ``team_{team_id}``, #770). Supabase mode:
-    ``teams.graph_name`` is the source of truth (SDK team creation names
-    graphs ``team_{name}`` — a sweep that assumed ``team_{id}`` would back up
-    a nonexistent graph for SDK-created teams). Since #1903 the Supabase-lane
-    provisions (create_team, onboarding sub-team) mint ``team_{team_id}``, so
-    ``teams.graph_name`` now resolves ``team_{team_id}`` for dashboard teams
-    and ``team_{name}`` only for registry-lane (sdk.team_create) teams (#2023).
+    Registry mode: deterministic ``org_{id}`` (the registry stores no graph
+    name — provision writes ``org_{org_id}``, #770). Supabase mode:
+    ``teams.graph_name`` is the source of truth (SDK org creation names
+    graphs ``org_{name}`` — a sweep that assumed ``org_{id}`` would back up
+    a nonexistent graph for SDK-created orgs). Since #1903 the Supabase-lane
+    provisions (create_org, onboarding sub-org) mint ``org_{org_id}``, so
+    ``teams.graph_name`` now resolves ``org_{org_id}`` for dashboard orgs
+    and ``org_{name}`` only for registry-lane (sdk.org_create) orgs (#2023).
 
     Fail-closed: a query error or a vanished/missing ``graph_name`` row
     raises RuntimeError — the sweep never guesses a graph name.
@@ -244,25 +289,25 @@ def team_graph_name(source, team_id: str) -> str:
     if _is_supabase_source(source):
         try:
             rows = source.query(
-                "teams", select=["graph_name"], filters=[("id", "eq", team_id)]
+                "organizations", select=["graph_name"], filters=[("id", "eq", org_id)]
             )
         except Exception as e:
             raise RuntimeError(
-                f"team graph-name lookup failed for {team_id}: {e}"
+                f"team graph-name lookup failed for {org_id}: {e}"
             ) from e
         if not rows:
-            raise RuntimeError(f"team {team_id} vanished from the control plane")
+            raise RuntimeError(f"team {org_id} vanished from the control plane")
         graph_name = rows[0].get("graph_name")
         if not graph_name:
             raise RuntimeError(
-                f"team {team_id} has no graph_name in the control plane"
+                f"team {org_id} has no graph_name in the control plane"
             )
         return str(graph_name)
-    return f"team_{team_id}"
+    return f"org_{org_id}"
 
 
-def enumerate_team_graphs(source, team_id: str) -> list[dict[str, Any]]:
-    """Per-team ACTIVE graph list — the per-graph sweep seam (#2313).
+def enumerate_org_graphs(source, org_id: str) -> list[dict[str, Any]]:
+    """Per-org ACTIVE graph list — the per-graph sweep seam (#2313).
 
     Returns registry-shaped rows ``[{graph_id, kind, namespace}]``
     default-first (the DEFAULT graph always first, then customs by id) so
@@ -277,16 +322,16 @@ def enumerate_team_graphs(source, team_id: str) -> list[dict[str, Any]]:
     keys are stable across lanes (Q4 owner decision).
 
     Fail-closed: a query failure raises RuntimeError — the sweep never
-    guesses a graph list (same contract as ``enumerate_teams``).
+    guesses a graph list (same contract as ``enumerate_orgs``).
     """
     if _is_supabase_source(source):
         try:
             from .supabase_control import graph_metadata
 
-            rows = graph_metadata(source, team_id)
+            rows = graph_metadata(source, org_id)
         except Exception as e:
             raise RuntimeError(
-                f"team-graph enumeration failed for {team_id}: {e}") from e
+                f"team-graph enumeration failed for {org_id}: {e}") from e
         out = [
             {"graph_id": r["graph_id"], "kind": r["kind"],
              "namespace": r["namespace"]}
@@ -299,12 +344,12 @@ def enumerate_team_graphs(source, team_id: str) -> list[dict[str, Any]]:
         return out
     try:
         rows = source.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN properties(g)",
-            params={"tid": team_id},
+            "MATCH (g:Graph {org_id:$tid}) RETURN properties(g)",
+            params={"tid": org_id},
         ).result_set
     except Exception as e:
         raise RuntimeError(
-            f"team-graph enumeration failed for {team_id}: {e}") from e
+            f"team-graph enumeration failed for {org_id}: {e}") from e
     out = []
     for (props,) in rows:
         if (props.get("status") or "active") == "deleted":
@@ -338,16 +383,16 @@ def read_ops_state(storage) -> dict[str, Any]:
     return _read_json(storage, OPS_STATE_KEY)
 
 
-def read_team_state(storage, team_id: str) -> dict[str, Any]:
-    return _read_json(storage, f"{_TEAM_STATE_PREFIX}{team_id}/state.json")
+def read_org_state(storage, org_id: str) -> dict[str, Any]:
+    return _read_json(storage, f"{_TEAM_STATE_PREFIX}{org_id}/state.json")
 
 
 # ── #2370: legacy flat classification index ────────────────────────────────
-# Pre-#2313 team-level ("flat") archives (backups/{team}/{ts}_{rnd}/…) carry
+# Pre-#2313 org-level ("flat") archives (backups/{org}/{ts}_{rnd}/…) carry
 # their graph in the manifest graph_name but no graph_id key segment. The
-# sweep classifies the flat pool ONCE per run (it already lists the team)
+# sweep classifies the flat pool ONCE per run (it already lists the org)
 # and persists {backup_id: {graph_name, graph_id}} under
-# ops/legacy-flat-index/{team}.json — flat manifest KEYS are immutable
+# ops/legacy-flat-index/{org}.json — flat manifest KEYS are immutable
 # (prune only deletes, nothing rewrites an existing manifest), so a written
 # classification never goes stale while the key exists. Consumers:
 #   • the watcher's per-poll freshness reads ONE index object instead of
@@ -370,20 +415,20 @@ _PURGE_FLAT_GHOSTS_PREFIX = "ops/purge-flat-ghosts/"
 _PURGE_FLAT_GHOSTS_MAX_AGE_DAYS = 14
 
 
-def _legacy_flat_index_key(team_id: str) -> str:
-    return f"{_LEGACY_FLAT_INDEX_PREFIX}{team_id}.json"
+def _legacy_flat_index_key(org_id: str) -> str:
+    return f"{_LEGACY_FLAT_INDEX_PREFIX}{org_id}.json"
 
 
-def _purge_flat_ghosts_key(team_id: str) -> str:
-    return f"{_PURGE_FLAT_GHOSTS_PREFIX}{team_id}.json"
+def _purge_flat_ghosts_key(org_id: str) -> str:
+    return f"{_PURGE_FLAT_GHOSTS_PREFIX}{org_id}.json"
 
 
-def read_purge_flat_ghosts(storage, team_id: str) -> dict[str, Any]:
-    """#2466: purge-erased flat bids of a team ({full_bid: {erased_at}})."""
-    return _read_json(storage, _purge_flat_ghosts_key(team_id))
+def read_purge_flat_ghosts(storage, org_id: str) -> dict[str, Any]:
+    """#2466: purge-erased flat bids of an org ({full_bid: {erased_at}})."""
+    return _read_json(storage, _purge_flat_ghosts_key(org_id))
 
 
-def _record_purged_flat_bids(storage, team_id: str, bids: list[str],
+def _record_purged_flat_bids(storage, org_id: str, bids: list[str],
                              erased_at: str) -> None:
     """#2466: record purge-erased flat bids so the sweep's next index
     rewrite drops any stale reclassification of them. Best-effort: a failure
@@ -391,12 +436,12 @@ def _record_purged_flat_bids(storage, team_id: str, bids: list[str],
     row is stamped regardless)."""
     if not bids:
         return
-    ghosts = read_purge_flat_ghosts(storage, team_id)
+    ghosts = read_purge_flat_ghosts(storage, org_id)
     ghosts.update({str(b): {"erased_at": erased_at} for b in bids})
     try:
-        _write_json(storage, _purge_flat_ghosts_key(team_id), ghosts)
+        _write_json(storage, _purge_flat_ghosts_key(org_id), ghosts)
     except Exception as e:
-        logger.warning("purge ghost record failed for %s: %s", team_id, e)
+        logger.warning("purge ghost record failed for %s: %s", org_id, e)
 
 
 def _filter_flat_index_ghosts(flats: dict[str, Any], ghosts: dict[str, Any],
@@ -409,20 +454,20 @@ def _filter_flat_index_ghosts(flats: dict[str, Any], ghosts: dict[str, Any],
     return out
 
 
-def read_legacy_flat_index(storage, team_id: str) -> dict[str, Any]:
-    return _read_json(storage, _legacy_flat_index_key(team_id))
+def read_legacy_flat_index(storage, org_id: str) -> dict[str, Any]:
+    return _read_json(storage, _legacy_flat_index_key(org_id))
 
 
-def _write_flat_index_filtered(storage, team_id: str, flats: dict[str, Any],
+def _write_flat_index_filtered(storage, org_id: str, flats: dict[str, Any],
                                *, now: datetime | None = None) -> None:
     """#2466: write the legacy flat index with purge-ghost reconciliation —
     the sweep's write path. A purge that erased flat objects (possibly while
     this sweep listed them) recorded the bids in the ghost list; a stale
     reclassification must not resurrect index entries for deleted objects.
     Ghosts older than the horizon are pruned on the same write."""
-    ghosts = read_purge_flat_ghosts(storage, team_id)
+    ghosts = read_purge_flat_ghosts(storage, org_id)
     if not ghosts:
-        _write_json(storage, _legacy_flat_index_key(team_id), flats)
+        _write_json(storage, _legacy_flat_index_key(org_id), flats)
         return
     now = now or datetime.now(timezone.utc)  # noqa: UP017
     cutoff = (now - timedelta(days=_PURGE_FLAT_GHOSTS_MAX_AGE_DAYS))
@@ -431,12 +476,12 @@ def _write_flat_index_filtered(storage, team_id: str, flats: dict[str, Any],
         bid: meta for bid, meta in ghosts.items()
         if _within_ghost_horizon(meta, cutoff)
     }
-    _write_json(storage, _legacy_flat_index_key(team_id), out)
+    _write_json(storage, _legacy_flat_index_key(org_id), out)
     if remaining != ghosts:
         try:
-            _write_json(storage, _purge_flat_ghosts_key(team_id), remaining)
+            _write_json(storage, _purge_flat_ghosts_key(org_id), remaining)
         except Exception as e:
-            logger.warning("purge ghost prune failed for %s: %s", team_id, e)
+            logger.warning("purge ghost prune failed for %s: %s", org_id, e)
 
 
 def _within_ghost_horizon(meta: Any, cutoff: datetime) -> bool:
@@ -451,11 +496,11 @@ def _within_ghost_horizon(meta: Any, cutoff: datetime) -> bool:
     return ts > cutoff
 
 
-def _classify_flat_pool(storage, team_id: str,
+def _classify_flat_pool(storage, org_id: str,
                         rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """#2370: read the team's legacy FLAT manifests and classify each by its
+    """#2370: read the org's legacy FLAT manifests and classify each by its
     manifest graph_name against the ACTIVE graph rows (namespace → graph_id).
-    Only flat keys (backups/{team}/{key}/manifest.json — 4 segments) are
+    Only flat keys (backups/{org}/{key}/manifest.json — 4 segments) are
     indexed; nested (default + custom) manifests never appear here. Keys whose
     manifest read fails are skipped (retried next run; a classification is
     never guessed). Returns {listing-derived backup_id: {graph_name,
@@ -468,7 +513,7 @@ def _classify_flat_pool(storage, team_id: str,
     }
     out: dict[str, Any] = {}
     try:
-        for k in storage.list(f"backups/{team_id}/"):
+        for k in storage.list(f"backups/{org_id}/"):
             parts = k.split("/")
             if len(parts) != 4 or not k.endswith("/manifest.json"):
                 continue
@@ -479,7 +524,7 @@ def _classify_flat_pool(storage, team_id: str,
             if not isinstance(m, dict):
                 continue
             name = str(m.get("graph_name") or "")
-            # #2414: key from the LISTING (backups/{team}/{key}/…) — the
+            # #2414: key from the LISTING (backups/{org}/{key}/…) — the
             # manifest's backup_id is untrusted (a forged/stale manifest must
             # never redirect the index or the drain's delete to another
             # backup's objects).
@@ -490,29 +535,29 @@ def _classify_flat_pool(storage, team_id: str,
                 break
     except Exception as e:
         logger.warning("legacy flat classification failed for %s: %s",
-                       team_id, e)
+                       org_id, e)
     return out
 
 
-def _graph_state_key(team_id: str, graph_id: str) -> str:
-    return f"{_TEAM_STATE_PREFIX}{team_id}/graphs/{graph_id}/state.json"
+def _graph_state_key(org_id: str, graph_id: str) -> str:
+    return f"{_TEAM_STATE_PREFIX}{org_id}/graphs/{graph_id}/state.json"
 
 
-def read_graph_state(storage, team_id: str, graph_id: str) -> dict[str, Any]:
+def read_graph_state(storage, org_id: str, graph_id: str) -> dict[str, Any]:
     """Per-graph sweep state (#2313). For the DEFAULT graph, an absent
-    per-graph file falls back to the legacy team-level state file (the
+    per-graph file falls back to the legacy org-level state file (the
     pre-#2313 bridge — first per-graph run inherits the transition-guard
-    baseline; the sweep mirrors team-state for the default graph every run,
-    so the fallback only ever fires for teams whose sweep never wrote a
+    baseline; the sweep mirrors org-state for the default graph every run,
+    so the fallback only ever fires for orgs whose sweep never wrote a
     graph file before). Custom graphs have no legacy file — empty dict.
     """
-    state = _read_json(storage, _graph_state_key(team_id, graph_id))
+    state = _read_json(storage, _graph_state_key(org_id, graph_id))
     if state or graph_id != "default":
         return state
-    return _read_json(storage, f"{_TEAM_STATE_PREFIX}{team_id}/state.json")
+    return _read_json(storage, f"{_TEAM_STATE_PREFIX}{org_id}/state.json")
 
 
-def _delete_uploaded(storage, team_id: str, backup_id: str) -> None:
+def _delete_uploaded(storage, org_id: str, backup_id: str) -> None:
     """Best-effort removal of a just-uploaded (guard-rejected) backup."""
     for suffix in ("dump.enc", "manifest.json"):
         try:
@@ -521,17 +566,17 @@ def _delete_uploaded(storage, team_id: str, backup_id: str) -> None:
             logger.warning("cleanup of %s/%s failed: %s", backup_id, suffix, e)
 
 
-def _sweep_graph_list(source, team_id: str) -> list[dict[str, Any]]:
-    """Per-team ACTIVE sweep target list — default graph always first (#2313).
+def _sweep_graph_list(source, org_id: str) -> list[dict[str, Any]]:
+    """Per-org ACTIVE sweep target list — default graph always first (#2313).
 
     The default graph is synthesized from the authoritative graph-name seam
-    (``team_graph_name`` — registry ``team_{id}`` / Supabase
+    (``org_graph_name`` — registry ``org_{id}`` / Supabase
     ``teams.graph_name``), NOT from a kind='default' Graph row: pre-#2083
-    teams have no Graph nodes at all, and for registry-lane SDK teams the
+    orgs have no Graph nodes at all, and for registry-lane SDK orgs the
     seam is the name the sweep has always dumped (behavior-preserving; see
-    #770/#2023). Custom graphs come from ``enumerate_team_graphs``; the row
+    #770/#2023). Custom graphs come from ``enumerate_org_graphs``; the row
     ``namespace`` is the FalkorDB graph to select/dump (customs are
-    ``team_{tid}_{gid}``). kind='default' rows from the seam are skipped
+    ``org_{tid}_{gid}``). kind='default' rows from the seam are skipped
     (the default is synthesized — never doubled).
 
     Rows: ``[{graph_id, kind, namespace, graph_name}]`` where
@@ -539,8 +584,8 @@ def _sweep_graph_list(source, team_id: str) -> list[dict[str, Any]]:
     seam-resolved default name). Fail-closed: any seam failure raises
     RuntimeError (the caller's resolution-failure isolation).
     """
-    default_name = team_graph_name(source, team_id)  # raises → per-team resolution failure
-    rows = enumerate_team_graphs(source, team_id)  # raises RuntimeError fail-closed
+    default_name = org_graph_name(source, org_id)  # raises → per-org resolution failure
+    rows = enumerate_org_graphs(source, org_id)  # raises RuntimeError fail-closed
     graphs: list[dict[str, Any]] = [{
         "graph_id": "default", "kind": "default",
         "namespace": default_name, "graph_name": default_name,
@@ -573,13 +618,13 @@ def _backup_graph(
     registry,
     storage,
     config: BackupConfig,
-    team_id: str,
+    org_id: str,
     graph: dict[str, Any],
     now: datetime,
     incidents: list[dict[str, Any]],
     mirror=None,
 ) -> dict[str, Any]:
-    """Back up ONE graph (default or custom) of a team (#2313).
+    """Back up ONE graph (default or custom) of an org (#2313).
 
     ``graph``: a ``_sweep_graph_list`` row — graph_id (object-key segment;
     ``"default"`` literal for the default graph, Q4 owner decision),
@@ -587,17 +632,17 @@ def _backup_graph(
     P0, empty-transition, per-label drift) is per-graph: state, dumps, and
     retention are graph-scoped (Option A). For the default graph the
     artifacts/state are the graph-keyed equivalents of the pre-#2313
-    team-level layout (the legacy team file is mirrored each run for the
-    pre-#2313 consumers; legacy flat R2 objects drain via the team-level
-    legacy prune in ``_sweep_team``).
+    org-level layout (the legacy org file is mirrored each run for the
+    pre-#2313 consumers; legacy flat R2 objects drain via the org-level
+    legacy prune in ``_sweep_org``).
     """
     graph_id = graph["graph_id"]
     graph_name = graph.get("graph_name") or ""
     if graph.get("_invalid"):
-        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+        return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": "custom Graph row missing id/namespace — cannot dump"}
     if not graph_name:
-        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+        return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": "no graph name resolved for graph"}
 
     # ── Size guard: cheap COUNT before any dump (the #545 OOM blast radius). ──
@@ -605,22 +650,22 @@ def _backup_graph(
         g = db.select_graph(graph_name)
         count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
     except Exception as e:
-        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+        return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": str(e)}
     if count > config.size_guard_max_nodes:
         incidents.append(
             {
                 "kind": "SIZE_GUARD_ABORT",
-                "team_id": team_id,
+                "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {"count": count, "max": config.size_guard_max_nodes,
                            "graph_name": graph_name},
             }
         )
-        return {"status": "aborted_size_guard", "team_id": team_id,
+        return {"status": "aborted_size_guard", "org_id": org_id,
                 "graph_id": graph_id, "count": count}
 
-    prior = read_graph_state(storage, team_id, graph_id)
+    prior = read_graph_state(storage, org_id, graph_id)
     prev_node_count = int(prior.get("node_count") or 0)
     prev_label_counts: dict[str, int] = prior.get("label_counts") or {}
 
@@ -637,20 +682,20 @@ def _backup_graph(
     # ── Dump via the shipped pipeline (registry-stream-key, not GH-key, #661). ──
     proj = SimpleNamespace(g=g)
     if not config.registry_stream_key or len(config.registry_stream_key) != 32:
-        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+        return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": "REGISTRY_STREAM_KEY missing or invalid — fail-closed (#661)"}
     try:
         manifest = create_backup(
             proj, registry, storage,
-            team_id=team_id, graph_name=graph_name, graph_id=graph_id,
+            org_id=org_id, graph_name=graph_name, graph_id=graph_id,
             key=config.registry_stream_key,
         )
     except Exception as e:
-        return {"status": "error", "team_id": team_id, "graph_id": graph_id,
+        return {"status": "error", "org_id": org_id, "graph_id": graph_id,
                 "error": str(e)}
 
     # ── P0 guard: the manifest must name the seam-derived graph and carry data.
-    # The graph name comes from the sweep list seam (registry: team_{id};
+    # The graph name comes from the sweep list seam (registry: org_{id};
     # Supabase: teams.graph_name — #669), so this is a broken-pipeline tripwire
     # rather than an independent wrong-graph detector — the independent teeth
     # are the non-empty requirement plus the restore-time isolation checks
@@ -658,11 +703,11 @@ def _backup_graph(
     if manifest.get("graph_name") != graph_name:
         backup_id = manifest.get("backup_id", "")
         if backup_id:
-            _delete_uploaded(storage, team_id, backup_id)
+            _delete_uploaded(storage, org_id, backup_id)
         incidents.append(
             {
                 "kind": "P0_GUARD_FAIL",
-                "team_id": team_id,
+                "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {
                     "manifest_graph_name": manifest.get("graph_name"),
@@ -670,35 +715,35 @@ def _backup_graph(
                 },
             }
         )
-        return {"status": "p0_guard_failed", "team_id": team_id, "graph_id": graph_id}
+        return {"status": "p0_guard_failed", "org_id": org_id, "graph_id": graph_id}
 
     node_count = int(manifest["node_count"])
 
     # ── Empty-content transition guard (no state.json write on fire). ──
     if node_count == 0:
         # An empty archive is never a usable backup — remove it either way.
-        _delete_uploaded(storage, team_id, manifest.get("backup_id", ""))
+        _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
         if prev_node_count > 0:
             # A >0 → 0 transition is the #101-empty class: incident, not signal.
             incidents.append(
                 {
                     "kind": "DATA_LOSS_CANDIDATE",
-                    "team_id": team_id,
+                    "org_id": org_id,
                     "graph_id": graph_id,
                     "detail": {"previous": prev_node_count, "now": 0, "drop_pct": 100},
                 }
             )
-            return {"status": "data_loss_candidate", "team_id": team_id,
+            return {"status": "data_loss_candidate", "org_id": org_id,
                     "graph_id": graph_id, "node_count": 0}
-        # Steady-0 (chronic empty team) is a signal, never an incident.
-        return {"status": "empty_skipped", "team_id": team_id,
+        # Steady-0 (chronic empty org) is a signal, never an incident.
+        return {"status": "empty_skipped", "org_id": org_id,
                 "graph_id": graph_id, "node_count": 0}
     if prev_node_count > 0 and node_count < prev_node_count * 0.5:
-        _delete_uploaded(storage, team_id, manifest.get("backup_id", ""))
+        _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
         incidents.append(
             {
                 "kind": "DATA_LOSS_CANDIDATE",
-                "team_id": team_id,
+                "org_id": org_id,
                 "graph_id": graph_id,
                 "detail": {
                     "previous": prev_node_count,
@@ -707,7 +752,7 @@ def _backup_graph(
                 },
             }
         )
-        return {"status": "data_loss_candidate", "team_id": team_id,
+        return {"status": "data_loss_candidate", "org_id": org_id,
                 "graph_id": graph_id, "node_count": node_count}
 
     # ── Per-label drift guard (#661): fires when the overall >50% ratio is
@@ -717,11 +762,11 @@ def _backup_graph(
             prev_counts=prev_label_counts, current_counts=label_counts,
         )
         if breaches:
-            _delete_uploaded(storage, team_id, manifest.get("backup_id", ""))
+            _delete_uploaded(storage, org_id, manifest.get("backup_id", ""))
             incidents.append(
                 {
                     "kind": "DATA_LOSS_CANDIDATE",
-                    "team_id": team_id,
+                    "org_id": org_id,
                     "graph_id": graph_id,
                     "detail": {
                         "previous": prev_node_count,
@@ -733,7 +778,7 @@ def _backup_graph(
                     },
                 }
             )
-            return {"status": "data_loss_candidate", "team_id": team_id,
+            return {"status": "data_loss_candidate", "org_id": org_id,
                     "graph_id": graph_id, "node_count": node_count}
 
     # ── #2319 geo-mirror (env-guarded second-store copy): an ACCEPTED
@@ -749,8 +794,8 @@ def _backup_graph(
         except Exception as e:
             logger.exception(
                 "mirror of %s/%s failed (primary backup durable): %s",
-                team_id, graph_id, e)
-            return {"status": "error", "team_id": team_id,
+                org_id, graph_id, e)
+            return {"status": "error", "org_id": org_id,
                     "graph_id": graph_id,
                     "error": f"backup accepted but mirror failed: {e}"}
     else:
@@ -765,25 +810,25 @@ def _backup_graph(
         "label_counts": label_counts,
         # graph_name names the dumped FalkorDB graph — the watcher uses the
         # DEFAULT graph's state graph_name to disambiguate legacy flat
-        # manifests (custom-era on-demand dumps must not gate team freshness).
+        # manifests (custom-era on-demand dumps must not gate org freshness).
         "graph_name": graph_name,
         "graph_id": graph_id,
         "updated_at": now.isoformat(),
     }
     # ── Persist per-graph state (counts feed the transition guard next run).
-    # The default graph ALSO mirrors the legacy team-level file (the pre-#2313
+    # The default graph ALSO mirrors the legacy org-level file (the pre-#2313
     # consumers — watcher staleness, GET /backups summary, re-baseline —
     # read it until Tasks 4/5 move them per-graph; the mirror keeps them
     # truthful about the default graph in the same PR). ──
-    _write_json(storage, _graph_state_key(team_id, graph_id), state)
+    _write_json(storage, _graph_state_key(org_id, graph_id), state)
     if graph_id == "default":
-        _write_json(storage, f"{_TEAM_STATE_PREFIX}{team_id}/state.json", state)
+        _write_json(storage, f"{_TEAM_STATE_PREFIX}{org_id}/state.json", state)
 
     # ── Retention (per-graph pool; the default graph's nested pool plus the
-    # team-wide legacy flat drain in _sweep_team). ──
+    # org-wide legacy flat drain in _sweep_org). ──
     try:
         deleted = prune_backups(
-            storage, team_id,
+            storage, org_id,
             keep_daily=config.retention_daily,
             keep_weekly=config.retention_weekly,
             keep_hourly=config.retention_hourly,
@@ -795,7 +840,7 @@ def _backup_graph(
 
     return {
         "status": "backed_up",
-        "team_id": team_id,
+        "org_id": org_id,
         "graph_id": graph_id,
         "node_count": node_count,
         "pruned": len(deleted),
@@ -803,29 +848,29 @@ def _backup_graph(
     }
 
 
-def _sweep_team(
+def _sweep_org(
     *,
     db,
     registry,
     storage,
     config: BackupConfig,
-    team_id: str,
+    org_id: str,
     now: datetime,
     incidents: list[dict[str, Any]],
     mirror=None,
 ) -> dict[str, Any]:
-    """Sweep ONE team's active graphs (default + customs) (#2313).
+    """Sweep ONE org's active graphs (default + customs) (#2313).
 
-    Returns the team summary — the DEFAULT graph's result (back-compat: the
-    team-level result was the default graph pre-#2313) with a ``graphs``
-    sub-map of per-graph results, plus a per-team legacy-flat-pool drain
-    (pre-#2313 team-level R2 objects are only pruned team-wide — nested
-    per-graph keys are never touched by a team-wide prune).
+    Returns the org summary — the DEFAULT graph's result (back-compat: the
+    org-level result was the default graph pre-#2313) with a ``graphs``
+    sub-map of per-graph results, plus a per-org legacy-flat-pool drain
+    (pre-#2313 org-level R2 objects are only pruned org-wide — nested
+    per-graph keys are never touched by an org-wide prune).
     """
     try:
-        graphs = _sweep_graph_list(registry, team_id)
+        graphs = _sweep_graph_list(registry, org_id)
     except Exception as e:
-        return {"status": "error", "team_id": team_id, "error": str(e),
+        return {"status": "error", "org_id": org_id, "error": str(e),
                 "resolution": True}
 
     graph_results: dict[str, Any] = {}
@@ -834,21 +879,21 @@ def _sweep_team(
         try:
             gr = _backup_graph(
                 db=db, registry=registry, storage=storage, config=config,
-                team_id=team_id, graph=graph, now=now, incidents=incidents,
+                org_id=org_id, graph=graph, now=now, incidents=incidents,
                 mirror=mirror,
             )
         except Exception as e:  # per-graph isolation: one bad graph never
-            # aborts the team's other graphs (review P3-2)
-            logger.exception("sweep of %s/%s failed: %s", team_id,
+            # aborts the org's other graphs (review P3-2)
+            logger.exception("sweep of %s/%s failed: %s", org_id,
                              graph.get("graph_id"), e)
-            gr = {"status": "error", "team_id": team_id,
+            gr = {"status": "error", "org_id": org_id,
                   "graph_id": graph.get("graph_id"), "error": str(e)}
         graph_results[graph["graph_id"]] = gr
         if gr.get("status") == "backed_up":
             any_backed_up = True
 
-    # Legacy flat-pool drain: pre-#2313 team-level artifacts (and any
-    # straggler from pre-T5 on-demand endpoints) are pruned team-wide under
+    # Legacy flat-pool drain: pre-#2313 org-level artifacts (and any
+    # straggler from pre-T5 on-demand endpoints) are pruned org-wide under
     # the same retention policy. Nested per-graph keys are never touched
     # here. The drain runs ONLY when the DEFAULT graph backed up this pass —
     # the pre-#2313 prune that managed the flat pool ran exactly on a
@@ -860,18 +905,18 @@ def _sweep_team(
     # object the watcher/list read instead of per-manifest downloads / CP
     # reverse lookups). Classification itself lists + reads the flats once
     # per run — cheap at hourly cadence.
-    flats = _classify_flat_pool(storage, team_id, graphs)
+    flats = _classify_flat_pool(storage, org_id, graphs)
     if default_status == "backed_up":
         try:
             prune_backups(
-                storage, team_id,
+                storage, org_id,
                 keep_daily=config.retention_daily,
                 keep_weekly=config.retention_weekly,
                 keep_hourly=config.retention_hourly,
             )
         except Exception as e:
             logger.warning("legacy team-level prune failed for %s: %s",
-                           team_id, e)
+                           org_id, e)
     else:
         # #2370 indicator 4: while the default is failing (drain frozen to
         # protect its last-good archives), C5-era custom FLAT dumps are pure
@@ -890,34 +935,34 @@ def _sweep_team(
                     except Exception as e:
                         logger.warning(
                             "custom-era flat cleanup of %s/%s failed: %s",
-                            team_id, bid, e)
+                            org_id, bid, e)
                 flats.pop(bid, None)
     # #2466: the sweep's index write reconciles purge-erased flat bids (a
     # stale reclassification must never resurrect deleted objects) and prunes
     # aged ghost records.
     try:
-        _write_flat_index_filtered(storage, team_id, flats)
+        _write_flat_index_filtered(storage, org_id, flats)
     except Exception as e:
         logger.warning("legacy flat index write failed for %s: %s",
-                       team_id, e)
+                       org_id, e)
 
     default = graph_results.get("default", {})
-    team_res = dict(default)
-    team_res["team_id"] = team_id
-    team_res["graphs"] = graph_results
-    # Back-compat status: a team is backed_up iff its default graph was
+    org_res = dict(default)
+    org_res["org_id"] = org_id
+    org_res["graphs"] = graph_results
+    # Back-compat status: an org is backed_up iff its default graph was
     # (the pre-#2313 semantics); ``graphs`` carries per-graph detail.
-    team_res["status"] = (
+    org_res["status"] = (
         default.get("status") if default else ("backed_up" if any_backed_up else "error")
     )
-    return team_res
+    return org_res
 
 
 # ── #2317 scheduled-restore-drill archive selection ───────────────────────
 # The scheduled (monthly, unattended) drill restores the OLDEST eligible
 # archive into _drill_* scratch. Selection is a pure storage walk (no
 # control-plane query): only NESTED per-graph pools qualify
-# (backups/{team}/{graph}/{ts}_{rnd}/dump.enc — 5 key segments). Legacy
+# (backups/{org}/{graph}/{ts}_{rnd}/dump.enc — 5 key segments). Legacy
 # FLAT 4-segment artifacts are excluded: their key shape does not name a
 # graph, and the operator-invoked drill surface already covers the pre-#2313
 # shapes. The caller resolves each candidate through the ACTIVE-graph seam
@@ -926,9 +971,9 @@ def _sweep_team(
 
 
 def list_drill_candidates(storage, *, max_candidates: int = 8) -> list[dict[str, Any]]:
-    """Oldest-first eligible nested archives across all teams.
+    """Oldest-first eligible nested archives across all orgs.
 
-    Returns candidate rows ``[{team_id, graph_id, backup_key, created_at}]``
+    Returns candidate rows ``[{org_id, graph_id, backup_key, created_at}]``
     sorted by manifest ``created_at`` ascending (oldest first). Dumps with an
     unreadable/missing manifest are skipped (restore_backup manifest-verifies
     whatever is drilled anyway). Raises RuntimeError on a storage-list
@@ -941,10 +986,10 @@ def list_drill_candidates(storage, *, max_candidates: int = 8) -> list[dict[str,
     for key in storage.list("backups/"):
         if not key.endswith("/dump.enc"):
             continue
-        if len(key.split("/")) != 5:  # backups/{team}/{graph}/{ts}_{rnd}/dump.enc
+        if len(key.split("/")) != 5:  # backups/{org}/{graph}/{ts}_{rnd}/dump.enc
             continue  # legacy flat (4 segments) and any future shape
         try:
-            team_id, graph_id, _ = _parse_backup_key(key)
+            org_id, graph_id, _ = _parse_backup_key(key)
         except ValueError:
             continue
         if not graph_id:
@@ -958,7 +1003,7 @@ def list_drill_candidates(storage, *, max_candidates: int = 8) -> list[dict[str,
             continue
         rows.append(
             {
-                "team_id": team_id,
+                "org_id": org_id,
                 "graph_id": graph_id,
                 "backup_key": key,
                 "created_at": created_at,
@@ -976,11 +1021,11 @@ def list_drill_candidates(storage, *, max_candidates: int = 8) -> list[dict[str,
     return rows[:max_candidates]
 
 
-def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
+def resolve_active_graph(source, org_id: str, graph_id: str) -> dict[str, Any]:
     """Resolve a restore/re-baseline target graph to its ACTIVE sweep row.
 
     #2313 Task 5 tombstone guard: a restore target must be an ACTIVE graph
-    of the team. The sweep list (``_sweep_graph_list``) contains ONLY active
+    of the org. The sweep list (``_sweep_graph_list``) contains ONLY active
     graphs — deleted (tombstoned/quarantined, #2304) and unknown graphs are
     absent, so resolution failure refuses the op with a clear error instead of
     swapping an archive into a quarantined or unregistered namespace. The
@@ -990,13 +1035,13 @@ def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
     for deleted/unknown graphs (never RuntimeError — a MISSING graph is a
     client error, not a control-plane failure).
     """
-    for row in _sweep_graph_list(source, team_id):
+    for row in _sweep_graph_list(source, org_id):
         if row.get("_invalid"):
             continue
         if row["graph_id"] == graph_id:
             return row
     raise ValueError(
-        f"graph {graph_id!r} is not an active graph of team {team_id} "
+        f"graph {graph_id!r} is not an active graph of team {org_id} "
         "-- restore/re-baseline refused (deleted or unknown)"
     )
 
@@ -1009,41 +1054,60 @@ def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
 _OPS_STATE_LOCK = threading.Lock()
 
 
-def _noop_ops_state_write(storage, now: datetime) -> None:
+def _noop_ops_state_write(storage, now: datetime,
+                          *, source: str | None = None) -> None:
     """#2560: write the merge-preserving no-op roll-up AFTER re-reading the
     state under _OPS_STATE_LOCK — a no-op run whose start-of-run read
     predates a concurrent purge's ghost-drop would otherwise resurrect the
-    dropped keys. Serialized against the purge drop + real-run write."""
+    dropped keys. Serialized against the purge drop + real-run write.
+
+    ``source`` is THIS no-op run's resolved dialect (see _noop_ops_state): it
+    lands in ``last_run_source``, never in the preserved ``source``."""
     with _OPS_STATE_LOCK:
         ops_state = read_ops_state(storage)
-        _write_json(storage, OPS_STATE_KEY, _noop_ops_state(ops_state, now))
+        _write_json(storage, OPS_STATE_KEY,
+                    _noop_ops_state(ops_state, now, source=source))
 
 
-def _noop_ops_state(ops_state: Any, now: datetime) -> dict[str, Any]:
-    """#2412: a no-op run (0 eligible / 0 teams) must NOT erase the last real
+def _noop_ops_state(ops_state: Any, now: datetime,
+                    *, source: str | None = None) -> dict[str, Any]:
+    """#2412: a no-op run (0 eligible / 0 orgs) must NOT erase the last real
     run's roll-up — merge-preserve the #2372 sweep fields (last_sweep_at,
     graph_totals, graph_failures, graph_error_streaks) so /status last_sweep
     keeps showing the last REAL sweep and the cross-run error-streak
     bookkeeping survives no-op runs (the pre-#2412 code replaced the whole
     object, rendering last_sweep: None "sweep never ran" right after a
-    healthy run)."""
+    healthy run).
+
+    #2823 lineage: ``source`` is preserved with those OUTCOME fields because it
+    describes the run they came from — the block is surfaced verbatim as
+    /status last_sweep, so overwriting the dialect while keeping the previous
+    run's timestamps/totals would claim the wrong lane produced them. This
+    run's own dialect lands in the separate ``last_run_source`` field, so both
+    questions are answerable from one object: "which lane produced the totals
+    shown?" (``source``) and "which lane did the most recent run read?"
+    (``last_run_source`` — equal to ``source`` after a real sweep)."""
     prev = ops_state if isinstance(ops_state, dict) else {}
     out = {"last_team_count": 0, "updated_at": now.isoformat()}
     for key in ("last_sweep_at", "graph_totals", "graph_failures",
-                "graph_error_streaks"):
+                "graph_error_streaks", "source"):
         if key in prev:
             out[key] = prev[key]
+    if source is not None:
+        out["last_run_source"] = source
+    elif "last_run_source" in prev:
+        out["last_run_source"] = prev["last_run_source"]
     return out
 
 
-def _drop_purged_graphs_from_ops_state(storage, team_id: str,
+def _drop_purged_graphs_from_ops_state(storage, org_id: str,
                                        graph_ids: set[str],
                                        *, now: datetime | None = None) -> None:
     """#2471: remove erased graphs from the ops-state roll-up
     (graph_failures entries + graph_error_streaks keys keyed
-    "{team}:{gid}") so /status never references graphs the purge erased.
+    "{org}:{gid}") so /status never references graphs the purge erased.
     Merge-preserving for every other field (mirror of _noop_ops_state).
-    Best-effort under the purge's per-team lock; a racing real-run sweep
+    Best-effort under the purge's per-org lock; a racing real-run sweep
     converges on its own next pass (it only carries keys for graphs it
     attempted)."""
     if not graph_ids:
@@ -1056,15 +1120,15 @@ def _drop_purged_graphs_from_ops_state(storage, team_id: str,
             prev = read_ops_state(storage)
         except Exception as e:
             logger.warning("purge ops-state read failed for %s: %s",
-                           team_id, e)
+                           org_id, e)
             return
         if not isinstance(prev, dict):
             return
-        keys = {f"{team_id}:{gid}" for gid in graph_ids}
+        keys = {f"{org_id}:{gid}" for gid in graph_ids}
         failures = [
             f for f in (prev.get("graph_failures") or [])
             if not (isinstance(f, dict)
-                    and f.get("team_id") == team_id
+                    and f.get("org_id") == org_id
                     and str(f.get("graph_id") or "") in graph_ids)
         ]
         streaks = {
@@ -1080,7 +1144,7 @@ def _drop_purged_graphs_from_ops_state(storage, team_id: str,
             _write_json(storage, OPS_STATE_KEY, prev)
         except Exception as e:
             logger.warning("purge ops-state write failed for %s: %s",
-                           team_id, e)
+                           org_id, e)
 
 
 def run_backup_sweep(
@@ -1089,16 +1153,16 @@ def run_backup_sweep(
     registry,
     storage,
     config: BackupConfig,
-    team_ids: list[str] | None = None,
+    org_ids: list[str] | None = None,
     lock_for: Callable[[str], Any] | None = None,
     now: datetime | None = None,
     mirror=None,
 ) -> dict[str, Any]:
-    """Back up every team's knowledge graphs (default + custom, #2313).
+    """Back up every org's knowledge graphs (default + custom, #2313).
     Returns the run result.
 
-    ``lock_for`` is an optional per-team lock factory (the endpoint supplies
-    the asyncio-lock seam); the sweep serializes each team's dump under it.
+    ``lock_for`` is an optional per-org lock factory (the endpoint supplies
+    the asyncio-lock seam); the sweep serializes each org's dump under it.
 
     ``mirror`` (#2319): optional second-store BackupStorage. When provided,
     every ACCEPTED archive is mirrored (copy + sha256 read-back verify) right
@@ -1107,49 +1171,56 @@ def run_backup_sweep(
     the endpoint from BACKUP_MIRROR_ENABLED + R2_MIRROR_* env; None keeps the
     sweep byte-for-byte mirror-free.
 
-    When ``config.team_sweep_enabled`` is True, only Pro teams (tier != 'free'
-    AND backup_enabled) are enumerated (#655). A 0-eligible-teams result files
-    a deduplicated NO_ELIGIBLE_TEAMS incident — the chronic-no-op alarm.
+    When ``config.org_sweep_enabled`` is True, only Pro orgs (tier != 'free'
+    AND backup_enabled) are enumerated (#655). A 0-eligible-orgs result files
+    a deduplicated NO_ELIGIBLE_ORGS incident — the chronic-no-op alarm.
     """
     now = now or datetime.now(timezone.utc)  # noqa: UP017
+    # #2823: record WHICH control plane this run enumerated. A wrong-dialect
+    # read is otherwise indistinguishable from an empty deployment in every
+    # run result — the reason this defect looked healthy for 31 days.
+    resolved_source = source_dialect(registry)
 
-    if team_ids is None:
-        if config.team_sweep_enabled:
+    if org_ids is None:
+        if config.org_sweep_enabled:
             try:
-                team_ids = enumerate_eligible_teams(registry)
+                org_ids = enumerate_eligible_orgs(registry)
             except RuntimeError as e:
-                return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
+                return {"status": "enum_failed", "error": str(e),
+                        "teams_backed_up": 0, "source": resolved_source}
         else:
             try:
-                team_ids = enumerate_teams(registry)
+                org_ids = enumerate_orgs(registry)
             except RuntimeError as e:
-                return {"status": "enum_failed", "error": str(e), "teams_backed_up": 0}
+                return {"status": "enum_failed", "error": str(e),
+                        "teams_backed_up": 0, "source": resolved_source}
 
     incidents: list[dict[str, Any]] = []
     ops_state = read_ops_state(storage)
     prev_team_count = int(ops_state.get("last_team_count") or 0)
 
-    if not team_ids:
-        # ── Team-sweep no-op alarm (#655): enabled but 0 Pro teams ──
-        if config.team_sweep_enabled:
+    if not org_ids:
+        # ── Org-sweep no-op alarm (#655): enabled but 0 Pro orgs ──
+        if config.org_sweep_enabled:
             incidents.append(
                 {
                     "kind": "NO_ELIGIBLE_TEAMS",
-                    "team_id": "",
+                    "org_id": "",
                     "detail": {"message": "team sweep enabled but 0 eligible (Pro) teams found"},
                 }
             )
-            _noop_ops_state_write(storage, now)
+            _noop_ops_state_write(storage, now, source=resolved_source)
             return {
                 "status": "no_eligible_teams",
                 "teams_backed_up": 0,
+                "source": resolved_source,
                 "results": {},
                 "incidents": incidents,
             }
-        # ── Legacy path: 0 ALL teams ──
+        # ── Legacy path: 0 ALL orgs ──
         if prev_team_count > 0 and not _enum_delta_suppressed():
                 # A wiped enumeration source must not degrade silently to the
-                # chronic NO_TEAMS state — this is an incident, not a signal.
+                # chronic NO_ORGS state — this is an incident, not a signal.
                 # (#669 flip window P3-4: suppressed while the operator sets
                 # TORTOISE_SUPPRESS_ENUM_DELTA=1 — the registry delete makes the
                 # 0→0 drop legitimate; the pre-deploy gate guarantees both stores
@@ -1157,64 +1228,65 @@ def run_backup_sweep(
             incidents.append(
                 {
                     "kind": "ENUM_DELTA",
-                    "team_id": "",
+                    "org_id": "",
                     "detail": {"previous": prev_team_count, "now": 0},
                 }
             )
-        _noop_ops_state_write(storage, now)
+        _noop_ops_state_write(storage, now, source=resolved_source)
         return {
             "status": "no_teams",
             "teams_backed_up": 0,
+            "source": resolved_source,
             "results": {},
             "incidents": incidents,
         }
     results: dict[str, Any] = {}
     resolution_failures = 0
-    for team_id in sorted(team_ids):
-        ctx, acquired = _team_lock_ctx(lock_for, team_id)
+    for org_id in sorted(org_ids):
+        ctx, acquired = _org_lock_ctx(lock_for, org_id)
         if not acquired:
-            # #2562: a stuck holder must not wedge the pass — skip the team
+            # #2562: a stuck holder must not wedge the pass — skip the org
             # with a loud error (next run retries it).
-            results[team_id] = {
-                "status": "error", "team_id": team_id,
+            results[org_id] = {
+                "status": "error", "org_id": org_id,
                 "error": "team lock busy past the timeout "
                          "(a restore or purge holds it)",
             }
             continue
         with ctx:
             try:
-                res = _sweep_team(
+                res = _sweep_org(
                     db=db, registry=registry, storage=storage, config=config,
-                    team_id=team_id, now=now, incidents=incidents,
+                    org_id=org_id, now=now, incidents=incidents,
                     mirror=mirror,
                 )
-            except Exception as e:  # per-team isolation: one bad team never
+            except Exception as e:  # per-org isolation: one bad org never
                 # aborts the sweep for the others (review P3-2)
-                logger.exception("sweep of %s failed: %s", team_id, e)
-                res = {"status": "error", "team_id": team_id, "error": str(e)}
-            results[team_id] = res
+                logger.exception("sweep of %s failed: %s", org_id, e)
+                res = {"status": "error", "org_id": org_id, "error": str(e)}
+            results[org_id] = res
             if res.get("resolution"):
-                # Graph-list resolution failure (vanished team, missing
+                # Graph-list resolution failure (vanished org, missing
                 # graph_name, seam query error) — the flap guard counts it.
                 resolution_failures += 1
 
-    # ── Control-plane flapping alarm (#669): every enumerated team failing
+    # ── Control-plane flapping alarm (#669): every enumerated org failing
     # graph-name resolution means the control plane died between enumeration
-    # and the per-team phase. Without this, the sweep would return a clean
+    # and the per-org phase. Without this, the sweep would return a clean
     # ``no_work`` with a fresh ops heartbeat — a chronic no-op that looks
     # healthy to the #596 watcher (the same silent-degradation class the
-    # ENUM_DELTA / NO_ELIGIBLE_TEAMS guards exist to prevent). ──
-    if resolution_failures and resolution_failures == len(team_ids):
+    # ENUM_DELTA / NO_ELIGIBLE_ORGS guards exist to prevent). ──
+    if resolution_failures and resolution_failures == len(org_ids):
         incidents.append(
             {
                 "kind": "GRAPH_NAME_RESOLUTION_FAIL",
-                "team_id": "",
+                "org_id": "",
                 "detail": {
                     "message": (
                         "control-plane graph-name resolution failed for every "
                         "enumerated team — sweep degraded to no_work"
                     ),
-                    "total": len(team_ids),
+                    "total": len(org_ids),
                     "failed": resolution_failures,
                 },
             }
@@ -1222,7 +1294,7 @@ def run_backup_sweep(
 
     # ── #2372: per-graph run roll-up — a green headline must never mask
     # custom-graph failures. Aggregate every active graph's outcome (the
-    # team surface only reflects the DEFAULT graph); graph errors ride the
+    # org surface only reflects the DEFAULT graph); graph errors ride the
     # error-streak map across runs so an operator can distinguish "healthy"
     # from "graph X errored N consecutive runs" without duplicating the
     # watcher's STALE/NEVER path (they fire on ARCHIVE AGE, these on RUN
@@ -1238,23 +1310,23 @@ def run_backup_sweep(
     graph_errors = 0
     graph_failures: list[dict[str, Any]] = []
     streaks: dict[str, int] = {}
-    for team_id, res in results.items():
-        team_graphs = res.get("graphs") if isinstance(res, dict) else None
-        if not isinstance(team_graphs, dict):
+    for org_id, res in results.items():
+        org_graphs = res.get("graphs") if isinstance(res, dict) else None
+        if not isinstance(org_graphs, dict):
             continue  # resolution/error results carry no graph map
-        graphs_attempted += len(team_graphs)
-        for gid, gr in team_graphs.items():
+        graphs_attempted += len(org_graphs)
+        for gid, gr in org_graphs.items():
             st = gr.get("status") if isinstance(gr, dict) else None
             if st == "backed_up":
                 graphs_backed_up += 1
-                streaks.pop(f"{team_id}:{gid}", None)
+                streaks.pop(f"{org_id}:{gid}", None)
             elif st == "error":
                 graph_errors += 1
-                key = f"{team_id}:{gid}"
+                key = f"{org_id}:{gid}"
                 streak = int(prev_streaks.get(key) or 0) + 1
                 streaks[key] = streak
                 graph_failures.append({
-                    "team_id": team_id, "graph_id": gid,
+                    "org_id": org_id, "graph_id": gid,
                     "error": str(gr.get("error") or "")[:300],
                     "streak": streak,
                 })
@@ -1268,9 +1340,11 @@ def run_backup_sweep(
         _write_json(
             storage, OPS_STATE_KEY,
             {
-                "last_team_count": len(team_ids),
+                "last_team_count": len(org_ids),
                 "last_sweep_at": now.isoformat(),
                 "updated_at": now.isoformat(),
+                "source": resolved_source,  # #2823: which control plane
+                "last_run_source": resolved_source,  # the same run, by definition
                 "graph_totals": graph_totals,
                 "graph_failures": graph_failures[:20],
                 "graph_error_streaks": streaks,
@@ -1280,16 +1354,17 @@ def run_backup_sweep(
     backed_up = sum(
         1 for r in results.values() if r.get("status") == "backed_up"
     )
-    # #2372 headline truthfulness: teams whose DEFAULT backed up are green,
+    # #2372 headline truthfulness: orgs whose DEFAULT backed up are green,
     # but a run where any ACTIVE graph errored is degraded — never a bare
     # "backed_up". (Custom-only failures with a failing default already
-    # read no_work via the team surface; graph_totals carries the detail.)
+    # read no_work via the org surface; graph_totals carries the detail.)
     status = "backed_up" if backed_up else "no_work"
     if graph_errors and backed_up:
         status = "degraded"
     return {
         "status": status,
         "teams_backed_up": backed_up,
+        "source": resolved_source,
         "graph_totals": graph_totals,
         "graph_failures": graph_failures,
         "graph_error_streaks": streaks,
@@ -1316,8 +1391,8 @@ _GRAPH_PURGE_GRACE_DAYS = 7  # the #2304 default recovery window
 logger = logging.getLogger(__name__)
 
 
-def enumerate_team_tombstones(source, team_id: str) -> list[dict[str, Any]]:
-    """Per-team trash (tombstone) list — the purge + trash-list seam (#2304).
+def enumerate_org_tombstones(source, org_id: str) -> list[dict[str, Any]]:
+    """Per-org trash (tombstone) list — the purge + trash-list seam (#2304).
 
     Returns registry-shaped rows ``[{graph_id, name, namespace,
     deleted_at, purged_at}]`` for kind='custom', status='deleted' graphs
@@ -1333,12 +1408,12 @@ def enumerate_team_tombstones(source, team_id: str) -> list[dict[str, Any]]:
             rows = source.query(
                 "graphs",
                 select=["id", "name", "namespace", "deleted_at", "purged_at"],
-                filters=[("team_id", "eq", team_id), ("status", "eq", "deleted"),
+                filters=[("org_id", "eq", org_id), ("status", "eq", "deleted"),
                          ("kind", "eq", "custom"), ("purged_at", "is", None)],
             )
         except Exception as e:
             raise RuntimeError(
-                f"tombstone enumeration failed for {team_id}: {e}") from e
+                f"tombstone enumeration failed for {org_id}: {e}") from e
         return [
             {"graph_id": r["id"], "name": r.get("name"),
              "namespace": r.get("namespace"), "deleted_at": r.get("deleted_at"),
@@ -1347,15 +1422,15 @@ def enumerate_team_tombstones(source, team_id: str) -> list[dict[str, Any]]:
         ]
     try:
         rows = source.query(
-            "MATCH (g:Graph {team_id:$tid, status:'deleted'}) "
+            "MATCH (g:Graph {org_id:$tid, status:'deleted'}) "
             "WHERE coalesce(g.kind, 'custom') <> 'default' "
             "AND g.purged_at IS NULL "
             "RETURN g.id, g.name, g.namespace, g.deleted_at, g.purged_at",
-            params={"tid": team_id},
+            params={"tid": org_id},
         ).result_set
     except Exception as e:
         raise RuntimeError(
-            f"tombstone enumeration failed for {team_id}: {e}") from e
+            f"tombstone enumeration failed for {org_id}: {e}") from e
     return [
         {"graph_id": r[0], "name": r[1], "namespace": r[2],
          "deleted_at": r[3], "purged_at": r[4]}
@@ -1378,7 +1453,7 @@ def _graph_purged_at_expired(deleted_at: Any, cutoff: str) -> bool:
 
 def _drop_graph_namespace(db, namespace: str) -> None:
     """GRAPH.DELETE of a tombstoned custom data-plane namespace. Mirror of
-    hosted_api._drop_team_graph_impl (#2163): select_graph(ns).delete() on
+    hosted_api._drop_org_graph_impl (#2163): select_graph(ns).delete() on
     every lane; an ABSENT graph (never minted / dropped earlier) raises the
     FalkorDB "empty key" family — treat that as success so the purge
     converges. Any other failure propagates: the tombstone row stays the
@@ -1392,19 +1467,19 @@ def _drop_graph_namespace(db, namespace: str) -> None:
         raise
 
 
-def _purge_graph_storage(storage, team_id: str, graph_id: str,
+def _purge_graph_storage(storage, org_id: str, graph_id: str,
                          namespace: str | None = None) -> dict[str, Any]:
     """Delete every backup artifact of one purged graph, best-effort per
     family (failures are logged + reported and never abort the purge of the
     namespace — the row is stamped regardless, so residual artifacts are
     logged loudly for operator follow-up; the artifact families are:
-      - nested per-graph pool   backups/{team}/{gid}/  (#2313)
-      - per-graph ops state     ops/teams/{team}/graphs/{gid}/ (#2313)
+      - nested per-graph pool   backups/{org}/{gid}/  (#2313)
+      - per-graph ops state     ops/teams/{org}/graphs/{gid}/ (#2313)
       - legacy FLAT archives of this graph, resolved through the #2370
-        classification index (ops/legacy-flat-index/{team}.json) — only the
+        classification index (ops/legacy-flat-index/{org}.json) — only the
         listing-derived backup_id objects are deleted (#2414 parity).
 
-    ``namespace`` is the tombstone's data-plane namespace (team_{tid}_{gid},
+    ``namespace`` is the tombstone's data-plane namespace (org_{tid}_{gid},
     gid-keyed and never reused): flat index entries keep the manifest's
     graph_name (= the namespace) even after the sweep re-attributed the
     entry to graph_id "" (the classify step maps ACTIVE rows only, so a
@@ -1414,8 +1489,8 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str,
     misattribute a new graph's flats)."""
     out: dict[str, Any] = {"pool_keys": 0, "state_keys": 0,
                            "flat_keys": 0, "errors": []}
-    for prefix in (f"backups/{team_id}/{graph_id}/",
-                   f"ops/teams/{team_id}/graphs/{graph_id}/"):
+    for prefix in (f"backups/{org_id}/{graph_id}/",
+                   f"ops/teams/{org_id}/graphs/{graph_id}/"):
         try:
             keys = list(storage.list(prefix))
         except Exception as e:
@@ -1431,10 +1506,10 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str,
     # Legacy flat archives via the classification index.
     index = {}
     try:
-        index = read_legacy_flat_index(storage, team_id) or {}
+        index = read_legacy_flat_index(storage, org_id) or {}
     except Exception as e:
         logger.warning("purge %s %s: legacy index unreadable: %s",
-                       team_id, graph_id, e)
+                       org_id, graph_id, e)
     flat_bids = [
         str(bid) for bid, ent in (index or {}).items()
         if isinstance(ent, dict) and (
@@ -1448,9 +1523,9 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str,
     if flat_bids:
         for bid in flat_bids:
             try:
-                # Index bids are FULL keys ("{team}/{key}" — the #2370
+                # Index bids are FULL keys ("{org}/{key}" — the #2370
                 # producer composes parts[1]/parts[2]) — the objects live at
-                # backups/{team}/{key}/..., so list/delete under the full bid.
+                # backups/{org}/{key}/..., so list/delete under the full bid.
                 for k in storage.list(f"backups/{bid}/"):
                     try:
                         storage.delete(k)
@@ -1468,7 +1543,7 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str,
         # be resurrected by the next sweep's reclassification.
         try:
             _write_json(
-                storage, _legacy_flat_index_key(team_id),
+                storage, _legacy_flat_index_key(org_id),
                 {bid: ent for bid, ent in (index or {}).items()
                  if bid not in flat_bids},
             )
@@ -1476,25 +1551,27 @@ def _purge_graph_storage(storage, team_id: str, graph_id: str,
             # reclassification can never resurrect these index entries
             # (R2 last-writer-wins — the sweep rewrites the whole index).
             _record_purged_flat_bids(
-                storage, team_id, flat_bids,
+                storage, org_id, flat_bids,
                 datetime.now(timezone.utc).isoformat())  # noqa: UP017
         except Exception as e:
             out["errors"].append(f"index rewrite: {e}")
     return out
 
 
-def _purge_tombstone(source, db, storage, team_id: str, tomb: dict[str, Any],
+def _purge_tombstone(source, db, storage, org_id: str, tomb: dict[str, Any],
                      now_iso: str) -> dict[str, Any]:
     """Physically erase ONE expired tombstone. Order:
       1. Re-verify the row is STILL an unpurged tombstone (VGATE race fix:
-         the purge is per-team-locked, but a restore can flip the row
+         the purge is per-org-locked, but a restore can flip the row
          between enumeration and this call when the sweep runs without the
          lock seam) — a restored graph is LIVE: never drop its namespace.
       2. Ownership guard — only drop the namespace when it still maps to
-         THIS graph id (team_{tid}_{gid}); a mismatch means the namespace
+         THIS graph id and org id; a mismatch means the namespace
          was re-occupied by a live graph (name-based reuse / drift) — the
          guard trips and the namespace is RETAINED (residual: operator
-         review — the live occupant owns it now).
+         review — the live occupant owns it now). Two prefixes are accepted:
+         `org_{tid}_{gid}` (current) and `team_{tid}_{gid}` (namespaces
+         written before the #3543 rename, which no data migration rewrites).
       3. GRAPH.DELETE the namespace (absent-tolerant; real failures raise
          → the row stays the retry anchor).
       4. Delete the backup artifacts (best-effort per family).
@@ -1502,11 +1579,17 @@ def _purge_tombstone(source, db, storage, team_id: str, tomb: dict[str, Any],
     Returns {status: purged|residual|skipped|error, ...}."""
     gid = tomb.get("graph_id")
     ns = str(tomb.get("namespace") or "")
-    if not _row_still_tombstoned(source, team_id, gid):
+    if not _row_still_tombstoned(source, org_id, gid):
         return {"status": "skipped", "graph_id": gid,
                 "reason": "row_restored_or_gone"}
-    expected = f"team_{team_id}_{gid}"
-    residual = (not ns) or ns != expected
+    expected = f"org_{org_id}_{gid}"
+    # #3543: the derivation uses the 4-char `org_` prefix, but stored
+    # namespaces written before the rename still carry `team_` and no data
+    # migration rewrites them. Accept both so a legacy tombstone's namespace
+    # is still droppable — the ownership property the guard protects ("the
+    # namespace derives from THIS graph id") holds either way.
+    legacy = f"team_{org_id}_{gid}"
+    residual = (not ns) or ns not in (expected, legacy)
     if residual:
         # Ownership guard tripped (verifier P1): never GRAPH.DELETE a
         # namespace that does not derive from this graph id — it may host a
@@ -1518,22 +1601,22 @@ def _purge_tombstone(source, db, storage, team_id: str, tomb: dict[str, Any],
         logger.warning(
             "purge ownership guard: team=%s graph=%s namespace=%r "
             "(expected %r) — namespace RETAINED, artifacts purged",
-            team_id, gid, ns, expected)
+            org_id, gid, ns, expected)
     else:
         _drop_graph_namespace(db, ns)
-    artifacts = _purge_graph_storage(storage, team_id, gid, namespace=ns)
+    artifacts = _purge_graph_storage(storage, org_id, gid, namespace=ns)
     # Post-artifact re-verify (#2464): a cross-process restore could have
     # flipped the row to ACTIVE while the drop + artifact purge ran (the
-    # per-team lock is process-local). Never stamp a live row — report the
+    # per-org lock is process-local). Never stamp a live row — report the
     # race loudly instead of silently succeeding.
-    if not _row_still_tombstoned(source, team_id, gid):
+    if not _row_still_tombstoned(source, org_id, gid):
         logger.error(
             "purge race: team=%s graph=%s restored while purge ran — "
             "purged_at NOT stamped (row is live); namespace/artifacts were "
-            "already dropped", team_id, gid)
+            "already dropped", org_id, gid)
         return {"status": "race_restored", "graph_id": gid,
                 "namespace": ns, "artifacts": artifacts}
-    _stamp_purged(source, team_id, gid, now_iso, residual=residual)
+    _stamp_purged(source, org_id, gid, now_iso, residual=residual)
     if residual:
         return {"status": "residual", "graph_id": gid,
                 "namespace": ns, "reason": "namespace_ownership_guard",
@@ -1542,7 +1625,7 @@ def _purge_tombstone(source, db, storage, team_id: str, tomb: dict[str, Any],
             "artifacts": artifacts}
 
 
-def _row_still_tombstoned(source, team_id: str, graph_id: str) -> bool:
+def _row_still_tombstoned(source, org_id: str, graph_id: str) -> bool:
     """Re-verify a graph row is STILL an unpurged tombstone (the purge's
     pre-drop guard — a restore may have flipped it between enumeration and
     the drop). Supabase lane: query the row. Registry lane: MATCH the node.
@@ -1553,22 +1636,22 @@ def _row_still_tombstoned(source, team_id: str, graph_id: str) -> bool:
             rows = source.query(
                 "graphs", select=["id"],
                 filters=[("id", "eq", graph_id),
-                         ("team_id", "eq", team_id),
+                         ("org_id", "eq", org_id),
                          ("status", "eq", "deleted"),
                          ("purged_at", "is", None)],
             )
             return bool(rows)
         rows = source.query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "MATCH (g:Graph {id:$gid, org_id:$tid}) "
             "WHERE g.status = 'deleted' AND g.purged_at IS NULL RETURN g.id",
-            params={"gid": graph_id, "tid": team_id},
+            params={"gid": graph_id, "tid": org_id},
         ).result_set
         return bool(rows)
     except Exception:  # never erase on an uncertain read — fail closed
         return False
 
 
-def _stamp_purged(source, team_id: str, graph_id: str, now_iso: str,
+def _stamp_purged(source, org_id: str, graph_id: str, now_iso: str,
                   *, residual: bool) -> None:
     """Stamp a tombstone row purged_at on the control-plane lane. A failure
     RAISES (the retry anchor: the data is already dropped — never let a
@@ -1578,17 +1661,17 @@ def _stamp_purged(source, team_id: str, graph_id: str, now_iso: str,
     the caller records the race instead of silently succeeding."""
     if _is_supabase_source(source):
         from .supabase_control import purge_graph_row
-        stamped = purge_graph_row(source, team_id, graph_id, now=now_iso,
+        stamped = purge_graph_row(source, org_id, graph_id, now=now_iso,
                                   residual=residual)
         if not stamped:
             raise RuntimeError(
-                f"purge stamp refused for {team_id}/{graph_id}: row is "
+                f"purge stamp refused for {org_id}/{graph_id}: row is "
                 "no longer a deleted tombstone (restored concurrently?)")
         return
     rows = source.query(
-        "MATCH (g:Graph {id:$gid, team_id:$tid, status:'deleted'}) "
+        "MATCH (g:Graph {id:$gid, org_id:$tid, status:'deleted'}) "
         "SET g.purged_at = $ts, g.purged_residual = $r RETURN count(g)",
-        params={"gid": graph_id, "tid": team_id, "ts": now_iso,
+        params={"gid": graph_id, "tid": org_id, "ts": now_iso,
                 "r": bool(residual)},
     ).result_set
     # #2559 (re-audit P2): the registry stamp must OBSERVE whether its
@@ -1601,7 +1684,7 @@ def _stamp_purged(source, team_id: str, graph_id: str, now_iso: str,
     matched = bool(rows and rows[0] and rows[0][0])
     if not matched:
         raise RuntimeError(
-            f"purge stamp refused for {team_id}/{graph_id}: row is "
+            f"purge stamp refused for {org_id}/{graph_id}: row is "
             "no longer a deleted tombstone (restored concurrently?)")
 
 
@@ -1610,26 +1693,26 @@ def run_graph_purge(
     db,
     registry,
     storage,
-    team_ids: list[str] | None = None,
+    org_ids: list[str] | None = None,
     grace_days: int = _GRAPH_PURGE_GRACE_DAYS,
     lock_for: Callable[[str], Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """#2304: purge every team's expired trash (custom graphs tombstoned
+    """#2304: purge every org's expired trash (custom graphs tombstoned
     longer than ``grace_days`` ago, plus legacy tombstones) — physical
     erasure. Returns the run result.
 
     Ownership-guarded namespace drops; idempotent (purged rows are never
-    re-enumerated; absent namespaces converge). Per-team isolation: one
-    bad team never aborts the purge of the others. Default graph can never
+    re-enumerated; absent namespaces converge). Per-org isolation: one
+    bad org never aborts the purge of the others. Default graph can never
     be purged (delete refuses it — tombstones are custom-only).
     """
     now = now or datetime.now(timezone.utc)  # noqa: UP017
     now_iso = now.isoformat()
     cutoff = (now - timedelta(days=max(1, grace_days))).isoformat()
-    if team_ids is None:
+    if org_ids is None:
         try:
-            team_ids = enumerate_teams(registry)
+            org_ids = enumerate_orgs(registry)
         except RuntimeError as e:
             return {"status": "enum_failed", "error": str(e),
                     "teams_purged": 0}
@@ -1637,24 +1720,24 @@ def run_graph_purge(
     residuals: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     teams_purged = 0
-    for team_id in sorted(team_ids or []):
-        ctx, acquired = _team_lock_ctx(lock_for, team_id)
+    for org_id in sorted(org_ids or []):
+        ctx, acquired = _org_lock_ctx(lock_for, org_id)
         if not acquired:
             # #2562: a stuck holder must not wedge the purge pass — record
-            # the team as an error (next run retries it).
-            errors.append({"team_id": team_id,
+            # the org as an error (next run retries it).
+            errors.append({"org_id": org_id,
                            "error": "team lock busy past the timeout "
                                     "(a restore or purge holds it)"})
             continue
         with ctx:
             try:
-                tombs = enumerate_team_tombstones(registry, team_id)
-            except Exception as e:  # per-team isolation
+                tombs = enumerate_org_tombstones(registry, org_id)
+            except Exception as e:  # per-org isolation
                 logger.exception("purge tombstone enumeration of %s failed",
-                                 team_id)
-                errors.append({"team_id": team_id, "error": str(e)})
+                                 org_id)
+                errors.append({"org_id": org_id, "error": str(e)})
                 continue
-            team_done = 0
+            org_done = 0
             erased_gids: set[str] = set()
             for tomb in tombs:
                 if not _graph_purged_at_expired(
@@ -1662,42 +1745,42 @@ def run_graph_purge(
                     continue  # inside the grace window — still recoverable
                 try:
                     res = _purge_tombstone(
-                        registry, db, storage, team_id, tomb, now_iso)
+                        registry, db, storage, org_id, tomb, now_iso)
                 except Exception as e:  # per-graph isolation: the row is
                     # the retry anchor (unpurged) — never abort the pass
                     logger.exception("purge of team=%s graph=%s failed",
-                                     team_id, tomb.get("graph_id"))
-                    errors.append({"team_id": team_id,
+                                     org_id, tomb.get("graph_id"))
+                    errors.append({"org_id": org_id,
                                    "graph_id": tomb.get("graph_id"),
                                    "error": str(e)})
                     continue
                 if res.get("status") == "purged":
                     purged.append(res)
                     erased_gids.add(str(tomb.get("graph_id") or ""))
-                    team_done += 1
+                    org_done += 1
                 elif res.get("status") == "residual":
                     residuals.append(res)
                     erased_gids.add(str(tomb.get("graph_id") or ""))
-                    team_done += 1
+                    org_done += 1
                 elif res.get("status") == "race_restored":
                     # #2464: a cross-process restore won mid-purge — the
                     # row is LIVE and unpurged; surface loudly (data loss
                     # already occurred; the row is re-deletable).
-                    errors.append({"team_id": team_id,
+                    errors.append({"org_id": org_id,
                                    "graph_id": tomb.get("graph_id"),
                                    "error": "restore raced the purge "
                                             "(row live; not stamped)"})
-            if team_done:
+            if org_done:
                 teams_purged += 1
                 # #2471: erased graphs must stop ghosting in the ops-state
                 # roll-up (/status graph_failures + graph_error_streaks
-                # reference {team}:{gid} — a real sweep drops them on its
+                # reference {org}:{gid} — a real sweep drops them on its
                 # next pass, but NO-OP runs (#2412) merge-preserve them, so
                 # a purged graph could linger indefinitely). Runs under the
-                # same per-team lock as the sweep's writes; a racing real-
+                # same per-org lock as the sweep's writes; a racing real-
                 # run sweep converges on its own next pass.
                 _drop_purged_graphs_from_ops_state(
-                    storage, team_id, erased_gids, now=now)
+                    storage, org_id, erased_gids, now=now)
     return {"status": "ok" if not errors else "errors",
             "purged_at": now_iso, "grace_days": grace_days,
             "teams_purged": teams_purged,

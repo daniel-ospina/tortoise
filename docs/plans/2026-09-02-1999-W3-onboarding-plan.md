@@ -26,7 +26,7 @@
 
 | # | Surface | Type | Data Flow | Test Layer | Contract | Key Failure Modes |
 |---|---------|------|-----------|-----------|----------|-------------------|
-| 1 | Tenant graph Subject writes (team_{id} via `_make_sdk(namespace=team_id)`) | DB (graph) | Write | Integration (docker lane) | org Subject {name, subjectKind:'organization', org_id}; person Subject {name, subjectKind:'naturalPerson', user_id?/email}; person−[:memberOf]→org | Wrong kind filed (Object/Statement — B1); silent merge (collision skipped) |
+| 1 | Tenant graph Subject writes (org_{id} via `_make_sdk(namespace=org_id)`) | DB (graph) | Write | Integration (docker lane) | org Subject {name, subjectKind:'organization', org_id}; person Subject {name, subjectKind:'naturalPerson', user_id?/email}; person−[:memberOf]→org | Wrong kind filed (Object/Statement — B1); silent merge (collision skipped) |
 | 2 | OnboardingState node ↔ anchor link (org_subject_id + onboards edge) | DB (graph) | Write | Integration (docker lane) | state.py `write_onboards_edge` sets n.org_subject_id + MERGE [:onboards]→org Subject; idempotent | Link missing (compact gate depends on it); re-seed re-write |
 | 3 | POST /v1/onboarding/state/checkpoint (decide record) | API | Write | Integration (docker lane) | step decide-completed (FWW); last_decide_attempt LWW enum; 503-failed distinct from dismissed; retry reachable | Forged completion; failed un-completes |
 | 4 | POST /v1/onboarding/seed (new) | API | Write | Integration (docker lane) | dual-auth; auth-context team; gaps/collisions → 200 no-write; names explicit → two Subjects + memberOf + step edge + onboards + gate eval; idempotent replay | Invented identity; writes before confirmation; silent merge |
@@ -109,13 +109,13 @@
 **Intent:** The interactive hosted seed write path. Auth-context anchor data (teams.name, team email, session_user_id/created_by); explicit names win; email-prefix derivation flagged for confirmation; collision → disambiguation surfaced; writes ONLY when fully resolved: two Subjects via the Task-1 core + memberOf + `write_onboards_edge` + `first-points-filed` step edge (created-signal) + gate eval; include_person = not node.compact (seed-lite); response carries merged onboarding projection + next-step hint (decide for self fork — the nudge trigger; catalog for build).
 **Acceptance:** `POST /v1/onboarding/seed` dual-auth; `{}` → needs_confirmation with derived person name (no writes); `{person_name}` → seeded: 2 Subjects + memberOf + onboards + first-points-filed; same-name distinct Subject → 200 collision (no writes); compact org → org-anchor-only seed; replay idempotent; gate eval runs post-write (self stays active until decide; build completes on catalog; compact completes when connected).
 **Files:**
-- Modify: `tortoise/hosted_api.py` (seed runner `_run_onboarding_seed` + endpoint; `_team_name` control-plane read helper; supabase_control `team_name` seam)
+- Modify: `tortoise/hosted_api.py` (seed runner `_run_onboarding_seed` + endpoint; `_org_name` control-plane read helper; supabase_control `org_name` seam)
 - Test: `tests/test_onboarding_seed_endpoint.py` (docker-lane module-level skip guard)
 
 **Steps:**
 1. Write the failing docker-lane endpoint tests (TestSeedEndpoint class).
 2. Run to verify fail.
-3. Implement `_team_name` + `team_name` seam; the seed runner + endpoint.
+3. Implement `_org_name` + `org_name` seam; the seed runner + endpoint.
 4. Run to verify pass.
 5. Commit.
 

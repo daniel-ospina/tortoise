@@ -818,7 +818,15 @@ jobs:
             # index_cli/index_restore legitimately spawn redislite servers
             # whose atexit close races the end-sweep). Bound the assert to
             # absorb those known exceptions; a real leak still reds (E2E-7).
-            THRESHOLD=6
+            # #2032: the docker half is not always ~0 — the SAME
+            # embedded-file-contract atexit race leaves strays on the full
+            # matrix too (trunk run 34928488659 measured 7 orphans; pytest
+            # rc 1, with the only failures being the four known test-side
+            # defects — i.e. no leak-class failure at all, so the old 6 red'd
+            # on the leak counter alone). Match the tier-2 shape's 12: same
+            # exception class, same "a per-test leaky file spawns dozens; 12
+            # still catches it" bar.
+            THRESHOLD=12
           else
             # Tier-2 embedded shape (full=false PR runs): the SAME
             # embedded-file-contract files run in the fast-gate halves and
@@ -890,6 +898,7 @@ jobs:
             files: >-
               test_backfill_sources test_cli_context
               test_enumeration_surfaces test_event_provenance
+              test_graphcopy_boolean_index_3154
               test_index_directory test_ingest test_ingest_validation
               test_mcp_http test_mcp_route_challenge test_pack_shipping_wheel
               test_sdk test_search_engine_gaps
@@ -1188,9 +1197,11 @@ jobs:
           fi
 
       - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
-        # The slow legs are docker surfaces at P3 — same lane-aware ~0
-        # threshold as the fast job (full==true -> 0; tier-2 embedded shape
-        # keeps the bounded assert). Kill-aware downgrade per #1371.
+        # The slow legs are docker surfaces at P3 and do NOT share the fast
+        # job's bar: full==true asserts ~0 here, while the fast job's full
+        # branch absorbs the embedded-file-contract atexit race at 12 (see its
+        # assert). This leg runs a narrower surface, so it stays strict.
+        # tier-2 keeps the bounded assert. Kill-aware downgrade per #1371.
         if: always()
         run: |
           set +e
@@ -1849,9 +1860,33 @@ jobs:
             echo "the Task 9 half-a flip)."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The agent-facing surface expansion gate (#3863).
+  #
+  # No `if:`, no `paths:` filter, deliberately: this job must run on EVERY pull
+  # request. A filtered gate is how a surface change slips through a docs-only
+  # path, and a skipped job reports Success, so a conditional guard would
+  # satisfy the required check without guarding anything.
+  surface-guard:
+    runs-on: ubuntu-latest
+    # Sibling `manifest-integrity` documents the same decision for the same reason:
+    # this job owns a network install AND feeds the REQUIRED aggregate, so without a
+    # bound a stalled PyPI would hold python-ci-gate red for hours on every PR.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install -e .
+      - name: The surface cannot expand without an explicit human decision
+        run: python3 tools/surface-guard.py
+      - name: The ordering lint (AC13)
+        run: python3 tools/surface_manifest.py check
+
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak]
+    needs: [changes, manifest-integrity, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak, surface-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
@@ -1860,6 +1895,14 @@ jobs:
           echo "matrix results: $RESULTS"
           if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
             echo "❌ matrix leg failed or was cancelled — merge blocked"
+            exit 1
+          fi
+          # The surface guard has no `if:`/`paths:` today, so it cannot skip — but the
+          # aggregate would not notice if it ever did, and an inert guard satisfying a
+          # REQUIRED check is the failure this whole job exists to prevent. Assert it
+          # explicitly rather than relying on the absence of a filter.
+          if [ "${{ needs.surface-guard.result }}" != "success" ]; then
+            echo "❌ surface-guard did not run to success (result=${{ needs.surface-guard.result }}) — merge blocked"
             exit 1
           fi
           echo "✅ matrix green or skipped (docs-only PR)"

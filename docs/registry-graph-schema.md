@@ -19,7 +19,7 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 
 Two layers coexist and must not share one word:
 
-- **Organization account** — the account-level unit of the product (owner direction 2026-09-06). An organization account owns **one or more graphs** and carries billing/tenure/membership. This is what the registry `Team` entity below (and the `teams` table, `/v1/teams`, `team_id`, …) represents: those **legacy code/API/DB identifiers still read "team"** and are deliberately unchanged in this vocabulary-first phase (phase-2 candidates). User-facing copy and docs call this unit an *organization account* (or *organization* where UI shorthand is established).
+- **Organization account** — the account-level unit of the product (owner direction 2026-09-06). An organization account owns **one or more graphs** and carries billing/tenure/membership. This is what the registry `Team` entity below (and the `teams` table, and the remaining `team_*` internals) represents: the account-layer *contract* identifiers are now `org_id` / `org_memberships` / `/v1/organizations` (#3543), while **legacy internal code/DB identifiers still read "team"** and are deliberately unchanged in this vocabulary-first phase (phase-2 candidates). User-facing copy and docs call this unit an *organization account* (or *organization* where UI shorthand is established).
 - **In-graph Subjects** — `organization` and `team` **Subject kinds inside a memory graph** (ONTOLOGY.md §5/§6), e.g. the onboarding seed's org Subject + person. These live in the knowledge layer and are semantically distinct from the account layer; the Subject kinds are **not renamed** by #2311.
 
 Cross-references: ONTOLOGY.md §5 (Subject Kind Vocabulary) / §6 (Subclass Model); docs/00_index.md.
@@ -60,7 +60,7 @@ Cross-references: ONTOLOGY.md §5 (Subject Kind Vocabulary) / §6 (Subclass Mode
   event_id: string,      // Stripe event.id — unique dedup key (SET-then-marker)
   type: string,          // "checkout.session.completed" | "invoice.payment_failed" | "customer.subscription.updated" | "customer.subscription.deleted"
   received_at: datetime,
-  team_id: string?,      // bound team when resolvable
+  org_id: string?,      // bound team when resolvable
 })
 ```
 
@@ -70,7 +70,7 @@ Cross-references: ONTOLOGY.md §5 (Subject Kind Vocabulary) / §6 (Subclass Mode
 (:Membership {
   id: string,       // ULID
   user_id: uuid,    // Supabase auth.users id
-  team_id: string,  // references Team.id
+  org_id: string,  // references Team.id
   role: string,     // "owner" | "admin"
   joined_at: datetime
 })
@@ -91,12 +91,12 @@ as `graphs.deleted_at / purged_at / purged_residual` (migration
                      // graph's id is the DERIVED default (registry:
                      // kind='default' node; supabase: the literal 'default'
                      // — no graphs row, derived from teams.graph_name)
-  team_id: string,   // references Team.id
+  org_id: string,   // references Team.id
   name: string,      // display name (default graph: "default")
   kind: string,      // "default" | "custom"
   namespace: string, // FalkorDB tenant namespace (the DEFAULT graph's ns
                      // IS the team namespace team_<name>; customs =
-                     // team_<team_id>_<gid> — the graph SWITCHER/contexts
+                     // team_<org_id>_<gid> — the graph SWITCHER/contexts
                      // ride this)
   status: string,    // "active" | "deleted" (tombstone; list filters)
   recording: boolean?,  // C6 #2115 / #2302 session_recording override — true/false
@@ -150,7 +150,7 @@ Default-graph semantics (the no-migration contract):
   namespace holds `:Graph` control-plane rows.
 - **Backups are per-graph since #2313:** every active graph (default +
   custom) is swept hourly with its own archive pool
-  (`backups/{team}/{graph}/{ts}_{rnd}/…`; default graph segment = the
+  (`backups/{org_id}/{graph}/{ts}_{rnd}/…`; default graph segment = the
   literal `default`), per-graph state
   (`ops/teams/{team}/graphs/{graph_id}/state.json`), independent retention
   (24 hourly + 7 daily + 4 weekly ≈35 objects/pool: all <24 h + newest per
@@ -166,7 +166,7 @@ Default-graph semantics (the no-migration contract):
 ```
 (:APIKey {
   id: string,              // ULID
-  team_id: string,         // references Team.id
+  org_id: string,         // references Team.id
   graph_id: string?,       // C1: NULL = team-wide key → default graph;
                            // set = bound to ONE custom graph (no per-graph
                            // key exists for the default graph — graph-bound
@@ -202,7 +202,7 @@ Key-class derivation (resolution, D2 — all three lanes agree):
 ```
 (:Invitation {
   id: string,        // ULID
-  team_id: string,   // references Team.id
+  org_id: string,   // references Team.id
   email: string,
   role: string,      // always "admin" — only admins can be invited
   token: uuid,

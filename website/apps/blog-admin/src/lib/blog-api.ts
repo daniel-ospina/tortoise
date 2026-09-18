@@ -315,12 +315,12 @@ export async function purgePostCache(slug: string): Promise<void> {
   if (existing) return existing;
   const run = (async () => {
     try {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
-      if (!token) return;
+      // #3501: no token to attach — the HttpOnly session cookie rides along on
+      // same-origin requests. Attaching a bearer token here was the exposure.
       await fetch('/blog/api/purge', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug }),
       });
     } catch {
@@ -355,12 +355,10 @@ export async function generateSeo(input: {
   body: string;
   tags: string[];
 }): Promise<GenerateSeoResult> {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
-  if (!token) throw new Error('No session');
   const res = await fetch('/blog/api/generate-seo', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -383,12 +381,10 @@ export async function generateCover(input: {
   mode: 'founder' | 'abstract';
   slug?: string;
 }): Promise<GenerateCoverResult> {
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
-  if (!token) throw new Error('No session');
   const res = await fetch('/blog/api/generate-cover', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;

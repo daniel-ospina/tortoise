@@ -69,7 +69,7 @@ W4_KEYS = ("warnings", "why", "conflicts", "supersession", "tradeoffs", "dig_dee
 CANONICAL_ASK_KEYS = frozenset({
     "answer", "abstained", "question_type", "question_date", "evidence",
     "context_tokens", "model", "provider", "route", "cost_estimate_usd",
-    "duration_ms", "retrieval_degraded",
+    "duration_ms", "retrieval_degraded", "retrieved_session_ids",
 })
 
 
@@ -261,7 +261,7 @@ def test_flag_off_emission_byte_identical(monkeypatch):
         for h in rec:
             for k in W4_KEYS:
                 assert k not in h, f"recall flag-off leak: {k}"
-        # ask surface: 12-field response WITHOUT the why key; the reader is
+        # ask surface: 13-field response WITHOUT the why key; the reader is
         # called EXACTLY once (zero-LLM — enrichment adds no reader calls).
         import tortoise.sdk as sdk_mod
         fake = _FakeReader()
@@ -681,15 +681,16 @@ def test_flag_off_mcp_surfaces_byte_identical(monkeypatch):
         assert "why" not in ana
 
         # 4. MCP ask — with the flag OFF the why key is absent and the
-        # response stays the canonical 12-field shape (byte-identical). The
-        # fake reader keeps the lane local (no provider key required).
+        # response stays the canonical 13-field shape (byte-identical for
+        # every non-why field). The fake reader keeps the lane local (no
+        # provider key required).
         import tortoise.sdk as sdk_mod
         fake = _FakeReader()
         monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
         _reset_ask_reader_cache_for_tests()
         ask = _mcp_ask(sdk, "what contradicted the off-mcp-topic belief statement?")
         assert set(ask) == CANONICAL_ASK_KEYS, \
-            "flag-off MCP ask must stay byte-identical (12-field response)"
+            "flag-off MCP ask must stay byte-identical (13-field response)"
     finally:
         sdk.close()
 
@@ -1199,8 +1200,10 @@ def test_assemble_why_blocks_canonical_shape(w4_flag):
         block = blocks[g["claim"]]
         assert block["point_id"] == g["claim"]
         assert isinstance(block["support_chain"], list)
+        # #3276: measured/baseline are the additive explicit measurement state
+        # (has_ep == measured; baseline marks a prior-only declared baseline).
         assert set(block["ep"]) == {"confidence_mean", "variance", "contested",
-                                    "has_ep"}
+                                    "has_ep", "measured", "baseline"}
         assert block["ep"]["contested"] is True
         assert set(block["supersession"]) == {"status", "superseded_by",
                                               "supersedes", "successor_label"}

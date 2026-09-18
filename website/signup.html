@@ -19,6 +19,40 @@
   <script>
     window.__DASHBOARD_BASE_URL = window.__DASHBOARD_BASE_URL || "https://app.premiselabs.co";
   </script>
+  <!-- #3080: admin return-to. The /admin gate bounces to /auth?next=%2Fadmin;
+       without this the post-login redirect always went to the app ROOT, so the
+       blog admin console was unreachable by navigation. Runs BEFORE the hard
+       gate below (which uses __DASHBOARD_BASE_URL as its destination), so
+       overriding the base URL here covers every post-login path at once.
+       Allowlist-only: we never echo an arbitrary `next` — anything that is not
+       a same-origin PATH under /admin is ignored (open-redirect guard).
+       The query is the ONLY carrier: claimRedirectTarget() sends OAuth back to
+       /auth?next=... (not to /admin), so no round-trip marker cookie is needed. -->
+  <script>
+    (function () {
+      try {
+        var raw = new URLSearchParams(window.location.search).get("next");
+        if (!raw) return;
+        // Same-origin PATH only: reject backslashes, then resolve and re-derive
+        // the path so dot-segments cannot escape the allowlist
+        // (/admin/../blog resolves to /blog) and an absolute or
+        // protocol-relative value cannot change the origin.
+        // NOTE: ':' is deliberately NOT rejected — a colon is legal in a path
+        // and the server gate emits it (returnToPath accepts /admin/a:b), so
+        // rejecting it here would silently drop the return-to and reproduce
+        // #3080 for colon paths. Schemes are already excluded by the leading
+        // '/' requirement plus the same-origin check below.
+        if (/\\/.test(raw) || raw.charAt(0) !== "/") return;
+        var u;
+        try { u = new URL(raw, window.location.origin); } catch (e) { return; }
+        if (u.origin !== window.location.origin) return;
+        var path = u.pathname;
+        if (path !== "/admin" && path !== "/admin/" && path.indexOf("/admin/") !== 0) return;
+        window.__ADMIN_RETURN_TO = path;
+        window.__DASHBOARD_BASE_URL = window.location.origin + path;
+      } catch (e) { /* best-effort — fall back to the app root */ }
+    })();
+  </script>
   <!-- #1494: hard gate — a visitor with a VALID session must reach their
        destination WITHOUT seeing the auth card flash. The shared
        readValidSession enforces STRICT validity (missing/past expires_at =
@@ -35,9 +69,31 @@
         // bounces a signed-in visitor past the banner that explains it.
         var h = new URLSearchParams(window.location.hash.replace(/^#/, ""));
         if (p.get("error") || p.get("error_code") || h.get("error") || h.get("error_code")) return;
+        // #3080: the /admin gate bounced us with the LOCAL session intact but
+        // server-refused (expired/revoked token, or Supabase unreachable — the
+        // gate fails closed). Trusting the local cookie here would replace
+        // straight back to /admin and loop (ERR_TOO_MANY_REDIRECTS), because
+        // readValidSession only checks expires_at and never asks the server.
+        // Clear it (#1511 loop-safety: clear before bouncing) and stay on the
+        // card so the visitor can sign in again — then land on the return-to.
+        // #3080: the gate bounced us because the SERVER refused the local
+        // session. Do NOT destroy it here: this URL is attacker-forgeable
+        // (?next=/admin&stale=1), so clearing would be a one-link forced logout
+        // of the shared parent-domain cookie — taking the dashboard with it.
+        // Instead suppress BOTH forwarding paths (this gate and the async
+        // getSession bounce below) and let the visitor sign in again, which
+        // overwrites the cookie. An expired access token is also refreshable
+        // client-side, so destroying it would discard a recoverable session.
+        if (p.get("stale") === "1" && window.__ADMIN_RETURN_TO) {
+          window.__ADMIN_STALE = true;
+          return;
+        }
         var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
         if (!s) return;  // no VALID session → stay on the auth card
         var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
+        // #3080: an explicit /admin return-to wins — claim routing is
+        // meaningless there (<?claim=1> on /admin is not a route).
+        if (window.__ADMIN_RETURN_TO) { window.location.replace(window.__ADMIN_RETURN_TO); return; }
         window.location.replace(claim ? window.__DASHBOARD_BASE_URL + "/?claim=1" : window.__DASHBOARD_BASE_URL);  // #1566: in-app welcome (root)
       } catch (e) { /* best-effort — the async bounce below still applies */ }
     })();
@@ -47,40 +103,6 @@
       display: none;
     }
 
-    /* ── TEMP BETA GATE (#beta-gate) ─────────────────────────────── */
-    .beta-gate {
-      position: fixed; inset: 0; z-index: 500;
-      display: flex; align-items: center; justify-content: center;
-      background: var(--bg, #060b14);
-      padding: 1.5rem;
-    }
-    html.beta-unlocked .beta-gate { display: none; }
-    .beta-gate-card {
-      width: 100%; max-width: 400px;
-      background: var(--surface, #0d1a2d);
-      border: 1px solid var(--border, #1e293b);
-      border-radius: 12px; padding: 1.75rem;
-    }
-    .beta-gate-card h2 { font-size: 1.2rem; margin: 0 0 0.5rem; color: var(--text, #cbd5e1); }
-    .beta-gate-card p { font-size: 13px; color: var(--text-dim, #94a3b8); line-height: 1.6; margin: 0 0 1rem; }
-    .beta-gate-card input {
-      width: 100%; box-sizing: border-box; padding: 0.6rem 0.7rem;
-      background: var(--bg, #060b14); color: var(--text, #cbd5e1);
-      border: 1px solid var(--border, #1e293b); border-radius: 8px; font-size: 14px;
-      margin-bottom: 0.6rem;
-    }
-    .beta-gate-actions { display: flex; gap: 0.6rem; }
-    .beta-gate-actions .btn-primary {
-      flex: 1; background: var(--accent, #06b6d4); color: #04121a;
-      border: none; padding: 0.6rem 0.8rem; border-radius: 8px;
-      font-weight: 600; cursor: pointer; font-size: 14px;
-    }
-    .beta-gate-actions .btn-cancel {
-      background: none; border: 1px solid rgba(255,255,255,0.15);
-      color: var(--text-dim, #94a3b8); padding: 0.6rem 0.8rem; border-radius: 8px;
-      cursor: pointer; font-size: 14px;
-    }
-    .beta-gate-error { color: var(--red, #ef4444); font-size: 13px; margin: 0 0 0.6rem; min-height: 1.1em; }
     .checkmark {
       width: 48px; height: 48px;
       margin: 0 auto 1rem;
@@ -123,6 +145,16 @@
     .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
     .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
     .topbar .login:hover { background: var(--accent-hover, #0891b2); }
+    /* #3950: the Blog link makes this a 3-item nav plus Login, and the row no longer
+       fit a phone. This topbar is `position: fixed`, so its overflow never extends
+       `documentElement.scrollWidth` — the mobile no-horizontal-scroll guard is blind
+       to it. Measured in Chromium: with the Blog link the Login button sat 41.6px
+       off-screen at 320px (topbar scrollWidth 362 vs 320 client) while origin/main
+       fitted. Wrap below 560px so the bar reflows instead of clipping the button. */
+    @media (max-width: 560px) {
+      .topbar { flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
+      .topbar nav { flex-wrap: wrap; gap: 12px; }
+    }
 
     body {
       background: var(--bg);
@@ -426,47 +458,16 @@
   </style>
 </head>
 <body>
-  <!-- ══ TEMP PRIVATE-BETA GATE (#beta-gate) ════════════════════════════════════
-       Gate the whole auth funnel until the visitor enters the beta access code
-       (or has a stored flag). REMOVE when Tortoise goes public: delete the
-       <section id="beta-gate"> markup, the #beta-gate CSS, and the BETA_* code
-       in the main script below. The dashboard app / welcome page already bounce
-       to /auth, so this single overlay covers login, signup, OAuth and
-       connect-your-agent entry points. -->
-  <script>
-    // Early flag check so returning (unlocked) visitors never see the gate flash.
-    try { if (localStorage.getItem('tortoise_beta_access') === '1') document.documentElement.classList.add('beta-unlocked'); } catch (e) {}
-  </script>
   <div class="topbar">
     <a class="logo" href="/"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></a>
     <nav>
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
+      <a href="/blog">Blog</a>
     </nav>
     <a class="login" id="topbar-login" href="/auth" onclick="setAuthMode(false); return false;">Login</a>
     <script>try { if (window.location.pathname === '/auth') document.getElementById('topbar-login').style.display = 'none'; } catch (e) {}</script>
   </div>
-
-  <!-- TEMP BETA GATE (#beta-gate): covers every sign-in option until the code
-       is confirmed. Remove with the CSS + BETA_* JS when public. -->
-  <section class="beta-gate" id="beta-gate" aria-label="Private beta access">
-    <div class="beta-gate-card">
-      <h2>Tortoise is in private beta</h2>
-      <p>
-        We're letting people in gradually while we finish onboarding. Request
-        access at <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>
-        and we'll send you an access code.
-      </p>
-      <label for="beta-code" style="font-size:12px;color:var(--text-dim,#94a3b8);display:block;margin-bottom:0.3rem;">Access code</label>
-      <input id="beta-code" type="password" autocomplete="off" placeholder="Enter your access code"
-             onkeydown="if (event.key === 'Enter') { event.preventDefault(); window.confirmBetaAccess && window.confirmBetaAccess(); }" />
-      <div class="beta-gate-error" id="beta-error" role="alert"></div>
-      <div class="beta-gate-actions">
-        <button class="btn-primary" id="beta-confirm" onclick="window.confirmBetaAccess && window.confirmBetaAccess()">Confirm</button>
-        <button class="btn-cancel" onclick="window.location.replace('https://tortoise.premiselabs.co/')">Cancel</button>
-      </div>
-    </div>
-  </section>
 
   <div class="container">
     <div class="logo">
@@ -595,7 +596,7 @@
 
     <div class="footer">
       <p>Already have an account? <a href="/auth" onclick="setAuthMode(false); return false;">Sign in</a></p>
-      <p class="footer-legal"><a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> · <a href="/license">License</a> · <a href="/dpa">DPA</a> · <a href="/security">Security</a></p>
+      <p class="footer-legal"><a href="/faq">FAQ</a> · <a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> · <a href="/license">License</a> · <a href="/dpa">DPA</a> · <a href="/security">Security</a></p>
     </div>
   </div>
 
@@ -604,46 +605,8 @@
        dead form — the historical trigger for the credential-echo bug. -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
           onerror="(function(){var e=document.getElementById('error');if(e){e.textContent='Signup is temporarily unavailable (script blocked). Please try again later.';e.classList.add('visible');}})()"></script>
-  <!-- #1225: the session bridge now loads in <head> (before the gate). -->
+  <!-- #1225: the session bridge now loads in <head> (before the auth card). -->
   <script>
-    // ── TEMP PRIVATE-BETA GATE (#beta-gate) ────────────────────────────────
-    // REMOVE with the markup + CSS when Tortoise goes public. The access code
-    // is intentionally simple (a courtesy gate against random signups, not a
-    // security boundary): the dashboard app and /welcome bounce to /auth, so
-    // this is the single funnel for login, signup, OAuth and connect flows.
-    const BETA_ACCESS_KEY = "tortoise_beta_access";
-    const BETA_ACCESS_CODE = "betatester";
-    function unlockBeta() {
-      try { localStorage.setItem(BETA_ACCESS_KEY, "1"); } catch (e) {}
-      document.documentElement.classList.add("beta-unlocked");
-      const gate = document.getElementById("beta-gate");
-      if (gate) gate.style.display = "none";
-      const code = document.getElementById("beta-code");
-      if (code) code.value = "";
-    }
-    window.confirmBetaAccess = function () {
-      const input = document.getElementById("beta-code");
-      const err = document.getElementById("beta-error");
-      const code = (input && input.value ? input.value : "").trim().toLowerCase();
-      if (code === BETA_ACCESS_CODE.toLowerCase()) {
-        if (err) err.textContent = "";
-        unlockBeta();
-      } else {
-        if (err) err.textContent = "That code isn't right — contact hello@premiselabs.co to request access.";
-        if (input) { input.select(); input.focus(); }
-      }
-    };
-    // Unlocked visitor (flag set in the early head script) → hide the gate now
-    // that the DOM exists; never leave it covering the auth card.
-    (function () {
-      let unlocked = false;
-      try { unlocked = localStorage.getItem(BETA_ACCESS_KEY) === "1"; } catch (e) {}
-      if (unlocked) {
-        const gate = document.getElementById("beta-gate");
-        if (gate) gate.style.display = "none";
-      }
-    })();
-
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
@@ -655,7 +618,11 @@
     // (?claim=1), NEVER welcome.html (its Phase-2 mint would orphan the
     // claimable anon team).
     const DASHBOARD_URL = window.__DASHBOARD_BASE_URL;
+    // #3080: where to NAVIGATE once a session exists (head gate + async bounce).
     function claimRedirectTarget() {
+      // The admin return-to wins over claim routing — the console is the
+      // requested destination, and /admin has no claim card.
+      if (window.__ADMIN_RETURN_TO) return DASHBOARD_URL;  // absolute: origin + /admin path
       try {
         const m = document.cookie.match(/(?:^|; )tt_claim_pending=([^;]*)/);
         if (m) {
@@ -663,6 +630,24 @@
         }
       } catch (e) { /* fall through to welcome */ }
       return WELCOME_URL;
+    }
+
+    // #3080: what to hand GoTrue as a redirect target — for the OAuth provider
+    // AND for the email flows (signUp confirmation + resend). Deliberately NOT
+    // the same as the navigation target above. Landing must be /AUTH, never
+    // /admin: a #access_token fragment is never sent to a server function, so a
+    // landing on /admin makes the gate see an unauthenticated request and bounce
+    // (inheriting the fragment) to /auth?...&stale=1, whose stale branch then
+    // clears the token that had just arrived — the sign-in would revoke itself.
+    // /auth ingests the fragment, persists the session, and the async getSession
+    // bounce then forwards to the return-to.
+    // Absolute because GoTrue validates redirect_to by host + scheme and
+    // silently drops a relative value.
+    function gotrueRedirectTarget() {
+      if (window.__ADMIN_RETURN_TO) {
+        return window.location.origin + "/auth?next=" + encodeURIComponent(window.__ADMIN_RETURN_TO);
+      }
+      return claimRedirectTarget();
     }
 
     // #801: server-side signup — the hosted API creates the Supabase auth
@@ -806,6 +791,10 @@
     // the failure).
     if (supabaseClient) {
       supabaseClient.auth.getSession().then(function (r) {
+        // #3080: a corroborated stale bounce must not be forwarded here either —
+        // without this the async path re-enters the /admin ↔ /auth loop that the
+        // head gate just broke.
+        if (window.__ADMIN_STALE) return;
         if (r && r.data && r.data.session) {
           // #1511: strict validity — missing/past expires_at is NOT authed
           // (a presence-only bounce here loops /auth↔welcome with the
@@ -1359,7 +1348,9 @@
             // dashboard claim card (the raw key never crosses origins; the
             // user re-pastes it there).
             setClaimPendingMarker();
-            window.location.href = window.__DASHBOARD_BASE_URL + "/?claim=1";
+            // #3080: an admin return-to wins — /admin has no claim card, so
+            // appending ?claim=1 would land the user on a dead route.
+            window.location.href = window.__ADMIN_RETURN_TO || (window.__DASHBOARD_BASE_URL + "/?claim=1");
             return;
           }
           if (code === "KEY_NOT_USER_MINTED") {
@@ -1449,7 +1440,7 @@
         const { data, error } = await supabaseClient.auth.signInWithOAuth({
           provider: provider,
           options: {
-            redirectTo: claimRedirectTarget(),
+            redirectTo: gotrueRedirectTarget(),
           },
         });
 
@@ -1685,7 +1676,10 @@
           email: email,
           password: password,
           options: {
-            emailRedirectTo: WELCOME_URL,
+            // #3080: GoTrue target, not a navigation target — see
+            // gotrueRedirectTarget(). WELCOME_URL would point the confirmation
+            // link at the gated /admin and self-revoke the sign-in.
+            emailRedirectTo: gotrueRedirectTarget(),
           },
         });
 
@@ -1954,7 +1948,9 @@
         const { error } = await supabaseClient.auth.resend({
           type: 'signup',
           email: email,
-          options: { emailRedirectTo: WELCOME_URL },
+          // #3080: same GoTrue target as signUp — a resend must not point the
+          // confirmation link at the gated /admin.
+          options: { emailRedirectTo: gotrueRedirectTarget() },
         });
         if (error) {
           if (isRateLimitError(error)) {

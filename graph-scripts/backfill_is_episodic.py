@@ -25,7 +25,7 @@ Usage:
     python3 graph-scripts/backfill_is_episodic.py [--dry-run] [--graph GRAPH] [--uri URI] [--yes]
 
 Defaults to TORTOISE_DB_URI env var (or docker://:falkordb@localhost:16379/tortoise).
-Hosted multi-tenant: run once per tenant graph (--graph team_<team_id>).
+Hosted multi-tenant: run once per tenant graph (--graph team_<org_id>).
 Local embedded (--uri <path to embedded.db>, or TORTOISE_DB_PATH): runs on
 the graph named by --graph (default "tortoise").
 

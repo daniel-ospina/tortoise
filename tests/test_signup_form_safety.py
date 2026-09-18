@@ -29,6 +29,27 @@ SIGNIN = (WEBSITE / "signin.html").read_text()
 WELCOME = (WEBSITE / "welcome.html").read_text()
 
 
+def _strip_html_comments(text: str) -> str:
+    """Remove HTML and JS comments from a page source.
+
+    Absence assertions MUST run against comment-stripped source. welcome.html
+    explains the #3501 removal in a comment that names
+    `createTortoiseSupabaseClient`, so an unstripped check fails on the
+    documentation of the fix rather than on a reintroduction of the bug.
+
+    TRAILING `//` comments are stripped too, not just line-start ones: a future
+    `x = 1; // … location` would otherwise fail the navigation guard on a
+    comment. The `//` must be preceded by whitespace, `;`, `)` or line start, so
+    a URL's `//` (preceded by `:`) is left intact.
+    """
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"(?m)(^|[;\s])//[^\n]*", r"\1", text)
+
+
+WELCOME_CODE = _strip_html_comments(WELCOME)
+
+
 # ── Form safety: method=post + explicit action kills the GET echo ──────────
 
 
@@ -60,6 +81,40 @@ def test_email_and_password_have_autocomplete() -> None:
     assert 'autocomplete="new-password"' in SIGNUP
     assert 'autocomplete="email"' in SIGNIN
     assert 'autocomplete="current-password"' in SIGNIN
+
+
+# ── #3781: the private-beta gate must never come back ──────────────────────
+
+
+def test_no_client_side_beta_gate() -> None:
+    """#3781: the signup funnel must stay OPEN for a real new user.
+
+    The retired gate was a full-viewport overlay that covered all four
+    sign-in options until the visitor typed a hardcoded client-side
+    constant (`BETA_ACCESS_CODE = "betatester"`) or carried a
+    `localStorage['tortoise_beta_access']` flag — it blocked every real
+    signup and restricted nobody who read the page source (the endpoint it
+    appeared to protect, POST /v1/signup/email, is in SKIP_AUTH).
+
+    Checked against comment-stripped source so documenting the removal in a
+    comment can never miss a re-introduction of the overlay itself.
+    """
+    stripped = _strip_html_comments(SIGNUP)
+    # Quote- and attribute-agnostic on purpose (review P2): pinning `id="beta-gate"`
+    # missed `id='beta-gate'`, a `class="beta-gate"` overlay, and the `.beta-gate`
+    # CSS rule — a re-introduction in any of those spellings passed the guard while
+    # restoring the exact defect. The bare identifier covers every spelling; the
+    # constant/flag tokens are already spelling-independent.
+    for token, why in (
+        ("beta-gate", "the full-viewport overlay (or its CSS) is back"),
+        ("BETA_ACCESS_CODE", "the hardcoded client-side access code is back"),
+        ("BETA_ACCESS_KEY", "the client-side access-key constant is back"),
+        ("confirmBetaAccess", "the client-side unlock handler is back"),
+        ("tortoise_beta_access", "the localStorage unlock flag is back"),
+    ):
+        assert token not in stripped, f"#3781 regression: {why} ({token})"
+    # The front door itself must remain reachable (the gate's inverse).
+    assert 'id="btn-email"' in stripped, "the email signup CTA is missing"
 
 
 # ── The historical script-kill: no `let supabase` shadowing ────────────────
@@ -183,16 +238,50 @@ def test_recovery_flow_present() -> None:
     recovery_form = re.search(r'<form[^>]*id="recovery-form"[^>]*>', SIGNIN).group(0)
     assert re.search(r'method="post"', recovery_form), "recovery form must be method=post"
     assert re.search(r'action="/signin"', recovery_form), "recovery form must action=/signin"
-    # welcome.html: recovery-landing reset panel
+    # welcome.html: recovery-landing reset panel.
+    #
+    # #3501 replaced the client-side reset (a supabase-js `updateUser` call on a
+    # JavaScript-readable session) with a same-origin POST to the BFF. The
+    # assertions below pin the NEW contract; the ABSENCE assertions after them
+    # are the load-bearing half — a regression that reintroduces the bridge
+    # would pass every positive pin here while restoring the #3485 login loop.
     assert 'id="reset-form"' in WELCOME
     assert 'id="reset-error"' in WELCOME
     assert 'id="btn-reset"' in WELCOME
-    assert "PASSWORD_RECOVERY" in WELCOME
-    assert "updateUser" in WELCOME
-    assert "resetInFlight" in WELCOME
-    # recovery mode must short-circuit the session bridge (no team mint mid-reset)
-    assert "runSessionBridge" in WELCOME
-    assert "recoveryMode" in WELCOME
+    assert 'action="/auth/update-password"' in WELCOME
+    assert 'fetch("/auth/update-password"' in WELCOME_CODE
+    assert 'credentials: "same-origin"' in WELCOME_CODE
+    # #527 form-safety contract still holds on the new form: method=post with
+    # an explicit same-origin action (the native form must not GET-echo the
+    # password in a query string if JS fails).
+    reset_form = re.search(r'<form[^>]*id="reset-form"[^>]*>', WELCOME).group(0)
+    assert re.search(r'method="post"', reset_form), "reset form must be method=post"
+    assert re.search(r'action="/auth/update-password"', reset_form), (
+        "reset form must action=/auth/update-password"
+    )
+    # Double-submit guard (bucket burn): the in-flight latch must survive.
+    assert "var inFlight = false" in WELCOME_CODE
+    assert "if (inFlight) return" in WELCOME_CODE
+    # 401 vs 503 must stay DISTINCT. 401 = the recovery link is dead; the
+    # catch-all must say "try again", never "you are signed out" — conflating
+    # store/fault with signed-out is the #3485 class.
+    assert "r.status === 401" in WELCOME_CODE
+    assert "This reset link has expired or is invalid" in WELCOME_CODE
+    assert "sign in with your new password" in WELCOME_CODE
+    # The legacy client bridge is GONE. It could not read an HttpOnly session
+    # cookie, so its no-session branch fired on EVERY successful login and
+    # bounced the user back to /auth.
+    for legacy in (
+        "runSessionBridge",
+        "createTortoiseSupabaseClient",
+        "PASSWORD_RECOVERY",
+        "updateUser",
+        "supabase",
+    ):
+        assert legacy not in WELCOME_CODE, (
+            f"welcome.html still contains {legacy!r} — the client session "
+            "bridge was removed in #3501 and must not come back"
+        )
     assert "This reset link has expired or is invalid. Request a new one." in WELCOME
 
 
@@ -300,16 +389,223 @@ def test_inline_scripts_pass_node_syntax_check(fname: str) -> None:
 # ── Welcome page: defensive session wait (the "No active session" bounce) ──
 
 
-def test_welcome_waits_for_session_before_erroring() -> None:
-    """welcome.html must give the email-confirmation / OAuth callback a
-    bounded wait for the session (SIGNED_IN / getSession) before redirecting
-    an unauthenticated visitor to the single auth page (/auth) — prevents
-    bouncing legitimate callbacks to a dead state on older/cached
-    supabase-js builds."""
-    assert "waitForSession" in WELCOME
-    assert "SIGNED_IN" in WELCOME
-    # #1494: the no-session redirect uses location.replace — hard gate,
-    # Back cannot return to /welcome; the head gate covers the immediate
-    # cookie-missing case, this is the async-callback fallback.
-    assert 'window.location.replace("/auth"' in WELCOME
-    assert 'window.location.replace("/auth" + window.location.search + landingHash)' in WELCOME
+def test_welcome_does_not_wait_for_a_client_session() -> None:
+    """#3501: welcome.html must NOT wait for, or read, a client-side session.
+
+    This replaces the pre-#3501 assertion that the page ran a bounded
+    `waitForSession`/`SIGNED_IN` wait. Under the BFF there is no
+    JavaScript-readable session, so that wait could only ever time out — and
+    its no-session branch bounced every successfully-authenticated visitor back
+    to /auth. That was the #3485 login loop, reproduced by construction for
+    every user.
+
+    The decision now happens SERVER-side in `functions/welcome.ts`, which reads
+    the HttpOnly cookie and redirects before any HTML is served (pinned by
+    `tests/e2e/auth/test_welcome_and_password.py`). This test pins the ABSENCE of
+    the client-side implementation, so a regression fails here instead of in
+    production.
+    """
+    for legacy in ("waitForSession", "SIGNED_IN", "getSession"):
+        assert legacy not in WELCOME_CODE, (
+            f"welcome.html still contains {legacy!r} — the client-side session "
+            "wait was the #3485 login loop and must stay removed (#3501)"
+        )
+    # The page must not perform a client-side navigation; that is the server's
+    # job now, and a JS bounce back to /auth IS the #3485 loop.
+    #
+    # See _NAVIGATION_BANS for the mechanism list and its honestly-stated
+    # limits. The patterns are shared with the discrimination matrix below, so
+    # there is ONE definition rather than two that can drift apart.
+    for what, pattern in _NAVIGATION_BANS:
+        assert not re.search(pattern, WELCOME_CODE.lower()), (
+            f"welcome.html must not {what} (matched {pattern!r}) — the page "
+            "must not navigate client-side (#3501). The auth decision is the "
+            "server's, and a client-side bounce back to /auth is the #3485 "
+            "login loop."
+        )
+
+
+# ── The client-navigation guard: its mechanisms and its limits ─────────────
+#
+# A guard that has never been shown to fail is not a guard, and a guard whose
+# claim was never falsifiable is not evidence. Three generations were tried:
+#
+#   v1  substring `/auth'` / `"/auth"` / `location.replace`
+#   v2  regex, re.I: `location\s*\.\s*(?:replace|assign|href)\s*[(=]`
+#                   | `http-equiv\s*=\s*["']refresh["']`
+#   v3  the mechanism bans below (current)
+#
+# v3 vs v2 — NOT a strict superset in either direction, and the matrix below
+# does not prove that it is:
+#   * v2 missed `location['href'] = ...`, `location = '/auth'` and
+#     `setAttribute("http-equiv", ...)`; v3 catches all three.
+#   * v3's `\blocation\b` deliberately NARROWS v2, which had no left word
+#     boundary and so also matched any identifier merely ENDING in it:
+#     `_location.href = '/auth'`, `prevLocation.replace('/auth')`,
+#     `foo_location.assign('/auth')`. Those are v2-caught / v3-missed. Losing
+#     them costs no real coverage — they are v2 false positives on unrelated
+#     identifiers — but they are a genuine loss, so this is not "strictly
+#     stronger". The `\b` is kept because it is what keeps `relocation` /
+#     `allocation` prose out.
+#   A 37-form matrix cannot assert a universal property; it asserts its own
+#   rows. Read the claim as "every form in the matrix is caught", nothing more.
+#
+# v3 does NOT restore everything v1 caught, and that is a TRADE, not an
+# improvement. v1 matched the TARGET literal `/auth`, so it also caught
+# navigations that name no mechanism at all — `document.write(url='/auth')`,
+# `a.setAttribute("href", "/auth")`. Those are MISSED here.
+#
+# The reason they were not restored: matching the target cannot distinguish a
+# navigation from a legitimate reference to the same path. The demonstration is
+# `action="/auth"` (website/signup.html:612,638), which v1's `"/auth"` literal
+# DOES catch — i.e. the literal fires on a plain form action, not only on a
+# bounce. (Note v1 happens to pass on welcome.html: its `/auth` references
+# INCLUDE `action="/auth/update-password"`, `fetch("/auth/update-password"` and
+# two `href="/auth?mode=login"` links, none of which contain the exact literals.
+# That is luck of quoting, not the property v1 was pinning — which is itself the
+# reason to pin mechanisms.)
+#
+# Known limits, stated rather than implied: indirection THROUGH a mechanism
+# (`window.open.call(window, '/auth')`), computed member access
+# (`window['loc'+'ation']`), unicode escapes (`loca\u0074ion`), and
+# target-only navigations (above). A static gate cannot close these. The
+# behavioural proof is tests/e2e/auth/test_welcome_and_password.py.
+_NAVIGATION_BANS = (
+    ("read or assign `location`", r"\blocation\b"),
+    ("navigate via `history`", r"\bhistory\b"),
+    ("embed a meta-refresh redirect", r"http-equiv"),
+    ("open a window", r"\bopen\s*\("),
+    ("submit a form programmatically", r"\.\s*submit\s*\("),
+    ("click an element programmatically", r"\.\s*click\s*\("),
+    # Bracket/quoted method access (`window['open']('/auth')`) evades the dotted
+    # patterns and is a plausible reintroduction rather than exotic obfuscation.
+    # Requiring the INVOCATION keeps `type="submit"`, `class="btn-submit"` and
+    # `addEventListener("submit", ...)` out of it.
+    ("invoke a navigation method by name",
+     r"['\"]\s*(?:open|submit|click)\s*['\"]\s*\]?\s*\("),
+)
+
+
+def _guard_flags(source: str) -> str | None:
+    """Return the ban a source trips, or None.
+
+    Shared by the real-page assertion above and the matrix below, so the matrix
+    exercises the SAME patterns the guard enforces.
+    """
+    code = _strip_html_comments(source).lower()
+    for what, pattern in _NAVIGATION_BANS:
+        if re.search(pattern, code):
+            return what
+    return None
+
+
+# Every mechanism the guard claims to catch, as it would appear reintroduced.
+# Each is injected into a copy of the REAL page, so the matrix exercises the
+# actual guard over the actual file rather than a synthetic fixture.
+_NAVIGATION_FORMS = (
+    "location.replace('/auth')",
+    "location.assign('/auth?next=1')",
+    "location.href = '/auth'",
+    "location = '/auth'",
+    "window.location.href = '/auth'",
+    "document.location = '/auth'",
+    "self.location = '/auth'",
+    "top.location = '/auth'",
+    "parent.location.href = '/auth'",
+    "frames[0].location = '/auth'",
+    "location['replace']('/auth')",
+    "location['href'] = '/auth'",
+    "window['location']['replace']('/auth')",
+    "location[k]('/auth')",
+    "location.assign?.('/auth')",
+    "location.href ||= '/auth'",
+    "LOCATION.HREF = '/auth'",
+    "Location.Replace('/auth')",
+    "location . replace ( '/auth' )",
+    "location\n.href\n= '/auth'",
+    "history.pushState({}, '', '/auth')",
+    "history.replaceState({}, '', '/auth')",
+    '<meta http-equiv="refresh" content="0;url=/auth">',
+    "<meta http-equiv='refresh' content='0;url=/auth'>",
+    '<meta http-equiv=refresh content="0;url=/auth">',
+    '<meta http-equiv = "refresh" content="0;url=/auth">',
+    'x.setAttribute("http-equiv","refresh")',
+    'document.write(\'<meta http-equiv="refresh">\')',
+    'x.innerHTML = `<meta http-equiv="refresh">`',
+    "open('/auth')",
+    "window.open('/auth','_self')",
+    "window['open']('/auth')",
+    "window . open('/auth')",
+    "document.getElementById('f').submit()",
+    "document.forms[0].submit()",
+    "document.getElementById('a').click()",
+    "el['click']()",
+)
+
+# Constructs the REAL page legitimately contains. None may trip the guard: a
+# guard that fires on the correct implementation gets deleted by the next
+# person, and then it protects nothing.
+_LEGITIMATE_CONSTRUCTS = (
+    '<form id="reset-form" method="post" action="/auth/update-password">',
+    '<a href="/auth?mode=login">Sign in</a>',
+    '<a href="/auth?mode=signup">Create account</a>',
+    'fetch("/auth/update-password", { credentials: "same-origin" })',
+    '<button type="submit" class="btn-submit" id="btn-reset">Update</button>',
+    'form.addEventListener("submit", function (e) { e.preventDefault(); })',
+    '<link rel="icon" type="image/png" href="/logo.png">',
+    '<script src="/consent.js" defer></script>',
+    'var u = "https://app.premiselabs.co/x";',
+    '// a trailing comment mentioning location must not fire',
+)
+
+
+def test_the_navigation_guard_is_not_tripped_by_the_real_page() -> None:
+    """Non-vacuity, both directions.
+
+    The guard must PASS the real correct implementation, and the matrix must be
+    large enough to be meaningful — a matrix that silently shrank to two cases
+    would make the parametrized tests below pass while asserting almost
+    nothing.
+    """
+    assert _guard_flags(WELCOME) is None, (
+        "the guard fires on website/welcome.html as it actually is — a guard "
+        "that breaks the correct implementation gets deleted, not respected"
+    )
+    assert len(_NAVIGATION_FORMS) >= 30, (
+        f"discrimination matrix shrank to {len(_NAVIGATION_FORMS)} — the "
+        "guard's claim is only as strong as this list"
+    )
+    assert len(_LEGITIMATE_CONSTRUCTS) >= 8, (
+        f"legitimate-construct list shrank to {len(_LEGITIMATE_CONSTRUCTS)}"
+    )
+
+
+@pytest.mark.parametrize("anchor", ["</body>", "</head>"], ids=["body", "head"])
+@pytest.mark.parametrize("payload", _NAVIGATION_FORMS)
+def test_navigation_guard_catches_each_mechanism(payload: str, anchor: str) -> None:
+    """Every navigating mechanism must be flagged when injected into the real
+    page source.
+
+    This is the matrix the guard's claim rests on, run in CI. An earlier
+    version of this evidence lived in a scratch script under /tmp and was cited
+    in a commit message; it could not be re-run by anyone, it re-implemented the
+    guard instead of importing it, and it could not fail. This cannot drift
+    from the guard: both read _NAVIGATION_BANS.
+    """
+    injected = WELCOME.replace(anchor, f"<script>{payload}</script>\n{anchor}", 1)
+    assert injected != WELCOME, f"injection anchor {anchor!r} missing"
+    assert _guard_flags(injected), (
+        f"guard MISSED {payload!r} injected at {anchor} — a client-side bounce "
+        "back to /auth is the #3485 login loop"
+    )
+
+
+@pytest.mark.parametrize("construct", _LEGITIMATE_CONSTRUCTS)
+def test_navigation_guard_permits_legitimate_constructs(construct: str) -> None:
+    """And it must not fire on the constructs the page actually needs."""
+    injected = WELCOME.replace("</body>", construct + "\n</body>", 1)
+    assert injected != WELCOME
+    assert _guard_flags(injected) is None, (
+        f"guard false-fired on legitimate {construct!r} — a guard that breaks "
+        "correct code gets deleted, and then it protects nothing"
+    )

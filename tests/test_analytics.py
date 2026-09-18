@@ -42,7 +42,7 @@ class TestDisabled:
         # No POSTHOG_API_KEY in the environment → no-op (R19)
         assert analytics.is_enabled() is False
         # Must never raise even with garbage input
-        analytics.capture("tenant_provisioned", "u1", {"team_id": "t1"})
+        analytics.capture("tenant_provisioned", "u1", {"org_id": "t1"})
 
     def test_placeholder_key_disabled(self, monkeypatch):
         # "__..." keys are placeholders (same convention as consent.js)
@@ -81,18 +81,18 @@ class TestCapture:
         assert calls[0]["event"] == "tenant_provisioned"
         assert calls[0]["distinct_id"] == "user-uuid"
         assert calls[0]["properties"] == {
-            "team_id": "t1", "team_name": "Acme", "tier": "free",
+            "org_id": "t1", "org_name": "Acme", "tier": "free",
             "graph_name": "team_t1",
         }
 
     def test_api_key_created_wrapper(self):
         calls = []
         _enable(lambda **kw: calls.append(kw))
-        analytics.api_key_created("user-uuid", "t1", "t1key_01", "k1", "team_keys")
+        analytics.api_key_created("user-uuid", "t1", "t1key_01", "k1", "org_keys")
         assert calls[0]["event"] == "api_key_created"
         assert calls[0]["properties"] == {
-            "team_id": "t1", "key_prefix": "t1key_01", "key_id": "k1",
-            "source": "team_keys",
+            "org_id": "t1", "key_prefix": "t1key_01", "key_id": "k1",
+            "source": "org_keys",
         }
 
 
@@ -106,7 +106,7 @@ class TestFirstApiCallDedup:
         assert len(calls) == 1
         assert calls[0]["event"] == "first_api_call"
         assert calls[0]["properties"] == {
-            "team_id": "t1", "endpoint": "/v1/points", "method": "POST",
+            "org_id": "t1", "endpoint": "/v1/points", "method": "POST",
         }
 
     def test_distinct_teams_each_fire(self):

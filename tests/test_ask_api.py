@@ -27,7 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from test_hosted_api import (  # noqa: E402, RUF100
-    TEST_TEAM_ID,
+    TEST_ORG_ID,
     unauth_client,  # noqa: F401
 )
 from test_hosted_api import (
@@ -103,7 +103,7 @@ class _FakeReaderFactory:
 def _seed_point(client, content: str = "the gym schedule is Monday and Wednesday",
                 session_date: str = "2026-08-01") -> None:
     """Seed a point into the TEST_TEAM graph (through the patched SDK)."""
-    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     try:
         proj = sdk._get_proj()
         point = sdk.create_point("statement", content)
@@ -156,7 +156,7 @@ def test_suspended_team_403_passthrough(client):
 
     def _suspended(request: _AskRequest):
         raise HTTPException(status_code=403, detail=_suspended_detail())
-    ha_mod.app.dependency_overrides[ha_mod.get_current_team] = _suspended
+    ha_mod.app.dependency_overrides[ha_mod.get_current_org] = _suspended
     try:
         r = client.post("/v1/ask", json={"question": "q"})
         assert r.status_code == 403
@@ -171,7 +171,7 @@ def test_suspended_team_403_passthrough(client):
 # ── The happy path ─────────────────────────────────────────────────────────
 
 def test_ask_returns_answer(client, monkeypatch):
-    """test_ask_returns_answer pins the full 12-field shape + the RESOLVED
+    """test_ask_returns_answer pins the full 13-field shape + the RESOLVED
     question_date semantics (P2-15)."""
     _seed_point(client)
     fake = _FakeReaderFactory().install(monkeypatch)
@@ -181,7 +181,8 @@ def test_ask_returns_answer(client, monkeypatch):
     assert set(body) == {"answer", "abstained", "question_type",
                          "question_date", "evidence", "context_tokens",
                          "model", "provider", "route", "cost_estimate_usd",
-                         "duration_ms", "retrieval_degraded"}
+                         "duration_ms", "retrieval_degraded",
+                         "retrieved_session_ids"}
     assert body["answer"] == "The gym schedule is Monday and Wednesday."
     assert body["abstained"] is False
     assert body["question_date"]  # resolved value present
@@ -352,7 +353,7 @@ def test_reader_failure_502(client, monkeypatch):
     r = client.post("/v1/ask", json={"question": "q"})
     assert r.status_code == 502
     assert r.json() == {"error": {"code": "reader_unavailable"}}
-    usage = get_ask_usage(TEST_TEAM_ID)
+    usage = get_ask_usage(TEST_ORG_ID)
     assert usage["ask_calls"] == 0  # no record when the reader call FAILS
 
 
@@ -427,14 +428,14 @@ def test_ask_exec_floor_guarantees_execution(monkeypatch):
 
 def test_metered_exactly_once_per_hosted_ask(client, monkeypatch):
     """Meter record written exactly once per hosted ask (the single call
-    site: sdk.ask with team_id from get_current_team)."""
+    site: sdk.ask with org_id from get_current_org)."""
     _seed_point(client)
     _FakeReaderFactory().install(monkeypatch)
     from tortoise.metering import get_ask_usage
     for _ in range(3):
         r = client.post("/v1/ask", json={"question": "gym schedule?"})
         assert r.status_code == 200
-    usage = get_ask_usage(TEST_TEAM_ID)
+    usage = get_ask_usage(TEST_ORG_ID)
     assert usage["ask_calls"] == 3
     assert usage["ask_tokens_in"] > 0
 
@@ -444,7 +445,7 @@ def test_metered_exactly_once_per_hosted_ask(client, monkeypatch):
 def _seed_assembly_graph(client) -> None:
     """Build the #2165 base fixture graph into the TEST_TEAM namespace."""
     import tests._assembly_graph as ag
-    sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     try:
         ag.build_base_graph(sdk)
     finally:

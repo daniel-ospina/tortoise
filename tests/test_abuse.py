@@ -11,7 +11,7 @@ Covers (plan Task 2/4/9 + scoping deltas 8/9/11/13/14):
 - suspended-signal set semantics (invalidation signal, not an authority)
 - FakeControlPlane migration-0015 trigger emulation (bootstrap exclusion,
   ON CONFLICT DO NOTHING no-duplicate)
-- notify_abuse (recipient precedence, missing/NULL email fallback, no-raise)
+- notify_abuse (Telegram-only per #3639 — never touches Resend, no-raise)
 - CLI SUSPENDED detail parse; Turnstile siteverify fail-open/fail-closed
 """
 from __future__ import annotations
@@ -74,14 +74,14 @@ class TestStaging:
         eng = AbuseEngine(store)
         # exactly 500 (threshold) must NOT flag — breach is strictly >
         assert eng.record_point_create("t1", 500, now=T0) is None
-        assert store.team_flagged_at("t1") is None
+        assert store.org_flagged_at("t1") is None
         assert notified == []
 
     def test_above_threshold_flags(self, notified):
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         assert eng.record_point_create("t1", 501, now=T0) == "flag"
-        assert store.team_flagged_at("t1") is not None
+        assert store.org_flagged_at("t1") is not None
         assert [c[0] for c in notified] == ["abuse_flag"]
         assert notified[0][2]["rule"] == "point_create"
 
@@ -95,7 +95,7 @@ class TestStaging:
         for i in range(5):
             r = eng.record_point_create("t1", 100, now=T0 + timedelta(minutes=10 * (i + 1)))
             assert r == "breach"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
         assert not is_suspended_signal("t1")
 
     def test_boundary_crossing_suspends(self, notified):
@@ -113,7 +113,7 @@ class TestStaging:
         # (T0+1800, T0+5400] still breaches via the fresh 501.
         r = eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=90))
         assert r == "suspend"
-        assert store.team_suspended("t1") is True
+        assert store.org_suspended("t1") is True
         assert is_suspended_signal("t1") is True
         assert "abuse_suspended" in [c[0] for c in notified]
         assert notified[-1][2]["appeal_url"]
@@ -123,7 +123,7 @@ class TestStaging:
         eng = AbuseEngine(store)
         eng.record_point_create("t1", 501, now=T0)
         # no further evaluations (team went quiet) — even far past the window
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_new_burst_after_quiet_is_new_episode(self, notified):
         """Code-review P1 fix: a stale flag must not auto-suspend a fresh
@@ -136,10 +136,10 @@ class TestStaging:
         # quiet for 2 full windows, then a new single-window burst
         burst = T0 + timedelta(seconds=7200)
         assert eng.record_point_create("t1", 501, now=burst) == "flag"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
         assert eng.record_point_create("t1", 100,
                                        now=burst + timedelta(minutes=10)) == "breach"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
         # the re-flagged episode stages normally from its own anchor
         # (sustained breach throughout — no clean evaluation)
         assert eng.record_point_create(
@@ -160,7 +160,7 @@ class TestStaging:
                                created_at=later)
         r = eng.evaluate_key_creates("t1", now=later)
         assert r == "flag"  # stage 1 for R2, NOT suspension
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_weighted_rows_sum(self, notified):
         """One weighted row (bulk ingest) counts by weight, not rows."""
@@ -169,7 +169,7 @@ class TestStaging:
         eng.record_point_create("t1", 250, now=T0)
         assert store.window_sum("t1", "point_create", 3600, now=T0) == 250
         eng.record_point_create("t1", 251, now=T0)
-        assert store.team_flagged_at("t1") is not None  # 501 via 2 rows
+        assert store.org_flagged_at("t1") is not None  # 501 via 2 rows
 
 
 class TestKeyRule:
@@ -206,7 +206,7 @@ class TestKeyRule:
         assert eng.evaluate_key_creates("t1", now=T0) == "flag"
         self._seed_keys(store, "t1", 11, T0 + timedelta(hours=25))
         assert eng.evaluate_key_creates("t1", now=T0 + timedelta(hours=25)) == "flag"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_piggyback_on_point_create(self, notified):
         """Trigger-recorded key events (signup RPC path) evaluate on the
@@ -235,14 +235,14 @@ class TestEpisodeLifecycle:
         # Pass the simulated clock: the default now=wall-clock would stamp
         # the flag_clear rows AFTER the (simulated) future burst, so
         # latest_flag_at would see the new burst as already cleared.
-        store.unsuspend_team("t1", now=T0 + timedelta(minutes=90))
+        store.unsuspend_org("t1", now=T0 + timedelta(minutes=90))
         assert store.latest_flag_at("t1", "point_create") is None
         # fresh burst long after recovery: stage 1 again, never stage 2
         burst = T0 + timedelta(days=30)
         assert eng.record_point_create("t1", 501, now=burst) == "flag"
         assert eng.record_point_create(
             "t1", 100, now=burst + timedelta(minutes=10)) == "breach"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_clean_evaluation_ends_episode(self, notified):
         """Confirmation-review P2: a window back under threshold ends the
@@ -262,7 +262,7 @@ class TestEpisodeLifecycle:
         # much later burst: re-flag, never a stale-flag suspend
         burst = T0 + timedelta(days=10)
         assert eng.record_point_create("t1", 501, now=burst) == "flag"
-        assert store.team_suspended("t1") is False
+        assert store.org_suspended("t1") is False
 
     def test_unsuspend_clears_all_rules(self, notified):
         store = MemoryAbuseStore()
@@ -275,7 +275,7 @@ class TestEpisodeLifecycle:
         eng.evaluate_key_creates("t1", now=later)              # R2 flag
         assert store.latest_flag_at("t1", "point_create") is not None
         assert store.latest_flag_at("t1", "key_create") is not None
-        store.unsuspend_team("t1")
+        store.unsuspend_org("t1")
         assert store.latest_flag_at("t1", "point_create") is None
         assert store.latest_flag_at("t1", "key_create") is None
 
@@ -292,7 +292,7 @@ class TestEpisodeLifecycle:
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=30))
         eng.record_point_create("t1", 501, now=T0 + timedelta(minutes=90))
         assert any(w[1] == "suspended_at" and w[2] is not None for w in writes)
-        store.unsuspend_team("t1")
+        store.unsuspend_org("t1")
         assert ("t1", "suspended_at", None) in writes
         assert ("t1", "flagged_at", None) in writes
         # every write names exactly one field (no combined prop clobber)
@@ -326,7 +326,7 @@ class TestSwitches:
         assert eng.record_point_create("t1", 5, now=T0) is None
         assert eng.record_point_create("t1", 1, now=T0) == "flag"
 
-    def test_empty_team_id_noop(self, notified):
+    def test_empty_org_id_noop(self, notified):
         store = MemoryAbuseStore()
         eng = AbuseEngine(store)
         assert eng.record_point_create("", 9999, now=T0) is None
@@ -344,8 +344,8 @@ class TestReadVelocity:
         breach = tr.record_read("key1", "t1", now=now + 2)
         assert breach == ("key", "key1")
         assert [c[0] for c in notified] == ["abuse_read_velocity"]
-        # key-scope breach still notifies the TEAM owner (team_id carried)
-        assert notified[0][1]["team_id"] == "t1"
+        # key-scope breach still notifies the TEAM owner (org_id carried)
+        assert notified[0][1]["org_id"] == "t1"
         # dedup: same window → no repeat notification, no repeat breach return
         assert tr.record_read("key1", "t1", now=now + 3) is None
         assert len(notified) == 1
@@ -386,31 +386,31 @@ class TestSignupVelocity:
         # P1-FIX-2: breach on >= — the success feed fires on the 2nd mint
         # ("IP consumed its entire allowance" = the designed review signal).
         tr = SignupVelocityTracker(threshold=2, window_s=3600)
-        assert tr.record_signup("1.2.3.4", team_id="t1") is None
-        breach = tr.record_signup("1.2.3.4", team_id="t2")  # 2nd mint = breach
+        assert tr.record_signup("1.2.3.4", org_id="t1") is None
+        breach = tr.record_signup("1.2.3.4", org_id="t2")  # 2nd mint = breach
         assert breach == ("ip", "1.2.3.4")
         assert [c[0] for c in notified] == ["abuse_signup_velocity"]
         assert len(notified) == 1
         # dedup: further mints in the same window do NOT re-notify
-        tr.record_signup("1.2.3.4", team_id="t3")
+        tr.record_signup("1.2.3.4", org_id="t3")
         assert len(notified) == 1
 
     def test_window_expiry_rearms(self, monkeypatch, notified):
         tr = SignupVelocityTracker(threshold=2, window_s=60)
         for i in range(2):
-            tr.record_signup("9.9.9.9", team_id=f"t{i}", now=1000.0 + i)
+            tr.record_signup("9.9.9.9", org_id=f"t{i}", now=1000.0 + i)
         assert len(notified) == 1
         # window expires → a fresh burst is a NEW episode (re-notify)
         for i in range(2):
-            tr.record_signup("9.9.9.9", team_id=f"t{i}", now=2000.0 + i)
+            tr.record_signup("9.9.9.9", org_id=f"t{i}", now=2000.0 + i)
         assert len(notified) == 2
 
     def test_block_path_same_episode(self, monkeypatch, notified):
         # P1-FIX-2: success breach (2nd mint) + 429 block dedup to ONE email
         # per (ip, window) — same dedup key, never two.
         tr = SignupVelocityTracker(threshold=2, window_s=3600)
-        tr.record_signup("1.2.3.4", team_id="t1")
-        tr.record_signup("1.2.3.4", team_id="t2")   # success breach → notify
+        tr.record_signup("1.2.3.4", org_id="t1")
+        tr.record_signup("1.2.3.4", org_id="t2")   # success breach → notify
         tr.record_block("1.2.3.4")                    # 429 path → dedup'd
         tr.record_block("1.2.3.4")
         assert len(notified) == 1
@@ -418,7 +418,7 @@ class TestSignupVelocity:
     def test_kill_switch(self, monkeypatch, notified):
         monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
         tr = SignupVelocityTracker(threshold=1, window_s=3600)
-        assert tr.record_signup("1.2.3.4", team_id="t1") is None
+        assert tr.record_signup("1.2.3.4", org_id="t1") is None
 
     def test_memory_bound(self, monkeypatch, notified):
         # P1-B: the prune drops STALE entries (R3 precedent) — feed 10,100
@@ -428,7 +428,7 @@ class TestSignupVelocity:
         base = 1_000_000.0
         for i in range(10_100):
             now = base - 7200 if i < 200 else base  # first 200 stale (>window)
-            tr.record_signup(f"10.{(i // 250) % 250}.{i % 250}", team_id=f"t{i}", now=now)
+            tr.record_signup(f"10.{(i // 250) % 250}.{i % 250}", org_id=f"t{i}", now=now)
         # 10,100 > 10,000 → prune ran; 200 stale dropped, 9,900 live remain
         assert len(tr._by_ip) == 9_900
 
@@ -483,13 +483,13 @@ class TestSignalSet:
 # ── FakeControlPlane migration-0015 emulation (delta 9) ────────────────────
 
 class TestFakeTrigger:
-    def _provision(self, fake, team_id, lookup):
+    def _provision(self, fake, org_id, lookup):
         fake.rpc("provision_team", {
             "p_user_id": None, "p_identity": f"id-{lookup[:6]}",
-            "p_team_id": team_id, "p_team_name": team_id,
+            "p_org_id": org_id, "p_org_name": org_id,
             "p_api_key": f"tt_{lookup}", "p_key_hash": "kh",
-            "p_lookup_hash": lookup, "p_graph_name": f"team_{team_id}",
-            "p_email": f"{lookup}@x.co", "p_key_prefix": team_id[:8],
+            "p_lookup_hash": lookup, "p_graph_name": f"org_{org_id}",
+            "p_email": f"{lookup}@x.co", "p_key_prefix": org_id[:8],
         })
 
     def test_provision_records_key_create(self):
@@ -497,7 +497,7 @@ class TestFakeTrigger:
         self._provision(fake, "t1", "aaaa1111")
         events = [r for r in fake.tables["abuse_events"]
                   if r["event_type"] == "key_create"]
-        assert len(events) == 1 and events[0]["team_id"] == "t1"
+        assert len(events) == 1 and events[0]["org_id"] == "t1"
 
     def test_reprovision_no_duplicate_event(self):
         fake = FakeControlPlane()
@@ -510,36 +510,36 @@ class TestFakeTrigger:
     def test_bootstrap_mints_excluded(self):
         fake = FakeControlPlane()
         fake.query("api_keys", method="POST", json_body={
-            "id": "k1", "team_id": "t1", "created_via": "bootstrap"})
+            "id": "k1", "org_id": "t1", "created_via": "bootstrap"})
         assert fake.tables.get("abuse_events", []) == []
         fake.query("api_keys", method="POST", json_body={
-            "id": "k2", "team_id": "t1", "created_via": "recovery"})
+            "id": "k2", "org_id": "t1", "created_via": "recovery"})
         events = [r for r in fake.tables["abuse_events"]
                   if r["event_type"] == "key_create"]
         assert len(events) == 1
 
     def test_suspend_rpc_toggles_state(self):
-        fake = FakeControlPlane().seed("teams", [{"id": "t1", "tier": "free"}])
-        fake.rpc("abuse_suspend", {"p_team_id": "t1"})
-        assert fake.tables["teams"][0]["suspended_at"] is not None
-        fake.rpc("abuse_unsuspend", {"p_team_id": "t1"})
-        assert fake.tables["teams"][0]["suspended_at"] is None
-        assert fake.tables["teams"][0].get("flagged_at") is None
+        fake = FakeControlPlane().seed("organizations", [{"id": "t1", "tier": "free"}])
+        fake.rpc("abuse_suspend", {"p_org_id": "t1"})
+        assert fake.tables["organizations"][0]["suspended_at"] is not None
+        fake.rpc("abuse_unsuspend", {"p_org_id": "t1"})
+        assert fake.tables["organizations"][0]["suspended_at"] is None
+        assert fake.tables["organizations"][0].get("flagged_at") is None
 
     def test_supabase_store_over_fake(self):
         """SupabaseAbuseStore window_sum/flag/suspend over the fake plane."""
         from tortoise.abuse import SupabaseAbuseStore
-        fake = FakeControlPlane().seed("teams", [{"id": "t1", "tier": "free"}])
+        fake = FakeControlPlane().seed("organizations", [{"id": "t1", "tier": "free"}])
         store = SupabaseAbuseStore(fake)
         store.record_event("t1", "point_create", weight=300)
         store.record_event("t1", "point_create", weight=201)
         assert store.window_sum("t1", "point_create", 3600) == 501
-        store.flag_team("t1", "point_create", {"count": 501})
-        assert store.team_flagged_at("t1") is not None
-        store.suspend_team("t1")
-        assert store.team_suspended("t1")
-        store.unsuspend_team("t1")
-        assert not store.team_suspended("t1")
+        store.flag_org("t1", "point_create", {"count": 501})
+        assert store.org_flagged_at("t1") is not None
+        store.suspend_org("t1")
+        assert store.org_suspended("t1")
+        store.unsuspend_org("t1")
+        assert not store.org_suspended("t1")
         alerts = store.recent_alerts("t1")
         assert alerts and alerts[0]["type"] in ("suspend", "flag")
 
@@ -547,45 +547,67 @@ class TestFakeTrigger:
 # ── notify_abuse (Task 4) ───────────────────────────────────────────────────
 
 class TestNotifyAbuse:
-    def test_recipient_precedence_and_fallbacks(self, monkeypatch):
+    def test_telegram_only_never_calls_resend(self, monkeypatch):
+        """#3639: any Resend call from the abuse path is a regression.
+
+        The abuse path is uncounted by the Resend send budget, so an email leg
+        here can starve the transactional quota (401 abuse_flag emails in 3h
+        drove two consecutive days to a reported 200% of the daily cap).
+        """
         import tortoise.notify as notify
-        sent: list[tuple[str, str]] = []
+
+        resend_calls: list[tuple] = []
         monkeypatch.setattr(notify, "_send_resend",
-                            lambda key, to, subj, html: sent.append((key, to)))
+                            lambda *a, **k: resend_calls.append(a))
+        telegram_sent: list[str] = []
+        monkeypatch.setattr(notify, "telegram_send",
+                            lambda bot, chat, text, **k: telegram_sent.append(text))
         monkeypatch.setenv("RESEND_API_KEY", "re_test")
         monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@premiselabs.co")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
 
-        notify.notify_abuse("abuse_flag", {"team_id": "t1", "email": "owner@x.co"}, {})
-        assert sent[-1][1] == "owner@x.co"
+        # every org shape (email set / NULL / absent) must behave identically
+        for org in ({"org_id": "t1", "email": "owner@x.co"},
+                    {"org_id": "t1", "email": None},
+                    {"org_id": "t1"}):
+            notify.notify_abuse("abuse_flag", org,
+                                {"rule": "point_create", "count": 2826,
+                                 "threshold": 500, "window_s": 3600})
 
-        # NULL email → ops fallback
-        notify.notify_abuse("abuse_flag", {"team_id": "t1", "email": None}, {})
-        assert sent[-1][1] == "ops@premiselabs.co"
+        assert resend_calls == [], "abuse must never consume the Resend quota"
+        assert len(telegram_sent) == 3
+        assert all("abuse_flag" in t and "point_create" in t for t in telegram_sent)
 
-        # MISSING email key (registry dict shape) → ops fallback, no KeyError
-        notify.notify_abuse("abuse_flag", {"team_id": "t1"}, {})
-        assert sent[-1][1] == "ops@premiselabs.co"
-
-    def test_never_raises_on_channel_failure(self, monkeypatch):
+    def test_never_raises_on_telegram_failure(self, monkeypatch):
         import tortoise.notify as notify
 
         def boom(*a, **k):
-            raise RuntimeError("resend down")
+            raise RuntimeError("telegram down")
 
-        monkeypatch.setattr(notify, "_send_resend", boom)
-        monkeypatch.setenv("RESEND_API_KEY", "re_test")
-        monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@premiselabs.co")
-        # must not raise
-        notify.notify_abuse("abuse_suspended", {"team_id": "t1"}, {"rule": "point_create"})
+        monkeypatch.setattr(notify, "telegram_send", boom)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
+        # Telegram is the ONLY channel now, so its failure must still not
+        # propagate into the caller's request path.
+        notify.notify_abuse("abuse_suspended", {"org_id": "t1"}, {"rule": "point_create"})
 
     def test_unknown_kind_ignored(self, monkeypatch):
         import tortoise.notify as notify
-        sent = []
-        monkeypatch.setattr(notify, "_send_resend", lambda *a: sent.append(a))
+        resend_calls: list[tuple] = []
+        telegram_calls: list[tuple] = []
+        monkeypatch.setattr(notify, "_send_resend", lambda *a: resend_calls.append(a))
+        monkeypatch.setattr(notify, "telegram_send", lambda *a, **k: telegram_calls.append(a))
         monkeypatch.setenv("RESEND_API_KEY", "re_test")
         monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@x.co")
-        notify.notify_abuse("not_a_kind", {"team_id": "t1"}, {})
-        assert sent == []
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+        notify._skip_logged.clear()
+        notify.notify_abuse("not_a_kind", {"org_id": "t1"}, {})
+        assert resend_calls == []
+        assert telegram_calls == []
 
 
 # ── CLI SUSPENDED parse (Task 9) ────────────────────────────────────────────

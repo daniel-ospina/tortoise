@@ -5,6 +5,8 @@ domain: operations
 doc_status: live
 created: 2026-08-29
 ownedBy: epistemic-team
+aboutSubjects: tortoise-memory
+aboutObjects: tortoise-ask, tortoise-search
 ---
 
 # Ask Answer Surface (#1987)
@@ -64,7 +66,7 @@ surface — never the implicit answer path for search.
   `question_date` is ALWAYS the RESOLVED value — the server-now-UTC default
   when omitted, the caller override when provided.
 
-## Response schema (12 fields)
+## Response schema (13 fields)
 
 | Field | Meaning |
 |---|---|
@@ -79,6 +81,9 @@ surface — never the implicit answer path for search.
 | `cost_estimate_usd` | An ESTIMATE at the ×1.5 over-cover rate (see Cost) — never an exact bill |
 | `duration_ms` | Wall-clock: local lane = `ask()` entry → response; hosted HTTP = request receipt → response; hosted MCP = in-process local-lane wall-clock (the MCP handler runs the SDK local lane in-process). Reader-only breakdown deferred |
 | `retrieval_degraded` | True when any retrieval leg degraded or D8 decoration was unavailable → 200 success with degraded evidence, **metered as success**; raised retrieval/annotation failure → 502 `retrieval_unavailable` |
+| `retrieved_session_ids` | The DISTINCT session ids DERIVED for the assembled `evidence`, in the order the evidence presents them (the legacy lane's own post-dedup ranking order — post-boost, and when enabled post-rerank (A7) / post-package (A8) — **not** raw RRF once `apply_evidence_boost` or the A7 rerank reorders the pool; the subject-major `post_cap_lines` order of the connected-assembly fired branch) — built from the same hit list the evidence was rendered from, never inferred from an id's shape. Derived means read from an explicit identity only: an explicit `session_id` already on the hit (the `annotate_ask_hits` Event join — which also supplies a Point's own camel `sessionId` prop whenever the Event arm yields no `sessionId`: no matching Event, or a matching Event without the prop), else the hit's `sessionId` (the Point's own prop, else the `:Session` `CONTAINS` edge). A hit whose identity cannot be derived contributes nothing, so `[]` is honest. Independently, the value is sanitized: anything outside `[A-Za-z0-9._:@+\-]{1,128}` after stripping surrounding whitespace is **dropped** on both surfaces — reported as unknown whenever no other safe identity source exists for that hit (a safe sibling source is used instead). That is a sanitizer rule, not a divergence. This sanitizer covers the **session id only** — `session_date` and `speaker` are interpolated into the same annotation zone unsanitized (a pre-existing, separately-tracked gap: #3844). **The field is NOT a mirror of the tags — only the honest set of identities the retrieved hits carry.** The two should be read together, because a hit carrying the eval/assembly lanes' `lme_session_index` keeps its historical tag (byte-identical to the pre-change expression per the R17 assembly goldens) regardless of the id it names, in both directions: (a) a RENDERING index (`>= 0`) shows `[session <index>]`, so the field can be empty while the evidence names sessions, or can name a session the reader was never shown — the D3 defect (the evidence does not name the true session) still stands for such rows, because the index wins the tag; (b) a NON-RENDERING index (the eval lane's `-1` sentinel, or an explicit `None` — the connected-assembly spine's spelling) shows `[session ?]` while the field still names the id. Consequence for the whole-hit caps — BYTE cap only: the derived tag is part of the byte accounting (`assemble_context` accounts `len(_render_block(h).encode())`), so `[session <uuid>]` is ~35 B wider than `[session ?]` and a pool already at the 32 KiB byte ceiling can admit **fewer** hits than pre-change (measured at the production cap: 40 → 38 of the same 40-hit pool). The 8K token cap is unaffected — it accounts `len(block.split())`, and the tag replaces one word with one word, so it adds bytes, not whitespace words. Cap VALUES and the admission mechanism are unchanged; the post-cap byte outcome is not, and that shrink is the accepted price of naming the session. |
+
+`/v1/search`'s `sessionId` is populated from the Point's `sessionId` prop, else the `:Session` `CONTAINS` edge, and passes through the same sanitizer (as does the `entity_type='document'` branch of the same agent-consumed MCP/`tortoise_search` path). Because the ask lane additionally prefers an explicit `session_id`, the two surfaces can name a different (both graph-derived) session for the same point. The **self-host** `/v1/search` response (`selfhost_api.PointResponse` = `id`/`content`/`kind`/`created_at`) does not carry a session id — a deliberate pre-existing narrow contract, out of scope for this change.
 
 `evidence` is present in ALL successful responses INCLUDING abstained ones
 (the caller-visible reason for the abstention).
@@ -145,9 +150,17 @@ measurement justifies a change.
   nothing. Measurement-gated: defaults stay OFF until the runbook
   baseline justifies a raise.
 - **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 product
-  cross-encoder rerank (eval R6 port, `tortoise/rerank.py`). Truthy-only;
-  needs the `embeddings` extra. Degrades to untouched on any scorer
-  failure (never raises).
+  cross-encoder rerank (eval R6 port, `tortoise/rerank.py` — the ONE
+  implementation, re-exported by the eval lane). Truthy-only; needs the
+  `embeddings` extra. Degrades to untouched on any scorer failure (never
+  raises). Context/token budget guard (#2976): the measured lever costs
+  ~6.6× context, so a reranked set over the SAME 8000-token / 32 KiB caps
+  `assemble_context` enforces is refused WHOLE — the pool degrades to the
+  unreranked order with a declared `reranked-set-exceeds-context-budget`
+  reason (logged), never a silent truncation of the reranked set.
+  Pre-packaging note: the guard runs before the A8 evidence package, which
+  can only shrink the pool — so the guard is deliberately conservative (it
+  may over-refuse, never under-refuse).
 - **Vector leg (A2):** a documented runtime requirement for ask quality —
   the lexical-trio retrieval class needs the `embeddings` extra. NEVER
   enforced: a degraded lane keeps `retrieval_degraded=true` honestly (no
@@ -187,7 +200,7 @@ measurement justifies a change.
 - **Metering:** per-query record via `record_ask_usage` (best-effort,
   non-fatal — metering failures never block the answer). Recorded when the
   SDK call completes successfully (the single call site: the SDK local lane
-  with an explicit `team_id`); zero records when the reader/retrieval call
+  with an explicit `org_id`); zero records when the reader/retrieval call
   FAILS. Selfhost (HTTP MCP + REST + stdio) records nothing — the
   transport-keyed `_selfhost_transport` exemption, never a value-keyed
   "selfhost" check (a hosted team literally named "selfhost" records usage
@@ -232,7 +245,7 @@ always receivable.
 
 ## Notes
 
-- **Connected-assembly branch (#2165 Task 6, `TORTOISE_ASK_CONNECTED_ASSEMBLY`, default OFF):** the ask() local lane slots a deterministic pre-retrieval branch AFTER validation. Flag ON + a routed shape (current-state / ordering / interval) + BOTH subject halves resolved → the evidence is ASSEMBLED from typed slices (state header `STATE (couch): superseded by sofa on 2026-09-01` + chronological dated spine) instead of the legacy FTS pool; flag OFF / unrouted / unresolved → legacy byte-identical by construction. `sdk.ask_assembled()` exposes the same pipeline in PURE-ASSEMBLY mode (no reader; the eval arm reads `post_cap_lines` for gold-id admission) or with a `_reader_factory`. The fired path passes `[]` to the D8-decoration-unavailable gate → a fired render NEVER reports `retrieval_degraded` (R11). Response shape is unchanged (12 fields) — hosted /v1/ask and MCP `tortoise_ask` inherit the branch in-process.
+- **Connected-assembly branch (#2165 Task 6, `TORTOISE_ASK_CONNECTED_ASSEMBLY`, default OFF):** the ask() local lane slots a deterministic pre-retrieval branch AFTER validation. Flag ON + a routed shape (current-state / ordering / interval) + BOTH subject halves resolved → the evidence is ASSEMBLED from typed slices (state header `STATE (couch): superseded by sofa on 2026-09-01` + chronological dated spine) instead of the legacy FTS pool; flag OFF / unrouted / unresolved → legacy byte-identical by construction. `sdk.ask_assembled()` exposes the same pipeline in PURE-ASSEMBLY mode (no reader; the eval arm reads `post_cap_lines` for gold-id admission) or with a `_reader_factory`. The fired path passes `[]` to the D8-decoration-unavailable gate → a fired render NEVER reports `retrieval_degraded` (R11). Response shape is `retrieved_session_ids`-inclusive (13 fields) — hosted /v1/ask and MCP `tortoise_ask` inherit the branch in-process.
 - **Real-lane caveats (documented, R12/R17 DA P2-4):** the assembled evidence trusts write-side state: (1) the supersession fold's `supersededAt` is authoritative for state headers but object-level evidence carries neutral-0.5 EP until write-side EP lands; (2) sparse extractor `when` (D3) makes many rows tier-created/undated — chronological spines reflect `createdAt`/`startedAt` where `when` is absent; (3) alias cold-start — the resolver's alias leg needs anchored `search_keys` on the Object (high/FTS legs are alias-independent). Byte-golden tests pin the fixture's dated rows; real graphs with wall-clock timestamps should set `question_date` explicitly for deterministic as-of windows.
 - **JSON-mode pin:** the ask lane pins `json_mode=False` STRUCTURALLY (the
   `_should_send_json_mode` content heuristic would fire on "json" inside

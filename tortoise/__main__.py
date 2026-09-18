@@ -307,7 +307,7 @@ def _cmd_init(args):
                     _emit_json({
                         "status": "connected",
                         "already_connected": True,
-                        "team_id": existing.get("team_id"),
+                        "org_id": existing.get("org_id"),
                         "api_url": existing_api_url,
                         "mcp": {
                             "endpoint": f"{existing_api_url}/mcp/",
@@ -363,14 +363,14 @@ def _cmd_init(args):
 
         # Validation outcome: (error_kind, message, http_code) or None when the
         # key validated. Hard-fail kinds → config NOT saved; warn kinds → saved.
-        team_id = None
+        org_id = None
         fail: tuple[str, str, int | None] | None = None
 
         try:
             for attempt in range(2):
                 try:
-                    team_data = _validate_key()
-                    team_id = (team_data or {}).get("team_id") if isinstance(team_data, dict) else None
+                    org_data = _validate_key()
+                    org_id = (org_data or {}).get("org_id") if isinstance(org_data, dict) else None
                     if not json_mode:
                         print("✅ API key validated against Tortoise Cloud")
                     break
@@ -382,11 +382,11 @@ def _cmd_init(args):
                             body = e.read().decode()
                         except Exception:
                             pass
-                        # #308: suspended teams get a structured 403 — surface
+                        # #308: suspended orgs get a structured 403 — surface
                         # the appeal link instead of the generic rejection.
                         sus = _suspended_info(body)
                         if sus is not None:
-                            fail = ("team_suspended", f"Team suspended — {sus[0]}", e.code)
+                            fail = ("org_suspended", f"Team suspended — {sus[0]}", e.code)
                         else:
                             fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
                         if not json_mode:
@@ -455,7 +455,7 @@ def _cmd_init(args):
             # Machine-consumable output — full shape for agents (#304).
             _emit_json({
                 "status": "connected",
-                "team_id": team_id,
+                "org_id": org_id,
                 "api_url": base_url,
                 "mcp": {
                     "endpoint": f"{base_url}/mcp/",
@@ -863,11 +863,11 @@ def _is_invalid_signup_token(body: str) -> bool:
 
 def _cmd_recover(args) -> int:
     """Keyless config-loss recovery (#1709): POST /v1/agent/recover with the
-    saved st_ token → a NEW key on the SAME team; config rewritten, data
+    saved st_ token → a NEW key on the SAME org; config rewritten, data
     intact. The token is persisted back into the config — the recover
     endpoint does NOT re-issue tokens (rotation rejected), so without
     persistence this surface would be one-shot-only and the NEXT key-loss
-    would silently fresh-mint and orphan the recovered team.
+    would silently fresh-mint and orphan the recovered org.
     """
     import json, os, sys, uuid  # noqa: E401, I001
     from pathlib import Path
@@ -935,21 +935,21 @@ def _cmd_recover(args) -> int:
         print(f"Cannot reach API at {base}: {e}", file=sys.stderr)
         return 1
 
-    if not (isinstance(data, dict) and "key" in data and "team_id" in data):
-        # #1709 fixer P2.2: a 200 with valid JSON but no key/team_id (proxy/
+    if not (isinstance(data, dict) and "key" in data and "org_id" in data):
+        # #1709 fixer P2.2: a 200 with valid JSON but no key/org_id (proxy/
         # edge garbage) must not KeyError-traceback on the derefs below —
         # mirror _cmd_signup's malformed-response guard (fail-soft: the
         # recovery may have committed server-side, so never blindly retry).
         print("Recovery may have succeeded but the response was malformed "
-              "(missing 'key' or 'team_id') — check the dashboard or support "
+              "(missing 'key' or 'org_id') — check the dashboard or support "
               "before re-running; do NOT blindly retry.", file=sys.stderr)
         return 1
 
     config = {
         "api_key": data["key"],
         "api_url": api_url,
-        "team_id": data["team_id"],
-        "team_name": data.get("team_name"),
+        "org_id": data["org_id"],
+        "org_name": data.get("org_name"),
         "signup_token": token,  # ⛔ persist — recovery must not be one-shot
     }
     # Write to the #1708 global store (0600, dir 0700, atomic) — same shape
@@ -968,7 +968,7 @@ def _cmd_recover(args) -> int:
         print(f"Recovered key could NOT be saved to config: {e}", file=sys.stderr)
         print(f"   API key (save it now): {data['key']}", file=sys.stderr)
         return 1
-    print(f"✅ Key recovered on team {data.get('team_name')} (data intact)")
+    print(f"✅ Key recovered on team {data.get('org_name')} (data intact)")
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     print(f"   Recovery token kept: {token[:14]}…")
@@ -978,17 +978,17 @@ def _cmd_recover(args) -> int:
 def _cmd_token_revoke(args) -> int:
     """User-facing signup-token revocation (#1715): POST
     /v1/agent/token/revoke with the saved (or --token) st_ token → the
-    token can no longer recover keys on the team. The request is
-    authenticated with the stored team key (env → cwd → global resolver,
-    #1708) — the same credential that proves team ownership server-side;
-    the endpoint is team-scoped, so a leaked token is killable the moment
+    token can no longer recover keys on the org. The request is
+    authenticated with the stored org key (env → cwd → global resolver,
+    #1708) — the same credential that proves org ownership server-side;
+    the endpoint is org-scoped, so a leaked token is killable the moment
     it is noticed. Prints confirmation; the stored config is left intact
     (the revoked token simply 422s on any later recover).
 
     #1755 UX gate: revocation is PERMANENT (no un-revoke RPC exists) — a
-    stray invocation permanently destroys the team's only keyless-recovery
+    stray invocation permanently destroys the org's only keyless-recovery
     path. Requires explicit [y/N] confirmation unless --force, mirroring
-    _cmd_team_keys_revoke; non-interactive runs fail closed (no revoke).
+    _cmd_org_keys_revoke; non-interactive runs fail closed (no revoke).
     """
     import json, sys  # noqa: E401, I001
     from urllib.error import HTTPError, URLError
@@ -1008,14 +1008,14 @@ def _cmd_token_revoke(args) -> int:
     # #1752: the token must come from the SAME config the auth key came
     # from — an env key has no token, so a stored token from another source
     # is used only with a warning naming the shadow source (no silent 403
-    # "Not your signup token" dead-end when the sources are different teams).
+    # "Not your signup token" dead-end when the sources are different orgs).
     token = _resolve_same_source_token(args, _cfg_path, _cfg)
     if not token:
         print("No recovery token found. Pass --token st_... or run "
               "'tortoise signup' first.", file=sys.stderr)
         return 1
     # #1755 confirmation gate — revoke is PERMANENT (no un-revoke RPC
-    # exists) and removes the team's only keyless-recovery path. Only an
+    # exists) and removes the org's only keyless-recovery path. Only an
     # explicit yes proceeds; --force skips the prompt for scripts; a
     # non-interactive run without --force fails CLOSED (no revoke).
     if not getattr(args, "force", False):
@@ -1137,7 +1137,7 @@ def _cmd_signup(args) -> int:
         The 401/403 source may be a higher-precedence key (env or a legacy
         cwd/.tortoise config) that still shadows the global store at read
         time — re-running would re-validate the dead source and mint ANOTHER
-        team (the exact duplicate-mint incident #1708 fixes). When the
+        org (the exact duplicate-mint incident #1708 fixes). When the
         shadowing source is rejected, check the store the mint would write:
 
           "valid"         — GET /v1/team 200 → reuse instead of minting.
@@ -1152,7 +1152,7 @@ def _cmd_signup(args) -> int:
         except (json.JSONDecodeError, ValueError, OSError):
             # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
             # a ValueError subclass — a corrupt store is FAIL-CLOSED (D6):
-            # never mint over an unreadable store (the team it belonged to
+            # never mint over an unreadable store (the org it belonged to
             # would be orphaned and its signup budget silently burned).
             return "unvalidatable"
         if not isinstance(store, dict):
@@ -1186,7 +1186,7 @@ def _cmd_signup(args) -> int:
             # is the EXACT state `tortoise recover` is designed for — the
             # corrupt-config boilerplate ("fix or delete it, or use --force")
             # is destructive here: deleting destroys the recovery token and
-            # --force mints a NEW team, orphaning the old one. Point at
+            # --force mints a NEW org, orphaning the old one. Point at
             # recovery; genuinely corrupt files keep the boilerplate below.
             token_only, shadow = _token_only_config_path()
             if token_only is not None:
@@ -1230,7 +1230,7 @@ def _cmd_signup(args) -> int:
                 body = e.read().decode() if e.fp else ""
                 if e.code in (401, 403):
                     # #308: SUSPENDED 403 must NOT mint (mirrors the other
-                    # _cmd_* team handlers — a suspended team must not be
+                    # _cmd_* org handlers — a suspended org must not be
                     # silently orphaned by a fresh anonymous mint).
                     sus = _suspended_info(body)
                     if sus is not None:
@@ -1240,7 +1240,7 @@ def _cmd_signup(args) -> int:
                     # the mint would write to. When the 401/403 came from a
                     # higher-precedence source (env/cwd), a valid global key
                     # must be REUSED — otherwise every re-run re-validates the
-                    # dead source and mints ANOTHER team (the duplicate-mint
+                    # dead source and mints ANOTHER org (the duplicate-mint
                     # incident). The store's own host is used when it differs.
                     if cfg_path != config_path:
                         gs = _global_key_status(base)
@@ -1304,14 +1304,14 @@ def _cmd_signup(args) -> int:
         stored["device_id"] = legacy_device_id
     device_id = stored.get("device_id") or f"anon-{uuid.uuid4().hex[:12]}"
 
-    # #1709: a stored st_ signup token re-presents the SAME team on re-signup
+    # #1709: a stored st_ signup token re-presents the SAME org on re-signup
     # (keyless recovery — the dedupe check). Read from the active configs.
     stored_token = _read_stored_signup_token()
     if force:
         # #1709 fixer P2.4: --force is the documented escape hatch — a FRESH
         # mint, never a recovery. Without this the stored token was still
         # re-presented and --force silently performed a RECOVERY (a suspended
-        # team + dead token could never be escaped). Clearing it here also
+        # org + dead token could never be escaped). Clearing it here also
         # makes the recovery/fresh-mint branch distinction below purely
         # request-shaped (P2.5).
         stored_token = None
@@ -1321,7 +1321,7 @@ def _cmd_signup(args) -> int:
         payload = {"identity": device_id}
         if stored_token:
             # #1709: token possession = the dedupe credential — the server
-            # RECOVERS the same team (new key, no second team).
+            # RECOVERS the same org (new key, no second org).
             payload["signup_token"] = stored_token
         try:
             req = Request(
@@ -1356,8 +1356,8 @@ def _cmd_signup(args) -> int:
                 return 1
             if e.code == 422 and stored_token and _is_invalid_signup_token(body):
                 # #1709 P3: a revoked/truncated token must NOT silently orphan the
-                # original team — warn FIRST and require confirmation before
-                # clearing the token + minting a NEW team. Non-interactive runs
+                # original org — warn FIRST and require confirmation before
+                # clearing the token + minting a NEW org. Non-interactive runs
                 # fail CLOSED (no mint, no orphan).
                 print("⚠️  Your recovery token is invalid — this will create a NEW "
                       "team; the old team will be unreachable.", file=sys.stderr)
@@ -1417,8 +1417,8 @@ def _cmd_signup(args) -> int:
     config = {
         "api_key": data["key"],
         "api_url": mint_url,
-        "team_id": data.get("team_id"),
-        "team_name": data.get("team_name"),
+        "org_id": data.get("org_id"),
+        "org_name": data.get("org_name"),
         "device_id": device_id,
     }
     if new_token:
@@ -1460,7 +1460,7 @@ def _cmd_signup(args) -> int:
         # Orphan class: the key was minted but cannot be saved — echo it AND
         # the recovery token (the success-path shown-once contract) and fail
         # closed so the user never loses either and never silently re-mints
-        # (the incident pattern #1750 fixes: a re-run minted a SECOND team
+        # (the incident pattern #1750 fixes: a re-run minted a SECOND org
         # and the first's token was never shown).
         print(f"A key was minted but could NOT be saved to {config_path}: {e}",
               file=sys.stderr)
@@ -1471,16 +1471,16 @@ def _cmd_signup(args) -> int:
             print("   RECOVERY TOKEN — save this: it is the only way back into "
                   "this team if your key is lost.", file=sys.stderr)
         if stored_token:
-            # recovery-orphan leg: the server recovered the SAME team, only the
+            # recovery-orphan leg: the server recovered the SAME org, only the
             # save failed — re-running re-presents the token and re-recovers
-            # the SAME team; no new team is created (review P2, #1750).
+            # the SAME org; no new org is created (review P2, #1750).
             print("Fix the path permissions and re-run — recovery is re-attempted "
                   "on the SAME team (no new team is created). "
                   "The key+token above are your only access until then.",
                   file=sys.stderr)
         elif orphan_token:
             # fresh-mint-orphan leg: a re-run with no stored key mints a SECOND
-            # team and orphans the first — warn hard (the incident pattern).
+            # org and orphans the first — warn hard (the incident pattern).
             print("Fix the path permissions and re-run, or use the key directly — "
                   "but do NOT re-run blindly: this creates a NEW team; the old "
                   "team's key+token above are your only access.", file=sys.stderr)
@@ -1512,13 +1512,13 @@ def _cmd_signup(args) -> int:
     # (stored_token — a recovery) vs whether the mint RETURNED one (new_token —
     # a fresh mint). A fresh mint whose response lacks signup_token (server
     # version skew / a field-stripping proxy) is NOT a recovery — "data intact"
-    # would be false — so say "Free team created" and warn the recovery
+    # would be false — so say "Free org created" and warn the recovery
     # backdoor was not issued (the same fail-soft contract as the missing-key
     # leg: never misreport, never silently drop a credential).
     if stored_token:
-        print(f"✅ Key recovered on existing team: {data.get('team_name')} (data intact)")
+        print(f"✅ Key recovered on existing team: {data.get('org_name')} (data intact)")
     else:
-        print(f"✅ Free team created: {data.get('team_name')}")
+        print(f"✅ Free team created: {data.get('org_name')}")
         if not new_token:
             print("⚠️  Recovery backdoor NOT created — the server did not return "
                   "a signup token; you cannot use `tortoise recover` for this "
@@ -1528,13 +1528,13 @@ def _cmd_signup(args) -> int:
     print(f"   Config saved to {config_path} (shown once — store it)")
     if new_token:
         # #1709: the recovery token is the SINGLE save point (the only way
-        # back into this team if the key is lost). Shown once, like the key.
+        # back into this org if the key is lost). Shown once, like the key.
         print(f"   Recovery token: {new_token}")
         print("   RECOVERY TOKEN — save this: it is the only way back into "
               "this team if your key is lost.")
     if getattr(args, "claim", False):
-        # #1082: the anonymous team can attach a verified identity (same key,
-        # same team, memories intact) — one-time human act, no device flow.
+        # #1082: the anonymous org can attach a verified identity (same key,
+        # same org, memories intact) — one-time human act, no device flow.
         dashboard = os.environ.get(
             "TORTOISE_DASHBOARD_URL", "https://app.premiselabs.co")
         print()
@@ -1549,8 +1549,8 @@ def _cmd_signup(args) -> int:
     return 0
 
 
-def _cmd_team_info(args) -> int:
-    """Show team info from Tortoise Cloud API."""
+def _cmd_org_info(args) -> int:
+    """Show org info from Tortoise Cloud API."""
     import json, sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1579,7 +1579,7 @@ def _cmd_team_info(args) -> int:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=sys.stderr)
         return 1
 
-    print(f"Team:       {data.get('team_id', '?')}")
+    print(f"Team:       {data.get('org_id', '?')}")
     print(f"Tier:       {data.get('tier', 'free')}")
     print(f"Points:     {data.get('point_count', 0)}")
     print(f"Max users:  {data.get('max_users', 1)}")
@@ -1601,7 +1601,7 @@ def _resolve_config_path(include_env: bool = True, *,
     Returns (config_path, config, api_key, api_url) or (None, None, None, None).
     INVARIANT: whenever api_key is not None, config is a dict (env candidate is
     synthesized as {"api_key": key, "api_url": url} — callers like
-    _cmd_team_keys_list do config.get(...) unconditionally and must never see None).
+    _cmd_org_keys_list do config.get(...) unconditionally and must never see None).
     - Empty/whitespace env TORTOISE_API_KEY (.strip()) is treated as unset
       (prevents a lockout shadow where a bad env key beats a good stored one).
     - A candidate file that exists but fails JSON parse / is unreadable / has a
@@ -1670,7 +1670,7 @@ def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str 
     """Read the resolved config → (config, api_key, api_url) (env → cwd → global).
 
     Thin wrapper over _resolve_config_path preserving the legacy 3-tuple +
-    _cmd_fail contract for the hosted-team commands (team info, team keys *).
+    _cmd_fail contract for the hosted-org commands (org info, org keys *).
     Prints the failure reason to stderr; callers must return 1 when api_key is
     None. With json_mode, also emits the machine-readable error on stdout so
     the --json contract holds even for config failures (#875 P2).
@@ -1710,7 +1710,7 @@ def _cmd_fail(json_mode: bool, error: str, message: str, **extra: object) -> int
 def _suspended_info(body: str) -> tuple[str, str | None] | None:
     """#308 (R5): parse a 403 body for the SUSPENDED detail code.
 
-    Returns (message, appeal_url) when the team is suspended, else None —
+    Returns (message, appeal_url) when the org is suspended, else None —
     unparseable/other bodies keep each caller's pre-#308 behavior."""
     try:
         import json as _j
@@ -1876,8 +1876,8 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     return 0
 
 
-def _cmd_team_keys_list(args) -> int:
-    """List team API keys (GET /v1/team/keys). Hashes only — no plaintext."""
+def _cmd_org_keys_list(args) -> int:
+    """List org API keys (GET /v1/team/keys). Hashes only — no plaintext."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1899,7 +1899,7 @@ def _cmd_team_keys_list(args) -> int:
         if e.code in (401, 403):
             sus = _suspended_info(body)  # #308
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=e.code,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
@@ -1919,11 +1919,11 @@ def _cmd_team_keys_list(args) -> int:
 
     keys = data.get("keys", [])
     if getattr(args, "json", False):
-        _emit_json({"team_id": config.get("team_id"), "keys": keys})
+        _emit_json({"org_id": config.get("org_id"), "keys": keys})
         return 0
 
-    team_id = config.get("team_id")
-    print(f"API keys for team {team_id}:" if team_id else "API keys:")
+    org_id = config.get("org_id")
+    print(f"API keys for team {org_id}:" if org_id else "API keys:")
     print(f"  {'ID':<14}{'Name':<20}{'Prefix':<14}{'Created':<26}{'Last used':<26}Status")
     for k in keys:
         status = "revoked" if k.get("revoked_at") else "active"
@@ -1934,8 +1934,8 @@ def _cmd_team_keys_list(args) -> int:
     return 0
 
 
-def _cmd_team_keys_create(args) -> int:
-    """Mint a new team API key (POST /v1/team/keys). Key shown exactly once."""
+def _cmd_org_keys_create(args) -> int:
+    """Mint a new org API key (POST /v1/team/keys). Key shown exactly once."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1972,7 +1972,7 @@ def _cmd_team_keys_create(args) -> int:
         if e.code in (401, 403):
             sus = _suspended_info(body)  # #308
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=e.code,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "key_rejected",
@@ -1997,7 +1997,7 @@ def _cmd_team_keys_create(args) -> int:
             "id": data.get("id"),
             "created_at": data.get("created_at"),
             "name": data.get("name"),
-            "team_id": config.get("team_id"),
+            "org_id": config.get("org_id"),
         })
         return 0
 
@@ -2011,8 +2011,8 @@ def _cmd_team_keys_create(args) -> int:
     return 0
 
 
-def _cmd_team_keys_revoke(args) -> int:
-    """Revoke a team API key (DELETE /v1/team/keys/{id}). Soft delete."""
+def _cmd_org_keys_revoke(args) -> int:
+    """Revoke an org API key (DELETE /v1/team/keys/{id}). Soft delete."""
     import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -2043,11 +2043,11 @@ def _cmd_team_keys_revoke(args) -> int:
         if e.code == 404:
             return _cmd_fail(json_mode, "not_found", "API key not found", http_code=404)
         if e.code == 403:
-            # #308: a suspended team's revoke also 403s — the SUSPENDED
-            # detail (with appeal link) must not masquerade as cross-team.
+            # #308: a suspended org's revoke also 403s — the SUSPENDED
+            # detail (with appeal link) must not masquerade as cross-org.
             sus = _suspended_info(body)
             if sus is not None:
-                return _cmd_fail(json_mode, "team_suspended",
+                return _cmd_fail(json_mode, "org_suspended",
                                  f"Team suspended — {sus[0]}", http_code=403,
                                  appeal_url=sus[1])
             return _cmd_fail(json_mode, "cross_team",
@@ -2763,6 +2763,126 @@ def _cmd_install_hooks(args) -> int:
     return 0
 
 
+def _cmd_hooks(args) -> int:
+    """Detect and repair drift in an already-installed capture-hook seam.
+
+    The install contract is two halves: the script bytes (marked with
+    ``# tortoise-hook-version: N``) and the ``settings.json`` entry that must
+    carry the load-bearing per-hook ``timeout`` (#3754/#3801).  Both are
+    checked here; ``upgrade`` merges the settings half rather than
+    overwriting it, and re-copies the scripts.  Harness-agnostic: the layout
+    registry in ``tortoise.hook_install`` supplies the targets.
+    """
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from tortoise.hook_install import (
+        contract_version,
+        detect_install,
+        get_layout,
+        upgrade_install,
+    )
+
+    try:
+        layout = get_layout(args.harness)
+    except ValueError as e:
+        print(str(e), file=_sys.stderr)
+        return 1
+    root = _P(getattr(args, "dir", "."))
+
+    if args.hooks_cmd == "status":
+        try:
+            findings = detect_install(root, args.harness)
+        except OSError as e:
+            print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
+                  file=_sys.stderr)
+            return 1
+        version = contract_version(layout)
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps({
+                "harness": args.harness,
+                "root": str(root),
+                "contract_version": version,
+                "current": not any(f.blocking for f in findings),
+                "findings": [
+                    {"kind": f.kind, "script": f.script, "event": f.event,
+                     "detail": f.detail, "blocking": f.blocking}
+                    for f in findings
+                ],
+            }, indent=2))
+        elif not findings:
+            print(f"✅ {args.harness} capture hooks in {root} are current "
+                  f"(contract v{version}).")
+        else:
+            print(f"Capture-hook install at {root} (contract v{version}):")
+            for f in findings:
+                print(f"  {f.line()}")
+            blocking = [f for f in findings if f.blocking]
+            if blocking:
+                # Some blocking kinds are NOT repairable by `upgrade` (it
+                # refuses rather than clobber an unreadable/unsafe path), so
+                # the hint must name the manual fix for those instead of
+                # recommending a command that will refuse.
+                _manual = frozenset({
+                    "unreadable-settings",
+                    "not-a-regular-file",
+                    "not-executable-symlink",
+                    "not-readable",
+                    "foreign-script",
+                })
+                kinds = {f.kind for f in blocking}
+                # `upgrade` refuses on ANY symlink in a target path, and the
+                # finding kinds for those are not knowable in advance, so
+                # treat any symlink finding as manual too.
+                symlinked_kinds = {f.kind for f in findings
+                                   if f.kind.startswith("symlinked")}
+                if kinds & _manual or symlinked_kinds:
+                    # A manual kind makes `upgrade` refuse the WHOLE run, so
+                    # recommending it (even alongside repairable findings)
+                    # would point at a command that refuses.
+                    print("\nSome findings need a manual fix before upgrade "
+                          "can run: "
+                          + ", ".join(sorted(
+                              (kinds & _manual) | symlinked_kinds))
+                          + ".")
+                elif kinds:
+                    print("\nRun `tortoise hooks upgrade"
+                          f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
+                          f" --dir {root}` to repair.")
+        return 1 if any(f.blocking for f in findings) else 0
+
+    # upgrade (also performs a fresh install when nothing is present)
+    try:
+        result = upgrade_install(root, args.harness,
+                                 dry_run=getattr(args, "dry_run", False))
+    except OSError as e:
+        print(f"Upgrade failed: {e.__class__.__name__}: {e}",
+              file=_sys.stderr)
+        return 1
+    if not result.ok:
+        print(result.refused, file=_sys.stderr)
+        return 1
+    prefix = "[dry-run] " if getattr(args, "dry_run", False) else ""
+    if not result.actions:
+        print(f"{prefix}✅ {args.harness} capture hooks at {root} already "
+              "current — nothing to do.")
+        return 0
+    for action in result.actions:
+        # `upgrade_install` already prefixes its planned actions when in
+        # dry-run; prefixing again here printed `[dry-run] [dry-run]`.
+        print(action)
+    if not getattr(args, "dry_run", False):
+        remaining = [f for f in result.findings_after if f.blocking]
+        if remaining:
+            print(f"⚠️ {len(remaining)} issue(s) remain after upgrade:",
+                  file=_sys.stderr)
+            for f in remaining:
+                print(f"  {f.line()}", file=_sys.stderr)
+            return 1
+        print(f"✅ {args.harness} capture hooks upgraded.")
+    return 0
+
 
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
@@ -2937,7 +3057,7 @@ def _cmd_session_probe(args, api_key: str, api_url: str) -> int:
     UNCONDITIONAL install telemetry (harness + timestamp only, no content) —
     not gated on session_recording, but auth-gated (the .tortoise config
     key). The server
-    records install_probe_{harness} on the team's onboarding state — the
+    records install_probe_{harness} on the org's onboarding state — the
     dashboard's server-visible install signal (the browser cannot stat the
     user's filesystem). The CLI resolves api_url from the .tortoise config
     (self-hosted routing pin: probes target the configured TORTOISE_API_URL,
@@ -2985,15 +3105,19 @@ def _cmd_sessions_import(args) -> int:
     2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
     same content is a no-op (receipt exists ⇒ already imported) — and even a
     re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi REUSES the codex parser (named reuse — pi session
-    JSONL is tree-structured JSONL like codex's, plan P2 Task 15).
+    zero new nodes). pi parses its own record shape (#3667 — it no longer
+    aliases the codex parser, which returned 0 turns for real Pi sessions).
+    The parsed conversation is windowed to the hosted turn cap
+    (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
+    capture extension applies) keeping the most recent turns, with the
+    truncation reported — never a silent drop.
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    from tortoise.session_import import parse_transcript
+    from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
 
     file_path = Path(args.file)
     if not file_path.exists():
@@ -3011,6 +3135,22 @@ def _cmd_sessions_import(args) -> int:
     if not turns:
         print("No conversation turns parsed from session file.", file=_sys.stderr)
         return 1
+
+    # The bound is the HANDLER's `MAX_SESSION_TURNS` (tortoise/quota.py) — not
+    # `SessionRequest.conversation`'s max_length=1000, which the handler then
+    # overrides with an HTTP 400 above 500. The live capture extension caps at
+    # the same constant, so this backfill leg must too — a 501–1000-turn file
+    # would otherwise clear the Pydantic boundary and still write no receipt.
+    # Keep the MOST RECENT turns and REPORT the truncation (never a silent drop).
+    parsed_total = len(turns)
+    turns, dropped_turns = window_turns(turns)
+    if dropped_turns:
+        print(
+            f"Session has {parsed_total} turns; truncating to the most recent "
+            f"{MAX_TURNS} ({dropped_turns} older turns dropped — hosted "
+            f"conversation limit).",
+            file=_sys.stderr,
+        )
 
     raw = file_path.read_bytes()
     session_id = args.session_id or (
@@ -3243,14 +3383,24 @@ def _mask_uri_userinfo(target: str) -> str:
     terminal/log. Host/port/path stay visible for debuggability (matches
     the FALKORDB_* legacy display mask, conf 95).
 
-    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of the
-    authority region (everything before the first '?'/'#'), NOT
-    urlsplit's netloc — a password may contain '/' (docker://user:p/ss@
-    host:... is RFC-invalid but urlparse/redis-py accept it, and
-    urlsplit's netloc cuts at the first '/'), which would split
-    mid-credential and leak the tail. The '://' may also sit mid-message
-    (RELATIVE_PATH_ERROR embeds the raw URI in prose), so every
-    scheme:// pattern in the string is scanned, not just a leading one.
+    #720 P2 conf 68: the userinfo→host boundary is the LAST '@' of
+    everything after the scheme, NOT urlsplit's netloc — a password may
+    contain '/' (docker://user:p/ss@host:... is RFC-invalid but
+    urlparse/redis-py accept it, and urlsplit's netloc cuts at the first
+    '/'), which would split mid-credential and leak the tail. The '://'
+    may also sit mid-message (RELATIVE_PATH_ERROR embeds the raw URI in
+    prose), so the scheme token is recovered by walking back over scheme
+    characters rather than assuming a leading position.
+
+    #2983 fail-closed: a literal '?'/'#'/'://'/'@' inside a password is
+    RFC-invalid (it should be %3F/%23) but is copy-pasteable, and each
+    used to truncate the region before the real '@' and re-emit the
+    credential in clear. The boundary is therefore the LAST '@' of the
+    whole remainder: over-reaching past a genuine query/fragment, or
+    across later prose or a second URI in the same message, is
+    diagnosability loss and never a leak (it mirrors
+    entrypoint.sh::_redact_uri). For well-formed URIs the output is
+    unchanged.
     """
     from urllib.parse import urlsplit
 
@@ -3284,26 +3434,18 @@ def _mask_uri_userinfo(target: str) -> str:
                     break
             except ValueError:
                 pass  # malformed authority (e.g. unmatched '[') — mask below
-        # The authority region runs to the earliest of: the start of the
-        # next URI's scheme token (a second URI in the same message), or a
-        # '?'/'#' delimiter (query/fragment never belong to userinfo — an
-        # '@' in a query value must not swallow the host).
+        # #2983 fail-closed: the userinfo→host boundary is the LAST '@' of
+        # everything that follows the scheme. A password may contain '?',
+        # '#', '://' or '@' (RFC-invalid, but copy-pasteable); bounding the
+        # region on any of those truncates it before the real '@' and
+        # re-emits credential material. Masking to the last '@' can
+        # over-reach — past a genuine query/fragment, or across later prose
+        # or a second URI in the same message — which loses diagnosability
+        # but never leaks, and mirrors entrypoint.sh::_redact_uri. For
+        # well-formed URIs (delimiters only after the userinfo '@') the
+        # output is unchanged.
         rest_start = j + 3
-        cut = None
-        for c in ("?", "#"):
-            pos = target.find(c, rest_start)
-            if pos >= 0 and (cut is None or pos < cut):
-                cut = pos
-        nxt = target.find("://", rest_start)
-        if nxt >= 0:
-            s = nxt
-            while s > rest_start and (target[s - 1].isalnum()
-                                      or target[s - 1] in "+-."):
-                s -= 1
-            if s < nxt and (cut is None or s < cut):
-                cut = s
-        region_end = cut if cut is not None else len(target)
-        authority = target[rest_start:region_end]
+        authority = target[rest_start:]
         at = authority.rfind("@")
         if at < 0:
             out.append(target[i:j + 3])
@@ -3311,7 +3453,7 @@ def _mask_uri_userinfo(target: str) -> str:
             continue
         out.append(target[i:k])
         out.append(f"{scheme}://:***@{authority[at + 1:]}")
-        i = region_end
+        i = len(target)
     return "".join(out)
 
 
@@ -4091,7 +4233,7 @@ def _cmd_setup(args) -> int:
         print("No role entered. Skipping.")
         return 0
 
-    team_name = input("Team name (e.g., app, org-design): ").strip() or role_name
+    org_name = input("Team name (e.g., app, org-design): ").strip() or role_name
 
     config = {}
 
@@ -4165,7 +4307,7 @@ def _cmd_setup(args) -> int:
     print()
     print("=" * 50)
     output = {
-        "team": team_name,
+        "team": org_name,
         "role": role_name,
         "memory_filter": config,
     }
@@ -4177,7 +4319,7 @@ def _cmd_setup(args) -> int:
         try:
             with open("tortoise-setup.yaml", "w") as f:
                 f.write("# Tortoise memory_filter config\n")
-                f.write(f"# Role: {role_name}  Team: {team_name}\n")
+                f.write(f"# Role: {role_name}  Team: {org_name}\n")
                 f.write(yaml_text)
             print("Saved to tortoise-setup.yaml")
         except OSError as e:
@@ -4268,7 +4410,7 @@ def _cmd_index_github(args):
     (keyed by content hash via idempotency.document_key).
     """
     import atexit
-    import os  # noqa: F401
+    import os
     import subprocess
     import sys
     import tempfile
@@ -4371,6 +4513,29 @@ def _cmd_index_github(args):
         print(f"tortoise index: Cannot connect to database: {e}", file=sys.stderr)
         print("Set --db to a Docker URI or ensure FalkorDB is running.", file=sys.stderr)
         return 1
+
+    # #2947: the embedded projection (and its redis-server child) is now fully
+    # built. Signalling DURING construction lands while an in-flight server
+    # command still holds a connection, so redislite's last-client cleanup
+    # guard (correctly) declines to shut the server down and the kill orphans
+    # it. Expose a readiness marker for a supervisor/test that must signal
+    # this process at a deterministic point; the index loop's next step is the
+    # first file read, which the test blocks on (a FIFO), so the projection is
+    # open and the process quiescent. Written as a file under
+    # TORTOISE_INDEX_READY_FILE purely to synchronize the regression test —
+    # normal runs see nothing (env unset).
+    _ready_file = os.environ.get("TORTOISE_INDEX_READY_FILE")
+    if _ready_file:
+        try:
+            with open(_ready_file, "w") as _fh:
+                _fh.write("ready\n")
+        except OSError:
+            # Narrow on purpose: a failure here surfaces as the test's
+            # readiness timeout, which names the marker path (and the child's
+            # rc, if the child has also exited) — more useful than a silently
+            # swallowed error in a process that is about to be signalled
+            # anyway. A non-OSError bug should not hide.
+            pass
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
     log = EventLog(str(log_path))
@@ -4801,6 +4966,39 @@ def _cmd_doctor(args):
         results.append(("Harnesses", "✅", ", ".join(detections)))
     else:
         results.append(("Harnesses", "⚠️", "none detected — run tortoise setup to configure"))
+
+    # 7. Capture-hook install freshness (#3795/#3801). The install seam is a
+    # manual copy, so an already-installed host keeps a byte-frozen script and
+    # an un-timed settings entry — and silently files no sessions (the hook is
+    # fail-open). Drift is therefore a FAIL, not a warning. Read-only, and
+    # checked ONLY when a capture-hook install is actually present: a project
+    # that never installed the hooks must not be nagged (they may use the
+    # hosted MCP path alone). Also probed by `tortoise hooks status`.
+    try:
+        from tortoise.hook_install import (
+            contract_version,
+            detect_install,
+            get_layout,
+            is_installed,
+        )
+        if is_installed(Path("."), "claude"):
+            findings = detect_install(Path("."), "claude")
+            blocking = [f for f in findings if f.blocking]
+            version = contract_version(get_layout("claude"))
+            if not blocking:
+                results.append(("Capture hooks", "✅",
+                                f"install current (contract v{version})"))
+            else:
+                first = blocking[0]
+                results.append((
+                    "Capture hooks", "❌",
+                    f"{len(blocking)} stale issue(s) — run `tortoise hooks "
+                    f"status` for the repair path ({first.kind}: "
+                    f"{first.detail})",
+                ))
+    except Exception as e:
+        results.append(("Capture hooks", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
 
     # Print results
     for check, icon, detail in results:
@@ -5551,14 +5749,14 @@ def _cmd_serve_http(args) -> int:
 
     # ── HTTP mode: note the fresh-namespace semantics for existing stdio data ──
     # EVERY HTTP auth mode serves an isolated namespace, never the stdio
-    # 'tortoise' graph: tenant → team_{id}; static/none → team_selfhost
-    # (SELFHOST_TEAM_ID, see tortoise/mcp_auth.py). A stdio → static-auth LAN
+    # 'tortoise' graph: tenant → org_{id}; static/none → org_selfhost
+    # (SELFHOST_ORG_ID, see tortoise/mcp_auth.py). A stdio → static-auth LAN
     # switch would otherwise land on a silently empty graph — say it out loud.
     if not is_db_uri(db_uri):
         db_path = os.path.expanduser(os.environ.get("TORTOISE_DB_PATH") or resolve_db_path())
         try:
             if os.path.exists(db_path):
-                namespace = "team_{id}" if args.auth == "tenant" else "team_selfhost"
+                namespace = "org_{id}" if args.auth == "tenant" else "org_selfhost"
                 print(f"  ℹ️  HTTP ({args.auth}) mode uses a fresh {namespace} namespace — existing stdio data")
                 print("      remains in the 'tortoise' graph. See docs/infra-runbook.md §4.5.")
         except Exception:
@@ -5599,7 +5797,7 @@ def _cmd_serve_http(args) -> int:
         return 1
 
     if args.auth == "tenant":
-        # Inject the registry SDK built from the SAME canonical DB as the team
+        # Inject the registry SDK built from the SAME canonical DB as the org
         # SDK (avoids the /data default divergence — #702).
         registry_sdk = TortoiseSDK(namespace="registry")
         app = create_http_app(allowed_origins=origins, allowed_hosts=allowed_hosts,
@@ -5658,12 +5856,12 @@ def _cmd_serve_http(args) -> int:
 
 
 def _cmd_key_create(args) -> int:
-    """Bootstrap a local registry team + tt_ API key for `serve --http --auth tenant`.
+    """Bootstrap a local registry org + tt_ API key for `serve --http --auth tenant`.
 
-    Mirrors hosted /internal/provision: Team + APIKey nodes in the registry
-    graph, TeamMeta in the team_{team_id} graph. Prints ONLY the apikey_create
-    key (the one apikey_verify actually matches — team_create's returned key
-    is stored on the Team node and never verifies).
+    Mirrors hosted /internal/provision: Org + APIKey nodes in the registry
+    graph, TeamMeta in the org_{org_id} graph. Prints ONLY the apikey_create
+    key (the one apikey_verify actually matches — org_create's returned key
+    is stored on the Org node and never verifies).
     """
     import os
     import sys
@@ -5681,7 +5879,7 @@ def _cmd_key_create(args) -> int:
     else:
         from tortoise.config import resolve_db_path
         print(f"key create: registry at {os.environ.get('TORTOISE_DB_PATH') or resolve_db_path()}")
-        # #942: team keys on embedded = single-writer eval only. The key-mint
+        # #942: org keys on embedded = single-writer eval only. The key-mint
         # moment is the enforcement point — interactive/foreground, unlike a
         # daemonized serve's stderr.
         from tortoise._embedded import EMBEDDED_EVAL_BANNER
@@ -5690,31 +5888,31 @@ def _cmd_key_create(args) -> int:
     sdk = TortoiseSDK(namespace="registry")
     reg = sdk._get_registry()
 
-    # Find an existing team with this name (idempotent re-runs), else create.
-    team_id = None
+    # Find an existing org with this name (idempotent re-runs), else create.
+    org_id = None
     rows = reg.query("MATCH (t:Team) RETURN t.id, t.name").result_set or []
     for tid, tname in rows:
         if tname == args.name:
-            team_id = tid
+            org_id = tid
             print(f"  ℹ️  Team {args.name!r} already exists — reusing.")
             break
-    if team_id is None:
+    if org_id is None:
         try:
-            result = sdk.team_create(args.name)
+            result = sdk.org_create(args.name)
         except ControlPlaneError as e:
             # conf 85: an invalid --name (spaces/punctuation, >64 chars,
             # blank) must surface as a clean CLI error, never a raw
             # ControlPlaneError traceback.
             print(f"  ❌ {e}", file=sys.stderr)
             return 1
-        team_id = result["id"]
-        print(f"  ✅ Team {args.name!r} created (id {team_id})")
+        org_id = result["id"]
+        print(f"  ✅ Team {args.name!r} created (id {org_id})")
 
-    # Seed the team_{team_id} graph the tools actually resolve (hosted parity).
+    # Seed the org_{org_id} graph the tools actually resolve (hosted parity).
     try:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        team_graph = sdk._get_proj().db.select_graph(f"team_{team_id}")
-        team_graph.query(
+        org_graph = sdk._get_proj().db.select_graph(f"org_{org_id}")
+        org_graph.query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
             params={"name": args.name, "now": now},
         )
@@ -5722,7 +5920,7 @@ def _cmd_key_create(args) -> int:
         print(f"  ⚠️  Could not seed team graph: {e}", file=sys.stderr)
 
     # Create the verifiable API key and print ONLY this one.
-    key = sdk.apikey_create(team_id, created_by="local-cli")
+    key = sdk.apikey_create(org_id, created_by="local-cli")
     print()
     print(f"✅ Created API key: {key['api_key']}")
     print("   Store it securely — the plaintext is shown once.")
@@ -5894,24 +6092,24 @@ def main(argv: list[str] | None = None) -> int:
     hs = sp.add_parser("health-server", help="Start standalone /health HTTP server")
     hs.add_argument("--port", type=int, default=9090, help="HTTP port (default: 9090)")
     hs.add_argument("--bind", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
-    # tortoise team <subcommand>
-    team = sp.add_parser("team", help="Team management (Tortoise Cloud)")
-    team_sp = team.add_subparsers(dest="team_cmd")
-    team_info_p = team_sp.add_parser("info", help="Show team info and usage")  # noqa: F841
-    # tortoise team keys {list,create,revoke} (#304)
-    team_keys = team_sp.add_parser("keys", help="Manage API keys")
-    team_keys_sp = team_keys.add_subparsers(dest="team_keys_cmd")
-    team_keys_list_p = team_keys_sp.add_parser("list", help="List API keys")
-    team_keys_list_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_create_p = team_keys_sp.add_parser("create", help="Create a new API key (shown once)")
-    team_keys_create_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_create_p.add_argument("--name", metavar="LABEL", default="",
+    # tortoise org <subcommand>
+    org = sp.add_parser("team", help="Team management (Tortoise Cloud)")
+    org_sp = org.add_subparsers(dest="team_cmd")
+    org_info_p = org_sp.add_parser("info", help="Show team info and usage")  # noqa: F841
+    # tortoise org keys {list,create,revoke} (#304)
+    org_keys = org_sp.add_parser("keys", help="Manage API keys")
+    org_keys_sp = org_keys.add_subparsers(dest="team_keys_cmd")
+    org_keys_list_p = org_keys_sp.add_parser("list", help="List API keys")
+    org_keys_list_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_create_p = org_keys_sp.add_parser("create", help="Create a new API key (shown once)")
+    org_keys_create_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_create_p.add_argument("--name", metavar="LABEL", default="",
                                     help="Optional label (max 64 chars) to remember which key is which")
-    team_keys_revoke_p = team_keys_sp.add_parser("revoke", help="Revoke an API key")
-    team_keys_revoke_p.add_argument("key_id", help="Key ID to revoke")
-    team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
-    # tortoise signup — zero-email free-team mint (issue #663)
+    org_keys_revoke_p = org_keys_sp.add_parser("revoke", help="Revoke an API key")
+    org_keys_revoke_p.add_argument("key_id", help="Key ID to revoke")
+    org_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    org_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
+    # tortoise signup — zero-email free-org mint (issue #663)
     signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
     signup_p.add_argument(
         "--force", action="store_true",
@@ -6027,8 +6225,8 @@ def main(argv: list[str] | None = None) -> int:
     sess_import.add_argument(
         "--harness", required=True,
         choices=["codex", "claude-desktop", "desktop", "pi"],
-        help="Harness format to parse (pi reuses the codex parser; "
-             "'desktop' is an alias for claude-desktop)")
+        help="Harness format to parse (each harness has its own record "
+             "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(
         "--session-id", default=None,
         help="Explicit idempotency key (default: content-hash derived)")
@@ -6059,6 +6257,33 @@ def main(argv: list[str] | None = None) -> int:
     inst.add_argument(
         "--uninstall", action="store_true",
         help="Remove the hook registration for the harness")
+    # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
+    # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
+    # (re-copies the scripts AND merges the settings.json timeout). Also
+    # installs when nothing is present. Layout-driven (tortoise.hook_install),
+    # so Cursor/Codex seams plug in without new CLI surface.
+    hooks_p = sp.add_parser(
+        "hooks",
+        help="Detect and upgrade installed capture hooks (Claude Code)")
+    hooks_sp = hooks_p.add_subparsers(dest="hooks_cmd", required=True)
+    hooks_status = hooks_sp.add_parser(
+        "status", help="Report whether the installed capture hooks are stale")
+    hooks_upgrade = hooks_sp.add_parser(
+        "upgrade",
+        help="Install or upgrade the capture hooks in place (merges settings)")
+    for _hp in (hooks_status, hooks_upgrade):
+        _hp.add_argument(
+            "--harness", default="claude",
+            help="Harness seam to inspect (default: claude)")
+        _hp.add_argument(
+            "--dir", default=".",
+            help="Project directory holding the install (default: cwd)")
+    hooks_status.add_argument(
+        "--json", action="store_true",
+        help="Emit a machine-readable drift report")
+    hooks_upgrade.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the planned writes without touching anything")
     # tortoise volunteer — per-turn volunteering-memory reflex (epic #2080
     # end-state platform seams, #2119/#2123 et al). ONE thin CLI over the
     # shared canonical pipeline (POST /v1/context hosted / SDK
@@ -6209,17 +6434,17 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_token_revoke(args)
     elif args.cmd == "team":
         if args.team_cmd == "info":
-            return _cmd_team_info(args)
+            return _cmd_org_info(args)
         elif args.team_cmd == "keys":
             if args.team_keys_cmd == "list":
-                return _cmd_team_keys_list(args)
+                return _cmd_org_keys_list(args)
             elif args.team_keys_cmd == "create":
-                return _cmd_team_keys_create(args)
+                return _cmd_org_keys_create(args)
             elif args.team_keys_cmd == "revoke":
-                return _cmd_team_keys_revoke(args)
-            team_keys.print_help()
+                return _cmd_org_keys_revoke(args)
+            org_keys.print_help()
             return 1
-        team.print_help()
+        org.print_help()
         return 1
     elif args.cmd == "create-point":
         return _cmd_create_point(args)
@@ -6245,6 +6470,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_context(args)
     elif args.cmd == "install":
         return _cmd_install_hooks(args)
+    elif args.cmd == "hooks":
+        return _cmd_hooks(args)
     elif args.cmd == "volunteer":
         return _cmd_volunteer(args)
     elif args.cmd == "list-sources":

@@ -18,8 +18,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
-    load_manifest, select, integrity, slow_file_issues,  # noqa: F401
+    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
+    surface_audit, render_surface_audit, duplicate_entries,
 )
 
 
@@ -32,9 +33,84 @@ def _tier1() -> set:
 
 
 def test_docs_only_runs_tier1():
-    r = _sel(["docs/README.md", "website/welcome.html"])
+    # A markdown-only docs change stays the pure tier-1 smoke path.
+    r = _sel(["docs/README.md"])
     assert r["full"] is False
     assert r["surfaces"] == []
+    assert set(r["test_files"]) == _tier1()
+
+
+def test_public_site_surface_change_selects_onboarding_and_skips_slow():
+    """#3332: a public *site surface* change selects `onboarding`.
+
+    Each path listed in SOURCE_PATTERNS is a file some guard test in the
+    onboarding surface reads — most importantly test_website_docs_consistency.py
+    (checks each public page against its canonical source: POINT_STATUS_VALUES in
+    tortoise/sdk.py, the EP mechanism, the ontology link) and test_website_static.py
+    (pins product.html's pricing surface). Before #3332 every `website/` path was
+    filtered out by NON_PYTHON_PREFIXES *before* SOURCE_PATTERNS was consulted, so
+    changed == [] -> tier-1 smoke: those guard tests never ran for the files
+    they guard.
+
+    The #2147/#2148 cost gates are unchanged — only the fast surface tests are
+    added; no slow leg, no carve-out leg.
+    """
+    for changed in (["website/docs.html"], ["website/faq.html"],
+                    ["website/welcome.html"], ["website/self-hosted.html"],
+                    ["website/product.html"], ["website/index.html"],
+                    ["website/signup.html"], ["website/signin.html"],
+                    ["website/privacy.html"],
+                    ["docs/README.md", "website/self-hosted.html"]):
+        r = _sel(changed)
+        assert r["surfaces"] == ["onboarding"], changed
+        assert r["full"] is False
+        assert r["slow_run"] is False
+        assert r["carve_out_run"] is False
+        assert r["slow_selected"] == []
+        assert "test_website_docs_consistency.py" in r["test_files"], changed
+
+
+def test_every_source_pattern_is_selectable():
+    """The ratchet: every SOURCE_PATTERNS entry must reach `select()`.
+
+    This is the invariant whose absence let the same bug ship twice — #1349 for
+    `tools/` (patched with the TOOL_CARVEOUTS mirror) and #3332 for `website/`
+    (where the SOURCE_PATTERNS entries for welcome.html and self-hosted.html were
+    dead on arrival, and the hand-maintained mirror that replaced them caught only
+    4 of the 10 guarded paths). A pattern that a NON_PYTHON_PREFIXES prefix would
+    filter out must be re-included by `select()`'s `_selection_relevant` rule.
+    Derived from SOURCE_PATTERNS rather than enumerated, so a future entry cannot
+    be added and silently not run — prior review (#2994) rejected an enumerated
+    guard for exactly this reason.
+
+    Direction: entry -> runs. This does NOT catch the reverse (a guarded page with
+    no SOURCE_PATTERNS entry at all) — that direction is tracked separately.
+    """
+    assert "onboarding" in load_manifest()["surfaces"]
+    dead = []
+    for surface, pats in SOURCE_PATTERNS.items():
+        if surface == "core":
+            continue
+        for pat in pats:
+            if not _sel([pat])["surfaces"]:
+                dead.append((surface, pat))
+    assert not dead, (
+        f"SOURCE_PATTERNS entries that select NO surface (dead on arrival — the "
+        f"path is filtered by NON_PYTHON_PREFIXES before SOURCE_PATTERNS is "
+        f"consulted, so no guard test for that file ever runs): {dead}"
+    )
+
+
+def test_unrelated_website_change_stays_tier1():
+    """SITE_CARVEOUTS is not a wholesale `website/` removal.
+
+    A website path that owns no guard test keeps the old docs-only behavior
+    (empty changed -> tier-1 smoke), so unrelated website edits do not drag the
+    onboarding surface in.
+    """
+    r = _sel(["website/robots.txt"])
+    assert r["surfaces"] == []
+    assert r["full"] is False
     assert set(r["test_files"]) == _tier1()
 
 
@@ -81,6 +157,30 @@ def test_test_file_change_selects_owning_surface():
     assert "ep" in r["surfaces"]
     r2 = _sel(["tests/test_harness_mcp_config.py"])
     assert "onboarding" in r2["surfaces"]
+
+
+def test_pi_hooks_change_selects_the_capture_guard():
+    """#3575 P1-B: `tortoise/pi-hooks/` matches no SOURCE_PATTERNS entry, so a
+    change to the extension selects `core` via the `tortoise/` fallback. The
+    guard that pins the extension must be IN that selection — registered only
+    under `onboarding`, a PR fixing the extension ran neither the Python guard
+    nor the extension's `node --test` suite. `--integrity` cannot see this
+    (the file is classified); only a selection assertion can."""
+    r = _sel(["tortoise/pi-hooks/tortoise-capture.ts"])
+    assert r["full"] is False
+    assert "core" in r["surfaces"]
+    assert "test_pi_capture_hooks.py" in r["test_files"]
+
+
+def test_session_import_change_selects_the_window_guard():
+    """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
+    parsers.py change selects `core` via the fallback. The window guard must be
+    in that selection — registered only under `api`, it did not run for the
+    change it guards."""
+    r = _sel(["tortoise/session_import/parsers.py"])
+    assert r["full"] is False
+    assert "core" in r["surfaces"]
+    assert "test_session_import_codex.py" in r["test_files"]
 
 
 def test_two_surfaces_union():
@@ -190,6 +290,36 @@ def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
     assert "sdk" in r["surfaces"]
 
 
+def test_ask_recall_bench_change_selects_sdk_not_tier1():
+    # #3910: tools/ask_recall_bench.py owns the `_retrieve_pipeline` mirror in
+    # tests/test_ask_retrieval_levers.py. Before its SOURCE_PATTERNS entry the
+    # flat "tools/" prefix swallowed the path, so `changed` came back empty and
+    # select() took the docs-only return — surfaces=[], tier-1 smoke only — and
+    # the guard test for that exact file never ran on the PR that changed it
+    # (the #1349/#3332 shape the ratchet exists for).
+    r = _sel(["tools/ask_recall_bench.py"])
+    assert r["full"] is False
+    assert "sdk" in r["surfaces"], r
+    assert "test_ask_retrieval_levers.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_collision_preflight_tool_change_fails_closed_to_full():
+    # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
+    # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the
+    # path: `changed` came back empty, so select() took the docs-only return
+    # (surfaces=[], tier-1 smoke only) and the tool's own guard test never ran
+    # on the PR that changed the tool. The early docs-only return bypasses the
+    # `if not matched: matched.add("core")` fallback, so the pre-#3261 note
+    # claiming such a change "falls back to core" was never true.
+    # No SOURCE_PATTERNS entry matches the path, so it takes the unknown-path
+    # branch -> full matrix (fail closed), exactly like tools/ci_selection.py.
+    r = _sel(["tools/collision_preflight.py"])
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert "core" in r["surfaces"]
+
+
 def test_backfill_script_only_change_selects_eval():
     # graph-scripts/backfill_embeddings.py is a SOURCE_PATTERNS["eval"]
     # path — a backfill-only PR selects the eval surface (its test,
@@ -258,13 +388,16 @@ def test_diff_gate_keys_emitted_on_every_return_path():
 
 
 def test_docs_only_skips_slow_and_carve_out():
-    """#2147/#2148: docs/website-only PRs touch no slow/carve-out surface —
+    """#2147/#2148: docs-only PRs touch no slow/carve-out surface —
     both formerly-unconditional legs (the audit's F1/F2 cost drivers) skip;
-    the tier-1 smoke still runs in the fast job."""
-    for changed in (["docs/README.md"], ["website/welcome.html"],
+    the tier-1 smoke still runs in the fast job.
+
+    #3332: a public site surface additionally selects the *fast* onboarding
+    surface (see test_public_site_surface_change_selects_onboarding_and_skips_slow),
+    but the slow and carve-out legs still skip — which is what this test pins."""
+    for changed in (["docs/README.md"],
                     ["docs/README.md", "website/self-hosted.html"]):
         r = _sel(changed)
-        assert r["surfaces"] == []
         assert r["full"] is False
         assert r["slow_run"] is False
         assert r["carve_out_run"] is False
@@ -403,6 +536,39 @@ def test_register_keeps_alphabetical_order():
         assert api == ["test_aaa_new.py", "test_existing_api.py", "test_mmm_new.py", "test_zzz_new.py"]
 
 
+def test_register_handles_manifest_without_trailing_newline():
+    # #3073 item 1: a manifest whose final entry line lacks a newline
+    # concatenated the appended entry onto it (`  - test_b.py  - test_c.py`,
+    # malformed YAML). The terminator is normalised before insertion.
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_new_thing.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_api.py").write_text("def test_x():\n    pass\n")
+        m = td / "ci-surfaces.yml"
+        # the api block is LAST and its final line has NO newline
+        m.write_text("surfaces:\n  api:\n  - test_existing_api.py")
+        import yaml
+        manifest = yaml.safe_load(m.read_text())
+        assert register_tests(m, td, "api", manifest) == ["test_new_thing.py"]
+        parsed = yaml.safe_load(m.read_text())  # must not raise
+        assert parsed["surfaces"]["api"] == ["test_existing_api.py",
+                                            "test_new_thing.py"]
+
+
+def test_classify_and_select_tolerate_null_or_scalar_surface():
+    # #3073 item 2: `integrity()`'s duplicate scan tolerated a None surface via
+    # `files or ()`, but classification/selection did not — a bare `api:` key
+    # (None) or a scalar raised `TypeError: argument of type 'NoneType' is not
+    # iterable`, and a string would be iterated character-by-character. A
+    # falsy/scalar value means "no members"; the drift gate reports its files.
+    for bad in (None, 3, "test_x.py", {"a": 1}):
+        m = load_manifest()
+        m["surfaces"]["api"] = bad
+        assert classify_test_file("test_api.py", m) is None
+        r = select(["tortoise/api.py"], "pull_request", m)
+        assert r["surfaces"] == ["api", "core"]  # CORE_ALSO still applies
+
+
 def test_register_default_surface_is_core():
     with tempfile.TemporaryDirectory() as d:
         td = Path(d)
@@ -415,6 +581,97 @@ def test_register_default_surface_is_core():
         manifest2 = yaml.safe_load(m.read_text())
         assert "test_new_default.py" in manifest2["surfaces"]["core"]
 
+
+# ── #2913: comment-safe insertion + duplicate-safe registration ──────────
+
+
+def test_register_never_splits_a_comment_run():
+    """#2913: `pos` indexes entries (comment lines excluded) and must be
+    converted to a physical line; treating it as a raw line offset dropped the
+    new entry INSIDE a comment run and detached the run from the entries it
+    documents."""
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_cc.py").write_text("def test_x():\n    pass\n")
+        for name in ("test_a.py", "test_b.py", "test_c.py", "test_d.py"):
+            (td / name).write_text("def test_x():\n    pass\n")
+        (td / "test_existing_core.py").write_text("def test_x():\n    pass\n")
+        m = td / "ci-surfaces.yml"
+        m.write_text(
+            "version: 1" + "\n" +
+            "surfaces:" + "\n" +
+            "  api:" + "\n" +
+            "  - test_a.py" + "\n" +
+            "  - test_b.py" + "\n" +
+            "  # comment 1 about the group below" + "\n" +
+            "  # comment 2 about the group below" + "\n" +
+            "  - test_c.py" + "\n" +
+            "  - test_d.py" + "\n" +
+            "  core:" + "\n" +
+            "  - test_existing_core.py" + "\n" +
+            "tier1:" + "\n" +
+            "  - test_a.py" + "\n"
+        )
+        import yaml
+        manifest = yaml.safe_load(m.read_text())
+        assert register_tests(m, td, "api", manifest) == ["test_cc.py"]
+        lines = m.read_text().splitlines()
+        # the comment run stays contiguous — no entry wedged between its lines
+        i = lines.index("  # comment 1 about the group below")
+        assert lines[i + 1] == "  # comment 2 about the group below", lines
+        # the entry is among real entries and alphabetical order is preserved
+        api = yaml.safe_load(m.read_text())["surfaces"]["api"]
+        assert api == sorted(api)
+        assert api == ["test_a.py", "test_b.py", "test_c.py",
+                       "test_cc.py", "test_d.py"]
+
+
+def test_register_already_present_in_surface_is_reported_noop(capsys):
+    """#2913: a file already present in the target surface is a reported no-op.
+
+    The old code did not write a duplicate line either (`to_add` filtered on
+    `names`), but it RETURNED `missing`, so `--register` reported an
+    already-present file as newly added. This pins the return value and the
+    `already registered` report for a caller passing a stale manifest dict —
+    the only way to reach that state, since the CLI always loads the manifest
+    fresh from disk.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_new_thing.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_api.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_core.py").write_text("def test_x():\n    pass\n")
+        m = _tmp_manifest(td)
+        import yaml
+        stale = yaml.safe_load(m.read_text())
+        assert register_tests(m, td, "api", stale) == ["test_new_thing.py"]
+        assert m.read_text().count("  - test_new_thing.py\n") == 1
+        # second call with the pre-registration manifest dict: the entry is
+        # already in the surface text, so it must be a reported no-op.
+        added = register_tests(m, td, "api", stale)
+        assert added == []
+        assert m.read_text().count("  - test_new_thing.py\n") == 1, \
+            "a second line was written for an already-present entry"
+        assert "already registered" in capsys.readouterr().out
+
+
+def test_duplicate_entries_reports_same_surface_repeats():
+    """#2913: a same-surface duplicate is invisible to select() (it unions
+    surfaces) and to integrity() (it only asks "classified?") — the new
+    duplicate_entries() check surfaces it for the --integrity note."""
+    from tools.ci_selection import duplicate_entries
+    m = {"surfaces": {"core": ["test_a.py", "test_a.py", "test_b.py"],
+                      "api": ["test_a.py"]}}
+    # cross-surface (dual) membership is deliberate — only the SAME-surface
+    # repeat is reported
+    assert duplicate_entries(m) == ["core: test_a.py"]
+    assert duplicate_entries({"surfaces": {"core": ["test_a.py", "test_b.py"]}}) == []
+    # a name repeated 3x is ONE distinct problem, not two
+    assert duplicate_entries(
+        {"surfaces": {"core": ["test_a.py", "test_a.py", "test_a.py"]}}
+    ) == ["core: test_a.py"]
+    # a value that is None (empty surface block) must not raise
+    assert duplicate_entries({"surfaces": {"core": None}}) == []
 
 
 # ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
@@ -512,13 +769,29 @@ def test_real_workflow_halves_are_consistent():
     # (space-joined matrix_* outputs) —
     # the #1266 discipline runs against the derivation. Verify the derived
     # halves carry every fast file exactly once and tilt is bounded.
+    # #3400: the tilt invariant is now DURATION, not count. The full-matrix
+    # halves are packed by measured weight (LPT), so a correct split is
+    # duration-balanced while carrying very different file counts — the real
+    # pool splits 195/325 at 27.95m/27.95m (one 855s file + ~130 sub-second
+    # files on one side). The old `abs(count_a - count_b) <= 3` assertion
+    # encoded the duration-blind parity split this issue exists to remove.
     from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
-                                    workflow_halves_issues)
-    legs = push_legs(load_manifest())
+                                    workflow_halves_issues,
+                                    HALF_DURATION_IMBALANCE_RATIO)
+    m = load_manifest()
+    legs = push_legs(m)
     halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
-    issues = workflow_halves_issues(load_manifest(), halves, TESTS_DIR)
+    issues = workflow_halves_issues(m, halves, TESTS_DIR)
     assert issues == [], f"derived halves drift: {issues}"
-    assert abs(len(halves["a"]) - len(halves["b"])) <= 3, "tilt beyond ±3"
+    weights = {h: sum(m["durations"].get(f + ".py", 2.0) for f in fs)
+               for h, fs in halves.items()}
+    ratio = max(weights.values()) / min(weights.values())
+    assert ratio <= HALF_DURATION_IMBALANCE_RATIO, (
+        f"duration tilt beyond {HALF_DURATION_IMBALANCE_RATIO}x: "
+        f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
+        f"(ratio {ratio:.2f}x)")
+    # every fast file rides exactly one half (no coverage hole, no double-run)
+    assert not (halves["a"] & halves["b"]), "leg overlap"
 
 
 def test_push_legs_partitions_every_classified_file():
@@ -612,6 +885,130 @@ def test_duration_integrity():
     bad2 = dict(m)
     bad2["durations"] = {"not_a_real_file.py": 10.0}
     assert duration_issues(bad2) != []
+
+
+# ── #3400: duration-balanced full-matrix halves + durations coverage ──────
+# The push halves used to be index-parity (`fast[0::2]` / `fast[1::2]`) —
+# duration-blind, so half (b) collected the slow files by luck (37.1m vs
+# 18.8m on the real pool) and blew the 55m watchdog. These pin the LPT pack (#1473)
+# on the full-matrix path and the coverage floor that keeps the `durations`
+# map from rotting back to a handful of entries.
+
+
+def _duration_manifest(heavy: dict[str, float],
+                       tiny_count: int) -> dict:
+    """A synthetic full-matrix manifest: a few heavy files + many 2s files,
+    all in one freshly-named surface so nothing touches the real pool."""
+    tiny = [f"test_tiny_{i:04d}.py" for i in range(tiny_count)]
+    files = [*heavy.keys(), *tiny]
+    durations = {**heavy, **{f: 2.0 for f in tiny}}
+    return {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+            "carve_out": [], "push_extra": [], "durations": durations}
+
+
+def test_full_matrix_split_is_duration_balanced():
+    """#3400: the full-matrix (push) halves are packed by measured duration.
+
+    Four heavy files + many 2s files: parity can cluster the heavies on one
+    half; LPT must not.  The assertion is the *duration* ratio, not a count
+    ratio — the correct duration split of the real pool is 195/325 files.
+    """
+    from tools.ci_selection import HALF_DURATION_IMBALANCE_RATIO, push_legs
+    heavy = {"test_h0.py": 850.0, "test_h1.py": 700.0,
+             "test_h2.py": 650.0, "test_h3.py": 600.0}
+    m = _duration_manifest(heavy, tiny_count=200)
+    legs = push_legs(m)
+    a, b = set(legs["half_a"]), set(legs["half_b"])
+    assert not (a & b), "leg overlap"
+    assert a | b == {f[:-3] for f in m["surfaces"]["core"]}, "coverage hole"
+    weights = {h: sum(m["durations"][f + ".py"] for f in fs)
+               for h, fs in (("a", a), ("b", b))}
+    ratio = max(weights.values()) / min(weights.values())
+    assert ratio <= HALF_DURATION_IMBALANCE_RATIO, (
+        f"parity-style tilt survived: { {h: round(w / 60, 1) for h, w in weights.items()} }"
+        f" min (ratio {ratio:.2f}x)")
+    # the heavy files must be SPREAD — the 850s file must not sit with every
+    # other heavy file on one half while the other side carries only 2s files.
+    a_heavy = {f for f in heavy if f[:-3] in a}
+    b_heavy = {f for f in heavy if f[:-3] in b}
+    assert a_heavy and b_heavy, (
+        f"heavy files clustered on one half: a={sorted(a_heavy)} b={sorted(b_heavy)}")
+    assert len(a_heavy) < len(heavy) and len(b_heavy) < len(heavy)
+    # and the OLD parity split of the same pool is the thing being fixed
+    order = sorted(m["surfaces"]["core"])
+    p_a, p_b = order[0::2], order[1::2]
+    p_wa = sum(m["durations"][f] for f in p_a)
+    p_wb = sum(m["durations"][f] for f in p_b)
+    parity_ratio = max(p_wa, p_wb) / min(p_wa, p_wb)
+    assert parity_ratio > ratio, (
+        f"fixture does not exercise the defect: parity {parity_ratio:.2f}x "
+        f"vs LPT {ratio:.2f}x")
+
+
+def test_push_legs_is_deterministic():
+    """#3400: same manifest -> byte-identical halves, repeated calls."""
+    from tools.ci_selection import push_legs
+    m = _duration_manifest({"test_h0.py": 850.0, "test_h1.py": 700.0}, 50)
+    first = push_legs(m)
+    assert push_legs(m) == first
+    assert push_legs(m) == first
+    real = load_manifest()
+    assert push_legs(real) == push_legs(real)
+
+
+def test_halves_duration_imbalance_flagged():
+    """#3400: a heavy file dumped on one half reds even when counts look even."""
+    from tools.ci_selection import workflow_halves_issues
+    m = _duration_manifest({"test_big.py": 600.0}, tiny_count=10)
+    # 5 vs 6 files — a count-balanced split, duration-lopsided
+    halves = {"a": ["test_big", "test_tiny_0000", "test_tiny_0002",
+                     "test_tiny_0004", "test_tiny_0006"],
+              "b": ["test_tiny_0001", "test_tiny_0003", "test_tiny_0005",
+                     "test_tiny_0007", "test_tiny_0008", "test_tiny_0009"]}
+    issues = workflow_halves_issues(m, halves)
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_duration_coverage_guard_fires_when_low():
+    """#3400: 15 weights for 100 fast files is the rot this guard forbids."""
+    from tools.ci_selection import duration_coverage_issues
+    m = _duration_manifest({}, tiny_count=0)
+    m["surfaces"]["core"] = [f"test_cov_{i:03d}.py" for i in range(100)]
+    m["durations"] = {f: 2.0 for f in m["surfaces"]["core"][:15]}
+    issues = duration_coverage_issues(m)
+    assert issues, "guard did not bite at 15% coverage"
+    assert any("15.0%" in i and "floor" in i for i in issues), issues
+
+
+def test_duration_coverage_guard_boundary_and_realistic():
+    """#3400: the floor is inclusive; realistic coverage is silent."""
+    from tools.ci_selection import duration_coverage_issues, load_manifest
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    below = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:89]}}
+    at = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+          "durations": {f: 2.0 for f in files[:90]}}
+    above = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+             "durations": {f: 2.0 for f in files[:95]}}
+    assert duration_coverage_issues(below) != [], "89% must fire"
+    assert duration_coverage_issues(at) == [], "90% is at the floor, not below"
+    assert duration_coverage_issues(above) == [], "95% must be silent"
+    # the real map: 502/520 fast files measured (96.5%)
+    assert duration_coverage_issues(load_manifest()) == []
+
+
+def test_duration_coverage_guard_backwards_compatible():
+    """#3400: an absent/empty durations map is never a hard failure."""
+    from tools.ci_selection import duration_coverage_issues
+    files = [f"test_cov_{i:03d}.py" for i in range(100)]
+    base = {"surfaces": {"core": files}, "tier1": [], "slow_files": []}
+    assert duration_coverage_issues(base) == []              # key absent
+    assert duration_coverage_issues({**base, "durations": {}}) == []   # empty
+    assert duration_coverage_issues({**base, "durations": None}) == []  # null
+    # a repo with no fast files at all must not divide by zero
+    assert duration_coverage_issues(
+        {"surfaces": {}, "tier1": [], "slow_files": [],
+         "durations": {"x.py": 1.0}}) == []
 
 
 # ── #1668: the P2 flip's workflow-wiring pins (epic #1647 Task 6) ─────────
@@ -1264,3 +1661,597 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 "does not block the merge (#2656)")
         assert _verdict(*green[:-1], "skipped") == 0, (
             "a skipped need is not a failure (docs-only PRs skip the matrix)")
+
+
+# ── #2938: surface audit (report-only) ───────────────────────────────────
+# The audit must resolve what the rejected mechanical derivation could not:
+# package-level imports, `tortoise/api.py` (absent from SOURCE_PATTERNS),
+# helper/fixture indirection, string path refs — and it must stay a REPORT
+# (never mutate the manifest, never change select()/--integrity).
+
+_AUDIT_SOURCES = {
+    "tortoise/hosted_api.py": "",
+    "tortoise/api.py": "",
+    "tortoise/decide.py": "",
+    "tortoise/sdk.py": "",
+    "tortoise/ep.py": "",
+    "tortoise/exceptions.py": "",
+    "battery/cli.py": "",
+}
+
+
+def _audit_repo(tmp_path: Path, extra: dict[str, str]) -> Path:
+    """A synthetic repo: the shared source tree plus `extra` files."""
+    for rel, body in {**_AUDIT_SOURCES, **extra}.items():
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(body)
+    return tmp_path
+
+
+def _audit(manifest: dict, repo: Path) -> dict:
+    return surface_audit(manifest, repo=repo, tests_dir=repo / "tests")
+
+
+def _audit_manifest(**surfaces: list[str]) -> dict:
+    """A manifest carrying every surface the real one has (empty unless
+    overridden) so assertions can address any surface."""
+    base: dict[str, list[str]] = {
+        s: [] for s in ("api", "battery", "classify", "core", "ep",
+                        "eval", "onboarding", "sdk")}
+    base.update(surfaces)
+    return {"surfaces": base, "tier1": []}
+
+
+def test_surface_audit_reports_unregistered_surface_pin_as_addition(tmp_path):
+    # requirement: a file importing a surface's source but not registered
+    # under it is an addition candidate, with the import as evidence
+    repo = _audit_repo(tmp_path, {
+        "tests/test_imports_api.py": "from tortoise.hosted_api import app\n"})
+    report = _audit(_audit_manifest(battery=["test_imports_api.py"]), repo)
+    api = {e["file"]: e for e in report["surfaces"]["api"]["addition"]}
+    assert "test_imports_api.py" in api
+    assert api["test_imports_api.py"]["evidence"] == ["tortoise/hosted_api.py"]
+    # ... and the same file is a battery removal candidate (pins nothing battery)
+    assert [e["file"] for e in report["surfaces"]["battery"]["removal"]] \
+        == ["test_imports_api.py"]
+
+
+def test_surface_audit_reports_member_pinning_nothing_as_removal(tmp_path):
+    repo = _audit_repo(tmp_path, {
+        "tests/test_stray_api.py": "from battery.cli import main\n"})
+    report = _audit(_audit_manifest(api=["test_stray_api.py"]), repo)
+    removal = report["surfaces"]["api"]["removal"]
+    assert [e["file"] for e in removal] == ["test_stray_api.py"]
+    assert removal[0]["pins"] == {"battery": ["battery/cli.py"]}
+    # the reverse direction is reported too: not registered under battery
+    assert [e["file"] for e in report["surfaces"]["battery"]["addition"]] \
+        == ["test_stray_api.py"]
+
+
+def test_surface_audit_resolves_package_level_import(tmp_path):
+    # rule (a): `from tortoise import X` -> tortoise/X.py (or X/__init__.py);
+    # this is the gap that made 28 onboarding files read as "pins nothing"
+    repo = _audit_repo(tmp_path, {
+        "tortoise/onboarding/__init__.py": "",
+        "tests/test_pkg_import.py": "from tortoise import onboarding\n"})
+    report = _audit(_audit_manifest(api=["test_pkg_import.py"]), repo)
+    ep_add = {e["file"]: e for e in report["surfaces"]["ep"]["addition"]}
+    assert "test_pkg_import.py" not in ep_add  # sanity: not the wrong surface
+    additions = {e["file"]: e for e in report["surfaces"]["onboarding"]["addition"]}
+    assert "test_pkg_import.py" in additions
+    assert "tortoise/onboarding/__init__.py" in additions["test_pkg_import.py"]["evidence"]
+    # `tortoise` alone (the bare package root) is never a pin
+    assert report["surfaces"]["api"]["addition"] == []
+
+
+def test_surface_audit_excludes_shared_modules(tmp_path):
+    # rule: SHARED_MODULES force the full matrix, so importing one is NOT a
+    # pin and must not surface as an addition/uncovered mismatch
+    repo = _audit_repo(tmp_path, {
+        "tests/test_shared.py":
+            "from tortoise.sdk import TortoiseSDK\n"
+            "from tortoise.exceptions import TortoiseError\n"})
+    report = _audit(_audit_manifest(sdk=["test_shared.py"]), repo)
+    for surface in report["surfaces"].values():
+        assert surface["addition"] == []
+    assert all(r["path"] not in ("tortoise/sdk.py", "tortoise/exceptions.py")
+               for r in report["uncovered"])
+    assert all(r["path"] not in ("tortoise/sdk.py", "tortoise/exceptions.py")
+               for r in report["coverage_gaps"])
+    removal = report["surfaces"]["sdk"]["removal"]
+    assert [e["file"] for e in removal] == ["test_shared.py"]
+    assert set(removal[0]["shared"]) \
+        >= {"tortoise/sdk.py", "tortoise/exceptions.py"}
+
+
+def test_surface_audit_catches_string_path_reference(tmp_path):
+    # rule (c): a test may shell out to / read a path instead of importing it
+    repo = _audit_repo(tmp_path, {
+        "tests/test_string_ref.py":
+            "import subprocess\n"
+            "\n"
+            "def test_script():\n"
+            "    subprocess.run(['python', 'battery/cli.py'])\n"})
+    report = _audit(_audit_manifest(core=["test_string_ref.py"]), repo)
+    additions = {e["file"]: e for e in report["surfaces"]["battery"]["addition"]}
+    assert "test_string_ref.py" in additions
+    assert additions["test_string_ref.py"]["evidence"] == ['"battery/cli.py"']
+
+
+def test_surface_audit_follows_tests_helper(tmp_path):
+    # rule (d): a test reaching a surface only through a tests/ helper must
+    # still count, with the chain visible in the evidence
+    repo = _audit_repo(tmp_path, {
+        "tests/_helper.py": "from tortoise.hosted_api import app\n",
+        "tests/test_uses_helper.py": "from tests._helper import app\n"})
+    report = _audit(_audit_manifest(battery=["test_uses_helper.py"]), repo)
+    additions = {e["file"]: e for e in report["surfaces"]["api"]["addition"]}
+    assert "test_uses_helper.py" in additions
+    assert additions["test_uses_helper.py"]["evidence"] \
+        == ["tortoise/hosted_api.py (via tests/_helper.py)"]
+    # the helper module itself is not a test file, so it is never audited
+    assert all(e["file"] != "_helper.py"
+               for s in report["surfaces"].values() for e in s["addition"])
+
+
+def test_surface_audit_reports_uncovered_surface_named_source(tmp_path):
+    # rule (b): a surface-named source absent from that surface's
+    # SOURCE_PATTERNS entry is SAID, not silently binned as core. #2938 mapped
+    # the real instance (`tortoise/api.py`), so this test uses a synthetic
+    # unmapped one (`tortoise/eval.py`) to keep the rule covered.
+    repo = _audit_repo(tmp_path, {
+        "tortoise/eval.py": "",
+        "tests/test_eval_mod.py": "from tortoise.eval import X\n"})
+    report = _audit(_audit_manifest(eval=["test_eval_mod.py"]), repo)
+    gaps = report["coverage_gaps"]
+    assert any(g["path"] == "tortoise/eval.py" and g["surface"] == "eval"
+               for g in gaps), gaps
+    assert "tortoise/eval.py" not in [r["path"] for r in report["uncovered"]]
+    removal = report["surfaces"]["eval"]["removal"][0]
+    assert removal["gap"] == ["tortoise/eval.py"]
+
+
+def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
+    # #2938 item 1: `tortoise/api.py` is mapped to `api` now — a file importing
+    # it is an api pin, not an uncovered path and not a coverage gap.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_imports_api.py": "from tortoise.api import EventAPI\n"})
+    report = _audit(_audit_manifest(api=["test_imports_api.py"]), repo)
+    assert "tortoise/api.py" not in [g["path"] for g in report["coverage_gaps"]]
+    assert "tortoise/api.py" not in [r["path"] for r in report["uncovered"]]
+
+
+def test_tortoise_api_change_selects_api_and_core():
+    # #2938 item 1: mapping `tortoise/api.py` to `api` closes the coverage gap,
+    # but its pinning tests are registered across surfaces — CORE_ALSO keeps
+    # `core` in the selection so the core-registered importers of EventAPI
+    # (test_extractor, test_projection via the slow leg, …) still run. An
+    # api-only mapping would silently drop them — the exact regression #2938
+    # exists to prevent.
+    r = _sel(["tortoise/api.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["api", "core"]
+    selected = set(r["test_files"]) | set(r["slow_selected"])
+    assert "test_api.py" in selected, "api-registered pinner must run"
+    assert "test_extractor.py" in selected, "core-registered pinner must run"
+    assert "test_projection.py" in selected, "core slow-leg pinner must run"
+
+
+def test_surface_audit_skips_removal_for_unmapped_surfaces(tmp_path):
+    # classify/core have no SOURCE_PATTERNS entry: "pins nothing from it" is
+    # undefined, so the audit must not propose emptying classify
+    repo = _audit_repo(tmp_path, {
+        "tests/test_classify_x.py": "import os\n",
+        "tests/test_api_nothing.py": "import os\n"})
+    report = _audit(_audit_manifest(classify=["test_classify_x.py"],
+                                    core=["test_classify_x.py"],
+                                    api=["test_api_nothing.py"]), repo)
+    for surface in ("classify", "core"):
+        assert report["surfaces"][surface]["source_mapped"] is False
+        assert report["surfaces"][surface]["removal"] == []
+        assert report["surfaces"][surface]["addition"] == []
+    # non-vacuity: a source-mapped surface in the SAME repo still reports
+    assert [e["file"] for e in report["surfaces"]["api"]["removal"]] \
+        == ["test_api_nothing.py"]
+
+
+def test_surface_audit_reports_no_surface_and_duplicates(tmp_path):
+    repo = _audit_repo(tmp_path, {
+        "tests/test_dup.py": "import os\n",
+        "tests/test_unregistered.py": "import os\n"})
+    report = _audit(_audit_manifest(core=["test_dup.py", "test_dup.py"]), repo)
+    assert report["no_surface"] == ["test_unregistered.py"]
+    assert report["duplicates"] == {"core": ["test_dup.py"]}
+
+
+def test_surface_audit_is_deterministic_and_non_mutating(tmp_path):
+    repo = _audit_repo(tmp_path, {
+        "tests/test_a.py": "from tortoise.hosted_api import app\n",
+        "tests/test_b.py": "from battery.cli import main\n"})
+    manifest = _audit_manifest(api=["test_b.py"], battery=["test_a.py"])
+    before = {s: list(f) for s, f in manifest["surfaces"].items()}
+    report = _audit(manifest, repo)
+    # non-vacuity: the audit actually found the two cross-surface additions
+    assert [e["file"] for e in report["surfaces"]["api"]["addition"]] \
+        == ["test_a.py"]
+    assert [e["file"] for e in report["surfaces"]["battery"]["addition"]] \
+        == ["test_b.py"]
+    first = render_surface_audit(report)
+    second = render_surface_audit(_audit(manifest, repo))
+    assert first == second
+    assert manifest["surfaces"] == before, "the audit must not mutate the manifest"
+
+
+def test_surface_audit_coverage_gap_names_only_gap_surface_members(tmp_path):
+    # P1-1: only files this change does not select fail to run when the
+    # unmapped source changes. A core-registered pinner still runs (via core),
+    # so naming it under "never run" overstated the blast radius.
+    # P3: assert on the DERIVED data (gap["files"]/["victims"]), not the
+    # rendered sentence, so a legitimate wording change cannot break this.
+    repo = _audit_repo(tmp_path, {
+        "tortoise/eval.py": "",
+        "tests/test_eval_registered.py": "from tortoise.eval import X\n",
+        "tests/test_core_registered.py": "from tortoise.eval import X\n"})
+    manifest = _audit_manifest(eval=["test_eval_registered.py"],
+                               core=["test_core_registered.py"])
+    report = _audit(manifest, repo)
+    gap = next(g for g in report["coverage_gaps"]
+               if g["path"] == "tortoise/eval.py")
+    # both files are STRONG pinners (they import it); registration differs
+    assert set(gap["files"]) == {"test_eval_registered.py",
+                                 "test_core_registered.py"}
+    assert gap["files"]["test_eval_registered.py"] == ["eval"]
+    assert gap["files"]["test_core_registered.py"] == ["core"]
+    assert gap["registered"] == ["core", "eval"]
+    # `select(['tortoise/eval.py'])` selects `core`, so only the eval-registered
+    # pinner is a victim; the core-registered one runs.
+    assert gap["selected_surfaces"] == ["core"]
+    assert gap["victims"] == ["test_eval_registered.py"]
+    assert gap["runs"] == ["test_core_registered.py"]
+    # ... and the rendered line agrees with the data
+    never_line = render_surface_audit(report).split(
+        "never run on a change to tortoise/eval.py:")[1].split("\n")[0]
+    assert "test_eval_registered.py" in never_line
+    assert "test_core_registered.py" not in never_line, (
+        "a core-registered pinner runs via core and must not be in the "
+        "\"never run\" list")
+
+
+def test_surface_audit_coverage_gap_counts_unselected_surface_as_victim(tmp_path):
+    # P2: `select(['tortoise/eval.py'], 'pull_request', manifest)` falls back
+    # to `core` — it does NOT select `ep`, so an ep-registered pinner never
+    # runs. The previous renderer asserted the non-gap pinners "run via
+    # core/ep", which was false for the ep one.
+    repo = _audit_repo(tmp_path, {
+        "tortoise/eval.py": "",
+        "tests/test_eval_registered.py": "from tortoise.eval import X\n",
+        "tests/test_core_registered.py": "from tortoise.eval import X\n",
+        "tests/test_ep_registered.py": "from tortoise.eval import X\n"})
+    manifest = _audit_manifest(eval=["test_eval_registered.py"],
+                               core=["test_core_registered.py"],
+                               ep=["test_ep_registered.py"])
+    report = _audit(manifest, repo)
+    gap = next(g for g in report["coverage_gaps"]
+               if g["path"] == "tortoise/eval.py")
+    assert set(gap["files"]) == {"test_eval_registered.py",
+                                 "test_core_registered.py",
+                                 "test_ep_registered.py"}
+    assert gap["files"]["test_ep_registered.py"] == ["ep"]
+    assert gap["selected_surfaces"] == ["core"]
+    assert gap["victims"] == ["test_ep_registered.py",
+                              "test_eval_registered.py"]
+    assert gap["runs"] == ["test_core_registered.py"]
+    never_line = render_surface_audit(report).split(
+        "never run on a change to tortoise/eval.py:")[1].split("\n")[0]
+    assert "test_ep_registered.py" in never_line, (
+        "an ep-registered pinner is not selected by a change that yields core")
+    assert "test_core_registered.py" not in never_line
+
+
+def test_surface_audit_ignores_function_local_helper_import(tmp_path):
+    # P1 (this fix): a helper module is IMPORTED, not called, so an import
+    # nested in one of its function bodies never executes and must not become
+    # a strong addition. The previous BFS followed `ast.walk`, fabricating 25
+    # battery additions from one call-time import in
+    # tools/longmem_eval/report.py::build_methodology.
+    repo = _audit_repo(tmp_path, {
+        "battery/parity/runner.py": "",
+        "tests/_deferred.py":
+            "def build():\n"
+            "    from battery.parity.runner import run\n"
+            "    return run\n",
+        "tests/test_via_deferred.py": "from tests._deferred import build\n"})
+    report = _audit(_audit_manifest(core=["test_via_deferred.py"]), repo)
+    assert report["surfaces"]["battery"]["addition"] == [], (
+        "a function-local import in a helper never runs on import")
+    assert "test_via_deferred.py" not in {
+        e["file"] for s in report["surfaces"].values()
+        for e in s["addition"] if e["strong"]}
+
+
+def test_surface_audit_honors_module_level_helper_import(tmp_path):
+    # complement of the test above: a MODULE-LEVEL import in a helper DOES
+    # execute when the helper is imported, so it stays a strong pin.
+    repo = _audit_repo(tmp_path, {
+        "tests/_eager.py": "from battery.cli import main\n",
+        "tests/test_via_eager.py": "from tests._eager import main\n"})
+    report = _audit(_audit_manifest(core=["test_via_eager.py"]), repo)
+    additions = {e["file"]: e for e in report["surfaces"]["battery"]["addition"]}
+    assert additions["test_via_eager.py"]["evidence"] == [
+        "battery/cli.py (via tests/_eager.py)"]
+    assert additions["test_via_eager.py"]["strong"] is True
+
+
+def test_surface_audit_honors_root_function_local_import(tmp_path):
+    # the ROOT test file's function bodies DO run when the test runs, so its
+    # own call-time imports stay strong pins — only HELPERS are pruned.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_deferred_own.py":
+            "def test_x():\n"
+            "    from battery.cli import main\n"
+            "    assert main\n"})
+    report = _audit(_audit_manifest(core=["test_deferred_own.py"]), repo)
+    additions = {e["file"]: e
+                 for e in report["surfaces"]["battery"]["addition"]}
+    assert additions["test_deferred_own.py"]["evidence"] == ["battery/cli.py"]
+    assert additions["test_deferred_own.py"]["strong"] is True
+
+
+def test_surface_audit_normalises_scalar_surface_values(tmp_path):
+    # P3: a hand-edited scalar (`api: 3`, `api: {...}`, `api: "x.py"`) must
+    # not raise or silently become a character list; it normalises to empty.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_scalar.py": "from tortoise.api import EventAPI\n"})
+    for bad in (3, {"a": 1}, "test_scalar.py"):
+        manifest = _audit_manifest(core=["test_scalar.py"])
+        manifest["surfaces"]["api"] = bad
+        report = _audit(manifest, repo)  # must not raise
+        assert report["surfaces"]["api"]["members"] == []
+        assert report["surfaces"]["api"]["removal"] == []
+        render_surface_audit(report)  # must not raise
+
+
+def test_surface_audit_string_only_pin_is_weak_and_labelled(tmp_path):
+    # P1-2: a path STRING is fixture data, not an import. It stays visible
+    # (labelled) but must not make the file a strong pinnner, or the "never
+    # run" claim inflates (test_ci_selection.py's own corpus).
+    repo = _audit_repo(tmp_path, {
+        "tortoise/eval.py": "",
+        "tests/test_fixture_data.py":
+            "PATHS = ['tortoise/eval.py']\n"
+            "def test_x(): assert PATHS\n",
+        "tests/test_fixture_elsewhere.py":
+            "PATHS = ['battery/cli.py']\n"
+            "def test_y(): assert PATHS\n"})
+    report = _audit(_audit_manifest(eval=["test_fixture_data.py"],
+                                    core=["test_fixture_elsewhere.py"]), repo)
+    gap = next(g for g in report["coverage_gaps"]
+               if g["path"] == "tortoise/eval.py")
+    assert gap["files"] == {}, "a string-only reference is not a strong pinnner"
+    assert list(gap["weak_files"]) == ["test_fixture_data.py"]
+    out = render_surface_audit(report)
+    assert '"tortoise/eval.py" (string, not an import)' in out, \
+        "the human must still see the string pin, labelled"
+    assert "1 string-only pinnner(s), weak" in out
+    # an UNREGISTERED string-only reference is a weak addition, not candidate
+    weak = {e["file"]: e for e in
+            report["surfaces"]["battery"]["addition"] if not e["strong"]}
+    assert weak["test_fixture_elsewhere.py"]["evidence"] == ['"battery/cli.py"']
+    assert report["surfaces"]["battery"]["addition"] and all(
+        not e["strong"] for e in report["surfaces"]["battery"]["addition"])
+    assert ("string-only references — weak evidence, not counted as pins"
+            in out)
+    # ... and a strong (import) pin in the SAME repo still claims the gap
+    repo2 = _audit_repo(tmp_path / "strong", {
+        "tortoise/eval.py": "",
+        "tests/test_imports_eval.py": "from tortoise.eval import X\n"})
+    report2 = _audit(_audit_manifest(eval=["test_imports_eval.py"]), repo2)
+    gap2 = next(g for g in report2["coverage_gaps"]
+                if g["path"] == "tortoise/eval.py")
+    assert list(gap2["files"]) == ["test_imports_eval.py"]
+
+
+def test_surface_audit_credits_pin_reached_through_repo_root_helper(tmp_path):
+    # P2: the BFS used to follow only tests/ helpers, so a test reaching a
+    # surface through tools/ read as "pins nothing" -> false removal candidate
+    # (the real report called test_temporal_constraint.py an sdk removal while
+    # tools/longmem_eval/retrieve.py imports tortoise.retrieval).
+    repo = _audit_repo(tmp_path, {
+        "tortoise/retrieval.py": "",
+        "tools/reach.py": "from tortoise.retrieval import search\n",
+        "tests/test_via_tool.py": "from tools.reach import search\n",
+        "tests/test_control.py": "import os\n"})
+    # attribution: registered elsewhere, the sdk pin is an addition candidate
+    # and the evidence names the helper chain
+    additions = {e["file"]: e for e in
+                 _audit(_audit_manifest(battery=["test_via_tool.py"]), repo)
+                 ["surfaces"]["sdk"]["addition"]}
+    assert additions["test_via_tool.py"]["evidence"] == [
+        "tortoise/retrieval.py (via tools/reach.py)"]
+    # ... and the false removal is gone: only the genuinely pin-less file stays
+    report = _audit(_audit_manifest(sdk=["test_via_tool.py",
+                                         "test_control.py"]), repo)
+    assert [e["file"] for e in report["surfaces"]["sdk"]["removal"]] \
+        == ["test_control.py"], "the helper-reached sdk pin must suppress it"
+
+
+def test_surface_audit_removal_candidate_without_surface_pin_warns(tmp_path):
+    # P3: every removal candidate has NO pin for its own surface by definition,
+    # so the "don't act" cue belongs on all of them — shared-only members
+    # (`shared: tortoise/sdk.py`) used to render as bare removals.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_shared_only.py": "from tortoise.sdk import TortoiseSDK\n",
+        "tests/test_no_refs.py": "import os\n"})
+    report = _audit(_audit_manifest(sdk=["test_shared_only.py",
+                                         "test_no_refs.py"]), repo)
+    assert [e["file"] for e in report["surfaces"]["sdk"]["removal"]] \
+        == ["test_no_refs.py", "test_shared_only.py"]
+    out = render_surface_audit(report)
+    assert ("test_shared_only.py <- (shared: tortoise/sdk.py)  "
+            "⚠ no `sdk` pin resolved") in out
+    assert ("test_no_refs.py <- (no source references at all)  "
+            "⚠ no `sdk` pin resolved") in out
+
+
+def test_surface_audit_tolerates_null_surface_value(tmp_path):
+    # P3: a curated manifest can carry `null` for a surface; the audit must
+    # traceback-proof it the way integrity() does with `files or ()`.
+    repo = _audit_repo(tmp_path, {
+        "tests/test_null_surface.py": "import os\n"})
+    manifest = _audit_manifest(api=None, core=["test_null_surface.py"])
+    report = _audit(manifest, repo)  # must not raise TypeError
+    assert report["surfaces"]["api"]["members"] == []
+    assert report["surfaces"]["api"]["removal"] == []
+    assert report["surfaces"]["api"]["addition"] == []
+    assert report["no_surface"] == []
+    assert report["duplicates"] == {}
+    # the renderer must survive it too
+    assert "api" in render_surface_audit(report)
+
+
+def test_real_manifest_has_no_duplicate_entries():
+    # #3381: two files were each registered twice — one entry added by two
+    # different PRs fixing the same drift independently. A same-surface
+    # duplicate is invisible to select() (surfaces are unioned) and reported
+    # non-fatally by `--integrity` and `--surface-audit` — never as a gate
+    # failure — so pin its absence here where CI will actually see it.
+    # Call the production detector rather than reimplementing it, so this pin
+    # cannot drift from the real semantics (e.g. cross-surface dual
+    # registration is deliberate and must stay allowed).
+    dupes = duplicate_entries(load_manifest())
+    assert dupes == [], f"duplicate manifest entries: {dupes}"
+
+
+def test_halves_guard_reports_single_sided_pack_without_crashing():
+    # #3407 review P2: the branch written to CATCH a zero-weight half died with
+    # ZeroDivisionError while formatting its own diagnosis — `hi / lo` was
+    # evaluated inside the f-string after `lo <= 0` had short-circuited the
+    # comparison. A single-sided pack is reachable (a 1-file pool, or an
+    # all-zero measured map), and this is the only check that catches it:
+    # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both pass
+    # when one half is empty.
+    from tools.ci_selection import workflow_halves_issues
+    m = {"surfaces": {"core": ["test_only.py"]}, "tier1": [], "slow_files": [],
+         "durations": {"test_only.py": 5.0}}
+    issues = workflow_halves_issues(m, {"a": {"test_only.py"}, "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_halves_guard_reports_all_zero_map_without_crashing():
+    from tools.ci_selection import workflow_halves_issues
+    files = ["test_a.py", "test_b.py", "test_c.py"]
+    m = {"surfaces": {"core": files}, "tier1": [], "slow_files": [],
+         "durations": {f: 0.0 for f in files}}
+    issues = workflow_halves_issues(m, {"a": set(files), "b": set()})
+    assert any("duration-imbalanced" in i for i in issues), issues
+
+
+def test_duration_issues_flags_non_numeric_value():
+    # #3407 review P2: the guards iterated KEYS only, so a hand-edit typo in the
+    # now-505-line map passed `--integrity` silently and then crashed
+    # `push_legs` with a TypeError inside `split_fast_gate`'s sort key.
+    from tools.ci_selection import duration_issues
+    m = {"surfaces": {"core": ["test_crypto.py"]}, "tier1": [], "slow_files": [],
+         "durations": {"test_crypto.py": "fast"}}
+    issues = duration_issues(m)
+    assert any("not numeric" in i for i in issues), issues
+
+
+def test_integrity_chain_names_bad_duration_instead_of_crashing():
+    # #3407 review P1 (cycle 2): `duration_issues` alone is NOT the gate. The
+    # real `--integrity` chain evaluates `leg_coverage_issues()` -> `push_legs()`
+    # -> `split_fast_gate()`, whose sort key negates the weight — so a
+    # non-numeric value raised TypeError inside the packer BEFORE the check
+    # that names it had run, and the gate tracebacked instead of diagnosing.
+    # This test runs the CLI's actual chain, on a real manifest with one real
+    # fast-pool key poisoned, which the isolated helper test cannot see.
+    from tools.ci_selection import (
+        duration_coverage_issues,
+        duration_issues,
+        fast_pool,
+        integrity,
+        leg_coverage_issues,
+        load_manifest,
+    )
+    # cycle 3 added an int beyond float range (math.isfinite raises
+    # OverflowError) and a negative duration (impossible data, exited 0).
+    for bad in (None, "fast", float("nan"), 10 ** 400, -5.0):
+        m = load_manifest()
+        key = fast_pool(m)[0]
+        m = dict(m)
+        m["durations"] = dict(m.get("durations") or {})
+        m["durations"][key] = bad
+        # Must not raise.
+        problems = (integrity(m) + slow_file_issues(m) + duration_issues(m)
+                    + leg_coverage_issues(m) + duration_coverage_issues(m))
+        named = [p for p in problems if "durations value" in p]
+        assert named, f"a bad duration value ({bad!r}) was not named: {problems}"
+
+
+def test_split_fast_gate_cannot_crash_on_a_malformed_duration():
+    # The packer must degrade to the default, never raise — belt and braces for
+    # the ordering fix above (any consumer, any order).
+    from tools.ci_selection import split_fast_gate
+    files = ["tests/test_a.py", "tests/test_b.py"]
+    for bad in (None, "fast", float("nan"), float("inf"), True):
+        a, b = split_fast_gate(files, {"test_a.py": bad})
+        assert len(a) + len(b) == 2, (bad, a, b)
+
+
+def test_integrity_cli_exits_nonzero_for_a_huge_int_and_a_negative(tmp_path, monkeypatch):
+    # #3407 review cycle 3: the isolated helper tests could not see an EXIT
+    # CODE, and the two residual classes were both silent-green failures. This
+    # drives the real CLI entry point (`main()`, which reads sys.argv and the
+    # module-level MANIFEST) over a genuinely poisoned manifest.
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+    for bad in (10 ** 400, -5.0, float("nan")):
+        m = cs.load_manifest()
+        m = dict(m)
+        m["durations"] = dict(m.get("durations") or {})
+        m["durations"][cs.fast_pool(m)[0]] = bad
+        poisoned = tmp_path / "poisoned-ci-surfaces.yml"
+        poisoned.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", poisoned)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() != 0, f"a bad duration value ({bad!r}) exited 0"
+
+
+def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path, monkeypatch):
+    # #3407 review cycle 4 (pre-existing): `duration_issues` and `--split` read
+    # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
+    # as None — the empty-map state `duration_coverage_issues` documents as
+    # "NOT a failure". A raw TypeError traceback is not a diagnosis: it makes
+    # the gate look broken rather than making it say what is wrong.
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+    # `None` is NOT in this list: null/absent is the documented empty-map
+    # PASS, and is asserted below.
+    for bad in (0, "foo", [1.0]):
+        m = dict(cs.load_manifest())
+        m["durations"] = bad
+        poisoned = tmp_path / "bad-durations.yml"
+        poisoned.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", poisoned)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() != 0, f"durations={bad!r} exited 0"
+    # The documented empty-map contracts must still PASS, or the guard above
+    # has simply turned one wrong answer into another.
+    for empty in ({}, None):
+        m = dict(cs.load_manifest())
+        if empty is None:
+            m.pop("durations", None)
+        else:
+            m["durations"] = {}
+        ok = tmp_path / "empty-durations.yml"
+        ok.write_text(yaml.safe_dump(m))
+        monkeypatch.setattr(cs, "MANIFEST", ok)
+        monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
+        assert cs.main() == 0, f"an empty durations map ({empty!r}) was treated as a failure"
