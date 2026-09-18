@@ -515,6 +515,12 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
                 "NOT the client-facing 8000 plane — its whole point is to be off "
                 f"the request path; got port={ll.get('port')!r}"
             )
+            assert ll.get("method", "get") == "get", (
+                "[checks.loop_liveness] must be a GET — the handler 405s anything "
+                "else (monitoring.py _method_not_allowed), and flyctl's deploy "
+                "wait requires every reported check to pass, so a non-GET fails "
+                f"every deploy; got {ll.get('method')!r}"
+            )
             # Its OWN documented bounds (fly.toml §6.4): pin them so a silent
             # edit to the interval/timeout/grace cannot pass through the model.
             interval, timeout, grace = "15s", "5s", "180s"
