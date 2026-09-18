@@ -548,31 +548,36 @@ def test_sync_legacy_migration_is_present_and_confirm_before_clear() -> None:
         "the both-present branch must still require a real legacy session before it "
         "may overwrite the cookie (#3485 review P1)"
     )
-    # #3485 review P2 (cycle 2): a host-only cookie SHARES NOTHING, so a
-    # "confirmed" write on a *.pages.dev preview is not evidence of sharing and
-    # must not cost the legacy copy — the last copy would be destroyed while the
-    # session stays invisible to the other origin and to the server gate.
-    assert "if (!isLocal() && !isPremiselabsHost()) continue;" in body, (
-        "the migration must not clear the legacy key on a host where the cookie is "
-        "host-only (#3485 review P2)"
+    # Rather than a host-only guard, what must hold is that `legacyOk` is DERIVED
+    # from the parsed value and assigned nowhere else: an unconditional
+    # `legacyOk = true;` after the parse re-opens the junk-overwrites-a-valid-
+    # cookie path while leaving the guard text above perfectly intact
+    # (#3485 review P2, cycle 3 — proven by mutation).
+    assert body.count("legacyOk =") == 2, (
+        "legacyOk must be assigned exactly twice — the declaration and the parse "
+        "derivation. A third assignment (e.g. `legacyOk = true;`) defeats the "
+        "both-present guard without changing its text (#3485 review P2)"
     )
     # The sibling writer for the SAME keys (createTortoiseSupabaseClient path —
     # reached when the head gate is skipped, e.g. the ?error early return) must
     # not be a second, unguarded way to write a non-session into the cookie.
     mig = text[text.index("var migrateLegacySession = function") :]
     mig = mig[: mig.index("\n  };\n")]
-    # COUNT, not presence (#3485 review P1, cycle 2): migrateLegacySession has
-    # TWO confirm sites (cookie-absent, and both-present-newer). A presence check
-    # is satisfied by the else-branch copy alone, so deleting one site leaves a
-    # size-guard-stripped write falling through to removeItem(legacyKey) — the
-    # only surviving copy destroyed.
-    assert mig.count("if (readCookie(COOKIE_NAME) !== legacy) return;") == 2, (
-        "both migrateLegacySession write branches must confirm the round-trip before "
-        "dropping the legacy key (#3485 review P1)"
+    # PER BRANCH, not a total (#3485 review P1, cycle 3): a count of 2 is
+    # branch-blind — duplicating the confirm inside the cookie-absent branch and
+    # deleting it from the both-present branch keeps the count at 2 while that
+    # write falls through unconfirmed to removeItem(legacyKey), destroying the
+    # only surviving copy when the size guard stripped the value.
+    _absent_branch, _sep, _both_branch = mig.partition("} else {")
+    assert _sep, (
+        "migrateLegacySession must keep both a cookie-absent and a both-present branch"
     )
-    assert "if (!isLocal() && !isPremiselabsHost()) return;" in mig, (
-        "migrateLegacySession must not clear the legacy key on a host where the cookie "
-        "is host-only (#3485 review P2)"
+    _confirm = "if (readCookie(COOKIE_NAME) !== legacy) return;"
+    assert _absent_branch.count(_confirm) == 1, (
+        "the cookie-absent branch must confirm its write exactly once (#3485 review P1)"
+    )
+    assert _both_branch.count(_confirm) == 1, (
+        "the both-present branch must confirm its write exactly once (#3485 review P1)"
     )
     assert "typeof lo.access_token === 'string'" in mig and "!legacyOk" in mig, (
         "migrateLegacySession must refuse to share a non-session (#3485 review)"
@@ -584,17 +589,26 @@ def test_sync_legacy_migration_is_present_and_confirm_before_clear() -> None:
     assert "return readValidSession()" not in store, (
         "storeSession must not re-enter the migrating accessor to verify its write (#3485 review)"
     )
-    # The verification must check the RESULT, not merely that readCookie was
-    # called: a bare `readCookie(COOKIE_NAME); return true;` satisfies a presence
-    # check while reporting success for a write the browser refused
-    # (#3485 review P1, cycle 2).
-    assert "stored.access_token === session.access_token" in store, (
-        "storeSession must confirm the cookie now carries THE session it just wrote — "
+    # The predicate must GOVERN THE RETURN (#3485 review P1, cycle 3): substring
+    # checks pass with the comparisons kept as no-op statements and `return true;`
+    # at the end, which still reports success for a refused or expired write.
+    _verdict = re.search(r"return\s+!!\([^;]*\);", store)
+    assert _verdict, (
+        "storeSession must RETURN its verified verdict — a computed-but-discarded "
+        "check reports success unconditionally (#3485 review P1)"
+    )
+    _v = _verdict.group(0)
+    assert "stored.access_token === session.access_token" in _v, (
+        "the verdict must confirm the cookie now carries THE session just written — "
         "reading back a stale pre-existing value reports success for a write the "
         "browser actually refused (#3485 review P1)"
     )
-    assert "stored.expires_at && stored.expires_at * 1000 > Date.now()" in store, (
-        "storeSession must apply the same strict validity predicate as "
+    assert "stored.refresh_token === session.refresh_token" in _v, (
+        "the verdict must compare the token PAIR — a cookie sharing only the "
+        "access_token (a rotated pair) is not this write (#3485 review P2)"
+    )
+    assert "stored.expires_at && stored.expires_at * 1000 > Date.now()" in _v, (
+        "the verdict must apply the same strict validity predicate as "
         "readValidSession, or it reports success for a session the destination gate "
         "will reject and bounce back to /auth (#3485 review P1)"
     )
@@ -608,9 +622,32 @@ def test_sync_legacy_migration_is_present_and_confirm_before_clear() -> None:
         "readValidSession must migrate unconditionally — a present-but-unparseable "
         "cookie must not skip the migration and lose the legacy copy (#3485 review P2)"
     )
+    # BARE STATEMENT, not a guarded one (#3485 review P2, cycle 3):
+    # `if (false) migrateLegacyKeysToCookie();` keeps the text in place while the
+    # migration never runs, so position alone is not enough.
+    assert re.search(r"^\s*migrateLegacyKeysToCookie\(\);\s*$", read_body, re.MULTILINE), (
+        "the migration must be CALLED as a bare statement, not wrapped in a guard "
+        "that can be disabled while keeping the text (#3485 review P2)"
+    )
     _first_read = read_body.index("readCookie(COOKIE_NAME)")
     assert read_body.index("migrateLegacyKeysToCookie();") < _first_read, (
         "the migration must run BEFORE the first cookie read, not inside the "
         "cookie-absent branch (#3485 review P1)"
     )
     assert "LEGACY_KEYS" in body, "migration must iterate the hardcoded LEGACY_KEYS"
+
+
+def test_oauth_fragment_is_only_stripped_once_the_write_landed() -> None:
+    """#3485 review P1 (cycle 2): the implicit-flow fragment carries the ONLY copy
+    of the NEW credential, so erasing it when storeSession() returned false
+    strands the visitor on /auth (or leaves the previous account's session in
+    place) with nothing stored. The strip must be conditional on the write."""
+    text = _read(SHARED)
+    assert "if (storeSession(session)) {" in text, (
+        "the fragment must only be stripped when the session actually landed in the "
+        "cookie (#3485 review P1)"
+    )
+    assert not re.search(r"^\s*storeSession\(session\);\s*$", text, re.MULTILINE), (
+        "a bare `storeSession(session);` discards the verdict — the fragment is then "
+        "erased unconditionally (#3485 review P1)"
+    )

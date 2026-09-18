@@ -149,10 +149,6 @@
         try { window.localStorage.removeItem(legacyKey); } catch (e) { /* ignore */ }
         return;
       }
-      // #3485 review P2: the same rule as migrateLegacyKeysToCookie — on a host
-      // where the cookie cannot be parent-domain, a confirmed write is NOT a
-      // shared write, and buying it with the only legacy copy is a net loss.
-      if (!isLocal() && !isPremiselabsHost()) return;
       if (!alreadyShared) {
         // Copy + confirm write before clearing (never destroy the only copy).
         // readCookie returns the DECODED value; equality holds unless the size
@@ -242,16 +238,15 @@
       var legacy = null;
       try { legacy = window.localStorage.getItem(LEGACY_KEYS[i]); } catch (e) { continue; }
       if (!legacy) continue;
-      // #3485 review P2: a host-only cookie SHARES NOTHING. On a public origin
-      // that is neither premiselabs.co nor a local dev host (e.g. a *.pages.dev
-      // preview) `domainAttr()` is empty, so the write below lands host-only —
-      // invisible to the other subdomain and to the server gate — while the
-      // equality check still passes and the legacy copy is then dropped: the last
-      // copy destroyed, and exactly the mismatch this migration exists to remove.
-      // Leave the legacy key alone there (readValidSession still returns null, so
-      // the visitor signs in again instead of looping); junk keys are left in
-      // place too, since on such a host nothing is shared and nothing destroyed.
-      if (!isLocal() && !isPremiselabsHost()) continue;
+      // Host-only origins are fine (#3485 review cycle 2, which refuted the
+      // cycle-1 P2 premise with facts): the write below is CONFIRMED by
+      // readCookie equality, so a host-only cookie is a faithful copy of the
+      // session rather than a lost one — nothing is destroyed — and on a host
+      // that is not premiselabs.co there is no server gate that reads this
+      // cookie at all (the console's Function is on the tortoise host, and the
+      // dashboard Pages project deploys no functions/). Declining to migrate
+      // there would instead bounce a preview user who was previously signed in,
+      // while leaving behind a localStorage key no current path reads.
       var existing = readCookie(COOKIE_NAME);
       // #3485 review P3: parse the legacy value ONCE and require a real session
       // shape (non-empty access_token) in BOTH branches. Object-ness alone is
@@ -414,7 +409,7 @@
       // promise a session the gate will reject and bounce back to /auth. That
       // bounce is the loop this change exists to remove (#3485 review P1).
       return !!(stored && stored.access_token === session.access_token &&
-        stored.refresh_token &&
+        stored.refresh_token === session.refresh_token &&
         stored.expires_at && stored.expires_at * 1000 > Date.now());
     } catch (e) { return false; }
   };
@@ -448,10 +443,17 @@
       if (pt) session.provider_token = pt;
       var prt = p.get('provider_refresh_token');
       if (prt) session.provider_refresh_token = prt;
-      storeSession(session);
-      // Strip the fragment to prevent supabase-js from redundantly
-      // re-processing the same fragment (which may log console errors).
-      history.replaceState(null, '', window.location.pathname + window.location.search);
+      // #3485 review (cycle 2, P1): only strip the fragment once the session is
+      // actually IN the cookie. This fragment is the only copy of the NEW
+      // credential at this point, and storeSession() returns false both when the
+      // write was refused (an oversized session) and when the cookie still holds
+      // a different one — erasing it then strands the user on /auth, or leaves
+      // them signed in as the previous account, with nothing stored.
+      if (storeSession(session)) {
+        // Strip the fragment to prevent supabase-js from redundantly
+        // re-processing the same fragment (which may log console errors).
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
     } catch (e) { /* best-effort */ }
   })();
 
