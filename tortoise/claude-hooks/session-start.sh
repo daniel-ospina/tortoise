@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
+# tortoise-hook-version: 3
 # Tortoise memory injection for Claude Code — SessionStart hook.
+#
+# The `tortoise-hook-version` marker above is the install-contract generation
+# for this hook (see tortoise/hook_install.py). Bump it on ANY behavioural
+# edit — `tortoise hooks status` and `tortoise doctor` read it to tell an
+# already-installed copy it is stale.
 #
 # Install (once, per project):
 #   mkdir -p .claude/hooks

@@ -161,7 +161,9 @@ def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
     """Build the reader from env/config. ``mock=True`` returns MockReader.
 
     Raises RuntimeError when no provider key is configured and mock is off —
-    fail-closed, mirroring ``capture_session``'s no-key posture.
+    fail-closed for the READER, which cannot do anything without a model.
+    (Not a mirror of ``capture_session``, which since #3892 STORES the
+    session's turns and skips only the extraction keylessly.)
     """
     if mock:
         return MockReader()

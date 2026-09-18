@@ -125,6 +125,70 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #3952: the blog-admin console SPA's build config and its
+                   # committed build snapshot own the guard tests added in
+                   # tests/test_admin_return_to.py (the build base, and
+                   # document-independent resolution of the shell's asset refs).
+                   # Neither path is under a Python package prefix, so without
+                   # these entries a PR that reverts `base: '/admin/'` to the
+                   # relative form selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the same
+                   # #3616 pattern these entries sit next to, one level up.
+                   "website/apps/blog-admin/vite.config.ts",
+                   "website/apps/blog-admin/dist/index.html",
+                   # The guard also reads the gate Function itself (it extracts
+                   # returnToPath/gateDecision from it, and derives the console's
+                   # mount path from its directory), so a change to the gate must
+                   # run the guard too.
+                   "website/functions/admin/[[path]].ts",
+                   # #3950: the blog-discoverability guard
+                   # (test_website_docs_consistency.py
+                   # ::test_every_in_scope_page_links_to_the_blog) covers all 12
+                   # public+indexable+served pages, not just docs/faq. An unlisted
+                   # page means a PR touching ONLY that page selects no surface
+                   # (surfaces=[], full=False) and the guard never runs — verified
+                   # before listing: `--changed-files website/tos.html` yielded
+                   # surfaces=[] while website/product.html yielded ['onboarding'].
+                   # That is the #1349/#3332 silent-drop class one more time: the
+                   # guard silently stops covering the page it was written for.
+                   # The ratchet is now two-directional, so adding a guarded page
+                   # without listing it here FAILS a test instead of silently
+                   # shrinking coverage: `test_every_source_pattern_is_selectable`
+                   # (tests/test_ci_selection.py) checks entry -> runs, and
+                   # `test_every_in_scope_page_is_selectable_by_ci`
+                   # (tests/test_website_docs_consistency.py) checks the reverse —
+                   # that every page in the blog guard's derived set reaches a
+                   # surface through this tuple.
+                   "website/security.html", "website/tos.html",
+                   "website/license.html", "website/dpa.html",
+                   "website/aviso-privacidad.html",
+                   # The shared href extractor both blog-guard layers call
+                   # (tests/test_website_docs_consistency.py here, and
+                   # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
+                   # job, which CI runs on every PR regardless of selection).
+                   # Without this entry, editing ONLY the extractor selects core
+                   # and does NOT run the static guard — so the file implementing
+                   # the guard's rule could be changed without running
+                   # `test_rendered_hrefs_ignores_non_rendered_markup`, the test
+                   # that pins that rule. Same #1349/#3332/#3616 class as the
+                   # pages above, one level up: the helper needs the same
+                   # reachability guarantee as the pages it serves.
+                   # Deliberately NARROW rather than promoted to SHARED_MODULES:
+                   # this file has a single matrix consumer, and the full matrix
+                   # would buy nothing the E2E consumer is not already given.
+                   "tests/_html_links.py",
+                   # #3950 review: two more inputs the guard DERIVES its scope from,
+                   # so each changes guard coverage without changing a page.
+                   # `website/_redirects` is what `_canonical_redirect_targets()`
+                   # reads to drop redirected pages from scope, and
+                   # `website/functions/blog/[[path]].ts` is the Function
+                   # `_function_serves()` resolves the blog link against. A
+                   # routing-only PR could therefore silently shrink or break the
+                   # guard while selecting NO surface (surfaces=[], full=False) —
+                   # the same #1349/#3332/#3616 silent-drop class, applied to the
+                   # derivation's own inputs rather than to its output.
+                   "website/_redirects",
+                   "website/functions/blog/[[path]].ts",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that
@@ -134,7 +198,16 @@ SOURCE_PATTERNS = {
                    # it. That is the #3616 pattern one level up: the thing that
                    # decides whether the gate works would not itself be gated.
                    "tools/check_pages_bindings.py",
-                   "config/required-bindings.yml"),
+                   "config/required-bindings.yml",
+                   # #3806: the ship-test instrument and its guard. The guard test
+                   # (tests/test_ship_test_onboarding.py) is registered in BOTH
+                   # `core` (its generic probe helpers) and `onboarding` (the
+                   # onboarding surface it measures). Without this entry a change
+                   # to the instrument alone selects NO surface (`tools/` is a
+                   # flat NON_PYTHON_PREFIXES entry, and the docs-only return
+                   # bypasses the `core` fallback) so its guard never runs on the
+                   # PR that edits it — the #3261/#3616/#3910 silent-drop class.
+                   "tools/ship_test_onboarding.py"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
@@ -166,7 +239,13 @@ SOURCE_PATTERNS = {
             # spot-check-only PR selects the sdk surface (its tests live
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
-            "tools/ask_spotcheck_probe.py"),
+            "tools/ask_spotcheck_probe.py",
+            # #3910: the ask-lane recall bench is the same QA family —
+            # tests/test_ask_retrieval_levers.py pins the `_retrieve_pipeline`
+            # it mirrors, so a bench-only PR must select `sdk` rather than
+            # drop to tier-1 smoke with that guard test never running.
+            # Refs #2089, whose criterion 1 this entry satisfies.
+            "tools/ask_recall_bench.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the

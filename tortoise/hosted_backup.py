@@ -46,6 +46,14 @@ import secrets
 from datetime import datetime, timezone
 from typing import Callable, Protocol  # noqa: UP035
 
+from tortoise.fork_slot import (
+    ForkSlotRecovery,
+    ForkSlotWedgedError,
+    fork_slot_is_wedged,
+    is_fork_refusal,
+    recover_fork_slot,
+)
+
 logger = logging.getLogger(__name__)
 
 DUMP_FORMAT = "tortoise-logical-dump-v1"
@@ -1167,6 +1175,143 @@ def _audit_copied_boolean_indexes(
     return present
 
 
+def _graph_copy_or_diagnose(
+    graph,
+    dst_name: str,
+    *,
+    db,
+    site: str,
+) -> ForkSlotRecovery | None:
+    """``graph.copy(dst_name)``, recovering a wedged module-fork slot (#3845).
+
+    A plain ``GRAPH.COPY`` is the only operation that forks a Redis MODULE
+    child. On the embedded lane that child can deadlock in the server's log
+    path (see :mod:`tortoise.fork_slot`), permanently occupying the single
+    module-fork slot — after which every later copy is refused and the whole
+    DR family stays red until a restart.
+
+    Detection is EVIDENCE-based, never a guess:
+
+    * a copy that raises the engine's fork-refusal response (``could not
+      fork``) is a wedge by construction; and
+    * a copy that failed for ANY other reason (a read timeout is the usual
+      one) is *also* a wedge when our own daemon is still carrying a
+      module-fork child that has outlived :data:`_FORK_CHILD_HUNG_AGE_S` — a
+      child that old for a graph this small is parked, not working.
+
+    On either signal the hung child(ren) of OUR socket are reaped (which is
+    what actually releases the slot — Redis's ``checkChildrenDone`` calls
+    ``resetChildState``), and the copy is retried on the freed slot. The retry
+    is inherently racy (a fresh fork can lose the same race), so it is BOUNDED:
+    when it keeps hitting the wedge the caller gets a
+    :class:`ForkSlotWedgedError` rather than an endless loop. Returns the
+    recovery when a wedge was handled, ``None`` on the clean path. Any other
+    copy failure is re-raised unchanged.
+    """
+    last_recovery: ForkSlotRecovery | None = None
+    last_exc: BaseException | None = None
+    for attempt in range(1, _FORK_COPY_ATTEMPTS + 1):
+        try:
+            graph.copy(dst_name)
+            return last_recovery
+        except Exception as exc:
+            last_exc = exc
+            wedged = is_fork_refusal(exc) or fork_slot_is_wedged(
+                db, min_age_s=_FORK_CHILD_HUNG_AGE_S)
+            if not wedged:
+                raise  # an ordinary copy failure — not ours to reinterpret
+
+        # Wedge confirmed. Recover the SLOT (not just this call): until the
+        # hung child is reaped, every later GRAPH.COPY on this server is
+        # refused, so freeing it is the whole point.
+        recovery = recover_fork_slot(db)
+        if not recovery.recovered:
+            raise ForkSlotWedgedError(
+                site=site, dst_name=dst_name, recovery=recovery) from last_exc
+        last_recovery = recovery
+        logger.warning(
+            "#3845: %s fork slot was wedged — released it (%s); retrying "
+            "GRAPH.COPY -> %s (attempt %d/%d)",
+            site, recovery.detail, dst_name, attempt, _FORK_COPY_ATTEMPTS,
+        )
+
+    raise ForkSlotWedgedError(
+        site=site, dst_name=dst_name,
+        recovery=last_recovery or ForkSlotRecovery(
+            wedged=True, detail="every retry re-wedged the slot"),
+    ) from last_exc
+
+
+def _promote_payload_fork_free(
+    live_g,
+    payload: dict,
+    *,
+    live_name: str,
+    temp_name: str,
+    expected_nodes: int,
+    expected_edges: int,
+) -> dict:
+    """Install a VERIFIED payload into ``live_g`` with NO ``GRAPH.COPY``.
+
+    The last-resort path when the module-fork slot cannot be released: rebuild
+    the live graph from the authenticated payload through the SAME fork-free
+    logical path that built the verified temp graph. Correctness is not
+    weakened — this never reports success it did not achieve:
+
+    * the live graph must be EMPTY first (the logical restore APPENDS; the
+      pre-swap delete is best-effort, so emptiness is re-checked here);
+    * the restored counts must equal the counts the temp graph was verified
+      against, else it raises; and
+    * a failure names the verified temp graph as intact and the live graph as
+      NOT restored — the temp graph is never presented as the live one.
+    """
+    # Fail closed on a non-empty destination: restoring on top of existing
+    # nodes would duplicate data while still satisfying the count check only
+    # by luck. Re-delete, then confirm emptiness by reading the graph.
+    try:
+        live_g.delete()
+    except Exception as e:
+        logger.warning(
+            "#3845: live graph delete before fork-free promotion reported: %s", e)
+    try:
+        rows = live_g.query("MATCH (n) RETURN count(n)").result_set
+        live_now = int(rows[0][0]) if rows else 0
+    except Exception as e:
+        raise RuntimeError(
+            f"Restore swap failed (fork slot wedged; fork-free promotion could "
+            f"not verify {live_name} is empty) — verified temp graph "
+            f"{temp_name} intact"
+        ) from e
+    if live_now:
+        raise RuntimeError(
+            f"Restore swap failed (fork slot wedged; {live_name} still holds "
+            f"{live_now} nodes — refusing to append the restore) — verified "
+            f"temp graph {temp_name} intact"
+        )
+    promoted = restore_graph(live_g, payload)
+    if (promoted.get("nodes") != expected_nodes
+            or promoted.get("edges") != expected_edges):
+        raise RestoreVerificationError(
+            f"Restore swap failed (fork slot wedged; fork-free promotion "
+            f"restored {promoted.get('nodes')}/{expected_nodes} nodes, "
+            f"{promoted.get('edges')}/{expected_edges} edges) — verified temp "
+            f"graph {temp_name} intact"
+        )
+    return promoted
+
+
+#: A module-fork child older than this is parked, not working: a healthy
+#: ``GRAPH.COPY`` of a DR-sized graph completes in milliseconds. Used only to
+#: classify a FAILED copy as a wedge when the engine's refusal text is absent.
+_FORK_CHILD_HUNG_AGE_S = 2.0
+
+#: Bounded detect → reap → retry rounds for one copy. The retry forks again and
+#: can lose the very race it is recovering from, so an unbounded loop would be
+#: the wedge in a different costume; on exhaustion the caller gets a
+#: :class:`ForkSlotWedgedError`.
+_FORK_COPY_ATTEMPTS = 3
+
+
 def _restore_into_temp_verify_swap(
     db,
     payload: dict,
@@ -1322,10 +1467,18 @@ def _restore_into_temp_verify_swap(
     # graph so the swap is reversible even if the process dies mid-window
     # (the 2026-08-05 "wipe followed by any write re-saves the empty state"
     # failure chain). Best-effort — skipped when live is empty/missing.
+    fork_slot: ForkSlotRecovery | None = None
     pre_g = None
     if live_nodes > 0:
         try:
-            live_g.copy(pre_name)
+            # #3845: a wedged module-fork slot refuses this copy too. The copy
+            # is best-effort, but the RECOVERY is not — releasing the slot here
+            # is what lets the swap below use a fork at all instead of the
+            # fork-free fallback.
+            recovery = _graph_copy_or_diagnose(
+                live_g, pre_name, db=db, site="pre-restore safety copy")
+            if recovery is not None:
+                fork_slot = recovery
             pre_g = db.select_graph(pre_name)
             # #3154: a boolean index corrupted by this copy would silently
             # break `= false` predicates on the DR fallback copy. Repair and
@@ -1335,6 +1488,12 @@ def _restore_into_temp_verify_swap(
                 pre_g, graph_name=pre_name,
                 stage="pre-restore safety copy", raise_on_failure=False,
             )
+        except ForkSlotWedgedError as e:
+            # Best-effort copy; the swap below still gets its chance (and its
+            # own fork-free fallback). Report the wedge distinctly — never as
+            # a generic "copy failed".
+            fork_slot = e.recovery
+            logger.warning("pre-restore safety copy skipped — %s", e)
         except Exception as e:
             logger.warning("pre-restore copy failed (continuing): %s", e)
 
@@ -1348,7 +1507,37 @@ def _restore_into_temp_verify_swap(
     except Exception as e:
         logger.warning("live graph delete failed (proceeding to copy): %s", e)
     try:
-        temp_g.copy(live_name)
+        recovery = _graph_copy_or_diagnose(
+            temp_g, live_name, db=db, site="restore swap")
+        if recovery is not None:
+            fork_slot = recovery
+    except ForkSlotWedgedError as e:
+        # The module-fork slot is wedged and could not be released. Do NOT fail
+        # the restore on a fork primitive: promote the already-VERIFIED,
+        # authenticated payload into the live graph through the fork-free
+        # logical path (the one that built the temp graph). The result is
+        # re-verified against the same counts before success is reported.
+        fork_slot = e.recovery
+        logger.warning(
+            "#3845: restore swap: fork slot wedged and not recoverable — "
+            "falling back to a FORK-FREE promotion of the verified temp "
+            "graph %s into %s (%s)", temp_name, live_name, e.recovery.detail,
+        )
+        try:
+            _promote_payload_fork_free(
+                live_g, payload,
+                live_name=live_name, temp_name=temp_name,
+                expected_nodes=expected_nodes, expected_edges=expected_edges,
+            )
+        except Exception as promo_exc:
+            logger.exception(
+                "fork-free promotion failed for %s — temp graph %s intact",
+                live_name, temp_name,
+            )
+            raise RuntimeError(
+                f"Restore swap failed (fork slot wedged; fork-free promotion "
+                f"failed) — verified temp graph {temp_name} intact: {promo_exc}"
+            ) from promo_exc
     except Exception as e:
         logger.exception(
             "GRAPH.COPY temp→live failed for %s — temp graph %s intact",
@@ -1386,10 +1575,16 @@ def _restore_into_temp_verify_swap(
         except Exception as e:  # best-effort metadata (#669 P3)
             logger.warning("restore stamp failed for %s: %s", live_name, e)
 
-    return {
+    result = {
         "restored": counts,
         "restored_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }
+    if fork_slot is not None:
+        # #3845: report the wedge DISTINCTLY from a slow copy, and what was
+        # done about it, so an operator sees "fork slot wedged" rather than a
+        # misleading "copy failed".
+        result["fork_slot"] = fork_slot.as_dict()
+    return result
 
 
 def restore_backup(

@@ -216,8 +216,13 @@ jobs:
               "watchdog_scripts": any_file(
                   startswith(".github/scripts/availability-watchdog"),
                   startswith(".github/scripts/welcome-e2e-monitor"),
+                  # #3810: the record-only baseline recorder — its harness proves
+                  # the record cannot silently lose the cadence factor that
+                  # qualifies every availability figure.
+                  startswith(".github/scripts/availability-record"),
                   isfile(".github/workflows/availability-watchdog.yml"),
                   isfile(".github/workflows/welcome-e2e-monitor.yml"),
+                  isfile(".github/workflows/availability-record.yml"),
                   # a job-definition change re-runs its own suite (dashboard_e2e
                   # precedent) — review R12/Config.
                   isfile(".github/workflows/ci.yml"),
@@ -242,6 +247,11 @@ jobs:
                   isfile("tests/e2e/test_graphs_management.py"),
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
+                  # #3806: the ship-test guard's browser half (real clean-browser
+                  # walk against the built bundle) + the instrument it guards.
+                  isfile("tests/e2e/test_ship_test_onboarding.py",
+                         "tests/test_ship_test_onboarding.py",
+                         "tools/ship_test_onboarding.py"),
                   startswith("website/apps/dashboard/src/"),
                   # public/ is copied verbatim into dist/ by vite (default
                   # publicDir) and was previously only visible via the
@@ -515,6 +525,21 @@ jobs:
         run: bash .github/scripts/availability-watchdog.test.sh
       - name: Welcome-e2e auto-file monitor (#2706/#2850)
         run: bash .github/scripts/welcome-e2e-monitor.test.sh
+
+  availability-record:
+    needs: changes
+    if: needs.changes.outputs.watchdog_scripts == 'true'  # #3810: recorder surface only
+    # #3810: the RECORD-ONLY baseline instrument's harness. Self-contained:
+    # stubs gh, no network. It proves the record keeps the delivered/intended
+    # cadence factor beside EVERY availability figure (the revert test — drop
+    # it and this job goes red), that DEGRADED is never folded into DOWN, that
+    # restarts= is read from the ledger, and that a low figure never fails the
+    # run (record-only, not a gate). Mirrors availability-watchdog above.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Availability record-only baseline (#3810)
+        run: bash .github/scripts/availability-record.test.sh
 
   entrypoint-guards:
     needs: changes
@@ -975,10 +1000,11 @@ jobs:
           echo "::error::wrangler (dashboard) dev server failed to start"
           tail -50 /tmp/wrangler-dash.log || true
           exit 1
-      - name: Run keys-table mixed-fixture e2e (#2166/#2178)
+      - name: Run keys-table mixed-fixture e2e (#2166/#2178) + ship-test guard (#3806)
         run: >
           RUN_DASHBOARD_E2E=1
           python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py
+          tests/e2e/test_ship_test_onboarding.py
           -q -rs -p no:cacheprovider
         env:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
