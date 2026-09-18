@@ -966,14 +966,11 @@ decrement logs *before* it can raise, and only on the branch where no decrement 
 
 ### Convergence note
 
-The MCP-header over-claim took **three cycles** to fully remove (14 claimed in cycle 6, 15 found in cycle 7,
-16 found in cycle 8) because each pass fixed the copies it searched and then asserted completeness over a
-set it had not enumerated. The lesson recorded here: **enumerate before claiming completeness** —
-`git grep` the claim across every tracked file, count the hits, fix them, and re-count, rather than
-asserting a total from the files in hand. The cycle-8 sweep did that (`git grep -n "Retry-After"` across
-all tracked `.py`/`.md`, filtered for MCP co-occurrence) and found exactly this one remaining production
-site plus one legitimate non-issue (`exceptions.py:83`, which is about `/v1/dream`'s own 429 and the MCP
-`ERR_QUOTA` code, and makes no header claim about MCP).
+The MCP-header over-claim took **three cycles** to remove (cycle 6 corrected the doc copies it searched
+and claimed completeness; cycle 7 found a further mis-stated count; cycle 8 found the last site, which
+was in **production code** — the `AskBoundedTimeoutError` docstring). The durable lesson, and the reason
+this is recorded as a rule rather than a story: **enumerate the set before claiming completeness over
+it.** Each cycle's assertion was true of the files it had searched and false of the set it had not.
 
 ### Not re-litigated
 
