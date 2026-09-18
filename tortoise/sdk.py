@@ -12828,6 +12828,10 @@ class TortoiseSDK:
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
+        # B6 (#3892): the read-path status sink — one of the four recorded terms
+        # (tortoise.read_status). Caller-owned and opt-in, exactly like
+        # ``leg_trace``; default None = not computed, byte-identical behavior.
+        read_status_out: dict | None = None,
         recency_field: str | None = None,
         recency_boost: float = 0.0,
         keep_numeric: bool = False,
@@ -12893,6 +12897,16 @@ class TortoiseSDK:
             ``fallback`` entry is appended last on every early-return branch
             (snapshot TF-IDF path, legacy fallback_tfidf path, non-point
             return []). Default None = no trace, byte-identical behavior.
+        read_status_out (B6 #3892): the read-path status contract — when
+            provided, the dict receives ``{"status": <term>}`` with ONE of the
+            four recorded terms (``tortoise.read_status``): ``available``
+            (reached, hits), ``empty`` (reached, nothing matched), ``degraded``
+            (reached, but a leg did not run — e.g. the embedder is absent so
+            the dense leg was skipped, the #2573/#2898 class), or
+            ``unconfigured`` (no store/endpoint could be reached — returned as
+            a status, NEVER as an empty result and never as an exception).
+            Caller-owned opt-in sink, the same pattern as ``leg_trace``;
+            default None = not computed, no probe, byte-identical behavior.
         structural_kind (R4 #1543): keyword-only, default None — the kind
             passed to the STRUCTURAL strategy only (kind-scan), WITHOUT
             triggering the post-retrieval kind filter. Deliberately distinct
@@ -12968,6 +12982,12 @@ class TortoiseSDK:
             enrich_items as w4_enrich_items,
             w4_enrichment_enabled,
         )
+        # B6 (#3892): the recorded read-path status vocabulary lives in ONE
+        # module; this method consumes it and mints no terms of its own.
+        from .read_status import (
+            STATUS_UNCONFIGURED as _STATUS_UNCONFIGURED,
+            classify_leg_trace as _classify_leg_trace,
+        )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
             raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
@@ -12983,8 +13003,40 @@ class TortoiseSDK:
         if order_by not in ("relevance", "confidence", "graph"):
             raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
 
-        proj = self._get_proj()
+        # B6 (#3892): the status sink and the trace used to classify it. When
+        # no status is requested this is exactly today's ``leg_trace`` (None
+        # unless the caller passed one) — byte-identical behavior.
+        status_trace: list[dict] | None = leg_trace
+        if read_status_out is not None and status_trace is None:
+            status_trace = []
+
+        def _with_read_status(rows: list[dict]) -> list[dict]:
+            """Attach the recorded read status when the caller asked for it."""
+            if read_status_out is not None:
+                read_status_out["status"] = _classify_leg_trace(
+                    status_trace or (), hit_count=len(rows))
+            return rows
+
+        try:
+            proj = self._get_proj()
+        except Exception:
+            if read_status_out is not None:
+                # No store: unconfigured — never empty, never an exception.
+                read_status_out["status"] = _STATUS_UNCONFIGURED
+                return []
+            raise
         graph = proj.g
+        if read_status_out is not None:
+            # The store is configured; prove it ANSWERS before claiming
+            # anything about its contents (the same probe `tortoise init`
+            # uses). A store that cannot answer is unconfigured, NOT empty.
+            try:
+                graph.query("RETURN 1")
+            except Exception as e:  # noqa: BLE001, RUF100
+                _logger.warning(
+                    "read path cannot reach the store (%s) — unconfigured", e)
+                read_status_out["status"] = _STATUS_UNCONFIGURED
+                return []
         label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
         # Operator: Point nodes with is_operator=true, kind=op_type
         # Source: Source nodes, kind=sourceKind
@@ -13019,11 +13071,11 @@ class TortoiseSDK:
                     query_vec = model.encode([query])[0].tolist()
                 except Exception:  # noqa: BLE001, RUF100
                     _vec_reason = "encode_failed"
-        if _vec_reason is not None and leg_trace is not None:
+        if _vec_reason is not None and status_trace is not None:
             # Recorded at the source (the strategy is never submitted) —
             # BEFORE degradation_chain merges its own entries, so the
             # vector entry always precedes the fts/structural merge.
-            leg_trace.append(_trace_entry(
+            status_trace.append(_trace_entry(
                 "vector", ran=False, degraded=True,
                 reason=_vec_reason, count=0))
 
@@ -13068,7 +13120,7 @@ class TortoiseSDK:
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
             excluded_statuses=() if include_terminal else None,
-            leg_trace=leg_trace,
+            leg_trace=status_trace,
             # A1 (#2070): the ask-lane numeric-token policy threads into the
             # sparse leg's OR-union (default False = search lane unchanged).
             keep_numeric=keep_numeric,
@@ -13097,11 +13149,12 @@ class TortoiseSDK:
                         exclude_status=exclude_status,
                         include_terminal=include_terminal,
                     )
-                    if leg_trace is not None:
-                        leg_trace.append(_trace_entry(
+                    if status_trace is not None:
+                        status_trace.append(_trace_entry(
                             "fallback", ran=True, degraded=True,
                             reason="tfidf_snapshot", count=len(snap_hits)))
-                    return _decorate_fallback_hits(snap_hits, graph)
+                    return _with_read_status(
+                        _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
                                     include_retracted=include_terminal)
                 if exclude_status and points:
@@ -13112,16 +13165,17 @@ class TortoiseSDK:
                     points = [p for p in points
                               if (p.get("status") or "") not in set(exclude_status)]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
-                if leg_trace is not None:
-                    leg_trace.append(_trace_entry(
+                if status_trace is not None:
+                    status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
                         reason="tfidf_legacy", count=len(legacy_hits)))
-                return _decorate_fallback_hits(legacy_hits, graph)
-            if leg_trace is not None:
-                leg_trace.append(_trace_entry(
+                return _with_read_status(
+                    _decorate_fallback_hits(legacy_hits, graph))
+            if status_trace is not None:
+                status_trace.append(_trace_entry(
                     "fallback", ran=True, degraded=True,
                     reason="no_fallback_applicable", count=0))
-            return []
+            return _with_read_status([])
 
         # R4 (#1543): 1-2 hop IMPL/NAND expansion on TEXT hits (graph as
         # recall amplifier — graphiti episode-mentions pattern). Folds into
@@ -13165,7 +13219,7 @@ class TortoiseSDK:
                 query, raw_results["fts"],
                 str_limit=str_limit,
                 excluded_statuses=() if include_terminal else None,
-                leg_trace=leg_trace,
+                leg_trace=status_trace,
                 # P1-fix (#2070): the second pass respects the caller's A1
                 # keep_numeric — an operator who opted OUT of numeric tokens
                 # must not have them silently re-introduced by the PRF pass
@@ -13195,7 +13249,7 @@ class TortoiseSDK:
                 query, raw_results["fts"],
                 str_limit=str_limit,
                 excluded_statuses=() if include_terminal else None,
-                leg_trace=leg_trace,
+                leg_trace=status_trace,
                 # the anchor + alias tokenization honors the caller's A1
                 # numeric policy (same posture as the A4 P1-fix).
                 keep_numeric=keep_numeric,
@@ -13630,7 +13684,7 @@ class TortoiseSDK:
             if entity_type == "point" and w4_enrich \
                     and w4_enrichment_enabled():
                 ranked = w4_enrich_items(proj, ranked)
-            return ranked
+            return _with_read_status(ranked)
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
             # that ep.confidence_mean carries. GraphRanker reads the
@@ -13655,7 +13709,7 @@ class TortoiseSDK:
         if entity_type == "point" and w4_enrich \
                 and w4_enrichment_enabled():
             out = w4_enrich_items(proj, out)
-        return out
+        return _with_read_status(out)
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
@@ -14919,6 +14973,10 @@ class TortoiseSDK:
         object_centric: bool = True,
         state_ranker=None,
         leg_trace: list[dict] | None = None,
+        # B6 (#3892): the read-path status sink — the coalesced status of the
+        # composite (Points + Objects) read. Same opt-in caller-owned pattern
+        # as ``leg_trace``; default None = not computed, byte-identical.
+        read_status_out: dict | None = None,
     ) -> list[dict]:
         """UC1 "state" recall (epic #898 Wave A) — what is true and
         high-confidence right now.
@@ -14963,8 +15021,21 @@ class TortoiseSDK:
             :func:`tortoise.search_engine.declared_degraded_read` (declare the
             single-leg read) or :func:`tortoise.search_engine.require_hybrid_read`
             (fail loud) — see also :meth:`retrieval_legs`.
+        read_status_out (B6 #3892): the read-path status contract — when
+            provided, the dict receives ``{"status": <term>}`` with ONE of the
+            four recorded terms (``tortoise.read_status``) for the WHOLE
+            composite read: ``available`` / ``empty`` / ``degraded`` /
+            ``unconfigured``. The Point and Object legs each classify their
+            own read and the two are coalesced (``unconfigured`` >
+            ``degraded`` > ``available`` > ``empty``), so an unreachable store
+            can never be laundered into a clean empty result. Caller-owned
+            opt-in sink; default None = not computed, byte-identical behavior.
         """
         from .ranking import StateRanker
+        from .read_status import (
+            STATUS_UNCONFIGURED,
+            combine_read_statuses,
+        )
 
         if limit < 1 or limit > 10000:
             raise ValueError(f"limit must be 1-10000, got {limit}")
@@ -14976,7 +15047,14 @@ class TortoiseSDK:
         if not 0.0 <= centrality_weight <= 1.0:
             raise ValueError(f"centrality_weight must be 0-1, got {centrality_weight}")
 
-        proj = self._get_proj()
+        try:
+            proj = self._get_proj()
+        except Exception:
+            if read_status_out is not None:
+                # No store: unconfigured — never an empty result.
+                read_status_out["status"] = STATUS_UNCONFIGURED
+                return []
+            raise
         ranker = state_ranker or StateRanker(
             proj,
             relevance_exp=relevance_exp,
@@ -14994,6 +15072,13 @@ class TortoiseSDK:
         # superseded/deprecated are excluded here unless include_superseded.
         exclude_status = None if include_superseded else sorted(
             self.STATE_EXCLUDED_STATUS - {"retracted"})
+        # B6 (#3892): per-leg status sinks, combined into one after both reads.
+        # None when no status was requested, so the calls stay byte-identical.
+        _point_status: dict | None = None
+        _object_status: dict | None = None
+        if read_status_out is not None:
+            _point_status = {}
+            _object_status = {}
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             exclude_status=exclude_status,
@@ -15005,13 +15090,19 @@ class TortoiseSDK:
             w4_enrich=False,
             # #2985: observational only — the call is byte-identical when
             # leg_trace is None (the product default).
-            leg_trace=leg_trace)
+            leg_trace=leg_trace,
+            read_status_out=_point_status)
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
-                leg_trace=leg_trace)
+                leg_trace=leg_trace,
+                read_status_out=_object_status)
             if object_centric else []
         )
+        if read_status_out is not None:
+            read_status_out["status"] = combine_read_statuses(
+                (_point_status or {}).get("status"),
+                (_object_status or {}).get("status"))
         # #1350: Object status filter (decision 2a — completed/in_progress
         # stay visible; superseded/deprecated/archived/retracted excluded
         # from the state view unless include_superseded brings them back).
