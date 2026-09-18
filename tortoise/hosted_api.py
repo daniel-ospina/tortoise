@@ -8595,6 +8595,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": session_id, "tid": turn_id},
         )
+        # #3947: journal the turn write so a rebuild can recreate it (parity
+        # with sdk.capture_session's loop — the two are kept byte-identical by
+        # design, #1532). The raw Cypher writes above are unchanged; this is
+        # the missing RECORD. `contains_session` rides the event envelope so
+        # the projection's edge fold restores the CONTAINS link without a
+        # node property the live write never sets.
+        sdk._emit_event(
+            "PointAdded",
+            {"id": turn_id, "kind": "event"},
+            point={
+                "id": turn_id,
+                "content": turn_text,
+                "pointKind": "event",
+                "speaker": role,
+                "is_episodic": True,
+                "status": "draft",
+                "createdAt": now,
+            },
+            contains_session=session_id,
+        )
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not

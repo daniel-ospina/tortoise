@@ -3382,6 +3382,33 @@ class TortoiseSDK:
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": session_id, "tid": turn_id},
             )
+            # #3947: JOURNAL the turn write so a rebuild can recreate it.
+            # The two Cypher writes above stay raw and un-reordered: their
+            # MERGE ordering + the deterministic `{session_id}_t{i}` id ARE
+            # the idempotency contract (#490 review P2-2), and the raw form
+            # keeps the live node shape byte-identical. What was missing was
+            # the RECORD — with no PointAdded in the journal, `rebuild()`
+            # deleted every turn Point and had nothing to replay, silently.
+            #
+            # `contains_session` rides the EVENT ENVELOPE, not the point
+            # payload: the CONTAINS link is a capture-write structural fact
+            # (ONTOLOGY §4.5), so it is restored by the projection's edge fold
+            # without inventing a node property the live write never set —
+            # and without becoming a caller-forgeable prop.
+            self._emit_event(
+                "PointAdded",
+                {"id": turn_id, "kind": "event"},
+                point={
+                    "id": turn_id,
+                    "content": turn_text,
+                    "pointKind": "event",
+                    "speaker": role,
+                    "is_episodic": True,
+                    "status": "draft",
+                    "createdAt": now,
+                },
+                contains_session=session_id,
+            )
 
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
