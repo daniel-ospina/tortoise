@@ -42,6 +42,8 @@ from tortoise import hosted_api as ha_mod
 ha_mod._register_ask_route()
 from fastapi import Request as _AskRequest  # noqa: E402 — module-level so the
 
+from tools.ask_spotcheck import seed_capture_turn_store  # noqa: E402
+
 # `_suspended(request: _AskRequest)` override annotation resolves under
 # ``from __future__ import annotations`` (a local import inside the test fn
 # would leave 'Request' unresolvable in the fn's module globals → FastAPI
@@ -51,6 +53,11 @@ from tortoise.quota import (  # noqa: E402
     _reset_ask_loop_state_for_tests,
 )
 from tortoise.sdk import _reset_ask_reader_cache_for_tests  # noqa: E402
+
+#: The session the seeded turn belongs to. The ask lane must resolve this
+#: value from the ``(:Session)-[:CONTAINS]`` EDGE — the fixture writes no
+#: ``sessionId`` prop for it to fall back on (#3914).
+SEEDED_SESSION_ID = "sess-ask-api"
 
 
 @pytest.fixture(autouse=True)
@@ -102,18 +109,33 @@ class _FakeReaderFactory:
 
 def _seed_point(client, content: str = "the gym schedule is Monday and Wednesday",
                 session_date: str = "2026-08-01") -> None:
-    """Seed a point into the TEST_TEAM graph (through the patched SDK)."""
+    """Seed ONE captured turn into the TEST_TEAM graph (through the patched
+    SDK).
+
+    Capture-shaped (#3914): a ``(:Session {id})`` node plus an episodic turn
+    ``:Point`` wired by ``(:Session)-[:CONTAINS]->(:Point)`` — the only
+    provenance the capture path writes. The Point carries NO ``sessionId`` /
+    ``eventId`` prop, so the ``retrieved_session_ids`` the callers assert can
+    be produced by THAT EDGE ALONE.
+
+    Pre-#3914 this helper wrote ``create_point("statement", …)`` followed by
+    ``SET p.sessionId = 's1'`` with no Session node and no edge. The shipping
+    point fetch PREFERS a renderable ``p.sessionId`` prop over the edge, so
+    the identity surface green-lit a graph where the CONTAINS read was never
+    exercised — and the fixture taught the forged shape to every later author.
+
+    The date-only ``:Event`` marker is retained (turn Points carry no
+    ``eventId``, so nothing joins a turn to it — as in capture).
+    """
     sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
     try:
         proj = sdk._get_proj()
-        point = sdk.create_point("statement", content)
+        seed_capture_turn_store(
+            sdk, SEEDED_SESSION_ID,
+            [{"role": "user", "content": content}])
         proj.g.query(
             "MERGE (e:Event {eventId: 'ev-ask'}) SET e.startedAt = $st",
             params={"st": f"{session_date}T10:00:00Z"},
-        )
-        proj.g.query(
-            "MATCH (p:Point {id: $pid}) SET p.eventId = 'ev-ask', p.sessionId = 's1'",
-            params={"pid": point["id"]},
         )
     finally:
         sdk.close()
@@ -190,6 +212,57 @@ def test_ask_returns_answer(client, monkeypatch):
     assert body["cost_estimate_usd"] >= 0
     assert body["duration_ms"] >= 0
     assert fake["n"] == 1  # exactly one LLM call
+    # D3 identity READBACK (#3914): the seeded turn carries no
+    # `sessionId` prop, so this value can be produced by the
+    # `(:Session)-[:CONTAINS]` edge alone. Reverting that edge in the seeder
+    # reds these two lines on the hosted happy path.
+    assert body["retrieved_session_ids"] == [SEEDED_SESSION_ID], \
+        body["evidence"]
+    assert f"[session {SEEDED_SESSION_ID}]" in body["evidence"]
+
+
+def test_seed_point_writes_the_capture_shape(client):
+    """#3914: `_seed_point` emits the CAPTURE shape, read back out of the store.
+
+    Pre-fix it wrote `create_point("statement", …)` + `SET p.sessionId='s1'`
+    with NO `(:Session)` node and NO edge. The shipping point fetch PREFERS a
+    renderable `p.sessionId` prop, so `test_ask_returns_answer`'s identity
+    surface was decided by a forgeable prop — it would have stayed green with
+    the `CONTAINS` read removed entirely (#3888).
+    """
+    _seed_point(client)
+    turn_id = f"{SEEDED_SESSION_ID}_t0"
+    sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
+    try:
+        proj = sdk._get_proj()
+        row = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.content, p.pointKind, "
+            "p.is_episodic, p.is_operator, p.speaker, p.sessionId, p.eventId",
+            params={"id": turn_id},
+        ).result_set
+        assert len(row) == 1, row
+        content, kind, episodic, is_op, speaker, sess_prop, ev_prop = row[0]
+        assert content == "[user] the gym schedule is Monday and Wednesday"
+        assert kind == "event"
+        assert episodic is True
+        assert is_op is False
+        assert speaker == "user"
+        # THE DEFECT: neither provenance prop may exist — the identity the
+        # happy-path test asserts must come from the CONTAINS edge.
+        assert sess_prop is None, sess_prop
+        assert ev_prop is None, ev_prop
+
+        assert proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": SEEDED_SESSION_ID},
+        ).result_set[0][0] == 1
+        edges = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) RETURN p.id",
+            params={"sid": SEEDED_SESSION_ID},
+        ).result_set
+        assert [r[0] for r in edges] == [turn_id]
+    finally:
+        sdk.close()
 
 
 def test_empty_pool_abstained_200(client, monkeypatch):
