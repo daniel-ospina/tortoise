@@ -15042,10 +15042,12 @@ class TortoiseSDK:
             four recorded terms (``tortoise.read_status``) for the WHOLE
             composite read: ``available`` / ``empty`` / ``degraded`` /
             ``unconfigured``. The Point and Object legs each classify their
-            own read and the two are coalesced (``unconfigured`` >
-            ``degraded`` > ``available`` > ``empty``), so an unreachable store
-            can never be laundered into a clean empty result. Caller-owned
-            opt-in sink; default None = not computed, byte-identical behavior.
+            own read and the two are coalesced so that a leg that reached the
+            store makes the composite ``degraded`` (incomplete) rather than
+            ``unconfigured``; ``unconfigured`` wins only when NO leg reached
+            the store. A read that returned rows can therefore never report
+            ``unconfigured`` alongside them. Caller-owned opt-in sink; default
+            None = not computed, byte-identical behavior.
         """
         from .ranking import StateRanker
         from .read_status import (

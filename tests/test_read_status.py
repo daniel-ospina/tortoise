@@ -275,16 +275,21 @@ class TestReadPathStates:
         """P1 review fix: the probe is PROOF. A store that answers `RETURN 1`
         but whose in-process breakers are still open is a store with a skipped
         leg (`degraded`) — never `unconfigured`, which is the term reserved for
-        a store that could not be reached at all."""
+        a store that could not be reached at all.
+
+        The store is deliberately EMPTY and no leg returns rows, so the probe's
+        `reached=True` is the ONLY thing that can move this test: without the
+        override the trace derives no reachability and classifies
+        `unconfigured` (the P1 defect)."""
         _no_embedder(monkeypatch)
         from tortoise import search_engine
 
         monkeypatch.setattr(search_engine, "_breaker_allow", lambda leg: False)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
             out: dict = {}
-            sdk.tortoise_fts_query("alpha beta", read_status_out=out, limit=5)
+            rows = sdk.tortoise_fts_query("alpha beta", read_status_out=out, limit=5)
+            assert rows == []
             assert out["status"] == STATUS_DEGRADED
             assert out["status"] != STATUS_UNCONFIGURED
         finally:

@@ -30,6 +30,19 @@ exist yet. What this module guarantees is the read-path term itself.
 from ``empty``, and a failure must never be returned as a successful empty
 result.
 
+⚠️ **A KNOWN CROSS-LANE CONFLICT, RAISED NOT RESOLVED HERE.** The read-path
+contract's home issue is #3805 (*the read-path failure contract — unavailable
+must be distinguishable from empty*), which stays open: this module implements
+only its status-vocabulary sub-item. A second, older vocabulary already lives on
+an adjacent client surface: `157a3f8f3` (#3893 "D5") landed ``not_configured``
+(never set up) and ``tortoise_unavailable`` (configured but unreachable) in
+``tortoise/tortoise_client.py`` and ``client/tortoise_client/cli.py``. The four
+recorded terms collapse that pair into one ``unconfigured`` by the roadmap's own
+definition. This module deliberately does **not** rename or split to match D5 —
+the four terms are the recorded contract — so the reconciliation of the two
+vocabularies belongs to the client-boundary half of #3805 and is handed up, not
+silently settled here.
+
 **Additive and off by default.** The status is computed only when a caller
 passes ``read_status_out`` (the same caller-owned-mutable-sink pattern as the
 private ``leg_trace``), and the hosted read surface emits the field only when
@@ -96,8 +109,9 @@ def classify_leg_trace(entries, *, hit_count: int,
                        reached: bool | None = None) -> str:
     """Classify a read from its leg trace (R3 #1542 D4) and its hit count.
 
-    ``reached`` is derived, never assumed: either rows came back, or at least
-    one leg answered the store. ``degraded`` is true when any leg recorded a
+    ``reached`` is derived BY DEFAULT (either rows came back, or at least one
+    leg answered the store); it may be passed explicitly when the caller holds
+    independent reachability proof (the read path's probe). ``degraded`` is true when any leg recorded a
     degradation (a leg skipped, an index missing, a timeout) or when the
     TF-IDF fallback actually produced the rows. A zero-count fallback is a
     recovery that found nothing, not a degradation — the #2952 rule, so an
