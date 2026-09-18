@@ -207,7 +207,14 @@ SOURCE_PATTERNS = {
                    # flat NON_PYTHON_PREFIXES entry, and the docs-only return
                    # bypasses the `core` fallback) so its guard never runs on the
                    # PR that edits it — the #3261/#3616/#3910 silent-drop class.
-                   "tools/ship_test_onboarding.py"),
+                   "tools/ship_test_onboarding.py",
+                   # #3620: the Pages UPLOAD-ROOT gate is a pair too — the
+                   # preflight checker and the reviewed classification it reads.
+                   # A PR that adds a top-level entry under website/ (or edits
+                   # the checker) must select this surface, or the ratchet that
+                   # classifies the new entry never runs on the PR that owns it.
+                   "tools/check_pages_upload_root.py",
+                   "config/pages-upload-classification.txt"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
