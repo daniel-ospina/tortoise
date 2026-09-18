@@ -186,8 +186,13 @@ def test_hook_files_the_real_rollout_with_harness_codex_and_the_session_id(tmp_p
     assert proc.returncode == 0, proc.stderr
 
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not log.exists():
+    while time.monotonic() < deadline:
+        if log.exists() and "DONE" in log.read_text(encoding="utf-8"):
+            break
         time.sleep(0.1)
+    assert log.exists() and "DONE" in log.read_text(encoding="utf-8"), (
+        "the detached capture did not complete — reading argv now would race "
+        "the two appends")
     argv = [t for t in log.read_text(encoding="utf-8").split() if t != "DONE"]
     assert argv == ["sessions", "import", "--file", str(rollout),
                     "--harness", "codex", "--session-id", "01a0b5c6-e7f1"], argv

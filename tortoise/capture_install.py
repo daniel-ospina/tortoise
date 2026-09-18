@@ -561,9 +561,13 @@ def codex_home(home: Path) -> Path:
     Codex honors ``CODEX_HOME`` for its whole config/auth tree, so an install
     that ignored it would register the hook in a file Codex never reads on
     every non-default setup. ``home`` is the user home (injectable for tests).
+
+    DELEGATES to :func:`tortoise.hook_install.default_root` — the ONE resolver
+    ``tortoise hooks status|upgrade`` also uses, so the installer and the CLI
+    can never disagree about where Codex's hooks live (#3818).
     """
-    env = os.environ.get("CODEX_HOME", "").strip()
-    return Path(env) if env else home / ".codex"
+    return hook_install.default_root(
+        hook_install.get_layout("codex"), home)
 
 
 def merge_codex_capture_hooks(data: dict, *, command: str,

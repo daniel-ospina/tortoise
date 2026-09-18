@@ -1145,6 +1145,52 @@ def test_codex_hooks_status_reports_the_install_as_current(cli):
     assert "are current" in r.stdout, r.stdout
 
 
+def test_codex_hooks_status_defaults_to_codex_home_not_the_cwd(cli):
+    """With NO ``--dir``, `tortoise hooks status --harness codex` resolves its
+    root from ``$CODEX_HOME`` (here ``$HOME/.codex``) — the only path Codex
+    reads — not the cwd.
+
+    Mutation: resolve the default root from the cwd (``--dir .``) → the check
+    lands on a path with no install, reports ``missing-script`` +
+    ``missing-hook-entry``, and exits 1 → this REDs."""
+    run, root, home = cli
+    assert install_capture("codex", home=home).ok
+    codex_root = capture_install.codex_home(home)
+
+    r = run("hooks", "status", "--harness", "codex")  # no --dir
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "are current" in r.stdout, r.stdout
+    assert str(codex_root) in r.stdout, r.stdout
+    # the dead project-local path Codex never reads was not inspected
+    assert not (root / "hooks.json").exists()
+
+
+def test_codex_hooks_upgrade_defaults_to_codex_home_not_the_cwd(cli):
+    """With NO ``--dir``, `tortoise hooks upgrade --harness codex` writes into
+    ``$CODEX_HOME`` — the script plus an ABSOLUTE registration — and leaves the
+    dead project-local path untouched.
+
+    Mutation: resolve the default root from the cwd (``--dir .``) → the
+    upgrade writes ``<cwd>/hooks.json`` and ``<cwd>/hooks/`` with a RELATIVE
+    command, prints ``upgraded.``, and the real ``$CODEX_HOME/hooks.json`` is
+    never created → this REDs (the #3818 silent no-capture)."""
+    run, root, home = cli
+    codex_root = capture_install.codex_home(home)
+    assert not codex_root.exists()
+
+    r = run("hooks", "upgrade", "--harness", "codex")  # no --dir
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    installed = codex_root / "hooks" / capture_install.CODEX_SCRIPT_NAME
+    assert installed.is_file(), r.stdout + r.stderr
+    assert _codex_commands(home) == [str(installed)], _codex_json(home)
+    assert os.path.isabs(_codex_commands(home)[0])
+    # nothing landed in the dead cwd path the old default wrote into
+    assert not (root / "hooks.json").exists(), r.stdout
+    assert not (root / "hooks").exists(), r.stdout
+
+
 # ── the CLI surface (`tortoise install <harness>`) ──────────────────────
 
 
@@ -1197,9 +1243,6 @@ def test_cli_install_codex_second_run_is_a_no_op(cli):
 
     assert r.returncode == 0, r.stderr
     assert "already installed" in r.stdout, r.stdout
-
-
-# ── the CLI surface (`tortoise install <harness>`) ──────────────────────
 
 
 def test_cli_install_claude_installs_capture_in_a_temp_home(cli):

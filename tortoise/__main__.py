@@ -3028,6 +3028,7 @@ def _cmd_hooks(args) -> int:
 
     from tortoise.hook_install import (
         contract_version,
+        default_root,
         detect_install,
         get_layout,
         upgrade_install,
@@ -3038,7 +3039,16 @@ def _cmd_hooks(args) -> int:
     except ValueError as e:
         print(str(e), file=_sys.stderr)
         return 1
-    root = _P(getattr(args, "dir", "."))
+    # An explicit `--dir` always wins (Claude's project-scoped install depends
+    # on it). With NO `--dir`, a layout that declares an env root (Codex)
+    # resolves through it — `${CODEX_HOME:-$HOME/.codex}` — because Codex reads
+    # its hooks ONLY from the HOME-scoped file: defaulting to the cwd inspected
+    # and "upgraded" the dead project-local path Codex never reads, printing
+    # `✅ ... upgraded.` while leaving the real install untouched — the silent
+    # no-capture this seam exists to prevent (#3818).
+    explicit_dir = getattr(args, "dir", None)
+    root = (_P(explicit_dir) if explicit_dir is not None
+            else default_root(layout, _P.home()))
 
     if args.hooks_cmd == "status":
         try:
@@ -5286,27 +5296,40 @@ def _cmd_doctor(args):
     # checked ONLY when a capture-hook install is actually present: a project
     # that never installed the hooks must not be nagged (they may use the
     # hosted MCP path alone). Also probed by `tortoise hooks status`.
+    #
+    # Each layout is checked at the root a REAL install uses — through the same
+    # `default_root` resolver the CLI uses: Claude is project-scoped (cwd) and
+    # Codex lives in `$CODEX_HOME`. Checking Codex at the cwd would report a
+    # green row for an install Codex never reads (#3818) — the same silent
+    # no-capture the row exists to catch.
     try:
         from tortoise.hook_install import (
             contract_version,
+            default_root,
             detect_install,
             get_layout,
             is_installed,
         )
-        if is_installed(Path("."), "claude"):
-            findings = detect_install(Path("."), "claude")
+        for _harness in ("claude", "codex"):
+            _layout = get_layout(_harness)
+            _root = default_root(_layout, home)
+            if not is_installed(_root, _harness):
+                continue
+            findings = detect_install(_root, _harness)
             blocking = [f for f in findings if f.blocking]
-            version = contract_version(get_layout("claude"))
+            version = contract_version(_layout)
+            label = ("Capture hooks" if _harness == "claude"
+                     else f"Capture hooks ({_harness})")
             if not blocking:
-                results.append(("Capture hooks", "✅",
+                results.append((label, "✅",
                                 f"install current (contract v{version})"))
             else:
                 first = blocking[0]
                 results.append((
-                    "Capture hooks", "❌",
+                    label, "❌",
                     f"{len(blocking)} stale issue(s) — run `tortoise hooks "
-                    f"status` for the repair path ({first.kind}: "
-                    f"{first.detail})",
+                    f"status --harness {_harness}` for the repair path "
+                    f"({first.kind}: {first.detail})",
                 ))
     except Exception as e:
         results.append(("Capture hooks", "⚠️",
@@ -6589,8 +6612,9 @@ def main(argv: list[str] | None = None) -> int:
             "--harness", default="claude",
             help="Harness seam to inspect (default: claude)")
         _hp.add_argument(
-            "--dir", default=".",
-            help="Project directory holding the install (default: cwd)")
+            "--dir", default=None,
+            help="Directory holding the install (default: the harness's own "
+                 "root — cwd for claude, $CODEX_HOME for codex)")
     hooks_status.add_argument(
         "--json", action="store_true",
         help="Emit a machine-readable drift report")

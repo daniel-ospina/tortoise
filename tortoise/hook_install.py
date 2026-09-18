@@ -241,6 +241,14 @@ class HarnessLayout:
     ``matcher`` is False for a harness whose event entry is a bare group with
     no ``matcher`` key (Codex's nested shape).  Both default to the Claude
     shape so the existing layout is untouched.
+
+    ``root_env`` declares the env var a harness resolves its install root
+    through when the caller passes NO explicit directory (``root_home_default``
+    is the ``$HOME``-relative fallback): Codex reads its hooks ONLY from
+    ``$CODEX_HOME`` (never a project-local file), so a cwd default would
+    inspect and "upgrade" a path Codex never reads while the real install stays
+    broken (#3818).  ``None`` keeps the cwd default — Claude's install is
+    project-scoped.
     """
 
     harness: str
@@ -249,6 +257,8 @@ class HarnessLayout:
     settings_file: str | None = None
     absolute_command: bool = False
     matcher: bool = True
+    root_env: str | None = None
+    root_home_default: str | None = None
 
     def hooks_root(self, root: Path) -> Path:
         return root / self.hooks_dir
@@ -309,6 +319,8 @@ def _codex_layout() -> HarnessLayout:
         settings_file="hooks.json",
         absolute_command=True,
         matcher=False,
+        root_env="CODEX_HOME",
+        root_home_default=".codex",
         scripts=(
             HookScriptSpec(
                 "tortoise-session-end.sh", "SessionEnd", None,
@@ -335,6 +347,24 @@ def get_layout(harness: str) -> HarnessLayout:
         raise ValueError(
             f"unknown harness {harness!r} — known layouts: {known}"
         ) from None
+
+
+def default_root(layout: HarnessLayout, home: Path) -> Path:
+    """The install root to use when the caller passes no explicit directory.
+
+    Claude's install is project-scoped, so its default is the cwd (``.``).  A
+    layout with ``root_env`` resolves through that env var — for Codex the
+    documented ``${CODEX_HOME:-$HOME/.codex}`` — because Codex reads its hooks
+    only from the HOME-scoped ``hooks.json``: a cwd default would inspect and
+    "upgrade" the dead project-local path this seam replaces, and report
+    success while nothing is captured (#3818).
+    """
+    if layout.root_env is None:
+        return Path(".")
+    env = os.environ.get(layout.root_env, "").strip()
+    if env:
+        return Path(env)
+    return home / (layout.root_home_default or "")
 
 
 def contract_version(layout: HarnessLayout) -> int | None:
