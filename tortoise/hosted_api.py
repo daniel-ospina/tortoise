@@ -81,9 +81,6 @@ from tortoise.projection import (
     _journal_append_product,  # #1686: org_* mint journaling (session sweep drops them)
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
-from tortoise.quota import (
-    DEFAULT_MAX_SESSIONS,  # used by get_current_org (#754 P0: missing import → 500 on every agent_signup auth)
-)
 from tortoise.schemas import AskRequest
 from tortoise.sdk import (
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
@@ -3180,10 +3177,10 @@ async def get_current_org(request: Request) -> dict:
         )
         row = org.result_set[0] if org.result_set else None
         if row:
-            (tier, mu, mg, mp, mak, ms, t_suspended, t_flagged, t_email,
+            (tier, mu, mg, mp, mak, _ms, t_suspended, t_flagged, t_email,
              t_sub_status, t_customer_email, t_graph_name) = row
         else:
-            tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
+            tier, mu, mg, mp, mak, _ms = ("free", None, None, None, None, None)
             t_suspended = t_flagged = t_email = None
             t_sub_status = t_customer_email = None
             t_graph_name = None
@@ -3221,7 +3218,12 @@ async def get_current_org(request: Request) -> dict:
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+                # #4010: sessions are UNLIMITED for every tier. `_ms` (the
+                # stored t.max_sessions) is read so the deliberate departure is
+                # visible at the exact site, and then NOT honoured as a cap —
+                # a stored 1000 must never re-cap an org after the constant is
+                # gone.
+                "max_sessions": None,
                 # #1748: key creator's user UUID rides the org dict (Supabase
                 # resolve_api_key parity) so session-user-owned endpoints can
                 # identify the owner from a key-auth request (onboarding
@@ -3527,7 +3529,10 @@ async def _session_user_org(request: Request, user: dict) -> dict:
         "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
         "max_points": int(_mp) if _mp is not None else lim["max_graph_nodes"],
         "max_api_keys": lim["max_api_keys"],
-        "max_sessions": DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier — no cap of any kind,
+        # so the resolved value is always the explicit None (the pre-#4010
+        # `DEFAULT_MAX_SESSIONS` fallback is deleted, not relocated).
+        "max_sessions": None,
         "suspended_at": row.get("suspended_at"),
         "flagged_at": row.get("flagged_at"),
         "email": row.get("email"),
@@ -10713,7 +10718,6 @@ def _org_limits_from_node(org_node: dict) -> dict:
     tier_limits from pricing.json when a stored value is None/missing.
     """
     from tortoise.pricing import tier_limits
-    from tortoise.quota import DEFAULT_MAX_SESSIONS
     tier = org_node.get("tier", "free")
     lim = tier_limits(tier)
     # Fetch each field; use `is None` to preserve None (unlimited) and explicit 0.
@@ -10721,7 +10725,6 @@ def _org_limits_from_node(org_node: dict) -> dict:
     mg = org_node.get("max_graphs")
     mp = org_node.get("max_points")
     mak = org_node.get("max_api_keys")
-    ms = org_node.get("max_sessions")
     return {
         "org_id": org_node["id"],
         "tier": tier,
@@ -10732,7 +10735,9 @@ def _org_limits_from_node(org_node: dict) -> dict:
         # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
         "max_points": mp if mp is not None else lim["max_graph_nodes"],
         "max_api_keys": mak if mak is not None else lim["max_api_keys"],
-        "max_sessions": ms if ms is not None else DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier — the stored value is
+        # deliberately NOT honoured as a cap (see quota.resolve_org_limits).
+        "max_sessions": None,
     }
 
 

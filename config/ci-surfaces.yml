@@ -135,6 +135,9 @@ surfaces:
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
+  # #4010: the session-cap removal — drives the hosted capture path + the
+  # registry resolver, so it belongs with the quota/api surface.
+  - test_issue_4010_sessions_unlimited.py
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py

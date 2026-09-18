@@ -63,7 +63,7 @@ TEST_TEAM = {
     "max_graphs": 1,
     "max_points": 10000,
     "max_api_keys": 2,
-    "max_sessions": 1000,
+    "max_sessions": None,
 }
 
 
@@ -94,19 +94,6 @@ def client_no_auth():
     """TestClient WITHOUT auth override — exercises the real 401 path."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
-            yield tc
-
-
-@pytest.fixture
-def client_quota40():
-    """Client whose team has max_sessions=40 (DE2E-7 quota fixture — direct
-    write convention: no tier gives 40)."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = os.path.join(tmpdir, "test.db")
-        team40 = dict(TEST_TEAM)
-        team40["max_sessions"] = 40
-        app.dependency_overrides[get_current_org] = lambda: dict(team40)
         with patched_tortoise_sdk(db_path), TestClient(app) as tc:
             yield tc
 
@@ -1267,21 +1254,22 @@ class TestBudgetDE2E7:
         ).result_set[0][0]
         assert n == 0, "items remain held client-side — never written"
 
-    def test_sessions_quota_41st_commit_402(self, client_quota40):
-        """Quota fixture: max_sessions=40 → 40 minimal commits → 41st commit
-        402; _count_resource('sessions') returns 40 (NOT the all-nodes count,
-        the #947 P0 regression)."""
+    def test_sessions_count_and_41st_commit_lands(self, client):
+        """#947 P0 (preserved): `_count_resource('sessions')` returns the
+        Session-node count, NOT the all-nodes count. #4010: the 41st commit
+        LANDS — sessions have no cap (the old fixture's direct
+        `max_sessions=40` write is no longer honoured as a cap)."""
         from tortoise.quota import count_org_usage
         sdk = _team_sdk()
         for i in range(40):
             raw = _raw_payload(1, session_id=f"qs{i}")
-            r = _commit(client_quota40, raw)
+            r = _commit(client, raw)
             assert r.status_code == 200, f"commit {i} failed: {r.text}"
         assert count_org_usage(TEST_ORG_ID, "sessions", sdk=sdk) == 40
-        # 41st commit → 402
-        r = _commit(client_quota40, _raw_payload(1, session_id="qs40"))
-        assert r.status_code == 402
-        assert "sessions" in r.json()["detail"]
+        # 41st commit is STORED (was a 402 before #4010).
+        r = _commit(client, _raw_payload(1, session_id="qs40"))
+        assert r.status_code == 200, r.text
+        assert count_org_usage(TEST_ORG_ID, "sessions", sdk=sdk) == 41
 
     def test_empty_commit_ok_zero_budget(self, client):
         """An empty derived commit is valid: 200, zero budget burn,

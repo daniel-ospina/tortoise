@@ -358,17 +358,18 @@ class TestResolveApiKey:
         # points counter counts graph nodes → graph_size_cap (#310 GAP-B)
         assert team["max_points"] == 500000
         assert team["max_api_keys"] > 0
-        assert team["max_sessions"] == 1000
+        # #4010: sessions are unlimited for every tier — always None.
+        assert team["max_sessions"] is None
 
     def test_free_tier_quota_falls_back_to_pricing(self, fake):
         """0006 teams has no max_api_keys/max_sessions columns → pricing
-        defaults (mirrors registry path)."""
+        resolves max_api_keys; max_sessions is unlimited (#4010)."""
         fake.seed("api_keys", [_key_row()])
         team = resolve_api_key(fake, TOKEN)
         assert team["max_users"] == 1
         assert team["max_graphs"] == 1
         assert team["max_points"] == 10000
-        assert team["max_sessions"] == 1000
+        assert team["max_sessions"] is None
         assert team["max_api_keys"] > 0
 
     def test_max_points_override_honored_over_graph_size_cap(self, fake):
@@ -594,6 +595,14 @@ class TestResolveApiKeyFailSoft:
             fake.missing_columns = {"organizations": {"dashboard_key_login"}}
             team = asyncio.run(_session_user_org(request, user))
             assert team["dashboard_key_login"] is True
+            # #4010: the session-lane resolver, like every other limit
+            # builder, must carry `max_sessions` — present with None
+            # (unlimited). A missing key is fail-closed at the sessions gate
+            # (#310 GAP-B), so this is a contract assertion, not a nicety.
+            assert "max_sessions" in team, (
+                "_session_user_org dropped max_sessions — a sessions-gated "
+                "write through this dict would 500 (#4010)")
+            assert team["max_sessions"] is None
         finally:
             monkeypatch.undo()
 

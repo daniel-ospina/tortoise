@@ -919,8 +919,7 @@ def _quota_fields(cp, org_row: dict) -> dict:
     (#329): preserve None (unlimited, Team tier), fall back to pricing.
     #1859 P3-2: max_points column (points-cap override) takes precedence
     over graph_size_cap, then pricing — mirrors resolve_api_key."""
-    from tortoise.pricing import tier_limits  # noqa: I001
-    from tortoise.quota import DEFAULT_MAX_SESSIONS
+    from tortoise.pricing import tier_limits
     from tortoise.quota import derived_tier
     tier = derived_tier({**org_row, "id": org_row.get("id")})
     lim = tier_limits(tier)
@@ -940,7 +939,9 @@ def _quota_fields(cp, org_row: dict) -> dict:
                        if mp is not None
                        else int(lim["max_graph_nodes"])),
         "max_api_keys": lim["max_api_keys"],
-        "max_sessions": DEFAULT_MAX_SESSIONS,
+        # #4010: sessions are unlimited for every tier — no cap of any kind
+        # (the pre-#4010 DEFAULT_MAX_SESSIONS fallback is deleted).
+        "max_sessions": None,
         "suspended_at": org_row.get("suspended_at"),
         "flagged_at": org_row.get("flagged_at"),
         # #1765: prefer the owner's USER email (demotion — teams.email is a

@@ -3619,6 +3619,9 @@ _CONSENT_TEAM = {
     # C5 #2114: C2 owner class (legacy tt_ key) — scope-less key_id dicts
     # 403 the capture gates otherwise.
     "legacy_full_access": True, "max_points": 100000,
+    # #4010: the resolved-limits contract carries EVERY resource — sessions is
+    # unlimited (explicit None), and a MISSING key is fail-closed.
+    "max_sessions": None,
 }
 
 
@@ -4104,7 +4107,8 @@ def _mcp_team_context(tmp_path, monkeypatch, *, org_id="team-1727-mcp",
                 _ha._update_onboarding_state(org_id, session_recording=True)
             tok_t = _current_org_id.set(org_id)
             tok_l = _current_org_limits.set(
-                {"org_id": org_id, "tier": "free", "max_points": 100000})
+                {"org_id": org_id, "tier": "free", "max_points": 100000,
+                 "max_sessions": None})
             tok_m = _transport_mode.set("http")
             try:
                 yield org_id
@@ -4169,7 +4173,7 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
         tok_t = _current_org_id.set("team-1727-mcp-opt")
         tok_l = _current_org_limits.set(
             {"org_id": "team-1727-mcp-opt", "tier": "free",
-             "max_points": 100000})
+             "max_points": 100000, "max_sessions": None})
         try:
             result = tortoise_session_capture(conversation=_CONV, harness="pi")
             st = _ha._get_onboarding_state("team-1727-mcp-opt")
@@ -4485,11 +4489,13 @@ def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
         _provision_team(org_id)
         _opt_in(org_id, enabled=False)  # OFF first
         team = {"org_id": org_id, "tier": "free", "key_id": "k-1727",
-                "legacy_full_access": True, "max_points": 100000}
+                "legacy_full_access": True, "max_points": 100000,
+                "max_sessions": None}
         app.dependency_overrides[_get_current_team] = lambda: dict(team)
         tok_t = _current_org_id.set(org_id)
         tok_l = _current_org_limits.set(
-            {"org_id": org_id, "tier": "free", "max_points": 100000})
+            {"org_id": org_id, "tier": "free", "max_points": 100000,
+             "max_sessions": None})
         tok_m = _transport_mode.set("http")
         try:
             with TestClient(app) as tc:
