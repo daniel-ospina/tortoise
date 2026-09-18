@@ -41,6 +41,19 @@
 -- Ordering (D14): #3780 lands first and KEEPS the month bucket; this migration
 -- is the one that re-keys it — including #3780's own third month producer at
 -- ``cohort_cost.py:218`` and its ``metering_cohort_spend`` month-equality read.
+--
+-- ============================================================================
+-- ⛔ DEPLOY ORDER — THIS MIGRATION MUST LAND *BEFORE* THE #3825 CODE.
+--
+-- The anchor SELECT in ``tortoise/metering.py::_metering_anchor`` is
+-- **UNCONDITIONAL**: it reads ``o.current_period_start`` for EVERY org, before
+-- any subscription check. On a schema that lacks this migration, that SELECT
+-- errors for every org — **including the free tier**, whose D13 calendar-month
+-- fallback is unreachable because the anchor READ fails first. The metering
+-- window is then unresolvable for every org, the cap's read path raises, and
+-- requests fail closed. There is no partial rollout in which code-first is
+-- safe: deploy this migration first, and only then ship the code.
+-- ============================================================================
 
 -- ============================================================================
 -- 1. The anchor: ``organizations.current_period_start``
