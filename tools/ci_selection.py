@@ -136,6 +136,11 @@ SOURCE_PATTERNS = {
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
                    "website/apps/blog-admin/dist/index.html",
+                   # The guard also reads the gate Function itself (it extracts
+                   # returnToPath/gateDecision from it, and derives the console's
+                   # mount path from its directory), so a change to the gate must
+                   # run the guard too.
+                   "website/functions/admin/[[path]].ts",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that
