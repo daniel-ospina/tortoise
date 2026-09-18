@@ -54,7 +54,9 @@ def test_supersede_valid_from_is_the_sole_source_when_successor_is_undated(sdk):
     ⚠️ This scenario produces an OVERLAP, not contiguity: an undated successor
     has an open window start, so ``_covers`` treats it as covering every
     instant and the predecessor's kwarg-written ``validTo`` cannot meet it
-    (ONTOLOGY.md §4.7; tracked as #3985). Contiguity from the kwarg is
+    (ONTOLOGY.md §4.7; the undated-successor overlap is tracked as #3945 —
+    NOT #3985, which is the separate falsey-but-present no-kwarg residual).
+    Contiguity from the kwarg is
     demonstrated by ``test_supersede_successor_valid_from_contiguity``, where
     the successor IS dated.
 
@@ -243,9 +245,16 @@ def test_supersede_falsey_but_present_stored_valid_from_refused(sdk):
     ``_covers`` gates on ``vf is not None``, so a falsey-but-present stored
     ``validFrom`` is a real window start there: ``0`` keys as the parseable
     epoch-0 instant and ``""`` keys as an unparseable start that covers
-    nothing. Trusting the kwarg in that case wrote a predecessor ``validTo``
-    INSIDE the successor's ``[epoch0, ∞)`` window ⇒ ``ambiguous`` — the exact
-    overlap this guard exists to prevent. Both forms are refused.
+    nothing. The two forms fail DIFFERENTLY, and both are refused:
+
+      * ``0`` — trusting the kwarg wrote a predecessor ``validTo`` INSIDE the
+        successor's ``[epoch-0, ∞)`` window ⇒ ``ambiguous`` (the overlap this
+        guard exists to prevent).
+      * ``""`` — the read path treats the start as present but unorderable, so
+        the successor covers NOTHING at any instant; trusting the kwarg leaves
+        the successor permanently unreachable rather than visibly overlapping.
+        Refused fail-closed because the write path and ``_covers`` would
+        silently diverge on it — not because of an overlap.
     """
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     # epoch-0: present AND parseable to the read path
