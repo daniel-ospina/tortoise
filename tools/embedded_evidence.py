@@ -115,7 +115,7 @@ def load1() -> float:
 # a matching `Module fork exited pid:` for every `Module fork started pid:`
 # (for the module-fork-hang class).
 # ---------------------------------------------------------------------------
-CAUSE_PRECEDENCE = ("module-fork-hang", "aof-rewrite-fork", "save-child-slot")
+CAUSE_PRECEDENCE = ("module-fork-hang", "module-fork-eexist", "aof-rewrite-fork", "save-child-slot")
 
 CAUSE_CLASSES: dict[str, dict] = {
     # #3845: a previous RM_Fork child never exited, so the next refusal is
@@ -125,6 +125,27 @@ CAUSE_CLASSES: dict[str, dict] = {
         "requires_lines": [r"Can't fork for module:"],
         "requires_absent": [],
         "requires_unexited_fork": True,
+    },
+    # EEXIST refusal with NO save/AOF discriminator present.
+    #
+    # Observed on the family reproducer: `Can't fork for module: File exists`
+    # appears with NO `Background saving` and NO BGREWRITEAOF line, so both
+    # discard-candidates above are excluded and this fell through to
+    # `unattributed` — a cause the log DOES state, thrown away.
+    #
+    # It is deliberately NOT folded into `module-fork-hang`: that class's
+    # discriminator is the ABSENCE of a matching `Module fork exited pid:`, and
+    # the reviewer's Devil's-Advocate finding is precisely that the two
+    # mechanically distinct causes emit a BYTE-IDENTICAL refusal. Folding this in
+    # would re-conflate what the discriminator exists to separate. A refusal with
+    # no `Module fork started` in THIS log means the slot was held by a child of a
+    # PRIOR instance — a different run — so its started line is not in this file.
+    # That is a distinct, honestly-labellable fact, so it gets its own name rather
+    # than being forced into a neighbour or lost.
+    "module-fork-eexist": {
+        "requires_lines": [r"Can't fork for module:"],
+        "requires_absent": [r"Background saving", r"Starting BGREWRITEAOF"],
+        "requires_unexited_fork": False,
     },
     # appendonly yes -> a background AOF rewrite child occupies the slot.
     "aof-rewrite-fork": {
@@ -342,6 +363,24 @@ def _python() -> str:
     return sys.executable
 
 
+def _short_tmp_root(run_root: Path) -> Path:
+    """A SHORT, stable TMPDIR for the child — deliberately NOT under run_root.
+
+    The embedded Redis binds a Unix socket below its own working dir, and macOS caps
+    that path at 104 bytes. Nesting the child's TMPDIR under the harness's run root
+    (`$TMPDIR/pi-embedded-evidence-XXXX/tmp/tmpYYY/` = 14 dir chars + the socket
+    name) produced a 107-byte path, so Redis NEVER STARTED:
+
+        # Failed opening Unix socket: unix socket path too long (107), must be under 104
+
+    The run then hung at fixture setup with executed=0, and the harness reported that
+    as `timeout-red` — an ENVIRONMENT failure presented as the family RED. A temp
+    root is a budget, and the harness was spending it on directory names.
+    """
+    tag = hashlib.sha256(str(run_root).encode()).hexdigest()[:8]
+    return Path("/tmp") / f"pi3827-{tag}"
+
+
 def _child_env(run_root: Path) -> dict:
     env = dict(os.environ)
     # Pop every lane variable so a dev shell cannot flip the child's lane.
@@ -351,7 +390,7 @@ def _child_env(run_root: Path) -> dict:
         "TORTOISE_EMBEDDED_AOF", "TORTOISE_ALLOW_NONSTANDARD_PATH",
     ):
         env.pop(var, None)
-    tmp = run_root / "tmp"
+    tmp = _short_tmp_root(run_root) / "t"
     tmp.mkdir(parents=True, exist_ok=True)
     env["TMPDIR"] = str(tmp)
     env["TORTOISE_TEST_CARVE_OUT"] = "1"
@@ -403,6 +442,32 @@ def _porcelain_digest(cwd: Path, exclude: Path | None = None) -> tuple[str, bool
     return "sha256:" + hashlib.sha256(blob).hexdigest(), bool(status.strip())
 
 
+def _snapshot_redis_logs(run_root: Path) -> list[Path]:
+    """Copy every redis.log the child's TMPDIR holds into evidence/.
+
+    Mirrors the capture plugin's `_snap`, but callable from the HARNESS. The plugin
+    can only fire from a pytest hook (`pytest_runtest_makereport` / sessionfinish),
+    and the case that needs this most is the one where no hook ever runs — a hang
+    before any test executes. Both measured runs hit the bound with executed=0, so
+    the plugin was silent and `red_cause` was null by construction, not by absence
+    of a cause. Same class as the rest of this lane: an observer waiting on a proxy
+    that is silent in exactly the case it exists to cover.
+    """
+    evid = run_root / "evidence"
+    evid.mkdir(parents=True, exist_ok=True)
+    found: list[Path] = []
+    # The child's TMPDIR is the SHORT root, not run_root/tmp — see _short_tmp_root.
+    roots = [_short_tmp_root(run_root), run_root / "tmp"]
+    for root in roots:
+        for p in sorted(root.glob("**/redis.log")):
+            try:
+                (evid / (p.parent.name + ".redis.log")).write_bytes(p.read_bytes())
+                found.append(p)
+            except OSError:
+                continue
+    return found
+
+
 def _run_once(
     files: list[str],
     measured_root: Path,
@@ -425,15 +490,28 @@ def _run_once(
     before = load1()
     started = time.time()
     timed_out = False
+    child_out = ""
+    # Popen + communicate, NOT subprocess.run(timeout=...): run() re-raises
+    # TimeoutExpired and NEVER retrieves the captured pipes, so the child's output —
+    # the only diagnostic when a run is killed — is destroyed by the exact path that
+    # needs it. Both measured runs died this way with no output kept.
+    proc = subprocess.Popen(
+        cmd, cwd=str(measured_root), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
     try:
-        proc = subprocess.run(
-            cmd, cwd=str(measured_root), env=env,
-            capture_output=True, text=True, timeout=timeout,
-        )
+        child_out, _ = proc.communicate(timeout=timeout)
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         timed_out = True
         rc = 124
+        proc.kill()
+        try:
+            child_out, _ = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            child_out = ""
+        _snapshot_redis_logs(run_root)
+        (run_root / f"child-output-{run_id}.txt").write_text(child_out or "")
     wall = time.time() - started
     after = load1()
     counts = _read_junit_counts(junit)
