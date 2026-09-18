@@ -495,6 +495,36 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     # whenever it happened to have a full page of calls — the state inversion
     # this module exists to prevent, and one that would land the org in a
     # cohort's `orgs_unavailable` list.
+    # Window re-check BEFORE any count this function reports — including
+    # `recall_attempted_any` on the no-memory path, which is otherwise an
+    # UNVERIFIED whole-history count presented as a windowed one. It sits above
+    # the `first_memory_at is None` and `truncated` branches so those paths
+    # carry the same doubt; the STAGE precedence is left unchanged (an org with
+    # no memory stays `not_measurable`, it does not become `unavailable`).
+    window_failed = False
+    if window is not None:
+        out_of_range = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                stamp = _parse_iso(row.get("created_at"), "created_at")
+            except (WindowError, TypeError):
+                # Not placeable on the timeline. An ALLOWLISTED row that fails
+                # here is refused below via `unparseable_analytic_rows`; a
+                # non-allowlisted row is excluded before its timestamp is read,
+                # so it was never part of the count either way.
+                continue
+            if not (window[0] <= stamp.isoformat() < window[1]):
+                out_of_range += 1
+        if out_of_range:
+            detail["analytics_window_out_of_range"] = out_of_range
+            window_failed = True
+            _logger.warning(
+                "activation scorecard: %d analytics row(s) fell outside the "
+                "requested window [%s, %s) — the created_at predicate did not "
+                "apply", out_of_range, window[0], window[1])
+
     if first_memory_at is None:
         # Distinguish the two reasons `first_memory_at` can be NULL, because
         # they carry opposite meanings. `LIFETIME_MEMORY_QUERY` returns a
@@ -502,7 +532,11 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         # with a NULL min means memory EXISTS but carries no timestamp — a data
         # gap, not an absence. Reading that as "no memory was ever produced"
         # would report nothing-to-measure for an org that has memory.
-        detail["recall_attempted_any"] = _count_allowlisted(rows, None)[0]
+        if not window_failed:
+            # `recall_attempted_any` must mean a WINDOWED count on every path
+            # that emits it, so it is withheld when the rows cannot be
+            # attributed to the window.
+            detail["recall_attempted_any"] = _count_allowlisted(rows, None)[0]
         if memory_sessions:
             return _stage(None, "calls", "first_memory_at_missing"), detail
         # No memory has ever been produced, so no retrieval can have been
@@ -527,35 +561,14 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     if memory_at is None:
         return _stage(None, "calls", "first_memory_at_unparseable"), detail
 
-    # Python re-check of the analytics window, mirroring `stage_counts`. The
-    # PostgREST `created_at` predicate is the ONLY thing confining the fetched
-    # rows to [since, until); a silently-dropped bound (the class this PR
-    # already fixed one layer down, in `SupabaseControlPlane.query`) would
-    # otherwise let an out-of-window tool call be counted as a measured recall
-    # attempt. Fail closed: refuse the count, never guess it.
     if window is None:
+        # The window re-check is not optional on the counting path: reading
+        # rows without verifying their window is the silent-dropped-bound class
+        # this PR fixed one layer down. Fail closed rather than count rows that
+        # were never placed on the timeline.
         return _stage(None, "calls",
                       "analytics_window_not_supplied"), detail
-    out_of_range = 0
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            stamp = _parse_iso(row.get("created_at"), "created_at")
-        except (WindowError, TypeError):
-            # Not placeable on the timeline. An ALLOWLISTED row that fails here
-            # is refused below via `unparseable_analytic_rows`; a
-            # non-allowlisted row is excluded before its timestamp is read, so
-            # it was never part of the count either way.
-            continue
-        if not (window[0] <= stamp.isoformat() < window[1]):
-            out_of_range += 1
-    if out_of_range:
-        detail["analytics_window_out_of_range"] = out_of_range
-        _logger.warning(
-            "activation scorecard: %d analytics row(s) fell outside the "
-            "requested window [%s, %s) — the created_at predicate did not "
-            "apply", out_of_range, window[0], window[1])
+    if window_failed:
         return _stage(None, "calls",
                       "analytics_window_predicate_not_applied"), detail
 
@@ -676,12 +689,14 @@ LIMITATIONS: tuple[str, ...] = (
     "the failure direction is narrower than it looks. This read and the "
     "telemetry WRITE use the SAME credential in the SAME process, so a "
     "rotated/revoked key fails the read too and surfaces honestly as "
-    "`unavailable` (`analytics_store_unreachable`), not as a false zero. There "
-    "are exactly two known routes to a false `measured 0`: (1) a window that "
-    "predates the repair, above; (2) a failure that rejects the WRITE while "
-    "letting this READ succeed (an INSERT-only RLS denial, a partial/limited "
-    "role, a silent PostgREST drop). Detectability of (2) is tracked in "
-    "#3677.",
+    "`unavailable` (`analytics_store_unreachable`), not as a false zero. The "
+    "two routes to a false `measured 0` that arise from the WRITE PATH'S OWN "
+    "health are: (1) a window that predates the repair, above; (2) a failure "
+    "that rejects the WRITE while letting this READ succeed (an INSERT-only "
+    "RLS denial, a partial/limited role, a silent PostgREST drop). This is not "
+    "an exhaustive list of every false-zero route — the page-cap entry above "
+    "and the stdio/REST recall-invisibility entry are two more, from "
+    "different causes. Detectability of (2) is tracked in #3677.",
     "Extraction outcome (capture_ok / capture_extractor) is recorded on the "
     "Session but exposed by no read surface (owned by #3520).",
     "The analytics leg's interval is [since, until) — the same as the graph "

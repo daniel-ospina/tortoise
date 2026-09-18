@@ -1605,6 +1605,16 @@ _DREAM_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_DREAM_WORKERS", 2), 8)),
     thread_name_prefix="dream-pass")
 
+# #3060 doctrine, applied to the activation scorecard: `LIFETIME_MEMORY_QUERY`
+# is an unbounded all-time scan of an org's Sessions + CONTAINS (the windowed
+# funnel rides the same hand-off), so this is the "long / stallable" class the
+# comment at the top of this file says must NOT share the loop's default
+# executor with ~80 other `to_thread` sites and the auth middleware's abuse
+# hooks. Its own small pool means a slow graph can only starve the scorecard.
+_SCORECARD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_SCORECARD_WORKERS", 2), 8)),
+    thread_name_prefix="activation-scorecard")
+
 
 async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
     """Run one long dream pass on the dream pool; the helper owns ``sdk.close()``.
@@ -10517,11 +10527,12 @@ async def activation_scorecard(
     rows: list = []
     lifetime: dict | None = None
     try:
-        # The FalkorDB client is synchronous, and LIFETIME_MEMORY_QUERY is an
-        # unbounded all-time scan — running either inline would block the event
-        # loop, and with it every other request on this worker (#3772 is the
-        # same fix for the write handlers).
-        rows, lifetime = await asyncio.to_thread(_read_graph)
+        # The FalkorDB client is synchronous and LIFETIME_MEMORY_QUERY is an
+        # unbounded all-time scan, so this runs on the scorecard's OWN pool
+        # (#3060 doctrine, above) rather than the loop's shared default
+        # executor — a slow graph must not stall other tenants of that pool
+        # (#3772 is the same separation for the write handlers).
+        rows, lifetime = await _run_off_loop(_SCORECARD_EXECUTOR, _read_graph)
     except HTTPException:
         # An authorization/tenancy denial from `_data_sdk` is NOT a graph
         # outage — swallowing it would convert a 403 into a 200 with

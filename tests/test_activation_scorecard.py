@@ -1565,3 +1565,30 @@ def test_a_malformed_funnel_row_yields_unavailable_not_a_500(client, monkeypatch
     for name in ("captured", "stored", "memory_produced"):
         assert body["stages"][name]["state"] == "unavailable", body["stages"]
     assert "org_graph_unavailable" in body["integrity"], body["integrity"]
+
+
+def test_out_of_window_rows_refuse_recall_any_on_the_no_memory_path():
+    """The window re-check must cover `detail.recall_attempted_any` on the
+    no-memory path too — otherwise that key means "window-verified count" on
+    one path and "unverified whole-history count" on another, and the
+    no-memory path is today's production state. The STAGE precedence is
+    deliberately unchanged: an org with no memory stays `not_measurable`, it
+    does not become `unavailable`."""
+    from tortoise.activation_scorecard import recall_stages
+    window = ("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00")
+    rows = [
+        {"properties": {"tool_name": "tortoise_search"},
+         "created_at": "2026-09-16T13:00:00+00:00"},
+        {"properties": {"tool_name": "tortoise_recall"},
+         "created_at": "2027-01-01T00:00:00+00:00"},
+    ]
+    stage, detail = recall_stages(rows, None, memory_sessions=0, window=window)
+    assert stage["state"] == "not_measurable", stage
+    assert stage["reason"] == "no_memory_produced_in_lifetime", stage
+    assert detail["analytics_window_out_of_range"] == 1, detail
+    assert detail["recall_attempted_any"] is None, detail
+    # Legitimate form: with no out-of-window row the raw count IS reported.
+    clean = [rows[0]]
+    _, ok = recall_stages(clean, None, memory_sessions=0, window=window)
+    assert ok["recall_attempted_any"] == 1, ok
+    assert ok["analytics_window_out_of_range"] == 0, ok
