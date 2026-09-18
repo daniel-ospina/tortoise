@@ -594,7 +594,7 @@ jobs:
           # stay in sync with verify_client.sh Gate 0.
           BAD="$(unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/' | \
             grep -vE '^tortoise/(__init__|mcp_client|config|exceptions)\.py$' | \
-            grep -vE '^tortoise_client/(__init__|__main__|cli)\.py$' || true)"
+            grep -vE '^tortoise_client/(__init__|__main__|cli|vocabulary)\.py$' || true)"
           if [ -n "$BAD" ]; then
             echo "::error::non-client entries leaked into the tortoise-client wheel:"
             echo "$BAD"

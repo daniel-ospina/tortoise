@@ -35,6 +35,7 @@ cp "$REPO_ROOT/tortoise/exceptions.py" "$STAGE/tortoise/exceptions.py"
 cp "$SCRIPT_DIR/tortoise/__init__.py"          "$STAGE/tortoise/__init__.py"
 cp "$SCRIPT_DIR/tortoise_client/__init__.py"   "$STAGE/tortoise_client/__init__.py"
 cp "$SCRIPT_DIR/tortoise_client/cli.py"        "$STAGE/tortoise_client/cli.py"
+cp "$SCRIPT_DIR/tortoise_client/vocabulary.py" "$STAGE/tortoise_client/vocabulary.py"
 cp "$SCRIPT_DIR/tortoise_client/__main__.py"   "$STAGE/tortoise_client/__main__.py"
 
 cp "$SCRIPT_DIR/pyproject.toml" "$STAGE/pyproject.toml"

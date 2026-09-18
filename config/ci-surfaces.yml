@@ -311,6 +311,7 @@ surfaces:
   # this `core` entry is the fallback arm (core is only added when nothing else matched),
   # so it is belt-and-braces rather than the load-bearing registration.
   - test_analytics_write_path_resolution.py
+  - test_client_status_vocabulary.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
