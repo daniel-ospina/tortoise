@@ -36,8 +36,10 @@ class _AnchorHrefParser(HTMLParser):
       ``<noscript>`` (raw text in a scripting-enabled browser, which is the
       default, so no anchor exists there); and the contents of ``<template>``,
       which is parsed but never rendered. ``<textarea>``/``<title>`` are RCDATA
-      and are already handled as text by the stdlib parser; they are not listed
-      here because nothing needs to be done for them.
+      and are already treated as text by the stdlib parser (a CPython detail: its
+      ``RCDATA_CONTENT_ELEMENTS`` covers both) — they are not listed here because
+      nothing needs to be done for them, and the pins below would catch it if a
+      future parser dropped that.
     * **Link** — only ``<a>`` is collected, so ``<link rel="prefetch">`` is not a
       way in. Only the FIRST ``href`` on a tag counts, since the tokenizer keeps
       the first of a duplicate pair. An ``href`` with no value, or an empty one,
@@ -46,13 +48,21 @@ class _AnchorHrefParser(HTMLParser):
     * **Foreign content** — ``<template>`` is only the HTML inert element outside
       ``<svg>``/``<math>``; inside them it is an ordinary foreign element whose
       children do render, so suppression is skipped there.
-    * **Self-closing non-void tags** — HTML5 ignores the ``/`` on a non-void HTML
-      element, so ``<template/>`` and ``<script/>`` OPEN their container rather
-      than being empty, and everything after them is suppressed until the matching
-      end tag or EOF. Deleting the ``/`` is exactly what a browser does.
+    * **Self-closing tags** — the rule differs by namespace, and getting it
+      backwards corrupts state for the rest of the document. In the HTML
+      namespace the ``/`` on a NON-void element is ignored, so ``<template/>`` and
+      ``<script/>`` OPEN their container and everything after them is suppressed
+      until the matching end tag or EOF. In FOREIGN content the ``/`` IS honored,
+      so ``<svg/>``/``<math/>`` is an empty element that closes immediately — it
+      must not leave a sticky foreign depth behind, or ``<template>`` suppression
+      would be disabled for every later template in the document.
     """
 
-    # Content is text, never markup a browser renders a link from.
+    # Content is text in a browser, never markup a link can be rendered from.
+    # `<noscript>` qualifies: it is raw text only with scripting ENABLED — the
+    # default, and the only mode this guard's question ("can a visitor reach the
+    # blog from this page?") is asked in. With scripting off its contents are
+    # parsed and do render, which is why it is suppressed here and not omitted.
     _RAW = frozenset({"script", "style", "noscript"})
     # Parsed, but never rendered (HTML namespace only — see _FOREIGN).
     _INERT = frozenset({"template"})
@@ -98,9 +108,16 @@ class _AnchorHrefParser(HTMLParser):
             self._collect(tag, attrs)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # HTML5 ignores the self-closing flag on a non-void HTML element (a parse
-        # error), so `<template/>` / `<script/>` OPEN rather than being empty and
-        # swallow what follows — the stdlib default would close them immediately.
+        # In FOREIGN content the self-closing flag IS honored, so `<svg/>`/`<math/>`
+        # is an empty element that closes at once — forwarding it to
+        # `handle_starttag` would increment `_foreign` with nothing to decrement
+        # it, disabling `<template>` suppression for the rest of the document
+        # (a false pass, review finding). In the HTML namespace the flag is
+        # ignored for a non-void element, so `<template/>`/`<script/>` genuinely
+        # open and swallow what follows — deleting the `/` is what a browser does.
+        if tag in self._FOREIGN:
+            self._collect(tag, attrs)
+            return
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:

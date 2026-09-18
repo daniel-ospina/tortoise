@@ -547,6 +547,11 @@ def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     # ...but only in the HTML namespace: inside foreign content `<template>`
     # renders normally, so its anchor IS a way in (regression guard, #3962).
     assert _rendered_hrefs('<svg><template><a href="/blog">x</a></template></svg>') == ["/blog"]
+    # A self-closing FOREIGN root is honored (empty element, closes immediately),
+    # so it must not leave foreign depth behind and disable `<template>`
+    # suppression for the rest of the document — a false pass (review finding).
+    assert _rendered_hrefs('<svg/><template><a href="/blog">x</a></template>') == []
+    assert _rendered_hrefs('<math/><template><a href="/blog">x</a></template>') == []
     # Suppression must unwind correctly for nested opens.
     assert _rendered_hrefs('<template><script></script><a href="/blog">x</a></template><a href="/docs">d</a>') == ["/docs"]
     # Not a link: a non-anchor element, and a valueless or empty href.
