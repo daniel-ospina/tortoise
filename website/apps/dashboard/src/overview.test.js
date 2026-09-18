@@ -272,8 +272,8 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
     [/card-label">\s*Memories</, 'the point_count card is labelled "Memories"'],
     [/file your first memory/i, 'live connect caption carries the anchor'],
     [/file my first memory/i, 'live prompt bodies carry the anchor (not just the caption)'],
-    [/decisions and findings it saves land here as memories/,
-      'the live first-contact empty state glosses the anchor'],
+    [/two ways to add\s+memory/,
+      'the live first-contact empty state glosses the anchor (#3832 D5 copy)'],
   ]
   for (const [re, label] of POSITIVES) assert.ok(re.test(scan), label)
 
@@ -293,7 +293,7 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   assert.notEqual(scan, src, 'the vocabulary scan must read a stripped view, not raw source')
   const commentOnly = 'const x = 1 /* card-label">Memories< */\n' +
     '// file your first memory\n// file my first memory\n' +
-    '/* decisions and findings it saves land here as memories */'
+    '/* two ways to add memory */'
   const commentOnlyStripped = stripComments(commentOnly)
   for (const [re, label] of POSITIVES) {
     assert.ok(re.test(commentOnly), `control: ${label} — the anchor pattern is present in the fixture`)
