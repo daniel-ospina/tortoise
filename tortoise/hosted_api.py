@@ -1667,8 +1667,8 @@ def _dream_key(org_id: str, graph_namespace: str | None) -> str:
 
 # #3718 (review P1): per-GRAPH dream serialization for the two POOLED pass
 # sites (REST /v1/dream and the write-triggered `_dream_worker` drain). The
-# contract is stated at :1556 — "Serialized per tenant (never two concurrent
-# dreams on one tenant graph)" — and repeated in the epic's test-design surface
+# contract is stated in the Dreaming-queue block above — "Serialized per tenant
+# (never two concurrent dreams on one tenant graph)" — and repeated in the epic's test-design surface
 # map ("new modes must run inside the same serialized worker, not spawn parallel
 # dreams"). Before the off-load the single event loop made both bodies atomic
 # (no await before `sdk.dream`), so the invariant held by construction; now the

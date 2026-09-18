@@ -16482,7 +16482,7 @@ class TortoiseSDK:
             scopes = m.get("scopes") or []
             # C5 #2114 (parity): REST's registry-lane resolution derives the
             # D2 owner class (deleg NULL + scopes [] → legacy_full_access)
-            # in REST's registry lane — apikey_verify is the MCP registry lane
+            # — apikey_verify is the MCP registry lane
             # and MUST carry the same field or the C5 scope gate 403s every
             # tt_/legacy owner key on the selfhost MCP surface.
             # #2300 (C5 registry-lane parity): a C1/C2 graph-bound key
