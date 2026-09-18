@@ -239,9 +239,33 @@ def _manifest_receipt(files: list[str], marker: str, out_dir: Path) -> dict:
     out = out_dir / "manifest.txt"
 
     def _runner(cmd: list[str]):
+        # The manifest collect-only MUST run under the same interpreter the runs
+        # do, or a 3.9 child fails in conftest and reports it as rc=4.
+        if cmd and cmd[0] != _python():
+            cmd = [_python(), *cmd[1:]]
         env = _child_env(out_dir)
         (out_dir / "pi3827_capture.py").write_text(_CAPTURE_PLUGIN)
         p = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+        # A fail-closed guard must not discard its own diagnostic. `rc` alone says
+        # "pytest usage error" and nothing about WHY — and rc=4 is also what a
+        # missing path yields, so the cause is unrecoverable without the stream.
+        # The first version of this dropped p.stderr, which made a deterministic
+        # manifest failure take a dozen probes to localize. Persist the child's
+        # argv, cwd and stderr so the failure is self-describing.
+        if p.returncode != 0:
+            (out_dir / "collect-diagnostic.txt").write_text(
+                "argv: " + " ".join(cmd) + "\n"
+                + "cwd: " + str(REPO_ROOT) + "\n"
+                + "TMPDIR: " + str(env.get("TMPDIR")) + "\n"
+                + "PYTHONPATH: " + str(env.get("PYTHONPATH")) + "\n"
+                + "--- child stderr ---\n" + (p.stderr or "(empty)")
+                + "--- child stdout (tail) ---\n" + (p.stdout or "")[-2000:]
+            )
+            print(
+                "emit-manifest: collect-only failed rc=%d — child stderr:\n%s"
+                % (p.returncode, (p.stderr or "(empty stderr)").strip()),
+                file=sys.stderr,
+            )
         return p.returncode, p.stdout
 
     rc = mod.emit_manifest(files, marker, out, runner=_runner)
@@ -299,6 +323,23 @@ def pytest_runtest_makereport(item, call):
 def pytest_sessionfinish(session, exitstatus):
     _snap()
 '''
+
+
+def _python() -> str:
+    """The interpreter the CHILDREN must run under.
+
+    `sys.executable` is whatever launched this tool — and on this box `python3` is
+    3.9 from the Command Line Tools while the repo's .venv is 3.12. The suite
+    imports `enum.StrEnum` (3.11+), so a 3.9 child dies inside tests/conftest.py
+    with `ImportError: cannot import name 'StrEnum'`, and pytest reports that as a
+    USAGE-class rc=4 — which reads like a bad path and is not. Prefer the repo
+    venv so the child matches the environment the suite is actually installed
+    into; a launch flag must not decide whether the evidence run works.
+    """
+    for cand in (REPO_ROOT / ".venv" / "bin" / "python",):
+        if cand.exists():
+            return str(cand)
+    return sys.executable
 
 
 def _child_env(run_root: Path) -> dict:
@@ -372,7 +413,7 @@ def _run_once(
 ) -> dict:
     junit = run_root / f"junit-{run_id}.xml"
     cmd = [
-        sys.executable, "-m", "pytest", *files,
+        _python(), "-m", "pytest", *files,
         "-q", "-p", "no:cacheprovider",
         f"--timeout={max(30, timeout // 3)}",
         f"--junitxml={junit}",
@@ -539,12 +580,20 @@ def _build_record(args: argparse.Namespace) -> dict:
         raise RuntimeError(args.environment_error)
 
     runs: list[dict] = []
+    porcelain = ""
+    dirty = False
     try:
         if cur_load > ceiling:
             raise RuntimeError(f"load {cur_load} exceeds ceiling {ceiling}")
         for i in range(1, args.n + 1):
             runs.append(_run_once(files, measured_root, run_root, i, args.marker,
                                   args.run_timeout))
+        # The cleanliness digest MUST be taken while the measured tree still
+        # EXISTS. It used to run after this `finally`, which removes the detached
+        # worktree — so a --ref measurement stat'd a path that was already gone
+        # and died with FileNotFoundError, losing the one field that says the tree
+        # did not move. Read state before the code that deletes it.
+        porcelain, dirty = _porcelain_digest(measured_root, exclude=args.record_out)
     finally:
         if worktree_added:
             subprocess.run(
@@ -552,7 +601,6 @@ def _build_record(args: argparse.Namespace) -> dict:
                 capture_output=True, text=True, cwd=str(REPO_ROOT),
             )
 
-    porcelain, dirty = _porcelain_digest(measured_root, exclude=args.record_out)
     red_run = next((r for r in runs if r["bucket"] not in ("green", "slow-run")), None)
     bands = {r["load"]["band"] for r in runs}
     green_runs = [r for r in runs if r["bucket"] in ("green", "slow-run")]
