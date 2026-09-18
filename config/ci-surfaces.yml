@@ -720,6 +720,11 @@ surfaces:
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
   - test_signup_form_safety.py
+  # #3485: dual-registered with `api` (cross-surface registration is deliberate,
+  # #2913). This is the website-guard home for the shared session-bridge asset:
+  # a `website/assets/supabase-session.js` change selects this surface via
+  # SOURCE_PATTERNS, so the guard runs on the PR that edits the file it guards.
+  - test_cross_subdomain_cookie_sync.py
   # #3616: the deploy-binding gate. A pure unit test of the (env, type, name)
   # comparison in tools/check_pages_bindings.py plus an execution harness for the
   # workflow's probe shell — no network, no Cloudflare credentials, no wrangler.
