@@ -12957,6 +12957,7 @@ class TortoiseSDK:
             annotate_ep_batch, get_relationships_bounded,
             fetch_point_epistemic_state, fallback_tfidf,
             SearchResult, SearchScores,
+            search_provenance_enabled,
             filter_by_relationship, filter_by_traversal_predicate,
             expand_structural_hops,
             _recency_factors,
@@ -13392,12 +13393,14 @@ class TortoiseSDK:
                 # re-captured) — a separate, policy-governed change. Tracked
                 # as #3804; this PR stays identity-only for the captured-turn
                 # surface the defect measured.
+                _prov = search_provenance_enabled()
+                _prov_cols = ", n.extractedFrom, n.createdAt" if _prov else ""
                 rows = graph.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n) "
                     "RETURN n.id, n.content, n.pointKind, "
                     "       coalesce(n.has_answer, false), n.sessionId, "
-                    "       sess.id",
+                    "       sess.id" + _prov_cols,
                     params={"ids": result_ids},
                 ).result_set
                 # A Point contained by MORE THAN ONE :Session yields one row
@@ -13419,6 +13422,16 @@ class TortoiseSDK:
                         "has_answer": bool(row[3]),
                         "sessionId": (row[4] or "") if len(row) > 4 else "",
                     }
+                    if _prov:
+                        # Provenance (#3837): the Source/document ref and the
+                        # capture time — additive, read ONLY when the flag is
+                        # set so the default query is unchanged.
+                        entity_data[pid]["source_ref"] = (
+                            row[6] if len(row) > 6 else None
+                        )
+                        entity_data[pid]["captured_at"] = (
+                            (row[7] or "") if len(row) > 7 else ""
+                        )
                     edge_sid = (row[5] or "") if len(row) > 5 else ""
                     if edge_sid:
                         edge_sids.setdefault(pid, []).append(edge_sid)
@@ -13604,6 +13617,10 @@ class TortoiseSDK:
                 source_path=cap_source_path,
                 # A5 (#2070): stored evidence mark (additive in to_dict).
                 has_answer=pt.get("has_answer", False),
+                # Provenance (#3837): present only when the flag fetched it;
+                # SearchResult.to_dict emits the block only when set.
+                source_ref=pt.get("source_ref"),
+                captured_at=pt.get("captured_at", ""),
             )
             results.append(result)
 

@@ -197,7 +197,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "masking — another tenant's packs are never observable).",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="get_tenant_packs",  # pack_state helper, not an SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls pack_state.get_tenant_packs)
     ),
     ToolDefinition(
         name="tortoise_pack_install",
@@ -209,7 +209,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "filesystem packs dir + tortoise pack CLI).",
         annotations=_rw(),  # C5 #2114 (re-review P2): MERGEs manifests/installs — a write
         http_policy=True,
-        sdk_method="upsert_tenant_manifest",  # pack_manifest_store helper
+        sdk_method="",  # custom handler in mcp_server.py (calls pack_manifest_store.upsert_tenant_manifest)
         group="admin",
         hosted_only=True,
     ),
@@ -545,7 +545,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "entity analysis; for a fast neighbor list use tortoise_list_topics.",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="entity_profile",  # navigation.entityProfile — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls navigation.entityProfile)
     ),
     ToolDefinition(
         name="tortoise_traverse",
@@ -724,7 +724,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "Ask things like: 'where is the disagreement?' 'what supports claim X?'",
         annotations=_ro(),
         http_policy=True,
-        sdk_method="analyze",  # analyze.analyze — not a direct SDK method
+        sdk_method="",  # custom handler in mcp_server.py (calls analyze.analyze)
     ),
     # ── P1-3: Staleness Detection ─────────────────────────────────
     ToolDefinition(
