@@ -58,7 +58,12 @@
 # truncated or failed fetch is an INSTRUMENT FAILURE: it explains itself on
 # stderr, exits non-zero and publishes NOTHING. It is never rendered as "NO
 # samples delivered" — a day the fetch never reached is not a day the probe did
-# not run, and a record that lies is worse than no record at all.
+# not run, and a record that lies is worse than no record at all. A returned run
+# that cannot be PLACED on a UTC day (no `created_at`) is the same class:
+# dropping it would shrink the denominator the published figure is computed
+# over — OVERSTATING availability when the dropped run was a failure — while the
+# marker still certified the pre-drop count. It fails the fetch closed, never
+# quietly excluded.
 #
 # A fifth: a run that carried NO verdict (cancelled / timed_out / in-progress /
 # skipped) is not evidence of availability AND not evidence of failure. It is
@@ -294,10 +299,15 @@ fetch_runs() { # reads $RUN_TMP/window_days.txt -> TSV "day<TAB>conclusion" in $
       printf 'TRUNCATED: slice %s returned %s of %s reported\n' "$day" "$slice_returned" "$slice_total" > "$RUN_TMP/fetch_integrity.txt"
       return 1
     fi
-    # A run with a missing created_at is DROPPED rather than bucketed into
-    # "today" — an unknown day is not a sample — but never silently: the drop
-    # count is warned about. (It is NOT part of the integrity check above, which
-    # compares what the API RETURNED against what it REPORTED.)
+    # A run with a missing created_at cannot be PLACED on a UTC day. It is not
+    # bucketed into "today" (an unknown day is not a sample) and it is not
+    # DROPPED either: dropping it would shrink the denominator the published
+    # availability figure is computed over — OVERSTATING availability when the
+    # dropped run was a failure — while the marker still certified the pre-drop
+    # count. It is therefore an INSTRUMENT FAILURE, exactly like every other run
+    # this fetch cannot fully account for: why, on stderr; non-zero exit; NOTHING
+    # published. (The real API always sends created_at, so this is a defensive
+    # path, not a live one.)
     if ! printf '%s' "$out" | jq -rs '
         [ .[].workflow_runs[]? ]
         | map(select((.created_at // "") != ""))
@@ -309,7 +319,9 @@ fetch_runs() { # reads $RUN_TMP/window_days.txt -> TSV "day<TAB>conclusion" in $
     fi
     slice_lines="$(awk 'END { print NR + 0 }' "$RUN_TMP/slice.tsv")"
     if [ "$slice_lines" -lt "$slice_returned" ]; then
-      warn "the ${day} slice returned $((slice_returned - slice_lines)) run(s) with no created_at — dropped (an unknown day is not a sample)"
+      fail "INSTRUMENT FAILURE — the ${day} slice returned $((slice_returned - slice_lines)) run(s) with no created_at, so their UTC day cannot be determined. Dropping them would shrink the denominator the published figure is computed over and would OVERSTATE availability if any was a failure. This window CANNOT be trusted and no record is published. This is a FETCH failure, NOT a gap."
+      printf 'INCOMPLETE: slice %s dropped %s of %s run(s) with no created_at\n' "$day" "$((slice_returned - slice_lines))" "$slice_returned" > "$RUN_TMP/fetch_integrity.txt"
+      return 1
     fi
     cat "$RUN_TMP/slice.tsv" >> "$RUN_TMP/runs.tsv"
     all_returned=$((all_returned + slice_returned))

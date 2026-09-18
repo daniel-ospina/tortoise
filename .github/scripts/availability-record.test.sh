@@ -51,6 +51,11 @@
 #       denominator or the malformed cadence value `n/a%` — including the
 #       reachable all-zero window, whose TOTAL used to print `cadence=n/a%`
 #       while its own cadence column said 0.0%
+#  22.  a returned run with no created_at fails the fetch CLOSED — it used to be
+#       dropped with a stderr-only warning while the marker still certified the
+#       pre-drop count, so the body could print "COMPLETE — N enumerated" beside
+#       an availability figure computed over the reduced set (OVERSTATED when the
+#       dropped run was a failure). The overstatement is REMOVED, not annotated.
 #
 # Fixtures are simulated; the real recorder is the script under test.
 
@@ -124,6 +129,10 @@ case "$path" in
     echo "GH-RUNS $path" >> "$STUB_TMP/calls.log"
     # An anomalous 200 with NO body: `gh` exits 0 and emits nothing.
     [ "${STUB_RUNS_EMPTY:-0}" = "1" ] && { printf ''; exit 0; }
+    # A RAW body, verbatim: the seam for a shape the per-day filter would itself
+    # reject — e.g. a run with no created_at, which the filter's day comparison
+    # excludes BEFORE the recorder could ever see it.
+    [ -n "${STUB_RUNS_RAW:-}" ] && { printf '%s' "$STUB_RUNS_RAW"; exit 0; }
     POP="${STUB_RUNS_POPULATION:-${STUB_RUNS_JSON:-$DEFAULT_RUNS_JSON}}"
     CAP="${STUB_RUNS_CAP:-1000}"
     CREATED_RAW="${path#*created=}"
@@ -229,7 +238,7 @@ reset_case() {
   : > "$STUB_TMP/calls.log"
   rm -f "$STUB_TMP/stderr.log" "$STUB_TMP/created.json" "$STUB_TMP/patched.log"
   unset STUB_RUNS_JSON STUB_RUNS_FAIL STUB_RUNS_CAP STUB_RUNS_POPULATION STUB_RUNS_EMPTY \
-        STUB_RUNS_TOTAL_FORCE \
+        STUB_RUNS_RAW STUB_RUNS_TOTAL_FORCE \
         STUB_LEDGER_SEARCH_JSON STUB_LEDGER_SEARCH_FAIL \
         STUB_RECORD_SEARCH_JSON STUB_RECORD_SEARCH_FAIL STUB_CREATE_FAIL STUB_NEW_ISSUE \
         STUB_PATCH_FAIL STUB_GET_BODY_FAIL STUB_ISSUE_JSON \
@@ -684,6 +693,30 @@ assert_eq "$RC" "0" "an all-zero window still exits 0 (record-only, not a gate)"
 assert_contains "$OUT" "n/a (delivered=0/720 cadence=0.0%)" "the TOTAL carries a WELL-FORMED cadence, not n/a%"
 assert_not_contains "$OUT" "n/a%" "no malformed cadence token anywhere in a zero-delivery window"
 assert_contains "$OUT" "zero-delivery days: 3 of 3" "every day is a gap row, never an 'up' day"
+
+# ── 22: a run with no created_at fails the fetch CLOSED (truthfulness) ───────
+# A returned run whose `created_at` is missing cannot be placed on a UTC day. The
+# old code DROPPED it with a stderr-only warning while the marker still certified
+# the pre-drop count, so the published body could assert "COMPLETE — 2 run(s)
+# enumerated" while rendering delivered=1 and 100.0% — OVERSTATING availability
+# when the dropped run was a failure (truth over the returned runs was 50%). It
+# now fails the fetch closed, like every other run the instrument cannot fully
+# account for.
+echo
+echo "22. a run with no created_at fails the fetch CLOSED, never a quiet drop"
+reset_case
+export STUB_RUNS_RAW='{"total_count":2,"workflow_runs":[{"conclusion":"failure"},{"conclusion":"success","created_at":"2026-09-17T02:00:00Z"}]}' \
+       STUB_LEDGER_SEARCH_JSON='{"items":[]}'
+run_record 1 --print-only
+assert_eq "$RC" "1" "a returned run with no created_at exits non-zero (nothing published)"
+assert_contains "$ERR" "INSTRUMENT FAILURE" "the drop is reported as an INSTRUMENT FAILURE"
+assert_contains "$ERR" "no created_at" "the failure names the missing created_at"
+assert_contains "$ERR" "OVERSTATE availability" "the failure explains the overstatement it prevents"
+assert_not_contains "$OUT" "run fetch integrity: COMPLETE" "the record never certifies a fetch that dropped a run"
+assert_not_contains "$OUT" "RECORD-ONLY baseline" "no record is rendered from a fetch that dropped a run"
+assert_not_contains "$OUT" "100.0%" "the overstated 100.0% figure is never printed"
+assert_eq "$(count_calls 'GH POST repos/daniel-ospina/tortoise/issues$')" "0" "a dropped run publishes nothing"
+assert_eq "$(count_calls 'GH PATCH')" "0" "a dropped run patches nothing"
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "availability-record.test.sh: $PASS passed, 0 failed ✅"
