@@ -109,6 +109,10 @@ from tortoise.exceptions import (  # noqa: E402
     AskValidationError,
 )
 
+#: RETIRED (#3849): the full code tuple the removed path-scoped /v1/ask
+#: translators matched on. No consumer remains (the route and its handlers
+#: went with the product surface); retained as vocabulary pending the
+#: #3849 §7 D5 purge — see the note in tortoise/exceptions.py.
 ASK_ERROR_CODES: tuple[str, ...] = (
     CODE_UNAUTHORIZED, CODE_QUOTA_EXCEEDED, CODE_IN_FLIGHT_LIMIT,
     CODE_READER_UNAVAILABLE, CODE_RETRIEVAL_UNAVAILABLE, CODE_TIMEOUT,
