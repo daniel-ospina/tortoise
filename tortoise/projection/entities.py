@@ -108,6 +108,20 @@ class _EntityHandlers:
         "aboutEvent",        # handled as aboutEvent edge
         "aboutPoint",        # handled as aboutPoint edge
         "aboutDocument",     # handled as aboutDocument edge
+        # #3947 review (security): the capture turn loop's session-container
+        # link. A structural EDGE carrier exactly like the `about*` keys above
+        # — never a node property. The replay reads it from the RAW envelope
+        # before `_norm` (`{**ev, **ev["point"]}`) can splice the payload over
+        # it, so a point key of the same name cannot shadow (or forge) it; this
+        # entry makes `_persist_extra_props` drop an IN-PAYLOAD forgery (its
+        # `skip` set is `_META_KEYS | handled_keys`), which is the only way the
+        # key can reach a node at all — the envelope half never enters the
+        # payload dict the extra-props walk reads. It sits here rather than in
+        # `_POINT_DENY` because that list is for payload keys the replay
+        # DELIBERATELY drops, and a forgery is not a policy-drop; the boundary
+        # rejects in `sdk._sanitize_props` / mcp `_SERVER_MANAGED_PROPS` are
+        # where a tenant is told no.
+        "contains_session",
         # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
         # on api._emit) + corrects — structural, never node properties. One
@@ -370,6 +384,22 @@ class _EntityHandlers:
             if p.get("label") is not None:
                 set_clauses.append("n.label=$label")
                 params["label"] = p["label"]
+        # #3947: `is_episodic` is a SERVER-MANAGED node property — the
+        # points-quota discriminator (#1486, quota.py counts only
+        # `is_episodic IS NULL OR = false` Points). `create_point` writes it
+        # from its explicit kwarg on the LIVE path, but it sits in
+        # `_POINT_HANDLED`, so the open-set passthrough never carried it and
+        # every REPLAY silently dropped it: a rebuilt turn Point came back as
+        # a plain Point — counted against quota, invisible to the episodic
+        # reads. Live/replay parity gap, fixed here as an explicit clause
+        # gated on the payload's own value (the `provenanceSource` shape).
+        # The property stays unreachable from the generic passthrough, and
+        # the payload is a server-authored journal snapshot: a
+        # tenant-supplied `is_episodic` is rejected at the SDK
+        # (`_sanitize_props`) and MCP (`_SERVER_MANAGED_PROPS`) boundaries.
+        if p.get("is_episodic") is not None:
+            set_clauses.append("n.is_episodic=$episodic")
+            params["episodic"] = bool(p["is_episodic"])
         # Phase 2 #49: context removed — never written
         self.g.query(
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
@@ -450,12 +480,21 @@ class _EntityHandlers:
                 "Point list prop %r dropped — undeclared list props are never "
                 "written raw (#2795); not restorable from the payload", key)
 
-    def _upsert_point_edges(self, p: dict) -> None:
-        """Wire all Point edges (provenance + about + operator).
+    def _upsert_point_edges(self, p: dict, contains_session: str | None = None) -> None:
+        """Wire all Point edges (provenance + about + operator + session).
 
         Single source of truth for Point edge parity between apply() and
         rebuild_all() pass 2 (#330) — same role as _upsert_point_props for
         node properties.
+
+        ``contains_session`` (#3947) is the CONTAINS-container link of an
+        episodic turn Point, and arrives on the EVENT envelope rather than in
+        the point payload: it is a capture-write structural fact, not a
+        Point property. The replay reads it from the **raw** envelope BEFORE
+        `_norm` (`{**ev, **ev["point"]}`) can splice the payload over it, so
+        a point key of the same name cannot shadow it; `_META_KEYS` is the
+        writer-side backstop that keeps the key out of the node, and the
+        SDK/MCP boundary rejects are the fail-closed backstop for tenants.
         """
         # Ontology v2.1: link Point → Source via extractedFrom edge.
         # #3263: many-to-many — one edge per source. _link_source fans a list
@@ -463,6 +502,23 @@ class _EntityHandlers:
         source_ref = p.get("extractedFrom")
         if source_ref:
             self._link_source(p["id"], source_ref)
+        # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
+        # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
+        # member of the deferred generic direct-edge replay (#1048: caller-
+        # authored `create_direct_edge` descriptors stay unaligned on
+        # rebuild): it carries no caller attrs, and it is the capture TURN LOOP
+        # ALONE that journals the link, on the turn's own PointAdded (the only
+        # two `contains_session=` emission sites are the SDK and hosted turn
+        # loops). The extractor-minted points are wired into the Session by
+        # OTHER, raw CONTAINS writes scattered through the capture/extraction
+        # path — every one of them unjournaled — so a journal-only `rebuild()`
+        # still drops those edges; only `rebuild_all`'s `:Session` snapshot
+        # restores them. That gap is #3664/#3722's scope. Do NOT read this fold
+        # as covering it: the list of unjournaled writers is deliberately not
+        # enumerated here, because line-number inventories rot (an earlier
+        # draft of this comment cited three and missed two).
+        if isinstance(contains_session, str) and contains_session:
+            self._link_session(contains_session, p["id"])
         # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
         about = p.get("aboutEntities")
         if about and isinstance(about, list):
@@ -471,10 +527,52 @@ class _EntityHandlers:
         if p.get("operator"):
             self._create_edges(p)
 
-    def _upsert(self, p: dict) -> None:
+    def _link_session(self, session_id: str, point_id: str) -> None:
+        """Recreate the capture Session + its CONTAINS edge to one turn (#3947).
+
+        The `:Session` node is itself part of the unjournaled capture write
+        (the live loop MERGEs it raw, right before the turn loop), so a
+        replay has to recreate it here — carrying `is_episodic: true`, the
+        flag the ontology pins on the session container (ONTOLOGY §4.5: "The
+        capture graph's :Session node (session container, CONTAINS → turn
+        Points) also carries is_episodic: true").
+
+        Ordering mirrors the live loop: the node MERGE runs BEFORE the edge
+        MERGE — a full-path MERGE with a missing edge makes FalkorDB create
+        the whole path from scratch, duplicating the Point node (#490 review
+        P2-2).
+
+        KNOWN LIMIT (review F6): this recreates a MINIMAL Session — `id` +
+        `is_episodic` only. A journal-only `rebuild()` has no Session record to
+        replay (the live loop never journaled it), so `capture_ok`,
+        `turn_count` and `created_at` come back absent. For `rebuild_all` the
+        durable pre-wipe `:Session` snapshot restore loop runs BEFORE pass 2
+        (this method's only call site, reached via `_upsert_point_edges`), so
+        the full container is written FIRST and this
+        `MERGE ... SET s.is_episodic=true` is a no-op on properties — the
+        minimal stub is never written, hence never overwritten. For
+        `rebuild()` the props stay missing and a later capture may read
+        `capture_ok=None` as the legacy
+        "presumed captured" case (#2335) instead of retrying. So the durability
+        split is: `rebuild_all` carries the container (and its CONTAINS links)
+        via the pre-wipe sidecar; the JOURNAL carrier is the `SessionRecorded`
+        work already open as #3722/#2296; `rebuild()` alone still yields the
+        stub. See the residual note in the #3947 PR body.
+        """
+        self.g.query(
+            "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+            params={"sid": session_id},
+        )
+        self.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": session_id, "tid": point_id},
+        )
+
+    def _upsert(self, p: dict, contains_session: str | None = None) -> None:
         """Upsert a Point: node properties via _upsert_point_props, then edges."""
         self._upsert_point_props(p)
-        self._upsert_point_edges(p)
+        self._upsert_point_edges(p, contains_session=contains_session)
 
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})

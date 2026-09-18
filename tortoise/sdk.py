@@ -371,10 +371,26 @@ _SESSION_LLM_DEFAULT_MODELS = {
     "gemini": "gemini-2.0-flash",
 }
 
+#: #3892 (owner ruling 2026-09-18): the additive warning a KEYLESS capture
+#: carries — the session's turns were stored (and are therefore searchable),
+#: but no memory points were extracted. One canonical string so the receipt
+#: and its tests cannot drift, and so a keyless capture is NEVER silent.
+_CAPTURE_NO_PROVIDER_WARNING = (
+    "no LLM provider key configured (set e.g. OPENROUTER_API_KEY or "
+    "DEEPSEEK_API_KEY) — the session's turns were STORED and remain "
+    "searchable, but LLM extraction into memory points was skipped"
+)
+
+#: #3892: the truthful ``extraction_mode`` for the keyless capture. Named so
+#: a consumer can tell "no provider configured" apart from the other
+#: zero-extraction states ("empty", "error", "replayed").
+_CAPTURE_NO_PROVIDER_MODE = "no-provider"
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider
-    key is set (fail-closed). Mirrors ingest._PROVIDERS exactly — the same key
+    key is set (the no-extraction case, #3892 — the capture itself still
+    stores its turns). Mirrors ingest._PROVIDERS exactly — the same key
     set hosted_api._llm_provider_available() reports (#722 parity)."""
     from tortoise.ingest import _PROVIDERS
 
@@ -398,8 +414,9 @@ def _session_llm_mock_enabled() -> bool:
 
 def _build_session_llm_extractor():
     """Build the M2 LLMExtractor for session capture from the configured
-    provider (or None when no provider key is set — the no-key case fails
-    closed). TORTOISE_SESSION_LLM_MOCK=1 is a test seam (precedent:
+    provider (or None when no provider key is set — the no-key case STORES
+    the session's turns and skips ONLY the extraction, #3892; it no longer
+    refuses). TORTOISE_SESSION_LLM_MOCK=1 is a test seam (precedent:
     TORTOISE_BACKUP_STORAGE=memory / RATE_LIMIT_DISABLED) that swaps in the
     deterministic MockModel so the E2E/unit suites exercise the real LLM
     pipeline shape with zero network."""
@@ -899,6 +916,16 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             raise ValueError(
                 f"{key!r} is a server-managed field and cannot be set via props."
             )
+    # #3947 review (security): `contains_session` is an ENVELOPE-level capture
+    # directive (it drives the `(:Session)-[:CONTAINS]->(:Point)` rebuild fold),
+    # never a Point property. Reject it here as the fail-closed boundary: a
+    # tenant-supplied prop of this name must not be able to reach a writer that
+    # could turn it into a structural graph fact on replay.
+    if "contains_session" in props:
+        raise ValueError(
+            "'contains_session' is a server-managed capture field and cannot "
+            "be set via props."
+        )
     # #1486 (code-review P1): is_episodic is the points-quota discriminator
     # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
     # setting it true via props would exclude their points from the quota —
@@ -1126,7 +1153,7 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     double-residual vs the effective escalation ceiling) is DIAGNOSABLE from
     the logs when the self-surfacing failure fires. Emitted at the shared
     resp/effective-mode assembly. NOTE the mode COVERAGE is v2/m2/replayed/
-    error — an "empty" line can never fire here: the empty/blank conversation
+    error/no-provider — an "empty" line can never fire here: the empty/blank conversation
     gate RETURNS before the Session MERGE + shared emit point on both lanes
     (no Session is written, so there is no capture to observe; the empty
     population is not a GO candidate). Same for the 402/turn-cap raise paths
@@ -3136,7 +3163,8 @@ class TortoiseSDK:
         eventId is stamped onto the extracted Points as their provenance
         surface (#1417 — provenance is eventId, NOT the aboutEvent content
         edge). The deterministic regex loop is removed as a product
-        path — LLM extraction is the default and no-key fails closed.
+        path — LLM extraction is the default, and a missing key SKIPS the
+        extraction while still STORING the turns (#3892).
 
         Supersession records are REAL-BACKEND-ONLY, by construction: the v2
         extractor forms conversation-driven supersessions only when its S3
@@ -3166,22 +3194,31 @@ class TortoiseSDK:
         the hosted #1727 replay skip; a replay is a no-op on the first
         capture's Event + Source).
 
-        Requires an LLM provider key (OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY)
-        or the TORTOISE_SESSION_LLM_MOCK=1 test seam — raises ValueError
-        otherwise (fail-closed, mirroring the hosted 503; the no-extractor
-        check precedes the empty gate).
+        #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL. A missing
+        LLM provider key does NOT refuse the capture — the Session is merged
+        and the mechanical turn Points are written exactly as they are on the
+        keyed path (the same loop, unchanged); ONLY the LLM extraction into
+        memory points is skipped, and the receipt says so truthfully
+        (``extraction_mode`` "no-provider" + the additive
+        ``_CAPTURE_NO_PROVIDER_WARNING``). The key gates extraction, not
+        storage: the stored turns are searchable with no key at all (FTS is
+        DB-side; the dense leg is a local sentence-transformers model).
+        With a provider key present, behaviour is UNCHANGED. This is a
+        DELIBERATE divergence from the hosted lane — ``hosted_api.
+        _capture_session_impl`` keeps its 503-first refusal, because a hosted
+        deploy must never store a session its org did not ask to pay to
+        extract. A keyless capture records ``capture_ok=False`` +
+        ``capture_extractor="none"`` (no extraction lane ran), so a LATER
+        capture of the same session WITH a key re-attempts extraction through
+        the existing #2335 TRUE-retry path instead of silently replaying.
         """
         import uuid
         from datetime import datetime, timezone
 
-        if _build_session_llm_extractor() is None:
-            raise ValueError(
-                "capture_session requires an LLM provider key (set e.g. "
-                "OPENROUTER_API_KEY or DEEPSEEK_API_KEY) — the regex "
-                "extraction loop was removed as a product path (#822). "
-                "Set TORTOISE_SESSION_LLM_MOCK=1 in tests for the offline "
-                "MockModel extractor."
-            )
+        # #3892: resolve the extractor ONCE, up front, but NEVER refuse the
+        # capture for a missing key — the key gates EXTRACTION, not storage.
+        extractor = _build_session_llm_extractor()
+        no_provider = extractor is None
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -3209,8 +3246,9 @@ class TortoiseSDK:
         # exact input the extractors receive), the SAME signal the extractors
         # use, so the gate and the extractors cannot disagree, and
         # pre-mutation (no Session stub). turns reports the COMMITTED state (0)
-        # — nothing lands. (The no-extractor ValueError above precedes this
-        # gate — hosted 503-first precedent, #1529 OQ14.)
+        # — nothing lands. (#3892 deleted the no-extractor ValueError that
+        # used to precede this gate; the turn-cap refusal above still comes
+        # first, and this gate still precedes every write.)
         transcript, _est = _session_llm_transcript(windowed)
         if not transcript.strip():
             return {
@@ -3315,9 +3353,29 @@ class TortoiseSDK:
         # runs v2 (env != m2) — otherwise replay (safe no-op).
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
+        # #3892: a keyless capture records lane "none" (no lane ran), and a
+        # FAILED prior attempt is re-attempted (#2335 TRUE retry) — that is
+        # how a session captured without a key gets its memory points once a
+        # key appears. "none" is retry-eligible for the same reason "v2" is
+        # (it minted no claims of its own, and its turn ids are deterministic,
+        # so the re-attempt converges).
+        # The m2 exclusion is UNCHANGED and deliberate: M2 dedups per-capture
+        # only, so re-running it can mint duplicate claims (the #1727/#2473
+        # hole). An earlier revision of this change admitted a "none" prior
+        # under M2 on the argument "a none prior minted nothing" — review
+        # cycles 4 and 5 showed that argument cannot be VERIFIED after the
+        # fact: a claim minted by a crashed or concurrent M2/V2 attempt is
+        # not yet :CONTAINS-wired (wiring happens only after the extractor
+        # returns), so no post-hoc graph read can distinguish a claim-free
+        # session from one with live unwired claims. Safety therefore wins
+        # over the M2-only upgrade capability: the retry stays refused under
+        # M2, and the refusal is DISCLOSED on the receipt (see the replay
+        # branch's warning) rather than silently reported as a plain replay.
+        # Residual (filed): a graph-local capture-attempt sentinel would make
+        # a claim-free M2 retry provable; see issue #3996.
         retry_failed_capture = (
             session_existed and prior_capture_ok is False
-            and prior_capture_extractor == "v2"
+            and prior_capture_extractor in ("v2", "none")
             and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
         proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
@@ -3365,23 +3423,82 @@ class TortoiseSDK:
             # [:cap] here is the idempotent no-op keeping the store loop's own
             # window definition explicit (#1532 D1).
             turn_text = f"[{role}] {content[:5000]}"
-            proj.g.query(
+            _turn_rows = proj.g.query(
                 "MERGE (t:Point {id:$id}) "
                 "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
                 "    t.speaker=$speaker, "
                 "    t.is_episodic=true, "
                 "    t.status=coalesce(t.status, $s), "
                 "    t.createdAt=coalesce(t.createdAt, $now), "
-                "    t.updatedAt=$now, t.content_hash=$ch",
+                "    t.updatedAt=$now, t.content_hash=$ch "
+                "RETURN t.createdAt AS createdAt, t.status AS status",
                 params={"id": turn_id, "c": turn_text, "k": "event",
                         "speaker": role, "s": "draft", "now": now,
                         "ch": _content_hash(turn_text)},
-            )
+            ).result_set
+            # #3947 review (F4 + parity): the write's COALESCE decides what the
+            # graph holds — a RE-capture keeps the ORIGINAL createdAt AND the
+            # stored status (`coalesce(t.status, 'draft')`). Journal exactly
+            # what was stored: emitting the literal `now`/`draft` regresses a
+            # promoted turn back to draft on replay, and drifts createdAt on
+            # every re-capture. Read both back in the same statement.
+            turn_created_at = (
+                _turn_rows[0][0]
+                if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
+                else now)
+            turn_status = (
+                _turn_rows[0][1]
+                if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
+                else "draft")
             proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": session_id, "tid": turn_id},
             )
+            # #3947: journal the turn write so a rebuild can recreate it.
+            # The two Cypher writes above stay raw and un-reordered: their
+            # MERGE ordering + the deterministic `{session_id}_t{i}` id ARE
+            # the idempotency contract (#490 review P2-2), and the raw form
+            # keeps the live node shape unchanged.
+            #
+            # #3947 review (cycle 2, #3086): emit ONLY when a journal exists.
+            # On a lane with no `event_log_path` (`_make_sdk`/`_data_sdk` in
+            # hosted_api.py) the JSONL half is a no-op, and the `:GraphEvent`
+            # half is not a rebuild source — `rebuild()` wipes it with the rest
+            # of the graph. Paying `ensure_event_schema` + `next_seq` +
+            # `append_event` per turn there buys no durability on the very lane
+            # #3086 measures as already blocking the event loop (~4.75 s per
+            # 500-turn capture). Where a journal IS configured the record is
+            # what makes the rebuild possible, so it is emitted unconditionally.
+            #
+            # `contains_session` rides the EVENT ENVELOPE, not the point
+            # payload: the CONTAINS link is a capture-write structural fact
+            # (ONTOLOGY §4.5), so it is restored by the projection's edge fold
+            # without inventing a node property the live write never set —
+            # and without becoming a caller-forgeable prop.
+            if self._get_event_log() is not None:
+                self._emit_event(
+                    # Parity with `create_point`'s emission (#3947 review F5):
+                    # the PAYLOAD carries `content_hash`. It belongs here and
+                    # NOT in the `point` snapshot, which `_emit_event` strips
+                    # it from (`content_hash` is derived, and the replay
+                    # recomputes it in `_upsert_point_props`) — an earlier
+                    # draft put it in the snapshot, where nothing would ever
+                    # read it.
+                    "PointAdded",
+                    {"id": turn_id, "kind": "event",
+                     "content_hash": _content_hash(turn_text)},
+                    point={
+                        "id": turn_id,
+                        "content": turn_text,
+                        "pointKind": "event",
+                        "speaker": role,
+                        "is_episodic": True,
+                        "status": turn_status,
+                        "createdAt": turn_created_at,
+                    },
+                    contains_session=session_id,
+                )
 
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
@@ -3396,18 +3513,55 @@ class TortoiseSDK:
         # existing session_id is a NO-OP replay (extraction_mode "replayed",
         # 0 new non-episodic nodes), byte-parity with hosted_api's replay
         # branch (meta mode "replayed" + the additive warning).
-        if session_existed and not retry_failed_capture:
+        if no_provider:
+            # #3892 (owner ruling): no provider key — the capture is still a
+            # capture. The Session MERGE + the mechanical turn loop above
+            # already ran UNCHANGED, so the turns are STORED and searchable;
+            # only the LLM extraction into memory points is skipped, with the
+            # truthful mode + additive warning the assembly below reports.
+            # Placed BEFORE the #1727 replay branch ON PURPOSE: a keyless call
+            # must ALWAYS be reported as keyless, never as a silent "replayed"
+            # that hides the missing provider (the pre-#3892 code raised here
+            # instead, so there is no prior keyless behaviour — for keyless
+            # calls this branch defines it, and it never says "replayed").
+            # This branch is UNREACHABLE for a keyed call (no_provider False),
+            # so keyed behaviour is byte-identical.
+            extracted = []
+            meta = {
+                "provider": None, "route": None, "failover_used": False,
+                "errors": [], "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+                "mode": _CAPTURE_NO_PROVIDER_MODE,
+                # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+                # (additive meta contract), empty here (not fabricated).
+                "stats": {},
+            }
+        elif session_existed and not retry_failed_capture:
             # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
             # (capture_ok True) OR the session predates the capture_ok
             # property (legacy None — presumed captured, backward compat).
             # A prior FAILED capture (capture_ok False) falls through to the
             # extraction branches below — retry is TRUE.
             extracted = []
+            _replay_warnings = [
+                "session already captured (same session_id) — no new "
+                "extraction"]
+            if prior_capture_ok is False and prior_capture_extractor == "none":
+                # #3892: this session's turns were STORED without a provider
+                # key and extraction has NEVER run for it — the re-attempt was
+                # refused only because this process is configured to the
+                # NON-convergent M2 lane (see the retry gate above). Said OUT
+                # LOUD: "already captured" would be a false statement of this
+                # state, and the user's remedy is one env var away.
+                _replay_warnings.append(
+                    "this session's turns were stored WITHOUT a provider key "
+                    "and no extraction has ever run for it; extraction was "
+                    "NOT re-attempted because TORTOISE_SESSION_EXTRACTOR=m2 "
+                    "selects a non-convergent lane (re-running it could mint "
+                    "duplicate claims) — unset it and re-capture, or capture "
+                    "the session under a convergent lane, to extract")
             meta = {
                 "provider": None, "route": None, "failover_used": False,
-                "errors": [], "warnings": [
-                    "session already captured (same session_id) — no new "
-                    "extraction"], "mode": "replayed",
+                "errors": [], "warnings": _replay_warnings, "mode": "replayed",
                 # #2335 WI-1a: replayed has no extractor_v2 telemetry —
                 # stats is ALWAYS present (additive meta contract), empty
                 # on the replay branch (empty-on-replay semantics).
@@ -3457,7 +3611,13 @@ class TortoiseSDK:
         # retry is the real capture). The duplicate journal line is benign —
         # rebuild upserts by eventId (idempotent-convergent), the same
         # property the concurrent-fresh race relies on.
-        if not session_existed or retry_failed_capture:
+        # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
+        # materialization — a keyless retry extracts nothing, so there is
+        # nothing to stamp, while re-minting re-journals EventRecorded and
+        # refreshes startedAt on every call (review cycle 2, P3). The #2335
+        # re-mint rationale is about a FAILED extraction attempt, not a
+        # deliberately-skipped one. A later KEYED retry still mints.
+        if not session_existed or (retry_failed_capture and not no_provider):
             # #2335 WI-2b: a RETRY re-runs the mint/provenance — the Event id
             # is DETERMINISTIC (_server_id = _session_capture_event_id), so
             # re-minting on a retry MERGEs onto the SAME Event node (no
@@ -3637,7 +3797,31 @@ class TortoiseSDK:
         # Hosted computes _capture_ok AFTER its enrichment and downgrades to
         # partial (retryable) when points are skipped. Both internally
         # consistent; not forced-aligned (no skipped/verb concept here).
-        if not session_existed or retry_failed_capture:
+        # #3892: what THIS attempt RECORDS on the Session. A keyed attempt
+        # records its real outcome + lane, exactly as before. A KEYLESS
+        # attempt records capture_ok=False + lane "none": no extraction lane
+        # ran, and recording ok=True / lane "v2" instead would make a LATER
+        # capture WITH a key take the #1727 replay branch — silently
+        # extracting nothing and leaving the stored session permanently
+        # points-less. False + "none" is what the #2335 TRUE-retry gate
+        # consumes (see the gate above), so the later keyed capture
+        # re-attempts and the deterministic turn ids converge.
+        # A keyless attempt records this ONLY when it CREATES the session. A
+        # keyless RE-capture must NOT rewrite the prior attempt's record: a
+        # prior FAILED v2 attempt's lane is the evidence the #2473 M2
+        # exclusion reads, and overwriting it with "none" would re-admit the
+        # non-convergent M2 re-run over that attempt's live claims (review
+        # cycle 3, P2). A successful prior is never downgraded either — the
+        # block below is skipped entirely for it.
+        _capture_ok_record = False if no_provider else ok
+        _capture_extractor_record = (
+            "none" if no_provider
+            else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
+                  else "v2"))
+        _record_session_state = (
+            (not session_existed) if no_provider
+            else (not session_existed or retry_failed_capture))
+        if _record_session_state:
             # #2335 WI-2b: the attempt outcome is recorded ONLY on a genuine
             # attempt (fresh OR retry) — a replay performs NO Session write
             # (zero-write no-op; the stored value — True or legacy None —
@@ -3658,10 +3842,8 @@ class TortoiseSDK:
                     "MATCH (s:Session {id:$sid}) "
                     "SET s.capture_ok=$ok, "
                     "    s.capture_extractor=$extractor",
-                    params={"sid": session_id, "ok": ok,
-                            "extractor": "m2" if os.environ.get(
-                                "TORTOISE_SESSION_EXTRACTOR") == "m2"
-                            else "v2"})
+                    params={"sid": session_id, "ok": _capture_ok_record,
+                            "extractor": _capture_extractor_record})
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
@@ -3669,6 +3851,11 @@ class TortoiseSDK:
             effective_mode = "empty"
         elif not ok:
             effective_mode = "error"
+        elif meta.get("mode") == _CAPTURE_NO_PROVIDER_MODE:
+            # #3892: the keyless capture — turns stored, extraction skipped.
+            # Reported under its OWN name, never folded into "llm" (which
+            # would claim an extraction that did not happen) nor "replayed".
+            effective_mode = _CAPTURE_NO_PROVIDER_MODE
         elif meta.get("mode") == "replayed":
             # W5 Phase F (#2104): SDK mirror replay parity — a re-capture of
             # an existing session_id reports extraction_mode "replayed"
@@ -3795,7 +3982,8 @@ class TortoiseSDK:
 
         Shared by the hosted copy so the two capture_session loops stay in
         sync — the regex decision/claim loop is removed as a product path
-        and no-key fails closed (the caller gates on _build_session_llm_extractor).
+        and no-key SKIPS EXTRACTION (the caller short-circuits with
+        extraction_mode "no-provider" before reaching here, #3892).
         """
         extractor = _build_session_llm_extractor()
         if extractor is None:

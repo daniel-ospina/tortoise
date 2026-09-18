@@ -57,9 +57,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1023,6 +1025,32 @@ def _read_bytes(path: Path) -> bytes | None:
         return None
 
 
+def _has_owner_exec_bit(st_mode: int) -> bool:
+    """True when the OWNER's exec bit is set — the bit that decides whether
+    the harness, running as the install's owner, can execute the hook.
+
+    The ONE exec-bit predicate both surfaces share (#4000 R33).  The
+    drift/upgrade half here (``detect_install`` + ``upgrade_install``) and the
+    install half (``capture_install``) each grew their own ``st_mode & 0o111``
+    test, and "any exec bit" is a silent false success for ``0o601``/``0o410``:
+    a non-owner exec bit is the ONLY exec bit there, so the owner still cannot
+    run the hook while ``detect_install`` returned ``[]`` (status reported it
+    current), ``upgrade_install`` planned no write (its mode-only repair was
+    skipped as unnecessary), and only ``capture_install`` — fixed first —
+    repaired it.  One definition, both callers, so the two halves cannot
+    diverge again.
+
+    ``stat.S_IXUSR`` and ``0o100`` are the same bit; the named constant is
+    used so the *ownership decision* has exactly one spelling in this
+    codebase.  The repair/rewrite target modes below still OR in ``0o111``
+    (``_target_mode`` and the differing-file replacement paths): those add
+    exec bits rather than test them, so they always set the owner bit and
+    cannot reintroduce the any-exec-bit fail-open this predicate exists to
+    close.
+    """
+    return bool(st_mode & stat.S_IXUSR)
+
+
 def _target_mode(installed: Path) -> int:
     """Mode for a rewritten hook: 0755 for a fresh copy, else the existing
     mode plus exec bits (a script installed 0700 stays 0700, not 0755)."""
@@ -1032,6 +1060,42 @@ def _target_mode(installed: Path) -> int:
         except OSError:
             return 0o755
     return 0o755
+
+
+def _is_timeout_budget(value: object) -> bool:
+    """True when ``value`` is a usable per-hook timeout budget.
+
+    A ``float`` counts: ``120.0`` is a real budget.  The ONE predicate both
+    surfaces share — ``_settings_findings``/``_merge_settings`` here and
+    ``capture_install.merge_capture_hooks`` — because testing ``int`` alone
+    made ``tortoise hooks status`` report BLOCKING drift on a float timeout
+    the installer deliberately preserved, and ``tortoise hooks upgrade`` then
+    LOWERED it to 60: the opposite of the module's "never lowered" promise.
+    ``bool`` is excluded explicitly (``True`` is an ``int``).
+
+    The value must also be FINITE: ``json.loads`` happily accepts a bare
+    ``NaN``/``Infinity`` literal, and a NaN budget is not a budget — nothing
+    can be compared against it (``nan < 60`` is False), so the old
+    ``isinstance``-only test let a ``"timeout": NaN`` through as "already
+    budgeted" and left the hook to Claude Code's 1.5 s default (#3808 R15).
+    Passing the widened float gate without this check is what made the
+    non-finite form survive every surface that shares this predicate.
+
+    An ``int`` larger than a double must ALSO come back ``False``, not raise:
+    ``json.loads`` parses an integer literal of any magnitude as an
+    arbitrary-precision ``int``, and ``math.isfinite`` coerces its argument to
+    a C double, so a >308-digit ``"timeout"`` raises ``OverflowError`` — a
+    CLI traceback out of install/status/upgrade on a perfectly valid
+    ``settings.json``.  A budget no double can hold is not a budget (Claude
+    Code's own ``JSON.parse`` reads it as ``Infinity``), and the shared
+    predicate is the single gate all three surfaces read (#3808 R16).
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _settings_findings(layout: HarnessLayout, data: dict,
@@ -1070,10 +1134,10 @@ def _settings_findings(layout: HarnessLayout, data: dict,
             for inner in _entry_command_dicts(entry, spec.name,
                                               layout.hooks_dir, root):
                 timeout = inner.get("timeout")
-                if not isinstance(timeout, int) or isinstance(timeout, bool):
+                if not _is_timeout_budget(timeout):
                     findings.append(Finding(
                         "settings-no-timeout",
-                        f"{spec.event} entry for {spec.name} has no integer "
+                        f"{spec.event} entry for {spec.name} has no numeric "
                         f'"timeout" (#3754: Claude Code cancels the hook at '
                         f"its 1.5s default) — expected {spec.timeout}",
                         script=spec.name, event=spec.event,
@@ -1199,7 +1263,7 @@ def detect_install(root: str | os.PathLike[str], harness: str = "claude",
                 f"{installed} is not readable — chmod it so the hook can run",
                 script=spec.name,
             ))
-        if installed.stat().st_mode & 0o111 == 0:
+        if not _has_owner_exec_bit(installed.stat().st_mode):
             # The exec-bit check applies to symlinks too: `stat` follows the
             # link, and an unexecutable target cannot be run by the harness.
             # Upgrade cannot repair a symlink (it refuses them), so this kind
@@ -1374,7 +1438,7 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
             for inner in _entry_command_dicts(entry, spec.name,
                                               layout.hooks_dir, root):
                 timeout = inner.get("timeout")
-                if (not isinstance(timeout, int) or isinstance(timeout, bool)
+                if (not _is_timeout_budget(timeout)
                         or timeout < spec.timeout):
                     inner["timeout"] = spec.timeout
                     actions.append(
@@ -1503,7 +1567,7 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
         )
         missing_exec = (
             installed.exists()
-            and not (installed.stat().st_mode & 0o111)
+            and not _has_owner_exec_bit(installed.stat().st_mode)
         )
         if found is not None and found > expected:
             result.actions.append(
