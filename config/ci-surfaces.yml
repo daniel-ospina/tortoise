@@ -736,6 +736,7 @@ surfaces:
   - test_ask_retrieval_levers.py
   - test_ask_sdk.py
   - test_ask_spotcheck_judge.py
+  - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge
   - test_client_surface.py
   - test_config.py
   - test_cross_lens.py

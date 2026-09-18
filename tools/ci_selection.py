@@ -174,7 +174,13 @@ SOURCE_PATTERNS = {
             # spot-check-only PR selects the sdk surface (its tests live
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
-            "tools/ask_spotcheck_probe.py"),
+            "tools/ask_spotcheck_probe.py",
+            # #3910: the ask-lane recall bench is the same QA family —
+            # tests/test_ask_retrieval_levers.py pins the `_retrieve_pipeline`
+            # it mirrors, so a bench-only PR must select `sdk` rather than
+            # drop to tier-1 smoke with that guard test never running.
+            # Refs #2089, whose criterion 1 this entry satisfies.
+            "tools/ask_recall_bench.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
