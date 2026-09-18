@@ -50,7 +50,43 @@ from datetime import UTC
 # (complete() + usage capture under it), so the shared cached wrapper IS the
 # locked object (P2-6).
 
-ASK_SDK_TIMEOUT_S = 75  # > the server's _ASK_TIMEOUT_S (60) — its 504 is always receivable
+# Per-ATTEMPT transport timeout for one POST /v1/ask. STRICTLY GREATER than the
+# server's ``_ASK_TIMEOUT_S`` (now 10s, #3834) so a bound breach is always
+# received as the typed ``AskTimeout`` (a server 504) and never as a socket
+# timeout — i.e. the server's legible refusal is always receivable.
+# **Explicitly NOT a bound on the retry envelope**: it is per attempt, and
+# ``ASK_RETRY_DEADLINE_S`` governs only whether a FURTHER attempt is started.
+ASK_SDK_TIMEOUT_S = 75  # > the server's _ASK_TIMEOUT_S (10) — its 504 is always receivable
+
+# #3834/#3993 retry knobs (read by ``TortoiseSDK._post_ask``).
+ASK_RETRY_ATTEMPTS = 3      # total attempts = 1 + (ASK_RETRY_ATTEMPTS - 1)
+ASK_RETRY_DEADLINE_S = 25   # no retry sleep BEGINS at/after this many seconds
+ASK_RETRY_BASE_S = 2.0      # exponential base for the non-advertised path
+ASK_RETRY_CAP_S = 30.0      # bounds a single computed wait AND an advertised floor
+#: ``math`` is not imported in this module and ``inf`` is NOT a Python
+#: builtin — a bare ``inf`` is a NameError, which crashed the SDK on EVERY 504
+#: carrying a ``Retry-After`` (i.e. exactly the #3834 refusal; caught by
+#: ``tests/test_ask_sdk.py``). The finite/NaN filter compares against this.
+_ASK_RETRY_AFTER_CEILING_S = float("inf")
+
+
+def _ask_timeout_retryable(exc: BaseException) -> bool:
+    """Retry predicate for ``_post_ask`` (#3834): ONLY a **server-fired** 504
+    that **advertised** a delay.
+
+    Narrow by construction: a bare 504 carries ``retry_after=None``, a
+    client-fired wire timeout carries ``source="client"``, and the 429/502
+    refusals are different types entirely — so none of them is ever retried.
+    """
+    from .exceptions import AskTimeout  # local: keeps the module import graph flat
+    return (isinstance(exc, AskTimeout) and exc.source == "server"
+            and exc.retry_after is not None)
+
+
+def _ask_advertised_delay(exc: BaseException) -> float | None:
+    """``call_with_predicate``'s ``delay_for`` seam: the peer's advertised
+    floor (``None`` = no advertisement, fall back to the exponential path)."""
+    return getattr(exc, "retry_after", None)
 _ASK_READER_CACHE_MAX = 64
 _ASK_READER_CACHE_LOCK = threading.Lock()
 _ask_reader_cache_store: collections.OrderedDict = None  # type: ignore[assignment]
@@ -14403,14 +14439,18 @@ class TortoiseSDK:
                 _prune_ask_reader_cache(cache)
             return locked
 
-    def _post_ask(self, question: str, *, question_type: str | None = None,
-                  question_date: str | None = None) -> dict:
-        """Hosted-mode POST to ``TORTOISE_API_URL`` ``/v1/ask`` (Task 5) —
-        mirrors ``_post_commit``'s pattern (auth header, NO auto-retry v1).
-        The SDK-side timeout (75s) is STRICTLY GREATER than the server's
-        ``_ASK_TIMEOUT_S`` (60s) so the server's 504 is always receivable and
-        mapped to ``AskTimeout`` reliably. Maps statuses/body codes to the
-        typed SDK exceptions (exceptions.py) per the pinned vocabulary.
+    def _post_ask_once(self, question: str, *, question_type: str | None = None,
+                       question_date: str | None = None) -> dict:
+        """ONE hosted-mode POST to ``TORTOISE_API_URL`` ``/v1/ask`` (Task 5) —
+        mirrors ``_post_commit``'s pattern (auth header). The per-ATTEMPT SDK
+        transport timeout is STRICTLY GREATER than the server's
+        ``_ASK_TIMEOUT_S`` so a bound breach is always received as the typed
+        ``AskTimeout`` and never as a socket timeout. Maps statuses/body codes
+        to the typed SDK exceptions (exceptions.py) per the pinned vocabulary.
+
+        The retry is deliberately NOT here — ``_post_ask`` owns the bounded,
+        deadline-guarded retry (#3834), which keeps this a faithful single
+        request.
         """
         from tortoise.schemas import (  # noqa: I001
             CODE_IN_FLIGHT_LIMIT,
@@ -14497,8 +14537,37 @@ class TortoiseSDK:
             raise AskReaderUnavailable("reader unavailable",
                                        status_code=status)
         if status == 504:
+            # #3834/#3993: parse the advertised back-off — header first, then
+            # the body field (mirroring the 429 parse above) — and admit it
+            # ONLY when finite and >= 0. THIS filter is what keeps an
+            # unparseable / hostile / fake-server hint out of the retry
+            # predicate and out of the primitive's sleep. Written with the
+            # ``inf`` builtin because this module has no ``import math`` (a
+            # ``math.isfinite`` call would be a NameError); a NaN fails
+            # ``0 <= ra`` so it is rejected without a special case.
+            retry_after = None
+            header_ra = r.headers.get("Retry-After")
+            if header_ra is not None:
+                try:
+                    retry_after = float(header_ra)
+                except (TypeError, ValueError):
+                    retry_after = None
+            if retry_after is None:
+                body_ra = (err.get("retry_after")
+                           if isinstance(err, dict) else None)
+                if body_ra is not None:
+                    try:
+                        retry_after = float(body_ra)
+                    except (TypeError, ValueError):
+                        retry_after = None
+            # ``inf`` is a module constant here (NOT a builtin): the finite/NaN
+            # filter is ``0 <= ra < _ASK_RETRY_AFTER_CEILING_S``, which rejects
+            # NaN without a special case (``0 <= nan`` is False).
+            if (retry_after is not None
+                    and not (0 <= retry_after < _ASK_RETRY_AFTER_CEILING_S)):
+                retry_after = None
             raise AskTimeout("server timeout", source="server",
-                             status_code=status)
+                             status_code=status, retry_after=retry_after)
         if status == 402:
             # a code-less 402 is a SERVER-side provider-billing condition —
             # never mislabeled invalid_question (P2-3).
@@ -14536,6 +14605,52 @@ class TortoiseSDK:
                                        status_code=status)
         r.raise_for_status()
         return body
+
+    def _post_ask(self, question: str, *, question_type: str | None = None,
+                  question_date: str | None = None) -> dict:
+        """Hosted-mode POST to ``/v1/ask`` with the #3834 bounded retry.
+
+        The retry ships **through the shared primitive**
+        (``tortoise.retry.call_with_predicate``) with ``marker_armed=False``,
+        so exhaustion re-raises the ORIGINAL ``AskTimeout`` unwrapped — no
+        ``WriteStageRetriesExhausted`` sentinel on this path.
+
+        Retryable = ONLY a **server-fired** 504 that advertised a delay (see
+        ``_ask_timeout_retryable``); the advertised value is honoured as a
+        **floor** with jitter added above it (RFC 9110 §10.2.3), and the
+        deadline guard stops a further sleep once the budget is spent.
+
+        Costs, stated rather than hidden:
+        * **Budget/metering** — each attempt is a fresh POST and the server may
+          have consumed a per-minute budget slot, so N attempts can mean N
+          metering records. Stated as a consequence, never asserted as a
+          count.
+        * **In-flight cap** — the server's **shielded** reader future keeps the
+          org's in-flight slot until it completes, so a retry issued 2-4s later
+          can be refused with 429 ``in_flight_limit``: a DIFFERENT refusal than
+          the advertised ``timeout`` (that refusal is predicate-FALSE, so it
+          propagates immediately and no further retry happens).
+        * **Envelope** — worst case is ``ASK_RETRY_ATTEMPTS`` attempts x
+          ``ASK_SDK_TIMEOUT_S`` plus the sleeps. ``ASK_RETRY_DEADLINE_S``
+          bounds only whether a *further* attempt is STARTED; it does not cap
+          a request already in flight.
+        """
+        from tortoise.retry import call_with_predicate
+        return call_with_predicate(
+            lambda: self._post_ask_once(question,
+                                        question_type=question_type,
+                                        question_date=question_date),
+            predicate=_ask_timeout_retryable,
+            retries=ASK_RETRY_ATTEMPTS - 1,
+            what="ask POST /v1/ask",
+            base=ASK_RETRY_BASE_S,
+            cap=ASK_RETRY_CAP_S,
+            marker_armed=False,
+            delay_for=_ask_advertised_delay,
+            # ``monotonic as _monotonic`` is bound at module scope (:21) —
+            # there is no module-level ``import time`` to call here.
+            deadline=_monotonic() + ASK_RETRY_DEADLINE_S,
+        )
 
 
     def expand_relationships(self, point_id: str) -> list[dict]:

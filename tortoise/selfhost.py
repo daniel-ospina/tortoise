@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
@@ -180,7 +180,7 @@ _selfhost_default_validation = app.exception_handlers.get(
 @app.exception_handler(_starlette_exceptions.HTTPException)
 async def _selfhost_ask_http_handler(request, exc):
     from tortoise.schemas import (  # noqa: I001
-        ASK_ERROR_CODES, CODE_UNAUTHORIZED,
+        ASK_BUSY_MESSAGE, ASK_ERROR_CODES, CODE_TIMEOUT, CODE_UNAUTHORIZED,
     )
     if request.url.path == "/v1/ask":
         status = exc.status_code
@@ -190,8 +190,20 @@ async def _selfhost_ask_http_handler(request, exc):
                                 status_code=401, headers=exc.headers)
         if (status in (400, 502, 504)
                 and isinstance(detail, str) and detail in ASK_ERROR_CODES):
-            return JSONResponse({"error": {"code": detail}},
-                                status_code=status, headers=exc.headers)
+            body = {"error": {"code": detail}}
+            # #3834/#3993 parity with hosted: mirror ``retry_after`` from the
+            # ``Retry-After`` header whenever one is present (the 504 bound-
+            # breach refusal now carries one), and add the static actionable
+            # ``message`` only on the timeout arm. RFC 7231 allows an
+            # HTTP-date header — the body field is omitted when it cannot be
+            # parsed as seconds.
+            if exc.headers and exc.headers.get("Retry-After"):
+                with suppress(TypeError, ValueError):
+                    body["error"]["retry_after"] = int(
+                        float(exc.headers["Retry-After"]))
+            if status == 504 and detail == CODE_TIMEOUT:
+                body["error"]["message"] = ASK_BUSY_MESSAGE
+            return JSONResponse(body, status_code=status, headers=exc.headers)
     return await _selfhost_default_http_exc(request, exc)
 
 

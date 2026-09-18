@@ -25,6 +25,20 @@ ASK_QUESTION_TYPES: tuple[str | None, ...] = (
 #: leap-year aware) is enforced by ``validate_ask_question_date``.
 _ASK_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 
+#: The bound-breach refusal's static, actionable ``message`` (#3834/#3993).
+#: Deliberately carries **NO NUMBER in digits**: the delay is advertised
+#: machine-readably via the ``Retry-After`` header and the body ``retry_after``
+#: field, whose single source of truth is ``quota.ASK_BUSY_RETRY_AFTER_S`` — a
+#: literal here would be a second, silently-drifting copy. Pinned by
+#: ``assert not any(ch.isdigit() for ch in ASK_BUSY_MESSAGE)`` (the digit form is
+#: what the pin can actually enforce; a *spelled-out* number would still pass it,
+#: which is recorded rather than over-claimed).
+ASK_BUSY_MESSAGE = (
+    "Tortoise is busy or still waking up and could not answer this question "
+    "within its wait budget. Retry after the delay in the Retry-After header "
+    "(also the retry_after field of this body)."
+)
+
 import datetime as _dt  # noqa: E402
 import re as _re  # noqa: E402
 
@@ -129,6 +143,7 @@ def valid_question_types() -> str:
 
 
 __all__ = [
+    "ASK_BUSY_MESSAGE",
     "ASK_ERROR_CODES",
     "ASK_QUESTION_TYPES",
     "CODE_INVALID_QUESTION",

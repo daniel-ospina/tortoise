@@ -22,6 +22,7 @@ from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
                           _RESERVED_ACTOR_PROPS)
 from tortoise.schemas import (  # one vocabulary, no duplicated boundary literals (P2-14)
+    ASK_BUSY_MESSAGE,
     CODE_IN_FLIGHT_LIMIT,
     CODE_QUOTA_EXCEEDED,
     CODE_READER_UNAVAILABLE,
@@ -1192,8 +1193,11 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     and are NEVER an unbounded call. Read-classified (never counted as a
     write; NOT in _QUOTA_GATED/WRITE_TOOL_NAMES). Budget/in-flight/timeout
     bounds are the SAME shared structures as the REST surface
-    (tortoise/quota.py run_ask_bounded — Semaphore(8) + 60s + per-org
-    in-flight cap 4); stdio/selfhost contexts are unbudgeted AND unmetered.
+    (tortoise/quota.py run_ask_bounded — Semaphore(8) + ``_ASK_TIMEOUT_S`` +
+    per-org in-flight cap 4); a bound breach returns the legible refusal
+    ``{"error": {"code": "timeout", "retry_after": 2, "message": …}}``
+    (#3834), matching hosted/selfhost REST; stdio/selfhost contexts are
+    unbudgeted AND unmetered.
     On the hosted path the MCP handler meters through the SAME single call
     site as HTTP (``sdk.ask(org_id=_current_org_id.get())``); stdio
     (org_id=None) and the selfhost transport (the ``_selfhost_transport``
@@ -1221,6 +1225,7 @@ async def tortoise_ask(question: str, question_type: str | None = None,
         AskValidationError,
     )
     from tortoise.quota import (
+        ASK_BUSY_RETRY_AFTER_S,
         AskBoundedTimeoutError,
         AskInFlightLimitError,
         ask_budget_retry_after,
@@ -1257,7 +1262,14 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     except AskInFlightLimitError:
         return {"error": {"code": CODE_IN_FLIGHT_LIMIT}}
     except AskBoundedTimeoutError:
-        return {"error": {"code": CODE_TIMEOUT}}
+        # #3834/#3993: the SAME legible refusal shape the REST surfaces ship
+        # (``code`` + ``retry_after`` + static ``message``), so an agent
+        # reading the tool error has an actionable delay instead of an opaque
+        # timeout. ``ASK_BUSY_MESSAGE`` carries no literal number — the
+        # advertised value's single source is ``ASK_BUSY_RETRY_AFTER_S``.
+        return {"error": {"code": CODE_TIMEOUT,
+                          "retry_after": ASK_BUSY_RETRY_AFTER_S,
+                          "message": ASK_BUSY_MESSAGE}}
     except AskReaderUnavailable:
         return {"error": {"code": CODE_READER_UNAVAILABLE}}
     except AskRetrievalUnavailable:

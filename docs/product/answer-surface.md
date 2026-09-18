@@ -195,8 +195,13 @@ measurement justifies a change.
 - **Budget:** `MAX_ASK_LLM_PER_MIN = 60` per team, per process (a
   multi-worker uvicorn deployment scales the bound ×workers). Past budget →
   **429 `quota_exceeded` + Retry-After** (the window self-heals). Per-team
-  in-flight cap 4 → 429 `in_flight_limit`. Global Semaphore(8) + 60s total
-  per-request bound → 504 `timeout` (queueing counts against the clock).
+  in-flight cap 4 → 429 `in_flight_limit`. Global Semaphore(8) + a
+  **10s** total per-request bound (#3834; was 60s) → 504 `timeout` (queueing
+  counts against the clock), carrying `Retry-After` + body `retry_after` +
+  a static `message`. The bound is derived from the measured `tortoise_ask`
+  distribution (n=573: p50 1 ms, p95 346 ms, p99 3 177 ms, max 21 759 ms —
+  **MCP transport per tool call, not the REST request wait**); 1 of 573
+exceeds it.
 - **Metering:** per-query record via `record_ask_usage` (best-effort,
   non-fatal — metering failures never block the answer). Recorded when the
   SDK call completes successfully (the single call site: the SDK local lane
@@ -209,6 +214,7 @@ measurement justifies a change.
 ## Error vocabulary (10 codes)
 
 Standard non-leaking error body — `{"error": {"code": …, "retry_after": …}}`
+(the bounded-timeout refusal adds `"message"`)
 with NO provider/model internals (#329 scrub). The canonical body ships
 ONLY on `/v1/ask`; ALL other endpoints keep FastAPI's default
 `{"detail": …}` — callers must NOT depend on a uniform body shape. The 403
@@ -227,7 +233,7 @@ suspended-team on `/v1/ask` passes through untranslated as the
 | 429 | `in_flight_limit` | per-team in-flight cap (4) full (Retry-After omitted) |
 | 502 | `reader_unavailable` | LLM reader failed with no surviving lane |
 | 502 | `retrieval_unavailable` | retrieval/annotation/context assembly failed wholesale |
-| 504 | `timeout` | bounded section exceeded 60s (queue or reader) |
+| 504 | `timeout` | bounded section exceeded `_ASK_TIMEOUT_S` (10s) — queue or reader. Carries `Retry-After` + body `retry_after` + static `message` (#3834) |
 
 ## SDK mapping (`_post_ask`)
 
@@ -238,10 +244,15 @@ Hosted-mode `ask()` maps statuses to typed exceptions
 400→`invalid_question`, 401/403→`unauthorized`); code-less 402 →
 `AskReaderUnavailable` (server-side provider-billing condition); 502 →
 `AskReaderUnavailable`/`AskRetrievalUnavailable`; 504 → `AskTimeout`
-(`source` marks client-fired vs server-504-fired). No auto-retry v1
-(`tortoise/retry.py` is the documented follow-up). The SDK-side timeout is
-75s — strictly greater than the server's 60s — so the server's 504 is
-always receivable.
+(`source` marks client-fired vs server-504-fired; a server-fired 504 also
+carries the parsed `retry_after`). **Auto-retry SHIPS** (#3834, retiring this
+doc's earlier "no auto-retry v1"): a server 504 that advertised a delay is
+retried through the shared primitive `tortoise/retry.py::call_with_predicate`
+(bounded, deadline-guarded, jitter added **above** the advertised floor). Only
+an ADVERTISED server 504 is retryable — a bare 504, a client-fired wire
+timeout, 429 and 502 are not. The per-ATTEMPT SDK transport timeout is 75s —
+strictly greater than the server's 10s — so the server's 504 is always
+receivable (it does NOT bound the retry envelope).
 
 ## Notes
 

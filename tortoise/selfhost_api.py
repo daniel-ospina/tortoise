@@ -467,7 +467,8 @@ async def ask_question(body: AskRequest):
     Task 9): the LOCAL SDK lane (no org registry, NO budget — unmetered,
     ZERO metering records: ``org_id=None`` flows through the ``not org_id``
     exemption), bounded by the SAME ``run_ask_bounded`` wrapper (Semaphore(8)
-    + 60s → 504 discipline) via ``org_id=None`` (P2-4). Errors mirror the
+    + ``_ASK_TIMEOUT_S`` → 504 discipline, with ``Retry-After`` — #3834) via
+    ``org_id=None`` (P2-4). Errors mirror the
     hosted vocabulary via the path-scoped handler on ``selfhost.app``:
     502 ``reader_unavailable`` / ``retrieval_unavailable``, 504 ``timeout``,
     400 canonical codes from the SHARED ``AskRequest`` validators (identical
@@ -478,6 +479,7 @@ async def ask_question(body: AskRequest):
         AskValidationError,
     )
     from tortoise.quota import (
+        ASK_BUSY_RETRY_AFTER_S,
         AskBoundedTimeoutError,
         run_ask_bounded,
     )
@@ -492,7 +494,13 @@ async def ask_question(body: AskRequest):
     except AskValidationError as e:
         raise HTTPException(status_code=400, detail=e.code) from e
     except AskBoundedTimeoutError:
-        raise HTTPException(status_code=504, detail=CODE_TIMEOUT) from None
+        # #3834/#3993: the bound-breach refusal now advertises the back-off in
+        # the ``Retry-After`` header too, so the selfhost 504 is as legible as
+        # the hosted one (the body's ``retry_after``/``message`` are mirrored by
+        # the path-scoped handler on ``selfhost.app``).
+        raise HTTPException(
+            status_code=504, detail=CODE_TIMEOUT,
+            headers={"Retry-After": str(ASK_BUSY_RETRY_AFTER_S)}) from None
     except AskReaderUnavailable:
         raise HTTPException(status_code=502,
                             detail=CODE_READER_UNAVAILABLE) from None

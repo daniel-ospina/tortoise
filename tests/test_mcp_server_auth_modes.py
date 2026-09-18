@@ -359,6 +359,91 @@ class TestAskExposureGating:
             assert "tortoise_ask" not in names, flag
 
 
+class TestAskBoundBreachRefusal:
+    """#3834/#3993: the MCP ``tortoise_ask`` bound-breach refusal is the SAME
+    legible shape as the REST surfaces — ``code`` + ``retry_after`` + a static
+    ``message``.
+
+    HERMETIC BY CONSTRUCTION (plan-review C6): the bound is breached by
+    patching ``run_ask_bounded`` to raise, NOT by installing a hung reader — a
+    hung reader would drag in a real graph open, and ``TestAskExposureGating``
+    (the class this sits beside) has NO DB fixture, so it would resolve the
+    developer's real ``~/.tortoise/tortoise.db``. Both the SDK and the ask
+    entrypoint are stubbed, so this test opens NO database and makes NO LLM
+    call — hence ``auth_mode="none"`` + an explicit ``tool_group="ask"``
+    (the call-time gate must pass; the flag state is irrelevant).
+    """
+
+    _list_tool_names = TestToolGroupFiltering._list_tool_names
+    _call_tool = TestAskExposureGating._call_tool
+    # `_result_text` is a staticmethod on the source class — re-binding it on a
+    # class body without re-wrapping would silently hand `self` to it.
+    _result_text = staticmethod(TestAskExposureGating._result_text)
+
+    @staticmethod
+    def _stub_bound(monkeypatch, exc):
+        """Install a hermetic ask lane: a stub SDK (no graph open, no LLM) +
+        a ``run_ask_bounded`` that raises ``exc``."""
+        import tortoise.mcp_server as mcp
+
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
+        class _FakeSdk:
+            # Referenced while BUILDING the call args (``sdk.ask``), before the
+            # stubbed primitive ever runs — so it must exist.
+            ask = staticmethod(lambda *a, **k: None)
+
+            def _ask_validate(self, *a, **k):
+                return None
+
+        monkeypatch.setattr(mcp, "_get_org_sdk", lambda: _FakeSdk())
+
+        async def _raise(*a, **k):
+            raise exc
+
+        # mcp_server imports the primitive INSIDE the handler body.
+        monkeypatch.setattr("tortoise.quota.run_ask_bounded", _raise)
+
+    def test_bound_breach_refusal_shape(self, make_client, monkeypatch):
+        import json as _json
+
+        from tortoise.quota import ASK_BUSY_RETRY_AFTER_S, AskBoundedTimeoutError
+        from tortoise.schemas import ASK_BUSY_MESSAGE, CODE_TIMEOUT
+
+        self._stub_bound(monkeypatch, AskBoundedTimeoutError("ask exceeded 10s"))
+
+        tc = make_client(auth_mode="none", tool_group="ask")
+        body = self._call_tool(tc, "tortoise_ask", {"question": "q"})
+        text = self._result_text(body)
+        # The refusal survives MCP serialization as a STRUCTURED dict (an
+        # agent reads a delay, not an opaque timeout).
+        payload = _json.loads(text)
+        assert payload == {"error": {
+            "code": CODE_TIMEOUT,
+            "retry_after": ASK_BUSY_RETRY_AFTER_S,
+            "message": ASK_BUSY_MESSAGE}}, payload
+        # The advertised value has ONE source, and the message is static.
+        assert payload["error"]["retry_after"] == 2
+        assert not any(ch.isdigit() for ch in payload["error"]["message"])
+
+    def test_other_refusals_did_not_inherit_the_message(self, make_client,
+                                                       monkeypatch):
+        """The `message` field is path-scoped to the bound-breach arm: an
+        in-flight-cap refusal keeps its EXACT prior body (a regression would
+        ship the busy text on an unrelated refusal)."""
+        import json as _json
+
+        from tortoise.quota import AskInFlightLimitError
+        from tortoise.schemas import CODE_IN_FLIGHT_LIMIT
+
+        self._stub_bound(monkeypatch, AskInFlightLimitError("cap"))
+        tc = make_client(auth_mode="none", tool_group="ask")
+        body = self._call_tool(tc, "tortoise_ask", {"question": "q"})
+        assert _json.loads(self._result_text(body)) == {
+            "error": {"code": CODE_IN_FLIGHT_LIMIT}}
+
+
 class TestAskConnectedAssemblyExposure:
     """#2165 Task 6: MCP tortoise_ask exposure inherits the connected-
     assembly branch via the in-process sdk.ask() — flags ON + fired shape →

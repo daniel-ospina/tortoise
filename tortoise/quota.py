@@ -654,13 +654,45 @@ class AskInFlightLimitError(Exception):
 
 class AskBoundedTimeoutError(Exception):
     """The bounded ask section exceeded ``_ASK_TIMEOUT_S`` (semaphore queue
-    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers."""
+    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers, with
+    ``Retry-After: ASK_BUSY_RETRY_AFTER_S`` + a body ``retry_after``/
+    ``message`` on all three surfaces (hosted REST, selfhost REST, MCP)."""
 
 
-#: Ask-lane bounds (#1987 Task 7): global semaphore, per-org in-flight cap,
-#: and the injectable module-level timeout (monkeypatched in tests — no real
-#: 60s sleeps).
-_ASK_TIMEOUT_S = 60
+#: Ask-lane bounds (#1987 Task 7 / #3834): global semaphore, per-org in-flight
+#: cap, and the injectable module-level timeout (monkeypatched in tests — no
+#: real 10s sleeps).
+#:
+#: ``_ASK_TIMEOUT_S`` — the cold/busy WAIT BOUND. Chosen from the measured
+#: distribution of ``tortoise_ask`` calls (n=573): p50 1ms, p95 346ms, p99
+#: 3177ms, max 21759ms. Exactly **1 of 573** measured asks exceeds 10s, and it
+#: is that 21.759s maximum — i.e. the bound is above the p99 and cuts only the
+#: single long tail. **Transport caveat that must travel with the numbers:**
+#: the measurement is the **MCP transport PER TOOL CALL**, not the REST HTTP
+#: request wait — the best available proxy, not the same quantity.
+#:
+#: Why a bound at all, given only a small tail exceeds it: the measured max
+#: (21.759s) sits **above** the 15s budget the narrowest hosted client exposes,
+#: so for that tail a server bound does NOT cause an abandonment that would
+#: otherwise have succeeded. It converts an **opaque client-side timeout into a
+#: legible refusal** while the server stops burning the work. The 15s figure is
+#: the **narrowest budget any hosted client exposes — its CONNECT budget (the
+#: D-12 anchor)** — and is explicitly **not** an ask caller's per-call timeout
+#: (the SDK's is 75s and the MCP client's ask call is effectively unbounded).
+#:
+#: ``SLO_MS = 300`` (volunteer.py) governs ``/v1/context`` and is a DIFFERENT
+#: decision — deliberately not moved here, and not a precedent for this number.
+#:
+#: Consequence for the execution floor: ``acquire_timeout`` is derived
+#: (``_ASK_TIMEOUT_S - _ASK_EXEC_FLOOR_S``), so it moves 55s -> 5s while a
+#: STARTED ask still keeps >= ``_ASK_EXEC_FLOOR_S`` of execution time.
+#: Deliberate trade (Option C, owner decision): the 10-60s band of genuinely
+#: slow asks is refused rather than waited out.
+_ASK_TIMEOUT_S = 10
+#: Advertised back-off on a bound breach (RFC 9110 §10.2.3 minimum).
+#: Single source of truth — ``ASK_BUSY_MESSAGE`` (schemas) deliberately carries
+#: no number, so this constant is the only place the delay is stated.
+ASK_BUSY_RETRY_AFTER_S = 2
 _ASK_EXEC_FLOOR_S = 5.0     # a started ask is guaranteed >= this much execution time
 _ASK_GLOBAL_SEMAPHORE_SIZE = 8
 _ASK_ORG_IN_FLIGHT_CAP = 4
