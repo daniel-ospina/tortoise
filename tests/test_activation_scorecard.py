@@ -1331,3 +1331,141 @@ class TestCohortGuards:
         # "activat" and would have missed it.
         assert not [k for k in keys if k.lower() in ("rate", "ratio",
                                                     "conversion")], keys
+
+
+# ── Round-7 fixes: the stage-4 window guard, key-set stability, shape safety ──
+
+def test_stage4_out_of_window_row_refuses_the_count():
+    """The analytics leg's `created_at` predicate is the ONLY thing confining
+    the fetched rows to [since, until). If a bound were silently dropped (the
+    exact class this PR fixed one layer down, in `SupabaseControlPlane.query`),
+    an out-of-window tool call would be counted as a measured recall attempt.
+    The Python re-check must refuse the number, mirroring `stage_counts`."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [{"properties": {"tool_name": "tortoise_search"},
+             "created_at": "2027-01-01T00:00:00+00:00"}]
+    stage, detail = recall_stages(
+        rows, "2026-09-16T01:00:00+00:00", memory_sessions=1,
+        window=("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00"))
+    assert stage["state"] == "unavailable", stage
+    assert stage["value"] is None, stage
+    assert stage["reason"] == "analytics_window_predicate_not_applied", stage
+    assert detail["analytics_window_out_of_range"] == 1, detail
+
+
+def test_stage4_in_window_row_still_counts():
+    """Legitimate form: the guard must not refuse everything — an in-window row
+    still yields a measured count."""
+    from tortoise.activation_scorecard import recall_stages
+    rows = [{"properties": {"tool_name": "tortoise_search"},
+             "created_at": "2026-09-16T12:00:00+00:00"}]
+    stage, _ = recall_stages(
+        rows, "2026-09-16T01:00:00+00:00", memory_sessions=1,
+        window=("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00"))
+    assert stage["state"] == "measured", stage
+    assert stage["value"] == 1, stage
+
+
+def test_stage4_detail_key_set_is_identical_on_every_return_path():
+    """Every counter must be present on EVERY return path — the four exclusion
+    counters were previously initialised only on the measured path, i.e. absent
+    exactly when a consumer most needs the doubt the exclusions carry."""
+    from tortoise.activation_scorecard import recall_stages
+    _, measured = recall_stages(
+        [{"properties": {"tool_name": "tortoise_search"},
+          "created_at": "2026-09-16T12:00:00+00:00"}],
+        "2026-09-16T01:00:00+00:00", memory_sessions=1)
+    stage, unread = recall_stages(None, None,
+                                  reason="analytics_store_unreachable")
+    assert stage["state"] == "unavailable"
+    assert set(measured) == set(unread)
+    for key in ("unparseable_analytic_rows", "unclassifiable_analytic_rows",
+                "unparseable_analytic_rows_wide",
+                "unclassifiable_analytic_rows_wide"):
+        assert key in unread, (key, unread)
+
+
+def test_a_non_mapping_analytic_row_makes_the_count_a_lower_bound():
+    """A store/proxy returning an array of non-mapping elements must be refused
+    (the count becomes a lower bound), not raise out of the fold as a 500."""
+    from tortoise.activation_scorecard import recall_stages
+    stage, detail = recall_stages(
+        [42, {"properties": {"tool_name": "tortoise_search"},
+              "created_at": "2026-09-16T12:00:00+00:00"}],
+        "2026-09-16T01:00:00+00:00", memory_sessions=1)
+    assert stage["state"] == "unavailable", stage
+    assert stage["value"] is None, stage
+    assert stage["reason"] == "unclassifiable_analytic_rows", stage
+    assert detail["unclassifiable_analytic_rows"] == 1, detail
+
+
+def test_analytics_write_path_probe_uses_the_writers_key_resolver(monkeypatch):
+    """The probe must resolve the key through the SAME seam the writer uses
+    (`supabase_control._service_key()`), not a second hand-rolled lookup — a
+    second resolver could report "unset" while the writer is working."""
+    from tortoise import activation_scorecard as sc
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    assert sc.analytics_write_path_configured() is False
+    # The LEGACY name is accepted by the writer, so the probe must accept it too.
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "svc")
+    assert sc.analytics_write_path_configured() is True
+
+
+def test_stage3_predicate_in_the_payload_is_the_query_predicate(client):
+    """The payload's own claim about what stage 3 counted must be the predicate
+    actually interpolated into the query — a hand-copied literal would let the
+    response describe a query that is no longer the one executed."""
+    from tortoise.activation_scorecard import FUNNEL_QUERY, STAGE3_PREDICATE
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    assert body["detail"]["stage3_predicate"] == STAGE3_PREDICATE
+    assert STAGE3_PREDICATE in FUNNEL_QUERY
+
+
+def test_cohort_partial_zero_from_an_unreadable_org_is_refused():
+    """A partial cohort's sum is a LOWER BOUND — the unreadable orgs are exactly
+    the ones that might carry the activity. A lower bound of 0 must not be
+    emitted as a confident 0."""
+    mod = _cohort_module()
+    report = mod.roll_up(
+        ["a", "b"],
+        [_payload(0, 0, 0, "measured", 0), None],
+        [None, "HTTP 500"])
+    cell = report["stages"]["captured"]
+    assert cell["state"] == "partial", cell
+    assert cell["value"] is None, cell
+    assert cell["reason"] == "partial_zero_from_an_unreadable_cohort", cell
+    assert cell["orgs_unavailable"] == ["b"], cell
+
+
+def test_cohort_partial_zero_from_a_not_measurable_org_is_a_real_zero():
+    """A 0 from `not_measurable` orgs alone IS a fact (they genuinely have
+    nothing), so only `unavailable` triggers the refusal."""
+    mod = _cohort_module()
+    report = mod.roll_up(
+        ["a", "b"],
+        [_payload(3, 3, 1, "measured", 0),
+         _payload(0, 0, 0, "not_measurable", None)])
+    cell = report["stages"]["recall_attempted"]
+    assert cell["state"] == "partial", cell
+    assert cell["value"] == 0, cell
+    assert cell["orgs_unavailable"] == [], cell
+
+
+def test_cohort_refuses_a_payload_whose_org_id_is_not_the_org_asked_for(
+        monkeypatch, capsys):
+    """A mistyped `--org A=key_of_B` must not produce a report whose
+    `cohort_definition` names A while the summed numbers are B's."""
+    import json
+    mod = _cohort_module()
+    payload = _payload(5, 5, 1)
+    payload["org_id"] = "b"
+    monkeypatch.setattr(mod, "fetch_scorecard", lambda *a, **k: payload)
+    monkeypatch.setattr(mod, "_assert_https", lambda *a, **k: None)
+    assert mod.main(["--api-base", "https://api.example",
+                     "--org", "a=KEY"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["org_errors"] == {"a": "org_id_mismatch"}, report
+    assert report["stages"]["captured"]["state"] == "unavailable", report
+    assert report["stages"]["captured"]["value"] is None, report

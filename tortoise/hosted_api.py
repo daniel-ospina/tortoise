@@ -10502,20 +10502,26 @@ async def activation_scorecard(
 
     log = logging.getLogger("tortoise.api")
 
+    def _read_graph() -> tuple[list, dict | None]:
+        sdk = _data_sdk(org)
+        proj = sdk._get_proj()
+        funnel = proj.g.query(
+            _FUNNEL, params={"since": since_iso, "until": until_iso}
+        ).result_set
+        life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set
+        return funnel, ({"first_memory_at": life[0][0],
+                         "sessions_with_memory": life[0][1]} if life else None)
+
     # ── Stages 1-3, and the lifetime baseline for stage 4 ──────────────────
     graph_error: str | None = None
     rows: list = []
     lifetime: dict | None = None
     try:
-        sdk = _data_sdk(org)
-        proj = sdk._get_proj()
-        rows = proj.g.query(
-            _FUNNEL, params={"since": since_iso, "until": until_iso}
-        ).result_set
-        life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set
-        if life:
-            lifetime = {"first_memory_at": life[0][0],
-                        "sessions_with_memory": life[0][1]}
+        # The FalkorDB client is synchronous, and LIFETIME_MEMORY_QUERY is an
+        # unbounded all-time scan — running either inline would block the event
+        # loop, and with it every other request on this worker (#3772 is the
+        # same fix for the write handlers).
+        rows, lifetime = await asyncio.to_thread(_read_graph)
     except HTTPException:
         # An authorization/tenancy denial from `_data_sdk` is NOT a graph
         # outage — swallowing it would convert a 403 into a 200 with
@@ -10537,9 +10543,9 @@ async def activation_scorecard(
     # ── Stage 4 ────────────────────────────────────────────────────────────
     analytics_state = ("configured" if analytics_write_path_configured()
                        else "unset")
-    recall_cell, recall_detail = _read_recall(
-        org, since_iso, until_iso, lifetime, graph_error, analytics_state, log,
-        _EVENT, _CAP)
+    recall_cell, recall_detail = await asyncio.to_thread(
+        _read_recall, org, since_iso, until_iso, lifetime, graph_error,
+        analytics_state, log, _EVENT, _CAP)
 
     payload = assemble(
         org_id=org["org_id"], since=since_iso, until=until_iso,
@@ -10574,12 +10580,9 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
     of failing to report.
     """
     from tortoise.activation_scorecard import (
-        analytics_write_path_configured,
-    )
-    from tortoise.activation_scorecard import (
         recall_stages as _recall_stages,
     )
-    if not analytics_write_path_configured():
+    if analytics_state != "configured":
         return _recall_stages(
             None, None, reason="analytics_write_path_unconfigured")
     if graph_error:
@@ -10602,17 +10605,22 @@ def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
             order="created_at.desc",
             limit=cap,
         )
+        # The fold runs INSIDE the fail-soft guard: a store/proxy that returns
+        # an array of non-mapping elements must become `unavailable`, not an
+        # AttributeError 500 — the endpoint's own contract.
+        truncated = (isinstance(analytics_rows, list)
+                     and len(analytics_rows) >= cap)
+        return _recall_stages(
+            analytics_rows,
+            (lifetime or {}).get("first_memory_at"),
+            truncated=truncated,
+            window=(since, until),
+            memory_sessions=(lifetime or {}).get("sessions_with_memory"))
     except Exception:
         log.warning("activation scorecard analytics unreachable (fail-soft): %s",
                     org["org_id"], exc_info=True)
         return _recall_stages(
             None, None, reason="analytics_store_unreachable")
-    truncated = isinstance(analytics_rows, list) and len(analytics_rows) >= cap
-    return _recall_stages(analytics_rows,
-                          (lifetime or {}).get("first_memory_at"),
-                          truncated=truncated,
-                          memory_sessions=(lifetime or {}).get(
-                              "sessions_with_memory"))
 
 
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings

@@ -3493,3 +3493,32 @@ class TestOnboardingEmailMarker:
         assert team.get("subscription_status") == "active"   # billing tier intact
         assert team.get("suspended_at") == "2026-09-01T00:00:00+00:00"
         assert any("additive" in r.message for r in caplog.records)
+
+
+# ── The abuse enforcement consumer of the same-column grouping (#3686) ─────
+
+def test_rule_event_between_passes_both_bounds_to_the_control_plane():
+    """The abuse enforcement path must hand BOTH `created_at` bounds to the
+    client. Before the same-column grouping fix in #3686 the second condition
+    overwrote the first in the flat PostgREST query string, so `continuity` was
+    essentially always True and the enforcement outcome changed silently. This
+    pins the CONSUMER's side of the fix (the wire grouping itself is pinned by
+    `TestRealQueryParamEncoding`), so a future edit cannot drop a bound again.
+    """
+    from datetime import UTC, datetime
+
+    from tortoise.abuse import SupabaseAbuseStore
+
+    seen: list[list] = []
+
+    class _CapturingCP:
+        def query(self, table, **kw):
+            seen.append(kw.get("filters"))
+            return []
+
+    store = SupabaseAbuseStore(_CapturingCP())
+    after = datetime(2026, 9, 1, tzinfo=UTC)
+    before = datetime(2026, 9, 2, tzinfo=UTC)
+    assert store.rule_event_between("org-x", "point_create", after, before) is False
+    conds = [c for c in seen[0] if c[0] == "created_at"]
+    assert [op for _, op, _ in conds] == ["gt", "lte"], seen[0]

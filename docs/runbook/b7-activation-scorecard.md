@@ -84,7 +84,8 @@ instant. If you change one leg's bounds, the other must move with it.
 
 **`recall_attempted` is an ATTEMPT, not an answer.** `mcp_tool_call.status ==
 "ok"` means only that the tool did not raise. `result_count` / `abstained` are
-not in the analytics props allowlist (`hosted_api.py:19418`), so "answered from
+not in the analytics props allowlist
+(`hosted_api.py::_ALLOWED_ANALYTICS_PROPS`), so "answered from
 memory" is currently unknowable. No `activated` field and no activation rate is
 emitted anywhere, and `tools/activation_cohort.py` fails loudly if a payload
 ever grows one.
@@ -119,8 +120,9 @@ whatever cohort the operator names — there is no N anyone must reach, and no
 rate.
 
 ```bash
-# Run with the PROJECT interpreter (this package requires Python >= 3.12).
-python3 tools/activation_cohort.py \
+# Run with the PROJECT interpreter via uv (this package requires Python >= 3.12;
+# the tool uses `zip(..., strict=True)`, so a system Python 3.9/3.8 fails).
+uv run python tools/activation_cohort.py \
   --api-base https://api.premiselabs.co \
   --org "$ORG_A=$KEY_A" --org "$ORG_B=$KEY_B" \
   --since 2026-09-16T00:00:00Z --until 2026-09-17T00:00:00Z \

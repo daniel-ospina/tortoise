@@ -195,12 +195,18 @@ VALUE_CONFIRMED_REFUSAL = (
 # (``pointKind IN ['decision','statement']``) is a known defect: extraction
 # writes NULL / other kinds, so it reports 0 for sessions that did produce
 # memory. Never use it here.
+# The stage-3 predicate has ONE home: it is interpolated into ``FUNNEL_QUERY``
+# below AND reported to consumers as ``detail.stage3_predicate``. A hand-copied
+# literal in the payload would let the response describe a query that is no
+# longer the one executed — a confident claim with no coupling.
+STAGE3_PREDICATE = "p.pointKind IS NULL OR p.pointKind <> 'event'"
+
 FUNNEL_QUERY = (
     "MATCH (s:Session) "
     "WHERE s.created_at >= $since AND s.created_at < $until "
     "OPTIONAL MATCH (s)-[:CONTAINS]->(t:Point {pointKind:'event'}) "
     "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
-    "WHERE p.pointKind IS NULL OR p.pointKind <> 'event' "
+    f"WHERE {STAGE3_PREDICATE} "
     "RETURN s.id, s.created_at, "
     "count(DISTINCT t) AS turn_points, count(DISTINCT p) AS extracted "
     "ORDER BY s.id"
@@ -429,27 +435,30 @@ def analytics_write_path_configured() -> bool:
     import os
 
     # Function-local import keeps this module import-pure (stdlib only at
-    # module level). The env-name tuple has exactly ONE home — re-declaring it
-    # here is how the analytics write path ended up reading a name the hosted
-    # deployment never sets (#3677).
-    from tortoise.supabase_control import _SERVICE_KEY_ENV
+    # module level). The key is resolved through the SAME seam the analytics
+    # WRITER uses (``supabase_control._service_key()``) — re-deriving the
+    # resolution here is how the write path ended up reading a name the hosted
+    # deployment never sets (#3677). A second resolver could report "unset"
+    # while the writer is working, darkening every window.
+    from tortoise.supabase_control import _service_key
 
-    url = os.environ.get("SUPABASE_URL")
-    key = next((os.environ.get(n) for n in _SERVICE_KEY_ENV
-                if os.environ.get(n)), None)
-    return bool(url and key)
+    return bool(os.environ.get("SUPABASE_URL")) and bool(_service_key())
 
 
 def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
                   reason: str | None = None,
                   truncated: bool = False,
-                  memory_sessions: int | None = None) -> tuple[dict, dict]:
+                  memory_sessions: int | None = None,
+                  window: tuple[str, str] | None = None) -> tuple[dict, dict]:
     """Derive the stage-4 cell from analytics rows.
 
     ``rows`` may be ``None`` to signal "the store was not read" (unreachable,
     unconfigured, or the graph leg failed) — in which case ``reason`` must say
     why. Returns ``(stage_cell, detail)``.
     """
+    # EVERY counter is initialised here, not only on the measured path: the
+    # detail key set must be identical on every return path, so a consumer read
+    # of (say) the exclusion counts does not vary with `state`.
     detail: dict[str, Any] = {
         "recall_attempted_any": None,
         "recall_attempted_after_memory": None,
@@ -458,6 +467,9 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         "recall_page_cap": RECALL_PAGE_CAP,
         "recall_truncated": False,
         "unparseable_analytic_rows": 0,
+        "unclassifiable_analytic_rows": 0,
+        "unparseable_analytic_rows_wide": 0,
+        "unclassifiable_analytic_rows_wide": 0,
         "retrieval_tool_allowlist": sorted(RETRIEVAL_TOOL_ALLOWLIST),
         "retrieval_tool_allowlist_wide": sorted(RETRIEVAL_TOOL_ALLOWLIST_WIDE),
     }
@@ -467,6 +479,34 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     rows = list(rows)
     detail["recall_rows_fetched"] = len(rows)
     detail["recall_truncated"] = truncated
+
+    if window is not None:
+        # Python re-check of the analytics window, mirroring `stage_counts`.
+        # The PostgREST `created_at` predicate is the ONLY thing confining
+        # these rows to [since, until); a silently-dropped bound (the class
+        # this PR already fixed one layer down, in `SupabaseControlPlane.query`)
+        # would otherwise let an out-of-window tool call be counted as a
+        # measured recall attempt. Fail closed: refuse the count, never guess
+        # it. Rows whose timestamp will not parse are already counted as
+        # `unparseable_analytic_rows` below, so they are skipped here.
+        out_of_range = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                stamp = _parse_iso(row.get("created_at"), "created_at")
+            except (WindowError, TypeError):
+                continue
+            if not (window[0] <= stamp.isoformat() < window[1]):
+                out_of_range += 1
+        if out_of_range:
+            detail["analytics_window_out_of_range"] = out_of_range
+            _logger.warning(
+                "activation scorecard: %d analytics row(s) fell outside the "
+                "requested window [%s, %s) — the created_at predicate did not "
+                "apply", out_of_range, window[0], window[1])
+            return _stage(None, "calls",
+                          "analytics_window_predicate_not_applied"), detail
 
     # ORDER MATTERS: the no-lifetime-memory fact comes from the GRAPH
     # (`LIFETIME_MEMORY_QUERY`), so it is independent of how many analytics
@@ -556,6 +596,12 @@ def _count_allowlisted(rows: Iterable[dict], after: datetime | None,
     unparseable = 0
     unclassifiable = 0
     for row in rows:
+        if not isinstance(row, dict):
+            # A store/proxy can return an array of non-mapping elements; that
+            # is a row we cannot read a tool_name out of, so it makes the count
+            # a lower bound — exactly like an unreadable `properties` value.
+            unclassifiable += 1
+            continue
         props = row.get("properties")
         tool: str | None = None
         if isinstance(props, dict):
@@ -635,6 +681,23 @@ LIMITATIONS: tuple[str, ...] = (
     "LOWER server-side cap (PostgREST db-max-rows, a proxy limit) would return "
     "a short page that looks complete, so recall_attempted would read measured "
     "while under-counting. The cap cannot be probed from here.",
+    "A BUSY org (>= RECALL_PAGE_CAP MCP tool calls in the window — ordinary at "
+    "the default 24h) reads `unavailable` (`analytics_page_cap_truncated`), not "
+    "a count: the analytics leg is a single unpaginated read, so a full page is "
+    "a lower bound. That is the EXPECTED outcome for such an org today, not an "
+    "anomaly. Paging the leg to completion is #4038.",
+    "Stage 4 is GATED on `first_memory_at` from the org DEFAULT graph while it "
+    "COUNTS an org-wide stream. A multi-graph org that produced memory only in "
+    "a non-default graph can read `not_measurable` "
+    "(`no_memory_produced_in_lifetime`) even though its windowed recall calls "
+    "are counted in `detail.recall_attempted_any`. The state is graph-scoped, "
+    "the count is org-wide. Surfacing the ambiguity is #4039.",
+    "`detail.first_memory_at` is the earliest memory-bearing SESSION's capture "
+    "time (`min(s.created_at)`), NOT the creation time of the first extracted "
+    "memory Point. Extraction runs after the session is written, so this "
+    "boundary is at-or-before the true instant and the recall count can include "
+    "calls made in the capture->extraction gap — an upward bias, not a "
+    "conservative one.",
 )
 
 
@@ -656,7 +719,7 @@ def assemble(*, org_id: str, since: str, until: str, graph_stages: dict,
         **recall_detail,
         "analytics_write_path": analytics_state,
         "graph_scope": "org_default_graph",
-        "stage3_predicate": "p.pointKind IS NULL OR p.pointKind <> 'event'",
+        "stage3_predicate": STAGE3_PREDICATE,
         "stages_1_3_granularity": "session",
         "stage_4_granularity": "org_time",
     }

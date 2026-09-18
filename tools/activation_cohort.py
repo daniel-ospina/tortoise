@@ -216,11 +216,22 @@ def roll_up(orgs: list[str], payloads: list[dict | None],
 
         measured = len(values)
         if measured and (orgs_unavailable or orgs_not_measurable):
-            stages[name] = {"state": "partial", "value": sum(values),
-                            "reason": "some_orgs_unavailable_or_not_measurable",
-                            "orgs_measured": measured,
-                            "orgs_unavailable": orgs_unavailable,
-                            "orgs_not_measurable": orgs_not_measurable}
+            total = sum(values)
+            cell = {"state": "partial", "value": total,
+                    "reason": "some_orgs_unavailable_or_not_measurable",
+                    "orgs_measured": measured,
+                    "orgs_unavailable": orgs_unavailable,
+                    "orgs_not_measurable": orgs_not_measurable}
+            if total == 0 and orgs_unavailable:
+                # A partial cohort's sum is a LOWER BOUND: the orgs we could
+                # not read are exactly the ones that might carry the activity.
+                # A lower bound of 0 is not a fact, so refuse the number rather
+                # than emit a zero the cohort never established. (A 0 from
+                # `not_measurable` orgs alone IS a fact — they genuinely have
+                # nothing — so only `unavailable` triggers the refusal.)
+                cell["value"] = None
+                cell["reason"] = "partial_zero_from_an_unreadable_cohort"
+            stages[name] = cell
         elif measured:
             stages[name] = {"state": "measured", "value": sum(values),
                             "reason": None, "orgs_measured": measured,
@@ -296,8 +307,18 @@ def main(argv: list[str] | None = None) -> int:
         try:
             payload = fetch_scorecard(args.api_base, key, args.since, args.until)
             _assert_no_activation_claim(payload)
-            payloads.append(payload)
-            errors.append(None)
+            if payload.get("org_id") != org_id:
+                # Bind the payload to the org that was ASKED FOR, by ID: a
+                # mistyped `--org A=key_of_B` would otherwise produce a report
+                # whose cohort_definition names A while the summed numbers are
+                # B's — a mislabelled metric no other guard can detect.
+                errors.append("org_id_mismatch")
+                payloads.append(None)
+                print(f"  ! {org_id}: payload belongs to a different org",
+                      file=sys.stderr)
+            else:
+                payloads.append(payload)
+                errors.append(None)
         except SystemExit:
             raise
         except urllib.error.HTTPError as exc:
