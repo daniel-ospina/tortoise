@@ -334,8 +334,12 @@ def test_capture_cost_props_none_only_for_a_genuinely_call_free_capture():
     assert props["calls"] == 0          # nothing was meterable
     assert props["by_stage"] == {}
 
-    # Junk evidence must not fabricate a row inside a best-effort emit.
-    for junk in (0, -1, None, "3", True, 2.5e-1, float("nan")):
+    # Junk evidence must not fabricate a row inside a best-effort emit —
+    # including a fraction, a non-finite value, and an absurd magnitude (the
+    # reader's own ``_as_int`` rejects those, so the emitter must agree or it
+    # writes a row the report then reads as ``excluded_no_calls``).
+    for junk in (0, -1, None, "3", True, 2.5e-1, float("nan"),
+                 float("inf"), 2.5, 10**400):
         assert ha._capture_cost_props(
             "sess-x", {"stats": {"unattributed": junk}}) is None, junk
     # ... while a real count beside a real roll-up rides the same row.
@@ -1434,6 +1438,36 @@ def test_hosted_capture_emits_that_session_s_measured_cost_row(
     assert props == model.expected_props("sess-b7-attrib")
 
 
+def test_counter_proxy_forwards_public_writes_but_keeps_its_own_count():
+    """#3824: the counter proxy must be transparent in BOTH directions.
+    Public attribute WRITES have to reach the wrapped model — the #2185 usage
+    seam is attached by assignment (``model.usage_sink = sink``), so a
+    read-only proxy would silently drop it — while ``count`` stays
+    wrapper-local, so counting cannot leak onto the model or be clobbered by
+    it. REDs on: removing ``__setattr__`` (the write is swallowed) or letting
+    ``count`` forward (the model grows a phantom ``count``).
+    """
+    from tortoise.sdk import _SessionLLMCallCounter
+
+    class _Model:
+        usage_sink = None
+        provider = "p"
+        id = "m"
+
+        def complete(self, **_kw):
+            return "ok"
+
+    model = _Model()
+    proxy = _SessionLLMCallCounter(model)
+    proxy.usage_sink = lambda *_a, **_k: None   # public write -> model
+    assert model.usage_sink is not None
+    assert proxy.provider == "p" and proxy.id == "m"   # reads delegate
+    assert proxy.count == 0 and not hasattr(model, "count")
+    proxy.complete()
+    proxy.complete()
+    assert proxy.count == 2 and not hasattr(model, "count")
+
+
 def test_m2_capture_makes_calls_so_it_is_counted_not_absent(
         tmp_path, monkeypatch, _b7_capture_client):
     """#3824 — THE EMISSION ACCEPTANCE. An M2 capture issues real provider
@@ -1531,6 +1565,51 @@ def test_hosted_replay_emits_no_cost_row_even_though_m2_does(
     # The replay's OWN telemetry is empty (F1) and it added no row.
     assert second.json()["stats"] == {}
     assert len(_cost_rows()) == 1, _cost_rows()
+
+
+def test_emit_call_site_writes_no_cost_row_when_props_is_none(
+        tmp_path, monkeypatch, _b7_capture_client):
+    """The emit call site's ``if _cost_props is not None:`` guard is what
+    actually decides whether a ``capture_cost`` row is written, and #3824's
+    rewrite of the old absence pin left it uncovered on its NEGATIVE branch:
+    an F1 capture (``_capture_cost_props`` -> ``None``) must write no row, or
+    a zero-cost phantom row is fabricated for a capture with no measurement.
+
+    REDs on: dropping the ``is not None`` guard (``if True:``), which writes a
+    row with ``properties == {}`` — the silent-measurement failure #3359 /
+    #3745 exist to prevent, and a real path on merged main (#3892: a keyless
+    capture stores its turns and reaches this guard).
+
+    The M2 lane is driven with its #3824 call counters ABSENT, so the capture
+    genuinely extracts and genuinely emits ``stats == {}`` — an F1 shape
+    driven through the producer seam, not a monkeypatched emitter.
+    """
+    from tortoise import hosted_api as ha
+    from tortoise import sdk as sdk_mod
+    from tortoise.extractor import LLMExtractor, MockModel
+
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    # The pre-#3824 M2 shape: an extractor that makes calls but carries no
+    # call evidence, so the emitter sees an empty ``stats`` and returns None.
+    monkeypatch.setattr(
+        sdk_mod, "_build_session_llm_extractor",
+        lambda: LLMExtractor(MockModel("mock-point"),
+                             MockModel("mock-relation")))
+
+    resp = _b7_capture_client.post("/v1/sessions", json={
+        "conversation": _conv(), "harness": "pi",
+        "session_id": "sess-b7-f1"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["extracted"] > 0        # the lane really ran
+    assert resp.json()["stats"] == {}          # ... with no roll-up: F1
+
+    # Positive control: the writer is live, so an absent row is the GUARD and
+    # not a dead writer.
+    ha._track_analytics_event(_B7_TEAM["org_id"], "b7_f1_sentinel", {})
+    assert any(r.get("event_name") == "b7_f1_sentinel"
+               for r in _b7_rows(tmp_path))
+    assert [r for r in _b7_rows(tmp_path)
+            if r.get("event_name") == "capture_cost"] == []
 
 
 def test_unattributed_survives_the_pii_allowlist(tmp_path, monkeypatch):

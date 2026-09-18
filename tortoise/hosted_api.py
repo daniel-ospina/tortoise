@@ -8965,11 +8965,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #3359: one capture_cost row per capture ATTEMPT that ran an
         # extraction (successful or errored — a failed extraction that made
         # provider calls has real spend, and the deadline/deadline_aborts
-        # disclosure depends on that row existing). Replays — and only
-        # replays — carry no extractor telemetry and emit nothing; an M2
-        # capture DOES make provider calls, so since #3824 it emits a row
-        # carrying its call count as ``unattributed`` rather than vanishing
-        # into the same silence as a zero-call replay. Idempotent for free: this
+        # disclosure depends on that row existing). A ZERO-CALL capture — a
+        # replay, or the empty-transcript / keyless path — carries no
+        # extractor telemetry and emits nothing; an M2 capture DOES make
+        # provider calls, so since #3824 it emits a row carrying its call
+        # count as ``unattributed`` rather than vanishing into the same
+        # silence as a zero-call capture. Idempotent for free: this
         # sits behind the SAME replay guard the write-op meter uses, so a
         # zero-node re-POST writes no second row; a genuine retry (#2335
         # WI-2b) does write a second row, which is why the report aggregates
@@ -20103,13 +20104,22 @@ def _analytics_alert_store():
 def _as_call_count(value) -> int:
     """Coerce a #3824 call-evidence value to a non-negative int (0 on junk).
 
-    A producer is free to hand over ``None``/missing/negative/a float; none
-    of those may become a phantom nonzero disclosure, and none may raise
-    inside the capture handler's best-effort emit.
+    A producer is free to hand over ``None``/missing/negative/a
+    fraction/a non-finite or absurd-magnitude value; none of those may become
+    a phantom nonzero disclosure, and none may raise inside the capture
+    handler's best-effort emit. The integrality + magnitude bounds mirror the
+    reader's own guard (``tools/longmem_eval/costing.py::_as_int``) so the
+    emitter and the reader agree on what junk is — a value one accepts and
+    the other rejects would write a row the report then reads as
+    ``excluded_no_calls``, dropping the very disclosure #3824 adds.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
+    if isinstance(value, float) and not value.is_integer():
+        return 0
     try:
+        if abs(value) > 1e300:
+            return 0
         n = int(value)
     except (TypeError, ValueError, OverflowError):
         return 0

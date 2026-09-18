@@ -415,9 +415,8 @@ def _session_llm_mock_enabled() -> bool:
 class _SessionLLMCallCounter:
     """#3824: a transparent pass-through that counts model completions.
 
-    The M2 session lane discards its usage block wholesale
-    (``_extract_session_llm`` hard-codes ``stats: {}``), so by the time its
-    capture reaches the cost emitter there is no in-hand evidence that a
+    The M2 session lane discards its usage block wholesale, so by the time
+    its capture reaches the cost emitter there is no in-hand evidence that a
     provider call happened — "made billed calls" and "made none" are the
     same shape (an empty ``stats``). The emitter cannot recover that fact
     from the roll-up, because the roll-up is exactly what is missing; it has
@@ -430,9 +429,9 @@ class _SessionLLMCallCounter:
     charge and no per-stage envelope, so it cannot drift from a real
     roll-up. It answers one question the roll-up cannot answer about
     itself — "did this capture reach the provider at all?". Every other
-    attribute delegates to the wrapped model (``id``, ``provider``,
-    ``usage_sink``), so ``LLMExtractor.version`` and the #2185 usage seam are
-    unaffected.
+    PUBLIC attribute round-trips to the wrapped model — reads delegate, and
+    so do writes (``id``, ``provider``, ``usage_sink``), so
+    ``LLMExtractor.version`` and the #2185 usage seam are unaffected.
     """
 
     def __init__(self, model):
@@ -445,6 +444,18 @@ class _SessionLLMCallCounter:
         if name.startswith("_"):
             raise AttributeError(name)
         return getattr(self._model, name)
+
+    def __setattr__(self, name, value):
+        # Public attribute WRITES must reach the wrapped model too, or the
+        # wrapper silently swallows them: the #2185 usage seam is attached by
+        # assignment (``model.usage_sink = sink``), and a read-only
+        # ``__getattr__`` would leave the UNDERLYING model's sink unset —
+        # dropping every usage block the wrapper exists to keep visible.
+        # ``_model`` and the wrapper-local ``count`` are NOT forwarded.
+        if name.startswith("_") or name == "count":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._model, name, value)
 
     def complete(self, *args, **kwargs):
         self.count += 1
@@ -1222,8 +1233,11 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     out-token (recovered-case max semantics per the #2408 Task-4 handoff:
     max(sX_out_tokens, truncation_completion_tokens_sX) — base in the
     truncation key, escalated final list in the out-token key) / error_census.
-    ``meta["stats"]`` is {} on replayed/M2 (no extractor_v2 telemetry) — the
-    line still fires with the mode + turns (a replay/no-op is observable).
+    ``meta["stats"]`` carries no ``llm`` roll-up on replayed/M2 (no
+    extractor_v2 telemetry) — ``{}`` on a replay and on a zero-call M2
+    capture, ``{"unattributed": N}`` on an M2 capture that issued N
+    completions (#3824). The line still fires with the mode + turns (a
+    replay/no-op is observable).
     """
     st = meta.get("stats") or {}
     rec = st.get("recovery") or {}
@@ -3940,7 +3954,9 @@ class TortoiseSDK:
             # sink decision) — present ONLY when the capture errored.
             **({"report_url": REPORT_HOOK_URL} if extraction_errors else {}),
             # #2335 WI-1a: the receipt carries the extractor telemetry
-            # (meta stats — real on v2, {} on replayed/M2). Additive.
+            # (meta stats — real on v2; {} on a replay or a zero-call M2
+            # capture, {"unattributed": N} on an M2 capture that reached the
+            # provider, #3824). Additive.
             "stats": meta.get("stats") or {},
         }
         # #1530 D8: extraction_provider reports the configured provider when a
@@ -4177,11 +4193,12 @@ class TortoiseSDK:
             "provider": None, "route": None, "failover_used": False,
             "errors": errors, "warnings": warnings,
             "mode": "error" if errors else "llm",
-            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats —
-            # stats is ALWAYS present, empty on the M2 branch.
+            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats — the
+            # key is ALWAYS present, but its value is not always empty.
             # #3824: the ONE extractor fact this lane can state without a
-            # roll-up is that it reached the provider. Empty when it did
-            # not, so a genuine zero-call path stays a clean no-row.
+            # roll-up is that it reached the provider, so ``stats`` is
+            # {"unattributed": N} when N completions were issued and {} when
+            # none were — a genuine zero-call path stays a clean no-row.
             "stats": ({"unattributed": calls_made} if calls_made else {}),
         }
         return extracted, meta
