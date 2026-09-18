@@ -82,15 +82,30 @@ class _NotFoundDoc(HTMLParser):
         self.bases: list[str] = []
         self.forms: list[str] = []
         self.event_handlers: list[str] = []
+        self.script_srcs: list[str] = []
+        self.javascript_urls: list[str] = []
         self.scripts: list[str] = []
         self._buf: list[str] = []
         self._in_script = False
 
+    def unclosed(self) -> bool:
+        """True when a `<script>` was never closed — its body is never collected,
+        so it would otherwise be invisible to the pin (#4006 review, cycle 5)."""
+        return self._in_script
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        for name, _value in attrs:
+        for name, value in attrs:
             # HTMLParser lowercases attribute names, so `ONLOAD` is caught too.
             if name.lower().startswith("on"):
                 self.event_handlers.append(f"<{tag} {name}>")
+            if name.lower() == "href" and (value or "").strip().lower().startswith("javascript:"):
+                self.javascript_urls.append(f"<{tag} href={value!r}>")
+            if name.lower() == "src" and tag == "script":
+                # A script that carries its body out-of-band has no text to pin,
+                # and the empty entry vanished from the joined string — so
+                # `<script src="data:text/javascript,location.replace('/')">`
+                # redirected a real browser past the pin (#4006 review, cycle 5).
+                self.script_srcs.append(value or "")
         if tag == "meta":
             for name, value in attrs:
                 if name.lower() == "http-equiv":
@@ -180,6 +195,26 @@ def test_top_level_404_html_exists() -> None:
     assert not doc.event_handlers, (
         "404.html carries an inline event handler, which can navigate and which "
         f"no attribute-level scan can enumerate: {doc.event_handlers!r} (#4006 review)"
+    )
+    assert not doc.script_srcs, (
+        "404.html loads an external script — an out-of-band body cannot be pinned, "
+        "and a `data:` URL executes on a page with no CSP: "
+        f"{doc.script_srcs!r} (#4006 review)"
+    )
+    assert not doc.javascript_urls, (
+        "404.html links to a `javascript:` URL — a click on a not-found page's "
+        f"own link must not run code: {doc.javascript_urls!r} (#4006 review)"
+    )
+    # EXACTLY one script, and it is the reviewed inline snippet. Counting matters:
+    # `<script src=…>` contributes an EMPTY entry, and the whitespace strip below
+    # erased it, so a source-only script rode the pin (#4006 review, cycle 5).
+    assert len(doc.scripts) == 1, (
+        "404.html must carry exactly ONE inline script (the reviewed snippet), "
+        f"found {len(doc.scripts)} (#4006 review)"
+    )
+    assert not doc.unclosed(), (
+        "404.html has an unterminated <script> — its body never reaches the pin "
+        "(#4006 review)"
     )
     # The page's scripting surface is EXACTLY one reviewed, read-only snippet
     # (it names the requested address so the visitor can see what was not
