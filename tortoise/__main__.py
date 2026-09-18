@@ -2763,6 +2763,126 @@ def _cmd_install_hooks(args) -> int:
     return 0
 
 
+def _cmd_hooks(args) -> int:
+    """Detect and repair drift in an already-installed capture-hook seam.
+
+    The install contract is two halves: the script bytes (marked with
+    ``# tortoise-hook-version: N``) and the ``settings.json`` entry that must
+    carry the load-bearing per-hook ``timeout`` (#3754/#3801).  Both are
+    checked here; ``upgrade`` merges the settings half rather than
+    overwriting it, and re-copies the scripts.  Harness-agnostic: the layout
+    registry in ``tortoise.hook_install`` supplies the targets.
+    """
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from tortoise.hook_install import (
+        contract_version,
+        detect_install,
+        get_layout,
+        upgrade_install,
+    )
+
+    try:
+        layout = get_layout(args.harness)
+    except ValueError as e:
+        print(str(e), file=_sys.stderr)
+        return 1
+    root = _P(getattr(args, "dir", "."))
+
+    if args.hooks_cmd == "status":
+        try:
+            findings = detect_install(root, args.harness)
+        except OSError as e:
+            print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
+                  file=_sys.stderr)
+            return 1
+        version = contract_version(layout)
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps({
+                "harness": args.harness,
+                "root": str(root),
+                "contract_version": version,
+                "current": not any(f.blocking for f in findings),
+                "findings": [
+                    {"kind": f.kind, "script": f.script, "event": f.event,
+                     "detail": f.detail, "blocking": f.blocking}
+                    for f in findings
+                ],
+            }, indent=2))
+        elif not findings:
+            print(f"✅ {args.harness} capture hooks in {root} are current "
+                  f"(contract v{version}).")
+        else:
+            print(f"Capture-hook install at {root} (contract v{version}):")
+            for f in findings:
+                print(f"  {f.line()}")
+            blocking = [f for f in findings if f.blocking]
+            if blocking:
+                # Some blocking kinds are NOT repairable by `upgrade` (it
+                # refuses rather than clobber an unreadable/unsafe path), so
+                # the hint must name the manual fix for those instead of
+                # recommending a command that will refuse.
+                _manual = frozenset({
+                    "unreadable-settings",
+                    "not-a-regular-file",
+                    "not-executable-symlink",
+                    "not-readable",
+                    "foreign-script",
+                })
+                kinds = {f.kind for f in blocking}
+                # `upgrade` refuses on ANY symlink in a target path, and the
+                # finding kinds for those are not knowable in advance, so
+                # treat any symlink finding as manual too.
+                symlinked_kinds = {f.kind for f in findings
+                                   if f.kind.startswith("symlinked")}
+                if kinds & _manual or symlinked_kinds:
+                    # A manual kind makes `upgrade` refuse the WHOLE run, so
+                    # recommending it (even alongside repairable findings)
+                    # would point at a command that refuses.
+                    print("\nSome findings need a manual fix before upgrade "
+                          "can run: "
+                          + ", ".join(sorted(
+                              (kinds & _manual) | symlinked_kinds))
+                          + ".")
+                elif kinds:
+                    print("\nRun `tortoise hooks upgrade"
+                          f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
+                          f" --dir {root}` to repair.")
+        return 1 if any(f.blocking for f in findings) else 0
+
+    # upgrade (also performs a fresh install when nothing is present)
+    try:
+        result = upgrade_install(root, args.harness,
+                                 dry_run=getattr(args, "dry_run", False))
+    except OSError as e:
+        print(f"Upgrade failed: {e.__class__.__name__}: {e}",
+              file=_sys.stderr)
+        return 1
+    if not result.ok:
+        print(result.refused, file=_sys.stderr)
+        return 1
+    prefix = "[dry-run] " if getattr(args, "dry_run", False) else ""
+    if not result.actions:
+        print(f"{prefix}✅ {args.harness} capture hooks at {root} already "
+              "current — nothing to do.")
+        return 0
+    for action in result.actions:
+        # `upgrade_install` already prefixes its planned actions when in
+        # dry-run; prefixing again here printed `[dry-run] [dry-run]`.
+        print(action)
+    if not getattr(args, "dry_run", False):
+        remaining = [f for f in result.findings_after if f.blocking]
+        if remaining:
+            print(f"⚠️ {len(remaining)} issue(s) remain after upgrade:",
+                  file=_sys.stderr)
+            for f in remaining:
+                print(f"  {f.line()}", file=_sys.stderr)
+            return 1
+        print(f"✅ {args.harness} capture hooks upgraded.")
+    return 0
+
 
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
@@ -2985,15 +3105,19 @@ def _cmd_sessions_import(args) -> int:
     2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
     same content is a no-op (receipt exists ⇒ already imported) — and even a
     re-POST without a local receipt converges server-side (same session_id ⇒
-    zero new nodes). pi REUSES the codex parser (named reuse — pi session
-    JSONL is tree-structured JSONL like codex's, plan P2 Task 15).
+    zero new nodes). pi parses its own record shape (#3667 — it no longer
+    aliases the codex parser, which returned 0 turns for real Pi sessions).
+    The parsed conversation is windowed to the hosted turn cap
+    (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
+    capture extension applies) keeping the most recent turns, with the
+    truncation reported — never a silent drop.
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    from tortoise.session_import import parse_transcript
+    from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
 
     file_path = Path(args.file)
     if not file_path.exists():
@@ -3011,6 +3135,22 @@ def _cmd_sessions_import(args) -> int:
     if not turns:
         print("No conversation turns parsed from session file.", file=_sys.stderr)
         return 1
+
+    # The bound is the HANDLER's `MAX_SESSION_TURNS` (tortoise/quota.py) — not
+    # `SessionRequest.conversation`'s max_length=1000, which the handler then
+    # overrides with an HTTP 400 above 500. The live capture extension caps at
+    # the same constant, so this backfill leg must too — a 501–1000-turn file
+    # would otherwise clear the Pydantic boundary and still write no receipt.
+    # Keep the MOST RECENT turns and REPORT the truncation (never a silent drop).
+    parsed_total = len(turns)
+    turns, dropped_turns = window_turns(turns)
+    if dropped_turns:
+        print(
+            f"Session has {parsed_total} turns; truncating to the most recent "
+            f"{MAX_TURNS} ({dropped_turns} older turns dropped — hosted "
+            f"conversation limit).",
+            file=_sys.stderr,
+        )
 
     raw = file_path.read_bytes()
     session_id = args.session_id or (
@@ -4827,6 +4967,39 @@ def _cmd_doctor(args):
     else:
         results.append(("Harnesses", "⚠️", "none detected — run tortoise setup to configure"))
 
+    # 7. Capture-hook install freshness (#3795/#3801). The install seam is a
+    # manual copy, so an already-installed host keeps a byte-frozen script and
+    # an un-timed settings entry — and silently files no sessions (the hook is
+    # fail-open). Drift is therefore a FAIL, not a warning. Read-only, and
+    # checked ONLY when a capture-hook install is actually present: a project
+    # that never installed the hooks must not be nagged (they may use the
+    # hosted MCP path alone). Also probed by `tortoise hooks status`.
+    try:
+        from tortoise.hook_install import (
+            contract_version,
+            detect_install,
+            get_layout,
+            is_installed,
+        )
+        if is_installed(Path("."), "claude"):
+            findings = detect_install(Path("."), "claude")
+            blocking = [f for f in findings if f.blocking]
+            version = contract_version(get_layout("claude"))
+            if not blocking:
+                results.append(("Capture hooks", "✅",
+                                f"install current (contract v{version})"))
+            else:
+                first = blocking[0]
+                results.append((
+                    "Capture hooks", "❌",
+                    f"{len(blocking)} stale issue(s) — run `tortoise hooks "
+                    f"status` for the repair path ({first.kind}: "
+                    f"{first.detail})",
+                ))
+    except Exception as e:
+        results.append(("Capture hooks", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
+
     # Print results
     for check, icon, detail in results:
         print(f"  {icon} {check}: {detail}")
@@ -6052,8 +6225,8 @@ def main(argv: list[str] | None = None) -> int:
     sess_import.add_argument(
         "--harness", required=True,
         choices=["codex", "claude-desktop", "desktop", "pi"],
-        help="Harness format to parse (pi reuses the codex parser; "
-             "'desktop' is an alias for claude-desktop)")
+        help="Harness format to parse (each harness has its own record "
+             "shape; 'desktop' is an alias for claude-desktop)")
     sess_import.add_argument(
         "--session-id", default=None,
         help="Explicit idempotency key (default: content-hash derived)")
@@ -6084,6 +6257,33 @@ def main(argv: list[str] | None = None) -> int:
     inst.add_argument(
         "--uninstall", action="store_true",
         help="Remove the hook registration for the harness")
+    # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
+    # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
+    # (re-copies the scripts AND merges the settings.json timeout). Also
+    # installs when nothing is present. Layout-driven (tortoise.hook_install),
+    # so Cursor/Codex seams plug in without new CLI surface.
+    hooks_p = sp.add_parser(
+        "hooks",
+        help="Detect and upgrade installed capture hooks (Claude Code)")
+    hooks_sp = hooks_p.add_subparsers(dest="hooks_cmd", required=True)
+    hooks_status = hooks_sp.add_parser(
+        "status", help="Report whether the installed capture hooks are stale")
+    hooks_upgrade = hooks_sp.add_parser(
+        "upgrade",
+        help="Install or upgrade the capture hooks in place (merges settings)")
+    for _hp in (hooks_status, hooks_upgrade):
+        _hp.add_argument(
+            "--harness", default="claude",
+            help="Harness seam to inspect (default: claude)")
+        _hp.add_argument(
+            "--dir", default=".",
+            help="Project directory holding the install (default: cwd)")
+    hooks_status.add_argument(
+        "--json", action="store_true",
+        help="Emit a machine-readable drift report")
+    hooks_upgrade.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the planned writes without touching anything")
     # tortoise volunteer — per-turn volunteering-memory reflex (epic #2080
     # end-state platform seams, #2119/#2123 et al). ONE thin CLI over the
     # shared canonical pipeline (POST /v1/context hosted / SDK
@@ -6270,6 +6470,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_context(args)
     elif args.cmd == "install":
         return _cmd_install_hooks(args)
+    elif args.cmd == "hooks":
+        return _cmd_hooks(args)
     elif args.cmd == "volunteer":
         return _cmd_volunteer(args)
     elif args.cmd == "list-sources":

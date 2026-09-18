@@ -1504,10 +1504,13 @@ class _HealthzHandler(BaseHTTPRequestHandler):
         stale = bool(info["loop_stale"])
         # STALE **AND** IDLE — the same idle predicate the stall watchdog
         # uses (#2850 round-3 review P1). A busy loop is not a wedged loop:
-        # with the deferred Fly check pointing here and 2xx-means-healthy,
-        # answering 503 for a legitimate synchronous multi-stage request
-        # would de-register the sole machine (total outage). Only "nothing
-        # has ticked AND nothing is in flight" is a genuinely wedged loop.
+        # the live top-level Fly check points here (fly.toml
+        # [checks.loop_liveness]) and 2xx-means-healthy to flyctl, so
+        # answering 503 for a legitimate synchronous request would fail
+        # EVERY deploy and cry wolf on the operator signal. It cannot
+        # de-register the machine — the proxy ignores top-level checks for
+        # routing; only flyctl's deploy wait reads it. Only "nothing has
+        # ticked AND nothing is in flight" is a genuinely wedged loop.
         idle = workload_is_idle()
         wedged = stale and idle
         self._send(503 if wedged else 200,

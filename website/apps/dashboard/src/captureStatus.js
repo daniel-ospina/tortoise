@@ -42,10 +42,17 @@ export function captureStatusForHarness(state, harness) {
 //               only state in which the owner-approved present-tense sentence
 //               is truthful: a receipt is a server-side fact that something
 //               actually filed (#1728 Task 16, receipt-authoritative).
-//   'future'  — capture is available for this harness but nothing has been
-//               observed yet (no install probe, or a probe with no receipt).
-//               The screen states what WILL happen. This is also the SAFE
-//               DEFAULT: an absent or unknown state can never reach 'present'.
+//   'future'  — the install PROBE has been observed server-side, so capture is
+//               installed and has not fired yet (probe with no receipt). The
+//               screen states what WILL happen. The PROBE is what makes the
+//               future tense honest: an unobserved state can never reach it.
+//   'install-pending' — recording is on and the server has observed NOTHING for
+//               this harness: no probe, no receipt (#3782). The screen must
+//               render the honest pending/not-installed state — the SAME
+//               "not installed yet" string Settings prints for this state —
+//               never a promise. Collapsing this into 'future' is the #3782
+//               defect: the success screen promised a capture the server never
+//               saw while the same deployment's Settings contradicted it.
 //   'none'    — print no capture sentence at all: either the harness has no
 //               capture install path (HARNESS_CAPTURE_SUPPORT false — Cursor's
 //               spike verdict, the backfill-only leaves) or the team's
@@ -61,9 +68,10 @@ export function captureStatusForHarness(state, harness) {
 export function captureClaimForHarness(state, harness) {
   if (!HARNESS_CAPTURE_SUPPORT[harness]) return 'none'
   const status = captureStatusForHarness(state, harness)
-  if (status === 'active') return 'present'
-  if (status === 'off') return 'none'   // the team's off-switch — claim nothing
-  return 'future'
+  if (status === 'active') return 'present'          // receipt observed
+  if (status === 'waiting') return 'future'          // probe observed — install confirmed
+  if (status === 'install-pending') return 'install-pending'  // #3782: nothing observed
+  return 'none'   // the team's off-switch — claim nothing
 }
 
 // #1927: the misled-user re-ask gate predicate (shouldShowReAsk) was removed

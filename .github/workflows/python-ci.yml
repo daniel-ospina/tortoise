@@ -1860,9 +1860,33 @@ jobs:
             echo "the Task 9 half-a flip)."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # The agent-facing surface expansion gate (#3863).
+  #
+  # No `if:`, no `paths:` filter, deliberately: this job must run on EVERY pull
+  # request. A filtered gate is how a surface change slips through a docs-only
+  # path, and a skipped job reports Success, so a conditional guard would
+  # satisfy the required check without guarding anything.
+  surface-guard:
+    runs-on: ubuntu-latest
+    # Sibling `manifest-integrity` documents the same decision for the same reason:
+    # this job owns a network install AND feeds the REQUIRED aggregate, so without a
+    # bound a stalled PyPI would hold python-ci-gate red for hours on every PR.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install -e .
+      - name: The surface cannot expand without an explicit human decision
+        run: python3 tools/surface-guard.py
+      - name: The ordering lint (AC13)
+        run: python3 tools/surface_manifest.py check
+
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak]
+    needs: [changes, manifest-integrity, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak, surface-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
@@ -1871,6 +1895,14 @@ jobs:
           echo "matrix results: $RESULTS"
           if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
             echo "❌ matrix leg failed or was cancelled — merge blocked"
+            exit 1
+          fi
+          # The surface guard has no `if:`/`paths:` today, so it cannot skip — but the
+          # aggregate would not notice if it ever did, and an inert guard satisfying a
+          # REQUIRED check is the failure this whole job exists to prevent. Assert it
+          # explicitly rather than relying on the absence of a filter.
+          if [ "${{ needs.surface-guard.result }}" != "success" ]; then
+            echo "❌ surface-guard did not run to success (result=${{ needs.surface-guard.result }}) — merge blocked"
             exit 1
           fi
           echo "✅ matrix green or skipped (docs-only PR)"

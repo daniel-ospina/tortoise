@@ -30,7 +30,7 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 // session mode; durableConnectKey + usableDurableRows resolve the connect
 // step's gate from the keys-table rows (Never-keys-only embed policy, #2426
 // decision 2).
-import { isManagedKey, durableConnectKey } from './sessionKey.js'
+import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from './sessionKey.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -106,6 +106,11 @@ const _MS_PER_DAY = 86400000
 // #2479 code-review fix P2: named constant for max re-auth attempts (spec: 1)
 const MAX_REAUTH_ATTEMPTS = 1
 const REAUTH_EXCEEDED_MESSAGE = 'Re-authentication failed — try again later or contact support.'
+// #3783 (review P2): how long the connect step waits on GET /v1/team/keys before
+// its wait state becomes actionable. A request that never settles produces no
+// rejection, so this bound is the only thing that turns a hang into a retry
+// instead of an infinite "Checking…" (the dead end the failed-read fix closes).
+const KEYS_LOAD_SLOW_MS = 12000
 
 // #2426: Custom date (YYYY-MM-DD) → whole days until that date, clamped to
 // 1..366. Null when missing/invalid/out-of-range — the + New key button stays
@@ -1081,6 +1086,47 @@ function claimIntentInFlight() {
   const [mountError, setMountError] = React.useState('')
   const [team, setTeam] = React.useState(null)
   const [keys, setKeys] = React.useState([])
+  // #3783 (review P2): `keys` initialises to [] — indistinguishable from a
+  // loaded-but-empty org. This flag marks whether the rows payload has actually
+  // ARRIVED, so the connect gate can render a wait state instead of a mint CTA
+  // in the window where a slow/failed GET /v1/team/keys would otherwise resolve
+  // 'mint' and can burn the plan's last key slot.
+  const [keysLoaded, setKeysLoaded] = React.useState(false)
+  // #3783 (review P2): `keysLoaded` flips on SUCCESS only, so it cannot tell
+  // "still in flight" from "the GET failed". The connect gate's 'loading' arm
+  // therefore had no failure exit — a failed or hanging keys read left the
+  // wizard on a dead wait (no mint, no action, reload-only). `keysLoadError`
+  // carries the failure so the gate resolves 'error' (a retryable state, still
+  // no mint); `keysLoadSlow` bounds a request that never settles at all (a hang
+  // never reaches loadAll's catch), degrading the wait to that same retry.
+  // `keysLoadNonce` re-arms the bound on every event that starts a fresh read:
+  // `keysLoaded` stays false across a retry AND across a team switch, so the
+  // flag alone would not restart the clock (see resetKeysLoadUnresolved below).
+  const [keysLoadError, setKeysLoadError] = React.useState('')
+  const [keysLoadSlow, setKeysLoadSlow] = React.useState(false)
+  const [keysLoadNonce, setKeysLoadNonce] = React.useState(0)
+  React.useEffect(() => {
+    if (keysLoaded) { setKeysLoadSlow(false); return undefined }
+    const t = setTimeout(() => setKeysLoadSlow(true), KEYS_LOAD_SLOW_MS)
+    return () => clearTimeout(t)
+  }, [keysLoaded, keysLoadNonce])
+  // #3783 (review P2, second pass): clear the unresolved keys-read state AND
+  // re-arm the wait bound, for EVERY event that starts a fresh read (logout, a
+  // team switch, the wizard's retry). `keysLoaded` is false both while a read is
+  // IN FLIGHT and after it FAILED (it flips on success only), so a caller
+  // cannot restart the effect's timer by touching that flag: the deps stay
+  // Object.is-equal, the effect does not re-run, and no timer is scheduled. The
+  // nonce is the re-arm trigger. Without it a team switch cleared `keysLoadSlow`
+  // while leaving the deps untouched — the new team's `loadAll('')` could then
+  // hang with the bound already spent and nothing left to fire, so the wait
+  // state had no action forever (the same dead wait this bound exists to
+  // prevent). Shared with the retry so the two cannot drift. The behaviour is
+  // EXECUTED by keysLoadRearmExec.test.js (the effect, these deps, this body).
+  function resetKeysLoadUnresolved() {
+    setKeysLoadError('')
+    setKeysLoadSlow(false)
+    setKeysLoadNonce((n) => n + 1)
+  }
   const [sessions, setSessions] = React.useState([])
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -1363,9 +1409,10 @@ function claimIntentInFlight() {
   // stated as two, which made the invariant unauditable.)
   const effectivelyPaused = wizardPaused && !serverHarnessConnected
   // #3428 (lane B3, option (a)): the success screen's capture sentence is
-  // DERIVED, never asserted — 'present' | 'future' | 'none'. Computed here so
-  // the derivation is a plain value (unit-testable without a React harness,
-  // which this repo does not have).
+  // DERIVED, never asserted — 'present' | 'future' | 'install-pending' | 'none'
+  // (#3782 added the pending state: nothing observed is not a promise). Computed
+  // here so the derivation is a plain value (unit-testable without a React
+  // harness, which this repo does not have).
   const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
@@ -4222,6 +4269,12 @@ function claimIntentInFlight() {
     setTeam(null)
     setStaleFired(false) // #1858: null→null when logging out from the terminal '—' state — the reset effect won't fire, so clear the per-load latch directly; the next session's skeleton must get a fresh floor
     setKeys([])
+    setKeysLoaded(false)
+    // #3783 (review P2): the failed/stalled read's state is per-user — never
+    // let one session's keys-read error (or a fired wait bound) land on the next.
+    // The helper also RE-ARMS the bound: logout leaves `keysLoaded` false, so
+    // clearing the flags alone would let the next session's read hang unbounded.
+    resetKeysLoadUnresolved()
     setSessions([])
     setNewKey(null)
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
@@ -4328,6 +4381,8 @@ function claimIntentInFlight() {
       ])
       if (orgIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
       setKeys(Array.isArray(k) ? k : k.keys || [])
+      setKeysLoaded(true)
+      setKeysLoadError('')
       // #2246 (ADR-010): the rule-5/7 held-key classification hook is DELETED
       // — no held key exists to classify in session mode (apiKey state is ''
       // and the KEY_STORAGE slot was purged at session resolution). keys[]
@@ -4337,7 +4392,16 @@ function claimIntentInFlight() {
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) {
+        setError(e.message)
+        // #3783 (review P2): Promise.all rejects both reads together, so a
+        // failure here means the keys payload never landed. Record it, so the
+        // connect gate resolves 'error' (retryable) instead of waiting on a
+        // read that has already failed — the 'loading' arm has no failure exit,
+        // which trapped the wizard until a full page reload.
+        setKeysLoadError(
+          (e && e.message) || 'Could not load your organization\u2019s API keys.')
+      }
     }
   }
 
@@ -4728,6 +4792,16 @@ function claimIntentInFlight() {
   // owner/admin, matching the server contract. The plaintext is shown ONCE —
   // the connect command embeds it (the reveal); afterwards the key is
   // managed/regenerable from the API Keys tab.
+  // #3783 (review P2): the connect step's in-wizard recovery for an unresolved
+  // keys read (a failed GET, or a wait that exceeded KEYS_LOAD_SLOW_MS). It
+  // re-issues the same load the mount used, so a transient failure no longer
+  // forces a page reload. Clearing the error flips the affordance back to the
+  // wait state (the retry's own feedback); the nonce re-arms the wait bound.
+  function wizardRetryKeysLoad() {
+    resetKeysLoadUnresolved()
+    loadAll('').catch(() => {})
+  }
+
   async function wizardMintDurableKey() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
@@ -4846,6 +4920,17 @@ function claimIntentInFlight() {
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
+    setKeysLoaded(false)
+    // #3783 (review P2): the previous team's keys-read failure (or a fired wait
+    // bound) must not render as the NEW team's state before its loadAll lands —
+    // and the bound must be RE-ARMED for that new read. `keysLoaded` is already
+    // false here, so clearing the flags alone leaves the effect's deps
+    // Object.is-equal: no re-run, no timer, and a hanging `loadAll('')` below
+    // would sit on the wait state with the action forever unavailable (reachable
+    // when the previous read already fired the bound, then the user switches
+    // without retrying). The helper bumps the nonce, which is what makes the
+    // effect below re-run and schedule a fresh timer.
+    resetKeysLoadUnresolved()
     setSessions([])
     clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
     setSessionDeletingId(null)
@@ -6324,6 +6409,15 @@ function claimIntentInFlight() {
   // create/rotate/paste ('rows-durable' when a usable durable exists, 'none'
   // when not).
   const durableConnect = durableConnectKey(welcomeKey, '', keys)
+  // #3783: the connect step's source-aware key gate. `durableConnect.source`
+  // already distinguishes 'rows-durable' (a usable row exists; its plaintext
+  // is not held) from 'none' (no key at all) — the wizard used to collapse
+  // both into the mint CTA, so an org whose key was provisioned at creation
+  // got a SECOND key minted here, spending the free tier's 2-key allowance on
+  // a key the user never chose to create, while the Overview (reading this
+  // same source) said an existing key was usable. Consumed by
+  // `wizardKeyAffordance` below.
+  const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -6483,7 +6577,9 @@ function claimIntentInFlight() {
   // no-key branch never offers a button that would 403.
   const wizardNoKeyAffordance = (
     <>
-      <p className="dim small">Create an API key to see the setup prompt.</p>
+      <p className="dim small">{isBuildFork
+        ? 'Create an API key to call the SDK from your application.'
+        : 'Create an API key to see the setup prompt.'}</p>
       <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
         <button type="button" className="btn-primary small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
           {wizardDurableBusy ? 'Creating…' : 'Create an API key'}
@@ -6506,6 +6602,105 @@ function claimIntentInFlight() {
       )}
     </>
   )
+
+  // #3783: the connect step's EXISTING-key affordance. `connectKeyGate` returns
+  // mode 'existing' when a usable durable row exists but its plaintext is not
+  // in this browser (keys are shown once). The step used to fall straight
+  // through to the mint CTA here, so an organization provisioned with a key at
+  // creation (created_via 'provisioned', name null) had a SECOND key minted at
+  // connect — burning the free tier's 2-key allowance on a key the user never
+  // chose to create — while the Overview banner read the same 'rows-durable'
+  // source and said an existing key was usable. Route to the existing key
+  // (rotating replaces it in place, without growing the count) and demote the
+  // fresh mint to an explicit choice whose cost is named. Owner/admin only
+  // (POST /v1/team/keys is _require_owner_admin); members keep the paste row.
+  const wizardExistingKeyAffordance = (
+    <>
+      <p className="dim small">
+        Your organization already has an API key
+        {connectGate.existing && connectGate.existing.key_prefix
+          ? <> (<code>{connectGate.existing.key_prefix}</code>, created {fmtTime(connectGate.existing.created_at)})</>
+          : null}{' '}
+        — its value can&apos;t be shown here: keys are displayed once, when they are created.
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        {/* Every connect-step exit clears the in-memory plaintext + cap state
+            (pinned by wizardConnectTripwire #3218/#3428) and lands on the tab
+            where the existing key can be rotated. */}
+        <button type="button" className="btn-primary small"
+          onClick={() => { setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardDurableCapped(false); setWizardShowPaste(false); setTab('keys') }}>
+          Use an existing key →
+        </button>
+        <button type="button" className="ghost small" aria-expanded={wizardShowPaste}
+          aria-controls={wizardShowPaste ? 'wizard-paste-row' : undefined}
+          onClick={() => setWizardShowPaste((v) => !v)}>
+          I already have a key — paste it instead
+        </button>
+        <button type="button" className="ghost small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+          {wizardDurableBusy ? 'Creating…' : 'Create a new key instead'}
+        </button>
+      </div>
+      <p className="wizard-note">
+        Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it
+        without adding a key. Creating a new key here spends another of your plan&apos;s key slots.
+      </p>
+      {wizardShowPaste && wizardPasteRow}
+      {!wizardShowPaste && wizardDurableError && (
+        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
+      )}
+    </>
+  )
+
+  // #3783 (review P2): the 'loading' mode offers NEITHER the mint nor the
+  // paste row — the rows GET has not landed, so "no key" is not a resolved
+  // answer and a mint CTA could burn a slot while an unloaded row already
+  // exists. The gate re-renders the moment `keysLoaded` flips.
+  const wizardLoadingKeyAffordance = (
+    <p className="dim small" aria-live="polite">Checking your organization&apos;s API keys…</p>
+  )
+
+  // #3783 (review P2 — the dead end this closes): the wait state above had no
+  // exit. `keysLoaded` flips on SUCCESS only, so a FAILED (or hanging) keys read
+  // left the connect step waiting forever: the mint was correctly withheld, but
+  // nothing replaced it, and the only recovery was a full page reload. An
+  // unresolved read is still NOT "no key" (offering a mint there re-opens the
+  // slot burn #3783 fixed), so this state keeps the mint withheld and adds the
+  // one honest action — retry the read in place. A failed read is ACTIONABLE,
+  // never a terminal wait.
+  const wizardKeysUnavailableKeyAffordance = (
+    <>
+      <p className="dim small" role="status">
+        {keysLoadError
+          ? `We couldn’t check your organization’s API keys — ${keysLoadError}`
+          : 'We still can’t see your organization’s API keys.'}
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        <button type="button" className="btn-primary small" onClick={wizardRetryKeysLoad}>
+          Try again
+        </button>
+      </div>
+      <p className="wizard-note">
+        We don&apos;t create a key until we can read the keys your organization already has — creating
+        one now could spend a plan slot on a key you already hold.
+      </p>
+    </>
+  )
+
+  // #3783: ONE role- and source-aware derivation for every keyed leaf, so the
+  // source-aware branch cannot drift between the shared, Codex Desktop and
+  // build-fork arms. Minting is offered ONLY when `connectGate.mode === 'mint'`
+  // (no usable key exists at all); 'existing' routes to the reuse path above;
+  // an unresolved read ('error', or a 'loading' that has exceeded the wait
+  // bound) shows the retryable state and NO mint; a read still in flight shows
+  // the wait state, also with no action.
+  const wizardKeyAffordance = connectGate.mode === 'error'
+    || (connectGate.mode === 'loading' && keysLoadSlow)
+    ? wizardKeysUnavailableKeyAffordance
+    : connectGate.mode === 'loading'
+      ? wizardLoadingKeyAffordance
+      : isOwnerAdmin
+        ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
+        : wizardPasteRow
 
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
@@ -6822,20 +7017,7 @@ function claimIntentInFlight() {
                           </>
                         ) : (
                           <>
-                            {isOwnerAdmin ? (
-                              <>
-                                <p className="dim small" style={{ margin: '0 0 0.6rem' }}>
-                                  Create an API key to call the SDK from your application.
-                                </p>
-                                <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
-                                  {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
-                                </button>
-                              </>
-                            ) : (
-                              <p className="dim" style={{ margin: 0 }}>
-                                Only owners and admins can create API keys. Ask an owner or admin to create one.
-                              </p>
-                            )}
+                            {wizardKeyAffordance}
                             <div style={{ marginTop: '0.6rem' }}>
                               {/* #3218: this arm is the NO-KEY branch (no
                                   plaintext is on screen here), so the clears
@@ -6880,9 +7062,6 @@ function claimIntentInFlight() {
                         </WizardBlock>
                       )}
 
-                      {wizardDurableError && (
-                        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
-                      )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
@@ -7092,7 +7271,7 @@ function claimIntentInFlight() {
                                   <p className="wizard-note">{KEY_VISIBILITY_NOTE}</p>
                                   {procedure}
                                 </>
-                              ) : wizardNoKeyAffordance}
+                              ) : wizardKeyAffordance}
                             </WizardBlock>
                           ) : (
                             <>
@@ -7137,8 +7316,12 @@ function claimIntentInFlight() {
                                      (POST /v1/team/keys is owner/admin-gated).
                                      A member on a keyed leaf keeps the paste
                                      escape they have today — never a mint CTA
-                                     that would 403. */
-                                  isOwnerAdmin ? wizardNoKeyAffordance : wizardPasteRow
+                                     that would 403. #3783: the same derivation
+                                     also routes an owner/admin who already has
+                                     a usable durable key to the existing-key
+                                     path instead of minting a second (which
+                                     spends the free tier's allowance). */
+                                  wizardKeyAffordance
                                 )}
                               </WizardBlock>
 
@@ -7263,21 +7446,30 @@ function claimIntentInFlight() {
                               <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
                               <p style={{ fontWeight: 600, margin: '0 0 0.5rem' }}>Connected</p>
                               <p className="dim" style={{ lineHeight: 1.6 }}>
-                                {/* Lane B3, option (a) / review cycle 3 P1-A, corrected in
-                                    cycle 4 (item 8): the TENSE follows the receipt
-                                    (present only on an observed per-harness receipt),
-                                    and the capability flag decides whether ANY sentence
-                                    prints at all ('none' for no install path, recording
-                                    off, or NO HARNESS PICKER offered). That is NOT a
-                                    guarantee that the printed sentence is
-                                    installed-truthful: HARNESS_CAPTURE_SUPPORT.pi is
-                                    true while Pi's installer ships no capture seam, so
-                                    a Pi user does read the 'future' sentence for a
-                                    capability that is not installed. That flag being
-                                    wrong is #3575 (lane B1) — this screen cannot
-                                    detect it. */}
+                                {/* Lane B3, option (a) / review cycle 3 P1-A,
+                                    corrected in cycle 4 (item 8), and #3782: the
+                                    sentence printed follows the server's
+                                    OBSERVATION, not the capability flag.
+                                    'present' prints only on an observed
+                                    per-harness RECEIPT; 'future' only once an
+                                    install PROBE was observed (the install is
+                                    confirmed server-side, capture has not fired);
+                                    'install-pending' — recording on, nothing
+                                    observed for this harness — prints the SAME
+                                    "not installed yet" string Settings renders
+                                    for the identical state, instead of promising
+                                    a capture the server never saw (#3782: live,
+                                    probe AND receipt were null while Settings
+                                    said "not installed yet"). The capability
+                                    flag still decides whether ANY sentence may
+                                    print ('none' for no install path, recording
+                                    off, or NO HARNESS PICKER offered). A true
+                                    flag with no installed seam (#3575, lane B1)
+                                    is still a separate defect this screen cannot
+                                    detect. */}
                                 {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
                                 {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
+                                {doneCaptureClaim === 'install-pending' && `Session capture is ${HARNESS_CAPTURE_STATUS_LABEL['install-pending']}. `}
                                 You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
                               </p>
                               {/* The redirect is PROSE, not a control: we cannot open
@@ -8138,7 +8330,7 @@ function claimIntentInFlight() {
                 wizard end): members can't create keys, and a fresh owner
                 create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {snippetKey || durableConnect.source === 'rows-durable'
+              {snippetKey || connectGate.mode === 'existing'
                 ? (isOwnerAdmin
                     ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
                     : "You're in — finish the setup below to connect your agent (paste the key an owner or admin shared with you).")
@@ -8197,7 +8389,7 @@ function claimIntentInFlight() {
               // one click away for owners (their only first-party surface).
               <p className="dim">
                 {isOwnerAdmin
-                  ? (durableConnect.source === 'rows-durable'
+                  ? (connectGate.mode === 'existing'
                       ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
                       : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
                   : "Your Organization is live — connect your agent below. You'll need an API key to paste: ask an owner or admin to share one."}
@@ -8214,9 +8406,25 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
+          // #3832 (D5): connected-and-genuinely-empty. The copy is the owner's
+          // APPROVED string, built verbatim from `d5-copy-v2.md` (③) — do not
+          // reword. Its two owner-named actions are HELD, not shipped:
+          //   [Tortoise Decide] — no in-product destination exists (decide is
+          //     an agent/CLI skill; the owner is choosing its target).
+          //   [Integrations]  — the LIVE wizard has NO integrations step
+          //     (WIZARD_STEPS is org-create → fork → connect → done); the
+          //     'Memory sources' step survives only in the ARCHIVED legacy
+          //     wizard (LEGACY_WIZARD_ARCHIVED = false). So the affordance
+          //     cannot be confirmed to land on a wizard integrations step and
+          //     the button is held too. The pre-existing action below is left
+          //     untouched so the state keeps a live destination.
           <section className="overview empty-state">
-            <h2>Welcome to your Tortoise graph</h2>
-            <p className="dim">Connect your agent so it remembers why, not just what — the decisions and findings it saves land here as memories.</p>
+            <h2>No memories yet</h2>
+            <p className="dim">
+              Your memory is connected — there's nothing in it yet. There are two ways to add
+              memory: <strong>Integrations</strong> (that's where the agent-session recorder
+              lives), or <strong>Tortoise Decide</strong>.
+            </p>
             <div className="empty-actions">
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
@@ -8471,7 +8679,7 @@ function claimIntentInFlight() {
                         />
                       ) : (
                         <span className="key-name">
-                          {k.name ? k.name : <span className="dim">—</span>}
+                          {keyDisplayName(k) ? keyDisplayName(k) : <span className="dim">—</span>}
                           {!k.revoked_at && isOwnerAdmin && (
                             <button
                               className="ghost small key-rename"
