@@ -2399,9 +2399,8 @@ class FalkorProjection(
         # this, `rebuild_all` restored every turn Point into an orphan —
         # success reported, container and links destroyed (the false PASS
         # #3947 removes). Captured alongside the two snapshots above — the
-        # episodic roster is read first (line ~1751), and all three reads are
-        # pre-wipe with no mutation between them, so they describe the same
-        # graph.
+        # episodic roster is read above, and all three reads are pre-wipe with
+        # no mutation between them, so they describe the same graph.
         session_snapshot: list[dict] = []
         session_point_links: list[tuple[str, str]] = []
         # #3947 review (cycle 2): this read is NOT best-effort like the two
@@ -3865,10 +3864,11 @@ class FalkorProjection(
                     "Failed to create index on Session.actor_user_id: %s", e)
 
         # ── Session.id index (#3947 review) ──
-        # `_link_session` (replay of a captured turn) and the live capture
-        # turn loop both MERGE `:Session {id:...}` once per turn; without an
-        # index each is a label scan, so replaying an N-turn session cost
-        # O(N²) — the exact path this fix makes reachable. String RANGE
+        # `_link_session` (the replay of a captured turn) MERGEs
+        # `:Session {id:...}` once per turn, and the live capture turn loop
+        # MATCHes the same key once per turn (`sdk.py` ~3399), so without an
+        # index each is a label scan — replaying an N-turn session cost O(N²),
+        # which is exactly the path this fix makes reachable. String RANGE
         # index, mirroring the id indexes above (the #522 composite hazard is
         # is_operator-BOOL-specific and does not apply).
         try:

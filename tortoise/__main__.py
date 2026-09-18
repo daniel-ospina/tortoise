@@ -6346,8 +6346,10 @@ def main(argv: list[str] | None = None) -> int:
     from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
     install_embedded_signal_cleanup()
     if args.cmd == "rebuild":
-        _cmd_rebuild(args)
-        return 0
+        # #3947 review (cycle 3): propagate the refusal's exit code — the
+        # handler's documented non-zero exit is worthless if the dispatcher
+        # discards it and returns 0 (the same false PASS, at the CLI edge).
+        return _cmd_rebuild(args)
     elif args.cmd == "demo":
         _cmd_demo(args)
         return 0
