@@ -549,6 +549,7 @@ surfaces:
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
   - test_security.py
   - test_semantic_extractor.py
+  - test_ship_test_onboarding.py   # #3806: the ship-test probe's guard (classifier + page-wide claim sweep + DOM/server readers + RED/GREEN mutation evidence); the browser half is tests/e2e/test_ship_test_onboarding.py, run by the dashboard-e2e job
   - test_skip_guard.py
   - test_slack_connector.py
   - test_sparse.py
@@ -706,6 +707,12 @@ surfaces:
   # `deploy` job, and a gate whose logic is only exercised during a production
   # deploy is a gate nobody has ever seen fail.
   - test_pages_bindings.py
+  # #3806: the ship-test instrument's guard, dual-registered here (its subject
+  # is the onboarding connection claim) and under `core` (its generic probe
+  # helpers). Both registrations are needed: the instrument itself is a
+  # `tools/` path, and listing it in SOURCE_PATTERNS' onboarding tuple is what
+  # makes a tool-only change select this surface at all.
+  - test_ship_test_onboarding.py
   # #3501: the BFF auth suites deliberately live under tests/e2e/auth/ and are
   # therefore NOT registered here. They stand up a real `wrangler pages dev`
   # server, a dependency-free mock Supabase process and (for the clickthrough) a
