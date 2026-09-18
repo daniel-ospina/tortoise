@@ -12,6 +12,13 @@ redirect lands on the dashboard LOGIN screen).
 Pure static text assertions: no browser, no network. Source files, not bundles,
 so regex anchoring to declaration patterns is reliable.
 
+#3485 is deliberately NOT pinned by text here. Its read/migrate/store invariants
+(the localStorage-only loop, expired-legacy displacement, corrupt-legacy
+containment, fragment-strip ordering) are EXECUTED against the real script in
+`website/apps/dashboard/src/supabaseSessionBridge.test.js` — three review cycles
+of brace/substring pins were each escaped by obfuscations that did not change
+behaviour, which is the whole reason a behavioural suite replaced them.
+
 ⚠️ THIS MODULE PINS A DESIGN THAT IS BEING RETIRED (#3501). The parent-domain
 cookie is a REVERSAL, not a fallback: it is JavaScript-readable by construction,
 which is the property #3501 exists to remove. This suite stays green for the

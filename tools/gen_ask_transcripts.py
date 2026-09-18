@@ -22,6 +22,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from tools.ask_spotcheck import seed_capture_turn_store
 from tortoise.reader import reader_prompt_constants
 from tortoise.retrieval import (
     DEFAULT_CONTEXT_ITEM_CAP,
@@ -40,27 +41,46 @@ def _sha256(text: str) -> str:
 
 
 def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
-    """Write the fixture's points + their Event nodes (startedAt from
-    session_date) so annotate_ask_hits reproduces the annotated hits.
-    ``supersedes_into`` (an id label) creates a real CORRECTS supersession so
-    the D8 markers render in the evidence."""
+    """Seed the fixture's memory in the CAPTURE shape (#3914).
+
+    Each seed is ONE TURN of its own session, written through
+    ``tools.ask_spotcheck.seed_capture_turn_store`` — the single
+    capture-shaped seeder — so this fixture cannot emit a graph the capture
+    path cannot produce. ``session_date`` is carried by a date-only
+    ``:Event`` marker (retained for fixture compatibility), and
+    ``supersedes_into`` (a label) creates a real CORRECTS supersession so the
+    D8 markers render.
+
+    Consequence of the shape (reported, not preserved): turn Points carry NO
+    ``sessionId`` / ``eventId`` prop, exactly as in capture. The identity the
+    shipping read reports therefore comes from the
+    ``(:Session)-[:CONTAINS]->(:Point)`` edge ALONE — which is what makes the
+    committed transcripts a real guard on that read — and the ``:Event`` date
+    join reaches NO turn, so the rendered blocks carry ``[session <sid>]``
+    with no ``(session date …)`` marker.
+
+    Seed keys ``kind`` / ``tags`` are NO LONGER honored: capture's turn store
+    takes neither, and a ``kind`` knob would let a seed silently opt out of
+    the turn shape — the very defect this seeder existed to stop teaching.
+    No committed fixture uses either key (unused dead branches removed).
+    """
     proj = sdk._get_proj()
     ids: dict[str, str] = {}
     for i, seed in enumerate(seeds):
-        point = sdk.create_point(seed.get("kind", "statement"),
-                                 seed["content"], tags=seed.get("tags", []))
-        pid = point["id"]
-        ids[seed.get("label", f"s{i}")] = pid
+        sid = seed.get("sessionId") or f"sess-{i}"
+        turn_ids = seed_capture_turn_store(
+            sdk, sid,
+            [{"role": seed.get("role") or "user",
+              "content": seed["content"]}])
+        if not turn_ids:
+            # Capture's pre-mutation blank gate — nothing was written.
+            continue
+        ids[seed.get("label", f"s{i}")] = turn_ids[0]
         event_id = seed.get("eventId") or f"ev-{i}"
         sdate = seed.get("session_date") or "2026-08-20"
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
             params={"eid": event_id, "st": f"{sdate}T10:00:00Z"},
-        )
-        proj.g.query(
-            "MATCH (p:Point {id: $pid}) SET p.eventId = $eid, p.sessionId = $sid",
-            params={"pid": pid, "eid": event_id,
-                    "sid": seed.get("sessionId") or f"sess-{i}"},
         )
     for seed in seeds:
         succ = seed.get("supersedes_into")
