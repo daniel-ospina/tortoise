@@ -99,6 +99,12 @@ surfaces:
   # tortoise/hosted_backup.py's restore/import swap; hosted_backup.py is
   # therefore added to SOURCE_PATTERNS["api"] + CORE_ALSO so both an api-only
   # and a hosted_backup.py-only change select it (the #2938 precedent).
+  # #3845: a hung GRAPH.COPY fork child holds its server's module-fork slot
+  # forever, so every later redisFork fails EEXIST and the whole DR/drill family
+  # blocks on a server that can never fork again. Pins tortoise/fork_slot.py
+  # against the hosted_backup.py copy sites, so it owns to `api` for the same
+  # reason as test_graphcopy_boolean_index_3154.py below (#2159 first-match).
+  - test_fork_slot_wedge_3845.py
   - test_graphcopy_boolean_index_3154.py
   - test_hosted_api.py
   # #3359: per-session provider-cost measurement — the hosted emit path
@@ -423,6 +429,12 @@ surfaces:
   - test_falkordb_compat.py
   - test_file_indexer.py
   - test_flip_gate.py
+  # #3845 part 2: the module-fork leak's producer + the fork-safe verbosity
+  # that keeps the GRAPH.COPY child off the macOS timezone rwlock. Owns to
+  # `core` (#2159 first-match) because what it pins — tortoise/fork_safety.py
+  # and the embedded choke point in tortoise/__init__.py — matches no named
+  # SOURCE_PATTERNS surface, so a change to either falls through to core.
+  - test_fork_safety_3845.py
   - test_fly_machines_guard.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py
@@ -739,6 +751,7 @@ surfaces:
   - test_ask_retrieval_levers.py
   - test_ask_sdk.py
   - test_ask_spotcheck_judge.py
+  - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge
   - test_client_surface.py
   - test_config.py
   - test_cross_lens.py

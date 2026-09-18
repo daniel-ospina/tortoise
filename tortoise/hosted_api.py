@@ -8551,7 +8551,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # role normalization (None -> "unknown", truthy non-strings -> str()), and
     # the same `speaker` property write (delta 5 — hosted previously wrote no
     # speaker tag). Hosted additionally adds quota/auth bounds + a pre-write
-    # estimate. Keep the two in sync. The LLM extraction that follows the
+    # estimate. Keep the two in sync — and note the THIRD copy:
+    # tools/ask_spotcheck.py::_seed_memory mirrors this same per-turn store
+    # (id, `[role] ` framing, prop set, CONTAINS edge) to seed the QA
+    # spot-check fixture (#3910). #3551 tracks collapsing all three onto
+    # one shared primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
@@ -22509,10 +22513,17 @@ def _drill_execute(
     except Exception:
         pass
     within_rto = duration_s <= _DRILL_RTO_S
+    # #3845: surface a wedge distinctly — "fork slot wedged" must never be
+    # readable as a plain "copy failed". Absent on the clean path, so a healthy
+    # drill record is unchanged.
+    detail = {k: v for k, v in (
+        ("restored", result.get("restored")),
+        ("fork_slot", result.get("fork_slot")),
+    ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",
         org_id=org_id, graph_id=graph_id, backup_key=backup_key,
-        duration_s=duration_s, detail={"restored": result.get("restored")},
+        duration_s=duration_s, detail=detail,
     )
     _write_drill_record(storage, record)
     return {
