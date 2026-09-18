@@ -24,15 +24,24 @@ regex test would miss the three defects the review cycles actually caught:
 
 Node is optional (the repo's convention — see test_cross_subdomain_cookie_sync):
 the test skips cleanly when node is unavailable.
+
+#3952 extends the subject from reachability to RENDERABILITY: the URL the gate
+returns you to must be able to load its own bundle. The console SPA is built
+with an absolute `base: '/admin/'`; a relative base resolved against the
+document URL, so the extensionless `/admin` (the form the gate emits in
+`next=`) requested `/assets/index-*.js` and rendered blank. The three #3952 tests
+at the end of this file pin the build base, the committed snapshot's asset
+resolution, and that the referenced files actually exist.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import pytest
 
@@ -572,4 +581,130 @@ def test_console_spa_carries_the_return_to() -> None:
     assert "window.location.pathname" in body, "the helper does not use the pathname"
     assert "window.location.search" not in body, (
         "the helper appends the query, which /auth rejects — dropping the return-to (#3080)"
+    )
+
+
+# ── #3952 — the console the gate returns you to must actually RENDER ──────
+
+DIST_INDEX = REPO_ROOT / "website" / "apps" / "blog-admin" / "dist" / "index.html"
+VITE_CONFIG = REPO_ROOT / "website" / "apps" / "blog-admin" / "vite.config.ts"
+
+# Vite emits exactly two asset-bearing tags into the shell: the module script and
+# the stylesheet link. Selecting by TAG (rather than by every `src`/`href` in the
+# document) is what scopes this to the refs Vite owns — a hand-authored favicon
+# `<link rel="icon">`, an `<a href>`, or a `#/route` fragment cannot be mistaken
+# for the bundle.
+_VITE_ASSET_TAG = re.compile(
+    r'<script\b[^>]*\bsrc="([^"]+)"'
+    r'|<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"',
+    re.IGNORECASE,
+)
+
+
+def _console_asset_refs() -> list[str]:
+    """Vite-emitted asset refs in the COMMITTED console shell.
+
+    Also requires a JS module ref: the stylesheet alone would still satisfy a
+    shape check while `<div id="root">` stays empty and the console renders blank
+    — the exact outcome this guard exists to catch (#3952).
+    """
+    html = DIST_INDEX.read_text(encoding="utf-8")
+    refs = [a or b for a, b in _VITE_ASSET_TAG.findall(html) if not (a or b).startswith("data:")]
+    assert refs, f"no Vite-emitted asset references in {DIST_INDEX}"
+    assert any(r.endswith(".js") for r in refs), (
+        f"no JS module ref in {DIST_INDEX} — the shell would render no script and "
+        "the console would render blank (#3952)"
+    )
+    return refs
+
+
+@pytest.mark.parametrize(
+    "doc_url",
+    [
+        # The canonical console URL — and the exact form the gate's next= emits.
+        # BROKEN with the old relative base (prefix '/').
+        f"{ORIGIN}/admin",
+        # Trailing-slash form — renders today; must not regress.
+        f"{ORIGIN}/admin/",
+        # Even-depth shell route — happened to resolve correctly with './' too.
+        f"{ORIGIN}/admin/blog",
+        # Odd-depth shell route — BROKEN with the old relative base
+        # (prefix '/admin/blog/' → '/admin/blog/assets/...').
+        f"{ORIGIN}/admin/blog/edit",
+    ],
+)
+def test_console_bundle_resolves_under_admin_from_every_entry_path(doc_url: str) -> None:
+    """#3952: every entry path that serves the shell must be able to load its bundle.
+
+    A RELATIVE base ('./') resolves against the DOCUMENT URL (RFC 3986 §5.2.3
+    "Merge Paths"), so whether it worked depended on the document's segment depth.
+    At `/admin/` and
+    `/admin/blog` the base prefix is `/admin/`, so `./assets/...` resolved to the
+    real bundle. At the extensionless `/admin` — the canonical console URL, and the
+    very form the gate emits in its own `next=` — the prefix is `/`, so the shell
+    requested `/assets/index-...js`, which is never deployed (CI stages the SPA into
+    website/admin/, so the bundle exists only at /admin/assets/). Odd-depth forms
+    like `/admin/blog/edit` failed the same way. Result: `<div id="root"></div>`
+    with no script = blank page.
+
+    Scope of this assertion: it pins the COMMITTED build snapshot. It is not the
+    byte-identical deployed bundle — CI rebuilds with VITE_* env substitution, so
+    the deployed JS filename differs. The base that build derives from is pinned
+    by `test_vite_base_is_the_console_public_path` below; the staging/mount
+    destination is not asserted here (filed as #3954).
+    """
+    for ref in _console_asset_refs():
+        resolved = urlparse(urljoin(doc_url, ref)).path
+        # The invariant is DOCUMENT-INDEPENDENCE: the bundle lives at one place,
+        # so resolving a reference from any entry path must name that same place.
+        # (Asserting merely "starts with /admin/" is too weak — under the old
+        # relative base `/admin/blog/edit` resolved to `/admin/blog/assets/...`,
+        # which is still under /admin/ but is not where the bundle is deployed.)
+        canonical = urlparse(urljoin(f"{ORIGIN}/admin/", ref)).path
+        assert canonical.startswith("/admin/"), (
+            f"{ref!r} does not resolve under /admin/ — the console bundle is never "
+            "deployed outside /admin/assets/ (#3952)"
+        )
+        assert resolved == canonical, (
+            f"{doc_url} → {ref!r} resolves to {resolved!r}, but the bundle is deployed "
+            f"at {canonical!r} — resolution depends on the entry path, so a 404 and a "
+            "blank console are possible (#3952)"
+        )
+
+
+def test_console_bundle_files_are_present() -> None:
+    """#3952: the shell's refs must name files that actually exist in the snapshot.
+
+    A shape-only assertion stays green on the very outcome it exists to prevent: a
+    ref to a nonexistent hash is exactly the 404 that blanks the console.
+    """
+    for ref in _console_asset_refs():
+        resolved = urlparse(urljoin(f"{ORIGIN}/admin/", ref)).path
+        rel = resolved.removeprefix("/admin/")
+        assert (DIST_INDEX.parent / rel).is_file(), (
+            f"the shell references {ref!r} but {rel!r} does not exist in "
+            f"{DIST_INDEX.parent} — the browser would 404 and the console would "
+            "render blank (#3952)"
+        )
+
+
+def test_vite_base_is_the_console_public_path() -> None:
+    """#3952: the base must be ABSOLUTE, and equal to the gate's mount path.
+
+    The base path is known and fixed, so the absolute form is the documented
+    treatment. Vite documents the relative form as the fallback "if you don't know
+    the base path in advance" (vite.dev/guide/build.html → "Relative base").
+
+    The expected value is derived from the gate Function's own directory
+    (`functions/admin/[[path]].ts` → `/admin/`), not hardcoded, so a rename of the
+    console route cannot silently diverge from the build base.
+    """
+    cfg = VITE_CONFIG.read_text(encoding="utf-8")
+    m = re.search(r"^\s*base:\s*['\"]([^'\"]*)['\"]", cfg, re.MULTILINE)
+    assert m, "no `base` in vite.config.ts — the SPA inherits the default '/'"
+    mount = f"/{GATE.parent.name}/"
+    assert m.group(1) == mount, (
+        f"vite base is {m.group(1)!r}, must be the absolute {mount!r} — the path the "
+        "gate Function mounts the console at. A relative base re-breaks the "
+        "extensionless /admin entry path (#3952)"
     )
