@@ -568,9 +568,13 @@ embedded_family:
                                  # test_backup_e2e.py (C19) but cannot demonstrate the family's red
   - whole-suite                  # supported, never the family's evidence
   expected_causes:               # CAUSE labels (F15); values are tools/embedded_evidence.CAUSE_CLASSES keys
+                                 # DERIVED in code (EXPECTED_CAUSES), never a hand-written copy: a class added
+                                 # to DETECT a cause must be a cause the record EXPECTS, or the class that exists
+                                 # to detect it invalidates the record (`cause-not-expected`) the moment it fires.
   - save-child-slot              # (renamed from `expected_signatures` — M29: "signature" held two meanings)
   - aof-rewrite-fork
   - module-fork-hang
+  - module-fork-eexist           # EEXIST refusal with no save/AOF discriminator (the #3845 sibling)
   lane_mix:                      # M23: the family selection deliberately mixes two lane classes
     redirect_exempt: [test_hosted_backup.py, test_backup_e2e.py]  # in TEST_NO_REDIRECT_STEMS
     redirect_non_exempt: [test_dr_endpoints.py]                   # api-surface; NOT redirect-exempt
@@ -723,7 +727,7 @@ reused verbatim because its fixed `.tmp` name is not writer-safe):
     "name": "family",                          // family | carve-out | whole-suite
     "files": ["test_dr_endpoints.py", "..."],  // the tests/-relative names actually run
     "source": "config/ci-surfaces.yml:embedded_family.family_reproducers",
-    "expected_causes": ["save-child-slot", "aof-rewrite-fork", "module-fork-hang"]
+    "expected_causes": ["module-fork-hang", "module-fork-eexist", "aof-rewrite-fork", "save-child-slot"]
     // renamed from `expected_signatures` — M29: a "signature" was both a CAUSE LABEL and a HASH
   },
   "selector": {
@@ -834,6 +838,8 @@ reused verbatim because its fixed `.tmp` name is not writer-safe):
   },
 
   "verdict": { "status": "RED-AT-PINNED-REF", "green_only": false, "attributable": true,
+               // `attributable` is DERIVED from `red.cause` — true only when the cause is a real class
+               // (not null, not `unattributed`); it is never a literal.
                "closes_issue": false, "violations": ["..."], "reasons": ["..."] },
   // M1: `violations` is the field D8's exit_code() branches on; `reasons` is appended per failing
   // conjunct by closes_issue() (never left empty on a false conjunct).
