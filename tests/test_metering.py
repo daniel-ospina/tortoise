@@ -63,8 +63,8 @@ def _break_increment_only(monkeypatch, sdk) -> None:
     reads the billing anchor through it, and the increment issues its
     ``MERGE (m:MeteringRecord …)`` through it. A blanket ``_reg_sdk`` raise is
     therefore no longer a statement about the increment at all — since #3825 it
-    makes the WINDOW unresolvable, and window resolution is FAIL-CLOSED (see
-    ``test_anchor_read_failure_refuses_the_write``, which pins that refusal).
+    makes the WINDOW unresolvable, and window resolution RAISES by design (see
+    ``test_anchor_read_failure_raises_the_signal``, which pins that signal).
 
     Injecting the failure BY STATEMENT — everything delegates to the real
     registry except the increment's MERGE — lets the window resolve and breaks
@@ -158,23 +158,31 @@ class TestRecordWriteOps:
 
         #3825: only the increment is broken here (``_break_increment_only``).
         A blanket ``_reg_sdk`` failure would now make the window unresolvable,
-        and window resolution is FAIL-CLOSED by design — so the old shape could
-        not tell "I could not resolve the window" apart from "the row write
-        failed". The window resolves; the MERGE raises; the write is non-fatal.
+        and window resolution RAISES by design — so the old shape could not
+        tell "I could not resolve the window" apart from "the row write
+        failed". The window resolves; the MERGE raises; the write is non-fatal
+        (the increment is dropped — it is NOT retried at any call site; that
+        residual is #3824's representation scope).
         """
         sdk, tid = reg_sdk
         _break_increment_only(monkeypatch, sdk)
         with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
             result = record_write_ops(tid, tier="pro")
-        assert result is None  # non-fatal: the window was known and retryable
+        assert result is None  # non-fatal: only the increment failed
         assert any("increment failed" in r.message for r in caplog.records), (
             [r.message for r in caplog.records]
         )
 
-    def test_anchor_read_failure_refuses_the_write(self, reg_sdk, monkeypatch):
+    def test_anchor_read_failure_raises_the_signal(self, reg_sdk, monkeypatch):
         """The OTHER half of the pair (#3825): when the ANCHOR READ fails, the
-        org's window is unresolvable and window resolution is FAIL-CLOSED — the
-        write is REFUSED with ``QuotaCheckError``, never silently dropped.
+        org's window is unresolvable and the writer RAISES ``QuotaCheckError``.
+
+        #3981: that raise is a SIGNAL, not enforcement. This is the module
+        boundary; every production caller absorbs it, serves the request and
+        reports the dropped increment to the operator
+        (``metering.report_unmetered_increment``). The user-facing refusal is
+        the pre-spend admission gate, never this raise. The assertion below is
+        therefore about the WRITER's contract, not about a refused write.
 
         ``test_non_fatal_on_db_error`` above pins the increment-RPC half (window
         known → non-fatal). Together the two tests hold the paths APART: the

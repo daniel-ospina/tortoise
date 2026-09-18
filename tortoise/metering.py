@@ -89,6 +89,7 @@ for quota-gated tools (the ``_QUOTA_GATED`` set). Stdio/selfhost mode
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -267,11 +268,19 @@ def _current_period(org_id: str) -> MeteringPeriod:
     Subscription present → the subscription's own billing period. No
     subscription → the calendar month in UTC (D13).
 
-    FAIL-CLOSED, and deliberately NOT tolerant of a half-known anchor. An org
-    that carries a ``subscription_id`` but whose period cannot be resolved
-    (missing, unparseable, naive, or inverted) RAISES
+    Deliberately NOT tolerant of a half-known anchor. An org that carries a
+    ``subscription_id`` but whose period cannot be resolved (missing,
+    unparseable, naive, or inverted) RAISES
     :class:`~tortoise.quota.QuotaCheckError` rather than falling back to the
     calendar month. A read failure raises too.
+
+    WHAT THAT RAISE IS DEPENDS ON WHO CALLS IT (#3981). On the **read** path
+    (``cohort_cost.enforce_cohort_cost_cap``, via ``metering_cohort_spend``)
+    it IS an enforcement: the spend ceiling refuses to answer, so it can never
+    silently over-read. On the **write** path (the three ``record_*`` writers,
+    via ``_require_period``) it is a **SIGNAL, not enforcement** — every
+    production caller absorbs it, alerts the operator and serves the request.
+    The user-facing refusal, where one exists, is the pre-spend admission gate.
 
     ``org_id`` is REQUIRED — the previous zero-argument form was structurally
     incapable of resolving a per-subscription anchor, which is how the whole
@@ -283,7 +292,7 @@ def _current_period(org_id: str) -> MeteringPeriod:
         raise QuotaCheckError(
             f"metering window unresolvable for org {org_id!r}: the billing "
             f"anchor read failed ({e}) — refusing to fall back to a calendar "
-            f"month (fail-closed)"
+            f"month (no calendar-month fallback)"
         ) from e
     sub_id = anchor.get("subscription_id")
     if sub_id is None or not str(sub_id).strip():
@@ -296,50 +305,84 @@ def _current_period(org_id: str) -> MeteringPeriod:
             f"subscription {sub_id!r} but its billing period is not a usable "
             f"half-open interval (start={anchor.get('current_period_start')!r}, "
             f"end={anchor.get('current_period_end')!r}) — refusing to meter a "
-            f"subscription org on a calendar month (fail-closed)"
+            f"subscription org on a calendar month (no calendar-month fallback)"
         )
     return MeteringPeriod(start=start, end=end)
 
 
 def _require_period(org_id: str, what: str) -> MeteringPeriod:
-    """Window resolution for the WRITE paths — FAIL-CLOSED (#3825).
+    """Window resolution for the write paths — a raised SIGNAL (#3825/#3981).
 
     This was ``_resolve_period_or_none``: it DROPPED the increment and returned
-    None, on the long-standing best-effort contract (#681/#923). That was a
-    hole in the cohort cap. A dropped increment leaves the ledger SHORT, so the
-    cohort SUM undercounts and the cap fires LATE — spending real money past the
-    cap. The cap's read path (``_current_period``, reached via
-    ``metering_cohort_spend``) has always RAISED for the same org, so writer and
-    reader disagreed: the reader refused to answer while the writer forgot.
+    None, on the long-standing best-effort contract (#681/#923). #3825 replaced
+    the silent drop with a raise, on the reasoning that a dropped increment
+    leaves the ledger SHORT, so the cohort SUM undercounts and the cap fires
+    LATE — spending real money past the cap. That reasoning is sound; what
+    shipped with it did not hold end-to-end.
 
-    Now the write path fails exactly when the read path fails. An unresolvable
-    window RAISES :class:`~tortoise.quota.QuotaCheckError` — the increment is
-    neither dropped nor re-attributed to a calendar month.
+    WHAT THIS IS, AND WHAT IT IS NOT (#3981): this is a **SIGNAL**. It is NOT
+    enforcement. An unresolvable window RAISES
+    :class:`~tortoise.quota.QuotaCheckError`, but every production caller of
+    the three ``record_*`` writers wraps the call in a broad ``except`` and
+    absorbs the raise: the request is served and the increment is dropped,
+    exactly as before #3825. A raise nobody re-raises refuses nothing. The
+    user-facing refusal, where one exists, lives at the **pre-spend admission
+    gate** (``cohort_cost.enforce_cohort_cost_cap``, reached from the hosted
+    capture path BEFORE any spend), which resolves the window itself and does
+    refuse. Nothing here adds or removes that refusal.
 
-    WHICH WAY THIS FAILS, AND WHY: it fails CLOSED. A cap that fires LATE spends
-    real money; a cap that fires EARLY refuses a request that could have been
-    served. Refusing is recoverable — the operator fixes the anchor and the call
-    is retryable — whereas an uncounted increment is not recoverable, because
-    nothing on the graph records that it happened. The cost is real and is
-    accepted here: a window-resolution failure now REFUSES the user write
-    instead of silently skipping the meter. An unmeterable write is
-    indistinguishable from free spend, and free spend is what this cap exists
-    to stop.
+    So the callers report the drop to the OPERATOR — never silently, and never
+    to the user: a bookkeeping fault of ours must never hand a user a 500
+    (``report_unmetered_increment``, one lane per swallow site). What was
+    recoverable about the old behaviour was the *silence*, which is why the
+    request is still served and the drop is still announced.
 
-    Scope of the reversal — ONLY window resolution. A failure of the increment
-    RPC itself stays non-fatal (see each caller's ``try``/``except``): there the
-    window is known and the spend remains countable on retry, so it is not this
-    hole.
+    Scope: ONLY window resolution. A failure of the increment RPC itself stays
+    non-fatal inside each writer — logged at WARNING and dropped, not retried
+    at any call site. That is a separate residual; representing it is #3824.
     """
     try:
         return _current_period(org_id)
     except Exception as e:
         _logger.error(
-            "%s REFUSED — the org's metering window is unresolvable "
-            "(fail-closed, no calendar-month fallback): team=%s error=%s",
+            "%s: the org's metering window is unresolvable (no calendar-month "
+            "fallback) — the increment will be DROPPED and the caller reports "
+            "it to the operator. This raise is a SIGNAL, not a refusal "
+            "(#3981): team=%s error=%s",
             what, org_id, e,
         )
         raise
+
+
+def report_unmetered_increment(lane: str, org_id: str | None,
+                               error: BaseException) -> None:
+    """Operator alert: an increment the ledger will NOT contain (#3981).
+
+    Call this from the ``except`` handler that absorbs a failed ``record_*``
+    writer. Under the recorded #3825/#3981 ruling the request is SERVED — a
+    bookkeeping fault of ours must never become a user-facing refusal — and the
+    increment is therefore gone. That is the defect the silent
+    ``except Exception: pass`` left behind: a ledger that reads short with no
+    trace anywhere. This is the trace.
+
+    ``lane`` names the swallow site (one stable token per site) so an alert is
+    attributable to the handler that dropped the increment rather than to
+    "metering failed somewhere". The six lanes are ``write_op``,
+    ``object_write_op``, ``subject_write_op``, ``capture_ledger``,
+    ``mcp_write_op`` and ``ask_ledger``.
+
+    Never raises: the alert itself must not become a new failure path (a signal
+    that can raise is a refusal by another name).
+    """
+    with contextlib.suppress(Exception):  # the alert must never raise
+        _logger.error(
+            "UNMETERED INCREMENT (#3981): lane=%s team=%s error=%s: %s — the "
+            "request was served and the ledger will read short for this "
+            "window; the pre-spend admission gate is the only enforcement "
+            "point on this lane",
+            lane, org_id or "<none>", type(error).__name__, error,
+            exc_info=error,
+        )
 
 
 def _display_period_label() -> str:
@@ -420,14 +463,18 @@ def record_write_ops(org_id: str, tier: str | None = None, n: int = 1,
     Returns:
         ``{write_ops, nodes_written, period, ops_allowance, overage_eligible}``
         for threshold checking, or None if the increment RPC is unreachable
-        (non-fatal — an RPC failure leaves the window known and retryable).
+        (non-fatal — the window is known, and the drop is logged at WARNING:
+        it is NOT retried at any call site, so that increment is not
+        recovered. Representing an unmeterable increment is #3824).
 
     Raises:
-        QuotaCheckError: the org's metering window is unresolvable. This is
-            FAIL-CLOSED and REFUSES the write (#3825) — a write that cannot be
-            metered is indistinguishable from free spend, and a cap that fires
-            late spends real money. Only window resolution raises; a failure of
-            the increment RPC itself is still logged and swallowed.
+        QuotaCheckError: the org's metering window is unresolvable. This is a
+            SIGNAL, not enforcement (#3981): this writer's callers absorb the
+            raise, alert the operator and serve the request, so it refuses no
+            user request. Enforcement -- where a refusal exists -- lives at the
+            pre-spend admission gate. Only window resolution raises; a failure
+            of the increment RPC itself is still logged and swallowed (the
+            window is known, but the increment is dropped — see Returns).
     """
     if not org_id:
         return None
@@ -629,9 +676,12 @@ def record_ask_usage(org_id: str | None, tier: str | None = None, *,
                      _selfhost_transport: bool = False) -> dict | None:
     """Record a per-query ask usage increment (#1987 Task 6).
 
-    Window resolution is FAIL-CLOSED (#3825): an unresolvable window REFUSES
-    the answer rather than dropping the increment. The increment RPC itself
-    stays non-fatal — there the window is known and the spend stays countable.
+    Window resolution RAISES on an unresolvable anchor (#3825) rather than
+    keying the row to a calendar month. That raise is a SIGNAL, not a refusal
+    (#3981): the caller (``sdk.ask``) absorbs it, serves the answer and reports
+    the dropped increment to the operator. A failure of the increment RPC
+    itself stays non-fatal — logged at WARNING and dropped, not retried at any
+    call site (representing that increment is #3824).
     Extends the ``:MeteringRecord`` (registry) with additive fields
     ``ask_calls``/``ask_tokens_in``/``ask_tokens_out``/``ask_cost_usd`` via
     the MERGE+coalesce pattern (mirrors ``record_write_ops``); Supabase mode
@@ -793,9 +843,12 @@ def record_capture_usage(org_id: str | None, *, calls: int = 1,
                          _selfhost_transport: bool = False) -> dict | None:
     """Record the MEASURED cost of one capture extraction attempt.
 
-    Window resolution is FAIL-CLOSED (#3825): an unresolvable window REFUSES
-    the capture rather than dropping the increment. The increment RPC itself
-    stays non-fatal — there the window is known and the spend stays countable.
+    Window resolution RAISES on an unresolvable anchor (#3825) rather than
+    keying the row to a calendar month. That raise is a SIGNAL, not a refusal
+    (#3981): the caller absorbs it, the capture is served and the dropped
+    increment is reported to the operator. A failure of the increment RPC
+    itself stays non-fatal — logged at WARNING and dropped, not retried at any
+    call site (representing that increment is #3824).
     Exemptions mirror ``record_ask_usage``: ``not org_id`` (stdio/None) or
     the selfhost-transport ContextVar (``_selfhost_transport``).
 

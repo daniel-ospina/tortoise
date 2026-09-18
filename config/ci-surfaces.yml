@@ -31,6 +31,7 @@ surfaces:
   - test_graph_write_loop_responsiveness.py
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_metering_period_window.py
+  - test_metering_window_admission.py  # #3981: the six swallow sites report the dropped increment (caller-level; the coverage is the proof)
   - test_onboarding_email_http.py
   - test_sentry.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
