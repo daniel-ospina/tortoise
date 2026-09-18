@@ -19,8 +19,8 @@ Worktree: `.worktrees/feat/3834-cold-busy-wait-bound` (branch from `origin/main`
 
 > **Scope of this document's code references.** This is a dated plan and review record. Any
 > `<file>.py:<line>` reference below is **as of the section that cites it** and is expected to drift as
-> the branch moves — a reading aid, not a maintained claim. The citations **this change adds or rewrites**
-> are symbol-based, so they cannot go stale. (Pre-existing references of
+> the branch moves — a reading aid, not a maintained claim. The **code** citations this change adds or
+> rewrites (comments and docstrings) are symbol-based, so they cannot go stale. (Pre-existing references of
 > that kind elsewhere in this repo, whose targets shift whenever the target file is edited, are the
 > subject of #4049.) A `## Cycle-*` section or a
 > plan-body sentence is likewise the record **as it stood when written** — including the mandated

@@ -123,6 +123,18 @@ class TestAsk:
         return calls
 
     def test_ask_returns_200_shape(self, monkeypatch, tmp_path):
+        # This is a SHAPE test, so it must not race the one-time lazy embedder
+        # load: the shipped 10s bound (`quota._ASK_TIMEOUT_S`) deliberately cuts
+        # a cold load, and hosted shields itself with a startup pre-warm (this
+        # codebase sizes the load at ~16-27s on a cold box, above the bound) —
+        # the selfhost lifespan does NOT pre-warm, so without the warm-up below
+        # this test passes only when a sibling test in the file already loaded
+        # the model, i.e. it is order-dependent and reds when run alone. The
+        # product consequence of a cold selfhost first ask is tracked
+        # separately (#4055); it is not this test's subject.
+        from tortoise.embeddings import EmbeddingModel
+
+        EmbeddingModel.get()
         tc = _client_for_env(monkeypatch, tmp_path)
         calls = self._install_fake_reader(monkeypatch)
         with tc:
