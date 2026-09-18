@@ -170,6 +170,26 @@ CAUSE_CLASSES: dict[str, dict] = {
     },
 }
 
+# The set of causes a RED may be labelled with — DERIVED from CAUSE_CLASSES, never a
+# hand-written copy. The copy is how `module-fork-eexist` (added to DETECT a real
+# cause) reached CAUSE_CLASSES while `expected_causes` kept the old three: the class
+# that exists to detect the cause became the one that invalidated the record
+# (`cause-not-expected`) the moment it fired, so that cause could never produce a
+# valid RED. Deriving makes the omission unrepresentable — a class added to detect a
+# cause IS, by construction, a cause the record expects. `unattributed` is excluded:
+# it is the absence of a cause, and closes_issue() rejects it separately
+# (`cause-unattributed`).
+EXPECTED_CAUSES: tuple[str, ...] = tuple(c for c in CAUSE_CLASSES if c != "unattributed")
+
+# The sibling of the same bug, one line away: a class in CAUSE_CLASSES but absent from
+# CAUSE_PRECEDENCE is UNREACHABLE — label_cause() only visits CAUSE_PRECEDENCE, so the
+# class would be declared, documented and never emitted. Fail closed here rather than
+# ship a class that can never fire.
+assert set(CAUSE_PRECEDENCE) | {"unattributed"} == set(CAUSE_CLASSES), (
+    "CAUSE_CLASSES and CAUSE_PRECEDENCE disagree — declared but unreachable: "
+    f"{sorted(set(CAUSE_CLASSES) - set(CAUSE_PRECEDENCE) - {'unattributed'})}"
+)
+
 # The refusal line that both save-child-slot and module-fork-hang emit.
 FORK_REFUSAL_RE = re.compile(r"Can't fork for module:")
 MODULE_FORK_STARTED_RE = re.compile(r"Module fork started pid:\s*(\d+)")
@@ -223,6 +243,17 @@ def label_cause(lines: list[str]) -> tuple[str, dict]:
         "module_forks_unexited": sorted(unexited),
         "module_fork_exited_absent": bool(started) and not exited,
     }
+
+
+def attributable(cause: str | None) -> bool:
+    """Whether a red's cause is an ATTRIBUTED one — the DERIVATION behind
+    `verdict.attributable` (it was the literal `True`, so a record with
+    `red.cause == null` claimed an attribution it did not have).
+
+    `None` = no red run at all; `"unattributed"` = the label_cause() fallback, i.e.
+    the log stated no cause this tool recognises. Neither is attributable.
+    """
+    return bool(cause) and cause != "unattributed"
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +718,11 @@ def _build_record(args: argparse.Namespace) -> dict:
     green_band = (green_runs[0]["load"]["band"] if green_runs else red_band)
     cause = red_run["redis_log_cause"] if red_run else None
     cause_evidence = red_run["cause_evidence"] if red_run else {}
+    # DERIVED from the label it summarises, never a literal (it was `True`).
+    # `attributable` is a claim ABOUT `red.cause`, so a record with `red.cause ==
+    # null` (no red run) or `unattributed` was claiming an attribution it does not
+    # have.
+    attributable_ = attributable(cause)
 
     rec = {
         "schema": "embedded-evidence/1",
@@ -697,7 +733,7 @@ def _build_record(args: argparse.Namespace) -> dict:
         "selection": {
             "name": args.selection,
             "files": files,
-            "expected_causes": ["save-child-slot", "aof-rewrite-fork", "module-fork-hang"],
+            "expected_causes": list(EXPECTED_CAUSES),
         },
         "manifest": mrec,
         "pin": {
@@ -762,7 +798,7 @@ def _build_record(args: argparse.Namespace) -> dict:
         "verdict": {
             "status": "RED-AT-PINNED-REF" if red_runs else "ALL-GREEN",
             "green_only": not red_runs,
-            "attributable": True,
+            "attributable": attributable_,
             "environment_error": False,
             "closes_issue": False,
             "violations": [],
