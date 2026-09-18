@@ -24,6 +24,7 @@ TORTOISE_DB_PATH at a per-test temp db (runs under any lane).
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
@@ -566,6 +567,157 @@ def test_install_codex_leaves_foreign_volunteer_hook_untouched(tmp_path):
     cmd = cfg["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     assert cmd == foreign  # live foreign hook untouched
     assert len(cfg["hooks"]["UserPromptSubmit"]) == 1
+
+
+# ── #3808 R27 — the read-half failure boundary is TOTAL, not a list ──────
+# The boundary that turns a read-half failure into a populated "Install
+# failed" refusal is a catch-all, not an exception enumeration.  The
+# raise-set is NOT closed, and an `except (A, B, ...)` tuple is refutable by
+# the next unenumerated member — which is exactly how #3987 ({"hooks": null}
+# → TypeError) and #3988 (non-UTF-8 settings.json → UnicodeDecodeError)
+# escaped the previous `(OSError, RuntimeError)`.  Each member below is raised
+# deliberately and asserted to be a refusal (exit 1, populated stderr, no
+# traceback) — a green suite that would also pass before the fix pins nothing.
+
+
+def _install_env():
+    return {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+
+def _write_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+def _loop_leaf(root: Path) -> None:
+    """Two symlinks pointing at each other → ``Path.resolve()`` loops."""
+    d = root / ".claude"
+    d.mkdir(parents=True)
+    (d / "a").symlink_to("b")
+    (d / "b").symlink_to("a")
+    (d / "settings.json").symlink_to("a")
+
+
+_BOUNDARY_CASES = [
+    # TypeError — valid JSON of the wrong SHAPE.  `{"hooks": null}` is not
+    # invalid JSON, so the JSONDecodeError guard never sees it, and the old
+    # `(OSError, RuntimeError)` boundary did not either (#3987).
+    ("hooks-null-typeerror", "claude",
+     lambda r: _write_bytes(r / ".claude" / "settings.json",
+                            b'{"hooks": null}'),
+     ["Install failed:", "TypeError"]),
+    # UnicodeDecodeError — a non-UTF-8 settings.json.  A ValueError, so the
+    # old boundary let it escape as a traceback (#3988).
+    ("non-utf8-unicodedecodeerror", "claude",
+     lambda r: _write_bytes(r / ".claude" / "settings.json",
+                            b'{"hooks": {"note": "\xff\xfe"}}'),
+     ["Install failed:", "UnicodeDecodeError"]),
+    # RuntimeError — a symlink cycle, where Path.resolve() raises RuntimeError
+    # (deliberately, not OSError) on CPython.
+    ("symlink-loop-runtimeerror", "claude", _loop_leaf,
+     ["Install failed:", "RuntimeError", "Symlink loop"]),
+    # RecursionError (a RuntimeError subclass) — a deeply nested document.
+    ("deep-json-recursionerror", "claude",
+     lambda r: _write_bytes(r / ".claude" / "settings.json",
+                            b"[" * 100_000 + b"]" * 100_000),
+     ["Install failed:", "RecursionError"]),
+    # IsADirectoryError — a directory where the registration file belongs.
+    ("directory-where-file-isadirectoryerror", "codex",
+     lambda r: (r / ".codex" / "hooks.json").mkdir(parents=True),
+     ["Install failed:", "IsADirectoryError"]),
+    # FileExistsError — a regular FILE where an intermediate dir belongs.
+    ("cline-hooks-as-file-fileexistserror", "cline",
+     lambda r: ((r / ".cline").mkdir(),
+                (r / ".cline" / "hooks").write_text("x")),
+     ["Install failed:", "FileExistsError"]),
+    # NotADirectoryError — a regular FILE where a parent dir belongs.
+    ("cline-dotdir-as-file-notadirectoryerror", "cline",
+     lambda r: (r / ".cline").write_text("x"),
+     ["Install failed:", "NotADirectoryError"]),
+]
+
+
+@pytest.mark.parametrize(("case_id", "harness", "setup", "tokens"),
+                         _BOUNDARY_CASES,
+                         ids=[case[0] for case in _BOUNDARY_CASES])
+def test_read_half_boundary_refuses_every_raise_set_member(
+        tmp_path, case_id, harness, setup, tokens):
+    """One mutation-verified check per declared member of the read half's
+    raise-set: raise it deliberately; the boundary must hold — exit 1, a
+    populated "Install failed" line, and NO traceback."""
+    setup(tmp_path)
+    r = _run(["install", harness, "--dir", str(tmp_path)], _install_env())
+    assert r.returncode == 1, (case_id, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, (case_id, r.stderr)
+    for token in tokens:
+        assert token in r.stderr, (case_id, token, r.stderr)
+
+
+def test_read_half_boundary_permission_error(tmp_path):
+    """PermissionError — an unreadable settings.json is a refusal, not a
+    traceback.  Skipped as root (mode bits are not enforced)."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores file mode bits")
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"hooks": {}}')
+    target.chmod(0o000)
+    try:
+        r = _run(["install", "claude", "--dir", str(tmp_path)],
+                 _install_env())
+    finally:
+        target.chmod(0o600)
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "Install failed:" in r.stderr, r.stderr
+    assert "PermissionError" in r.stderr, r.stderr
+
+
+def test_read_half_boundary_top_level_null_is_clean_refusal(tmp_path):
+    """`null` at the top level is the locally-handled member of the
+    raise-set: the shape guard's populated refusal, never the boundary's
+    generic message and never a traceback."""
+    (tmp_path / ".claude").mkdir(parents=True)
+    (tmp_path / ".claude" / "settings.json").write_text("null")
+    r = _run(["install", "claude", "--dir", str(tmp_path)], _install_env())
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "not a JSON object" in r.stderr, r.stderr
+
+
+def test_read_half_boundary_catches_unenumerated_exception(
+        monkeypatch, capsys):
+    """The property that makes this a CLASS fix: an exception member no
+    hand-written list would carry is STILL a refusal.  This is the mutation
+    the old `(OSError, RuntimeError)` tuple failed."""
+    import tortoise.__main__ as tmain
+
+    class _NotInAnyList(Exception):
+        pass
+
+    def _boom(_args):
+        raise _NotInAnyList("a member a hand-written list would miss")
+
+    monkeypatch.setattr(tmain, "_install_read_hook_impl", _boom)
+    rc = tmain._install_read_hook(argparse.Namespace())
+    err = capsys.readouterr().err
+    assert rc == 1, err
+    assert "Install failed: _NotInAnyList:" in err, err
+    assert "Traceback" not in err, err
+
+
+def test_read_half_boundary_reraises_memory_error(monkeypatch):
+    """MemoryError is the one raise-set member a refusal is the wrong answer
+    for (the refusal message itself allocates) — it must PROPAGATE, so the
+    boundary is not silently swallowing resource exhaustion."""
+    import tortoise.__main__ as tmain
+
+    def _oom(_args):
+        raise MemoryError("pretend the process cannot allocate")
+
+    monkeypatch.setattr(tmain, "_install_read_hook_impl", _oom)
+    with pytest.raises(MemoryError):
+        tmain._install_read_hook(argparse.Namespace())
 
 
 # ── #2369 per-turn reflex trust boundary (co-sourced identity) ──────────

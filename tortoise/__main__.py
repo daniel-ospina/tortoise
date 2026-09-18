@@ -2586,17 +2586,45 @@ def _install_read_hook(args) -> int:
     """`tortoise install <harness>` read half — the read-hook registration.
 
     A thin boundary around :func:`_install_read_hook_impl`: the whole read
-    half runs inside one ``(OSError, RuntimeError)`` catch, so a directory at
-    a registration path (``<root>/.codex/hooks.json``), a symlink loop in the
-    install tree, or a write that fails at the last moment is a populated
-    ``Install failed`` message with a non-zero exit — never an uncaught
-    ``IsADirectoryError``/``RuntimeError`` traceback out of the CLI (#3808
-    R23).  The capture half carries the same boundary in
-    :func:`capture_install.install_capture`.
+    half runs inside ONE catch-all, so any failure on the read/parse/merge
+    path is a populated ``Install failed`` message with a non-zero exit —
+    never an uncaught traceback out of the CLI (#3808 R23).
+
+    The raise-set this boundary must cover is enumerated from the code
+    paths, *not* from the exceptions that happened to be filed:
+
+    * ``OSError`` and subclasses — ``IsADirectoryError`` (a directory where
+      the registration file belongs), ``PermissionError`` (a ``settings.json``
+      the process may not read), ``FileExistsError``/``NotADirectoryError``
+      (a FILE where an intermediate directory belongs), ELOOP from
+      ``Path.resolve``, and any write that fails at the last moment;
+    * ``RuntimeError`` — ``Path.resolve()`` raises it (deliberately, not
+      ``OSError``) on a symlink cycle; ``RecursionError`` (a subclass) from
+      ``json.loads`` on a deeply nested document;
+    * ``ValueError`` — ``UnicodeDecodeError`` from a non-UTF-8
+      ``settings.json`` (#3988), and the locally-handled ``JSONDecodeError``
+      / ``shlex.split`` / ``relative_to`` cases;
+    * ``TypeError`` — valid JSON of the wrong SHAPE, e.g. ``{"hooks": null}``,
+      where ``setdefault`` hands back the ``None`` and the subscript raises
+      (#3987);
+    * ``MemoryError`` — a huge file, re-raised below rather than converted;
+    * anything unenumerated a future read/parse/merge path adds.
+
+    The last member is the reason this is a CATCH-ALL and not a list: an
+    ``except (A, B, ...)`` boundary is refutable by the next unenumerated
+    member, which is exactly how ``TypeError`` (#3987) and
+    ``UnicodeDecodeError`` (#3988) escaped the previous
+    ``(OSError, RuntimeError)`` tuple. ``except Exception`` cannot be escaped
+    by an unenumerated ``Exception``; the two ``BaseException`` control-flow
+    signals (``KeyboardInterrupt``, ``SystemExit``) are outside it and
+    propagate. ``MemoryError`` is the one member where a refusal is the wrong
+    answer — the refusal message itself allocates — so it is re-raised first.
     """
     try:
         return _install_read_hook_impl(args)
-    except (OSError, RuntimeError) as e:
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
         print(f"Install failed: {e.__class__.__name__}: {e}",
               file=sys.stderr)
         return 1
