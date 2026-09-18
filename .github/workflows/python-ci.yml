@@ -1883,6 +1883,10 @@ jobs:
         run: python3 tools/surface-guard.py
       - name: The ordering lint (AC13)
         run: python3 tools/surface_manifest.py check
+      - name: The list is generated from the manifest and cannot drift from it
+        run: |
+          python3 tools/surface_manifest.py render
+          git diff --exit-code -- docs/product/mcp-sdk-surface.md
 
   python-ci-gate:
     if: always()

@@ -4,7 +4,7 @@ These tests are the machine half of the acceptance criteria:
 
 * AC1  — the list is generated from the declaration and is in sync with it
 * AC11 — the baseline covers the declaration, and the gate fails closed
-* AC13 — the ordering lint's eight properties hold
+* AC13 — the ordering lint's ten properties hold
 
 They are deliberately fast and dependency-free: they execute the declaration and
 compare it to the checked-in baseline. No database, no network, no subprocess
@@ -47,6 +47,11 @@ def _run(script: str, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
     )
+
+
+def docs_product_stub() -> str:
+    """A repo-relative path `render` can write to during tests, then be removed."""
+    return "docs/product/_test-render-scratch.md"
 
 
 def test_baseline_exists_and_is_a_frozen_snapshot():
@@ -602,4 +607,215 @@ def test_the_usage_markers_are_not_inverted_and_every_row_is_well_formed_markdow
     assert marked_in_use == true_in_use, (
         "the 'in use' marker does not match the manifest's usage evidence "
         f"(rendered-only={sorted(marked_in_use - true_in_use)[:5]})"
+    )
+
+
+def _load_manifest_tool():
+    """Import tools/surface_manifest.py as a module (it reads module-level constants)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "surface_manifest_tool", ROOT / "tools" / "surface_manifest.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_malformed_response_fields_entry_is_reported_and_does_not_crash_render(tmp_path):
+    """`check` must REPORT a malformed `response_fields` entry; `render` must not crash.
+
+    Both halves were real defects when the block was introduced: a non-mapping entry
+    crashed `render` with a bare AttributeError while `check` reported it cleanly, so the
+    two disagreed about the same input.
+    """
+    mod = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [{"bad_entry": True}, "not-a-mapping"]
+    manifest = tmp_path / "malformed-manifest.yml"
+    manifest.write_text(yaml.safe_dump(doc, sort_keys=False, width=110))
+    mod.MANIFEST_FILE = manifest
+
+    assert mod.cmd_check(None) != 0, "a malformed response_fields entry must be reported"
+    # render writes to RENDERED_FILE; keep it inside the repo so its `relative_to` holds,
+    # and remove it again so the test cannot leave the tree dirty.
+    out = ROOT / docs_product_stub()
+    mod.RENDERED_FILE = out
+    try:
+        assert mod.cmd_render(None) == 0, "render must not crash on a malformed entry"
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_a_response_field_value_cannot_break_the_generated_table(tmp_path):
+    """A `|` or a newline in a recorded field must not split the generated markdown row."""
+    mod = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {
+            "response": "ask",
+            "field": "why",
+            "emitted_when": "flag on | piped\nand multiline",
+            "unchanged_when_off": "yes",
+        }
+    ]
+    manifest = tmp_path / "piped-manifest.yml"
+    manifest.write_text(yaml.safe_dump(doc, sort_keys=False, width=110))
+    mod.MANIFEST_FILE = manifest
+    out = ROOT / docs_product_stub()
+    mod.RENDERED_FILE = out
+    try:
+        assert mod.cmd_render(None) == 0
+        rows = [ln for ln in out.read_text().splitlines() if ln.startswith("| `ask`")]
+        assert len(rows) == 1, f"the recorded row was split across lines: {rows}"
+        assert rows[0].count("|") == 5, f"a pipe leaked into the row: {rows[0]}"
+    finally:
+        out.unlink(missing_ok=True)
+
+
+def test_a_recut_carries_response_fields_forward(tmp_path):
+    """`cut` must not drop the hand-authored `response_fields` block.
+
+    Those entries record response FIELDS — outside the gate, and not derivable from the
+    declaration — so a re-cut that dropped them would silently empty the table the
+    carve-out depends on, and the obligation to record a field would evaporate the first
+    time anyone regenerated the manifest.
+    """
+    mod = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [{"response": "ask", "field": "why", "emitted_when": "flag"}]
+    manifest = tmp_path / "manifest.yml"
+    manifest.write_text(yaml.safe_dump(doc, sort_keys=False, width=110))
+    mod.MANIFEST_FILE = manifest
+    assert mod._carried_response_fields() == doc["response_fields"], (
+        "a re-cut must carry `response_fields` forward, not drop the record"
+    )
+
+
+def test_a_non_list_response_fields_block_crashes_neither_command(tmp_path):
+    """A `response_fields:` value that is not a list must not crash `check` or `render`.
+
+    `cut` only ever writes a list, so this shape is not reachable from the generator —
+    but iterating a scalar raised `TypeError` in both commands, which is a crash path the
+    fail-closed surface should not have for a block it merely ignores.
+    """
+    mod = _load_manifest_tool()
+    out = ROOT / docs_product_stub()
+    for block in (5, "ask", {"a": 1}, None, []):
+        doc = _manifest()
+        doc["response_fields"] = block
+        manifest = tmp_path / f"block-{type(block).__name__}.yml"
+        manifest.write_text(yaml.safe_dump(doc, sort_keys=False, width=110))
+        mod.MANIFEST_FILE = manifest
+        mod.RENDERED_FILE = out
+        try:
+            assert mod.cmd_render(None) == 0, f"render crashed on block={block!r}"
+            assert mod.cmd_check(None) in (0, 1), f"check crashed on block={block!r}"
+        finally:
+            out.unlink(missing_ok=True)
+
+
+def test_a_recut_carries_response_fields_forward_when_the_block_is_absent(tmp_path):
+    """The carry-forward helper must return `[]` — not raise — when there is no record."""
+    mod = _load_manifest_tool()
+    mod.MANIFEST_FILE = tmp_path / "does-not-exist.yml"
+    assert mod._carried_response_fields() == []
+
+    doc = _manifest()
+    doc.pop("response_fields", None)
+    manifest = tmp_path / "no-block.yml"
+    manifest.write_text(yaml.safe_dump(doc, sort_keys=False, width=110))
+    mod.MANIFEST_FILE = manifest
+    assert mod._carried_response_fields() == []
+
+
+def test_check_reds_when_the_recorded_fields_block_is_empty_or_missing(tmp_path):
+    """Properties 9/10: the record must not be able to VANISH.
+
+    Before these properties the whole block could be deleted and `check` still said OK —
+    so the doc's promise that an off-by-default addition "cannot quietly become the way the
+    surface grows" was prose with nothing behind it.
+    """
+    mod = _load_manifest_tool()
+    for block in (None, []):
+        doc = _manifest()
+        if block is None:
+            doc.pop("response_fields", None)
+        else:
+            doc["response_fields"] = block
+        manifest = tmp_path / f"empty-{block is None}.yml"
+        manifest.write_text(yaml.safe_dump(doc, sort_keys=False, width=110))
+        mod.MANIFEST_FILE = manifest
+        assert mod.cmd_check(None) == 1, f"check passed with response_fields={block!r}"
+
+
+def test_check_reds_when_a_recorded_field_is_not_anchored_to_the_surface(tmp_path):
+    """Property 10: every entry must name a tool or endpoint that exists in the manifest."""
+    mod = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {"response": "no_such_endpoint", "field": "x", "emitted_when": "never"}
+    ]
+    manifest = tmp_path / "unanchored.yml"
+    manifest.write_text(yaml.safe_dump(doc, sort_keys=False, width=110))
+    mod.MANIFEST_FILE = manifest
+    assert mod.cmd_check(None) == 1, "an unanchored response_fields entry must red check"
+
+
+def test_check_accepts_a_recorded_field_anchored_to_a_real_endpoint(tmp_path):
+    """The anchor property must accept the real shape — `ask` resolves as the row `sdk:ask`."""
+    mod = _load_manifest_tool()
+    doc = _manifest()
+    doc["response_fields"] = [
+        {"response": "ask", "field": "why", "emitted_when": "truthy", "unchanged_when_off": "yes"}
+    ]
+    manifest = tmp_path / "anchored.yml"
+    manifest.write_text(yaml.safe_dump(doc, sort_keys=False, width=110))
+    mod.MANIFEST_FILE = manifest
+    assert mod.cmd_check(None) == 0, "the real `ask` row resolves as `sdk:ask`"
+
+
+def test_a_non_mapping_document_fails_cleanly_everywhere(tmp_path):
+    """A top-level YAML list must not crash any command with a bare TypeError."""
+    mod = _load_manifest_tool()
+    manifest = tmp_path / "not-a-mapping.yml"
+    manifest.write_text("- just\n- a\n- list\n")
+    mod.MANIFEST_FILE = manifest
+    mod.RENDERED_FILE = ROOT / docs_product_stub()
+    assert mod._carried_response_fields() == []
+    assert mod.cmd_check(None) == 1, "check must fail cleanly, not raise"
+    assert mod.cmd_render(None) == 1, "render must fail cleanly, not raise"
+
+
+def test_unparseable_yaml_is_not_fatal_to_the_carry_forward(tmp_path):
+    """`_carried_response_fields` must return `[]` on a YAML error, not raise."""
+    mod = _load_manifest_tool()
+    manifest = tmp_path / "broken.yml"
+    manifest.write_text("rows: [unclosed\n")
+    mod.MANIFEST_FILE = manifest
+    assert mod._carried_response_fields() == []
+
+
+def test_cmd_cut_is_actually_wired_to_carry_the_recorded_fields(tmp_path, monkeypatch):
+    """`_carried_response_fields` must be CALLED by `cmd_cut`, not merely defined.
+
+    The helper test alone does not pin the wiring: deleting the `response_fields:` line from
+    `cmd_cut` left every other test passing, so a re-cut would silently empty the table — the
+    exact way the recording obligation dies. Patch the helper with a sentinel and assert the
+    sentinel reaches the document `cmd_cut` writes.
+    """
+    mod = _load_manifest_tool()
+    sentinel = [{"response": "ask", "field": "why", "emitted_when": "truthy"}]
+    monkeypatch.setattr(mod, "_carried_response_fields", lambda: sentinel)
+    out = ROOT / "config" / "_scratch_recut_test.yml"
+    mod.MANIFEST_FILE = out
+    mod.RENDERED_FILE = ROOT / docs_product_stub()
+    try:
+        mod.cmd_cut(type("Args", (), {"commit": "test"})())
+        written = yaml.safe_load(out.read_text())
+    finally:
+        out.unlink(missing_ok=True)
+        (ROOT / docs_product_stub()).unlink(missing_ok=True)
+    assert written.get("response_fields") == sentinel, (
+        "cmd_cut did not carry the recorded fields into the manifest it wrote"
     )
