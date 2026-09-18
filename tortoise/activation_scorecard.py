@@ -457,11 +457,12 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     why. Returns ``(stage_cell, detail)``.
 
     ``window`` is the ``(since, until)`` interval the rows were fetched for. It
-    is REQUIRED on the counting path: reading rows without re-checking that
-    they fall inside the window is the silent-dropped-bound class this PR fixed
-    in ``SupabaseControlPlane.query``. A ``None`` window with rows present
-    fails closed (``analytics_window_not_supplied``) rather than counting
-    unverified rows.
+    is REQUIRED before any count is emitted: reading rows without re-checking
+    that they fall inside the window is the silent-dropped-bound class this PR
+    fixed in ``SupabaseControlPlane.query``. A ``None`` window on the counting
+    path fails closed (``analytics_window_not_supplied``); on the no-memory
+    path the raw count is WITHHELD (left ``None``) rather than emitted
+    unverified.
     """
     # EVERY counter is initialised here, not only on the failure paths: the
     # detail key set is identical on every return path, so a consumer read of
@@ -532,11 +533,19 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         # with a NULL min means memory EXISTS but carries no timestamp — a data
         # gap, not an absence. Reading that as "no memory was ever produced"
         # would report nothing-to-measure for an org that has memory.
-        if not window_failed:
-            # `recall_attempted_any` must mean a WINDOWED count on every path
-            # that emits it, so it is withheld when the rows cannot be
-            # attributed to the window.
-            detail["recall_attempted_any"] = _count_allowlisted(rows, None)[0]
+        if window is not None and not window_failed:
+            # `recall_attempted_any` is only emitted when it is a WINDOWED,
+            # fully-placeable count. A missing window, any out-of-range row, or
+            # any row whose timestamp / tool_name cannot be read makes the
+            # count unverifiable — and an unverifiable count is not reported.
+            # The STAGE is unaffected: an org with no memory stays
+            # `not_measurable`, it does not become `unavailable`.
+            since_at = _coerce_created_at(window[0])
+            if since_at is not None:
+                total, unparsable, unclassifiable = _count_allowlisted(
+                    rows, since_at)
+                if not (unparsable or unclassifiable):
+                    detail["recall_attempted_any"] = total
         if memory_sessions:
             return _stage(None, "calls", "first_memory_at_missing"), detail
         # No memory has ever been produced, so no retrieval can have been
@@ -693,10 +702,13 @@ LIMITATIONS: tuple[str, ...] = (
     "two routes to a false `measured 0` that arise from the WRITE PATH'S OWN "
     "health are: (1) a window that predates the repair, above; (2) a failure "
     "that rejects the WRITE while letting this READ succeed (an INSERT-only "
-    "RLS denial, a partial/limited role, a silent PostgREST drop). This is not "
-    "an exhaustive list of every false-zero route — the page-cap entry above "
-    "and the stdio/REST recall-invisibility entry are two more, from "
-    "different causes. Detectability of (2) is tracked in #3677.",
+    "RLS denial, a partial/limited role, a silent PostgREST drop). That "
+    "enumeration is scoped to the writer's health, not to this list's "
+    "completeness — other entries here name further false-zero causes from "
+    "different sources. Detectability of (2) is tracked in #3677.",
+    "memory_produced counts extraction-SUCCEEDED sessions (a non-transcript "
+    "Point exists). It is not a measure of memory that HELPED anyone — that is "
+    "value_confirmed, which is unmeasurable.",
     "Extraction outcome (capture_ok / capture_extractor) is recorded on the "
     "Session but exposed by no read surface (owned by #3520).",
     "The analytics leg's interval is [since, until) — the same as the graph "

@@ -1592,3 +1592,34 @@ def test_out_of_window_rows_refuse_recall_any_on_the_no_memory_path():
     _, ok = recall_stages(clean, None, memory_sessions=0, window=window)
     assert ok["recall_attempted_any"] == 1, ok
     assert ok["analytics_window_out_of_range"] == 0, ok
+    # ...but an unverifiable count is withheld: unparseable timestamp,
+    # non-mapping row, and no window at all.
+    bad_stamp = [{"properties": {"tool_name": "tortoise_search"},
+                  "created_at": "not-a-timestamp"}]
+    _, s1 = recall_stages(bad_stamp, None, memory_sessions=0, window=window)
+    assert s1["recall_attempted_any"] is None, s1
+    _, s2 = recall_stages([42, *clean], None, memory_sessions=0, window=window)
+    assert s2["recall_attempted_any"] is None, s2
+    _, s3 = recall_stages(clean, None, memory_sessions=0)
+    assert s3["recall_attempted_any"] is None, s3
+
+
+def test_the_graph_read_is_dispatched_off_the_shared_default_executor(client,
+                                                                     monkeypatch):
+    """The graph hand-off must go through the scorecard's OWN pool, not the
+    loop's shared default executor (#3060/#3718 doctrine) — reverting it to
+    `asyncio.to_thread` used to leave the suite green."""
+    import tortoise.hosted_api as ha
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    calls: list[object] = []
+    real = ha._run_off_loop
+
+    async def _spy(executor, fn, /, *args, **kwargs):
+        calls.append(executor)
+        return await real(executor, fn, *args, **kwargs)
+
+    monkeypatch.setattr(ha, "_run_off_loop", _spy)
+    resp = client.get("/v1/activation/scorecard", params=WINDOW)
+    assert resp.status_code == 200, resp.text
+    assert calls == [ha._SCORECARD_EXECUTOR], calls
