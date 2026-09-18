@@ -116,9 +116,14 @@ def test_supersede_undated_legacy_pair_still_supersedes(sdk):
     assert _props(sdk, old["id"]).get("validTo")  # from createdAt/now fallback
 
 
-def test_supersede_successor_created_at_valid_from_contiguity(sdk):
+def test_supersede_successor_valid_from_contiguity(sdk):
     """Contiguity: old.validTo == successor.validFrom — no gap between
-    windows (Graphiti semantics)."""
+    windows (Graphiti semantics).
+
+    (Name corrected: this exercises a successor that carries an explicit
+    ``validFrom``; the ``createdAt`` fallback is the branch that produces an
+    OVERLAP, and is covered by
+    ``test_supersede_fallback_to_successor_created_at``.)"""
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
     sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
@@ -391,6 +396,54 @@ def test_restore_ambiguous_overlapping_windows(sdk):
     assert len(out["candidates"]) == 2
     assert {c["id"] for c in out["candidates"]} == {a["id"], b["id"]}
     assert "valid_point" not in out
+
+
+def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
+    """Pins the READ-path premise the write-path guard is built on: ``_covers``
+    gates on presence (``vf is not None``), NOT on truthiness.
+
+    Both halves below bypass the guard by hand-planting the stamps, so they
+    measure `restore_point_at` rather than `supersede_point`:
+
+      * successor ``validFrom = 0`` — the parseable epoch-0 instant ⇒ its
+        window is ``[epoch-0, ∞)``. An instant inside the predecessor's window
+        is covered by BOTH ⇒ ``ambiguous``. This is the overlap the guard
+        prevents, and it is why a falsey-but-present stored value cannot be
+        skipped as "undated".
+      * successor ``validFrom = ""`` — unparseable to ``_created_sort_key``
+        (``(1, "")``) and never ordered below a parseable key ⇒ the successor
+        covers NOTHING. That distinguishes presence from truthiness: under a
+        truthiness predicate ``""`` would be skipped and the successor WOULD
+        cover, flipping the verdict to ``ambiguous``.
+    """
+    # (a) validFrom = 0 → a real window start ⇒ overlap ⇒ ambiguous
+    old = _make_point(sdk, content="zero v1", validFrom="2026-06-01")
+    new_zero = _make_point(sdk, content="zero v2", validFrom=0)
+    sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$n}), (b:Point {id:$o}) CREATE (a)-[:CORRECTS]->(b)",
+        params={"n": new_zero["id"], "o": old["id"]})
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='superseded', n.outdated=true, "
+        "n.validTo='2026-06-20'",
+        params={"id": old["id"]})
+    out = sdk.restore_point_at(new_zero["id"], "2026-06-15")
+    assert out.get("ambiguous") is True
+    assert len(out["candidates"]) == 2
+
+    # (b) validFrom = "" → present but unorderable ⇒ covers NOTHING
+    old2 = _make_point(sdk, content="empty v1", validFrom="2026-06-01")
+    new_empty = _make_point(sdk, content="empty v2", validFrom="")
+    sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$n}), (b:Point {id:$o}) CREATE (a)-[:CORRECTS]->(b)",
+        params={"n": new_empty["id"], "o": old2["id"]})
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status='superseded', n.outdated=true, "
+        "n.validTo='2026-06-20'",
+        params={"id": old2["id"]})
+    out2 = sdk.restore_point_at(new_empty["id"], "2026-06-15")
+    assert out2.get("ambiguous") is not True
+    assert out2["found"] is True
+    assert out2["valid_point"]["id"] == old2["id"]
 
 
 def test_restore_missing_point(sdk):
