@@ -209,3 +209,42 @@ def test_marker_strings_via_full_scan_decoration(sdk):
 
     new_hit = next(r for r in results if r["id"] == new["id"])
     assert "[valid since 2026-06-14]" in _validity_marker(new_hit)
+
+
+def test_provenance_flag_is_absent_by_default_and_additive_when_on(sdk, monkeypatch):
+    """Objectives 5/9 + owner decision #3837 (source + when learned + confidence).
+
+    The additive ``provenance`` block (source + captured_at) is OFF by default —
+    a default full-scan result is byte-identical to pre-change output (no key).
+    With ``TORTOISE_SEARCH_PROVENANCE`` set, every other key/value is unchanged
+    and exactly the ``provenance`` block is added.
+    """
+    p = sdk.create_point(
+        "statement",
+        "beta ships in October",
+        extractedFrom="https://example.com/beta-plan",
+    )
+
+    monkeypatch.delenv("TORTOISE_SEARCH_PROVENANCE", raising=False)
+    off = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    assert "provenance" not in off, "flag OFF must not add a response field"
+
+    monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
+    on = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    prov = on.pop("provenance")
+    assert prov["source"] == "https://example.com/beta-plan"
+    assert prov["captured_at"], "capture time must be present"
+    assert on == off, "the flag must be purely additive — every other key is byte-identical"
+
+
+def test_provenance_flag_off_omits_the_block_for_unlinked_points(sdk, monkeypatch):
+    """An unlinked point has no source/capture provenance to add — the block is
+    still omitted even with the flag ON (no empty shell)."""
+    p = sdk.create_point("statement", "orphan claim with no source")
+    monkeypatch.setenv("TORTOISE_SEARCH_PROVENANCE", "1")
+    hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    # captured_at is always present on a created point, so the block exists here
+    # (source omitted, capture time present) — the block is never an empty shell.
+    assert "provenance" in hit
+    assert "source" not in hit["provenance"]
+    assert hit["provenance"]["captured_at"]

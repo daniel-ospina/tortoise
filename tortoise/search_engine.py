@@ -6,6 +6,7 @@ Phase 0 (#7748): Foundation — FalkorDB indexes, RRF fusion, degradation chain,
 from __future__ import annotations  # noqa: I001
 
 import logging
+import os
 import threading
 import time
 from collections import Counter
@@ -287,6 +288,27 @@ class EpBreakdown:
             self.evidence = EpEvidence()
 
 
+# ── Provenance enrichment flag (objectives 5/9, owner decision #3837) ───────
+# The default read path carries SOURCE + WHEN LEARNED + CONFIDENCE; confidence
+# already rides ``ep``. Source (``extractedFrom``) and capture time
+# (``createdAt``) are additive and OFF by default: the search point fetch reads
+# those columns only when this flag is set, so a default call is byte-identical
+# (the #3986 freeze carve-out — a default-off response field is not a surface
+# change, but MUST still be recorded in the manifest's ``response_fields``).
+SEARCH_PROVENANCE_FLAG_ENV = "TORTOISE_SEARCH_PROVENANCE"
+
+
+def search_provenance_enabled() -> bool:
+    """Resolve the additive search-provenance flag. Default OFF.
+
+    Truthy values: 1/true/yes/on; anything else (including unset) is off.
+    """
+    v = os.environ.get(SEARCH_PROVENANCE_FLAG_ENV)
+    if v is None:
+        return False
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class SearchResult:
     id: str
@@ -320,6 +342,14 @@ class SearchResult:
     # in to_dict (emitted only when True — the wire shape stays clean for
     # the 99% unmarked majority).
     has_answer: bool = False
+    # Provenance enrichment (objectives 5/9; owner decision #3837 — the default
+    # path carries source + when learned + confidence; confidence already rides
+    # ``ep``). ADDITIVE and OFF by default: the point fetch reads these columns
+    # ONLY when ``search_provenance_enabled()``, and ``to_dict`` emits the
+    # ``provenance`` block only when a value is present, so a default call is
+    # byte-identical to pre-change output.
+    source_ref: Any = None  # Point.extractedFrom — the Source/document link
+    captured_at: str = ""   # Point.createdAt — when the fact entered memory
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -366,6 +396,16 @@ class SearchResult:
         # (unmarked hits stay byte-identical on the wire).
         if self.has_answer:
             d["has_answer"] = True
+        # Provenance (#3837 owner decision: source + when learned). Additive —
+        # emitted only when a value is present, so an unflagged call and an
+        # unflagged empty-provenance hit both stay byte-identical.
+        if self.source_ref or self.captured_at:
+            prov: dict[str, Any] = {}
+            if self.source_ref:
+                prov["source"] = self.source_ref
+            if self.captured_at:
+                prov["captured_at"] = self.captured_at
+            d["provenance"] = prov
         return d
 
 
