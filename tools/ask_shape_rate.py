@@ -298,7 +298,8 @@ def load_fixture_asserted() -> tuple[list[dict], dict]:
     n_sessions = sum(len(q.get("haystack_sessions") or []) for q in questions)
     n_turns = sum(len(s) for q in questions
                   for s in (q.get("haystack_sessions") or []))
-    shape = {"path": path, "sha256": actual, "expected_sha256": FIXTURE_SHA256,
+    shape = {"path": FIXTURE_REL, "sha256": actual,
+             "expected_sha256": FIXTURE_SHA256,
              "n_questions": n, "n_abs": n_abs, "n_with_gold": n_gold,
              "n_sessions": n_sessions, "n_turns": n_turns}
     if (n, n_abs, n_gold) != (FIXTURE_N, FIXTURE_ABS, FIXTURE_N):
@@ -482,9 +483,15 @@ def evaluate_question(sdk, question: dict, *, reader_mode: str,
                          question_date=_to_iso_date(
                              question.get("question_date") or ""))
     except Exception as e:  # noqa: BLE001, RUF100 — per-question FAIL
+        # Canonical leg keys: every consumer (_pn, _leg_map, movement_report)
+        # reads `l1_abstain`/`l2_provenance`/`l3_grounding`. An exception is a
+        # FAIL on all three, never a dropped question.
         return {"question_id": qid, "expected_abstain": expect_abstain,
                 "error": f"{type(e).__name__}: {e}",
-                "l1": False, "l2": False, "l3": False, "pass": False,
+                "abstained": None, "provider": None, "route": None,
+                "model": None,
+                "l1_abstain": False, "l2_provenance": False,
+                "l3_grounding": False, "pass": False,
                 "duration_ms": int((time.monotonic() - t0) * 1000)}
     if mcp_mod is not None:
         handlers = _handler_session_ids(mcp_mod, sdk, question)
@@ -1008,7 +1015,11 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             finally:
                 sdk.close()
                 sdk_mod._reset_ask_reader_cache_for_tests()
-            if rec.get("provider") != PINNED_PROVIDER:
+            # A per-question exception is a FAIL, never a VOID and never a
+            # dropped question — only a RESULT whose provider is not the pin
+            # makes the run VOID (a low rate must not be laundered as a void,
+            # and a void must not be laundered as a low rate).
+            if not rec.get("error") and rec.get("provider") != PINNED_PROVIDER:
                 print(f"ask_shape_rate: PROVIDER VOID on "
                       f"{rec['question_id']} — got {rec.get('provider')!r}, "
                       f"expected {PINNED_PROVIDER!r}. The run is VOID, not a "
@@ -1117,8 +1128,17 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                            f"{FIXTURE_N} < {GROUNDING_MIN}/{FIXTURE_N}")
             abort = True
         mov_fired = receipt.get("movement", {}).get("fired", {}).get("all")
-        if args.mode == "full" and not mov_fired:
-            reasons.append("movement control did not fire")
+        if not mov_fired:
+            # The frozen rule is unconditional: ADOPT requires the movement
+            # control to have run AND fired. `--mode live` skips it, so it can
+            # never ADOPT.
+            reasons.append("movement control did not run or did not fire — "
+                           "the frozen rule requires it for ADOPT")
+            abort = True
+        kg_ok = receipt.get("known_green", {}).get("ok")
+        if not kg_ok:
+            reasons.append("known-GREEN (committed recorded transports) did "
+                           "not pass — the pipeline itself is not reproduced")
             abort = True
         decision = "DO-NOT-CLAIM" if abort else "ADOPT"
         receipt["verdict"] = {
@@ -1141,9 +1161,10 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
             f">={f}w:{sens[f'span_ge_{f}_words']['passed']}"
             for f in (1, 2, 3, 4, 5, 6)))
         print(f"retrieval_degraded {len(degraded)}/{len(live)}")
+        _ga = receipt['live']['gold_answer_in_evidence_pn']
         print("gold-answer-in-evidence "
-              f"{receipt['live']['gold_answer_in_evidence_pn']['passed']}/"
-              f"{len(live)} (reported aside, not a leg)")
+              f"{_ga['passed']}/{_ga['n']} (answerable only, reported "
+              f"aside — not a leg)")
         print(f"VERDICT: {decision}"
               + (f" — {'; '.join(reasons)}" if reasons else ""))
         _write_receipt(args, receipt)
