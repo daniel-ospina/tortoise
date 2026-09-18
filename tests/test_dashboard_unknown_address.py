@@ -18,6 +18,7 @@ silently drops the pathname the SPA branches on.
 from __future__ import annotations
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 PUBLIC = (
@@ -49,6 +50,43 @@ def _rules() -> list[tuple[str, str, int]]:
         source, destination, code = parts
         rules.append((source, destination, int(code)))
     return rules
+
+
+class _NotFoundDoc(HTMLParser):
+    """Structural facts about 404.html, from a real parse.
+
+    A substring list cannot enumerate the equivalent spellings of a redirect:
+    HTML attribute names and the `refresh` keyword are ASCII case-insensitive,
+    attributes may be unquoted, and JS can assign through bracket notation. The
+    guard therefore constrains the SHAPE of what the page may do (#4006 review
+    cycle 3). HTMLParser lowercases attribute names for us, so
+    `<meta http-equiv=REFRESH>` is visible however it is spelled.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.meta_http_equiv: list[str] = []
+        self.scripts: list[str] = []
+        self._buf: list[str] = []
+        self._in_script = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "meta":
+            for name, value in attrs:
+                if name.lower() == "http-equiv":
+                    self.meta_http_equiv.append((value or "").strip().lower())
+        elif tag == "script":
+            self._in_script = True
+            self._buf = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self._in_script:
+            self.scripts.append("".join(self._buf))
+            self._in_script = False
+
+    def handle_data(self, data: str) -> None:
+        if self._in_script:
+            self._buf.append(data)
 
 
 def _first_wins() -> dict[str, tuple[str, int]]:
@@ -92,24 +130,38 @@ def test_top_level_404_html_exists() -> None:
     # It must not RE-REDIRECT the visitor home: a not-found page that bounces to
     # `/` discards the requested address exactly as the soft-404 did — the
     # symptom this change exists to remove, wearing a 404 status (#4006 review).
-    # Whitespace-NORMALIZED (#4006 review cycle 2): `window.location = "/"` and
-    # `window.location="/"` are the same redirect, so a space-sensitive
-    # substring list let the no-space form through. `location=` covers the
-    # assignment in every spelling (`window.`/`document.`/`top.`/bare), and the
-    # page's own `location.pathname` read does not contain it.
-    normalized = re.sub(r"\s+", "", body)
-    redirect_markers = (
-        'http-equiv="refresh"',
-        "http-equiv='refresh'",
-        "location.replace(",
-        "location.assign(",
-        "location.href=",
-        "location=",
+    # Structural, not lexical (#4006 review cycle 3). `<meta http-equiv=REFRESH>`
+    # (unquoted, different case), `location['href']='/'`,
+    # `window['location']='/'` and `window.open('/')` are all real redirects
+    # that defeated the previous marker list, so the guard now constrains the
+    # SHAPE of what a not-found page may do instead of listing forbidden
+    # spellings.
+    doc = _NotFoundDoc()
+    doc.feed(body)
+    assert not doc.meta_http_equiv, (
+        "404.html carries a meta http-equiv — the only reason a not-found page "
+        "needs one in this deployment is a refresh/redirect, which discards the "
+        f"requested address instead of reporting it (#4006 review): {doc.meta_http_equiv!r}"
     )
-    redirected = [m for m in redirect_markers if m in normalized]
-    assert not redirected, (
-        "404.html must state that the address was not found, not redirect the "
-        f"visitor away from it — found {redirected!r} (#4006 review)"
+    script = re.sub(r"\s+", "", "\n".join(doc.scripts)).lower()
+    assert "window.open" not in script, (
+        "404.html opens another document instead of reporting that the requested "
+        "address was not found (#4006 review)"
+    )
+    # ALLOWLIST: every `location` use must be a plain property READ. An
+    # assignment (`location='/…'`, `location.href='/…'`) or bracket access
+    # (`location['href']='/…'`) is rejected by construction, which is what makes
+    # this close the family rather than one spelling of it.
+    allowed_location_uses = {
+        ".pathname", ".search", ".hash", ".host", ".hostname", ".origin",
+        ".port", ".protocol",
+    }
+    uses = re.findall(r"location(\.\w+|\[[^\]]*\])?", script)
+    rejected = sorted({use for use in uses if use not in allowed_location_uses})
+    assert not rejected, (
+        "404.html uses location for something other than a property READ — an "
+        "assignment or bracket access is a redirect that discards the requested "
+        f"address: {rejected!r} (#4006 review)"
     )
     # It is an honest not-found page, not a second copy of the app shell. Check
     # the DEPLOYED shell markers too, not just the vite dev entry: the built
