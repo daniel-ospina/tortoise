@@ -294,8 +294,12 @@ from typing import Protocol  # noqa: E402
 #   superseded by sofa") IS the answer to the canonical current-state
 #   question, and excluding it makes that question stop firing
 #   (RED: test_resolver_docker_exact_and_both_halves).
-# * ``outdated`` is the POINT vocabulary and the object view deliberately
-#   surfaces it — never borrow it for Objects (#2977 scope §1 D3).
+# * ``outdated`` must not enter the OBJECT-RESOLUTION predicate: it is the
+#   POINT vocabulary and the object read/search surface deliberately
+#   surfaces it (#2977 scope §1 D3). (This is about the resolver's set
+#   only — the successor-EXISTENCE probe lower in this file keeps its own,
+#   WIDER, deliberately-divergent view; see
+#   ``_RECALL_OBJECT_EXCLUDED_STATUSES``.)
 # * ``deprecated`` / ``archived`` Objects still resolve and render their own
 #   status verbatim (``STATE (x): deprecated`` — never "current", which is
 #   R17 P3-3's requirement, satisfied by the verbatim state read).
@@ -303,7 +307,7 @@ from typing import Protocol  # noqa: E402
 # A ``retracted`` Object is a REMOVED Object (#2977): it has no current
 # state to report, so there is nothing to resolve — #2977's target (c),
 # "invisible to the read surfaces". The literal matches the established
-# "exclude retracted" idiom (``hosted_api.py:5009/:5021/:5045``).
+# "exclude retracted" idiom (``hosted_api.py:5011/:5023/:5047``).
 #
 # ⛔ TRANSITIONAL BINDING (#2977 Task 5, unlanded): the canonical home for
 # this value is ``commit_ops.OBJECT_SEARCH_EXCLUDED_STATUS = {retracted}``
@@ -501,39 +505,50 @@ def docker_resolver_port(sdk) -> ResolverPort:
     search_keys query. Function-level imports keep the module import-safe
     (no sdk import at module scope).
 
-    #3317: every leg excludes the UNRESOLVABLE Object statuses
+    #3317: every leg of THIS PORT excludes the UNRESOLVABLE Object statuses
     (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES`` — today ``retracted``), so
-    resolution can never return a removed Object. The exact + alias legs
-    carry it as a Cypher conjunct (the graph filters; the batched exact
-    probe stays one query). The FTS leg CANNOT take that conjunct —
-    ``search_engine`` gates its terminal clause on ``label == 'Point'`` so
-    an Object FTS hit still carries a terminal status — and its rows are
-    filtered here instead, through the SAME constant so the two can never
-    drift.
+    resolution here cannot return a removed Object. (Scoped to this port:
+    the sibling Object-anchor resolvers — ``aggregate.py``,
+    ``coverage_loop.py`` — remain status-blind; #2977 Task 5 owns the
+    search-lane vocabulary.) The exact + alias legs carry it as a Cypher
+    conjunct (the graph filters; the batched exact probe stays one query).
+    The FTS leg CANNOT take that conjunct — ``search_engine`` gates its
+    terminal clause on ``label == 'Point'`` so an Object FTS hit still
+    carries a terminal status — and its rows are filtered here instead,
+    through the SAME constant so the two can never drift.
     """
     proj = sdk._get_proj()
     # Object-scoped predicate, stated inline rather than routed through
     # ``search_engine._exclude_status_clause``: that helper composes the
     # POINT predicate (it ANDs the legacy ``outdated`` flag, coerce-false),
-    # and the Object lane deliberately has no such flag. Task 5's Object
-    # lanes take the same shape (``live._terminal_excluded`` with
-    # ``include_outdated_flag=False``). Derived from the constant so the
+    # and the Object lane deliberately has no such flag. (#2977 Task 5 gives
+    # ``live._terminal_excluded`` an ``excluded`` + ``include_outdated_flag``
+    # parameter, and its Object lanes take that flagless shape — the
+    # parameter does not exist on main yet.) Derived from the constant so the
     # Cypher and the Python (FTS) check share one vocabulary.
+    #
+    # WELL-FORMED AT ANY CARDINALITY: an emptied constant must not leave a
+    # dangling `AND` in either query — the resulting Cypher error is swallowed
+    # by ``resolve_subjects``' per-leg `except`, which would turn the
+    # connected-assembly lane off silently. Empty set = no exclusion.
+    status_predicate = " AND ".join(
+        f"(o.status IS NULL OR o.status <> '{s}')"
+        for s in sorted(_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES))
+    status_filter = f"AND ({status_predicate}) " if status_predicate else ""
     #
     # KNOWN RESIDUALS, owned by #4061 (not absorbed here): the FTS leg filters
     # AFTER ``tortoise_fts_query``'s own ``limit`` truncation (the other two
-    # legs filter pre-bound), and its Python check fails OPEN on a hit whose
-    # ``status`` is absent (the batch content-fetch degradation path emits no
-    # status) — the Cypher legs fail closed.
-    status_excluded = " AND ".join(
-        f"(o.status IS NULL OR o.status <> '{s}')"
-        for s in sorted(_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES))
+    # legs filter pre-bound), so >=limit matching rows can starve a live
+    # candidate; and its Python check — like both Cypher legs — ADMITS a hit
+    # with no ``status`` (the entity write path treats an absent status as
+    # live, ``live.py``); the Cypher legs simply cannot be affected by the
+    # batch content-fetch degradation, which is what drops ``status``.
 
     def exact_objects(names: list[str]) -> list[dict]:
         rows = proj.g.query(
             "MATCH (o:Object) "
             "WHERE (o.name IN $names OR o.id IN $names) "
-            f"AND {status_excluded} "
+            f"{status_filter}"
             "RETURN o.id, o.name",
             params={"names": names}).result_set
         return [{"id": r[0], "name": r[1]} for r in rows]
@@ -558,7 +573,7 @@ def docker_resolver_port(sdk) -> ResolverPort:
             "MATCH (p:Point)-[:aboutObject]->(o:Object) "
             "WHERE p.search_keys IS NOT NULL AND "
             "ANY(t IN $tokens WHERE toLower(p.search_keys) CONTAINS t) "
-            f"AND {status_excluded} "
+            f"{status_filter}"
             "RETURN o.id, o.name, collect(p.id) LIMIT $limit",
             params={"tokens": tokens, "limit": limit}).result_set
         return [{"id": r[0], "name": r[1]} for r in rows]
@@ -573,10 +588,15 @@ def docker_resolver_port(sdk) -> ResolverPort:
 
 # ══════════════════════════════════════════════════════════════════════════
 # #2165 Task 4 — typed walker + slice builder (R2/R3-8/R12, R17 P3-1/
-# P3-6; P3-3: the unresolvable Object-status exclusion binds at RESOLVE
-# time (the resolver's legs — see `docker_resolver_port`), and is NEVER
-# applied to a resolved subject's OWN state row (the superseded couch's
-# state IS the answer) nor to Points). One batched typed walk (never
+# P3-6; P3-3: TWO Object-status vocabularies now exist in this file and they
+# are NOT the same set — (a) the RESOLVE-time set
+# (``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES`` = {retracted}, the Object-SEARCH
+# boundary per #2977's ``OBJECT_SEARCH_EXCLUDED_STATUS``; the resolver's legs
+# apply it, see `docker_resolver_port`), and (b) the RENDER/probe-time set
+# (``_RECALL_OBJECT_EXCLUDED_STATUSES``, five statuses including ``outdated``,
+# used only by `_probe_visible_successors`). Neither is EVER applied to a
+# resolved subject's OWN state row (the superseded couch's state IS the
+# answer) nor to Points). One batched typed walk (never
 # row-level N+1, never blind BFS): state slice
 # (Object status/supersededBy/supersededAt in ONE statement), dated spine
 # (aboutObject Points ∪ Event-aboutObject edges ∪ product-lane eventId

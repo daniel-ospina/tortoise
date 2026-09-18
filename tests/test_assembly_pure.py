@@ -534,6 +534,30 @@ def test_resolver_empty_candidates_never_fire_current_state():
     assert ResolveResult().both_halves_ok(None) is False
 
 
+def test_resolver_excluded_statuses_stay_inside_the_recall_excluded_set():
+    """#3317 pin — the resolver's unresolvable set must stay a SUBSET of the
+    file's wider Object recall-exclusion set.
+
+    The two sets are different by design (the resolver's is the Object-SEARCH
+    boundary, ``{retracted}``; ``_RECALL_OBJECT_EXCLUDED_STATUSES`` is the
+    five-status successor-probe view). The invariant that must hold is
+    direction, not equality: a status the read surfaces consider VISIBLE must
+    never be made unresolvable here (that is what forbids widening to
+    ``outdated``, and what would break the pinned ``superseded``
+    current-state render).
+    """
+    from tortoise.assembly import (
+        _RECALL_OBJECT_EXCLUDED_STATUSES,
+        _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES,
+    )
+    assert (
+        _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+        <= _RECALL_OBJECT_EXCLUDED_STATUSES
+    )
+    assert "retracted" in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+    assert "superseded" not in _RESOLVER_UNRESOLVABLE_OBJECT_STATUSES
+
+
 # ── docker-lane resolver legs (fixture substrate; skip when the shared
 #    server is unreachable — pure tests above never touch this) ────────────
 
@@ -752,10 +776,15 @@ def test_resolver_docker_excludes_retracted_object(_docker_sdk,
         shape=AssemblyShape.CURRENT_STATE)
     assert [r["status"] for r in dep_slices.state_rows] == ["deprecated"]
 
-    # and the assembled payload never carries the retracted Object as a subject
+    # the assembled payload never carries the retracted Object as a subject,
+    # and the block STILL FIRES — the latter pinned because a bare
+    # `couch_id not in …` of `subjects=()` would also pass under an over-broad
+    # exclusion (either a data filter or an abort) — this asserts that the
+    # decided ladder fall-through is intact.
     from tortoise.assembly import _assemble_connected
     block = _assemble_connected(
         _docker_sdk, "what is the current status of the couch?")
+    assert block.fired is True
     assert couch_id not in {s["object_id"] for s in block.subjects}
 
 
@@ -764,12 +793,12 @@ def test_walker_explicit_id_renders_retracted_status_verbatim(_docker_sdk):
     """#3317 decision pin: the walker's state read is NOT a resolution leg.
 
     Given an id EXPLICITLY (the WalkerPort contract), the state row carries
-    ``status`` VERBATIM — the retracted Object is rendered as
-    ``STATE (couch): retracted`` by ``docker_walker_port.state_rows``. Adding
-    a status conjunct there would not stop a retracted Object from being
-    resolved (resolution has already happened) — it would only erase the
-    honest state line of an admitted subject. The guard lives upstream, at
-    the resolver legs.
+    ``status`` VERBATIM; the renderer (``_state_header_hit``) then emits
+    ``STATE (couch): retracted``. Adding a status conjunct to
+    ``docker_walker_port.state_rows`` would not stop a retracted Object from
+    being resolved (resolution has already happened) — it would only erase
+    the honest state line of an admitted subject. The guard lives upstream,
+    at the resolver legs.
     """
     _ag.build_base_graph(_docker_sdk)
     proj = _docker_sdk._get_proj()
