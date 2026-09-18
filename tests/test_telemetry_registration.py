@@ -1,0 +1,481 @@
+"""#3821 — an unregistered event/prop/key is never dropped SILENTLY.
+
+The defect: allowlist filters (analytics props, the onboarding-state router,
+the PATCH front door, the writer's FLOW strip, the beacon enum check) all had
+a membership test with no ``else``. A key that failed the test vanished — no
+error, no counter, no log — so a dropped signal was indistinguishable from an
+event that never fired, and the debugging direction was inverted: you hunt a
+product bug while the product is fine and the INSTRUMENT ate the event.
+
+The fix is one choke point, :func:`tortoise.hosted_api._report_unregistered`:
+never forwards (PII intact), always counts, emits a bounded WARN, and raises
+only in strict mode (env read at call time).
+
+The load-bearing test here is
+``test_every_emitted_prop_key_is_allowlisted`` — a structural AST pass over
+every emit site. It REDs on unmodified ``origin/main`` because the Stripe
+webhook emits ``plan``/``tier``, which were never registered (the live,
+~5-week silent loss since ``c928b0316``).
+"""
+from __future__ import annotations
+
+import ast
+import json
+import logging
+import os
+from pathlib import Path
+
+import pytest
+
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
+from tortoise import hosted_api as ha  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_HOSTED_API = _REPO_ROOT / "tortoise" / "hosted_api.py"
+_MCP_SERVER = _REPO_ROOT / "tortoise" / "mcp_server.py"
+
+_TELEMETRY_FUNCS = ("_track_analytics_event", "_track_onboarding_event")
+
+
+# ── fixtures ────────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _clean_telemetry_state(monkeypatch):
+    """Strict off + an empty counter/dedup set per test.
+
+    The counter is process-global by design (monotonic in production), so a
+    test must reset it — that is a test-hygiene concern, not a code smell.
+    """
+    monkeypatch.delenv(ha._TELEMETRY_STRICT_ENV, raising=False)
+    ha._TELEMETRY_DROP_COUNTS.clear()
+    ha._TELEMETRY_DROP_REPORTED.clear()
+    yield
+    ha._TELEMETRY_DROP_COUNTS.clear()
+    ha._TELEMETRY_DROP_REPORTED.clear()
+
+
+@pytest.fixture
+def state_seams(monkeypatch):
+    """Route the registry legs of `_update_onboarding_state` to a dict."""
+    monkeypatch.setattr(ha, "_get_onboarding_state", lambda org_id: {})
+    monkeypatch.setattr(ha, "_get_onboarding_projection", lambda org_id: {})
+    written: dict = {}
+
+    def fake_write(org_id, state):
+        written["org_id"] = org_id
+        written["state"] = dict(state)
+
+    monkeypatch.setattr(ha, "_write_onboarding_state", fake_write)
+    return written
+
+
+@pytest.fixture
+def patch_client(tmp_path, monkeypatch):
+    """TestClient for PATCH /v1/onboarding/state with auth + seams stubbed.
+
+    Mirrors the seam in tests/test_onboarding_analytics_patch.py: the state
+    writer and email reader are monkeypatched, and the analytics fallback is
+    redirected to a tmp JSONL so an emitted event is observable.
+    """
+    from fastapi.testclient import TestClient
+
+    team = {"org_id": "test-team-3821", "tier": "free", "key_id": "k1"}
+    monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH",
+                        str(tmp_path / "analytics.jsonl"))
+    for var in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+                "SUPABASE_SERVICE_ROLE_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(ha, "_update_onboarding_state",
+                        lambda org_id, **fields:
+                        dict(ha.DEFAULT_ONBOARDING_STATE))
+    monkeypatch.setattr(ha, "_org_email", lambda org_id: None)
+    ha.app.dependency_overrides[ha.get_current_org] = lambda: team
+    with TestClient(ha.app) as c:
+        yield c
+    ha.app.dependency_overrides.clear()
+
+
+def _emit(tmp_path, monkeypatch, event_name, props):
+    """Emit through the REAL writer with Supabase unset → JSONL fallback."""
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    fallback = tmp_path / "analytics.jsonl"
+    monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH", str(fallback))
+    outcome = ha._track_analytics_event("team-1", event_name, props)
+    rows = []
+    if fallback.exists():
+        rows = [json.loads(line) for line in fallback.read_text().splitlines()
+                if line.strip()]
+    return outcome, rows
+
+
+def _warnings(caplog):
+    return [r for r in caplog.records
+            if "unregistered telemetry" in r.getMessage()]
+
+
+# ── the choke point (mechanism) ─────────────────────────────────────────────
+
+def test_unregistered_analytics_prop_is_counted_not_dropped(
+        tmp_path, monkeypatch, caplog):
+    """The row is still written, the field is absent, the drop is COUNTED and
+    reported once — acceptance is on the value the row receives and the
+    counter that moves, never on a spelling in a file."""
+    with caplog.at_level(logging.WARNING):
+        _outcome, rows = _emit(tmp_path, monkeypatch, "capture_cost",
+                               {"cost_usd": 0.5, "aha": True})
+    assert rows, "analytics must never block the capture — the row still lands"
+    rec = rows[-1]
+    assert "aha" not in rec["properties"]           # never forwarded
+    assert rec["properties"]["cost_usd"] == 0.5     # registered field survives
+    assert ha._TELEMETRY_DROP_COUNTS[
+        ("analytics_props", "capture_cost", ("aha",))] == 1
+    warns = _warnings(caplog)
+    assert len(warns) == 1
+    assert "aha" in warns[0].getMessage()
+
+
+def test_unregistered_prop_is_never_forwarded_pii_guarantee(
+        tmp_path, monkeypatch):
+    """The anti-regression for the PII guarantee: reporting must not start
+    forwarding unknown keys."""
+    _outcome, rows = _emit(tmp_path, monkeypatch, "capture_cost",
+                           {"cost_usd": 0.1, "secret_key": "leak"})
+    assert rows
+    assert set(rows[-1]["properties"]) <= ha._ALLOWED_ANALYTICS_PROPS
+    assert "secret_key" not in rows[-1]["properties"]
+
+
+def test_prop_drop_counter_is_zero_for_a_fully_registered_event(
+        tmp_path, monkeypatch):
+    """The legitimate form: a registered event leaves the drop counter at 0."""
+    _outcome, rows = _emit(tmp_path, monkeypatch, "capture_cost",
+                           {"cost_usd": 0.1, "session_id": "s1"})
+    assert rows
+    assert not any(k[0] == "analytics_props" for k in ha._TELEMETRY_DROP_COUNTS)
+
+
+def test_drop_report_is_deduplicated(tmp_path, monkeypatch, caplog):
+    """OTel's "at most once per record" bound: three identical drops produce
+    ONE warning and a counter of 3."""
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            _emit(tmp_path, monkeypatch, "capture_cost", {"aha": True})
+    assert len(_warnings(caplog)) == 1
+    assert ha._TELEMETRY_DROP_COUNTS[
+        ("analytics_props", "capture_cost", ("aha",))] == 3
+
+
+def test_drop_report_does_not_recurse(tmp_path, monkeypatch):
+    """The reporter reports via log + counter only — it never emits a row, so
+    it cannot eat its own report."""
+    _outcome, rows = _emit(tmp_path, monkeypatch, "capture_cost", {"aha": True})
+    assert [r["event_name"] for r in rows] == ["capture_cost"]
+    assert {k[0] for k in ha._TELEMETRY_DROP_COUNTS} == {"analytics_props"}
+
+
+def test_strict_mode_does_not_break_the_capture_path(tmp_path, monkeypatch):
+    """Flag unset → the drop is reported and the call returns normally (the
+    capture path cannot 500). Flag set → the SAME call raises, and the
+    exception punches through `_track_onboarding_event`'s bare except."""
+    outcome, rows = _emit(tmp_path, monkeypatch, "capture_cost", {"aha": True})
+    assert rows
+    assert outcome in ha._ANALYTICS_OUTCOMES
+
+    monkeypatch.setenv(ha._TELEMETRY_STRICT_ENV, "1")
+    with pytest.raises(ha.UnregisteredTelemetryKey):
+        ha._track_analytics_event("team-1", "capture_cost", {"aha": True})
+    with pytest.raises(ha.UnregisteredTelemetryKey):
+        ha._track_onboarding_event({"org_id": "team-1"}, "cap", aha=True)
+
+
+# ── S1: the analytics prop filter / the shipped billing loss ────────────────
+
+def test_billing_emit_carries_plan_and_tier(tmp_path, monkeypatch):
+    """The billing emit passes `plan`/`tier`; they must survive the filter.
+    Before #3821 they were dropped — the live loss since 2026-08-09."""
+    _outcome, rows = _emit(tmp_path, monkeypatch, "invoice_paid",
+                           {"plan": "pro", "tier": "pro", "status": "active"})
+    assert rows
+    assert rows[-1]["properties"] == {
+        "plan": "pro", "tier": "pro", "status": "active"}
+    assert not any(k[0] == "analytics_props" for k in ha._TELEMETRY_DROP_COUNTS)
+
+
+def test_capture_cost_row_is_complete_when_all_keys_are_registered(
+        tmp_path, monkeypatch):
+    """#3359's requirement, enforced: every measured capture_cost field
+    survives the PII filter (or the measurement is silently lost)."""
+    meta = {"stats": {"llm": {
+        "calls": 1, "retries": 0, "prompt_tokens": 10,
+        "completion_tokens": 2, "cost_usd": 0.001,
+        "calls_without_cost": 0, "calls_without_usage": 0,
+        "deadline_aborts": 0, "by_stage": {}}}}
+    props = ha._capture_cost_props("sess-1", meta)
+    assert props is not None
+    assert set(props) <= ha._ALLOWED_ANALYTICS_PROPS
+    _outcome, rows = _emit(tmp_path, monkeypatch, "capture_cost", props)
+    assert rows
+    assert not any(k[0] == "analytics_props" for k in ha._TELEMETRY_DROP_COUNTS)
+
+
+# ── S2/S5: the onboarding-state router and the writer backstop ──────────────
+
+def test_unregistered_state_key_is_reported_at_the_router(state_seams):
+    """A registered key persists; an unregistered one is reported (counter +
+    WARN naming it) and is NOT persisted."""
+    ha._update_onboarding_state("org-1", prompt_pasted=True, bogus_key=1)
+    assert state_seams["state"].get("prompt_pasted") is True
+    assert "bogus_key" not in state_seams["state"]
+    assert ha._TELEMETRY_DROP_COUNTS[
+        ("onboarding_state", "unknown_key", ("bogus_key",))] == 1
+
+
+def test_registered_state_key_writes_through_with_zero_skips(state_seams):
+    """The legitimate form — a registered key writes through, no skip counted."""
+    ha._update_onboarding_state("org-1", prompt_pasted=True)
+    assert state_seams["state"].get("prompt_pasted") is True
+    assert not ha._TELEMETRY_DROP_COUNTS
+
+
+def test_flow_scalar_at_router_is_reported_as_flow_rejection_not_unknown(
+        state_seams):
+    """A scalar FLOW key is reported with its OWN reason, distinct from a
+    typo'd operational key — and still never reaches jsonb."""
+    ha._update_onboarding_state("org-1", fork="self")
+    assert ("onboarding_state", "flow_scalar_rejected_at_router", ("fork",)) \
+        in ha._TELEMETRY_DROP_COUNTS
+    assert ("onboarding_state", "unknown_key", ("fork",)) \
+        not in ha._TELEMETRY_DROP_COUNTS
+    assert "fork" not in state_seams.get("state", {})
+
+
+def test_write_onboarding_state_flow_strip_is_reported(monkeypatch, caplog):
+    """The belt-and-braces FLOW strip still strips (jsonb NEVER holds FLOW
+    state) AND now reports the strip — its last chance to be noticed."""
+    import tortoise.supabase_control as sc
+
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+
+    class _FakeReg:
+        def query(self, *args, **kwargs):
+            return self
+
+    class _FakeSdk:
+        def _get_registry(self):
+            return _FakeReg()
+
+    monkeypatch.setattr(ha, "_make_sdk", lambda namespace=None: _FakeSdk())
+    with caplog.at_level(logging.WARNING):
+        ha._write_onboarding_state("org-1",
+                                   {"prompt_pasted": True, "fork": "self"})
+    assert ha._TELEMETRY_DROP_COUNTS[
+        ("onboarding_state", "flow_keys_stripped_at_write", ("fork",))] == 1
+    assert any("fork" in r.getMessage() for r in caplog.records)
+
+
+# ── S3/S4: the PATCH front door and the beacon enum skip ────────────────────
+
+def test_unknown_onboarding_patch_field_is_reported_not_refused(patch_client):
+    """The front door drops unknown PATCH fields (pydantic extra='ignore')
+    before the router runs. It must stay a 200 — no unconditional refusal —
+    but the drop must be counted."""
+    r = patch_client.patch("/v1/onboarding/state", json={"bogus_key": 1})
+    assert r.status_code == 200
+    assert ("onboarding_state_patch", "unknown_field", ("bogus_key",)) \
+        in ha._TELEMETRY_DROP_COUNTS
+
+
+def test_artifact_copied_invalid_enum_is_reported(patch_client, caplog):
+    """An enum-invalid beacon still emits no event and returns 200, but the
+    rejected value is now reported instead of vanishing."""
+    with caplog.at_level(logging.WARNING):
+        r = patch_client.patch("/v1/onboarding/state",
+                               json={"harness": "vim", "section": "config"})
+    assert r.status_code == 200
+    assert ("artifact_copied", "invalid_enum", ("harness",)) \
+        in ha._TELEMETRY_DROP_COUNTS
+    assert any("harness" in rec.getMessage() for rec in caplog.records)
+
+
+# ── S6 + the structural gate: every emitted prop key must be registered ─────
+
+class _Call:
+    __slots__ = ("path", "lineno", "func", "event", "keys")
+
+    def __init__(self, path, lineno, func, event, keys):
+        self.path = path
+        self.lineno = lineno
+        self.func = func
+        self.event = event
+        self.keys = keys
+
+    def __repr__(self):  # pragma: no cover - diagnostics only
+        return (f"_Call({self.path.name}:{self.lineno} {self.func} "
+                f"event={self.event!r} keys={self.keys!r})")
+
+
+def _literal_dict_keys(node):
+    if not isinstance(node, ast.Dict):
+        return None
+    keys = set()
+    for key in node.keys:
+        if key is None or not isinstance(key, ast.Constant) \
+                or not isinstance(key.value, str):
+            return None
+        keys.add(key.value)
+    return keys
+
+
+def _resolve_keys(node, scopes):
+    """Prop keys for a call argument, or None if unresolvable.
+
+    Handles a dict literal, a bare name resolved to its unique literal dict
+    assignment in an enclosing scope (needed for mcp_server.py, which passes
+    `props`), and `props or None` (the wrapper's passthrough).
+    """
+    if node is None:
+        return None
+    if isinstance(node, ast.Dict):
+        return _literal_dict_keys(node)
+    if isinstance(node, ast.Name):
+        for scope in reversed(scopes):
+            if node.id in scope:
+                return scope[node.id]
+        return None
+    if isinstance(node, ast.BoolOp):
+        for value in node.values:
+            if isinstance(value, ast.Constant) and value.value is None:
+                continue
+            keys = _resolve_keys(value, scopes)
+            if keys is not None:
+                return keys
+        return None
+    return None
+
+
+def _walk_without_nested(node):
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _walk_without_nested(child)
+
+
+def _dict_assignments(func_node):
+    out: dict[str, set[str]] = {}
+    for stmt in _walk_without_nested(func_node):
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                and isinstance(stmt.targets[0], ast.Name):
+            keys = _literal_dict_keys(stmt.value)
+            if keys is not None:
+                out[stmt.targets[0].id] = keys
+        elif isinstance(stmt, ast.AnnAssign) \
+                and isinstance(stmt.target, ast.Name) \
+                and stmt.value is not None:
+            keys = _literal_dict_keys(stmt.value)
+            if keys is not None:
+                out[stmt.target.id] = keys
+    return out
+
+
+class _Collector(ast.NodeVisitor):
+    def __init__(self, path):
+        self.path = path
+        self.calls: list[_Call] = []
+        self.scopes: list[dict[str, set[str]]] = []
+
+    @staticmethod
+    def _name(node):
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return None
+
+    def visit_FunctionDef(self, node):
+        self.scopes.append(_dict_assignments(node))
+        self.generic_visit(node)
+        self.scopes.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def _record(self, node, func, event_arg, props_arg):
+        event = None
+        if isinstance(event_arg, ast.Constant) \
+                and isinstance(event_arg.value, str):
+            event = event_arg.value
+        self.calls.append(_Call(self.path, node.lineno, func, event,
+                                _resolve_keys(props_arg, self.scopes)))
+
+    def visit_Call(self, node):
+        callee = self._name(node.func)
+        if callee == "_track_analytics_event":
+            event_arg = node.args[1] if len(node.args) >= 2 else None
+            props_arg = node.args[2] if len(node.args) >= 3 else None
+            for kw in node.keywords:
+                if kw.arg == "properties":
+                    props_arg = kw.value
+                elif kw.arg == "event_name":
+                    event_arg = kw.value
+            self._record(node, callee, event_arg, props_arg)
+        elif callee == "_track_onboarding_event":
+            keys = set()
+            resolved = True
+            for kw in node.keywords:
+                if kw.arg is None:
+                    resolved = False
+                else:
+                    keys.add(kw.arg)
+            self.calls.append(_Call(self.path, node.lineno, callee, None,
+                                    keys if resolved else None))
+        elif node.args and self._name(node.args[0]) == "_track_analytics_event":
+            # Partial application: `asyncio.to_thread(_track_analytics_event,
+            # org, event, props)` — the capture_cost emit site.
+            event_arg = node.args[2] if len(node.args) >= 3 else None
+            props_arg = node.args[3] if len(node.args) >= 4 else None
+            self._record(node, "_track_analytics_event(to_thread)",
+                         event_arg, props_arg)
+        self.generic_visit(node)
+
+
+def _collect(path):
+    collector = _Collector(path)
+    collector.visit(ast.parse(path.read_text()))
+    return collector.calls
+
+
+def test_every_emitted_prop_key_is_allowlisted():
+    """The structural fix — the #3675 guard.
+
+    Walks the AST of both emitter modules, resolves each emit site's prop
+    keys (dict literal, or a name bound to a literal dict in an enclosing
+    scope), and asserts they are a subset of ``_ALLOWED_ANALYTICS_PROPS``.
+
+    This test REDs on unmodified ``origin/main``: the billing webhook emits
+    ``plan`` and ``tier``, neither registered. It is the gate that would have
+    caught the live Aug-2026 loss at CI time, and that catches #3675's new
+    props before they ship.
+    """
+    calls = _collect(_HOSTED_API) + _collect(_MCP_SERVER)
+    resolved = [c for c in calls if c.keys]
+    assert len(resolved) >= 8, (
+        "the AST walk resolved suspiciously few emit sites — the walk is "
+        f"broken, not the code: {calls}")
+
+    all_keys = set().union(*(c.keys for c in resolved))
+    # The billing site's event name is a variable, so pin the walk to it by
+    # its keys: if `plan`/`tier` are not inspected, the walk has a hole.
+    assert {"plan", "tier"} <= all_keys
+
+    violations = {}
+    for call in resolved:
+        bad = call.keys - ha._ALLOWED_ANALYTICS_PROPS
+        if bad:
+            violations[f"{call.path.name}:{call.lineno} {call.func}"] = sorted(bad)
+    assert violations == {}, (
+        "emit site(s) pass prop keys missing from _ALLOWED_ANALYTICS_PROPS — "
+        f"they would be dropped silently: {violations}")

@@ -27,7 +27,7 @@ import os
 import re
 import threading
 import time
-from collections import OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
@@ -18275,7 +18275,15 @@ def _write_onboarding_state(org_id: str, state: dict) -> None:
     jsonb NEVER holds FLOW state (the router branches before the allowlist
     filter; this is the belt-and-braces backstop the registration-split
     negatives pin)."""
-    if any(k in state for k in _os.FLOW_KEYS) or any(k in state for k in _os.STEP_IDS):
+    _stripped_flow = {k for k in state
+                      if k in _os.FLOW_KEYS or k in _os.STEP_IDS}
+    if _stripped_flow:
+        # #3821: this is the last chance to learn the router leaked a FLOW
+        # key. The strip itself is unchanged (jsonb NEVER holds FLOW state);
+        # the drop is now reported instead of silent — it was the
+        # "defensive" backstop with no observer.
+        _report_unregistered(
+            "onboarding_state", "flow_keys_stripped_at_write", _stripped_flow)
         state = {k: v for k, v in state.items()
                  if k not in _os.FLOW_KEYS and k not in _os.STEP_IDS}
     from tortoise.supabase_control import (
@@ -18357,10 +18365,17 @@ def _update_onboarding_state(org_id: str, **fields) -> dict:
         elif k in _os.FLOW_KEYS:
             # only step-edge keys are routable here; scalar FLOW keys are
             # rejected by the PATCH surface / checkpoint before reaching
-            # this point (defensive: silently skip — never default-to-jsonb)
-            pass
+            # this point (never default-to-jsonb). #3821: the rejection is
+            # reported with its OWN reason, so a scalar FLOW key stays
+            # distinguishable from a typo'd operational key.
+            _report_unregistered(
+                "onboarding_state", "flow_scalar_rejected_at_router", {k})
         elif k in _ALLOWED_STATE_KEYS:
             jsonb_fields[k] = v
+        else:
+            # #3821: the negative branch that used to be nothing. An
+            # unregistered key matched no arm and vanished with no observer.
+            _report_unregistered("onboarding_state", "unknown_key", {k})
     if jsonb_fields:
         state = _get_onboarding_state(org_id)
         for k, v in jsonb_fields.items():
@@ -18654,6 +18669,26 @@ class OnboardingStatePatchRequest(BaseModel):
     # a stray PATCH is REJECTED loudly (403 server-owned) like the siblings.
     fork_unsure_at: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _report_unknown_patch_fields(cls, data):
+        """#3821 (the front door): pydantic's default ``extra='ignore'``
+        drops an unknown PATCH field BEFORE `_update_onboarding_state` ever
+        runs, so the router's new negative branch could never see it.
+
+        This validator keeps the drop — it does NOT switch to
+        ``extra='forbid'``, which would make an unknown client field an
+        unconditional 422 (the owner ruled against unconditional
+        user-facing refusals) — but makes it observable: the offending
+        field name(s) are counted and reported through the same choke point.
+        Strict mode raises."""
+        if isinstance(data, dict):
+            unknown = set(data) - set(cls.model_fields)
+            if unknown:
+                _report_unregistered("onboarding_state_patch",
+                                     "unknown_field", unknown)
+        return data
+
 
 # #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
 # where (per-step write-surface ownership, scope pin 7/8).
@@ -18739,6 +18774,17 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
         _track_analytics_event(org["org_id"], "artifact_copied",
                                {"harness": harness, "section": section})
+    elif harness is not None or section is not None:
+        # #3821: an enum-invalid beacon used to produce NO event and NO
+        # observer — indistinguishable from a beacon that never fired. The
+        # event still does not fire (the enum check is unchanged); the
+        # rejected value(s) are now reported.
+        _report_unregistered(
+            "artifact_copied", "invalid_enum",
+            {name for name, value, allowed in (
+                ("harness", harness, _HARNESS_ANALYTICS_VALUES),
+                ("section", section, _SECTION_ANALYTICS_VALUES))
+             if value is not None and value not in allowed})
     # #1997 (W1): accept-and-drop (plan T7) — a client PATCH
     # onboarding_complete on a NODE-PRESENT org is DROPPED (accepted 200;
     # the echo is node-governed — the legacy jsonb flag is inert there).
@@ -19670,7 +19716,110 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "deadline_aborts", "by_stage",
+    # #3821: billing attribution. The Stripe webhook emits `plan` and `tier`
+    # (the notify_kind row at the billing emit), but they were never
+    # registered — so billing analytics rows have been written STRIPPED since
+    # c928b0316 (2026-08-09), despite
+    # docs/plans/2026-08-08-310-stripe-billing.md mandating those fields.
+    # Registering them here repairs that shipped, silent loss; the structural
+    # registration test is what keeps the two sets from drifting again.
+    "plan", "tier",
 }
+
+# ── #3821: the unregistered-key choke point ─────────────────────────────
+# Every allowlist filter in this module has the same shape: a membership
+# test with no `else`. Before this, a key that failed the test was simply
+# gone — no error, no counter, no log — so a dropped signal was
+# indistinguishable from an event that never fired, and the debugging
+# direction was inverted (you hunt a product bug while the product is fine
+# and the INSTRUMENT ate the event).
+#
+# The adopted standard is the OpenTelemetry attribute-limit rule: an
+# attribute that cannot be carried MUST NOT be discarded silently, and the
+# message MUST be printed at most once per record. The rule has four parts:
+#   1. never forward the key  (the PII guarantee is unchanged),
+#   2. always count it        (the drop is distinguishable from never-fired),
+#   3. report it once         (bounded — a hot emit site cannot flood),
+#   4. raise only in strict mode (an explicit dev/test opt-in, read at call
+#      time so a test can flip it and prod cannot accidentally be strict).
+_TELEMETRY_STRICT_ENV = "TORTOISE_TELEMETRY_STRICT"
+
+# (where, subject, sorted unknown keys) -> drop count. Monotonic — reads
+# never reset it.
+_TELEMETRY_DROP_COUNTS: Counter[tuple[str, str, tuple[str, ...]]] = Counter()
+
+# (where, subject, frozenset(unknown keys)) already warned — the OTel
+# "at most once per record" dedup.
+_TELEMETRY_DROP_REPORTED: set[tuple[str, str, frozenset[str]]] = set()
+
+# Guards the count and the warn-dedup so "always counted" and "reported at
+# most once" hold under the threaded emit sites (`asyncio.to_thread`, the
+# MCP executor). Contended only on a drop — rare by construction — never on
+# the happy path.
+_TELEMETRY_DROP_LOCK = threading.Lock()
+
+
+class UnregisteredTelemetryKey(ValueError):
+    """Raised by ``_report_unregistered`` ONLY in strict mode.
+
+    Subclasses ``ValueError`` so a raise inside
+    ``OnboardingStatePatchRequest``'s pydantic before-validator surfaces as a
+    validation error rather than an opaque 500; every other raise site
+    propagates it as-is."""
+
+    def __init__(self, where: str, subject: str, unknown: set[str]) -> None:
+        self.where = where
+        self.subject = subject
+        self.unknown = frozenset(unknown)
+        super().__init__(
+            f"unregistered telemetry key(s) at {where} (subject={subject}): "
+            f"{sorted(unknown)}")
+
+
+def _telemetry_strict() -> bool:
+    """Strictness is read AT CALL TIME.
+
+    Reading it at import time would both (a) make the flag untestable and
+    (b) let a dev flag set before boot survive into production."""
+    return os.environ.get(_TELEMETRY_STRICT_ENV) == "1"
+
+
+def _report_unregistered(where: str, subject: str,
+                         unknown: set[str] | frozenset[str] | None) -> None:
+    """Account for allowlist-dropped telemetry keys — and never forward them.
+
+    Contract (issue #3821), in order:
+
+    1. ALWAYS counts — ``(where, subject, sorted keys)`` is incremented before
+       any escalation, so the drop is visible even when strict mode raises.
+    2. Reports ONCE per ``(where, subject, key-set)`` per process — the OTel
+       bound, so an emit site in a hot loop cannot flood the log.
+    3. Raises ``UnregisteredTelemetryKey`` ONLY when strict mode is on at call
+       time; otherwise returns.
+    4. NEVER forwards the key: the caller's filtered props are byte-identical
+       to before, preserving the PII guarantee.
+
+    An empty/``None`` ``unknown`` is a no-op — a fully-registered event must
+    leave the counter at zero, or the counter itself is unreadable.
+    """
+    if not unknown:
+        return
+    keys = frozenset(unknown)
+    marker = (where, subject, keys)
+    with _TELEMETRY_DROP_LOCK:
+        _TELEMETRY_DROP_COUNTS[(where, subject, tuple(sorted(keys)))] += 1
+        report = marker not in _TELEMETRY_DROP_REPORTED
+        if report:
+            _TELEMETRY_DROP_REPORTED.add(marker)
+    if report:
+        _logger.warning(
+            "unregistered telemetry key(s) dropped at %s (subject=%s): %s — "
+            "NOT forwarded; if the loss is unintended, register them in "
+            "_ALLOWED_ANALYTICS_PROPS (props) or _ALLOWED_STATE_KEYS (state)",
+            where, subject, sorted(keys))
+    if _telemetry_strict():
+        raise UnregisteredTelemetryKey(where, subject, set(keys))
+
 
 _ANALYTICS_FALLBACK_PATH = None
 
@@ -19865,6 +20014,13 @@ def _track_analytics_event(org_id: str, event_name: str,
         # from `.items()` straight out of it. Every in-repo caller passes a
         # dict — this pins the contract for callers added later.
         properties = None
+    # #3821: observe the drop BEFORE the filter below removes it. The filter
+    # itself is unchanged — an unknown key is still never forwarded, so the
+    # PII guarantee is byte-identical. Reporting first also means strict mode
+    # raises before any row is written.
+    _report_unregistered(
+        "analytics_props", event_name,
+        set(properties or {}) - _ALLOWED_ANALYTICS_PROPS)
     props = {k: v for k, v in (properties or {}).items()
              if k in _ALLOWED_ANALYTICS_PROPS}
     event = {
@@ -20464,9 +20620,17 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
 
 
 def _track_onboarding_event(org: dict, event_name: str, **props) -> None:
-    """Convenience: track with the current org, swallowing errors."""
+    """Convenience: track with the current org, swallowing errors.
+
+    #3821: the ONE exception that must escape this swallow is
+    ``UnregisteredTelemetryKey`` — strict mode exists precisely so a
+    misregistered prop cannot be silently swallowed by this wrapper.
+    Everything else is still swallowed (analytics must never break the
+    onboarding flow)."""
     try:  # noqa: SIM105
         _track_analytics_event(org["org_id"], event_name, props or None)
+    except UnregisteredTelemetryKey:
+        raise
     except Exception:
         pass
 
