@@ -108,6 +108,17 @@ class _EntityHandlers:
         "aboutEvent",        # handled as aboutEvent edge
         "aboutPoint",        # handled as aboutPoint edge
         "aboutDocument",     # handled as aboutDocument edge
+        # #3947 review (security): the capture turn loop's session-container
+        # link. A structural EDGE carrier exactly like the `about*` keys above
+        # — never a node property. The replay reads it from the RAW envelope
+        # before `_norm` (`{**ev, **ev["point"]}`) can splice the payload over
+        # it, so a point key of the same name cannot shadow (or forge) it; this
+        # entry is the writer-side backstop that keeps the key out of the
+        # open-set passthrough entirely. Deliberately NOT in `_POINT_DENY`:
+        # the deny list's drop-warning would then fire on every healthy turn
+        # replay (the envelope key is present by design) — the #2958 noise
+        # class.
+        "contains_session",
         # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
         # on api._emit) + corrects — structural, never node properties. One
@@ -476,8 +487,11 @@ class _EntityHandlers:
         ``contains_session`` (#3947) is the CONTAINS-container link of an
         episodic turn Point, and arrives on the EVENT envelope rather than in
         the point payload: it is a capture-write structural fact, not a
-        Point property, so it can never be confused with (or forged through)
-        a caller-supplied node prop.
+        Point property. The replay reads it from the **raw** envelope BEFORE
+        `_norm` (`{**ev, **ev["point"]}`) can splice the payload over it, so
+        a point key of the same name cannot shadow it; `_POINT_DENY` and the
+        SDK/MCP boundary rejects are the backstops that keep the key out of
+        the node entirely.
         """
         # Ontology v2.1: link Point → Source via extractedFrom edge.
         # #3263: many-to-many — one edge per source. _link_source fans a list
@@ -515,6 +529,18 @@ class _EntityHandlers:
         MERGE — a full-path MERGE with a missing edge makes FalkorDB create
         the whole path from scratch, duplicating the Point node (#490 review
         P2-2).
+
+        KNOWN LIMIT (review F6): this recreates a MINIMAL Session — `id` +
+        `is_episodic` only. A journal-only `rebuild()` has no Session record to
+        replay (the live loop never journaled it), so `capture_ok`,
+        `turn_count` and `created_at` come back absent. For `rebuild_all` the
+        pre-wipe `:Session` snapshot restores the full property set, so this
+        stub is overwritten; for `rebuild()` the props stay missing and a
+        later capture may read `capture_ok=None` as the legacy
+        "presumed captured" case (#2335) instead of retrying. Carrying the
+        Session record durably is the `SessionRecorded` work already open as
+        #3722/#2296 — deliberately NOT re-invented here. See the residual
+        note in the #3947 PR body.
         """
         self.g.query(
             "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",

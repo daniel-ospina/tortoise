@@ -899,6 +899,16 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             raise ValueError(
                 f"{key!r} is a server-managed field and cannot be set via props."
             )
+    # #3947 review (security): `contains_session` is an ENVELOPE-level capture
+    # directive (it drives the `(:Session)-[:CONTAINS]->(:Point)` rebuild fold),
+    # never a Point property. Reject it here as the fail-closed boundary: a
+    # tenant-supplied prop of this name must not be able to reach a writer that
+    # could turn it into a structural graph fact on replay.
+    if "contains_session" in props:
+        raise ValueError(
+            "'contains_session' is a server-managed capture field and cannot "
+            "be set via props."
+        )
     # #1486 (code-review P1): is_episodic is the points-quota discriminator
     # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
     # setting it true via props would exclude their points from the quota —
@@ -3365,18 +3375,28 @@ class TortoiseSDK:
             # [:cap] here is the idempotent no-op keeping the store loop's own
             # window definition explicit (#1532 D1).
             turn_text = f"[{role}] {content[:5000]}"
-            proj.g.query(
+            _turn_rows = proj.g.query(
                 "MERGE (t:Point {id:$id}) "
                 "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
                 "    t.speaker=$speaker, "
                 "    t.is_episodic=true, "
                 "    t.status=coalesce(t.status, $s), "
                 "    t.createdAt=coalesce(t.createdAt, $now), "
-                "    t.updatedAt=$now, t.content_hash=$ch",
+                "    t.updatedAt=$now, t.content_hash=$ch "
+                "RETURN t.createdAt AS createdAt",
                 params={"id": turn_id, "c": turn_text, "k": "event",
                         "speaker": role, "s": "draft", "now": now,
                         "ch": _content_hash(turn_text)},
-            )
+            ).result_set
+            # #3947 review (F4): the write's COALESCE decides the stored
+            # timestamp — a RE-capture keeps the ORIGINAL createdAt. Journal
+            # what the graph actually holds, or every replay re-stamps it with
+            # a fresh `now` and drifts from the live value (re-capture is a
+            # supported path — the turn write is idempotent by design).
+            turn_created_at = (
+                _turn_rows[0][0]
+                if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
+                else now)
             proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
                 "MERGE (s)-[:CONTAINS]->(t)",
@@ -3401,11 +3421,12 @@ class TortoiseSDK:
                 point={
                     "id": turn_id,
                     "content": turn_text,
+                    "content_hash": _content_hash(turn_text),
                     "pointKind": "event",
                     "speaker": role,
                     "is_episodic": True,
                     "status": "draft",
-                    "createdAt": now,
+                    "createdAt": turn_created_at,
                 },
                 contains_session=session_id,
             )

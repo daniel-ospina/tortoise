@@ -1893,6 +1893,15 @@ class FalkorProjection(
         return ev
 
     def apply(self, event: dict) -> None:
+        # #3947 review: read the capture's structural directive from the RAW
+        # envelope, BEFORE `_norm` splices the point payload over it. `_norm`
+        # is `{**ev, **ev["point"]}`, so a point key of the same name would
+        # SHADOW the envelope — and a caller-supplied `contains_session` prop
+        # would then forge a `:Session`/`CONTAINS` link on every replay. Read
+        # it here so the point payload can never reach it (the SDK/MCP
+        # boundaries reject the key too, as the fail-closed backstop).
+        contains_session = (
+            event.get("contains_session") if isinstance(event, dict) else None)
         ev = self._norm(event)
         t = ev.get("type")
         if not isinstance(t, str):
@@ -1929,7 +1938,7 @@ class FalkorProjection(
             # capture-session link on the ENVELOPE — replay restores the
             # `(:Session)-[:CONTAINS]->(:Point)` edge the live turn loop wrote
             # raw (and which a rebuild previously destroyed with no way back).
-            self._upsert(p, contains_session=ev.get("contains_session"))
+            self._upsert(p, contains_session=contains_session)
         elif t == "PointRevised":
             # Phase 1: discard new_context for v2+ events (#49)
             if ev.get("projection_version", 0) >= 2:
@@ -2026,17 +2035,33 @@ class FalkorProjection(
     def _episodic_point_ids(self) -> set[str]:
         """Ids of every ``:Point`` currently carrying ``is_episodic = true``.
 
-        An unreadable graph degrades to the empty set (the caller is either
-        mid-recovery or about to wipe anyway) — the invariant below must never
-        turn a query failure into a rebuild abort.
+        #3947 review: this read is PRE-wipe, so it fails **closed** — a query
+        error propagates and the rebuild aborts with the graph untouched
+        (nothing has been lost yet). Degrading to the empty set would
+        silently disarm the very invariant that exists to prevent loss.
         """
-        try:
-            rows = self.g.query(
-                "MATCH (n:Point) WHERE n.is_episodic = true RETURN n.id"
-            ).result_set
-        except Exception:  # noqa: BLE001, RUF100
-            return set()
+        rows = self.g.query(
+            "MATCH (n:Point) WHERE n.is_episodic = true RETURN n.id"
+        ).result_set
         return {r[0] for r in rows if isinstance(r[0], str)}
+
+    @staticmethod
+    def _journal_recreated_ids(events) -> set[str]:
+        """Ids the journal will CREATE on replay (``PointAdded``/``OperatorAdded``).
+
+        The pre-wipe counterpart of `_episodic_point_ids`: it answers "can the
+        replay bring this id back?" WITHOUT running the replay — which is
+        what makes the #3947 invariant safe to raise on (see below).
+        """
+        ids: set[str] = set()
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            if ev.get("type") in ("PointAdded", "OperatorAdded"):
+                p = ev.get("point")
+                if isinstance(p, dict) and isinstance(p.get("id"), str):
+                    ids.add(p["id"])
+        return ids
 
     @staticmethod
     def _journal_hard_deleted_ids(events) -> set[str]:
@@ -2064,55 +2089,70 @@ class FalkorProjection(
                         deleted.add(mid)
         return deleted
 
-    def _assert_episodic_points_survived(self, before: set[str],
-                                         exempt: set[str] | None = None) -> None:
-        """#3947 rebuild invariant — never report success after dropping turns.
+    def _assert_episodic_points_recreatable(self, before: set[str], events,
+                                            snapshot_ids=()) -> None:
+        """#3947 rebuild invariant — refuse a rebuild that CANNOT restore the turns.
 
         Episodic turn Points are written by the capture loop with a raw Cypher
         MERGE, so before #3947 they never entered the journal the rebuild
-        replays: a wipe+replay deleted them and had no event from which to
+        replays: a wipe+replay deleted them with no event from which to
         recreate them, while returning normally. Silent destruction of
         captured work dressed as a successful recovery (category A: silent
         destruction + false PASS).
 
-        The assertion is deliberately NARROW — only Points that carried
-        ``is_episodic = true`` BEFORE the wipe are required to come back,
-        minus those the journal itself hard-deletes. It does not police
-        generic graph-only Points: a journal-only ``rebuild()`` is *defined*
-        to reproduce the journal, and widening the check to every Point would
-        make every unjournaled producer a false block (the #548 snapshot in
-        ``rebuild_all`` covers that class).
+        ⛔ **PRE-WIPE, deliberately.** This verification runs BEFORE
+        ``MATCH (n) DETACH DELETE n`` and raises with the graph untouched.
+        #2943 ("No loss without proof") is the recorded decision governing
+        that shape: a hard-failing rebuild verification is safe only because
+        it can no longer fail *after* the wipe — failing post-wipe converts a
+        durability bug into permanent data loss, which is strictly worse than
+        the silent-degradation bug it detects. Verifying before the mutation
+        is that issue's own named remedy, so a RED here costs a refused
+        rebuild, never the store.
+
+        The check is deliberately NARROW — only Points that carried
+        ``is_episodic = true`` BEFORE the wipe are required to be
+        RECREATABLE (journal record or caller-supplied snapshot id), minus
+        those the journal itself hard-deletes. It does not police generic
+        graph-only Points: a journal-only ``rebuild()`` is *defined* to
+        reproduce the journal, and widening the check to every Point would
+        make every unjournaled producer a false block.
 
         Raises:
             RebuildDroppedEpisodicPoints: naming the missing ids, so the
-                operator sees WHAT was lost instead of a clean exit.
+                operator sees WHAT would be lost instead of a clean exit.
         """
         if not before:
             return
-        missing = sorted(before - self._episodic_point_ids() - (exempt or set()))
+        # NOTE: the hard-deletes exempt ids from the REQUIREMENT (they are
+        # supposed to disappear) — subtracting them from `covered` instead
+        # would demand recreation and turn every journaled delete into a
+        # false block.
+        covered = self._journal_recreated_ids(events) | set(snapshot_ids)
+        missing = sorted(
+            before - covered - self._journal_hard_deleted_ids(events))
         if not missing:
             return
         shown = ", ".join(missing[:10]) + (" …" if len(missing) > 10 else "")
         raise RebuildDroppedEpisodicPoints(
-            f"rebuild lost {len(missing)} episodic Point(s) it could not "
+            f"rebuild would destroy {len(missing)} episodic Point(s) it cannot "
             f"recreate: {shown} — the journal holds no creation record for "
             "them (their write bypassed the event log). The graph was NOT "
-            "restored; recover from a snapshot/RDB backup instead of "
-            "trusting this rebuild."
+            "touched: repair the journal or the snapshot, or restore from an "
+            "RDB backup, instead of trusting this rebuild."
         )
 
     def rebuild(self, log) -> None:
         # #3947: read the journal FIRST (a torn/failed read must not wipe),
-        # then snapshot the episodic population so the replay can be asserted
-        # against it.
+        # then PROVE the replay can recreate every episodic Point BEFORE the
+        # wipe. #2943: verifying only after the wipe turns a durability bug
+        # into permanent data loss, so the proof has to precede the mutation.
         events = list(log.read_all())
         episodic_before = self._episodic_point_ids()
+        self._assert_episodic_points_recreatable(episodic_before, events)
         self.g.query("MATCH (n) DETACH DELETE n")
         for ev in events:
             self.apply(ev)
-        # Fail loudly rather than returning as if the graph was restored.
-        self._assert_episodic_points_survived(
-            episodic_before, self._journal_hard_deleted_ids(events))
 
     def rebuild_all(self, log_dir: str) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
@@ -2158,10 +2198,10 @@ class FalkorProjection(
         # per key per pass instead of once per graph-only point.
         self._deny_drop_warned = set()
 
-        # #3947: capture the episodic Point population BEFORE the wipe. The
-        # replay is asserted against it at the END of this method — a rebuild
-        # that cannot recreate captured turns must FAIL, not return counts as
-        # if it had restored the graph.
+        # #3947: capture the episodic Point population BEFORE the wipe, and
+        # PROVE the replay can recreate it BEFORE wiping anything (#2943: a
+        # verification that can fail only after the wipe is the thing that
+        # turns a durability bug into permanent data loss).
         episodic_before = self._episodic_point_ids()
 
         # ── #548: snapshot existing graph BEFORE wiping ──────────────
@@ -2170,6 +2210,12 @@ class FalkorProjection(
         # wipe+replay cycle.
         synthetic_events: list[dict] = []
         capture_failed: list[str] = []
+        # #3947 review: ids the #548 snapshot itself will recreate. Without
+        # this, a graph-only (journal-less) store's turns looked lost to the
+        # invariant even though the snapshot restores them — and, critically,
+        # a FAILED snapshot read leaves this empty, so the proof REDs before
+        # the wipe instead of the rebuild false-PASSing (the reviewers' F2).
+        snapshot_ids: set[str] = set()
         try:
             rows = self.g.query(
                 "MATCH (n:Point) RETURN properties(n)"
@@ -2181,6 +2227,7 @@ class FalkorProjection(
                 pid = props.get("id")
                 if isinstance(pid, str):
                     existing_points[pid] = props
+                    snapshot_ids.add(pid)
                 elif pid is not None:
                     # A non-str id cannot round-trip the sidecar (the replay
                     # indexes by str, #331 r4) — pass 1a would skip the entry,
@@ -2313,6 +2360,31 @@ class FalkorProjection(
                 "graph/connection and re-run."
             )
 
+        # ── :Session container snapshot (#3947 review) ──────────────
+        # Same class as the :Batch marker above: `:Session` nodes and their
+        # `CONTAINS` edges are RAW graph writes on the capture path (the turn
+        # loop in sdk.py/hosted_api.py) that ride no journal record on a
+        # pre-#3947 store, and the #548 snapshot covers Points ONLY. Without
+        # this, `rebuild_all` restored every turn Point into an orphan —
+        # success reported, container and links destroyed (the false PASS
+        # #3947 removes). Captured BEFORE the episodic-set read below so both
+        # provably describe the same pre-wipe graph.
+        session_snapshot: list[dict] = []
+        session_point_links: list[tuple[str, str]] = []
+        try:
+            rows = self.g.query(
+                "MATCH (s:Session) RETURN properties(s)"
+            ).result_set
+            session_snapshot = [r[0] for r in rows] if rows else []
+            link_rows = self.g.query(
+                "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
+                "RETURN s.id, p.id"
+            ).result_set
+            session_point_links = (
+                [(r[0], r[1]) for r in link_rows] if link_rows else [])
+        except Exception:
+            pass  # graph may be corrupt — best-effort, like the #548 snapshot
+
         # ── Wipe + rebuild ──────────────────────────────────────────
         # WIPE-AFTER-PARSE (epic #900 T12/T3, cycle-21 ordering pin): parse
         # ALL .jsonl into memory (line-tolerant — a torn TRAILING line from a
@@ -2409,6 +2481,12 @@ class FalkorProjection(
         elif leftover is not None:
             # Nothing left to protect — do not leave a stale sidecar behind.
             _clear_prewipe_snapshot(snapshot_path)
+
+        # #3947 review: the proof runs HERE — after every recreation source is
+        # assembled (synthetic snapshot + every JSONL file) and BEFORE the
+        # first destructive statement.
+        self._assert_episodic_points_recreatable(
+            episodic_before, events, snapshot_ids=snapshot_ids)
 
         self.g.query("MATCH (n) DETACH DELETE n")
 
@@ -2861,6 +2939,35 @@ class FalkorProjection(
                     params={"pid": sp["id"], "props": gap},
                 )
 
+        # ── #3947 review: restore the :Session containers + their CONTAINS
+        # edges from the pre-wipe snapshot ──
+        # Same class as the :Batch marker above, and the same reason: the
+        # capture Session is a RAW graph write that rides no journal record on
+        # a pre-#3947 store, so the #548 Point snapshot (Points only) cannot
+        # restore it. Without this, `rebuild_all` returned SUCCESS while
+        # silently destroying the session container and every
+        # `(:Session)-[:CONTAINS]->(:Point)` edge of exactly the population
+        # #3947 is about — the false PASS this change exists to remove. Runs
+        # after pass 1a (the Points exist) and its props WIN over
+        # `_link_session`'s `SET s.is_episodic=true` (same value, so no
+        # clobber); the edge MERGE is idempotent against a journaled
+        # `contains_session` replay.
+        for props in session_snapshot:
+            sid = props.get("id")
+            if not sid:
+                continue
+            clean = {k: v for k, v in props.items() if k != "id"}
+            self.g.query(
+                "MERGE (s:Session {id:$id}) SET s += $props",
+                params={"id": sid, "props": clean},
+            )
+        for sid, pid in session_point_links:
+            self.g.query(
+                "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                "MERGE (s)-[:CONTAINS]->(p)",
+                params={"sid": sid, "pid": pid},
+            )
+
         # Pass 2: create edges for all operators + provenance/entity wiring
         # (shared _upsert_point_edges — single source of truth with apply, #330).
         # Journal-order maps for the pass-2b re-point (order-faithful
@@ -2880,8 +2987,15 @@ class FalkorProjection(
         # _upsert_point_props, so timestamp comparison is unreliable — the
         # journal SEQUENCE is the faithful discriminator.
         operator_created_seq: dict[str, int] = {}
-        for seq, ev in enumerate(events):
-            ev = self._norm(ev)
+        for seq, raw_ev in enumerate(events):
+            # #3947 review: the capture directive lives on the RAW envelope —
+            # `_norm` splices `ev["point"]` over it, so a point prop named
+            # `contains_session` could shadow (and forge on replay) the link.
+            # Read it before normalising, exactly as `apply` does.
+            raw_contains_session = (
+                raw_ev.get("contains_session")
+                if isinstance(raw_ev, dict) else None)
+            ev = self._norm(raw_ev)
             if ev.get("type") in ("PointAdded", "OperatorAdded"):
                 # #331 (review r3): ev.get — missing 'point' key handled by
                 # the isinstance guard, not KeyError.
@@ -2914,7 +3028,7 @@ class FalkorProjection(
                     # unsequenced (None → always re-point), silently
                     # disabling the guard for that class (review P2-1).
                     operator_created_seq.setdefault(p["id"], seq)
-                self._upsert_point_edges(p, contains_session=ev.get("contains_session"))
+                self._upsert_point_edges(p, contains_session=raw_contains_session)
 
         # Pass 2b (#2423): PointSuperseded EDGE re-point replay +
         # DirectEdgeRepoint descriptor replay — AFTER pass-2 rebuilt operator
@@ -3259,10 +3373,10 @@ class FalkorProjection(
         edge_count = self.g.query(
             "MATCH ()-[r]->() RETURN count(r)"
         ).result_set[0][0]
-        # #3947 (fail-closed exit): the counts below are only ever returned
-        # when every pre-wipe episodic Point came back.
-        self._assert_episodic_points_survived(
-            episodic_before, self._journal_hard_deleted_ids(events))
+        # #3947: no post-wipe assertion — a failure here would leave the
+        # store EMPTY (#2943 "No loss without proof"). The pre-wipe proof
+        # above is what makes the returned counts trustworthy: reaching this
+        # line means every pre-wipe episodic Point was recreatable.
         return {"events": len(events), "nodes": node_count, "edges": edge_count}
 
     def query(self, cypher: str, **params):
@@ -3682,6 +3796,24 @@ class FalkorProjection(
                 import logging
                 logging.getLogger(__name__).error(
                     "Failed to create index on Session.actor_user_id: %s", e)
+
+        # ── Session.id index (#3947 review) ──
+        # `_link_session` (replay of a captured turn) and the live capture
+        # turn loop both MERGE `:Session {id:...}` once per turn; without an
+        # index each is a label scan, so replaying an N-turn session cost
+        # O(N²) — the exact path this fix makes reachable. String RANGE
+        # index, mirroring the id indexes above (the #522 composite hazard is
+        # is_operator-BOOL-specific and does not apply).
+        try:
+            self.g.query("CREATE INDEX FOR (s:Session) ON (s.id)")
+        except Exception as e:
+            msg = str(e).lower()
+            if "already indexed" in msg or "already exists" in msg:
+                pass
+            else:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Failed to create index on Session.id: %s", e)
 
         # ── Full-text & vector indexes require FalkorDB 4.x+ (#7779) ──
         _ver = getattr(self, '_falkordb_version', None)

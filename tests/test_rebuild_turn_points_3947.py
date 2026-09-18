@@ -23,8 +23,18 @@ Fix, in three parts:
   (b) ``_upsert_point_props`` writes ``is_episodic`` from the payload
       (live/replay parity), and ``_upsert_point_edges`` restores the
       ``(:Session)-[:CONTAINS]->(:Point)`` structural edge;
-  (c) ``rebuild`` / ``rebuild_all`` assert the episodic population survived,
-      and raise ``RebuildDroppedEpisodicPoints`` instead of returning.
+  (c) ``rebuild`` / ``rebuild_all`` PROVE — before the wipe — that every
+      pre-wipe episodic Point is recreatable (journal record or snapshot id),
+      and raise ``RebuildDroppedEpisodicPoints`` instead of returning. The
+      proof is PRE-wipe by design: #2943 ("No loss without proof") is the
+      recorded decision that a hard-failing rebuild verification is only safe
+      because it runs before the mutation — failing after the wipe would turn
+      a durability bug into permanent data loss. A RED here therefore leaves
+      the store INTACT (asserted below).
+      ``rebuild_all`` additionally snapshots/restores the ``:Session``
+      containers + their ``CONTAINS`` edges (the ``:Batch`` precedent), which
+      is what stops the CLI path from reporting success while orphaning every
+      restored turn.
 
 Offline only — ``TORTOISE_SESSION_LLM_MOCK=1`` installs the deterministic
 MockModel extractor: zero network, zero provider spend.
@@ -186,45 +196,108 @@ def test_rebuild_raises_when_turn_points_are_unjournaled(unjournaled):
 
     msg = str(ei.value)
     assert SESSION_ID + "_t0" in msg and SESSION_ID + "_t2" in msg
-    assert "NOT restored" in msg
+    assert "NOT touched" in msg
+    # ── #2943 "No loss without proof" ──
+    # The proof runs BEFORE `DETACH DELETE n`, so a refusal must leave the
+    # store exactly as it was. A post-wipe raise would have left 0 turns here
+    # — converting the silent-loss bug into a loud one, with nothing left.
+    assert len(_turn_ids(proj)) == 3, "a refused rebuild must not wipe the store"
+    assert set(_turn_ids(proj)) <= set(_contains(proj))
 
 
-def test_rebuild_all_raises_when_episodic_identity_would_be_lost(tmp_path):
-    """`rebuild_all` counterpart, driven through its real dispatch.
+def test_invariant_is_the_falsifier_for_is_episodic_parity(unjournaled):
+    """The pre-wipe proof must not be satisfiable by a node that only LOOKS
+    done: the check is on recreatability of the pre-wipe episodic set, so a
+    snapshot id that the replay will NOT re-flag still counts as covered only
+    because the parity clause (b) writes the flag.
 
-    The #548 snapshot restores the NODES, so this leg can only trip when the
-    replay drops the episodic FLAG (the pre-fix `_POINT_HANDLED` behaviour) —
-    i.e. it is the guard for fix (b) on the CLI path. Pointed at a journal
-    whose PointAdded carries no `is_episodic`, the pre-wipe population is
-    readable and the post-replay one is not, so the rebuild must raise.
+    Stated the other way round, this is where ``rebuild_all`` REDs for fix
+    (b): its #548 snapshot always supplies the id (so the proof passes), and
+    the flag is then asserted by
+    ``test_rebuild_all_restores_turn_points_and_session_link`` — whose
+    ``_turn_ids`` filter is ``is_episodic = true``, i.e. it returns ``[]``
+    without the parity clause.
+    """
+    sdk, _ = unjournaled
+    proj = sdk._get_proj()
+    turn = f"{SESSION_ID}_t0"
+    # No journal record and no snapshot id → refuse.
+    with pytest.raises(RebuildDroppedEpisodicPoints):
+        proj._assert_episodic_points_recreatable({turn}, [], snapshot_ids=())
+    # Either recreation source is enough — including the #548 snapshot alone.
+    proj._assert_episodic_points_recreatable({turn}, [], snapshot_ids={turn})
+    proj._assert_episodic_points_recreatable({turn}, [{
+        "type": "PointAdded", "point": {"id": turn},
+    }])
 
-    The journal is hand-built (not captured) so the assertion targets the
-    fold, not the emitter.
+
+def test_forged_payload_contains_session_cannot_create_a_link(tmp_path):
+    """#3947 review (security, F1): ``contains_session`` is read from the RAW
+    envelope, before ``_norm`` splices the point payload over it. Without
+    that ordering a tenant prop named ``contains_session`` would shadow the
+    envelope on replay and MERGE an arbitrary Session + CONTAINS edge.
     """
     tmp = tmp_path / "events"
     tmp.mkdir()
     pid = SESSION_ID + "_t0"
+    forged = "sess_ATTACKER"
     (tmp / "sdk.jsonl").write_text(json.dumps({
         "event_id": "e1", "ts": "2026-01-01T00:00:00Z", "type": "PointAdded",
         "initiated_by": "sdk", "projection_version": 2,
-        "point": {"id": pid, "content": "[user] hi", "pointKind": "event"},
+        "point": {"id": pid, "content": "[user] hi", "pointKind": "event",
+                  "is_episodic": True, "contains_session": forged},
     }) + "\n", encoding="utf-8")
 
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
     try:
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")
-        # A graph-only episodic Point — the pre-fix snapshot shape: node
-        # present, episodic flag only in the graph.
-        proj.g.query(
-            "CREATE (t:Point {id:$id}) SET t.content='[user] hi', "
-            "t.pointKind='event', t.is_episodic=true, t.status='draft'",
-            params={"id": pid},
-        )
-        with pytest.raises(RebuildDroppedEpisodicPoints):
-            proj.rebuild_all(str(tmp))
+        proj.rebuild(EventLog(str(tmp / "sdk.jsonl")))
+        # The forged prop must NOT have become a graph fact.
+        assert proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": forged}).result_set[0][0] == 0
+        # ...and it must not have been persisted as a node property either.
+        assert proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.contains_session",
+            params={"id": pid}).result_set[0][0] is None
     finally:
         sdk.close()
+
+
+def test_sdk_rejects_contains_session_prop():
+    """The boundary backstop for the same key (#3947 review F1)."""
+    with pytest.raises(ValueError, match="contains_session"):
+        from tortoise.sdk import _sanitize_props
+        _sanitize_props({"contains_session": "sess_x"})
+
+
+def test_rebuild_all_restores_graph_only_session_container(unjournaled):
+    """#3947 review (F2/F6): the CLI path reported success while destroying the
+    ``:Session`` container and its ``CONTAINS`` edges of a journal-less store —
+    the #548 snapshot covers ``:Point`` nodes only. The Session snapshot
+    (mirroring the #990 ``:Batch`` precedent) keeps them, properties included.
+    """
+    sdk, _tmp = unjournaled
+    proj = sdk._get_proj()
+    before = _turn_ids(proj)
+    assert len(before) == 3
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) SET s.capture_ok=true, s.turn_count=3",
+        params={"sid": SESSION_ID})
+
+    counts = proj.rebuild_all(_tmp)  # a directory with no journal at all
+
+    assert counts["nodes"] >= 3
+    assert _turn_ids(proj) == before
+    assert set(before) <= set(_contains(proj)), (
+        "the CONTAINS edges must survive: without them every turn is orphaned")
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_ok, s.turn_count",
+        params={"sid": SESSION_ID}).result_set
+    assert rows and rows[0][0] is True and rows[0][1] == 3, (
+        "Session properties must survive too — a stub Session reads as "
+        "capture_ok=None (#2335 legacy presumed-captured) on the next capture")
 
 
 def test_rebuild_all_tolerates_a_journaled_hard_delete(tmp_path):
