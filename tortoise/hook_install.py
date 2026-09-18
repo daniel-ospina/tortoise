@@ -367,7 +367,7 @@ _OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
     # word; ``-n``/``-s``/``-k``/``-i``/``-E``/``-S``/``-b``/``-A``/``-H`` are
     # booleans.
     "sudo": frozenset({
-        "-a", "--auth-type", "-c", "--class", "-C", "--close-from",
+        "-a", "--auth-type", "-c", "--login-class", "-C", "--close-from",
         "-D", "--chdir", "-g", "--group", "-h", "--host", "-p",
         "--prompt", "-R", "--chroot", "-r", "--role", "-t", "--type",
         "-T", "--command-timeout", "-u", "--user", "-U", "--other-user",
@@ -407,6 +407,57 @@ _OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
     # (there is no separate-argument form to skip); its bare long options are
     # boolean.
     "firejail": frozenset(),
+}
+
+#: LONG options that are BOOLEAN — they consume no separate argument.  THE
+#: ARITY DEFAULT IS "CONSUMES": an option not proved boolean here is assumed
+#: to take the following token as its value.  Enumerating argument-taking
+#: long options cannot be complete — GNU ``getopt_long`` accepts any
+#: unambiguous PREFIX (``--sig`` == ``--signal``), a short option has many
+#: long aliases (``env -a`` == ``--argv0``), and builds differ (BSD sudo's
+#: ``--login-class``) — and every gap was a FAIL-OPEN (the hook is read as the
+#: option's value, bash runs nothing, and the install still reports current).
+#: Defaulting the unknown case to "consumes" makes the class safe by
+#: construction: a long option can leave the hook in command position only
+#: when it is one of these booleans.
+_BOOLEAN_LONG: dict[str, frozenset[str]] = {
+    "bash": frozenset({
+        "--debugger", "--dump-po-strings", "--dump-strings", "--help",
+        "--login", "--noediting", "--noprofile", "--norc", "--posix",
+        "--protected", "--restricted", "--verbose", "--version",
+        "--wordexp",
+    }),
+    "sh": frozenset({"--help", "--version"}),
+    "dash": frozenset({"--help", "--version"}),
+    "zsh": frozenset({"--help", "--version", "--no-rcs", "--login",
+                      "--interactive"}),
+    "ksh": frozenset({"--help", "--version"}),
+    "env": frozenset({"--ignore-environment", "--null", "--debug",
+                      "--list-signal-handling", "--help", "--version"}),
+    "sudo": frozenset({
+        "--edit", "--help", "--login", "--list", "--non-interactive",
+        "--preserve-env", "--remove-timestamp", "--reset-timestamp",
+        "--set-home", "--shell", "--stdin", "--validate", "--version",
+    }),
+    "timeout": frozenset({"--verbose", "--foreground", "--preserve-status",
+                          "--help", "--version"}),
+    "nice": frozenset({"--help", "--version"}),
+    "ionice": frozenset({"--ignore", "--help", "--version"}),
+    "time": frozenset({"--append", "--portability", "--quiet", "--verbose",
+                       "--help", "--version"}),
+    "xargs": frozenset({"--interactive", "--no-run-if-empty", "--verbose",
+                        "--exit", "--open-tty", "--null", "--help",
+                        "--version"}),
+    "exec": frozenset({"-c", "-l"}),
+    "setsid": frozenset({"--ctty", "--fork", "--wait", "--help",
+                         "--version"}),
+    "nohup": frozenset({"--help", "--version"}),
+    "firejail": frozenset({
+        "--allow-debuggers", "--allusers", "--apparmor", "--appimage",
+        "--build", "--caps", "--debug", "--force", "--help", "--list",
+        "--noprofile", "--private", "--quiet", "--top", "--tree",
+        "--version", "--x11",
+    }),
 }
 
 #: Launchers that are shell syntax, not programs, and so cannot have options.
@@ -725,21 +776,34 @@ def _invokes_script(command: str, script_name: str,
                     or (not tok.startswith("--") and "n" in tok[1:])):
                 return False  # ``bash -n`` / ``sh -n``: syntax check only
             options = _OPTIONS_WITH_ARG.get(launcher_word or "", frozenset())
+            booleans = _BOOLEAN_LONG.get(launcher_word or "", frozenset())
             if launcher_word in _SHELLS and tok in _SHELL_COMMAND_FLAGS:
                 # A shell's ``-c`` argument is a command STRING to re-parse.
                 recurse_next = True
+            elif tok == "--":
+                pass  # end of options: the NEXT token is the command
+            elif "=" in tok:
+                pass  # attached value (``--signal=KILL``) consumes no token
             elif tok in options:
                 skip_next = True
-            elif (len(tok) > 2 and tok.startswith("--") and "=" not in tok
-                    and any(o.startswith("--") and o.startswith(tok)
-                            for o in options)):
-                # GNU getopt_long accepts an unambiguous PREFIX of a long
-                # option (``timeout --sig`` == ``--signal``), so the option's
-                # value must be skipped even though ``--sig`` is not listed
-                # verbatim.  ``--`` (end of options) is excluded by length, as
-                # ``bash -- <hook>`` really runs the hook.
-                skip_next = True
-            elif (len(tok) > 2 and not tok.startswith("--")
+            elif tok.startswith("--"):
+                if any(o.startswith("--") and o.startswith(tok)
+                       for o in options):
+                    # GNU getopt_long accepts an unambiguous PREFIX of a long
+                    # option (``timeout --sig`` == ``--signal``).
+                    skip_next = True
+                elif any(b.startswith("--") and b.startswith(tok)
+                         for b in booleans):
+                    pass  # a boolean long option (or its abbreviation)
+                else:
+                    # UNKNOWN long option: assume it consumes the next token.
+                    # Enumerating argument-taking options cannot be complete —
+                    # GNU prefixes, short/long aliases, and platform builds
+                    # (``sudo --login-class``) — and every gap is a FAIL-OPEN
+                    # (the hook is read as the option's value and bash runs
+                    # nothing), so the default is the safe direction.
+                    skip_next = True
+            elif (len(tok) > 2
                     and any(("-" + ch) in options for ch in tok[1:])):
                 # combined short flags hide a separate value (``-euxo pipefail``)
                 skip_next = True
