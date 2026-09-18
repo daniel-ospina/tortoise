@@ -3175,11 +3175,13 @@ class TortoiseSDK:
         # Hosted additionally adds quota/auth bounds; the extraction that
         # follows the loop is shared via _extract_session_llm/_extract_session_v2
         # (#822). Keep the two in sync when touching either — and note the
-        # THIRD copy: tools/ask_spotcheck.py::_seed_memory mirrors this same
-        # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to
-        # seed the QA spot-check fixture. It deliberately omits
+        # THIRD copy: tools/ask_spotcheck.py::seed_capture_turn_store
+        # mirrors this same per-turn store (id, `[role] ` framing, prop set,
+        # CONTAINS edge) to seed the ask fixtures — the ONE copy every ask
+        # seeder writes through since #3914 (#3910 had it in `_seed_memory`,
+        # which is now a delegating caller). It deliberately omits
         # embeddings/Source/extraction, but the turn write itself must stay
-        # identical, or the fixture teaches a shape capture no longer
+        # identical, or the fixtures teach a shape capture no longer
         # produces (#3910). #3551 tracks collapsing all three onto one
         # shared primitive.
         for i, turn in enumerate(windowed):

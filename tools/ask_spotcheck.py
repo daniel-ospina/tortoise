@@ -98,6 +98,109 @@ def _to_iso_date(raw: str) -> str:
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else "2020-01-01"
 
 
+def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
+                          now: str | None = None) -> str:
+    """MERGE a ``(:Session)`` node in the shape BOTH capture writers write.
+
+    The Session is never a bare ``{id}`` in production: both capture surfaces
+    SET ``created_at`` (coalesced, so an idempotent re-capture preserves the
+    ORIGINAL capture time), ``turn_count`` and ``is_episodic=true``
+    (``TortoiseSDK.capture_session`` / ``hosted_api._capture_session_impl``).
+    A bare-id Session is a node shape capture never produces, and a consumer
+    that reads those props (the hosted session listing reads ``s.turn_count``;
+    commit reads ``s.is_episodic``) sees ``None`` on any graph seeded without
+    them — so no fixture seeded that way can guard those surfaces.
+
+    Shared by every ask-lane seeder so the Session side cannot drift either.
+    Returns the ``now`` used, so a caller writing several sessions or turns
+    can hold ONE timestamp across them.
+    """
+    now = now or datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    sdk._get_proj().g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.created_at=coalesce(s.created_at, $now), "
+        "    s.turn_count=$tc, s.is_episodic=true",
+        params={"sid": session_id, "now": now, "tc": turn_count},
+    )
+    return now
+
+
+def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
+                            conversation: list[dict], *,
+                            now: str | None = None) -> list[str]:
+    """Write ONE session's turns in the CAPTURE shape (#3914, #3910).
+
+    The single seeder every ask-lane fixture writes through, so no fixture
+    can teach a graph shape the real capture path cannot produce. It
+    reproduces the turn-store sub-step of ``TortoiseSDK.capture_session`` /
+    ``hosted_api._capture_session_impl`` and nothing else:
+
+      * ``MERGE (s:Session {id:$session_id})`` with capture's own
+        ``created_at`` (coalesce — an idempotent re-capture preserves the
+        original time), ``turn_count`` and ``is_episodic=true``. A bare-id
+        Session is a node shape capture never writes, so leaving those off
+        would make every fixture seeded through this helper unusable for the
+        consumers that read them (the hosted session listing reads
+        ``s.turn_count``; commit reads ``s.is_episodic``);
+      * per windowed turn, a ``:Point`` with the deterministic
+        ``f"{session_id}_t{i}"`` id, ``pointKind='event'``,
+        ``is_episodic=true``, ``is_operator=false``, a role-normalized
+        ``speaker``, the ``[role] <content>`` text and a ``content_hash`` —
+        and NO ``sessionId`` / ``eventId`` prop (capture writes neither, so
+        no prop can satisfy an identity read that the ``CONTAINS`` edge
+        alone carries);
+      * the ``(:Session)-[:CONTAINS]->(:Point)`` edge — the provenance
+        mechanism the shipping read resolves identity from
+        (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``).
+
+    The window/coercion and the whole-session BLANK GATE are capture's own
+    shared primitives (``_capture_turn_window`` / ``_session_llm_transcript``
+    — capture's gate is PRE-MUTATION), so a degenerate session contributes no
+    Session stub, no turn and no edge, exactly as in capture.
+
+    Returns the turn ids WRITTEN, in window order. An EMPTY list means the
+    blank gate skipped the session — the caller must not assume a Point
+    exists. Callers own any non-capture furniture (the ask fixtures' date-only
+    ``:Event`` marker): turn Points carry no ``eventId``, so nothing joins a
+    turn to an ``:Event`` — in capture either.
+    """
+    windowed = _capture_turn_window(conversation or [])
+    transcript, _est = _session_llm_transcript(windowed)
+    if not transcript.strip():
+        return []
+    proj = sdk._get_proj()
+    now = merge_capture_session(sdk, session_id, len(windowed), now=now)
+    turn_ids: list[str] = []
+    for i, turn in enumerate(windowed):
+        role = _normalize_turn_role(turn.get("role"))
+        turn_id = f"{session_id}_t{i}"
+        # `_capture_turn_window` already truncated to the cap; the [:5000]
+        # mirrors the live store loop's explicit (idempotent) window.
+        turn_text = f"[{role}] {turn['content'][:5000]}"
+        # Node MERGE BEFORE the edge MERGE — capture's #490 ordering rule: a
+        # full-path MERGE whose edge is missing makes FalkorDB create the
+        # whole path from scratch, duplicating the Point node.
+        proj.g.query(
+            "MERGE (t:Point {id:$id}) "
+            "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            "    t.speaker=$speaker, "
+            "    t.is_episodic=true, "
+            "    t.status=coalesce(t.status, $s), "
+            "    t.createdAt=coalesce(t.createdAt, $now), "
+            "    t.updatedAt=$now, t.content_hash=$ch",
+            params={"id": turn_id, "c": turn_text, "k": "event",
+                    "speaker": role, "s": "draft", "now": now,
+                    "ch": _content_hash(turn_text)},
+        )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": session_id, "tid": turn_id},
+        )
+        turn_ids.append(turn_id)
+    return turn_ids
+
+
 def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
     """Seed the haystack in the CAPTURE shape (#3910).
 
@@ -122,17 +225,14 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
         mechanism the shipping read resolves identity from
         (``OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n)``).
 
-    The turn WINDOW and the whole-session blank gate come from the SHARED
-    ``_capture_turn_window`` / ``_session_llm_transcript`` pair — the same
-    two primitives both capture surfaces use — so coercion, the 5000-char
-    cap and the "a blank session writes NOTHING" gate are structural rather
-    than hand-copied. The ``[role] <content>`` framing and the node/edge
-    write below are still a THIRD copy of capture's per-turn store (the two
-    live writers being ``TortoiseSDK.capture_session`` and
-    ``hosted_api._capture_session_impl``). The NOTE at
-    ``tortoise/sdk.py`` / ``tortoise/hosted_api.py`` names this file — it is
-    a comment, not an enforced check; #3551 tracks collapsing all three onto
-    one shared primitive — so an edit to one is an edit to all three.
+    The turn window, the whole-session blank gate and the node/edge write all
+    live in ``seed_capture_turn_store`` — the SAME function the other ask
+    fixtures seed through (#3914), so this lane cannot drift from them. That
+    function is still a THIRD copy of capture's per-turn store (the two live
+    writers being ``TortoiseSDK.capture_session`` and
+    ``hosted_api._capture_session_impl``); the NOTE at ``tortoise/sdk.py`` /
+    ``tortoise/hosted_api.py`` names it — a comment, not an enforced check;
+    #3551 tracks collapsing all three onto one shared primitive.
 
     Pre-#3910 this seeder instead made plain ``statement`` Points and wrote
     ``p.sessionId`` / ``p.eventId`` PROPS with NO edge — a graph the capture
@@ -161,49 +261,16 @@ def _seed_memory(sdk: TortoiseSDK, question: dict) -> None:
         sid = (raw_sid.strip()
                if isinstance(raw_sid, str) and raw_sid.strip()
                else f"sess-{i}")
-        # #1532 D1 / #1529 D3 parity: the SAME window and the SAME
-        # whole-session blank gate capture runs BEFORE its first write — a
-        # session with no extractable line contributes NO Session, NO turn
-        # Point and NO Event (capture's gate is pre-mutation).
-        windowed = _capture_turn_window(session or [])
-        transcript, _est = _session_llm_transcript(windowed)
-        if not transcript.strip():
+        # The SAME window, blank gate and store write both capture surfaces
+        # run (#1532 D1 / #1529 D3) — a session with no extractable line
+        # contributes NO Session, NO turn Point and NO Event.
+        if not seed_capture_turn_store(sdk, sid, session or [], now=now):
             continue
         sdate = _to_iso_date(dates[i]) if i < len(dates) else "2020-01-01"
         proj.g.query(
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
             params={"eid": f"ev-s{i}", "st": f"{sdate}T10:00:00Z"},
         )
-        proj.g.query(
-            "MERGE (s:Session {id:$sid})",
-            params={"sid": sid},
-        )
-        # The SAME windowed turns capture stores, and the same per-turn
-        # write — including the blank turn, which capture stores as
-        # "[role] ".
-        for t, turn in enumerate(windowed):
-            role = _normalize_turn_role(turn.get("role"))
-            turn_id = f"{sid}_t{t}"
-            # `_capture_turn_window` already truncated to the cap; the
-            # [:5000] mirrors the store loop's explicit (idempotent) window.
-            turn_text = f"[{role}] {turn['content'][:5000]}"
-            proj.g.query(
-                "MERGE (p:Point {id:$id}) "
-                "SET p.content=$c, p.pointKind=$k, p.is_operator=false, "
-                "    p.speaker=$speaker, "
-                "    p.is_episodic=true, "
-                "    p.status=coalesce(p.status, $s), "
-                "    p.createdAt=coalesce(p.createdAt, $now), "
-                "    p.updatedAt=$now, p.content_hash=$ch",
-                params={"id": turn_id, "c": turn_text, "k": "event",
-                        "speaker": role, "s": "draft", "now": now,
-                        "ch": _content_hash(turn_text)},
-            )
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-                "MERGE (s)-[:CONTAINS]->(t)",
-                params={"sid": sid, "tid": turn_id},
-            )
 
 
 def _load_composition(path: str | None = None) -> list[dict]:

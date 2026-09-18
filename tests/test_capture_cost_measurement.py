@@ -297,6 +297,11 @@ def test_capture_cost_props_are_allowlisted_and_emitted(tmp_path, monkeypatch):
     # emit through the REAL writer (Supabase unset → JSONL fallback)
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    # #3820 (cycle-2 P1): the canonical name too, or on a box carrying
+    # production secrets `_service_key()` finds this one, `url` is empty, and
+    # the write is classified `fallback`/`supabase_env_incomplete` — the
+    # "no Supabase" premise above would be false.
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH",
                         str(tmp_path / "analytics.jsonl"))
     ha._track_analytics_event("team-1", "capture_cost", props)
@@ -1334,6 +1339,11 @@ def _b7_capture_client(tmp_path, monkeypatch):
     monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    # #3820 (cycle-2 P1): `SUPABASE_SERVICE_KEY` is the LEGACY name; the
+    # canonical `SUPABASE_SERVICE_ROLE_KEY` must go too, or an ambient
+    # production secret makes this "no Supabase" fixture build a real
+    # degradation (url absent + role key present → `supabase_env_incomplete`).
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     monkeypatch.setattr(_ha, "_ANALYTICS_FALLBACK_PATH",
                         str(tmp_path / "analytics.jsonl"))
     with patched_tortoise_sdk(str(tmp_path / "b7.db")):

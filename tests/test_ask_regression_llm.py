@@ -42,6 +42,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# The ONE capture-shaped seeder for this fixture family (#3914) — the
+# generator's own, imported rather than mirrored.
+from tools.gen_ask_transcripts import _seed as _generate_transcripts_seed
 from tortoise.ask_lane import run_ask_lane
 from tortoise.reader import reader_prompt_constants
 from tortoise.sdk import TortoiseSDK
@@ -78,31 +81,24 @@ def _load_transcripts() -> list[dict]:
 
 
 def _seed(sdk: TortoiseSDK, seeds: list[dict]) -> None:
-    """Seed the fixture's points + Event nodes (startedAt from session_date)
-    so annotate_ask_hits reproduces the annotated hits; ``supersedes_into``
-    creates a real CORRECTS supersession so the D8 markers render."""
-    proj = sdk._get_proj()
-    ids: dict[str, str] = {}
-    for i, seed in enumerate(seeds):
-        point = sdk.create_point(seed.get("kind", "statement"),
-                                 seed["content"], tags=seed.get("tags", []))
-        pid = point["id"]
-        ids[seed.get("label", f"s{i}")] = pid
-        event_id = seed.get("eventId") or f"ev-{i}"
-        sdate = seed.get("session_date") or "2026-08-20"
-        proj.g.query(
-            "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
-            params={"eid": event_id, "st": f"{sdate}T10:00:00Z"},
-        )
-        proj.g.query(
-            "MATCH (p:Point {id: $pid}) SET p.eventId = $eid, p.sessionId = $sid",
-            params={"pid": pid, "eid": event_id,
-                    "sid": seed.get("sessionId") or f"sess-{i}"},
-        )
-    for seed in seeds:
-        succ = seed.get("supersedes_into")
-        if succ and succ in ids and seed.get("label") in ids:
-            sdk.supersede_point(ids[seed["label"]], ids[succ])
+    """Seed the fixture's memory exactly as the GENERATOR does.
+
+    Imported, not mirrored (#3914): this file used to carry its own copy of
+    ``tools/gen_ask_transcripts.py::_seed``, and both copies wrote plain
+    ``statement`` Points with ``p.sessionId`` / ``p.eventId`` PROPS and NO
+    ``(:Session)-[:CONTAINS]`` edge — a graph capture cannot produce. Because
+    the shipping point fetch PREFERS a renderable ``p.sessionId`` prop, the
+    committed transcripts stayed byte-green even with the CONTAINS-edge
+    identity read removed entirely (the #3888 mutation): a false PASS on the
+    very read the goldens quote (``[session sess-N]``).
+
+    There is now exactly ONE seeder for this lane, so the replay test and the
+    generator cannot drift into disagreeing about the shape — a change to it
+    is exercised by ``test_fixture_replay_user_message_byte_equal`` on the
+    next run, and a reversion is caught by ``tests/test_ask_seed_shape.py``,
+    which reads the resolved graph back.
+    """
+    _generate_transcripts_seed(sdk, seeds)
 
 
 class _ReplayReader:
