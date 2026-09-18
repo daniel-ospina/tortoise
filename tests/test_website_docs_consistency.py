@@ -536,8 +536,19 @@ def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     # be reported as a link the browser does not have (review finding, #3962).
     assert _rendered_hrefs('<a href="#" href="/blog">x</a>') == ["#"]
     assert _rendered_hrefs('<a href="" href="/blog">x</a>') == []
-    # Inert containers are parsed but not rendered.
+    # Inert and raw-text containers are parsed but contribute no link.
     assert _rendered_hrefs('<template><a href="/blog">x</a></template>') == []
+    assert _rendered_hrefs('<noscript><a href="/blog">x</a></noscript>') == []
+    assert _rendered_hrefs('<textarea><a href="/blog">x</a></textarea>') == []
+    # A self-closing NON-void tag OPENS in a browser (the `/` is ignored), so the
+    # anchor after it is swallowed, not rendered (review finding, #3962).
+    assert _rendered_hrefs('<template/><a href="/blog">x</a>') == []
+    assert _rendered_hrefs('<script/><a href="/blog">x</a>') == []
+    # ...but only in the HTML namespace: inside foreign content `<template>`
+    # renders normally, so its anchor IS a way in (regression guard, #3962).
+    assert _rendered_hrefs('<svg><template><a href="/blog">x</a></template></svg>') == ["/blog"]
+    # Suppression must unwind correctly for nested opens.
+    assert _rendered_hrefs('<template><script></script><a href="/blog">x</a></template><a href="/docs">d</a>') == ["/docs"]
     # Not a link: a non-anchor element, and a valueless or empty href.
     assert _rendered_hrefs('<link rel="prefetch" href="/blog">') == []
     assert _rendered_hrefs("<a href>x</a>") == []

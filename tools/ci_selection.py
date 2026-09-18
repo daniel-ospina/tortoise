@@ -102,13 +102,6 @@ SHARED_MODULES = (
     "tortoise/projection/",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
-    # Shared by BOTH blog-guard layers (#3950): the static guard
-    # (tests/test_website_docs_consistency.py, surface "onboarding") and the
-    # production check (tests/e2e/test_legal_pages.py). An edit here that did NOT
-    # run the static guard would be the #1349/#3332/#3616 silent-drop class again
-    # — a helper-only change selects no surface of its own, so the guard's own
-    # pin test (test_rendered_hrefs_ignores_non_rendered_markup) would not run.
-    "tests/_html_links.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
@@ -169,6 +162,21 @@ SOURCE_PATTERNS = {
                    "website/security.html", "website/tos.html",
                    "website/license.html", "website/dpa.html",
                    "website/aviso-privacidad.html",
+                   # The shared href extractor both blog-guard layers call
+                   # (tests/test_website_docs_consistency.py here, and
+                   # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
+                   # job, which CI runs on every PR regardless of selection).
+                   # Without this entry, editing ONLY the extractor selects core
+                   # and does NOT run the static guard — so the file implementing
+                   # the guard's rule could be changed without running
+                   # `test_rendered_hrefs_ignores_non_rendered_markup`, the test
+                   # that pins that rule. Same #1349/#3332/#3616 class as the
+                   # pages above, one level up: the helper needs the same
+                   # reachability guarantee as the pages it serves.
+                   # Deliberately NARROW rather than promoted to SHARED_MODULES:
+                   # this file has a single matrix consumer, and the full matrix
+                   # would buy nothing the E2E consumer is not already given.
+                   "tests/_html_links.py",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that

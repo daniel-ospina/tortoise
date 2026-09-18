@@ -23,79 +23,102 @@ from html.parser import HTMLParser
 
 
 class _AnchorHrefParser(HTMLParser):
-    """Collect the ``href`` of every ``<a>`` in RENDERED markup.
+    """Collect the ``href`` of every ``<a>`` a browser would render as a link.
 
-    A real parser, not a regex, because both failure modes that matter come from
-    a regex guessing at attribute structure:
+    The contract is "the rendered-link set", because the guard's whole purpose is
+    to answer "can a visitor reach the blog from this page?" — so an anchor that
+    no browser exposes is not a way in, and an anchor a browser *does* expose must
+    not be missed. Both directions are enforced explicitly rather than left to
+    ``HTMLParser``'s defaults, which differ from a browser in several of these
+    cases:
 
-      * markup a browser does not render as a link must NOT count — comments,
-        and ``<script>``/``<style>`` bodies (HTMLParser already treats both as
-        CDATA; they are tracked explicitly as well so a malformed document
-        cannot leak through);
-      * an ``href=`` appearing INSIDE another attribute's value is not this
-        tag's href. ``<a title="see href=/blog">`` has no href at all, yet a
-        regex with an optional quote reported one — a false positive of exactly
-        the silent-pass class #3950 fixes (review finding, PR #3962).
-
-    Only ``<a>`` is collected, so ``<link rel="prefetch" href="/blog">`` is not
-    a way in. An ``href`` with no value, or an empty one, is not a link either, and
-    only the FIRST ``href`` on a tag counts — the HTML tokenizer discards duplicate
-    attributes, so ``<a href="#" href="/blog">`` has ``href="#"`` and reporting
-    ``/blog`` would be a link the browser does not have.
-
-    Inert containers (``<template>``) are skipped: their contents are parsed but
-    never rendered, so an anchor inside one is not a way in either.
+    * **Not a link** — comments; the contents of ``<script>``/``<style>``;
+      ``<noscript>`` (raw text in a scripting-enabled browser, which is the
+      default, so no anchor exists there); and the contents of ``<template>``,
+      which is parsed but never rendered. ``<textarea>``/``<title>`` are RCDATA
+      and are already handled as text by the stdlib parser; they are not listed
+      here because nothing needs to be done for them.
+    * **Link** — only ``<a>`` is collected, so ``<link rel="prefetch">`` is not a
+      way in. Only the FIRST ``href`` on a tag counts, since the tokenizer keeps
+      the first of a duplicate pair. An ``href`` with no value, or an empty one,
+      counts as no link: this extractor's own policy, not the tokenizer's — an
+      empty ``href`` merely self-links.
+    * **Foreign content** — ``<template>`` is only the HTML inert element outside
+      ``<svg>``/``<math>``; inside them it is an ordinary foreign element whose
+      children do render, so suppression is skipped there.
+    * **Self-closing non-void tags** — HTML5 ignores the ``/`` on a non-void HTML
+      element, so ``<template/>`` and ``<script/>`` OPEN their container rather
+      than being empty, and everything after them is suppressed until the matching
+      end tag or EOF. Deleting the ``/`` is exactly what a browser does.
     """
 
-    _CDATA = frozenset({"script", "style"})
+    # Content is text, never markup a browser renders a link from.
+    _RAW = frozenset({"script", "style", "noscript"})
+    # Parsed, but never rendered (HTML namespace only — see _FOREIGN).
     _INERT = frozenset({"template"})
+    # Foreign-content roots: inside these, `_INERT` does not apply.
+    _FOREIGN = frozenset({"svg", "math"})
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.hrefs: list[str] = []
-        self._in_cdata = 0
-        self._in_inert = 0
+        # Open elements currently suppressing collection. A stack, not a counter,
+        # so nested `<template><script>…</script></template>` unwinds correctly.
+        self._suppress: list[str] = []
+        self._foreign = 0
 
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "a" or self._in_cdata or self._in_inert:
+        if tag != "a" or self._suppress:
             return
         for name, value in attrs:
             if name == "href":
-                # First href wins, and an empty/valueless one means no link — the
-                # tokenizer's own rule, so `<a href="" href="/blog">` is not a way in.
+                # First href wins — the tokenizer keeps the first of a duplicate
+                # pair. An empty/valueless first href is treated as no link here:
+                # that is this guard's policy (an empty href only self-links),
+                # not the tokenizer's rule.
                 if value:
                     self.hrefs.append(value)
                 break
 
+    def _open(self, tag: str) -> bool:
+        """Track an opening tag. Returns True when it starts a suppressed region."""
+        if tag in self._FOREIGN:
+            self._foreign += 1
+            return False
+        if tag in self._RAW:
+            self._suppress.append(tag)
+            return True
+        if tag in self._INERT and not self._foreign:
+            self._suppress.append(tag)
+            return True
+        return False
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in self._CDATA:
-            self._in_cdata += 1
-            return
-        if tag in self._INERT:
-            self._in_inert += 1
-            return
-        self._collect(tag, attrs)
+        if not self._open(tag):
+            self._collect(tag, attrs)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # `<script />` and `<template />` are empty — never enter a skip state.
-        if tag in self._CDATA or tag in self._INERT:
-            return
-        self._collect(tag, attrs)
+        # HTML5 ignores the self-closing flag on a non-void HTML element (a parse
+        # error), so `<template/>` / `<script/>` OPEN rather than being empty and
+        # swallow what follows — the stdlib default would close them immediately.
+        self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in self._CDATA and self._in_cdata:
-            self._in_cdata -= 1
-        elif tag in self._INERT and self._in_inert:
-            self._in_inert -= 1
+        if tag in self._FOREIGN:
+            if self._foreign:
+                self._foreign -= 1
+            return
+        if self._suppress and self._suppress[-1] == tag:
+            self._suppress.pop()
 
 
 def extract_anchor_hrefs(html: str) -> list[str]:
     """Hrefs of the real ``<a>`` anchors in ``html``, in document order.
 
-    Accepts a full document or a fragment (the hero-section slice is passed in
-    as a fragment). Quoted, single-quoted, and unquoted attribute values are all
-    accepted, since HTML5 permits all three and an unquoted ``<a href=/blog>``
-    is a working link in every browser.
+    Accepts a full document or a fragment (the hero-section slice is passed in as
+    a fragment). Quoted, single-quoted, and unquoted attribute values are all
+    accepted, since HTML5 permits all three and an unquoted ``<a href=/blog>`` is
+    a working link in every browser.
     """
     parser = _AnchorHrefParser()
     parser.feed(html)
