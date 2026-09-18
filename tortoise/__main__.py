@@ -2763,6 +2763,126 @@ def _cmd_install_hooks(args) -> int:
     return 0
 
 
+def _cmd_hooks(args) -> int:
+    """Detect and repair drift in an already-installed capture-hook seam.
+
+    The install contract is two halves: the script bytes (marked with
+    ``# tortoise-hook-version: N``) and the ``settings.json`` entry that must
+    carry the load-bearing per-hook ``timeout`` (#3754/#3801).  Both are
+    checked here; ``upgrade`` merges the settings half rather than
+    overwriting it, and re-copies the scripts.  Harness-agnostic: the layout
+    registry in ``tortoise.hook_install`` supplies the targets.
+    """
+    import sys as _sys
+    from pathlib import Path as _P
+
+    from tortoise.hook_install import (
+        contract_version,
+        detect_install,
+        get_layout,
+        upgrade_install,
+    )
+
+    try:
+        layout = get_layout(args.harness)
+    except ValueError as e:
+        print(str(e), file=_sys.stderr)
+        return 1
+    root = _P(getattr(args, "dir", "."))
+
+    if args.hooks_cmd == "status":
+        try:
+            findings = detect_install(root, args.harness)
+        except OSError as e:
+            print(f"Cannot inspect {root}: {e.__class__.__name__}: {e}",
+                  file=_sys.stderr)
+            return 1
+        version = contract_version(layout)
+        if getattr(args, "json", False):
+            import json as _json
+            print(_json.dumps({
+                "harness": args.harness,
+                "root": str(root),
+                "contract_version": version,
+                "current": not any(f.blocking for f in findings),
+                "findings": [
+                    {"kind": f.kind, "script": f.script, "event": f.event,
+                     "detail": f.detail, "blocking": f.blocking}
+                    for f in findings
+                ],
+            }, indent=2))
+        elif not findings:
+            print(f"✅ {args.harness} capture hooks in {root} are current "
+                  f"(contract v{version}).")
+        else:
+            print(f"Capture-hook install at {root} (contract v{version}):")
+            for f in findings:
+                print(f"  {f.line()}")
+            blocking = [f for f in findings if f.blocking]
+            if blocking:
+                # Some blocking kinds are NOT repairable by `upgrade` (it
+                # refuses rather than clobber an unreadable/unsafe path), so
+                # the hint must name the manual fix for those instead of
+                # recommending a command that will refuse.
+                _manual = frozenset({
+                    "unreadable-settings",
+                    "not-a-regular-file",
+                    "not-executable-symlink",
+                    "not-readable",
+                    "foreign-script",
+                })
+                kinds = {f.kind for f in blocking}
+                # `upgrade` refuses on ANY symlink in a target path, and the
+                # finding kinds for those are not knowable in advance, so
+                # treat any symlink finding as manual too.
+                symlinked_kinds = {f.kind for f in findings
+                                   if f.kind.startswith("symlinked")}
+                if kinds & _manual or symlinked_kinds:
+                    # A manual kind makes `upgrade` refuse the WHOLE run, so
+                    # recommending it (even alongside repairable findings)
+                    # would point at a command that refuses.
+                    print("\nSome findings need a manual fix before upgrade "
+                          "can run: "
+                          + ", ".join(sorted(
+                              (kinds & _manual) | symlinked_kinds))
+                          + ".")
+                elif kinds:
+                    print("\nRun `tortoise hooks upgrade"
+                          f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
+                          f" --dir {root}` to repair.")
+        return 1 if any(f.blocking for f in findings) else 0
+
+    # upgrade (also performs a fresh install when nothing is present)
+    try:
+        result = upgrade_install(root, args.harness,
+                                 dry_run=getattr(args, "dry_run", False))
+    except OSError as e:
+        print(f"Upgrade failed: {e.__class__.__name__}: {e}",
+              file=_sys.stderr)
+        return 1
+    if not result.ok:
+        print(result.refused, file=_sys.stderr)
+        return 1
+    prefix = "[dry-run] " if getattr(args, "dry_run", False) else ""
+    if not result.actions:
+        print(f"{prefix}✅ {args.harness} capture hooks at {root} already "
+              "current — nothing to do.")
+        return 0
+    for action in result.actions:
+        # `upgrade_install` already prefixes its planned actions when in
+        # dry-run; prefixing again here printed `[dry-run] [dry-run]`.
+        print(action)
+    if not getattr(args, "dry_run", False):
+        remaining = [f for f in result.findings_after if f.blocking]
+        if remaining:
+            print(f"⚠️ {len(remaining)} issue(s) remain after upgrade:",
+                  file=_sys.stderr)
+            for f in remaining:
+                print(f"  {f.line()}", file=_sys.stderr)
+            return 1
+        print(f"✅ {args.harness} capture hooks upgraded.")
+    return 0
+
 
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
@@ -4847,6 +4967,39 @@ def _cmd_doctor(args):
     else:
         results.append(("Harnesses", "⚠️", "none detected — run tortoise setup to configure"))
 
+    # 7. Capture-hook install freshness (#3795/#3801). The install seam is a
+    # manual copy, so an already-installed host keeps a byte-frozen script and
+    # an un-timed settings entry — and silently files no sessions (the hook is
+    # fail-open). Drift is therefore a FAIL, not a warning. Read-only, and
+    # checked ONLY when a capture-hook install is actually present: a project
+    # that never installed the hooks must not be nagged (they may use the
+    # hosted MCP path alone). Also probed by `tortoise hooks status`.
+    try:
+        from tortoise.hook_install import (
+            contract_version,
+            detect_install,
+            get_layout,
+            is_installed,
+        )
+        if is_installed(Path("."), "claude"):
+            findings = detect_install(Path("."), "claude")
+            blocking = [f for f in findings if f.blocking]
+            version = contract_version(get_layout("claude"))
+            if not blocking:
+                results.append(("Capture hooks", "✅",
+                                f"install current (contract v{version})"))
+            else:
+                first = blocking[0]
+                results.append((
+                    "Capture hooks", "❌",
+                    f"{len(blocking)} stale issue(s) — run `tortoise hooks "
+                    f"status` for the repair path ({first.kind}: "
+                    f"{first.detail})",
+                ))
+    except Exception as e:
+        results.append(("Capture hooks", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
+
     # Print results
     for check, icon, detail in results:
         print(f"  {icon} {check}: {detail}")
@@ -6104,6 +6257,33 @@ def main(argv: list[str] | None = None) -> int:
     inst.add_argument(
         "--uninstall", action="store_true",
         help="Remove the hook registration for the harness")
+    # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
+    # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
+    # (re-copies the scripts AND merges the settings.json timeout). Also
+    # installs when nothing is present. Layout-driven (tortoise.hook_install),
+    # so Cursor/Codex seams plug in without new CLI surface.
+    hooks_p = sp.add_parser(
+        "hooks",
+        help="Detect and upgrade installed capture hooks (Claude Code)")
+    hooks_sp = hooks_p.add_subparsers(dest="hooks_cmd", required=True)
+    hooks_status = hooks_sp.add_parser(
+        "status", help="Report whether the installed capture hooks are stale")
+    hooks_upgrade = hooks_sp.add_parser(
+        "upgrade",
+        help="Install or upgrade the capture hooks in place (merges settings)")
+    for _hp in (hooks_status, hooks_upgrade):
+        _hp.add_argument(
+            "--harness", default="claude",
+            help="Harness seam to inspect (default: claude)")
+        _hp.add_argument(
+            "--dir", default=".",
+            help="Project directory holding the install (default: cwd)")
+    hooks_status.add_argument(
+        "--json", action="store_true",
+        help="Emit a machine-readable drift report")
+    hooks_upgrade.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the planned writes without touching anything")
     # tortoise volunteer — per-turn volunteering-memory reflex (epic #2080
     # end-state platform seams, #2119/#2123 et al). ONE thin CLI over the
     # shared canonical pipeline (POST /v1/context hosted / SDK
@@ -6290,6 +6470,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_context(args)
     elif args.cmd == "install":
         return _cmd_install_hooks(args)
+    elif args.cmd == "hooks":
+        return _cmd_hooks(args)
     elif args.cmd == "volunteer":
         return _cmd_volunteer(args)
     elif args.cmd == "list-sources":

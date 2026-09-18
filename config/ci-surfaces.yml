@@ -199,6 +199,10 @@ surfaces:
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
+  # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
+  # (api-classified source) — dual-registered so a CLI-wiring regression runs
+  # this guard. See the core entry for the mechanism half.
+  - test_hook_upgrade.py
   battery:
   - test_battery_arms.py
   - test_battery_judge.py
@@ -330,6 +334,13 @@ surfaces:
   # full matrix). THIS ENTRY IS LOAD-BEARING: without it classify_test_file()
   # returns None for the test and a hook-only PR would never run the guard.
   - test_claude_hook_install_probe.py
+  # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
+  # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
+  # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
+  # registered under `api` as well because the mechanism is exercised through
+  # `tortoise hooks` in `tortoise/__main__.py`, which selects the `api`
+  # surface: without that entry a CLI-wiring-only change would run no guard.
+  - test_hook_upgrade.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
