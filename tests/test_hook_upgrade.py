@@ -25,6 +25,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import string
 import subprocess
 import sys
@@ -51,6 +52,15 @@ _PY = sys.executable
 _LAYOUT = get_layout("claude")
 _CURRENT = contract_version(_LAYOUT)
 assert _CURRENT is not None, "shipped hooks must declare one contract version"
+
+#: Modes where a NON-owner exec bit is the ONLY exec bit.  The harness runs as
+#: the install's OWNER, so it cannot execute a hook at these modes and the
+#: fail-open script files nothing — yet ``st_mode & 0o111`` is non-zero and an
+#: any-exec-bit test reads them as already installed.  ``0o644`` (no exec bit
+#: at all) CANNOT distinguish the two masks: ``& 0o111`` and ``& stat.S_IXUSR``
+#: agree it is unexecutable, which is why the pre-existing 0o644 tests stayed
+#: green under the buggy mask and are not evidence for this fix (#4000 R33).
+_OWNER_UNEXECUTABLE_MODES = (0o601, 0o410)
 
 _DB_ENV_VARS = (
     "TORTOISE_DB_URI", "TORTOISE_DB_PATH", "FALKORDB_HOST", "FALKORDB_PORT",
@@ -723,6 +733,75 @@ class TestUpgrade:
         upgrade_install(root)
         assert installed.stat().st_mode & 0o111
         assert not any(f.kind == "not-executable" for f in detect_install(root))
+
+    @pytest.mark.parametrize("mode", _OWNER_UNEXECUTABLE_MODES,
+                             ids=[f"{m:o}" for m in _OWNER_UNEXECUTABLE_MODES])
+    def test_non_owner_exec_bit_is_stale_and_repaired(self, tmp_path, mode):
+        """A byte-identical hook whose ONLY exec bit is a non-owner bit is NOT
+        installed: the harness runs as the owner, cannot execute it, and the
+        fail-open script files nothing while status says "current".
+
+        MUTATION: revert the shared predicate to ``st_mode & 0o111`` — for
+        ``0o601``/``0o410`` ``detect_install`` returns no ``not-executable``
+        finding (first assertion RED) AND ``upgrade_install``'s mode-only
+        repair is skipped, so the hook stays unexecutable by its owner
+        (second assertion RED).  ``0o644`` cannot show this; see
+        ``_OWNER_UNEXECUTABLE_MODES``.
+        """
+        spec = next(s for s in _LAYOUT.scripts if s.name == "session-end.sh")
+        root = _old_install(tmp_path)
+        installed = root / ".claude/hooks/session-end.sh"
+        installed.write_bytes(spec.source.read_bytes())  # bytes are current
+        installed.chmod(mode)
+        assert not os.access(installed, os.X_OK), (
+            f"fixture bug: a {mode:o} file is already owner-executable")
+
+        findings = detect_install(root)
+        assert any(f.kind == "not-executable" and f.blocking
+                   for f in findings), (
+            f"a {mode:o} hook the owner cannot execute was not reported "
+            f"stale: {[(f.kind, f.script) for f in findings]}")
+
+        result = upgrade_install(root)
+        assert result.ok, result.refused
+        assert installed.stat().st_mode & stat.S_IXUSR, (
+            f"upgrade left the {mode:o} hook unexecutable by its owner "
+            f"(mode {installed.stat().st_mode & 0o777:o})")
+        assert os.access(installed, os.X_OK)
+        assert installed.read_bytes() == spec.source.read_bytes()
+        assert not any(f.kind == "not-executable"
+                       for f in detect_install(root))
+
+    @pytest.mark.parametrize("mode", _OWNER_UNEXECUTABLE_MODES,
+                             ids=[f"{m:o}" for m in _OWNER_UNEXECUTABLE_MODES])
+    def test_ahead_hook_with_non_owner_exec_bit_is_repaired(self, tmp_path, mode):
+        """The second plan branch: an AHEAD hook (never downgraded) whose only
+        exec bit is a non-owner bit must still get the mode-only repair —
+        otherwise it files nothing and status's advertised ``upgrade`` never
+        converges.
+
+        MUTATION: same predicate revert as the test above, but the assertion
+        that REDs is in the ``ahead-script`` branch — with ``& 0o111`` the
+        ``missing_exec`` plan entry is never added, so the mode stays
+        unexecutable and the ``ahead`` version is the only surviving property.
+        """
+        root = _old_install(tmp_path)
+        ahead = root / ".claude/hooks/session-end.sh"
+        _write_script(ahead, _CURRENT + 5, _HOOK_BODY)
+        ahead.chmod(mode)
+        assert not os.access(ahead, os.X_OK), (
+            f"fixture bug: a {mode:o} file is already owner-executable")
+
+        findings = detect_install(root)
+        assert any(f.kind == "not-executable" for f in findings)
+        assert any(f.kind == "ahead-script" for f in findings)
+        result = upgrade_install(root)
+        assert result.ok, result.refused
+        assert ahead.stat().st_mode & stat.S_IXUSR, (
+            f"upgrade left the ahead {mode:o} hook unexecutable by its owner")
+        assert read_hook_version(ahead) == _CURRENT + 5  # not downgraded
+        assert not any(f.kind == "not-executable"
+                       for f in detect_install(root))
 
     def test_status_notes_a_symlinked_install(self, tmp_path):
         """A symlinked hook is functionally current (it tracks the source) but

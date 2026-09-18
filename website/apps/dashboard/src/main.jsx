@@ -14,6 +14,12 @@ import { setupGuide } from './setupGuide.js'
 // memory digest, next action), zero toggles. Pure derivations, node --test
 // unit-tested (overview.test.js).
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
+// #3890: the D5 empty state's ONE primary action (a real link to the live
+// home of the four source toggles — Settings → Memory sources), the
+// hash→tab deep-link resolver, and the focus mover. Extracted so the suite
+// can RENDER the live action (react-dom/server) and execute the handler
+// instead of grepping source text.
+import { OverviewEmptyActions, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
@@ -461,7 +467,10 @@ function SettingsTab(props) {
           session_recording). DE2E-2: reachable only via Settings → Memory
           sources. ── */}
       <section className="settings-home" aria-labelledby="settings-memory-heading">
-        <h3 id="settings-memory-heading">Memory sources</h3>
+        {/* #3890: tabIndex -1 makes the heading a programmatic focus target —
+            the deep link from the Overview empty state moves focus here
+            (WCAG 2.4.3 / 2.4.11) and scroll-margin-top keeps it clear. */}
+        <h3 id="settings-memory-heading" tabIndex={-1}>Memory sources</h3>
         <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph; session recording is on by default and can be turned off any time.</p>
         <MemorySources {...memorySourcesProps} />
       </section>
@@ -810,7 +819,15 @@ try {
       storageKey: COOKIE_NAME,
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: true,
+      // ONE fragment consumer (#3503): this page also loads the shared bridge
+      // (`/assets/supabase-session.js`, index.html), whose load-time IIFE
+      // consumes #access_token and writes this same cookie with this same
+      // adapter. supabase-js ingesting the fragment too is fully redundant —
+      // it reads the same hash and writes the same storage — and it clears
+      // window.location.hash BEFORE awaiting _saveSession(), so an over-cap
+      // session loses the fragment a SECOND time and the bridge-level
+      // retention is invisible in the product.
+      detectSessionInUrl: false,
     },
   })
 } catch (e) {
@@ -1788,9 +1805,22 @@ function claimIntentInFlight() {
       const candidate = h.slice(2)
       if (KNOWN_TABS.includes(candidate)) return candidate
     }
+    // #3890: a section deep-link (#settings-memory-heading) opens the tab that
+    // holds the section, so a middle-click / new-tab / shared URL lands on the
+    // source toggles rather than the Overview.
+    const section = resolveSectionHash(h)
+    if (section) return section.tab
     return 'overview'
   })()
   const [tab, setTab] = React.useState(initialTab)
+  // #3890: the section a deep link is waiting to focus, seeded from the
+  // landing hash so a new-tab deep link focuses too (the effect below runs
+  // once the section's tab has rendered).
+  const deepLinkRef = React.useRef(resolveSectionHash(landingHash))
+  // #3890: a re-run trigger for the focus effect. A hash change that targets
+  // the tab we are ALREADY on does not change `tab`, so state alone would
+  // never re-run the effect (address-bar paste / forward-nav onto the section).
+  const [deepLinkTick, setDeepLinkTick] = React.useState(0)
   // #2509: sync tab state → URL hash (pushState for tab switches,
   // useRef guard skips initial mount to avoid strict-mode double effect).
   const tabSyncRef = React.useRef(false)
@@ -1800,6 +1830,10 @@ function claimIntentInFlight() {
     if (!tabSyncRef.current) { tabSyncRef.current = true; return }
     const hash = '#/' + tab
     if (window.location.hash !== hash) {
+      // #3890: keep a section deep-link intact for the tab it targets —
+      // rewriting it to '#/<tab>' would drop the section the user landed on.
+      const section = resolveSectionHash(window.location.hash)
+      if (section && section.tab === tab) return
       programmaticTabChangeRef.current = true
       window.history.pushState({ tab }, '', hash)
     }
@@ -1814,13 +1848,32 @@ function claimIntentInFlight() {
       if (popProcessingRef.current) return
       popProcessingRef.current = true
       setTimeout(() => { popProcessingRef.current = false }, 0)
+      const h = window.location.hash
+      // #3890: a section deep-link (#settings-memory-heading) is NEVER
+      // self-produced — the tab-sync effect only ever writes '#/<tab>' — so it
+      // is always a real user navigation and must be resolved BEFORE the #2528
+      // self-trigger guard below. That guard's flag is set before every
+      // nav-button pushState, and pushState fires no event to clear it, so a
+      // stale flag would otherwise swallow the FIRST click of the deep link
+      // (the action would change the URL but never switch tab or focus).
+      const section = resolveSectionHash(h)
+      if (section) {
+        programmaticTabChangeRef.current = false
+        deepLinkRef.current = section
+        setTab(section.tab)
+        // #3890: a hash change to the tab we are already on is a state no-op —
+        // bump the tick so the focus effect still runs.
+        setDeepLinkTick((n) => n + 1)
+        setSelectedSessionId(null)
+        setSessionDetail(null)
+        return
+      }
       // #2528: Safari fires popstate on pushState — skip when the change
       // was self-triggered (tab sync effect sets this ref before pushState).
       if (programmaticTabChangeRef.current) {
         programmaticTabChangeRef.current = false
         return
       }
-      const h = window.location.hash
       if (h.startsWith('#/')) {
         const candidate = h.slice(2)
         if (KNOWN_TABS.includes(candidate)) {
@@ -1850,6 +1903,26 @@ function claimIntentInFlight() {
   }, [])
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
+  // #3890: move focus to the deep-linked section heading once its tab has
+  // rendered (WCAG 2.4.3 Focus Order / 2.4.11 Focus Not Obscured). The tab
+  // switch and this focus are ONE interaction — the link's href is the
+  // navigation, so middle-click, new-tab and link announcement all work.
+  //
+  // `checking` / `authed` / `welcomeMode` / `team` are deps, not just `tab`:
+  // on a COLD load (new tab / middle-click / shared URL) the app is still
+  // checking the session and fetching the team, so the Settings tab — and this
+  // heading — is not mounted yet on the first commit. The pending route must
+  // survive that miss and retry once the content mounts; focusDeepLinkTarget
+  // reports whether it landed, and the route is cleared ONLY on success (or
+  // abandoned when the user navigates to a different tab first). Declared
+  // below `checking` because a deps array is evaluated eagerly during render
+  // (the #2709 TDZ class — `tdzDepsTripwire.test.js` guards it).
+  React.useEffect(() => {
+    const route = deepLinkRef.current
+    if (!route) return
+    if (route.tab !== tab) { deepLinkRef.current = null; return }
+    if (focusDeepLinkTarget(document, route.sectionId)) deepLinkRef.current = null
+  }, [tab, team, checking, authed, welcomeMode, deepLinkTick])
   const sessionTokenRef = React.useRef(null)
   // #1680: the session user metadata is captured at mount for component-
   // scope reads (the seed-step prefill for returning users).
@@ -8408,16 +8481,14 @@ function claimIntentInFlight() {
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
           // #3832 (D5): connected-and-genuinely-empty. The copy is the owner's
           // APPROVED string, built verbatim from `d5-copy-v2.md` (③) — do not
-          // reword. Its two owner-named actions are HELD, not shipped:
-          //   [Tortoise Decide] — no in-product destination exists (decide is
-          //     an agent/CLI skill; the owner is choosing its target).
-          //   [Integrations]  — the LIVE wizard has NO integrations step
-          //     (WIZARD_STEPS is org-create → fork → connect → done); the
-          //     'Memory sources' step survives only in the ARCHIVED legacy
-          //     wizard (LEGACY_WIZARD_ARCHIVED = false). So the affordance
-          //     cannot be confirmed to land on a wizard integrations step and
-          //     the button is held too. The pre-existing action below is left
-          //     untouched so the state keeps a live destination.
+          // reword. #3890: the approved [Integrations] action is now SHIPPED as
+          // the state's ONE primary action — a real link to the live home of
+          // the four source toggles, Settings → Memory sources (where the
+          // agent-session recorder actually lives). The wizard has NO
+          // integrations step, so the old external 'welcome' destination was a
+          // dead end. [Tortoise Decide] still has no in-product destination (it
+          // is an agent/CLI skill) and so still ships no button — never a dead
+          // or disabled one. The CLI command stays as the demoted secondary.
           <section className="overview empty-state">
             <h2>No memories yet</h2>
             <p className="dim">
@@ -8426,12 +8497,7 @@ function claimIntentInFlight() {
               lives), or <strong>Tortoise Decide</strong>.
             </p>
             <div className="empty-actions">
-              <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
-                Connect your agent →
-              </a>
-              {snippetKey && (
-                <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${snippetKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
-              )}
+              <OverviewEmptyActions snippetKey={snippetKey} />
             </div>
           </section>
         )}

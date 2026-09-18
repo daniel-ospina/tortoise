@@ -206,6 +206,11 @@ surfaces:
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
+  # #3808: the CLI half of the capture install (`tortoise install <harness>`
+  # in tortoise/__main__.py, an api-classified source) — dual-registered so a
+  # CLI-wiring regression still runs the install guard. See the core entry for
+  # the mechanism half.
+  - test_capture_install.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -335,6 +340,7 @@ surfaces:
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
+  - test_rebuild_turn_points_3947.py
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
@@ -346,6 +352,16 @@ surfaces:
   # full matrix). THIS ENTRY IS LOAD-BEARING: without it classify_test_file()
   # returns None for the test and a hook-only PR would never run the guard.
   - test_claude_hook_install_probe.py
+  # #3808: `tortoise install claude|pi` installs the CAPTURE seam (the hook
+  # scripts + the merged settings.json timeout; the Pi extension) instead of
+  # leaving it as dashboard copy-paste. Its sources are
+  # tortoise/capture_install.py plus the shipped claude-hooks/ and pi-hooks/
+  # artifacts — ENGINE paths that match no SOURCE_PATTERNS entry and so classify
+  # `core` via the `tortoise/` fallback. Dual-registered under `api` because the
+  # same tests drive the CLI in tortoise/__main__.py, which selects the `api`
+  # surface (the #3575/#3795 precedent: without that entry a CLI-wiring-only
+  # change would run no guard for the very change it guards).
+  - test_capture_install.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -549,6 +565,7 @@ surfaces:
   - test_secret_store.py   # #2318: managed backup-key store + rotation (embedded)
   - test_security.py
   - test_semantic_extractor.py
+  - test_ship_test_onboarding.py   # #3806: the ship-test probe's guard (classifier + page-wide claim sweep + DOM/server readers + RED/GREEN mutation evidence); the browser half is tests/e2e/test_ship_test_onboarding.py, run by the dashboard-e2e job
   - test_skip_guard.py
   - test_slack_connector.py
   - test_sparse.py
@@ -711,6 +728,12 @@ surfaces:
   # `deploy` job, and a gate whose logic is only exercised during a production
   # deploy is a gate nobody has ever seen fail.
   - test_pages_bindings.py
+  # #3806: the ship-test instrument's guard, dual-registered here (its subject
+  # is the onboarding connection claim) and under `core` (its generic probe
+  # helpers). Both registrations are needed: the instrument itself is a
+  # `tools/` path, and listing it in SOURCE_PATTERNS' onboarding tuple is what
+  # makes a tool-only change select this surface at all.
+  - test_ship_test_onboarding.py
   # #3501: the BFF auth suites deliberately live under tests/e2e/auth/ and are
   # therefore NOT registered here. They stand up a real `wrangler pages dev`
   # server, a dependency-free mock Supabase process and (for the clickthrough) a
@@ -731,6 +754,11 @@ surfaces:
   # through the same-origin BFF. It lives at the tests/ root because it scans all
   # of website/, not just the onboarding pages.
   - test_no_legacy_token_path.py
+  # #3503: the fragment-retention regression gate for the legacy cross-subdomain
+  # bridge (a failed session-cookie write must not destroy the only copy of the
+  # credential). Pure Node-harness + cookie-jar shim, no browser/network, so it
+  # runs in the python-ci matrix. Moves to the deletion test when #3559 lands.
+  - test_session_bridge_fragment_retention.py
   - test_waitlist_form.py
   - test_w7_publish.py
   - test_welcome_url_consolidation.py
