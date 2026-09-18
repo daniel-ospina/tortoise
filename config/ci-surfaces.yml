@@ -203,6 +203,12 @@ surfaces:
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
   - test_hook_upgrade.py
+  # #3963: the durable capture spool's CLI wiring lives in tortoise/__main__.py
+  # (`session capture` writes the spool before upload; `session drain` replays
+  # it) — an `api` source, so the guard must be `api`-registered. Also
+  # registered under `core` because `tortoise/capture_spool.py` and
+  # `tortoise/claude-hooks/` match no named surface and fall through to `core`.
+  - test_capture_spool.py
   battery:
   - test_battery_arms.py
   - test_battery_judge.py
@@ -341,6 +347,11 @@ surfaces:
   # `tortoise hooks` in `tortoise/__main__.py`, which selects the `api`
   # surface: without that entry a CLI-wiring-only change would run no guard.
   - test_hook_upgrade.py
+  # #3963: the Python capture spool (`tortoise/capture_spool.py`) and the
+  # SessionStart drain wiring. Dual-registered under `api` (its CLI consumer is
+  # tortoise/__main__.py); this `core` entry is what runs the guard when the
+  # spool module itself — an unmatched `tortoise/` path — changes.
+  - test_capture_spool.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
@@ -1439,6 +1450,8 @@ durations:
   test_sentry.py: 0.0
   test_session_attribution.py: 0.0
   test_session_import_codex.py: 0.0
+  # #3963: hermetic unit + CLI-spool tests (tmp_path spool, mocked transport).
+  test_capture_spool.py: 1.0
   test_session_import_desktop.py: 0.0
   test_session_indexer_ollama.py: 0.0
   test_session_login_helpers.py: 0.0

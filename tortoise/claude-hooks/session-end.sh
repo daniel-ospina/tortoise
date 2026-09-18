@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 3
+# tortoise-hook-version: 4
 # Tortoise session capture for Claude Code — SessionEnd hook (#564).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -10,6 +10,17 @@
 # Fires when a Claude Code session ends: converts the session transcript
 # (Claude Code's .jsonl) into Tortoise's text-turn format (User:/Assistant:)
 # and files it via `tortoise session capture` (hosted /v1/sessions).
+#
+# #3963: this hook is NO LONGER the mechanism of record — it is the final
+# flush. The MECHANISM is session-turn.sh (UserPromptSubmit), which copies the
+# conversation into the durable local spool (~/.tortoise/capture-spool) at
+# every user prompt with NO network call. This hook then does the costly half:
+# `tortoise session capture` spools again (no-op when unchanged) and files.
+# A CANCELED SessionEnd (Claude Code's ~1.5s default, #3754) or a killed
+# process therefore loses at most the in-flight turn, and the SessionStart
+# hook's `tortoise session drain` files whatever is still pending. The explicit
+# "timeout": 60 below is still load-bearing for the final flush — it is just no
+# longer the only chance to capture.
 # This is the exit-side counterpart to session-start.sh's memory injection —
 # together they close the loop: memory in at session start, session filed at
 # session end.

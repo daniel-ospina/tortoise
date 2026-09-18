@@ -167,6 +167,26 @@ def _p4_uri_required():
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _fresh_capture_spool():
+    """#3963: start every pytest SESSION with a fresh capture spool.
+
+    Under pytest, ``tortoise.capture_spool.spool_dir()`` redirects to
+    ``<tmp>/tortoise-capture-spool-tests/<sha256(test-id)>`` — keyed by test id
+    so a test AND any process it spawns share one spool (the fail-closed guard
+    that stops a test touching the developer's real captures). The key is
+    stable across RUNS, so a second run of the same test would inherit run 1's
+    `filed_key` and silently skip the capture — the suite would stop being
+    re-runnable. Wipe the tree once per session.
+    """
+    import shutil
+    from pathlib import Path
+
+    shutil.rmtree(Path(tempfile.gettempdir()) / "tortoise-capture-spool-tests",
+                  ignore_errors=True)
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _serialize_embedded_construction():
     """#3546: install ONE process-wide embedded construction lock, once.
 

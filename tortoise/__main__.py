@@ -2890,6 +2890,19 @@ def _cmd_session(args) -> int:
     from urllib.request import Request, urlopen  # noqa: F401
     from urllib.error import URLError, HTTPError  # noqa: F401
 
+    # #3963: `session spool` is the CHEAP local capture — no network, no
+    # credentials, and it must survive a BROKEN config. Dispatching it after the
+    # resolver (or after the api_key gate) made the per-turn mechanism of record
+    # a silent no-op for every local-only user, and turned a corrupt
+    # `credentials.json` into a total capture outage.
+    if args.session_cmd == "spool":
+        return _cmd_session_spool(args)
+    if args.session_cmd == "drain":
+        # ALWAYS exit 0 (it is backgrounded from SessionStart): with no config —
+        # or a CORRUPT one — there is simply nothing to file, and that is not an
+        # error the caller can act on.
+        return _cmd_session_drain_best_effort(args)
+
     # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
     try:
         _cfg_path, _config, api_key, api_url = _resolve_config_path()
@@ -2963,90 +2976,378 @@ def _parse_transcript(text: str) -> list:
     return turns
 
 
-def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
-    """Read transcript, parse into turns, POST to /v1/sessions."""
-    import json as _json, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
+def _session_post(api_key: str, api_url: str):
+    """Build the POST callable the capture spool replays through (#3963).
+
+    Returns a ``handle(payload) -> PostOutcome`` so the spool never knows the
+    transport: network/timeout failures come back with ``status=None`` (the
+    spool retries with backoff), HTTP errors keep their status (permanent 4xx
+    are discarded *with a reason*, not retried).
+    """
+    import json as _json
+    from http.client import HTTPException
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
-    from urllib.error import URLError, HTTPError
+
+    from tortoise.capture_spool import PostOutcome
+
+    def handle(payload: dict) -> PostOutcome:
+        try:
+            data = _json.dumps(payload).encode("utf-8")
+            req = Request(
+                f"{api_url}/v1/sessions",
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(req, timeout=30) as resp:
+                # `getattr` default keeps transcript-conversion fakes (and any
+                # transport that omits `.status`) working — a returned context
+                # manager is a success by construction.
+                return PostOutcome(ok=True, status=getattr(resp, "status", 200),
+                                   body=_json.loads(resp.read()))
+        except HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            return PostOutcome(ok=False, status=e.code, detail=body[:500])
+        except URLError as e:
+            return PostOutcome(ok=False, status=None,
+                               detail=str(getattr(e, "reason", e)))
+        except OSError as e:
+            # Transient transport failures urllib does NOT wrap: a read timeout
+            # after the headers (`TimeoutError` from resp.read()) and
+            # `http.client.RemoteDisconnected` from getresponse() are both
+            # OSErrors. They must defer, not crash the capture path.
+            return PostOutcome(ok=False, status=None, detail=str(e))
+        except ValueError as e:
+            # A 2xx with an empty / non-JSON body. The write may or may not have
+            # landed, and the idempotent key makes a retry safe → defer.
+            return PostOutcome(ok=False, status=None, detail=f"unparseable response: {e}")
+        except HTTPException as e:
+            # `http.client.HTTPException` derives from Exception, NOT OSError:
+            # a proxy/LB with a malformed status line, an over-long header, or a
+            # truncated body (`BadStatusLine`, `InvalidURL`, `LineTooLong`,
+            # `IncompleteRead`, `NotConnected`) would otherwise escape and abort
+            # the whole drain loop — the entries sorted after it never attempted.
+            return PostOutcome(ok=False, status=None, detail=f"malformed response: {e}")
+    return handle
+
+
+def _local_session_id(transcript_path) -> str:
+    """A STABLE session id for a transcript that arrives without one (#3963).
+
+    Anchored to the resolved path (not the content) so every per-turn snapshot
+    of one conversation addresses ONE spool entry. The stem keeps it readable;
+    the path digest disambiguates two files with the same basename.
+    """
+    import hashlib
+    from pathlib import Path
+
+    path = Path(transcript_path)
+    try:
+        anchor = str(path.resolve())
+    except OSError:  # pragma: no cover - resolution is best-effort
+        anchor = str(path)
+    digest = hashlib.sha256(anchor.encode("utf-8")).hexdigest()[:12]
+    return f"{path.stem[:240]}-{digest}"
+
+
+def _spool_transcript(args) -> dict:
+    """Parse a transcript and SPOOL it durably — no network (#3963).
+
+    Shared by ``session capture`` (spool then file) and ``session spool`` (the
+    per-turn Claude hook's cheap capture: spool only). Returns
+    ``{"rc", "root", "session_id", "turns", "harness", "source", "written"}``;
+    ``rc != 0`` means nothing usable was spooled (and the reason is on stderr).
+    """
+    import sys as _sys  # noqa: I001
+    from pathlib import Path
+    from tortoise.capture_spool import (
+        Snapshot,
+        spool_dir,
+        write_spool_entry,
+    )
     from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
     transcript_path = Path(args.file)
     if not transcript_path.exists():
         print(f"Transcript file not found: {args.file}", file=_sys.stderr)
-        return 1
+        return {"rc": 1}
 
-    text = transcript_path.read_text(encoding="utf-8")
+    try:
+        text = transcript_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # `session spool` documents "always exits 0" because it is the per-turn
+        # mechanism of record: an unreadable or non-UTF-8 transcript must not
+        # raise a traceback out of the hook (it did), and the failure must be
+        # RECORDED, not just printed.
+        print(f"Transcript unreadable: {args.file} ({exc})", file=_sys.stderr)
+        from tortoise.capture_spool import record_discard
+        record_discard(spool_dir(), {
+            "session_id": _local_session_id(transcript_path),
+            "reason": "transcript_unreadable",
+            "detail": f"{args.file}: {exc}",
+        })
+        return {"rc": 1}
+
     turns = _parse_transcript(text)
 
     if not turns:
         print("No conversation turns found in transcript.", file=_sys.stderr)
-        return 1
+        return {"rc": 1}
 
-    payload = {
-        "source": transcript_path.stem,
-        "conversation": turns,
-    }
+    # #3963: align the CLI leg with the server's legal window. The Pi leg caps
+    # at the same bounds; without this a long Claude transcript POSTs >500 turns
+    # (hosted 400) → the spool entry is discarded as a permanent error instead
+    # of being filed.
+    from tortoise.quota import MAX_SESSION_TURNS
+    from tortoise.session_import import window_turns
+    turns = [{"role": t["role"], "content": t["content"][:5000]} for t in turns]
+    # The spool's store IS the record and the meta digest is computed over it, so
+    # what is stored must be what is posted. Non-conversational roles (the
+    # transcript's `System:` lines) are excluded by POLICY — the same policy the
+    # Pi leg applies at capture (extractTurns keeps user/assistant text only) —
+    # and the exclusion is REPORTED, never silent (#3963).
+    conversational = [t for t in turns if t["role"] in ("user", "assistant")]
+    if len(conversational) != len(turns):
+        print(f"ignored {len(turns) - len(conversational)} non-conversational turn(s) "
+              "(system/other roles are not filed)", file=_sys.stderr)
+    turns = conversational
+    if not turns:
+        print("No user/assistant turns found in transcript.", file=_sys.stderr)
+        return {"rc": 1}
+    turns, dropped = window_turns(turns)
+    if dropped:
+        print(f"windowed: dropped {dropped} oldest turn(s) past the {MAX_SESSION_TURNS}-turn cap",
+              file=_sys.stderr)
+
     # #1727 Slice 2 (Task 14, T1-P11): harness + session_id pass through to
-    # SessionRequest — both set-only-when-present (None never erases a stored
-    # Session.harness, and the hook forwards Claude Code's real session_id as
-    # the idempotency key so re-captures converge to ONE Session). The hook
-    # (session-end.sh) drives these; the no-arg form stays legacy-compatible.
-    if getattr(args, "harness", None):
-        payload["harness"] = args.harness
-    if getattr(args, "session_id", None):
-        payload["session_id"] = args.session_id
+    # SessionRequest. The hook forwards Claude Code's real session_id as the
+    # idempotency key so re-captures converge to ONE Session; the legacy no-arg
+    # form now derives a CONTENT-ADDRESSED id (#3963) instead of letting the
+    # server mint a random one — so a replay of the same transcript is
+    # idempotent even without the hook's metadata.
+    harness = getattr(args, "harness", None) or "claude"
+    # Without an explicit `--session-id`, derive one anchored to the TRANSCRIPT
+    # PATH — NOT to the content (#3963 review P2). A content-addressed id changes
+    # on every snapshot of a growing conversation, so the per-turn spool created
+    # ONE ENTRY PER TURN, filed as N separate sessions (N server-side
+    # extractions). A path-anchored id is stable across snapshots, so the per-turn
+    # capture appends to ONE entry and the eventual filing is one session. The
+    # path digest also keeps two distinct transcripts with the same basename from
+    # colliding (the server upserts on `session_id`). Capped: 240 + "-" + 12 = 253
+    # ≤ the server's `max_length` (256); a longer id is a 422 → a permanent
+    # discard of the whole capture.
+    session_id = getattr(args, "session_id", None) or _local_session_id(transcript_path)
 
-    # #2681: derive machine_id + forward model when provided.  Derive-only
+    # #2681: derive machine_id + forward model when provided. Derive-only
     # sha256 of hostname\0username — never-throw, memoized per process.
-    machine_id = derive_machine_id()
-    if machine_id:
-        sanitized = sanitize_attribution_field(machine_id, max_length=256)
-        if sanitized:
-            payload["machine_id"] = sanitized
-    model = sanitize_attribution_field(
-        getattr(args, "model", None), max_length=128)
-    if model:
-        payload["model"] = model
+    machine_id = sanitize_attribution_field(derive_machine_id(), max_length=256) or ""
+    model = sanitize_attribution_field(getattr(args, "model", None), max_length=128) or None
 
-    try:
-        data = _json.dumps(payload).encode("utf-8")
-        req = Request(
-            f"{api_url}/v1/sessions",
-            data=data,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
+    root = spool_dir()
+    written = write_spool_entry(root, Snapshot(
+        session_id=session_id,
+        turns=turns,
+        source=transcript_path.stem,
+        machine_id=machine_id,
+        model=model,
+        harness=harness,
+    ))
+    return {
+        "rc": 0,
+        "root": root,
+        "session_id": session_id,
+        "turns": turns,
+        "harness": harness,
+        "source": transcript_path.stem,
+        "written": written,
+    }
+
+
+def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
+    """Read a transcript, SPOOL it durably, then attempt the filing (#3963).
+
+    The spool write happens BEFORE the network call, so a cancelled SessionEnd
+    hook (Claude Code cancels at ~1.5 s — #3754) or a killed process loses the
+    *filing* only; the turns are already in ``~/.tortoise/capture-spool`` and
+    ``tortoise session drain`` files them at the next opportunity.
+    """
+    import sys as _sys
+
+    from tortoise.capture_spool import flush_spool, read_spool_meta
+
+    prep = _spool_transcript(args)
+    if prep["rc"] != 0:
+        return prep["rc"]
+    root = prep["root"]
+    session_id = prep["session_id"]
+    turns = prep["turns"]
+    harness = prep["harness"]
+    written = prep["written"]
+    for d in written["discards"]:
+        print(f"spool discard ({d['reason']}): {d['detail']}", file=_sys.stderr)
+
+    if not written["written"] and written["bytes"] == 0:
+        # The entry exceeded the per-entry bound (the discard above names it).
+        return 1
+
+    summary = flush_spool(root, _session_post(api_key, api_url), only_session_id=session_id)
+    for d in summary.discarded:
+        print(f"capture discarded ({d['reason']}): {d['detail']}", file=_sys.stderr)
+    outcome = summary.outcomes.get(session_id)
+    if outcome is None:
+        # Not attempted: already filed, inside its backoff window, or the entry
+        # was discarded above. Distinguish them — "already filed" for a pending
+        # retry is a lie to the operator (#3963 review).
+        if summary.discarded or written["discards"]:
+            return 1
+        meta = read_spool_meta(root, session_id) or {}
+        if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
+            print(f"Session {session_id} already filed — nothing to capture.")
+            return 0
+        print(f"capture deferred: session {session_id} is spooled (backoff window) "
+              "and will retry", file=_sys.stderr)
+        print(f"Spooled session: {session_id}")
+        return 0
+    if not outcome.ok:
+        if summary.discarded:
+            return 1
+        # TRANSIENT (network / 5xx / retryable 4xx): the capture is DURABLE in
+        # the spool — report the deferral honestly and exit 0 (the data is not
+        # lost; the hook must never be blocked by a capture failure).
+        print(
+            f"capture deferred: session {session_id} is spooled and will retry "
+            f"({outcome.status if outcome.status is not None else 'network error'})",
+            file=_sys.stderr,
         )
-        with urlopen(req, timeout=30) as resp:
-            result = _json.loads(resp.read())
-    except HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        print(f"API error ({e.code}): {body}", file=_sys.stderr)
-        return 1
-    except URLError as e:
-        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
-        return 1
+        print(f"Spooled session: {session_id}")
+        return 0
 
-    session_id = result.get("session_id", result.get("id", "unknown"))
+    body = outcome.body or {}
+    server_session = body.get("session_id", body.get("id", session_id))
+    # #3963: a grown conversation re-POSTed under an existing session_id is
+    # replayed server-side (the turns land; extraction is deliberately skipped —
+    # the server extracts a session once). Surface it honestly instead of
+    # claiming a fresh extraction happened.
+    if body.get("extraction_mode") == "replayed":
+        print(f"Session {server_session} already captured — replayed (no new extraction).")
+        return 0
     # P1 #1529: a status-only consumer must not report success on a failed
     # capture — extraction failures surface as HTTP 200 + additive body
     # errors with extraction_mode "error"/"empty" (the turn mutation already
     # happened; the body is the failure surface). Exit 1 with the errors on
     # stderr, never "Captured session: …" with extracted: 0.
-    if result.get("extraction_mode") in ("error", "empty") or result.get("errors"):
+    if body.get("extraction_mode") in ("error", "empty") or body.get("errors"):
         print(
-            f"capture failed: {result.get('errors') or result.get('extraction_mode')}",
+            f"capture failed: {body.get('errors') or body.get('extraction_mode')}",
             file=_sys.stderr,
         )
         return 1
-    print(f"Captured session: {session_id}")
+    print(f"Captured session: {server_session}")
     print(f"  Turns: {len(turns)}")
-    print(f"  Source: {transcript_path.stem}")
-    if getattr(args, "harness", None):
-        print(f"  Harness: {args.harness}")
+    print(f"  Source: {prep['source']}")
+    print(f"  Harness: {harness}")
+    return 0
+
+
+def _cmd_session_drain_best_effort(args) -> int:
+    """Resolve config for the drain and ALWAYS return 0 (#3963).
+
+    `session drain` is backgrounded from the SessionStart hook, so a missing or
+    corrupt `.tortoise` config must not surface as a non-zero exit — there is
+    nothing to file and nothing the caller can do about it.
+    """
+    import sys as _sys
+
+    try:
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"spool drain: invalid config at {e} — nothing to file",
+              file=_sys.stderr)
+        return 0
+    if api_key is None:
+        print("spool drain: no .tortoise config — nothing to file", file=_sys.stderr)
+        return 0
+    try:
+        return _cmd_session_drain(api_key, api_url,
+                                  getattr(args, "exclude_session_id", None))
+    except Exception as e:
+        # The drain is backgrounded from SessionStart: WHATEVER goes wrong (an
+        # unreadable spool, a bug in a new transport) it must not surface as a
+        # crashed hook. The root causes are fixed above; this is the belt.
+        print(f"spool drain: unexpected failure — {e}", file=_sys.stderr)
+        return 0
+
+
+def _cmd_session_drain(api_key: str, api_url: str,
+                       exclude_session_id: str | None = None) -> int:
+    """Replay every spooled session that has not been filed (#3963).
+
+    This is the "next opportunity" the SessionStart hook wires in: an
+    interrupted session's filing survives in the spool and is delivered here.
+    Best-effort by contract — it must never block a session from starting, so
+    it always exits 0 and reports what it did.
+
+    ``exclude_session_id`` is the session that is LIVE right now (Claude Code
+    passes it on the SessionStart hook's stdin). Filing it would make the server
+    replay it — extraction is skipped once a session exists — so every turn
+    after a `--resume`/`clear`/`compact` would be stored but never mined. The
+    drain files OTHER sessions only, exactly as the Pi leg's `session_start`
+    flush does.
+    """
+    import sys as _sys
+
+    from tortoise.capture_spool import flush_spool, spool_dir
+
+    summary = flush_spool(spool_dir(), _session_post(api_key, api_url),
+                          exclude_session_id=exclude_session_id)
+    for d in summary.discarded:
+        print(f"spool discard ({d['reason']}): {d['session_id']} — {d['detail']}",
+              file=_sys.stderr)
+    if summary.attempted or summary.discarded:
+        print(
+            f"spool drain: filed {summary.filed}, deferred {summary.deferred}, "
+            f"skipped {summary.skipped}, held back {summary.held_back}, "
+            f"discarded {len(summary.discarded)}",
+            file=_sys.stderr,
+        )
+    return 0
+
+
+def _cmd_session_spool(args) -> int:
+    """Cheap capture: SPOOL a transcript, NO network (#3963).
+
+    This is what the per-turn Claude hook (``UserPromptSubmit``) calls. The
+    costly filing (which triggers server-side extraction) is deferred: the
+    SessionStart drain and the SessionEnd final flush do it. Spooling per turn
+    is what makes an interrupted / killed / laptop-closed session recoverable —
+    the durable record exists before the next turn starts.
+
+    Always exits 0: a turn must never be blocked, and a transient failure just
+    means the next turn's snapshot (which carries the whole conversation)
+    re-spools it. A PERMANENT problem (an entry past its bound) is reported and
+    recorded in `discarded.jsonl`.
+    """
+    import sys as _sys
+
+    prep = _spool_transcript(args)
+    if prep["rc"] != 0:
+        # Nothing usable in this snapshot — the next turn re-spools the same
+        # (growing) conversation, so this is not a loss.
+        return 0
+    written = prep["written"]
+    for d in written["discards"]:
+        print(f"spool discard ({d['reason']}): {d['detail']}", file=_sys.stderr)
+    if not written["written"] and written["bytes"] == 0:
+        # ALWAYS exit 0: this is the per-turn mechanism of record, and a
+        # non-zero exit would (a) contradict the documented contract and
+        # (b) let a caller treat a completed capture as a failure. The reason is
+        # on stderr and in `discarded.jsonl`.
+        return 0
+    print(f"Spooled session: {prep['session_id']}")
     return 0
 
 
@@ -6208,6 +6509,31 @@ def main(argv: list[str] | None = None) -> int:
     session_probe.add_argument(
         "--harness", default="claude",
         help="Harness that installed the hook (default: claude)")
+    # #3963: the replay opportunity. An interrupted/laptop-closed session left
+    # its turns in the local spool; the SessionStart hook calls this to file
+    # them. Best-effort, always exits 0.
+    session_drain = session_sp.add_parser(
+        "drain",
+        help="File every spooled session that has not been filed yet (#3963)")
+    session_drain.add_argument(
+        "--exclude-session-id", default=None,
+        help="Session id to leave alone (the LIVE session — filing it would "
+             "make the server replay it and skip extraction)")
+    # #3963: the CHEAP per-turn capture. The Claude Code `UserPromptSubmit` hook
+    # calls this: spool the transcript locally, no network. Filing is deferred
+    # to the drain (SessionStart) or the final flush (session capture).
+    session_spool = session_sp.add_parser(
+        "spool",
+        help="Spool a transcript locally without filing it (#3963)")
+    session_spool.add_argument("--file", required=True, help="Transcript file path")
+    session_spool.add_argument(
+        "--harness", default="claude",
+        help="Harness that produced the transcript (default: claude)")
+    session_spool.add_argument(
+        "--session-id", default=None,
+        help="Harness session id (the idempotency key when filing)")
+    session_spool.add_argument(
+        "--model", default=None, help="Model label to record with the session")
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")

@@ -249,6 +249,16 @@ def _claude_layout() -> HarnessLayout:
                 "session-end.sh", "SessionEnd", 60,
                 f"{_CLAUDE_HOOKS_DIR}/session-end.sh",
             ),
+            # #3963: the CHEAP per-turn capture. Capture used to happen only at
+            # SessionEnd, which is cancelled at its ~1.5s default (#3754) and
+            # does not fire at all on a kill — so an interrupted session filed
+            # nothing. This hook spools the transcript locally (no network) at
+            # every user prompt; the filing is deferred to the SessionStart
+            # drain / the SessionEnd final flush.
+            HookScriptSpec(
+                "session-turn.sh", "UserPromptSubmit", 30,
+                f"{_CLAUDE_HOOKS_DIR}/session-turn.sh",
+            ),
         ),
     )
 
