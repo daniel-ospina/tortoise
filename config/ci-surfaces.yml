@@ -206,6 +206,11 @@ surfaces:
   - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
   - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   - test_platform_seams.py            # epic #2080 end-state seams wave-1: per-turn volunteer CLI + install + shipped hook (embedded, lane-agnostic)
+  # #3808: the CLI half of the capture install (`tortoise install <harness>`
+  # in tortoise/__main__.py, an api-classified source) — dual-registered so a
+  # CLI-wiring regression still runs the install guard. See the core entry for
+  # the mechanism half.
+  - test_capture_install.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -346,6 +351,16 @@ surfaces:
   # full matrix). THIS ENTRY IS LOAD-BEARING: without it classify_test_file()
   # returns None for the test and a hook-only PR would never run the guard.
   - test_claude_hook_install_probe.py
+  # #3808: `tortoise install claude|pi` installs the CAPTURE seam (the hook
+  # scripts + the merged settings.json timeout; the Pi extension) instead of
+  # leaving it as dashboard copy-paste. Its sources are
+  # tortoise/capture_install.py plus the shipped claude-hooks/ and pi-hooks/
+  # artifacts — ENGINE paths that match no SOURCE_PATTERNS entry and so classify
+  # `core` via the `tortoise/` fallback. Dual-registered under `api` because the
+  # same tests drive the CLI in tortoise/__main__.py, which selects the `api`
+  # surface (the #3575/#3795 precedent: without that entry a CLI-wiring-only
+  # change would run no guard for the very change it guards).
+  - test_capture_install.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-

@@ -2452,6 +2452,204 @@ def _cmd_volunteer(args) -> int:
 
 
 def _cmd_install_hooks(args) -> int:
+    """`tortoise install <harness>` — the full harness seam (#3808).
+
+    Two independent halves:
+
+    * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude / cline;
+    * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
+      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry) and pi
+      (the in-repo capture extension).
+
+    Capture used to be a copy-paste block in the dashboard: the installer gave
+    a user the read path and nothing that files a session — and because the
+    capture hook is fail-open, a hand-merge that missed the ``timeout`` filed
+    sessions silently.  Installing it here is what makes the seam real.
+
+    Capture failures are loud: a non-zero exit and a message on stderr — never
+    a printed success over an install that did not land.
+    """
+    from tortoise.capture_install import install_capture
+
+    harness = getattr(args, "harness", None)
+    listing = getattr(args, "list", False) or not harness
+    uninstall = getattr(args, "uninstall", False)
+
+    # `--uninstall` is scoped to the read-hook registration (its documented
+    # contract) and never removes the capture scripts out from under a project.
+    # `pi` has NO read-hook registration, so it must not fall through to
+    # `_install_read_hook`'s cline target (a non-codex/claude harness lands in
+    # that `else` branch): `tortoise install pi --uninstall` would otherwise
+    # inspect — and could rewrite — `<dir>/.cline/hooks/UserPromptSubmit`.
+    if uninstall and harness == "pi":
+        print("pi has no shell-hook read seam — nothing for --uninstall to "
+              "remove. The pi capture extension (~/.pi/agent/extensions/"
+              "tortoise-capture.ts) is left in place; delete that file to "
+              "uninstall it.")
+        return 0
+    # `--list` / no harness prints the catalogue.
+    if listing or uninstall:
+        rc = _install_read_hook(args)
+        if uninstall and harness == "claude":
+            # Claude is the one harness with a SECOND half: the capture seam
+            # (`session-start.sh` / `session-end.sh` + their
+            # SessionStart/SessionEnd entries). `--uninstall` is scoped to the
+            # read-hook registration and never deletes a project's capture
+            # scripts, so the run must SAY that instead of leaving a user to
+            # conclude "Uninstalled volunteer-turn.sh" meant the seam was
+            # gone while the capture registrations stayed live (#3808 R14).
+            from pathlib import Path as _P
+
+            root = _P(getattr(args, "dir", "."))
+            print(
+                "Note: `--uninstall` removes only the per-turn read hook "
+                "(volunteer-turn.sh). If the capture seam is installed it is "
+                "left in place — .claude/hooks/session-start.sh and "
+                "session-end.sh plus their SessionStart/SessionEnd entries in "
+                f"{root / '.claude' / 'settings.json'} are untouched. Delete "
+                "those to uninstall capture."
+            )
+        return rc
+
+    # Validate the read half BEFORE the capture half writes.  `tortoise install
+    # claude` installs two halves; if the read half refuses (a malformed
+    # ``UserPromptSubmit``, a symlink that escapes the root, a foreign cline
+    # hook) the command must fail with NOTHING written, not leave a project
+    # with capture installed and the read registration refused.  The read
+    # half's own dry run performs the exact checks the real run does and
+    # writes nothing.  Only claude has BOTH halves: ``pi`` has no read hook,
+    # ``codex``/``cline`` no capture.
+    if harness == "claude":
+        refusal = _read_hook_refusal(args)
+        if refusal != 0:
+            return refusal
+
+    # Capture first: if any half of the seam is REFUSED (the read half's
+    # shape/symlink checks above, or the capture half's own pre-flight), the
+    # command fails with NOTHING written rather than leave a project with a
+    # read hook and a silently-absent capture step.
+    if harness in ("claude", "pi"):
+        rc = _install_capture_seam(args, install_capture)
+        if rc != 0:
+            return rc
+    if harness == "pi":
+        # Pi has no shell-hook read seam — its only seam is the capture
+        # extension; `_install_capture_seam` already reported the install,
+        # the no-op, and the MCP/restart guidance.
+        return 0
+    return _install_read_hook(args)
+
+
+#: Pi's capture seam is its whole install; the MCP wiring is set up by the
+#: dashboard (or ``tortoise setup``), and the extension only loads in a fresh
+#: Pi process. Printed after a real (non-dry-run) run, whether or not that run
+#: wrote the file.
+_PI_MCP_GUIDANCE = (
+    "The Tortoise MCP config comes from the dashboard's Pi setup (or "
+    "`tortoise setup`); restart Pi from a NEW terminal — a /reload keeps the "
+    "old environment."
+)
+
+
+def _install_capture_seam(args, install_capture) -> int:
+    """Install the capture seam for ``args.harness`` and report honestly.
+
+    The success sentence is printed ONLY by a run that actually changed
+    something: ``install_capture`` is idempotent, so a re-run (which is also
+    the upgrade path) must report the no-op — never "installed" over a run
+    that wrote nothing (#3808 R13).
+    """
+    from pathlib import Path as _P
+
+    result = install_capture(
+        args.harness,
+        root=_P(getattr(args, "dir", ".")),
+        dry_run=getattr(args, "dry_run", False),
+    )
+    if not result.ok:
+        print(f"Capture install FAILED for {args.harness}: {result.error}",
+              file=sys.stderr)
+        return 1
+    for action in result.actions:
+        print(action)
+    if not result.changed:
+        print(f"{args.harness} capture seam already installed — nothing to do.")
+    if args.harness == "pi" and not getattr(args, "dry_run", False):
+        # Under `--dry-run` nothing was written, so the success sentence would
+        # be a lie (the action lines already said what WOULD happen).
+        claim = "Pi capture extension installed. " if result.changed else ""
+        print(f"{claim}{_PI_MCP_GUIDANCE}")
+    return 0
+
+
+def _install_read_hook(args) -> int:
+    """`tortoise install <harness>` read half — the read-hook registration.
+
+    A thin boundary around :func:`_install_read_hook_impl`: the whole read
+    half runs inside ONE catch-all, so any failure on the read/parse/merge
+    path is a populated ``Install failed`` message with a non-zero exit —
+    never an uncaught traceback out of the CLI (#3808 R23).
+
+    The raise-set this boundary must cover is enumerated from the code
+    paths, *not* from the exceptions that happened to be filed:
+
+    * ``OSError`` and subclasses — ``IsADirectoryError`` (a directory where
+      the registration file belongs), ``PermissionError`` (a ``settings.json``
+      the process may not read), ``FileExistsError``/``NotADirectoryError``
+      (a FILE where an intermediate directory belongs), ELOOP from
+      ``Path.resolve``, and any write that fails at the last moment;
+    * ``RuntimeError`` — ``Path.resolve()`` raises it (deliberately, not
+      ``OSError``) on a symlink cycle; ``RecursionError`` (a subclass) from
+      ``json.loads`` on a deeply nested document;
+    * ``ValueError`` — ``UnicodeDecodeError`` from a non-UTF-8
+      ``settings.json`` (#3988), and the locally-handled ``JSONDecodeError``
+      / ``shlex.split`` / ``relative_to`` cases;
+    * ``TypeError`` — valid JSON of the wrong SHAPE, e.g. ``{"hooks": null}``,
+      where ``setdefault`` hands back the ``None`` and the subscript raises
+      (#3987);
+    * ``MemoryError`` — a huge file, re-raised below rather than converted;
+    * anything unenumerated a future read/parse/merge path adds.
+
+    The last member is the reason this is a CATCH-ALL and not a list: an
+    ``except (A, B, ...)`` boundary is refutable by the next unenumerated
+    member, which is exactly how ``TypeError`` (#3987) and
+    ``UnicodeDecodeError`` (#3988) escaped the previous
+    ``(OSError, RuntimeError)`` tuple. ``except Exception`` cannot be escaped
+    by an unenumerated ``Exception``; the two ``BaseException`` control-flow
+    signals (``KeyboardInterrupt``, ``SystemExit``) are outside it and
+    propagate. ``MemoryError`` is the one member where a refusal is the wrong
+    answer — the refusal message itself allocates — so it is re-raised first.
+    """
+    try:
+        return _install_read_hook_impl(args)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        print(f"Install failed: {e.__class__.__name__}: {e}",
+              file=sys.stderr)
+        return 1
+
+
+def _read_hook_refusal(args) -> int:
+    """Validate the read half with a write-free dry run, discarding its report.
+
+    Returns the read half's status (0 = it will install or no-op; non-zero =
+    it refuses).  ``_cmd_install_hooks`` calls this BEFORE the capture half
+    writes, so a read-half refusal fails the install with NOTHING on disk
+    instead of leaving the capture scripts and their registrations installed
+    (#3808 R20).  The dry run runs the same checks on the same files as the
+    real run; only its ``[dry-run] would …`` stdout is swallowed.
+    """
+    import contextlib
+    import io
+
+    probe = argparse.Namespace(**vars(args))
+    probe.dry_run = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        return _install_read_hook(probe)
+
+
+def _install_read_hook_impl(args) -> int:
     """Agent-first harness seam onboarding (epic #2080 #2123/#2124).
 
     Writes the per-harness UserPromptSubmit hook registration pointing at the
@@ -2476,14 +2674,20 @@ def _cmd_install_hooks(args) -> int:
     from pathlib import Path as _P
 
     if getattr(args, "list", False) or not getattr(args, "harness", None):
-        print("Installable harness seams (per-turn volunteering-memory hook):")
+        print("Installable harness seams (per-turn volunteering-memory hook "
+              "+ capture):")
         print("  tortoise install codex   → <dir>/.codex/hooks.json "
               "(UserPromptSubmit → volunteer-turn.sh codex)")
         print("  tortoise install claude  → <dir>/.claude/settings.json "
-              "hooks merged (UserPromptSubmit → volunteer-turn.sh claude)")
+              "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
+              "session-start.sh / session-end.sh into <dir>/.claude/hooks "
+              "with a merged SessionStart/SessionEnd entry (timeout 60)")
         print("  tortoise install cline   → <dir>/.cline/hooks/UserPromptSubmit "
               "(→ volunteer-turn.sh cline)")
-        print("Other seams (docs/matrix only, this wave): pi extension, "
+        print("  tortoise install pi      → ~/.pi/agent/extensions/"
+              "tortoise-capture.ts (the capture extension; Pi has no "
+              "shell-hook read seam)")
+        print("Other seams (docs/matrix only, this wave): "
               "devin, cursor, gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
         return 0
@@ -2515,9 +2719,17 @@ def _cmd_install_hooks(args) -> int:
         target = root / ".claude" / "settings.json"
         registration = [{"hooks": [{"type": "command",
                                     "command": f"{quoted_script} claude"}]}]
-    else:  # cline
+    elif harness == "cline":
         target = root / ".cline" / "hooks" / "UserPromptSubmit"
         registration = None
+    else:
+        # Never let a harness with no read seam fall into the cline target —
+        # that would inspect and could rewrite a cline file as if it were the
+        # requested harness's registration (`tortoise install pi --uninstall`
+        # used to do exactly this).
+        print(f"{harness!r} has no shell-hook read seam — nothing to install "
+              "or remove here.", file=_sys.stderr)
+        return 1
 
     dry = getattr(args, "dry_run", False)
     uninstall = getattr(args, "uninstall", False)
@@ -2739,7 +2951,18 @@ def _cmd_install_hooks(args) -> int:
         if dry:
             print(f"[dry-run] would merge into {target}:")
             print(out)
-        else:
+        elif not target.exists() or target.read_text(encoding="utf-8") != out:
+            # #3808: a re-run is the upgrade path, so a byte-identical
+            # document must not be rewritten — `tortoise install claude`
+            # running twice is a no-op only if neither half churns the file.
+            #
+            # The explicit encoding is load-bearing, not style (#3808 R24):
+            # the default is locale.getencoding(), so on an ASCII host a
+            # UTF-8 document with one non-ASCII byte raised UnicodeDecodeError
+            # — a ValueError, which the `(OSError, RuntimeError)` boundary
+            # above does not catch — and the CLI died with a traceback.  The
+            # sibling read above (``existing = target.read_text(...)``) has
+            # always passed utf-8.
             target.write_text(out)
             if not ours:
                 print(f"Merged volunteer-turn.sh into {target}")
@@ -6240,11 +6463,11 @@ def main(argv: list[str] | None = None) -> int:
     # volunteering-memory reflex (volunteer-turn.sh).
     inst = sp.add_parser(
         "install",
-        help="Install a harness seam (per-turn memory hook registration)")
+        help="Install a harness seam (per-turn memory hook + session capture)")
     inst.add_argument(
         "harness", nargs="?",
-        choices=["codex", "claude", "cline"],
-        help="Harness to install (codex | claude | cline)")
+        choices=["codex", "claude", "cline", "pi"],
+        help="Harness to install (codex | claude | cline | pi)")
     inst.add_argument(
         "--dir", default=".",
         help="Project directory to install into (default: cwd)")
@@ -6256,7 +6479,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the registration file(s) without writing")
     inst.add_argument(
         "--uninstall", action="store_true",
-        help="Remove the hook registration for the harness")
+        help="Remove the per-turn read-hook (volunteer-turn.sh) registration "
+             "for the harness — the capture seam is left in place")
     # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
     # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
     # (re-copies the scripts AND merges the settings.json timeout). Also
