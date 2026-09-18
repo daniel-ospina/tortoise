@@ -125,6 +125,22 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #3952: the blog-admin console SPA's build config and its
+                   # committed build snapshot own the guard tests added in
+                   # tests/test_admin_return_to.py (the build base, and
+                   # document-independent resolution of the shell's asset refs).
+                   # Neither path is under a Python package prefix, so without
+                   # these entries a PR that reverts `base: '/admin/'` to the
+                   # relative form selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the same
+                   # #3616 pattern these entries sit next to, one level up.
+                   "website/apps/blog-admin/vite.config.ts",
+                   "website/apps/blog-admin/dist/index.html",
+                   # The guard also reads the gate Function itself (it extracts
+                   # returnToPath/gateDecision from it, and derives the console's
+                   # mount path from its directory), so a change to the gate must
+                   # run the guard too.
+                   "website/functions/admin/[[path]].ts",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that
