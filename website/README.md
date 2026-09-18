@@ -67,14 +67,24 @@ choice. The one network call is isolated behind ONE seam —
 shape (name, replyTo, message, receivedAt, source) and result types are
 transport-neutral. Swapping transport is a change to that module alone.
 
-**There is no email leg — and that is a constraint, not a gap.** The product's
-outbound email sender is already over budget: `premise-labs#393` records Resend
-at **200% of its daily quota on two consecutive days**, with an objective of
-zero quota-rejected sends. Pointing this form at that sender would add a second
-producer to a saturated sender and would fail exactly when a customer needs it,
-so the seam **does not send email**. Do **not** provision a send-capable
-credential to restore one; the absence of a sending key is the intended state
-until the transport decision says otherwise.
+**The form is an intake producer — because receiving is the mechanism, and
+sending is the exception.** The owner's architecture is *we receive*: customers
+email `hello@premiselabs.co` and `support@premiselabs.co`, and those messages
+are processed automatically through intake; no reply is required for the
+product to work, and for most use cases we should not be sending email at all.
+Outbound email has exactly **two legitimate homes** — replying to a user who
+emailed us first, and **auth flows** (email+password login/sign-up), where
+sending ourselves is deliberate because Supabase's auth mail would max its
+quota and arrives from Supabase, which is confusing to a new sign-up. This form
+routes **into intake**; it is not an email sender.
+
+**The quota is managed, not avoided.** `premise-labs#393` is a **budget to
+manage** — its objective is zero quota-rejected sends — never a reason to
+refuse to build. An earlier revision of this section recorded the missing email
+leg as quota-avoidance; that framing is **retracted**. Do **not** provision a
+send-capable credential for this form while the transport decision is open; the
+absence of a sending key is the current shape of an unresolved decision, not a
+quota verdict.
 
 **Configuration:** the seam reads exactly one variable, `CONTACT_INTAKE_URL`
 (Pages project env var) — the URL the JSON item is POSTed to. **It is not a
@@ -108,9 +118,10 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/api/conta
    submissions; until it is bound the endpoint answers `503 not_configured`
    exactly as designed. It is the `CONTACT_INTAKE_URL` entry in
    `config/required-bindings.yml`. **Do not bind a send-capable email
-   credential** — the form has no email leg by design (see
-   `premise-labs#393` below). (When the transport decision lands, this binding
-   moves with the seam — see the seam note above.)
+   credential** while the transport decision is open — the seam needs none, and
+   none is provisioned for it. (#393 is a budget to manage, never a reason to
+   refuse to build — see the contact-form note above.) (When the transport
+   decision lands, this binding moves with the seam — see the seam note above.)
 3. **Turnstile site key** → paste into the `TURNSTILE_SITE_KEY` constant in
    `index.html`.
 4. **Deploy** — see `supabase/README.md` (CI workflow does it on merge once

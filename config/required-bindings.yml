@@ -99,13 +99,20 @@ bindings:
   # the visitor is told intake is unconfigured and given the direct mailto
   # fallback, and nothing is silently dropped.
   #
-  # NO CREDENTIAL, DELIBERATELY. The form has no email leg: the product's
-  # outbound email sender is already over budget (premise-labs#393 — Resend at
-  # 200% of quota on two consecutive days; objective is zero quota-rejected
-  # sends), so adding a second producer would ship a form that fails exactly
-  # when a customer needs it. The transport is an OPEN decision (queue vs.
-  # email) and this binding names only the queue-shaped intake endpoint. Do not
-  # provision a send-capable credential to "restore" an email leg.
+  # NO CREDENTIAL, DELIBERATELY — AND NOT FOR QUOTA REASONS. The form is an
+  # INTAKE PRODUCER: receiving is the mechanism and sending is the exception
+  # (customers email hello@/support@ and intake processes the message;
+  # outbound email belongs to replies to a user who wrote first, and to auth
+  # flows). The transport is an OPEN decision (queue vs. email) owned by the
+  # owner, and this binding names only the queue-shaped intake endpoint. No
+  # send-capable credential is provisioned for it while that decision is open —
+  # the queue leg needs none, so do not read the absence as a quota verdict.
+  #
+  # `premise-labs#393` IS A BUDGET TO MANAGE, NEVER A REASON TO REFUSE TO
+  # BUILD. Its objective is zero quota-rejected sends, and the sender's quota is
+  # managed against it. An earlier revision of this note cited #393 at 200% of
+  # quota as the reason the form has no email leg; that rationale is RETRACTED
+  # and must not be reinstated as a build prohibition.
   #
   # `recommended`, NOT `required`, and that is deliberate: `required` reds the
   # deploy, which would block the very deploy that ships the form (the endpoint

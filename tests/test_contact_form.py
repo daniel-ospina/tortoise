@@ -12,13 +12,16 @@ Guards the contract the form exists to honour — at the repo level, no network:
      200. This is the #3616 lesson applied to a second surface: a requirement
      that can only be read cannot fail. (The live proof is the curl probe in
      website/README.md; this pins the source that produces it.)
-  3. THERE IS NO EMAIL LEG — AND NO PROVIDER CALL. The product's outbound email
-     sender is already over budget (`premise-labs#393`: Resend at 200% of its
-     daily quota on two consecutive days; objective is zero quota-rejected
-     sends). The form therefore sends NO email: no `RESEND_*` read, no provider
-     endpoint, no `Authorization`/`Bearer` header, and no send-capable
-     credential — anywhere in the form's path. The absence of a sending key is
-     the intended state, not an ops gap.
+  3. THE FORM IS AN INTAKE PRODUCER, WITH NO PROVIDER CALL IN ITS PATH. The
+     owner's architecture is WE RECEIVE: customers email hello@/support@ and
+     intake processes the message; no reply is required for the product to
+     work, and outbound email has exactly two legitimate homes — replying to a
+     user who emailed first, and auth flows. So the form sends NO email: no
+     `RESEND_*` read, no provider endpoint, no `Authorization`/`Bearer` header,
+     and no send-capable credential. `premise-labs#393` is a BUDGET TO MANAGE
+     (objective: zero quota-rejected sends), NOT a reason to refuse to build —
+     the absence of a sending key is the shape of an OPEN transport decision,
+     not a quota verdict.
   4. THE FORM IS SURFACED, AND `hello@` IS VISIBLE. `/contact` is a real page,
      linked from the company landing page, the product footer, the FAQ footer
      and the docs next-steps, and the trailing-slash / .html variants redirect
@@ -29,7 +32,8 @@ Guards the contract the form exists to honour — at the repo level, no network:
      source}` posted to a configurable intake endpoint from
      `functions/_shared/contact-transport.ts`, behind `enqueue()`. The owner has
      NOT settled the transport (a queue vs. email), so the open decision and the
-     #393 reason the email leg was removed must stay recorded in the code and in
+     owner's architecture — with #393 recorded as a budget to manage, not a
+     reason to refuse to build — must stay recorded in the code and in
      website/README.md for the next reader.
 
 Run:  python -m pytest tests/test_contact_form.py -v
@@ -141,9 +145,10 @@ def test_unconfigured_message_gives_the_visitor_the_fallback() -> None:
 
 
 def test_no_email_provider_or_credential_anywhere_in_the_form_path() -> None:
-    """The email leg is REMOVED, not merely unconfigured. `premise-labs#393`
-    (Resend at 200% of its daily quota on two consecutive days) is why: a second
-    producer on a saturated sender fails exactly when a customer needs it."""
+    """The email leg is ABSENT from the form's path. `premise-labs#393` is a
+    BUDGET TO MANAGE (objective: zero quota-rejected sends), never a reason to
+    refuse to build — the form routes into intake because receiving is the
+    mechanism and sending is the exception."""
     for path in (FUNCTION_TS, TRANSPORT_TS):
         src = _src(path)
         low = src.lower()
@@ -213,14 +218,14 @@ def test_queued_item_has_exactly_the_agreed_shape() -> None:
 
 
 def test_transport_decision_is_marked_open_with_the_reason() -> None:
-    """The transport is deliberately unresolved, and the email leg was removed
-    for a stated reason … a reader must not mistake today's shape for the
-    decision, nor "helpfully" restore an email leg."""
+    """The transport is deliberately unresolved, and the reason the form is an
+    intake producer is stated … a reader must not mistake today's shape for the
+    decision, nor read #393 as a quota-based refusal to build."""
     tsrc = _src(TRANSPORT_TS)
     assert "OPEN DECISION" in tsrc
     assert "NOT SETTLED" in tsrc
-    assert "393" in tsrc, "the reason the email leg was removed must be named"
-    assert "quota" in tsrc.lower(), "#393 is a quota constraint"
+    assert "393" in tsrc, "the #393 budget must be named"
+    assert "quota" in tsrc.lower(), "#393 is a managed quota budget"
     assert "no credential" in tsrc.lower() or "do not" in tsrc.lower(), (
         "the seam must say a send-capable credential is not to be provisioned"
     )
@@ -234,7 +239,7 @@ def test_open_decision_is_recorded_in_the_readme() -> None:
     assert "OPEN DECISION" in section, "the undecided transport must be flagged as open"
     assert "contact-transport.ts" in section, "the seam's location must be named"
     assert "393" in section and "quota" in section.lower(), (
-        "the #393 quota reason for removing the email leg must be recorded"
+        "the #393 managed budget behind the intake shape must be recorded"
     )
     assert "CONTACT_INTAKE_URL" in section, "the seam's one configuration must be named"
     assert "503" in section

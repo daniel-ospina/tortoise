@@ -20,11 +20,22 @@
  * honeypot, rate limit, cross-site refusal — and mapping the seam's outcome to
  * HTTP.
  *
- * WHY THERE IS NO EMAIL LEG: the product's outbound email sender is already
- * over budget (`premise-labs#393` — at 200% of its daily quota on two
- * consecutive days; objective is zero quota-rejected sends). A second producer
- * on a saturated sender would fail exactly when a customer needs it, so this
- * form does not send email and no credential may be provisioned to make it.
+ * WHY THIS FORM ROUTES INTO INTAKE — THE OWNER'S ARCHITECTURE: WE RECEIVE.
+ * Customers email `hello@premiselabs.co` and `support@premiselabs.co`, and
+ * those messages are processed automatically through intake; no reply is
+ * required for the product to work, and for most use cases we should not be
+ * sending email at all. Outbound email has exactly two legitimate homes —
+ * replying to a user who emailed us first, and auth flows (email+password
+ * login/sign-up), where sending ourselves is deliberate because Supabase's auth
+ * mail would max its quota and arrives from Supabase, which is confusing to a
+ * new sign-up. This surface is therefore an INTAKE PRODUCER: RECEIVING IS THE
+ * MECHANISM AND SENDING IS THE EXCEPTION, and the form routes INTO intake.
+ *
+ * THE QUOTA IS MANAGED, NOT AVOIDED. `premise-labs#393` is a BUDGET TO MANAGE —
+ * its objective is zero quota-rejected sends — never a reason to refuse to
+ * build. An earlier revision of this file cited #393 as the reason an email leg
+ * was removed; that rationale is RETRACTED. The transport (a queue vs. email)
+ * is the owner's OPEN decision and is not settled here.
  *
  * FAIL LOUDLY WHEN UNCONFIGURED. If the intake endpoint is unconfigured the
  * seam reports `not_configured` and this function answers a visible 503 the

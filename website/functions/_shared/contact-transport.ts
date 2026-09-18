@@ -8,14 +8,28 @@
  * provider or an email sender: the point of this module is that the choice is
  * still OPEN.
  *
- * THE EMAIL LEG WAS REMOVED, AND THIS IS WHY — the product's outbound email
- * sender is ALREADY over budget. `premise-labs#393` records it at 200% of its
- * daily quota on two consecutive days, and its own objective is ZERO
- * quota-rejected sends. Pointing this form at that sender would add a second
- * producer to a saturated sender, and would ship a form that fails exactly when
- * a customer needs it. So this seam DOES NOT SEND EMAIL: it enqueues. That "no
- * send-capable key exists on this host" is a DESIGN SIGNAL, not an ops gap to
- * work around — no credential may be provisioned to restore an email leg.
+ * WHY THIS FORM IS QUEUE-SHAPED — THE OWNER'S ARCHITECTURE, IN HIS TERMS:
+ * WE RECEIVE. Customers email `hello@premiselabs.co` and
+ * `support@premiselabs.co`, and those messages are processed automatically
+ * through intake; NO REPLY IS REQUIRED for the product to work, and for most
+ * use cases we should not be sending email at all. Outbound email has exactly
+ * TWO legitimate homes — replying to a user who emailed us first, and AUTH
+ * FLOWS (email+password login/sign-up), where sending ourselves is deliberate
+ * because Supabase's auth mail would max its quota and arrives from Supabase,
+ * which is confusing to a new sign-up. So this form is an INTAKE PRODUCER, not
+ * an email sender: RECEIVING IS THE MECHANISM AND SENDING IS THE EXCEPTION.
+ * It routes INTO intake. No send-capable credential is provisioned for it —
+ * not because sending is forbidden, but because the queue leg needs none.
+ *
+ * ⛔ `premise-labs#393` IS A BUDGET TO MANAGE, NOT A REASON TO REFUSE TO
+ * BUILD. #393's objective is ZERO quota-rejected sends; the sender's quota is
+ * MANAGED against that objective. It is not a constraint that forbids a second
+ * producer. An earlier revision of this header recorded the email leg's
+ * removal as quota-avoidance (#393 "at 200% of quota") — that framing is
+ * RETRACTED and must not be reinstated: never cite the quota as a reason not
+ * to build. If the transport decision lands as email, provisioning that leg is
+ * the owner's call, while the decision is open nothing here names or reads a
+ * provider credential.
  *
  * WHAT THIS SEAM IS, THEN — QUEUE-SHAPED. One submission becomes ONE JSON item
  * posted to a configurable intake endpoint, and that is the whole transport:
@@ -37,7 +51,8 @@
  *
  * SECRET HANDLING: there is no secret. The intake endpoint is a plain URL read
  * from `env`; this module sends no credential and no authorization header,
- * because none exists and none may be provisioned while the decision is open.
+ * because the queue leg needs none and none may be provisioned while the
+ * transport decision is open (do not read that absence as a quota verdict).
  */
 
 /**

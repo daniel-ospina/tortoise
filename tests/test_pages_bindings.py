@@ -731,8 +731,9 @@ EXPECTED_CLASSIFICATION = {
     # (loud, actionable) while the rest of the site serves normally. Deliberately
     # NOT `required`: that would red every deploy — including the one shipping
     # the form — until the endpoint is bound. Promote it once bound. It is a
-    # plain intake URL, not a credential: the form has no email leg by design
-    # (premise-labs#393 — the outbound sender is over its daily quota).
+    # plain intake URL, not a credential: the form is an intake producer
+    # (receiving is the mechanism; sending is the exception), and #393 is a
+    # budget to manage — never a reason to refuse to build.
     "CONTACT_INTAKE_URL": ("recommended", ["production"]),
 }
 
