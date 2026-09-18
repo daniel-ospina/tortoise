@@ -969,9 +969,9 @@ def test_t19_the_suite_wide_isolation_covers_the_jsonl_sink_and_counts(
     _no_env(monkeypatch)
     _store(monkeypatch)
 
-    assert ha._ANALYTICS_FALLBACK_PATH == str(tmp_path / FALLBACK_NAME), (
+    assert str(tmp_path / FALLBACK_NAME) == ha._ANALYTICS_FALLBACK_PATH, (
         "the JSONL sink must be redirected out of the real HOME")
-    assert ha._ANALYTICS_COUNTS == {o: 0 for o in ha._ANALYTICS_OUTCOMES}, (
+    assert {o: 0 for o in ha._ANALYTICS_OUTCOMES} == ha._ANALYTICS_COUNTS, (
         ha._ANALYTICS_COUNTS)
 
     assert ha._track_analytics_event("org-19", "e") == "unconfigured"
@@ -2584,4 +2584,4 @@ def test_t37_a_late_arm_after_the_presence_read_survives_the_clear(
     assert calls["resolve"] == 2, (
         "the arm this test pins must keep the episode resolvable by a later "
         "delivered write — with the arm cleared the resolve is skipped and "
-        "the open incident is stranded (calls=%s)" % calls["resolve"])
+        f"the open incident is stranded (calls={calls['resolve']})")

@@ -20142,7 +20142,7 @@ def _analytics_note_success() -> str:
                 # and the next episode dedups into (cycle-8 criterion 2,
                 # pinned by T34/T37). `moved_to` re-validation keeps BOTH the
                 # arm and the object behind it.
-                if _ANALYTICS_RESOLVE_NOT_BEFORE == moved_to:
+                if moved_to == _ANALYTICS_RESOLVE_NOT_BEFORE:
                     _ANALYTICS_RESOLVE_PENDING = False
                     _ANALYTICS_RESOLVE_NOT_BEFORE = None
     finally:
