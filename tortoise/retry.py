@@ -212,10 +212,12 @@ def call_with_predicate(fn: Callable[[], Any], *, predicate: Callable[[BaseExcep
                         # (and time.sleep(nan) raises), `max(0.0, nan)` is 0.0.
                         floor = max(0.0, min(float(advertised), cap))
                     except (TypeError, ValueError, OverflowError):
-                        # OverflowError too: a hint that is a huge int/Decimal
-                        # raises it from float(), and it is an ArithmeticError —
-                        # NOT a ValueError — so omitting it broke this seam's
-                        # stated "a malformed hint never escapes" contract.
+                        # OverflowError too: a hint that is a huge int raises
+                        # it from float(), and it is an ArithmeticError — NOT a
+                        # ValueError — so omitting it broke this seam's stated
+                        # "a malformed hint never escapes" contract. (A huge
+                        # *Decimal* does NOT land here: float() returns inf for
+                        # it, so it is clamped at `cap` above instead.)
                         floor = 0.0  # a malformed hint never escapes
                     wait = floor + random.random() * floor
             if deadline is not None:

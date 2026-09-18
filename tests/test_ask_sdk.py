@@ -917,6 +917,50 @@ def test_post_ask_status_mapping(monkeypatch):
             server.stop()
 
 
+@pytest.mark.parametrize("header,body_ra,expected", [
+    # arbitrary-precision JSON int → float() raises OverflowError
+    (None, int("9" * 400), None),
+    # JSON float overflow (json.dumps → Infinity → json.loads → inf)
+    (None, float("inf"), None),
+    ("inf", None, None),
+    ("nan", None, None),
+    ("-5", None, None),
+    ("abc", None, None),
+    # A finite advertisement IS preserved (the value is honest; the
+    # primitive's cap bounds the sleep, not the parse).
+    ("42", None, 42.0),
+])
+def test_ask_429_advertised_hint_is_sanitised(monkeypatch, header, body_ra,
+                                              expected):
+    """The 429 arm applies the SAME finite/>=0 filter as its 504 sibling.
+
+    Without it a huge int became ``None`` (thanks to the OverflowError catch)
+    while a huge FLOAT or an ``inf``/``nan`` header survived verbatim, so
+    ``AskQuotaExceeded.retry_after`` was non-finite on exactly the hints the
+    504 arm rejects: a caller honouring it then dies with the same
+    OverflowError/ValueError, and the MCP lane mirrors ``Infinity``/``NaN``
+    into a JSON tool result. Pins the coercion asymmetry, not just the parse.
+    """
+    payload = {"error": {"code": "quota_exceeded"}}
+    if body_ra is not None:
+        payload["error"]["retry_after"] = body_ra
+    server = _FakeAskServer()
+    server.status = 429
+    server.responses = [payload]
+    if header is not None:
+        server.headers = {"Retry-After": header}
+    server.start(monkeypatch)
+    try:
+        with pytest.raises(AskQuotaExceeded) as ei:
+            _new_sdk().ask("q")
+        assert ei.value.retry_after == expected, (header, body_ra,
+                                                  ei.value.retry_after)
+        # A 429 is never auto-retried (the predicate admits 504 only).
+        assert len(server.requests) == 1, server.requests
+    finally:
+        server.stop()
+
+
 def test_post_ask_404_is_reader_unavailable(monkeypatch):
     """#2013: a code-less 404 on /v1/ask is the EXPECTED gated state
     (the route is NOT registered when the hosted ask exposure is gated

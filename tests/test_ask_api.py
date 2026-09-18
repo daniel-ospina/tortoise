@@ -671,6 +671,74 @@ def test_ask_analytics_writer_sends_only_allowlisted_props(monkeypatch):
     assert row["properties"] == {"status": "ok"}, row
 
 
+@pytest.mark.parametrize("branch", ["loop", "thread"])
+@pytest.mark.parametrize("boom", ["decrement", "log"])
+def test_ask_emission_failure_path_cannot_escape(monkeypatch, branch, boom):
+    """Cycle-7 regression: on BOTH dispatch-failure paths the fallback
+    decrement and the log are each inside a suppression.
+
+    The harm: this runs on the refusal arm, so anything escaping turns the
+    pinned 504 into a 500 — the exact contract the guard exists to keep. The
+    decrement is not hypothetical: it logs (unsuppressed) when the counter is
+    already zero, i.e. it raises wherever the log handler does.
+    """
+    import threading as _threading
+
+    calls: list = []
+
+    def _fail(*a, **k):
+        calls.append(1)
+        raise RuntimeError(f"{boom} boom")
+
+    monkeypatch.setattr(ha_mod, "_track_analytics_event", lambda *a, **k: None)
+
+    if branch == "loop":
+        class _BoomLoop:
+            def is_closed(self):
+                return False
+
+            def run_in_executor(self, *a, **k):
+                raise RuntimeError("executor boom")
+
+        monkeypatch.setattr(ha_mod.asyncio, "get_running_loop",
+                            lambda: _BoomLoop())
+    else:
+        monkeypatch.setattr(ha_mod.asyncio, "get_running_loop",
+                            _raise_no_loop)
+
+        class _BoomThread:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                raise RuntimeError("cannot start new thread")
+
+        class _ThreadingShim:
+            Thread = _BoomThread
+
+            def __getattr__(self, name):
+                return getattr(_threading, name)
+
+        monkeypatch.setattr(ha_mod, "threading", _ThreadingShim())
+
+    if boom == "decrement":
+        monkeypatch.setattr(ha_mod, "_ask_telemetry_decrement", _fail)
+    else:
+        monkeypatch.setattr(ha_mod._logger, "warning", _fail)
+
+    try:
+        # The whole point: this RETURNS. A raise here is a 504 -> 500.
+        ha_mod._emit_ask_latency_off_path(TEST_ORG_ID, 5, "timeout")
+        assert calls, "the probe never reached the guarded statement (vacuous)"
+    finally:
+        # A suppressed decrement may legitimately have leaked the counter.
+        ha_mod._reset_ask_telemetry_for_tests()
+
+
+def _raise_no_loop():
+    raise RuntimeError("no running event loop")
+
+
 def test_ask_emission_daemon_thread_start_failure(monkeypatch):
     """R1-6/R2-8: the daemon-thread branch's ``start()`` failure must be the
     same never-raise / single-decrement contract as the loop branch — a

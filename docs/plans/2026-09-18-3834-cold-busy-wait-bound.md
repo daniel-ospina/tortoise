@@ -852,7 +852,7 @@ independently confirmed by DISJOINT reviewers (#1+#3 on the stale comment; #2+#1
 | 3 | P2 (#2) | `retry.py` `delay_for` clamp | Same hole in the shared primitive, whose docstring promises "a malformed hint never escapes". | `OverflowError` added; a `10**400` row added to the malformed-hint test. |
 | 4 | P2 (#1) | `hosted_api.py` `_emit_ask_latency_off_path` | Both `except` branches called `_logger.warning(...)` **outside** any suppression — the only statements in a documented "NEVER RAISES" function not inside a swallowing guard, so a raising handler/stream would escape (turn the pinned 504 into a 500). The same PR suppresses exactly this hazard for the strip log. Two standards for one hazard in one file. | Both wrapped in `contextlib.suppress(Exception)`, matching the strip log. |
 | 5 | P2 (×2: #6, #7) | `schemas.ASK_BUSY_MESSAGE` | The message told the reader to retry "after the delay in the Retry-After header" — but it also ships as the **MCP tool error**, which has no HTTP response and therefore no header. On exactly the surface the measurement came from, the primary instruction named a field that cannot exist. | Reworded transport-neutrally (names the advertised value, then says where it lives per surface); still digit-free, so `ASK_BUSY_RETRY_AFTER_S` stays the single source. |
-| 6 | P2 (#7) | 1987 doc: 12 `SUPERSEDED` markers + AMENDMENT; scope doc ×2 | The docs claimed the refusal "carries `Retry-After` … on hosted REST, selfhost REST **and MCP**" — a header is structurally impossible on MCP. A future reader would test for something that cannot exist. | Corrected in all 14 places: header on the two REST surfaces, body-only on MCP. |
+| 6 | P2 (#7) | 1987 doc: 12 `SUPERSEDED` markers + AMENDMENT; scope doc ×2 | The docs claimed the refusal "carries `Retry-After` … on hosted REST, selfhost REST **and MCP**" — a header is structurally impossible on MCP. A future reader would test for something that cannot exist. | Corrected in all 15 places: header on the two REST surfaces, body-only on MCP. (Cycle 7 found this count was wrong and the AMENDMENT bullet had been missed — see the cycle-7 log.) |
 | 7 | **P1** (#3) | `quota.py` bound rationale | The comment said the max "sits **above** the 15s budget … converts an **opaque client-side timeout**" and then, two lines later, said the 15s is the **CONNECT** budget and "explicitly **not** an ask caller's per-call timeout" — a self-contradiction, and the scope record had marked the abandonment reading **Withdrawn**. | The owner's memo directs that this framing be preserved, so it is **kept** — but the following paragraph now scopes it explicitly (the 15s is the narrowest client's CONNECT budget; the max is *inside* every ask caller's per-call budget and was a **successful** slow ask; nothing claims a per-call abandonment). The claim no longer contradicts itself. See the decision note below. |
 | 8 | P2 (#7) | `tests/test_ask_api.py` | I had added a `set(props) <= _ALLOWED_ANALYTICS_PROPS` line next to the exact-set assertion. A subset check is a **tautology** after the allowlist filter has run — it cannot fail for the reason its comment claims. | Dropped; the exact-set assertion (which can fail) is kept. |
 
@@ -886,3 +886,61 @@ header-injection or tenant leak on the new body/header mirror; the four survivin
 filtering by `event_name` so the new `ask_request` rows never enter their populations; and all four
 prior artifacts the change amends verified to exist and to say what the PR claims (#4013, #4015,
 #4017, #4018).
+
+---
+
+## Cycle-7 code review (re-review of the cycle-6 fix commit) — findings, dispositions, cycle log
+
+The fix commit touched 11 files, so the skill's Smart-Re-Review scope rule (>4 files → fall back to
+full review) applied: 6 FRESH reviewers re-dispatched (Guidance, Bug two-pass, History + prior
+comments, Security, Architecture, Data/Schema) with no memory of cycle 6. Security returned
+**NO ISSUES FOUND**.
+
+### ⛔ Process failure found by this cycle — the verification gate verified the wrong artifact
+
+**The gate passed and the commit still shipped the defect.** Sequence: the 11 files were staged →
+VGATE **failed** on the 1987-doc AMENDMENT → the AMENDMENT was corrected **in the working tree** →
+VGATE was re-dispatched and **PASSED**, returning `349b42f9…` for that doc → `git commit -F` was run —
+and `git commit` records the **INDEX**, not the working tree. The index still held the pre-fix copy, so
+`93b4165e7` shipped the uncorrected text while the gate had certified the corrected text. Two
+independent reviewers (Bug pass 2 and History) found it by reading `git status` / `git grep … HEAD`.
+
+**This is the fleet's own "verify the ARTIFACT, not the send" rule failing in a new place.** A gate
+whose input is the working tree cannot certify a commit whose input is the index. The residual risk is
+general: **every VGATE-then-commit sequence in this repo has the same hole**, because re-verification
+after a finding inherently edits a tree that is already staged. Filed for the mechanism (not this PR's
+code) as **agent-infra #1232**, with three candidate fixes; the smallest is to compare the staged blob
+(`git show :<path>`) against the verified hashes at git-op time and refuse when they differ. **Recorded
+here because the cycle-6 log's claim
+was, at the pushed HEAD, false** — the honest record is that cycle 6's fix for that site did not ship
+until cycle 7.
+
+### Fixed in this cycle
+
+| # | Sev | Where | Finding | Fix |
+|---|---|---|---|---|
+| 1 | **P1** (#1) | `quota.py` bound rationale | Cycle 6's reconciliation did not resolve the self-contradiction: the retained sentence still asserted the *withdrawn* causal reading ("converts an opaque client-side timeout into a legible refusal") while the paragraph below denied any abandonment, so the closing "NOTHING here claims…" was falsified by the text above it. | The owner's framing is retained **as a directive** (quoted, and labelled as product intent — "NOT a measured claim"), with the measurement scoping following it. The two paragraphs no longer assert and deny the same thing. |
+| 2 | **P1** (#2, #3) | `docs/plans/2026-08-29-1987-ask-reader.md` AMENDMENT §1 + the cycle-6 count claim | The AMENDMENT still claimed the MCP tool surface carries a `Retry-After` **header** — there were **15** offending sites, not 14; the AMENDMENT was the one missed. The commit message and this plan's cycle-6 table both claimed completeness, so the record was wrong as well as the doc. | The AMENDMENT now scopes the header to the two REST surfaces and states MCP is body-only. Cycle-6 row 6's count corrected to 15; this section records why the earlier claim was false at HEAD. |
+| 3 | P2 (#2) | `sdk.py` 429 arm | The finite/≥0 filter that makes the 504 sibling safe was **absent** on the 429 arm, so the fix commit's `OverflowError` catch gave that arm `None` for a huge **int** while a huge **float** (`1e400` → `inf`) or an `inf`/`nan` header/body survived verbatim on `AskQuotaExceeded.retry_after` — a caller honouring it dies with the very error just caught, and the MCP lane would mirror non-standard `Infinity`/`NaN` into JSON. | The same filter applied after the header→body fallback (identical shape to the 504 arm). New parametrized test `test_ask_429_advertised_hint_is_sanitised`; **4 of its 7 rows verified RED without the filter** (stash-verified), so it pins the bug rather than the line. The commit message's "a regression row each" is now true. |
+| 4 | P2 (#2) | `retry.py` comment | My own new comment said a huge "int/Decimal" raises `OverflowError` from `float()`. Only `int` does — `float(Decimal('9'*400))` returns `inf`, so a huge Decimal takes the clamp path, not the floor path the comment describes, contradicting the docstring 30 lines above. | Corrected to `int`, with the Decimal distinction stated. |
+| 5 | P2 (#1) | `hosted_api.py` `_emit_ask_latency_off_path` | Cycle 6's comment claimed the loop-branch log "is the one statement in this function NOT already inside a swallowing guard". False twice: there are **two** such logs, and the fallback `_ask_telemetry_decrement()` calls (in the `except BaseException` body and the bare `finally`) were likewise unguarded — and that function itself emits an **unsuppressed** `_logger.warning`, i.e. it raises exactly where the log does. So the "Never raises" docstring still held only incidentally. | Both fallback decrements now suppressed; the comment scoped to what is actually true; the docstring states the claim's exact scope (logs + fallback decrements guarded; a `MemoryError`-class failure is not pretended to be handled). New parametrized test `test_ask_emission_failure_path_cannot_escape` (4 cases); **the two `decrement` cases verified RED without the fix** (stash-verified). |
+
+### Clean in this cycle (checked, not reported)
+
+Receiver-side parse hardening (all hostile hints reach a defined outcome: huge int → `None`,
+`inf`/`nan`/negative/HTTP-date → `None`; the sanitized value is used only as a delay, and `min(cap)`
+plus the deadline clamp bound the actual sleep ≤ 25 s); retry amplification (attempts hard-bounded at 3,
+per-delay cap 30 s, deadline enforced, jitter additive over the floor, bare 504 never retried);
+information disclosure (the 504 body is a static constant + int + fixed string;
+`_ALLOWED_ANALYTICS_PROPS` untouched by the fix commit; the suppressions remove no log record and leak
+no internals); audit trail unaffected (the suppressed warnings are analytics dispatch, not
+`_async_audit`); resource bounds (the retained-future registry self-prunes on completion; `/v1/ask` is
+rate-limited; the `asyncio.Future` widening is safe — a `Task` is a `Future`); commit-message signature
+integrity (balanced backticks, no `$()`/`${}` holes, no double-space tells); no prior-art churn (nothing
+re-added or see-sawed); doc-affiliation clean on all 3 docs.
+
+### Not re-litigated (settled, unchanged)
+
+10 s server bound; refusal staying 504 + `timeout`; retry through `call_with_predicate`; `duration_ms`
+persisted off the request path; `SLO_MS = 300` untouched; R5-3 filed as #4013 rather than folded; the
+two off-path emitters filed as #4023; the capped plan-review exit disclosed as capped.

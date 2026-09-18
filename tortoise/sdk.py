@@ -14529,6 +14529,15 @@ class TortoiseSDK:
                         # OverflowError: an arbitrary-precision JSON int beyond
                         # float range (see the 504 arm's note).
                         retry_after = None
+            # The SAME finite/>=0 filter the 504 arm applies. Without it a
+            # NON-finite value survives here while its 504 sibling sanitises it
+            # — and a caller honouring it (`time.sleep(exc.retry_after)`) dies
+            # with the very OverflowError/ValueError this arm just caught, or
+            # mirrors `Infinity`/`NaN` into a JSON tool result (non-standard).
+            # `0 <= ra` is False for nan; `< inf` rejects `float("9"*400")`.
+            if retry_after is not None and not (
+                    0 <= retry_after < _ASK_RETRY_AFTER_CEILING_S):
+                retry_after = None
             raise AskQuotaExceeded("ask quota exceeded",
                                    retry_after=retry_after,
                                    status_code=status)

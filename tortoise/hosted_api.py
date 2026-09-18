@@ -19850,6 +19850,14 @@ def _emit_ask_latency_off_path(org_id: str | None, duration_ms: int,
     The counter is incremented exactly once here, and decremented exactly once
     — by the worker's own ``finally``, or by whichever branch failed to hand
     the work off.
+
+    Scope of the never-raise claim, stated exactly (it is NOT "every statement
+    is inside a guard"): the two LOG calls and the two FALLBACK decrements on
+    the dispatch-failure paths are each inside a suppression, because those are
+    the statements that actually raise in practice (a raising log handler or
+    stream). ``_ask_telemetry_increment``/``_ask_telemetry_decrement`` take a
+    lock and touch an int — the residual risk is a ``MemoryError``-class
+    failure, which no guard here should pretend to handle.
     """
     props = {"duration_ms": duration_ms, "status": status}
     if error_kind is not None:
@@ -19880,14 +19888,18 @@ def _emit_ask_latency_off_path(org_id: str | None, duration_ms: int,
             return
         except BaseException:
             # Only when NO future was constructed — otherwise the worker (or
-            # its cancellation) owns the single decrement.
+            # its cancellation) owns the single decrement. This decrement is
+            # itself suppressed: it logs a warning when the counter is already
+            # zero, and an escaping log would fail the very contract it
+            # reports on.
             if fut is None:
-                _ask_telemetry_decrement()
-            # The log is itself inside a suppression: it is the one statement
-            # in this function NOT already inside a swallowing guard, and a
-            # raising handler/stream would escape — i.e. the never-raise
-            # contract would hold only incidentally (the same hazard the
-            # strip-log at `_track_analytics_event` suppresses for).
+                with contextlib.suppress(Exception):
+                    _ask_telemetry_decrement()
+            # The log is the statement that raises in practice — a handler or
+            # stream that raises on emit — and a raise here would escape as an
+            # untyped error on the refusal arm, i.e. the not-yet-pinned 504
+            # would become a 500 (the same hazard the strip-log at
+            # `_track_analytics_event` suppresses for).
             with contextlib.suppress(Exception):
                 _logger.warning("ask latency telemetry schedule failed",
                                 exc_info=True)
@@ -19912,7 +19924,8 @@ def _emit_ask_latency_off_path(org_id: str | None, duration_ms: int,
                             exc_info=True)
     finally:
         if not started:
-            _ask_telemetry_decrement()
+            with contextlib.suppress(Exception):
+                _ask_telemetry_decrement()
 
 
 def _drain_ask_telemetry(timeout: float = 5.0) -> None:

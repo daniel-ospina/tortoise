@@ -671,20 +671,26 @@ class AskBoundedTimeoutError(Exception):
 #: the measurement is the **MCP transport PER TOOL CALL**, not the REST HTTP
 #: request wait — the best available proxy, not the same quantity.
 #:
-#: Why a bound at all, given only a small tail exceeds it: the measured max
-#: (21.759s) sits **above** the 15s budget the narrowest hosted client exposes,
-#: so a bound converts an **opaque client-side timeout into a legible refusal**
-#: while the server stops burning the work.
+#: Why a bound at all, given only a small tail exceeds it. The **owner's
+#: directive framing**, quoted because it is the product intent behind this
+#: number — NOT a measured claim (see the precision note below, which exists
+#: precisely because an earlier revision of this comment stated it as fact and
+#: then denied it two paragraphs later): "the 21.759s max sits above the 15s
+#: client budget, so a bound converts an opaque client-side timeout into a
+#: legible refusal while the server stops burning the work".
 #:
-#: Precision on that sentence, so the comment does not read as two claims that
-#: cancel (code-review #3 flagged the earlier self-contradiction): the 15s is the
-#: **narrowest budget any hosted client exposes — its CONNECT budget (the D-12
-#: anchor)** — and is explicitly **not** an ask caller's per-call timeout (the
-#: SDK's is 75s and the MCP client's ask call is effectively unbounded). The max
-#: is therefore **inside** every ask caller's per-call budget and was a
-#: *successful* slow ask, so NOTHING here claims a successful per-call ask was
-#: abandoned at 15s. What the bound buys on that tail is stated above: the
-#: refusal is legible and the server stops burning the work.
+#: Precision on that framing, so the comment does not read as two claims that
+#: cancel (code-review cycles 6 and 7 both flagged the self-contradiction): the
+#: 15s is the **narrowest budget any hosted client exposes — its CONNECT budget
+#: (the D-12 anchor)** — and is explicitly **not** an ask caller's per-call
+#: timeout (the SDK's is 75s and the MCP client's ask call is effectively
+#: unbounded). The max is therefore **inside** every ask caller's per-call
+#: budget and was a *successful* slow ask. So NOTHING here claims a successful
+#: per-call ask was abandoned at 15s, and the framing above must not be read as
+#: one: what it encodes is the INTENT (bound the wait, advertise the retry),
+#: and what the bound actually buys on that tail is stated above — the refusal
+#: arrives inside the narrowest budget, so it is legible, and the server stops
+#: burning the work.
 #:
 #: ``SLO_MS = 300`` (volunteer.py) governs ``/v1/context`` and is a DIFFERENT
 #: decision — deliberately not moved here, and not a precedent for this number.
