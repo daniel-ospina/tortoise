@@ -39,7 +39,7 @@ exactly the mislabelling the scorecard exists to remove.
 
 USAGE
 -----
-    python3 tools/activation_cohort.py \\
+    uv run python tools/activation_cohort.py \\
         --api-base https://api.premiselabs.co \\
         --org <org_id_a>=<tt_key_a> --org <org_id_b>=<tt_key_b> \\
         --since 2026-09-16T00:00:00Z --until 2026-09-17T00:00:00Z \\

@@ -218,7 +218,7 @@ FUNNEL_QUERY = (
 # MATCH``). Because this query spans all time it is intentionally unwindowed.
 LIFETIME_MEMORY_QUERY = (
     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-    "WHERE p.pointKind IS NULL OR p.pointKind <> 'event' "
+    f"WHERE {STAGE3_PREDICATE} "
     "RETURN min(s.created_at) AS first_memory_at, "
     "count(DISTINCT s) AS sessions_with_memory"
 )
@@ -455,10 +455,17 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     ``rows`` may be ``None`` to signal "the store was not read" (unreachable,
     unconfigured, or the graph leg failed) — in which case ``reason`` must say
     why. Returns ``(stage_cell, detail)``.
+
+    ``window`` is the ``(since, until)`` interval the rows were fetched for. It
+    is REQUIRED on the counting path: reading rows without re-checking that
+    they fall inside the window is the silent-dropped-bound class this PR fixed
+    in ``SupabaseControlPlane.query``. A ``None`` window with rows present
+    fails closed (``analytics_window_not_supplied``) rather than counting
+    unverified rows.
     """
-    # EVERY counter is initialised here, not only on the measured path: the
-    # detail key set must be identical on every return path, so a consumer read
-    # of (say) the exclusion counts does not vary with `state`.
+    # EVERY counter is initialised here, not only on the failure paths: the
+    # detail key set is identical on every return path, so a consumer read of
+    # (say) the exclusion counts does not vary with `state`.
     detail: dict[str, Any] = {
         "recall_attempted_any": None,
         "recall_attempted_after_memory": None,
@@ -470,6 +477,7 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         "unclassifiable_analytic_rows": 0,
         "unparseable_analytic_rows_wide": 0,
         "unclassifiable_analytic_rows_wide": 0,
+        "analytics_window_out_of_range": 0,
         "retrieval_tool_allowlist": sorted(RETRIEVAL_TOOL_ALLOWLIST),
         "retrieval_tool_allowlist_wide": sorted(RETRIEVAL_TOOL_ALLOWLIST_WIDE),
     }
@@ -479,34 +487,6 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     rows = list(rows)
     detail["recall_rows_fetched"] = len(rows)
     detail["recall_truncated"] = truncated
-
-    if window is not None:
-        # Python re-check of the analytics window, mirroring `stage_counts`.
-        # The PostgREST `created_at` predicate is the ONLY thing confining
-        # these rows to [since, until); a silently-dropped bound (the class
-        # this PR already fixed one layer down, in `SupabaseControlPlane.query`)
-        # would otherwise let an out-of-window tool call be counted as a
-        # measured recall attempt. Fail closed: refuse the count, never guess
-        # it. Rows whose timestamp will not parse are already counted as
-        # `unparseable_analytic_rows` below, so they are skipped here.
-        out_of_range = 0
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            try:
-                stamp = _parse_iso(row.get("created_at"), "created_at")
-            except (WindowError, TypeError):
-                continue
-            if not (window[0] <= stamp.isoformat() < window[1]):
-                out_of_range += 1
-        if out_of_range:
-            detail["analytics_window_out_of_range"] = out_of_range
-            _logger.warning(
-                "activation scorecard: %d analytics row(s) fell outside the "
-                "requested window [%s, %s) — the created_at predicate did not "
-                "apply", out_of_range, window[0], window[1])
-            return _stage(None, "calls",
-                          "analytics_window_predicate_not_applied"), detail
 
     # ORDER MATTERS: the no-lifetime-memory fact comes from the GRAPH
     # (`LIFETIME_MEMORY_QUERY`), so it is independent of how many analytics
@@ -546,6 +526,38 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     memory_at = _coerce_created_at(first_memory_at)
     if memory_at is None:
         return _stage(None, "calls", "first_memory_at_unparseable"), detail
+
+    # Python re-check of the analytics window, mirroring `stage_counts`. The
+    # PostgREST `created_at` predicate is the ONLY thing confining the fetched
+    # rows to [since, until); a silently-dropped bound (the class this PR
+    # already fixed one layer down, in `SupabaseControlPlane.query`) would
+    # otherwise let an out-of-window tool call be counted as a measured recall
+    # attempt. Fail closed: refuse the count, never guess it.
+    if window is None:
+        return _stage(None, "calls",
+                      "analytics_window_not_supplied"), detail
+    out_of_range = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            stamp = _parse_iso(row.get("created_at"), "created_at")
+        except (WindowError, TypeError):
+            # Not placeable on the timeline. An ALLOWLISTED row that fails here
+            # is refused below via `unparseable_analytic_rows`; a
+            # non-allowlisted row is excluded before its timestamp is read, so
+            # it was never part of the count either way.
+            continue
+        if not (window[0] <= stamp.isoformat() < window[1]):
+            out_of_range += 1
+    if out_of_range:
+        detail["analytics_window_out_of_range"] = out_of_range
+        _logger.warning(
+            "activation scorecard: %d analytics row(s) fell outside the "
+            "requested window [%s, %s) — the created_at predicate did not "
+            "apply", out_of_range, window[0], window[1])
+        return _stage(None, "calls",
+                      "analytics_window_predicate_not_applied"), detail
 
     narrow, unparseable, unclassifiable = _count_allowlisted(
         rows, memory_at, RETRIEVAL_TOOL_ALLOWLIST)
@@ -681,11 +693,12 @@ LIMITATIONS: tuple[str, ...] = (
     "LOWER server-side cap (PostgREST db-max-rows, a proxy limit) would return "
     "a short page that looks complete, so recall_attempted would read measured "
     "while under-counting. The cap cannot be probed from here.",
-    "A BUSY org (>= RECALL_PAGE_CAP MCP tool calls in the window — ordinary at "
-    "the default 24h) reads `unavailable` (`analytics_page_cap_truncated`), not "
-    "a count: the analytics leg is a single unpaginated read, so a full page is "
-    "a lower bound. That is the EXPECTED outcome for such an org today, not an "
-    "anomaly. Paging the leg to completion is #4038.",
+    "A BUSY org that HAS produced memory (>= RECALL_PAGE_CAP MCP tool calls "
+    "in the window) reads `unavailable` (`analytics_page_cap_truncated`), not "
+    "a count: the analytics leg is a single unpaginated read, so a full page "
+    "is a lower bound. (An org with no lifetime memory reads "
+    "`not_measurable` instead — the no-memory check deliberately precedes the "
+    "page-cap check.) Paging the leg to completion is #4038.",
     "Stage 4 is GATED on `first_memory_at` from the org DEFAULT graph while it "
     "COUNTS an org-wide stream. A multi-graph org that produced memory only in "
     "a non-default graph can read `not_measurable` "

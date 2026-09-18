@@ -10538,7 +10538,23 @@ async def activation_scorecard(
                         "memory_produced_sessions": None,
                         "turn_points_total": None, "extracted_points_total": None}
     else:
-        graph_stages, graph_detail = stage_counts(rows, since_iso, until_iso)
+        try:
+            graph_stages, graph_detail = stage_counts(
+                rows, since_iso, until_iso)
+        except Exception:
+            # A malformed funnel row (a driver/version/proxy shape anomaly) must
+            # not become a 500 — the handler's contract is fail-soft for an
+            # unreadable graph, and the analytics fold carries the same guard.
+            graph_error = "org_graph_unavailable"
+            log.warning(
+                "activation scorecard graph fold failed (fail-soft): %s",
+                org["org_id"], exc_info=True)
+            graph_stages = graph_unavailable_stages(graph_error)
+            graph_detail = {"captured_sessions": None,
+                            "stored_sessions": None,
+                            "memory_produced_sessions": None,
+                            "turn_points_total": None,
+                            "extracted_points_total": None}
 
     # ── Stage 4 ────────────────────────────────────────────────────────────
     analytics_state = ("configured" if analytics_write_path_configured()

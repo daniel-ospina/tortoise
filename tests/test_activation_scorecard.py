@@ -1367,22 +1367,44 @@ def test_stage4_in_window_row_still_counts():
 
 
 def test_stage4_detail_key_set_is_identical_on_every_return_path():
-    """Every counter must be present on EVERY return path — the four exclusion
-    counters were previously initialised only on the measured path, i.e. absent
-    exactly when a consumer most needs the doubt the exclusions carry."""
+    """Every counter must be present on EVERY return path — the exclusion
+    counters and the window counter were previously set only on one path, i.e.
+    absent exactly when a consumer reads them unconditionally."""
     from tortoise.activation_scorecard import recall_stages
+    window = ("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00")
     _, measured = recall_stages(
         [{"properties": {"tool_name": "tortoise_search"},
           "created_at": "2026-09-16T12:00:00+00:00"}],
-        "2026-09-16T01:00:00+00:00", memory_sessions=1)
+        "2026-09-16T01:00:00+00:00", memory_sessions=1, window=window)
     stage, unread = recall_stages(None, None,
                                   reason="analytics_store_unreachable")
     assert stage["state"] == "unavailable"
-    assert set(measured) == set(unread)
+    _, out_of_range = recall_stages(
+        [{"properties": {"tool_name": "tortoise_search"},
+          "created_at": "2027-01-01T00:00:00+00:00"}],
+        "2026-09-16T01:00:00+00:00", memory_sessions=1, window=window)
     for key in ("unparseable_analytic_rows", "unclassifiable_analytic_rows",
                 "unparseable_analytic_rows_wide",
-                "unclassifiable_analytic_rows_wide"):
+                "unclassifiable_analytic_rows_wide",
+                "analytics_window_out_of_range"):
         assert key in unread, (key, unread)
+        assert key in out_of_range, (key, out_of_range)
+    assert set(measured) == set(unread) == set(out_of_range)
+
+
+def test_counting_rows_without_a_window_fails_closed():
+    """The window re-check is not optional. Reading rows without verifying
+    their window is the silent-dropped-bound class this PR fixed one layer
+    down, so a missing window must refuse the count rather than count rows it
+    never placed on the timeline."""
+    from tortoise.activation_scorecard import recall_stages
+    stage, _ = recall_stages(
+        [{"properties": {"tool_name": "tortoise_search"},
+          "created_at": "2026-09-16T12:00:00+00:00"}],
+        "2026-09-16T01:00:00+00:00", memory_sessions=1)
+    assert stage["state"] == "unavailable", stage
+    assert stage["value"] is None, stage
+    assert stage["reason"] == "analytics_window_not_supplied", stage
 
 
 def test_a_non_mapping_analytic_row_makes_the_count_a_lower_bound():
@@ -1392,7 +1414,8 @@ def test_a_non_mapping_analytic_row_makes_the_count_a_lower_bound():
     stage, detail = recall_stages(
         [42, {"properties": {"tool_name": "tortoise_search"},
               "created_at": "2026-09-16T12:00:00+00:00"}],
-        "2026-09-16T01:00:00+00:00", memory_sessions=1)
+        "2026-09-16T01:00:00+00:00", memory_sessions=1,
+        window=("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00"))
     assert stage["state"] == "unavailable", stage
     assert stage["value"] is None, stage
     assert stage["reason"] == "unclassifiable_analytic_rows", stage
@@ -1415,12 +1438,18 @@ def test_analytics_write_path_probe_uses_the_writers_key_resolver(monkeypatch):
 
 def test_stage3_predicate_in_the_payload_is_the_query_predicate(client):
     """The payload's own claim about what stage 3 counted must be the predicate
-    actually interpolated into the query — a hand-copied literal would let the
-    response describe a query that is no longer the one executed."""
-    from tortoise.activation_scorecard import FUNNEL_QUERY, STAGE3_PREDICATE
+    actually interpolated into BOTH queries — stage 3's `memory_produced` and
+    stage 4's gate come from different queries, so a hand-copied literal in one
+    of them would let the two disagree silently."""
+    from tortoise.activation_scorecard import (
+        FUNNEL_QUERY,
+        LIFETIME_MEMORY_QUERY,
+        STAGE3_PREDICATE,
+    )
     body = client.get("/v1/activation/scorecard", params=WINDOW).json()
     assert body["detail"]["stage3_predicate"] == STAGE3_PREDICATE
     assert STAGE3_PREDICATE in FUNNEL_QUERY
+    assert STAGE3_PREDICATE in LIFETIME_MEMORY_QUERY
 
 
 def test_cohort_partial_zero_from_an_unreadable_org_is_refused():
@@ -1469,3 +1498,70 @@ def test_cohort_refuses_a_payload_whose_org_id_is_not_the_org_asked_for(
     assert report["org_errors"] == {"a": "org_id_mismatch"}, report
     assert report["stages"]["captured"]["state"] == "unavailable", report
     assert report["stages"]["captured"]["value"] is None, report
+
+
+def test_an_out_of_window_analytics_row_refuses_the_recall_count(client, monkeypatch):
+    """The `window=` wiring must be pinned END-TO-END: a store that returns a
+    row outside [since, until) — the PostgREST predicate silently dropped, the
+    class this PR fixed one layer down — must make stage 4 `unavailable`, not
+    count it. Deleting the `window=` kwarg from `_read_recall` used to leave
+    the entire suite green."""
+    import tortoise.supabase_control as sc
+    _stub_graph(monkeypatch, created_at="2026-09-16T01:00:00+00:00",
+                turn_points=2, extracted=1)
+    monkeypatch.setenv("SUPABASE_URL", "https://fake.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+    rows = [
+        {"event_name": "mcp_tool_call",
+         "created_at": "2026-09-16T13:00:00+00:00",
+         "properties": {"tool_name": "tortoise_search"}},
+        # OUTSIDE the requested window — the read must not count it.
+        {"event_name": "mcp_tool_call",
+         "created_at": "2027-01-01T00:00:00+00:00",
+         "properties": {"tool_name": "tortoise_recall"}},
+    ]
+
+    class _CP:
+        def query(self, *a, **kw):
+            return rows
+
+    monkeypatch.setattr(sc, "get_control_plane", lambda: _CP())
+    body = client.get("/v1/activation/scorecard", params=WINDOW).json()
+    stage = body["stages"]["recall_attempted"]
+    assert stage["state"] == "unavailable", stage
+    assert stage["value"] is None, stage
+    assert stage["reason"] == "analytics_window_predicate_not_applied", stage
+    assert body["detail"]["analytics_window_out_of_range"] == 1, body["detail"]
+
+
+def test_a_malformed_funnel_row_yields_unavailable_not_a_500(client, monkeypatch):
+    """The graph fold sits INSIDE the fail-soft guard, exactly like the
+    analytics fold: a driver/version/proxy that returns a short row must yield
+    `unavailable` + an integrity flag, not an IndexError out of the handler —
+    the endpoint's contract is "never a 500"."""
+    import tortoise.hosted_api as ha
+    from tortoise.activation_scorecard import FUNNEL_QUERY as _FUNNEL
+
+    class _Res:
+        def __init__(self, r):
+            self.result_set = r
+
+    class _G:
+        def query(self, q, params=None):
+            # A shortened row: `stage_counts` unpacks four fields.
+            short = [["s1", "2026-09-16T01:00:00+00:00"]]
+            return _Res(short if q is _FUNNEL else [])
+
+    class _SDK:
+        def _get_proj(self):
+            class _Proj:
+                g = _G()
+            return _Proj()
+
+    monkeypatch.setattr(ha, "_data_sdk", lambda org: _SDK())
+    resp = client.get("/v1/activation/scorecard", params=WINDOW)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    for name in ("captured", "stored", "memory_produced"):
+        assert body["stages"][name]["state"] == "unavailable", body["stages"]
+    assert "org_graph_unavailable" in body["integrity"], body["integrity"]
