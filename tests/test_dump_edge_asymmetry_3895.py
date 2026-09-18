@@ -475,6 +475,74 @@ def test_swap_helper_salvages_a_legacy_payload_and_reports_the_drops():
             proj.close()
 
 
+def test_wedged_swap_salvages_a_legacy_payload_fork_free(monkeypatch):
+    """P1 (review cycle 2): the fork-free promotion is the LAST-RESORT path a
+    wedged swap falls back to, so it must salvage a legacy payload exactly as
+    the temp verify did. It used to re-run the STRICT restore — refusing
+    ``Edge restore incomplete`` in exactly the wedge mode the salvage exists
+    for, after the live graph had already been deleted.
+
+    This forces the wedge branch (every ``GRAPH.COPY`` raises
+    ``ForkSlotWedgedError``) and asserts the promotion completes, reports the
+    drops, and installs the linkable edge in the live graph.
+
+    Mutation (RED): drop ``allow_dangling_edges`` from the promotion's
+    ``restore_graph`` call, or drop the ``dropped_edges`` term from its count
+    check — either way the promotion raises and this test fails.
+    """
+    import contextlib
+
+    import tortoise.hosted_backup as hb
+    from tortoise.fork_slot import ForkSlotRecovery, ForkSlotWedgedError
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proj = _make_proj(tmp, "src.db")
+        # The legacy (rev-1) artifact shape: 2 nodes, 2 edges, one referencing
+        # a node the (pre-fix) node list omitted — edge_count is UNFILTERED.
+        payload = {
+            "format": DUMP_FORMAT,
+            "graph_name": "legacy_wedged",
+            "nodes": [
+                {"dump_id": 1, "labels": ["Point"], "props": {"id": "p1"}},
+                {"dump_id": 3, "labels": ["Point"], "props": {"id": "p3"}},
+            ],
+            "edges": [
+                {"src": 1, "dst": 3, "type": "IMPL", "props": {"weight": 1.0}},
+                {"src": 1, "dst": 2, "type": "STALE_BOOKKEEPING", "props": {}},
+            ],
+            "node_count": 2,
+            "edge_count": 2,
+        }
+        live = f"legacy_wedged_{uuid4().hex[:8]}"
+
+        def _always_wedged(*args, **kwargs):
+            raise ForkSlotWedgedError(
+                site=kwargs.get("site", "restore swap"), dst_name=live,
+                recovery=ForkSlotRecovery(
+                    wedged=True, recovered=False,
+                    detail="held by a foreign child"),
+            )
+
+        monkeypatch.setattr(hb, "_graph_copy_or_diagnose", _always_wedged)
+        try:
+            result = hb._restore_into_temp_verify_swap(
+                proj.db, payload, live_name=live, allow_dangling_edges=True)
+
+            # The salvage completed instead of dying in the wedge's own mode.
+            assert result["restored"]["edges"] == 1
+            assert result["restored"]["dropped_edges"] == 1
+            assert result["restored"]["dropped_edge_endpoints"] == [2]
+            assert result["fork_slot"]["wedged"] is True
+            # The LIVE graph — not just the temp graph — carries the real
+            # edge: the salvage is not a wipe and not a no-op.
+            assert ("p1", "IMPL", "p3") in _edge_uids(
+                proj.db.select_graph(live))
+        finally:
+            with contextlib.suppress(Exception):
+                proj.db.select_graph(live).delete()
+            proj.close()
+
+
 def test_swap_helper_still_refuses_a_legacy_payload_by_default():
     """Same payload, no opt-in: the swap must refuse (fail closed) so a drill
     keeps reporting the artifact as broken instead of quietly salvaging."""

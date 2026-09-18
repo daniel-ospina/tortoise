@@ -1627,6 +1627,7 @@ def _promote_payload_fork_free(
     temp_name: str,
     expected_nodes: int,
     expected_edges: int,
+    allow_dangling_edges: bool = False,
 ) -> dict:
     """Install a VERIFIED payload into ``live_g`` with NO ``GRAPH.COPY``.
 
@@ -1637,8 +1638,13 @@ def _promote_payload_fork_free(
 
     * the live graph must be EMPTY first (the logical restore APPENDS; the
       pre-swap delete is best-effort, so emptiness is re-checked here);
-    * the restored counts must equal the counts the temp graph was verified
-      against, else it raises; and
+    * the restored counts must match the counts the temp graph was verified
+      against — node count exactly, and edges counted together with a legacy
+      payload's dropped unlinkable edges exactly as
+      :func:`_restore_into_temp_verify_swap`'s temp verification counts them
+      (``counts["edges"] + dropped_edges``), with ``allow_dangling_edges``
+      threaded through so the SAME payload the temp verify accepted is not
+      re-refused here, else it raises; and
     * a failure names the verified temp graph as intact and the live graph as
       NOT restored — the temp graph is never presented as the live one.
     """
@@ -1665,13 +1671,17 @@ def _promote_payload_fork_free(
             f"{live_now} nodes — refusing to append the restore) — verified "
             f"temp graph {temp_name} intact"
         )
-    promoted = restore_graph(live_g, payload)
+    promoted = restore_graph(
+        live_g, payload, allow_dangling_edges=allow_dangling_edges)
     if (promoted.get("nodes") != expected_nodes
-            or promoted.get("edges") != expected_edges):
+            or promoted.get("edges") + int(promoted.get("dropped_edges", 0))
+            != expected_edges):
         raise RestoreVerificationError(
             f"Restore swap failed (fork slot wedged; fork-free promotion "
             f"restored {promoted.get('nodes')}/{expected_nodes} nodes, "
-            f"{promoted.get('edges')}/{expected_edges} edges) — verified temp "
+            f"{promoted.get('edges')} edges "
+            f"(+{int(promoted.get('dropped_edges', 0))} dropped unlinkable), "
+            f"expected {expected_edges} — verified temp "
             f"graph {temp_name} intact"
         )
     return promoted
@@ -2146,6 +2156,7 @@ def _restore_into_temp_verify_swap(
                 live_g, payload,
                 live_name=live_name, temp_name=temp_name,
                 expected_nodes=expected_nodes, expected_edges=expected_edges,
+                allow_dangling_edges=allow_dangling_edges,
             )
         except Exception as promo_exc:
             logger.exception(
