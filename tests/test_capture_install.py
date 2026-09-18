@@ -1356,6 +1356,71 @@ def test_classifier_parity_with_hook_install(tmp_path):
             f"capture_install={ours}, hook_install={theirs}")
 
 
+#: (st_mode, expected "owner can execute it?" verdict) for the ONE shared
+#: predicate.  ``0o111``/``0o100`` set the owner bit under different
+#: spellings; ``0o755``/``0o700`` are ordinary install modes; ``0o601`` /
+#: ``0o410`` are the modes where a NON-owner exec bit is the only exec bit and
+#: ``st_mode & 0o111`` gives the WRONG answer; ``0o644``/``0o000`` agree under
+#: either mask and therefore discriminate nothing.
+_OWNER_EXEC_CORPUS = [
+    (0o755, True), (0o700, True), (0o111, True), (0o100, True),
+    (0o644, False), (0o601, False), (0o410, False), (0o000, False),
+]
+
+
+def test_owner_exec_predicate_reads_only_the_owners_bit():
+    """``hook_install._has_owner_exec_bit`` is the one definition of "can the
+    harness run this hook?" — the OWNER's bit, not any exec bit.
+
+    Mutation: revert it to ``st_mode & 0o111`` — the ``0o601`` and ``0o410``
+    corpus entries RED (it reports True where the owner cannot execute the
+    hook); treat it as ``st_mode & stat.S_IXGRP | st_mode & stat.S_IXOTH`` —
+    the same two RED.  The expected verdict is asserted DIRECTLY, so the test
+    has signal independent of the delegation (comparing the two call sites
+    alone would move together under any mutation)."""
+    for mode, expected in _OWNER_EXEC_CORPUS:
+        got = hook_install._has_owner_exec_bit(mode)
+        assert got is expected, (
+            f"_has_owner_exec_bit({mode:o}) = {got}, expected {expected}")
+
+
+def test_capture_install_delegates_the_owner_exec_predicate(tmp_path, monkeypatch):
+    """`capture_install`'s exec-bit repair asks
+    `hook_install._has_owner_exec_bit` instead of spelling the mask again —
+    the same one-definition rule the classifier and command-dict helpers
+    follow.
+
+    Signal: force the shared predicate to say "has the owner exec bit" for a
+    `0o601` hook, where the owner CANNOT execute it.  If the two surfaces
+    share one definition, the capture installer now reads the hook as
+    installed and does nothing; if `capture_install` kept its own
+    `st_mode & stat.S_IXUSR` test, the hook is still repaired and
+    ``res.changed`` stays True → RED.  A second pass without the patch pins
+    the un-patched behaviour (the hook IS repaired), so the first pass is not
+    vacuously green.
+
+    Mutation: replace the delegated call with a local ``dst.stat().st_mode &
+    stat.S_IXUSR`` — the first pass REDs."""
+    install_capture("claude", root=tmp_path)
+    hook = tmp_path / ".claude" / "hooks" / "session-end.sh"
+    os.chmod(hook, 0o601)
+
+    monkeypatch.setattr(hook_install, "_has_owner_exec_bit",
+                        lambda st_mode: True)
+    res = install_capture("claude", root=tmp_path)
+    assert res.ok, res.error
+    assert res.changed is False, (
+        "capture_install ignored the shared exec-bit predicate and repaired "
+        "the hook on its own mask")
+    assert (hook.stat().st_mode & 0o777) == 0o601
+
+    monkeypatch.undo()
+    res = install_capture("claude", root=tmp_path)
+    assert res.ok, res.error
+    assert res.changed is True, "the real predicate no longer repairs 0o601"
+    assert os.access(hook, os.X_OK)
+
+
 def test_entry_shape_gate_reads_only_nested_typed_command_handlers(tmp_path):
     """The installer's entry reader accepts ONLY the shape Claude Code
     actually executes — a matcher entry whose ``hooks`` ARRAY holds typed

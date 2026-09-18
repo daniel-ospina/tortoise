@@ -61,6 +61,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1024,6 +1025,27 @@ def _read_bytes(path: Path) -> bytes | None:
         return None
 
 
+def _has_owner_exec_bit(st_mode: int) -> bool:
+    """True when the OWNER's exec bit is set — the bit that decides whether
+    the harness, running as the install's owner, can execute the hook.
+
+    The ONE exec-bit predicate both surfaces share (#4000 R33).  The
+    drift/upgrade half here (``detect_install`` + ``upgrade_install``) and the
+    install half (``capture_install``) each grew their own ``st_mode & 0o111``
+    test, and "any exec bit" is a silent false success for ``0o601``/``0o410``:
+    a non-owner exec bit is the ONLY exec bit there, so the owner still cannot
+    run the hook while ``detect_install`` returned ``[]`` (status reported it
+    current), ``upgrade_install`` planned no write (its mode-only repair was
+    skipped as unnecessary), and only ``capture_install`` — fixed first —
+    repaired it.  One definition, both callers, so the two halves cannot
+    diverge again.
+
+    ``stat.S_IXUSR`` and ``0o100`` are the same bit; the named constant is
+    used so the mask has exactly one spelling in this codebase.
+    """
+    return bool(st_mode & stat.S_IXUSR)
+
+
 def _target_mode(installed: Path) -> int:
     """Mode for a rewritten hook: 0755 for a fresh copy, else the existing
     mode plus exec bits (a script installed 0700 stays 0700, not 0755)."""
@@ -1236,7 +1258,7 @@ def detect_install(root: str | os.PathLike[str], harness: str = "claude",
                 f"{installed} is not readable — chmod it so the hook can run",
                 script=spec.name,
             ))
-        if installed.stat().st_mode & 0o111 == 0:
+        if not _has_owner_exec_bit(installed.stat().st_mode):
             # The exec-bit check applies to symlinks too: `stat` follows the
             # link, and an unexecutable target cannot be run by the harness.
             # Upgrade cannot repair a symlink (it refuses them), so this kind
@@ -1540,7 +1562,7 @@ def upgrade_install(root: str | os.PathLike[str], harness: str = "claude",
         )
         missing_exec = (
             installed.exists()
-            and not (installed.stat().st_mode & 0o111)
+            and not _has_owner_exec_bit(installed.stat().st_mode)
         )
         if found is not None and found > expected:
             result.actions.append(

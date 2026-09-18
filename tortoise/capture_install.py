@@ -87,6 +87,15 @@ event-level ``{type, command}`` (which Claude Code ignores), and a handler
 missing its ``type`` are all **not** ours in both modules; treating any of them
 as ours would leave a project capturing nothing while reporting a successful
 install.
+
+The same one-definition rule governs whether a hook is *runnable*: this
+module's exec-bit repair asks :func:`tortoise.hook_install._has_owner_exec_bit`
+— the predicate ``detect_install``/``upgrade_install`` use — instead of
+spelling the mask a second time.  A separate ``st_mode & 0o111`` test on each
+side made ``0o601``/``0o410`` (a non-owner exec bit is the only exec bit) read
+as installed to ``status``/``upgrade`` while this installer repaired it
+(#4000 R33).
+
 One intentional difference: #3866 refuses *any* symlink below the install root,
 while :func:`_symlink_escape` refuses only those that leave it — a symlink whose
 target is inside the project is replaced by a real file rather than refused.
@@ -592,13 +601,15 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
             # session files nothing while the install reports success.  This
             # is the `cp`-without-`chmod` legacy state the installer exists to
             # repair, so an unchanged-bytes hook is not automatically a no-op.
-            # The test is the OWNER's bit, not any exec bit (#4000): Claude
-            # Code runs as the owner, so a hook at `0o601`/`0o410` (group or
-            # others exec only) is unrunnable while `st_mode & 0o111` reads it
-            # as already correct — the silent false success this repair exists
-            # to prevent, and the bit the tests already assert
-            # (`stat.S_IXUSR`).
-            if dst.stat().st_mode & stat.S_IXUSR:
+            # The test is the OWNER's bit, not any exec bit (#4000), and it is
+            # the ONE predicate `hook_install._has_owner_exec_bit` defines —
+            # shared with status/upgrade so the two halves of the seam cannot
+            # disagree about whether a hook is runnable.  Claude Code runs as
+            # the owner, so a hook at `0o601`/`0o410` (group or others exec
+            # only) is unrunnable while `st_mode & 0o111` reads it as already
+            # correct — the silent false success this repair exists to
+            # prevent, and the bit the tests already assert (`stat.S_IXUSR`).
+            if hook_install._has_owner_exec_bit(dst.stat().st_mode):
                 continue
             repaired = (dst.stat().st_mode & 0o777) | stat.S_IXUSR
             if dry_run:
