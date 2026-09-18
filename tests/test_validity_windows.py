@@ -257,13 +257,10 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
         ``test_supersede_valid_from_below_microsecond_disagreement_refused``.
       * same instant, DIFFERENT non-zero offsets → ACCEPTED, and the value the
         caller passed is what gets persisted (``str(valid_from)``, not the
-        stored form). Of the guard inputs in this file, cases (b) and (d) are
-        the only ones whose literals carry an EXPLICIT non-zero UTC offset, so
-        they are the only ones that exercise ``_created_sort_key``'s offset
-        arithmetic through the guard; every other ISO literal here is date-only
-        or zero-offset (``Z``/``+00:00``). The file's non-ISO temporal literals
-        do not reach that arithmetic either — numbers key as ``(0, float)``,
-        and strings that cannot be parsed fall through to ``(1, text)``.
+        stored form). Cases (b) and (d) are the only guard inputs here whose
+        literals carry an explicit non-zero UTC offset; a raw string comparison
+        would refuse both, so they pin instant-level — not string-level —
+        agreement.
     """
     # (a) same day, 12 hours EARLIER → refused (would leave a GAP)
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
