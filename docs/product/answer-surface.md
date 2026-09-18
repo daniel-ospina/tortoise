@@ -202,8 +202,10 @@ measurement justifies a change.
   qwen rates worst ~$0.021; typical ~$0.012 at STRONG. Recorded owner
   decision (pending, runbook §#2069): tighten the strong lane's context
   cap, exploit OpenRouter's $0.25/M cache-read, or re-baseline the target
-  for the strong lane. The 60/min dollar blast radius grows from ~$0.14 to
-  ~$1.28/min/team worst case.
+  for the strong lane. At the then-live 60/min budget the dollar blast
+  radius would have grown from ~$0.14 to ~$1.28/min/team worst case; that
+  budget retired with the product surface (#3849 — see Budget below), so the
+  exposure is now bounded only by the eval lane's own call volume.
 - **Budget (RETIRED with the product surface, #3849):** `MAX_ASK_LLM_PER_MIN
   = 60` per team, per process, the per-team in-flight cap 4, and the global
   Semaphore(8) + 60s bound all lived on the hosted `/v1/ask` and MCP ask
@@ -250,8 +252,9 @@ and its path-scoped 400/429/502/504 translation were removed in #3849.
 Earlier revisions mapped hosted `/v1/ask` statuses to typed exceptions in a
 `_post_ask` client. That path is **removed (#3849)**: the eval-only lane
 requires a local graph, and `run_ask_lane` raises `AskRetrievalUnavailable`
-when `TORTOISE_API_URL` is set. The `tortoise/retry.py` follow-up is closed
-with it.
+when `TORTOISE_API_URL` is set. The ask lane's auto-retry-v1 follow-up is
+closed with it (the underlying `tortoise/retry.py` SDK write-path wiring
+remains open — see `docs/parity/2026-08-29-retrieval-inversion.md`).
 
 ## Notes
 

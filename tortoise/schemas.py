@@ -133,8 +133,10 @@ VALIDATION_CODE_BAD_DATE = CODE_INVALID_QUESTION_DATE
 
 
 def valid_question_types() -> str:
-    """The human-readable valid list for the 400 ``invalid_question_type``
-    body (the 4 fragment types; None is the default)."""
+    """RETIRED (#3849): the human-readable valid list for the removed 400
+    ``invalid_question_type`` wire body (the 4 fragment types; None is the
+    default). No caller left — the eval-only lane inlines the list in its
+    ``AskValidationError`` message."""
     return "|".join(t for t in ASK_QUESTION_TYPES if t)
 
 
