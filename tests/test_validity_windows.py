@@ -315,11 +315,11 @@ def test_supersede_valid_from_below_microsecond_disagreement_refused(sdk):
     """Pins the comparison BELOW the microsecond floor that ISO pairs cannot
     reach.
 
-    Every other case in this file constructs its disagreement from ISO-8601
-    literals, and ``datetime.fromisoformat`` truncates beyond 6 fractional
-    digits — so the smallest distinguishable separation any ISO case can build
-    is one microsecond (float delta 9.5367431640625e-07 s). A tolerance-based
-    equality therefore survives all of them: replacing the guard's
+    An ISO-8601 literal pair is limited to microsecond resolution —
+    ``datetime.fromisoformat`` truncates beyond 6 fractional digits — so the
+    smallest separation an ISO case can construct is one microsecond (float
+    delta 9.5367431640625e-07 s). A tolerance-based equality therefore survives
+    every ISO case in this file: replacing the guard's
     ``k_kwarg[1] == k_stored[1]`` with ``abs(k_kwarg[1] - k_stored[1]) < 1e-9``
     leaves the whole file green without this case.
 
@@ -365,8 +365,9 @@ def test_supersede_falsey_but_present_stored_valid_from_refused(sdk):
 
     ``_covers`` gates on ``vf is not None``, so a falsey-but-present stored
     ``validFrom`` is a real window start there: ``0`` keys as the parseable
-    epoch-0 instant and ``""`` keys as an unparseable start that covers
-    nothing. The two forms fail DIFFERENTLY, and both are refused:
+    epoch-0 instant and ``""`` keys as an unparseable start that covers no
+    PARSEABLE instant (an unparseable query instant, by contrast, is covered —
+    see the bullet below). The two forms fail DIFFERENTLY, and both are refused:
 
       * ``0`` — trusting the kwarg wrote a predecessor ``validTo`` INSIDE the
         successor's ``[epoch-0, ∞)`` window ⇒ ``ambiguous`` (the overlap this
