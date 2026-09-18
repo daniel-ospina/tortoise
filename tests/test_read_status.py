@@ -108,6 +108,16 @@ class TestClassify:
         assert classify_read_status(
             reached=False, hit_count=0, degraded=True) == STATUS_UNCONFIGURED
 
+    def test_explicit_reachability_overrides_a_breaker_open_trace(self):
+        # P1 review fix: the read path's reachability probe is PROOF — a trace
+        # skipped by tripped breakers must classify as degraded (a leg did not
+        # run), not as an unreachable store.
+        trace = [_leg("fts", False, True, "breaker_open", 0),
+                 _leg("structural", False, True, "breaker_open", 0)]
+        assert classify_leg_trace(trace, hit_count=0) == STATUS_UNCONFIGURED
+        assert classify_leg_trace(
+            trace, hit_count=0, reached=True) == STATUS_DEGRADED
+
     def test_leg_trace_available(self):
         trace = [_leg("fts", True, False, "ok", 2),
                  _leg("vector", True, False, "ok", 1),
@@ -157,8 +167,24 @@ class TestCombine:
             STATUS_AVAILABLE, STATUS_EMPTY) == STATUS_AVAILABLE
 
     def test_unconfigured_beats_everything(self):
+        # only when NO leg reached the store is the composite unconfigured —
+        # see test_reached_leg_beats_unconfigured for the other direction
         assert combine_read_statuses(
-            STATUS_AVAILABLE, STATUS_UNCONFIGURED) == STATUS_UNCONFIGURED
+            STATUS_UNCONFIGURED, STATUS_UNCONFIGURED) == STATUS_UNCONFIGURED
+        assert combine_read_statuses(
+            STATUS_UNCONFIGURED, None) == STATUS_UNCONFIGURED
+
+    def test_reached_leg_beats_unconfigured(self):
+        # P1/P2 review fix: a composite read that returned hits (or answered
+        # with an empty result) cannot simultaneously report `unconfigured` —
+        # the store WAS reached, so the leg that could not be reached makes the
+        # read incomplete (`degraded`), not absent.
+        assert combine_read_statuses(
+            STATUS_AVAILABLE, STATUS_UNCONFIGURED) == STATUS_DEGRADED
+        assert combine_read_statuses(
+            STATUS_EMPTY, STATUS_UNCONFIGURED) == STATUS_DEGRADED
+        assert combine_read_statuses(
+            STATUS_DEGRADED, STATUS_UNCONFIGURED) == STATUS_DEGRADED
 
     def test_degraded_beats_available(self):
         assert combine_read_statuses(
@@ -241,6 +267,26 @@ class TestReadPathStates:
             rows = sdk.tortoise_fts_query("alpha", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] == STATUS_UNCONFIGURED
+        finally:
+            sdk.close()
+
+    def test_state_breaker_open_but_reachable_is_degraded_not_unconfigured(
+            self, sdk_factory, monkeypatch):
+        """P1 review fix: the probe is PROOF. A store that answers `RETURN 1`
+        but whose in-process breakers are still open is a store with a skipped
+        leg (`degraded`) — never `unconfigured`, which is the term reserved for
+        a store that could not be reached at all."""
+        _no_embedder(monkeypatch)
+        from tortoise import search_engine
+
+        monkeypatch.setattr(search_engine, "_breaker_allow", lambda leg: False)
+        sdk = sdk_factory()
+        try:
+            sdk.create_point("statement", "alpha beta gamma waves")
+            out: dict = {}
+            sdk.tortoise_fts_query("alpha beta", read_status_out=out, limit=5)
+            assert out["status"] == STATUS_DEGRADED
+            assert out["status"] != STATUS_UNCONFIGURED
         finally:
             sdk.close()
 

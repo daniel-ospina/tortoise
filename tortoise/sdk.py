@@ -13005,16 +13005,30 @@ class TortoiseSDK:
 
         # B6 (#3892): the status sink and the trace used to classify it. When
         # no status is requested this is exactly today's ``leg_trace`` (None
-        # unless the caller passed one) — byte-identical behavior.
+        # unless the caller passed one) — byte-identical behavior. When a
+        # status IS requested the classification gets its OWN per-call trace,
+        # so one leg's entries can never answer for another (recall_state
+        # classifies its Point and Object legs separately) while the caller's
+        # ``leg_trace`` still receives every entry it used to.
         status_trace: list[dict] | None = leg_trace
-        if read_status_out is not None and status_trace is None:
+        if read_status_out is not None:
             status_trace = []
+            _caller_trace = leg_trace
+        else:
+            _caller_trace = None
+        #: True once the reachability probe has proved the store ANSWERS.
+        store_answered = False
 
         def _with_read_status(rows: list[dict]) -> list[dict]:
             """Attach the recorded read status when the caller asked for it."""
             if read_status_out is not None:
                 read_status_out["status"] = _classify_leg_trace(
-                    status_trace or (), hit_count=len(rows))
+                    status_trace or (), hit_count=len(rows),
+                    # The probe is proof; a trace whose legs were skipped by a
+                    # tripped breaker must not walk it back to `unconfigured`.
+                    reached=True if store_answered else None)
+                if _caller_trace is not None and _caller_trace is not status_trace:
+                    _caller_trace.extend(status_trace or ())
             return rows
 
         try:
@@ -13028,10 +13042,12 @@ class TortoiseSDK:
         graph = proj.g
         if read_status_out is not None:
             # The store is configured; prove it ANSWERS before claiming
-            # anything about its contents (the same probe `tortoise init`
-            # uses). A store that cannot answer is unconfigured, NOT empty.
+            # anything about its contents. BOUNDED like every other read query
+            # — an unbounded probe would let a wedged store stall the read it
+            # annotates.
             try:
-                graph.query("RETURN 1")
+                graph.query("RETURN 1", timeout=int(_elevated_timeout_ms or 500))
+                store_answered = True
             except Exception as e:  # noqa: BLE001, RUF100
                 _logger.warning(
                     "read path cannot reach the store (%s) — unconfigured", e)

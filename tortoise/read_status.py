@@ -17,9 +17,14 @@ from **memory empty**:
 are the adopted contract (roadmap §7 item 9). Do not add a fifth, do not rename
 one, do not add a synonym. A state the four do not cover is a contract change:
 raise it instead of naming one locally — coining a term in parallel is how one
-contract becomes two. The client boundary (``scripts/tortoise-memory.mjs``)
-maps these same terms to distinct exit codes, and the cross-lane acceptance
-test asserts the same condition yields the same term on both sides.
+contract becomes two.
+
+**The client boundary is NOT mapped here.** ``scripts/tortoise-memory.mjs``
+still exits 0 for both "unreachable" and "empty" (issue #3805); mapping the
+client side to distinct exit codes is the client-boundary lane's work, not this
+module's. The cross-lane acceptance test — the same condition must produce the
+same term on both sides — is likewise a lane-orchestrator step and does not
+exist yet. What this module guarantees is the read-path term itself.
 
 **The load-bearing property:** ``unconfigured`` must never be indistinguishable
 from ``empty``, and a failure must never be returned as a successful empty
@@ -87,7 +92,8 @@ def classify_read_status(*, reached: bool, hit_count: int, degraded: bool) -> st
     return STATUS_AVAILABLE if hit_count > 0 else STATUS_EMPTY
 
 
-def classify_leg_trace(entries, *, hit_count: int) -> str:
+def classify_leg_trace(entries, *, hit_count: int,
+                       reached: bool | None = None) -> str:
     """Classify a read from its leg trace (R3 #1542 D4) and its hit count.
 
     ``reached`` is derived, never assumed: either rows came back, or at least
@@ -96,8 +102,14 @@ def classify_leg_trace(entries, *, hit_count: int) -> str:
     TF-IDF fallback actually produced the rows. A zero-count fallback is a
     recovery that found nothing, not a degradation — the #2952 rule, so an
     honest no-match read on a healthy store is ``empty`` and not ``degraded``.
+
+    ``reached`` may be passed explicitly when the caller has INDEPENDENT proof
+    the store answered — the read path proves it with a reachability probe, and
+    a caller holding that proof must not have the answer walked back by a trace
+    whose legs were skipped by a tripped circuit breaker: a breaker-open leg is
+    a leg that did not run (``degraded``), never an unreachable store.
     """
-    answered = False
+    derived_reached = False
     degraded = False
     for entry in entries or ():
         if not isinstance(entry, dict):
@@ -107,34 +119,43 @@ def classify_leg_trace(entries, *, hit_count: int) -> str:
             # proves a degraded (keyword-only) result when it produced rows;
             # a zero-count fallback found nothing and disqualifies nothing.
             if (entry.get("count") or 0) > 0:
-                answered = True
+                derived_reached = True
                 degraded = True
             continue
         if entry.get("degraded"):
             degraded = True
         if entry.get("ran") and entry.get("reason") in _ANSWERED_REASONS:
-            answered = True
+            derived_reached = True
     if hit_count > 0:
-        answered = True
+        derived_reached = True
     return classify_read_status(
-        reached=answered, hit_count=hit_count, degraded=degraded
+        reached=(derived_reached if reached is None else reached),
+        hit_count=hit_count,
+        degraded=degraded,
     )
 
 
 def combine_read_statuses(*statuses: str | None) -> str | None:
     """Coalesce the statuses of the calls that make up ONE composite read.
 
-    ``unconfigured`` outranks ``degraded`` outranks ``available`` (any hits at
-    all) outranks ``empty`` — so a two-entity read (Points + Objects) reports a
-    hit from either entity as ``available`` and never launders an unreachable
-    store into a clean result.
+    A leg that returned hits, ran degraded, or answered-and-found-nothing
+    proves the store WAS reached — so ``unconfigured`` is not available as the
+    composite answer once any leg is one of those; a leg that could not be
+    reached then means the composite read was incomplete (``degraded``), not
+    that the store was absent. ``unconfigured`` wins only when NO leg reached
+    the store at all. This keeps the composite payload self-consistent: a read
+    that returns rows can never simultaneously report ``unconfigured``.
     """
     present = [status for status in statuses if status]
     if not present:
         return None
-    if STATUS_UNCONFIGURED in present:
+    reached = any(
+        status in (STATUS_AVAILABLE, STATUS_DEGRADED, STATUS_EMPTY)
+        for status in present
+    )
+    if not reached:
         return STATUS_UNCONFIGURED
-    if STATUS_DEGRADED in present:
+    if STATUS_DEGRADED in present or STATUS_UNCONFIGURED in present:
         return STATUS_DEGRADED
     if STATUS_AVAILABLE in present:
         return STATUS_AVAILABLE
