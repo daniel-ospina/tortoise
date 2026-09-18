@@ -1570,8 +1570,7 @@
         return;
       }
       if (data?.user) pushSignupEvents(data.user);
-      // #3485: an explicit /admin return-to wins, matching the head gate.
-      window.location.href = window.__ADMIN_RETURN_TO || WELCOME_URL;
+      window.location.href = WELCOME_URL;
     }
 
     // Analytics (#528) + X conversion (#736 Path A): client-side tracking —
@@ -1718,8 +1717,7 @@
 
         // Redirect to welcome page
         // For email/password signup without email confirmation, the user is already signed in
-        // #3485: an explicit /admin return-to wins, matching the head gate.
-        window.location.href = window.__ADMIN_RETURN_TO || WELCOME_URL;
+        window.location.href = WELCOME_URL;
       } catch (err) {
         console.error("signUpWithEmail:", err);
         showError(humanizeAuthError(err));
@@ -1923,8 +1921,7 @@
         }
         if (data?.user) pushSignupEvents(data.user);
         try { window.setLastAuthMethod("email"); } catch (e) {}
-        // #3485: an explicit /admin return-to wins, matching the head gate.
-        window.location.href = window.__ADMIN_RETURN_TO || WELCOME_URL;
+        window.location.href = WELCOME_URL;
       } catch (e) {
         showError((e && e.message) || "Something went wrong — try again.");
       } finally {

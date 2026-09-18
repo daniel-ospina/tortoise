@@ -149,6 +149,11 @@
         try { window.localStorage.removeItem(legacyKey); } catch (e) { /* ignore */ }
         return;
       }
+      // Host-only origins are handled correctly here too, for the same reason as
+      // migrateLegacyKeysToCookie (#3485 review cycle 3): the cookie is written
+      // and read on the SAME host, and the write is confirmed below before the
+      // legacy key is dropped. Do not reinstate a host-only guard here — it
+      // bounces preview users who are signed in and protects nothing.
       if (!alreadyShared) {
         // Copy + confirm write before clearing (never destroy the only copy).
         // readCookie returns the DECODED value; equality holds unless the size
@@ -165,7 +170,11 @@
             typeof co.access_token === 'string' && co.access_token.length > 0;
           cookieExp = (co && co.expires_at) || 0;
         } catch (e) { /* unusable cookie */ }
-        if (!cookieOk || legacyExp > cookieExp) {
+        // #3485 review P2 (cycle 3): same usability rule as the gate-time
+        // migration — an expired legacy session must not displace a valid
+        // cookie (or an unusable one) just because it carries a later
+        // expires_at value.
+        if (legacyExp * 1000 > Date.now() && (!cookieOk || legacyExp > cookieExp)) {
           supabaseStorage.setItem(COOKIE_NAME, legacy);
           if (readCookie(COOKIE_NAME) !== legacy) return;
         }
@@ -234,19 +243,20 @@
   // LEGACY_KEYS are hardcoded, so the migration needs no supabaseUrl and can
   // run at gate time. Never throws: storage may be blocked or the value corrupt.
   var migrateLegacyKeysToCookie = function () {
-    for (var i = 0; i < LEGACY_KEYS.length; i++) {
+    try {
+      for (var i = 0; i < LEGACY_KEYS.length; i++) {
       var legacy = null;
       try { legacy = window.localStorage.getItem(LEGACY_KEYS[i]); } catch (e) { continue; }
       if (!legacy) continue;
-      // Host-only origins are fine (#3485 review cycle 2, which refuted the
-      // cycle-1 P2 premise with facts): the write below is CONFIRMED by
-      // readCookie equality, so a host-only cookie is a faithful copy of the
-      // session rather than a lost one — nothing is destroyed — and on a host
-      // that is not premiselabs.co there is no server gate that reads this
-      // cookie at all (the console's Function is on the tortoise host, and the
-      // dashboard Pages project deploys no functions/). Declining to migrate
-      // there would instead bounce a preview user who was previously signed in,
-      // while leaving behind a localStorage key no current path reads.
+      // Host-only origins are handled correctly here, and this was checked
+      // (#3485 review cycle 3): on a host that is not premiselabs.co the cookie is
+      // written AND read on the SAME host — `website/functions/` deploys with the
+      // `premise-labs` Pages project, so a *.pages.dev preview runs the same gate
+      // and reads this very cookie — and the write below is CONFIRMED by
+      // readCookie equality, so a host-only cookie is a faithful copy rather than
+      // a lost one. Declining to migrate here would instead bounce a preview user
+      // who had been signed in and working, while leaving behind a localStorage
+      // key that no current path reads.
       var existing = readCookie(COOKIE_NAME);
       // #3485 review P3: parse the legacy value ONCE and require a real session
       // shape (non-empty access_token) in BOTH branches. Object-ness alone is
@@ -285,13 +295,26 @@
             typeof co.access_token === 'string' && co.access_token.length > 0;
           cookieExp = (co && co.expires_at) || 0;
         } catch (e) { /* unusable cookie */ }
-        if (legacyOk && (!cookieOk || legacyExp > cookieExp)) {
+        // #3485 review P2 (cycle 3): the legacy session must also still be USABLE
+        // before it may displace a cookie. An expired localStorage session (or one
+        // with no expires_at) must never overwrite a valid parent-domain cookie —
+        // that cookie is the session the server gate reads, and swapping it for a
+        // dead one silently signs the visitor out of both subdomains.
+        if (legacyOk && legacyExp * 1000 > Date.now() &&
+            (!cookieOk || legacyExp > cookieExp)) {
           supabaseStorage.setItem(COOKIE_NAME, legacy);
           if (readCookie(COOKIE_NAME) !== legacy) continue;
         }
       }
       // The new client never reads the legacy key — drop it once it is shared.
       try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) { /* ignore */ }
+    }
+    } catch (e) {
+      // Never throws (#3485 review cycle 3): a corrupt legacy value — e.g. one
+      // whose JSON parses but carries an unpaired surrogate, which makes
+      // encodeURIComponent throw URIError — must not stop the caller
+      // (readValidSession) from reading the cookie, or a visitor with a perfectly
+      // valid parent-domain cookie would be reported as having no session.
     }
   };
 
@@ -324,6 +347,13 @@
       document.cookie = COOKIE_NAME + '=;' + domainAttr() + '; Path=' + COOKIE_PATH +
         '; SameSite=Lax' + secureAttr() + '; Max-Age=0';
     } catch (e) {}
+    // The blog-admin SPA persists the session under the SAME name in
+    // localStorage (website/apps/blog-admin/src/lib/supabase.ts) and its client
+    // refreshes tokens from there — so clearing only the cookie lets the console
+    // re-write the cookie from an origin-scoped copy the server gate never saw,
+    // resurrecting the session just signed out of (#3485 review, successor
+    // cycle). Clear that key too.
+    try { window.localStorage.removeItem(COOKIE_NAME); } catch (e) {}
     for (var i = 0; i < LEGACY_KEYS.length; i++) {
       try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) {}
     }

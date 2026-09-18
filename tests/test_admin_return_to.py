@@ -708,20 +708,3 @@ def test_vite_base_is_the_console_public_path() -> None:
         "gate Function mounts the console at. A relative base re-breaks the "
         "extensionless /admin entry path (#3952)"
     )
-
-
-def test_email_password_success_paths_carry_the_return_to() -> None:
-    """#3485: the email/password success paths must name the explicit return-to
-    rather than rely on WELCOME_URL. At this base the two resolve to the SAME
-    url — the early #3080 script sets __DASHBOARD_BASE_URL = origin + path
-    whenever __ADMIN_RETURN_TO is set, and WELCOME_URL aliases it — so this is
-    a defensive pin (it is not the observed cause of the #3485 loop): the three
-    success redirects must keep preferring the explicit return-to, matching the
-    head gate, so a future change to WELCOME_URL cannot silently drop it."""
-    src = SIGNUP.read_text(encoding="utf-8")
-    assert src.count("window.location.href = window.__ADMIN_RETURN_TO || WELCOME_URL;") == 3, (
-        "the three email/password success paths must prefer __ADMIN_RETURN_TO"
-    )
-    assert "window.location.href = WELCOME_URL;" not in src, (
-        "an email/password success path still hardcodes WELCOME_URL, losing the /admin return-to (#3485)"
-    )

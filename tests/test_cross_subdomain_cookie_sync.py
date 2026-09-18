@@ -470,171 +470,256 @@ def test_dashboard_public_copy_is_byte_identical() -> None:
 # ── #3485: readValidSession trusts ONLY the cookie ──────────────────────────
 
 
-def _read_valid_session_body() -> str:
-    """Extract the readValidSession function body by brace counting."""
-    text = _read(SHARED)
-    start = text.index("var readValidSession = function () {")
-    i = text.index("{", start)
+def _strip_comments(text: str) -> str:
+    """Remove JS comments before any brace counting.
+
+    A brace-counting extractor that counts RAW text is defeated by a brace inside
+    a comment — e.g. `// legacy fallback (}}}` — which truncates the extracted
+    body and hides everything below it from every assertion in this file. That is
+    how the loop could be reintroduced with the suite still green (#3485 review,
+    cycle 3). String literals are deliberately left intact: several pins below
+    match code that contains them.
+    """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+def _function_body(name: str) -> str:
+    """Extract `var <name> = function (...) { ... }` by brace counting over
+    comment-stripped text."""
+    clean = _strip_comments(_read(SHARED))
+    start = clean.index(f"var {name} = function")
+    i = clean.index("{", start)
     depth, j = 0, i
-    while j < len(text):
-        if text[j] == "{":
+    while j < len(clean):
+        if clean[j] == "{":
             depth += 1
-        elif text[j] == "}":
+        elif clean[j] == "}":
             depth -= 1
             if depth == 0:
-                return text[i : j + 1]
+                return clean[i : j + 1]
         j += 1
-    raise AssertionError("unbalanced braces in readValidSession")
+    raise AssertionError(f"unbalanced braces in {name}")
+
+
+def _read_valid_session_body() -> str:
+    body = _function_body("readValidSession")
+    # Sanity: a truncated extraction would silently weaken every assertion below.
+    assert "return null" in body and len(body) > 200, (
+        "readValidSession body extraction is not plausible — a truncated body "
+        "would make every assertion in this file vacuous (#3485 review, cycle 3)"
+    )
+    return body
+
+
+def _assert_each_branch_confirms_before_clearing(body: str, *, ret: bool) -> None:
+    """Every cookie write must be CONFIRMED before the legacy copy is dropped.
+
+    Four bypasses are closed here (#3485 review, cycles 2-3). A TOTAL count of 2
+    is satisfied by duplicating one branch's confirm and deleting the other's. A
+    PER-BRANCH count is satisfied by wrapping one confirm in `if (false) { ... }`.
+    A count of any kind is satisfied by the confirm running BEFORE the write
+    rather than after it, or by the removal running before the confirm.
+    """
+    statement = "return;" if ret else "continue;"
+    confirm = f"if (readCookie(COOKIE_NAME) !== legacy) {statement}"
+    write = "supabaseStorage.setItem(COOKIE_NAME, legacy);"
+    assert body.count(write) == 2, "both branches must write the cookie"
+    adjacent = re.findall(
+        r"supabaseStorage\.setItem\(COOKIE_NAME, legacy\);\s*\n\s*" + re.escape(confirm),
+        body,
+    )
+    assert len(adjacent) == 2, (
+        "each write must be IMMEDIATELY followed by its own confirm — a guard "
+        "wrapped around the confirm (`if (false) { ... }`), a confirm that runs "
+        "before the write, or a confirm present in only one branch would otherwise "
+        "pass (#3485 review)"
+    )
+    assert body.rindex("removeItem(") > body.rindex(confirm), (
+        "the legacy key must be removed only AFTER the write is confirmed — "
+        "removing it first destroys the only surviving copy when the size guard "
+        "stripped the value (#3485 review, successor cycle)"
+    )
 
 
 def test_read_valid_session_never_returns_a_localstorage_only_session() -> None:
     """#3485: the auth loop was `readValidSession()` reporting a session that
     lived ONLY in origin-scoped localStorage — invisible to app.premiselabs.co
-    and the server /admin gate, which bounced straight back to /auth, forever
-    (393 document loads / 8s reproduced with Playwright).
+    and the server gate, which bounced straight back to /auth, forever (393
+    document loads / 8s reproduced with Playwright against production).
 
     A localStorage fallback here IS the loop, so the read must be cookie-only:
     when the cookie is absent, migrate the hardcoded LEGACY_KEYS synchronously
     into it, then return null if it still is not there (the visitor signs in
-    again rather than being told they are signed in somewhere they are not)."""
+    again rather than being told they are signed in somewhere they are not).
+    """
     body = _read_valid_session_body()
     assert "migrateLegacyKeysToCookie()" in body, (
         "readValidSession must migrate legacy keys synchronously before deciding"
     )
-    assert "window.localStorage.getItem" not in body, (
+    # Absence of the INVARIANT, not of a spelling (#3485 review, successor
+    # cycle): checking for `window.localStorage.getItem` exactly let the same
+    # defect back in as `localStorage.getItem(LEGACY_KEYS[0])`.
+    assert "localStorage" not in body, (
         "readValidSession must never read a session straight out of localStorage "
         "— that session is invisible to the other subdomain and the server gate (#3485)"
     )
 
 
 def test_sync_legacy_migration_is_present_and_confirm_before_clear() -> None:
-    """The gate-time migration must exist and never destroy the only copy: EVERY
-    cookie write is confirmed (readCookie equality) BEFORE the legacy key is
-    removed — the size guard can strip provider tokens, in which case the write
-    does not round-trip and the localStorage copy must survive. A legacy value
-    that is not a session must never be written to the shared cookie, and a
-    present-but-unusable cookie must never outrank a valid legacy session."""
+    """The gate-time migration must exist and never destroy the only copy, and a
+    legacy value that is not a session must never be written to the shared cookie
+    (nor may a present-but-unusable cookie outrank a valid legacy session)."""
     text = _read(SHARED)
     assert "var migrateLegacyKeysToCookie = function" in text, (
         "missing the #3485 synchronous legacy→cookie migration"
     )
-    body = text[text.index("var migrateLegacyKeysToCookie = function") :]
-    body = body[: body.index("\n  };\n")]
-    assert "supabaseStorage.setItem(COOKIE_NAME, legacy)" in body
-    # BOTH write branches (cookie absent, and both-present-newer) must confirm
-    # the round-trip before the legacy copy is dropped (#3485 review P2).
-    assert body.count("if (readCookie(COOKIE_NAME) !== legacy) continue;") == 2, (
-        "every legacy→cookie write must confirm the write before clearing the legacy key"
+    body = _function_body("migrateLegacyKeysToCookie")
+    _assert_each_branch_confirms_before_clearing(body, ret=False)
+
+    # The derivation is pinned, not just the guard that consumes it: appending
+    # `|| true` to any clause makes legacyOk unconditionally true while every
+    # named guard string stays intact (#3485 review, cycle 3).
+    deriv = re.search(r"legacyOk = (!![^;]*);", body)
+    assert deriv, "migrateLegacyKeysToCookie must derive legacyOk from the parsed value"
+    assert "typeof lo.access_token === 'string'" in deriv.group(1), (
+        "legacyOk must require a real access_token (#3485 review P3)"
     )
-    assert body.count("supabaseStorage.setItem(COOKIE_NAME, legacy)") == 2, (
-        "both the copy and the both-present-newer branches must write the cookie"
-    )
-    assert "typeof lo.access_token === 'string'" in body, (
-        "a legacy value that is not a session must never overwrite the cookie (#3485 review P3)"
+    assert "||" not in deriv.group(1), (
+        "legacyOk's derivation must be a conjunction — a disjunct (e.g. `|| true`) "
+        "defeats the both-present guard without changing its text (#3485 review P2)"
     )
     assert "if (!legacyOk) {" in body, (
         "the cookie-absent branch must refuse to share a non-session with the parent "
         "domain — poison there would outrank the second legacy key (#3485 review P3)"
     )
+    # Both-present guard: requires a real session AND that it is still usable.
+    # An expired legacy session (or one with no expires_at) must never displace a
+    # valid parent-domain cookie — that cookie is what the server gate reads, so
+    # swapping it for a dead one signs the visitor out of both subdomains.
+    guard = " ".join(body.split())
+    assert (
+        "if (legacyOk && legacyExp * 1000 > Date.now() && "
+        "(!cookieOk || legacyExp > cookieExp)) {" in guard
+    ), (
+        "the both-present branch must require a real AND UNEXPIRED legacy session "
+        "before overwriting the cookie (#3485 review P1/P2)"
+    )
     assert "typeof co.access_token === 'string'" in body, (
         "a present-but-unusable cookie must not outrank a valid legacy session (#3485 review P3)"
     )
-    # #3485 review P1 (cycle 2): the both-present branch's guard must NAMED-ly
-    # include legacyOk. Pinning only `typeof lo.access_token` (above) leaves the
-    # branch itself unpinned: dropping `legacyOk &&` lets a junk legacy blob
-    # ({"expires_at":1e11}) overwrite a VALID parent-domain cookie, after which
-    # its legacy key is deleted — logging the user out of both subdomains.
-    assert "if (legacyOk && (!cookieOk || legacyExp > cookieExp)) {" in body, (
-        "the both-present branch must still require a real legacy session before it "
-        "may overwrite the cookie (#3485 review P1)"
-    )
-    # Rather than a host-only guard, what must hold is that `legacyOk` is DERIVED
-    # from the parsed value and assigned nowhere else: an unconditional
-    # `legacyOk = true;` after the parse re-opens the junk-overwrites-a-valid-
-    # cookie path while leaving the guard text above perfectly intact
-    # (#3485 review P2, cycle 3 — proven by mutation).
-    assert body.count("legacyOk =") == 2, (
-        "legacyOk must be assigned exactly twice — the declaration and the parse "
-        "derivation. A third assignment (e.g. `legacyOk = true;`) defeats the "
-        "both-present guard without changing its text (#3485 review P2)"
-    )
-    # The sibling writer for the SAME keys (createTortoiseSupabaseClient path —
-    # reached when the head gate is skipped, e.g. the ?error early return) must
-    # not be a second, unguarded way to write a non-session into the cookie.
-    mig = text[text.index("var migrateLegacySession = function") :]
-    mig = mig[: mig.index("\n  };\n")]
-    # PER BRANCH, not a total (#3485 review P1, cycle 3): a count of 2 is
-    # branch-blind — duplicating the confirm inside the cookie-absent branch and
-    # deleting it from the both-present branch keeps the count at 2 while that
-    # write falls through unconfirmed to removeItem(legacyKey), destroying the
-    # only surviving copy when the size guard stripped the value.
-    _absent_branch, _sep, _both_branch = mig.partition("} else {")
-    assert _sep, (
-        "migrateLegacySession must keep both a cookie-absent and a both-present branch"
-    )
-    _confirm = "if (readCookie(COOKIE_NAME) !== legacy) return;"
-    assert _absent_branch.count(_confirm) == 1, (
-        "the cookie-absent branch must confirm its write exactly once (#3485 review P1)"
-    )
-    assert _both_branch.count(_confirm) == 1, (
-        "the both-present branch must confirm its write exactly once (#3485 review P1)"
-    )
+    assert "LEGACY_KEYS" in body, "migration must iterate the hardcoded LEGACY_KEYS"
+
+    # The sibling writer for the SAME keys (the createTortoiseSupabaseClient path,
+    # reached when the head gate is skipped) must not be a second, unguarded way
+    # to write a non-session into the cookie — nor to drop the only copy.
+    mig = _function_body("migrateLegacySession")
+    _assert_each_branch_confirms_before_clearing(mig, ret=True)
     assert "typeof lo.access_token === 'string'" in mig and "!legacyOk" in mig, (
         "migrateLegacySession must refuse to share a non-session (#3485 review)"
     )
-    # #3485 review: storeSession verifies the cookie it just wrote — re-entering
-    # the now-migrating readValidSession could let a legacy session win.
-    store = text[text.index("var storeSession = function") :]
-    store = store[: store.index("\n  };\n")]
+    # The SIBLING writer must be pinned to the same standard as the gate-time one.
+    # Mutation proved the gap: `|| true` appended to the sibling's derivation, and
+    # `legacyOk = true;` appended after it, both left every assertion above green
+    # (#3485 review, cycle 3).
+    for name, fn in (("migrateLegacyKeysToCookie", body), ("migrateLegacySession", mig)):
+        assert fn.count("legacyOk =") == 2, (
+            f"{name} may assign legacyOk only in its declaration and its parse "
+            "derivation — a third assignment (e.g. `legacyOk = true;`) makes the "
+            "guard's operand unconditionally true while its text stays intact"
+        )
+        fn_deriv = re.search(r"legacyOk = (!![^;]*);", fn)
+        assert fn_deriv, f"{name} must derive legacyOk from the parsed value"
+        assert "typeof lo.access_token === 'string'" in fn_deriv.group(1), (
+            f"{name}: legacyOk must require a real access_token"
+        )
+        assert "||" not in fn_deriv.group(1), (
+            f"{name}: legacyOk's derivation must be a conjunction — a disjunct "
+            "(e.g. `|| true`) defeats the guard without changing its text"
+        )
+    mig_guard = " ".join(mig.split())
+    assert (
+        "if (legacyExp * 1000 > Date.now() && (!cookieOk || legacyExp > cookieExp)) { "
+        in mig_guard + " "
+    ), (
+        "migrateLegacySession must also require an UNEXPIRED legacy session before "
+        "overwriting the cookie (#3485 review P1/P2)"
+    )
+
+    # storeSession verifies the cookie it just wrote — re-entering the now
+    # migrating readValidSession could let a legacy session win.
+    store = _function_body("storeSession")
     assert "return readValidSession()" not in store, (
         "storeSession must not re-enter the migrating accessor to verify its write (#3485 review)"
     )
-    # The predicate must GOVERN THE RETURN (#3485 review P1, cycle 3): substring
-    # checks pass with the comparisons kept as no-op statements and `return true;`
-    # at the end, which still reports success for a refused or expired write.
-    _verdict = re.search(r"return\s+!!\([^;]*\);", store)
-    assert _verdict, (
+    # The predicate must GOVERN THE RETURN, as a conjunction: substring checks
+    # pass with the comparisons kept as no-op statements and `return true;` at the
+    # end, and they also pass when a `&&` is flipped to `||`, which reports success
+    # for a rotated or expired session the destination gate will reject.
+    verdict = re.search(r"return\s+!!\([^;]*\);", store)
+    assert verdict, (
         "storeSession must RETURN its verified verdict — a computed-but-discarded "
         "check reports success unconditionally (#3485 review P1)"
     )
-    _v = _verdict.group(0)
-    assert "stored.access_token === session.access_token" in _v, (
+    v = " ".join(verdict.group(0).split())
+    assert v.count("&&") == 4 and "||" not in v, (
+        "the verdict must be a conjunction of four checks — an operator change or a "
+        "dropped clause keeps every substring while defeating the guard "
+        "(#3485 review P1)"
+    )
+    assert "stored.access_token === session.access_token" in v, (
         "the verdict must confirm the cookie now carries THE session just written — "
         "reading back a stale pre-existing value reports success for a write the "
         "browser actually refused (#3485 review P1)"
     )
-    assert "stored.refresh_token === session.refresh_token" in _v, (
+    assert "stored.refresh_token === session.refresh_token" in v, (
         "the verdict must compare the token PAIR — a cookie sharing only the "
         "access_token (a rotated pair) is not this write (#3485 review P2)"
     )
-    assert "stored.expires_at && stored.expires_at * 1000 > Date.now()" in _v, (
+    assert "stored.expires_at && stored.expires_at * 1000 > Date.now()" in v, (
         "the verdict must apply the same strict validity predicate as "
         "readValidSession, or it reports success for a session the destination gate "
         "will reject and bounce back to /auth (#3485 review P1)"
     )
+
+    # The migration must run BEFORE the first cookie read, and as a BARE
+    # statement: `if (false) migrateLegacyKeysToCookie();` keeps the text in
+    # place while the call never runs, and the same trick on the PREVIOUS line
+    # defeats a same-line-only check.
     read_body = _read_valid_session_body()
-    # ORDER, not presence (#3485 review P1, cycle 2): a presence check passes with
-    # the call moved INSIDE the absent-cookie branch — which reinstates the very
-    # defect this pins (a present-but-unparseable cookie skips the migration,
-    # readValidSession returns null, then migrateLegacySession() deletes the only
-    # valid localStorage copy). The migration must run before the first read.
-    assert "migrateLegacyKeysToCookie();" in read_body, (
-        "readValidSession must migrate unconditionally — a present-but-unparseable "
-        "cookie must not skip the migration and lose the legacy copy (#3485 review P2)"
-    )
-    # BARE STATEMENT, not a guarded one (#3485 review P2, cycle 3):
-    # `if (false) migrateLegacyKeysToCookie();` keeps the text in place while the
-    # migration never runs, so position alone is not enough.
-    assert re.search(r"^\s*migrateLegacyKeysToCookie\(\);\s*$", read_body, re.MULTILINE), (
+    call = re.search(r"^(\s*)migrateLegacyKeysToCookie\(\);\s*$", read_body, re.MULTILINE)
+    assert call, (
         "the migration must be CALLED as a bare statement, not wrapped in a guard "
         "that can be disabled while keeping the text (#3485 review P2)"
     )
-    _first_read = read_body.index("readCookie(COOKIE_NAME)")
-    assert read_body.index("migrateLegacyKeysToCookie();") < _first_read, (
+    # Nothing CONDITIONAL may precede the call: `if (false) { … }` (or a ternary)
+    # keeps the text in place while the call never runs. A bare `try {` wrapper is
+    # fine — the call still executes — so this pins unconditionality rather than
+    # the shape of the enclosing block (#3485 review, cycle 3).
+    prefix = read_body[: call.start()]
+    assert not re.search(r"\bif\b|\?", prefix), (
+        "nothing conditional may precede the migration — a disabled call would "
+        "otherwise satisfy every text check (#3485 review, cycle 3)"
+    )
+    first_read = read_body.index("readCookie(COOKIE_NAME)")
+    assert call.start() < first_read, (
         "the migration must run BEFORE the first cookie read, not inside the "
         "cookie-absent branch (#3485 review P1)"
     )
-    assert "LEGACY_KEYS" in body, "migration must iterate the hardcoded LEGACY_KEYS"
+
+
+def test_clear_stored_session_also_clears_the_spa_localstorage_key() -> None:
+    """#3485 review (successor cycle): the blog-admin SPA persists the session in
+    localStorage under the SAME name and refreshes tokens from there
+    (website/apps/blog-admin/src/lib/supabase.ts), so clearing only the cookie
+    lets the console re-write the cookie from an origin-scoped copy the server
+    gate never saw — resurrecting the session just signed out of. Clearing the
+    cookie alone is not a sign-out."""
+    body = _function_body("clearStoredSession")
+    assert "removeItem(COOKIE_NAME)" in body, (
+        "clearStoredSession must also clear the localStorage copy the blog-admin "
+        "SPA writes under the same name — otherwise sign-out does not stick (#3485)"
+    )
 
 
 def test_oauth_fragment_is_only_stripped_once_the_write_landed() -> None:
