@@ -1,53 +1,93 @@
 manifest_version: 1
 issue: 3863
-cut_at_commit: 4488de7d949a5ea586e2b071be528c15d2bcdb78
+cut_at_commit: 3be34cdd103eb06e0010867a1e6338dd1f8f6e07
 allowed_transforms:
 - _HTTPToolFilter
+- _RetiredToolTransform
 approval_status: pending-owner-approval
 approval_principal: null
 approval_pr: null
 counts:
-  tools: 99
+  tools: 83
   sdk_public_methods: 152
+  retired: 16
   keyword_distribution:
-    fetch: 22
-    create: 20
+    fetch: 14
+    create: 18
     update: 8
     delete: 6
-    list: 12
+    list: 9
     find: 7
     trace: 2
-    check: 9
+    check: 8
     link: 4
-    operate: 9
-rows:
-- name: tortoise_get_point
-  served_from: tortoise/mcp_server.py:1090:bbc9428ecc9c2b16
-  family: memory
-  family_rank: 1
-  served: http
+    operate: 7
+retired:
+- name: tortoise_get_entity
+  use_instead: tortoise_get(id, type="entity")
+  sdk_method: get_entity
+  http_policy: true
+- name: tortoise_get_events
+  use_instead: tortoise_get(None, type="events")
+  sdk_method: get_events
+  http_policy: true
+- name: tortoise_get_governance
+  use_instead: tortoise_get(id, type="governance")
+  sdk_method: get_owned_entities
+  http_policy: true
+- name: tortoise_get_operator
+  use_instead: tortoise_get(id, type="operator")
   sdk_method: get_point
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get a single Point by ID. Returns all properties, or empty dict.
-  dependency: declares TortoiseSDK.get_point (resolves)
-  lifecycle: active
-  used_by: agents, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
+  http_policy: true
+- name: tortoise_get_point
+  use_instead: tortoise_get(id, type="point")
+  sdk_method: get_point
+  http_policy: true
+- name: tortoise_health
+  use_instead: tortoise_overview(section="health")
+  sdk_method: health
+  http_policy: true
+- name: tortoise_index_sessions
+  use_instead: tortoise_index_files(directory)
+  sdk_method: index_sessions
+  http_policy: false
+- name: tortoise_ingest_corpus
+  use_instead: tortoise_index_files(directory)
+  sdk_method: ingest_corpus
+  http_policy: false
+- name: tortoise_list_pointkinds
+  use_instead: tortoise_overview(section="pointkinds")
+  sdk_method: list_pointkinds
+  http_policy: true
+- name: tortoise_list_sources
+  use_instead: tortoise_overview(section="sources")
+  sdk_method: list_sources
+  http_policy: true
+- name: tortoise_list_tags
+  use_instead: tortoise_overview(section="tags")
+  sdk_method: list_tags
+  http_policy: true
+- name: tortoise_paginated_query
+  use_instead: tortoise_query(offset=..., limit=...)
+  sdk_method: paginated_query
+  http_policy: true
+- name: tortoise_query_points_by_tag
+  use_instead: tortoise_query(tag=...)
+  sdk_method: query_points_by_tag
+  http_policy: true
+- name: tortoise_stale
+  use_instead: tortoise_overview(section="stale")
+  sdk_method: stale_points
+  http_policy: true
+- name: tortoise_status
+  use_instead: tortoise_overview(section="status")
+  sdk_method: status
+  http_policy: true
+- name: tortoise_taxonomy
+  use_instead: tortoise_overview(section="taxonomy")
+  sdk_method: taxonomy
+  http_policy: true
+rows:
 - name: tortoise_query
   served_from: tortoise/mcp_server.py:840:1e3a8ced6d0c7703
   family: memory
@@ -69,58 +109,6 @@ rows:
   recommendation: keep
   basis: observed
   reason: called by agents
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_query
-- name: tortoise_paginated_query
-  served_from: tortoise/mcp_server.py:934:091f9dd815e07ab6
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: paginated_query
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: query
-  canonical: false
-  job: 'DEPRECATED (Epic #888) — thin alias for tortoise_query(offset=, limit=). Kept for one release; will be removed
-    in the next release — migrate now.'
-  dependency: declares TortoiseSDK.paginated_query (resolves)
-  lifecycle: deprecated alias
-  used_by: never called, tooling, docs
-  recommendation: kill
-  basis: decided
-  reason: 'already deprecated and no warning is emitted to callers today (#3876); its own description names the
-    replacement: tortoise_query'
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_query
-- name: tortoise_query_points_by_tag
-  served_from: tortoise/mcp_server.py:1077:53ed14dfda3c5587
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: query_points_by_tag
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: query
-  canonical: false
-  job: 'DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). Kept for one release; will be removed in the
-    next release — migrate now.'
-  dependency: declares TortoiseSDK.query_points_by_tag (resolves)
-  lifecycle: deprecated alias
-  used_by: never called, tooling, docs
-  recommendation: kill
-  basis: decided
-  reason: 'already deprecated and no warning is emitted to callers today (#3876); its own description names the
-    replacement: tortoise_query'
   recommended_family: null
   proposed: false
   exemption: false
@@ -335,14 +323,12 @@ rows:
   recommendation: keep
   basis: observed
   reason: called by agents
-  recommended_family: memory
-  proposed: true
+  recommended_family: null
+  proposed: false
   exemption: false
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_index_files
-  cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
-    — waits for your approval
 - name: tortoise_create_point
   served_from: tortoise/mcp_server.py:787:83c52f7b0d029407
   family: memory
@@ -358,7 +344,7 @@ rows:
     returns existing Point if content matches.'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
-  used_by: agents, skill-docs, docs
+  used_by: agents, tooling, skill-docs, docs
   recommendation: keep
   basis: observed
   reason: called by agents
@@ -702,54 +688,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_list_pointkinds
-  served_from: tortoise/mcp_server.py:984:649081f291a8d046
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: list_pointkinds
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: List all pointKinds present in the graph with counts. What EXISTS.
-  dependency: declares TortoiseSDK.list_pointkinds (resolves)
-  lifecycle: active
-  used_by: agents, skill-docs, docs
-  recommendation: keep
-  basis: observed
-  reason: called by agents
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_list_tags
-  served_from: tortoise/mcp_server.py:1071:649081f291a8d046
-  family: memory
-  family_rank: 1
-  served: http
-  sdk_method: list_tags
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: List all Tag names with count of tagged Points. Where tags are USED.
-  dependency: declares TortoiseSDK.list_tags (resolves)
-  lifecycle: active
-  used_by: agents, docs
-  recommendation: keep
-  basis: observed
-  reason: called by agents
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_dream_health
   served_from: tortoise/mcp_server.py:1518:82cc33cd51e4f201
   family: memory
@@ -883,89 +821,8 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
-- name: tortoise_get_entity
-  served_from: tortoise/mcp_server.py:2415:bbc9428ecc9c2b16
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: get_entity
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get any entity by ID, eventId, or url.
-  dependency: declares TortoiseSDK.get_entity (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
-- name: tortoise_get_events
-  served_from: tortoise/mcp_server.py:2279:a852f8ae802dac7f
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: get_events
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get recent Events, optionally filtered by eventKind (e.g. 'AgentSession').
-  dependency: declares TortoiseSDK.get_events (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
-- name: tortoise_get_operator
-  served_from: tortoise/mcp_server.py:1574:2a8b7d4638debfb9
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: get_point
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get an operator Point by ID. Returns all properties including annotation dimensions.
-  dependency: declares TortoiseSDK.get_point (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
+  cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
+    approval
 - name: tortoise_create_entity
   served_from: tortoise/mcp_server.py:2191:d21fd5a2f34cd279
   family: graph
@@ -1335,31 +1192,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_stale
-  served_from: tortoise/mcp_server.py:2108:a852f8ae802dac7f
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: stale_points
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: null
-  canonical: null
-  job: Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
-  dependency: declares TortoiseSDK.stale_points (resolves)
-  lifecycle: active
-  used_by: never called, docs
-  recommendation: review
-  basis: observed
-  reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
-    that needs your judgement — I am not calling it fat on `never called` alone
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_traverse
   served_from: tortoise/mcp_server.py:1750:2799b6474ebb619e
   family: reasoning
@@ -1628,30 +1460,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_taxonomy
-  served_from: tortoise/mcp_server.py:1979:649081f291a8d046
-  family: reasoning
-  family_rank: 3
-  served: http
-  sdk_method: taxonomy
-  group_source: mapped
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: 'Count entities by node label. Returns {Point: N, Event: N, Subject: N, Object: N, Document: N}.'
-  dependency: declares TortoiseSDK.taxonomy (resolves)
-  lifecycle: active
-  used_by: agents, docs
-  recommendation: keep
-  basis: observed
-  reason: called by agents
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_get_session
   served_from: tortoise/mcp_server.py:2284:bbc9428ecc9c2b16
   family: sessions
@@ -1677,8 +1485,8 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
+  cluster_note: group `fetch-by-id` is split across ['graph', 'sessions']; proposed family `graph` — waits for your
+    approval
 - name: tortoise_search_sessions
   served_from: tortoise/mcp_server.py:2323:8c8cfd591771c133
   family: sessions
@@ -1704,34 +1512,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_index_sessions
-  served_from: tortoise/mcp_server.py:2289:a397ac7531568a63
-  family: sessions
-  family_rank: 4
-  served: stdio-only
-  sdk_method: index_sessions
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: deprecated-index
-  canonical: false
-  job: DEPRECATED — use tortoise_index_files. Index session .md files as AgentSession Events. EXCLUDED from tenant
-    HTTP — walks server filesystem with user-supplied path.
-  dependency: declares TortoiseSDK.index_sessions (resolves)
-  lifecycle: deprecated alias
-  used_by: never called, tooling, docs
-  recommendation: kill
-  basis: decided
-  reason: 'already deprecated and no warning is emitted to callers today (#3876); its own description names the
-    replacement: tortoise_index_files'
-  recommended_family: memory
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_index_files
-  cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
-    — waits for your approval
 - name: tortoise_session_capture
   served_from: tortoise/mcp_server.py:3079:96ad209c4ce8ffa8
   family: sessions
@@ -1891,33 +1671,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_get_governance
-  served_from: tortoise/mcp_server.py:2504:bbc9428ecc9c2b16
-  family: admin
-  family_rank: 5
-  served: http
-  sdk_method: get_owned_entities
-  group_source: mapped
-  keyword: fetch
-  keyword_rank: 1
-  cluster: fetch-by-id
-  canonical: false
-  job: Get all entities owned by a Subject.
-  dependency: declares TortoiseSDK.get_owned_entities (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: merge
-  basis: decided
-  reason: '`tortoise_get` in the same group already does this job (its own description names what it consolidates),
-    so this is one name too many — the caller keeps working either way'
-  recommended_family: graph
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_get
-  cluster_note: group `fetch-by-id` is split across ['admin', 'graph', 'memory', 'sessions']; proposed family `graph`
-    — waits for your approval
 - name: tortoise_backfill_v25
   served_from: tortoise/mcp_server.py:2653:fc9728f0c933bebb
   family: admin
@@ -1995,31 +1748,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_health
-  served_from: tortoise/mcp_server.py:1894:db25ee42ead0c5f0
-  family: admin
-  family_rank: 5
-  served: http
-  sdk_method: health
-  group_source: mapped
-  keyword: check
-  keyword_rank: 8
-  cluster: null
-  canonical: null
-  job: 'Health check + basic metrics: graph_size, last_ingest, error_count, uptime.'
-  dependency: 'declares TortoiseSDK.health, WHICH DOES NOT EXIST — see the #3838 note'
-  lifecycle: active
-  used_by: agents, docs
-  recommendation: fix-declaration
-  basis: decided
-  reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
-    is a false declaration to correct (or a tool to retire — that part is the owner's call)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_pack_install
   served_from: tortoise/mcp_server.py:1033:74ea1c9dd5313453
   family: admin
@@ -2042,30 +1770,6 @@ rows:
   basis: decided
   reason: declares an SDK method that does not exist; the tool itself is handler-served and still works, so this
     is a false declaration to correct (or a tool to retire — that part is the owner's call)
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_status
-  served_from: tortoise/mcp_server.py:1886:649081f291a8d046
-  family: admin
-  family_rank: 5
-  served: http
-  sdk_method: status
-  group_source: mapped
-  keyword: operate
-  keyword_rank: 10
-  cluster: null
-  canonical: null
-  job: Graph health + entity counts + FalkorDB connectivity. Returns {connected, counts, total_entities}.
-  dependency: declares TortoiseSDK.status (resolves)
-  lifecycle: active
-  used_by: agents, skill-docs, docs
-  recommendation: keep
-  basis: observed
-  reason: called by agents
   recommended_family: null
   proposed: false
   exemption: false
@@ -2395,35 +2099,6 @@ rows:
   class: agent-reachable
   cluster_canonical: tortoise_create_entity
   cluster_note: group `create` is split across ['graph', 'sources']; proposed family `graph` — waits for your approval
-- name: tortoise_ingest_corpus
-  served_from: tortoise/mcp_server.py:1965:42ced94067ca7968
-  family: sources
-  family_rank: 8
-  served: stdio-only
-  sdk_method: ingest_corpus
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: deprecated-index
-  canonical: false
-  job: DEPRECATED — use tortoise_index_files. Batch document ingestion — walk directory, parse YAML frontmatter
-    from .md files, create/update Document nodes. EXCLUDED from tenant HTTP — walks server filesystem with user-supplied
-    path.
-  dependency: declares TortoiseSDK.ingest_corpus (resolves)
-  lifecycle: deprecated alias
-  used_by: agents, tooling, docs
-  recommendation: kill
-  basis: decided
-  reason: 'already deprecated and no warning is emitted to callers today (#3876); its own description names the
-    replacement: tortoise_index_files'
-  recommended_family: memory
-  proposed: true
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: tortoise_index_files
-  cluster_note: group `deprecated-index` is split across ['memory', 'sessions', 'sources']; proposed family `memory`
-    — waits for your approval
 - name: tortoise_create_source
   served_from: tortoise/mcp_server.py:2352:50fe2f0a8bdf9cef
   family: sources
@@ -2444,30 +2119,6 @@ rows:
   basis: observed
   reason: never called and referenced only from documentation, so nothing observable uses it. This is the residue
     that needs your judgement — I am not calling it fat on `never called` alone
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_list_sources
-  served_from: tortoise/mcp_server.py:990:649081f291a8d046
-  family: sources
-  family_rank: 8
-  served: http
-  sdk_method: list_sources
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: List all Sources with point counts. Where data came FROM.
-  dependency: declares TortoiseSDK.list_sources (resolves)
-  lifecycle: active
-  used_by: never called, skill-docs, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by skill-docs — removing it would break that
   recommended_family: null
   proposed: false
   exemption: false
@@ -3805,7 +3456,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_entity.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_entity'
+  dependency: 'reached by 1 registered tool(s): tortoise_get_entity (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -3827,7 +3478,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_events.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_events'
+  dependency: 'reached by 1 registered tool(s): tortoise_get_events (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -3871,7 +3522,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_owned_entities.
-  dependency: 'reached by 1 registered tool(s): tortoise_get_governance'
+  dependency: 'reached by 1 registered tool(s): tortoise_get_governance (retired)'
   lifecycle: active
   used_by: docs
   recommendation: keep
@@ -3893,7 +3544,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_point.
-  dependency: 'reached by 2 registered tool(s): tortoise_get_operator, tortoise_get_point'
+  dependency: 'reached by 2 registered tool(s): tortoise_get_operator (retired), tortoise_get_point (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: keep
@@ -4201,7 +3852,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.index_sessions.
-  dependency: 'reached by 1 registered tool(s): tortoise_index_sessions'
+  dependency: 'reached by 1 registered tool(s): tortoise_index_sessions (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -4245,7 +3896,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.ingest_corpus.
-  dependency: 'reached by 1 registered tool(s): tortoise_ingest_corpus'
+  dependency: 'reached by 1 registered tool(s): tortoise_ingest_corpus (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -4597,7 +4248,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_pointkinds.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_pointkinds'
+  dependency: 'reached by 1 registered tool(s): tortoise_list_pointkinds (retired)'
   lifecycle: active
   used_by: skill-docs, docs
   recommendation: keep
@@ -4641,7 +4292,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_sources.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_sources'
+  dependency: 'reached by 1 registered tool(s): tortoise_list_sources (retired)'
   lifecycle: active
   used_by: skill-docs, docs
   recommendation: keep
@@ -4663,7 +4314,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.list_tags.
-  dependency: 'reached by 1 registered tool(s): tortoise_list_tags'
+  dependency: 'reached by 1 registered tool(s): tortoise_list_tags (retired)'
   lifecycle: active
   used_by: docs
   recommendation: keep
@@ -5015,7 +4666,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.paginated_query.
-  dependency: 'reached by 1 registered tool(s): tortoise_paginated_query'
+  dependency: 'reached by 1 registered tool(s): tortoise_paginated_query (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -5125,7 +4776,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.query_points_by_tag.
-  dependency: 'reached by 1 registered tool(s): tortoise_query_points_by_tag'
+  dependency: 'reached by 1 registered tool(s): tortoise_query_points_by_tag (retired)'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
@@ -5543,7 +5194,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.stale_points.
-  dependency: 'reached by 1 registered tool(s): tortoise_stale'
+  dependency: 'reached by 1 registered tool(s): tortoise_stale (retired)'
   lifecycle: active
   used_by: docs
   recommendation: keep
@@ -5565,7 +5216,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.status.
-  dependency: 'reached by 1 registered tool(s): tortoise_status'
+  dependency: 'reached by 1 registered tool(s): tortoise_status (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep
@@ -5697,7 +5348,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.taxonomy.
-  dependency: 'reached by 1 registered tool(s): tortoise_taxonomy'
+  dependency: 'reached by 1 registered tool(s): tortoise_taxonomy (retired)'
   lifecycle: active
   used_by: eval-harness, tooling, skill-docs, docs
   recommendation: keep

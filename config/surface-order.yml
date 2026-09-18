@@ -71,11 +71,11 @@ family_rank:
 # cannot pass silently. To change the surface you update this file and the
 # manifest together, in a PR that carries the owner's approval.
 baseline_counts:
-  fetch: 22
-  create: 20
-  list: 12
-  check: 9
-  operate: 9
+  fetch: 14
+  create: 18
+  list: 9
+  check: 8
+  operate: 7
   update: 8
   find: 7
   delete: 6

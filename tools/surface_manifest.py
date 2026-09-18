@@ -195,8 +195,10 @@ def seed_clusters() -> dict[str, tuple[str, str]]:
     return out
 
 
-# Methods that are deprecated aliases — prose only today (no deprecation warning
-# is emitted anywhere, which is the point of #3876).
+# The four names the declaration marked as deprecated aliases (#3876). All four are
+# now RETIRED (#3883), so no live row carries this lifecycle any more — the set is
+# kept as the alias vocabulary `recommend_tool` still reads, not as a claim about
+# the current registry.
 DEPRECATED_ALIASES = frozenset(
     {"tortoise_paginated_query", "tortoise_query_points_by_tag", "tortoise_ingest_corpus", "tortoise_index_sessions"}
 )
@@ -346,7 +348,7 @@ def _component_fingerprint(fn) -> str | None:
 def cmd_cut(args: argparse.Namespace) -> int:
     from tortoise.mcp_server import __name__ as _  # noqa: F401  (import check)
     from tortoise.sdk import TortoiseSDK
-    from tortoise.tool_registry import GROUP_BY_NAME, TOOL_REGISTRY
+    from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
     order = load_order()
     keywords = order["keywords"]
@@ -357,7 +359,13 @@ def cmd_cut(args: argparse.Namespace) -> int:
     public = sorted(
         name for name in dir(TortoiseSDK) if not name.startswith("_") and callable(getattr(TortoiseSDK, name))
     )
-    callers = scan_callers(set(public), {t.name for t in TOOL_REGISTRY})
+    # Retired names are STILL HANDLERS (they are served through the #3883 shim), so
+    # they count for the caller scan: a call inside `tortoise_get_point` is a call
+    # inside a tool handler, not free-floating code.
+    callers = scan_callers(
+        set(public),
+        {t.name for t in TOOL_REGISTRY} | {t.name for t in RETIRED_TOOL_REGISTRY},
+    )
     corpora = usage_index()
     called_names = telemetry_tools()
     clusters = seed_clusters()
@@ -489,6 +497,15 @@ def cmd_cut(args: argparse.Namespace) -> int:
         )
 
     sdk_out = []
+    # A RETIRED name still calls its handler, and the handler still calls the SDK
+    # method, so a method must not be reported as "reached by no registered MCP
+    # tool" when a retired name reaches it — that is the unverified-negative class
+    # this column was already fixed for once. The `(retired)` suffix keeps the
+    # distinction visible rather than hiding it.
+    for entry in RETIRED_TOOL_REGISTRY:
+        declared = getattr(entry, "sdk_method", "") or ""
+        if declared:
+            bound_by.setdefault(declared, []).append(f"{entry.name} (retired)")
     for name in public:
         reached = bool(bound_by.get(name))
         reached_paths = sorted(
@@ -592,6 +609,22 @@ def cmd_cut(args: argparse.Namespace) -> int:
     sdk_rows = sdk_out
     sdk_rows.sort(key=lambda r: (r["method"],))
 
+    # Retired names (#3883) are NOT surface rows — they are advertised nowhere. They
+    # are recorded separately so the gate can hold the other half of the contract:
+    # each one must still RESOLVE and WARN, not silently disappear. A retirement is
+    # as much a surface change as an addition, so entering or leaving this list is a
+    # re-cut in a PR that carries the decision.
+    retired_out = [
+        {
+            "name": e.name,
+            "use_instead": e.retired_use_instead,
+            "sdk_method": getattr(e, "sdk_method", None) or None,
+            "http_policy": bool(getattr(e, "http_policy", False)),
+        }
+        for e in RETIRED_TOOL_REGISTRY
+    ]
+    retired_out.sort(key=lambda r: r["name"])
+
     doc = {
         "manifest_version": 1,
         "issue": 3863,
@@ -605,15 +638,17 @@ def cmd_cut(args: argparse.Namespace) -> int:
         "counts": {
             "tools": len(tools_out),
             "sdk_public_methods": len(sdk_out),
+            "retired": len(retired_out),
             "keyword_distribution": keyword_counts,
         },
+        "retired": retired_out,
         "rows": tools_out + sdk_rows,
     }
     with MANIFEST_FILE.open("w") as fh:
         yaml.safe_dump(doc, fh, sort_keys=False, allow_unicode=True, width=110, default_flow_style=False)
 
     print(f"wrote {MANIFEST_FILE.relative_to(ROOT)}")
-    print(f"  tools={len(tools_out)} sdk={len(sdk_out)}")
+    print(f"  tools={len(tools_out)} sdk={len(sdk_out)} retired={len(retired_out)}")
     print(f"  keyword distribution: {keyword_counts}")
     print(f"  distinct declared bindings: {len({t['sdk_method'] for t in tools_out if t['sdk_method']})}")
     print(f"  dead declared bindings: {sorted({t['sdk_method'] for t in tools_out if t['sdk_method'] and not hasattr(TortoiseSDK, t['sdk_method'])})}")
@@ -692,7 +727,9 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("  or `handler-served` when it declares no SDK call at all.")
     add("- **`⚠ FALSE DECLARATION`** marks an entry that names an SDK method which does not exist. The")
     add("  tool still works; the declaration is wrong.")
-    add("- **`DEPRECATED`** marks an alias kept for compatibility. Nothing warns a caller today.")
+    add("- **`DEPRECATED`** marks an alias kept for compatibility. **Retired** names are listed at")
+    add("  the end: they are off the advertised surface, still answer, and warn the caller with the")
+    add("  replacement (#3883).")
     add("- **`used by`** answers *what is this for*: which eval harness, piece of tooling, skill, or")
     add("  doc references it by name — and whether agents actually call it.")
     add("- **`recomm.`** is a vocabulary of five values, and it is a **proposal**, not a verdict:")
@@ -708,6 +745,9 @@ def cmd_render(args: argparse.Namespace) -> int:
     for fam in sorted(families, key=lambda f: families[f][0]["family_rank"]):
         add(f"| {fam} | {len(families[fam])} |")
     add(f"| **total** | **{len(tools)}** |")
+    retired_rows = [r for r in (doc.get("retired") or []) if isinstance(r, dict)]
+    if retired_rows:
+        add(f"| **retired — callable, warns (#3883)** | **{len(retired_rows)}** |")
     add("")
     add("| SDK methods, by who reaches them | Count |")
     add("|---|---|")
@@ -762,6 +802,36 @@ def cmd_render(args: argparse.Namespace) -> int:
             add(
                 f"| `{r['name']}` | {does} | {reaches} | {r.get('used_by') or ''} | **{rec}** "
                 f"| {status} — {rationale} |"
+            )
+        add("")
+
+    retired_rows = [r for r in (doc.get("retired") or []) if isinstance(r, dict)]
+    if retired_rows:
+        add("---")
+        add("")
+        add(f"## Retired names — {len(retired_rows)} (off the advertised surface, not out of the product)")
+        add("")
+        add("A retired name is **no longer advertised**: it is absent from `tools/list`, so it is not")
+        add("counted above. It is **not gone** — calling it still works and now returns an answer that")
+        add("carries a warning naming the replacement (#3883). The ability to warn is what makes a")
+        add("retirement safe; a retired name that stopped resolving would be a silent removal.")
+        add("")
+        add("| Retired name | Use instead | SDK method it declared | Was |")
+        add("|---|---|---|---|")
+        from tortoise.sdk import TortoiseSDK as _SDK
+
+        for r in sorted(retired_rows, key=lambda x: str(x.get("name"))):
+            was = "http" if r.get("http_policy") else "stdio-only"
+            declared = r.get("sdk_method") or "—"
+            if r.get("sdk_method") and not hasattr(_SDK, str(r["sdk_method"])):
+                # The retired alias declared an SDK method that never existed
+                # (`tortoise_health` -> `health`). Do not assert it is public: the
+                # live table marked this \u26a0 FALSE DECLARATION, and the retired
+                # table must not silently upgrade a false declaration to a fact.
+                declared = f"~~{declared}~~ (no such method)"
+            add(
+                f"| `{r.get('name')}` | `{r.get('use_instead')}` | "
+                f"{declared if declared.startswith('~~') else '`' + str(declared) + '`'} | {was} |"
             )
         add("")
 
@@ -952,8 +1022,8 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """AC13's lint: eight properties over the declared set."""
-    from tortoise.tool_registry import GROUP_BY_NAME, TOOL_REGISTRY
+    """AC13's lint: nine properties over the declared set."""
+    from tortoise.tool_registry import GROUP_BY_NAME, RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
     order = load_order()
     verbs = order["keywords"]
@@ -1039,12 +1109,42 @@ def cmd_check(args: argparse.Namespace) -> int:
                 f"{r['family']!r} in the baseline"
             )
 
+    # 9. retired names (#3883) — the manifest's `retired:` block must match the
+    # declaration exactly. A retired name is not a surface row, but it IS a contract
+    # (it must resolve and warn), so a name that silently enters or leaves the retired
+    # set is the same class of defect as a row that appears or disappears.
+    retired = doc.get("retired")
+    if not isinstance(retired, list):
+        problems.append("the manifest carries no `retired:` list — re-cut the baseline")
+    else:
+        declared_retired = {
+            e.name: (getattr(e, "retired_use_instead", None) or "") for e in RETIRED_TOOL_REGISTRY
+        }
+        manifest_retired = {
+            str(r.get("name")): str(r.get("use_instead") or "")
+            for r in retired
+            if isinstance(r, dict) and r.get("name")
+        }
+        for name in sorted(set(declared_retired) - set(manifest_retired)):
+            problems.append(f"retired name {name!r} is declared but not in the manifest")
+        for name in sorted(set(manifest_retired) - set(declared_retired)):
+            problems.append(f"retired name {name!r} is in the manifest but not declared")
+        for name in sorted(set(declared_retired) & set(manifest_retired)):
+            if declared_retired[name] != manifest_retired[name]:
+                problems.append(
+                    f"retired name {name!r}: use_instead {manifest_retired[name]!r} in the "
+                    f"manifest != {declared_retired[name]!r} in the declaration"
+                )
+        row_names = {r["name"] for r in rows}
+        for name in sorted(set(declared_retired) & row_names):
+            problems.append(f"{name!r} is BOTH a surface row and a retired name")
+
     for p in problems:
         print(f"FAIL {p}")
     if problems:
         print(f"\n{len(problems)} problem(s)")
         return 1
-    print(f"OK — {len(rows)} tool rows, eight properties hold")
+    print(f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, nine properties hold")
     return 0
 
 

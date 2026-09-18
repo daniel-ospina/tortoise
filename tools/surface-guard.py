@@ -19,6 +19,13 @@ HOW IT WORKS
     could never go red. Regenerating is a human act (`tools/surface_manifest.py
     cut`), reviewed in a PR that carries the owner's approval.
 
+    RETIRED NAMES (#3883)
+    A retired name is removed from `TOOL_REGISTRY` but must still RESOLVE, and must
+    still WARN the caller with the replacement. This gate therefore checks the
+    `retired:` block of the baseline too: a name recorded as retired must resolve
+    through the warning shim, must not be advertised any more, and may not enter or
+    leave the retired set without a re-cut.
+
 FAIL-CLOSED
     A missing, unreadable or malformed manifest is a FAILURE, not a skip. A gate
     that cannot read its evidence must not report success — that is how the
@@ -26,7 +33,8 @@ FAIL-CLOSED
 
     Exit 0 = declaration matches the approved baseline.
     Exit 1 = expansion, removal, a served-surface change, an exemption
-             transition, an unapproved row, or unreadable evidence.
+             transition, an unapproved row, an unresolvable retired name, or
+             unreadable evidence.
 
 Usage:
     python3 tools/surface-guard.py [--manifest config/surface-manifest.yml]
@@ -109,7 +117,7 @@ def main(argv: list[str]) -> int:
     try:
         from tortoise import mcp_server
         from tortoise.sdk import TortoiseSDK
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
     except Exception as exc:
         return die(f"could not import the surface declaration: {exc}")
 
@@ -422,7 +430,95 @@ def main(argv: list[str]) -> int:
                 "remove the exemption rather than letting it stand."
             )
 
-    # --- 5. approval, once the list has been approved ----------------------
+    # --- 5. retired names (#3883): a retired name RESOLVES and WARNS ---------
+    # Retiring a name is a surface change like adding one, so the name must be in the
+    # approved baseline's `retired:` block or the gate reds. The inverse matters more:
+    # #3883 makes the WARNING the contract. If a name is recorded as retired and
+    # `get_tool` no longer resolves it, a caller gets a bare "tool not found" — the
+    # silent removal this mechanism exists to prevent. So the gate EXECUTES the
+    # declaration's resolution path and refuses to pass on a phantom. (That the shim
+    # then puts the warning IN the answer is pinned by tests/test_retired_tools.py,
+    # which can build a ToolResult without a database; this check pins the wiring:
+    # the tool resolves, and the function served behind it is the shim, not the
+    # original handler.)
+    declared_retired = {
+        e.name: (getattr(e, "retired_use_instead", None) or "") for e in RETIRED_TOOL_REGISTRY
+    }
+    baseline_retired = doc.get("retired")
+    if not isinstance(baseline_retired, list):
+        return die(
+            "the baseline carries no `retired:` list, so the guard cannot tell which names "
+            "are retired. Re-cut the baseline (tools/surface_manifest.py cut)."
+        )
+    baseline_retired_map: dict[str, str] = {}
+    for _row in baseline_retired:
+        if not isinstance(_row, dict) or "name" not in _row:
+            return die(f"malformed retired row in the baseline: {_row!r:.200}")
+        baseline_retired_map[str(_row["name"])] = str(_row.get("use_instead") or "")
+
+    for name in sorted(set(declared_retired) - set(baseline_retired_map)):
+        problems.append(
+            f"NEW RETIRED TOOL `{name}` is declared retired but is not in the approved "
+            "baseline's `retired:` block. Retiring a name removes it from every agent's "
+            "surface; it needs an explicit human decision (#3863)."
+        )
+    for name in sorted(set(baseline_retired_map) - set(declared_retired)):
+        problems.append(
+            f"`{name}` is retired in the approved baseline but NOT declared retired. "
+            "An approved retirement that was reverted is a surface change; re-cut the baseline."
+        )
+    for name, use_instead in sorted(declared_retired.items()):
+        if not use_instead:
+            problems.append(
+                f"retired tool `{name}` names no replacement. #3883 requires the warning to "
+                "name the replacement where one exists."
+            )
+        if name in served_tools:
+            problems.append(
+                f"retired tool `{name}` is still ADVERTISED by the MCP server. A retired name "
+                "must be resolvable on call but absent from `tools/list`."
+            )
+        try:
+            tool = asyncio.run(mcp_server.mcp.get_tool(name))
+        except Exception as exc:
+            problems.append(
+                f"could not resolve retired tool `{name}`: {type(exc).__name__}: {exc}. "
+                "A retired name must resolve so the caller gets a warning, not a bare "
+                '"tool not found" (#3883).'
+            )
+            continue
+        if tool is None:
+            problems.append(
+                f"retired tool `{name}` does NOT resolve — a caller invoking it would get a "
+                'silent "tool not found" instead of the #3883 warning.'
+            )
+            continue
+        marker = ((getattr(tool, "meta", None) or {}).get("tortoise") or {}).get("retired") or {}
+        if marker.get("retired") is not True:
+            problems.append(
+                f"retired tool `{name}` resolves but carries no retirement marker, so it would "
+                "answer without warning the caller. Serve it through the #3883 shim."
+            )
+        elif str(marker.get("use_instead") or "") != use_instead:
+            problems.append(
+                f"retired tool `{name}` warns to use {marker.get('use_instead')!r} but the "
+                f"declaration records {use_instead!r}."
+            )
+        if not (getattr(getattr(tool, "fn", None), "__doc__", "") or "").startswith(
+            "RETIRED"
+        ):
+            problems.append(
+                f"retired tool `{name}` resolves to its ORIGINAL handler, not the #3883 shim, "
+                "so a caller would get no warning. Serve retired names through "
+                "_RetiredToolTransform."
+            )
+        if baseline_retired_map.get(name) != use_instead:
+            problems.append(
+                f"retired tool `{name}`'s use_instead {use_instead!r} does not match the "
+                f"baseline's {baseline_retired_map.get(name)!r}."
+            )
+
+    # --- 6. approval, once the list has been approved ----------------------
     status = doc.get("approval_status")
     if status not in ("pending-owner-approval", "approved"):
         problems.append(
