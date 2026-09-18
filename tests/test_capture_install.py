@@ -650,7 +650,7 @@ def test_claude_install_turns_a_write_time_oserror_into_a_populated_error(
     for name in ("session-start.sh", "session-end.sh"):
         script = tmp_path / ".claude" / "hooks" / name
         assert script.is_file(), f"{name} was not written before the failure"
-        assert script.stat().st_mode & 0o111, f"{name} is not executable"
+        assert script.stat().st_mode & stat.S_IXUSR, f"{name} is not owner-executable"
     # The registration write failed, so no settings.json was left behind.
     assert not settings_path.exists()
 

@@ -1041,7 +1041,12 @@ def _has_owner_exec_bit(st_mode: int) -> bool:
     diverge again.
 
     ``stat.S_IXUSR`` and ``0o100`` are the same bit; the named constant is
-    used so the mask has exactly one spelling in this codebase.
+    used so the *ownership decision* has exactly one spelling in this
+    codebase.  The repair/rewrite target modes below still OR in ``0o111``
+    (``_target_mode`` and the differing-file replacement paths): those add
+    exec bits rather than test them, so they always set the owner bit and
+    cannot reintroduce the any-exec-bit fail-open this predicate exists to
+    close.
     """
     return bool(st_mode & stat.S_IXUSR)
 
