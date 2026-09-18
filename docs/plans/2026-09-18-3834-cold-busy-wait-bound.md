@@ -17,14 +17,13 @@ aboutObjects: hosted-api
 
 Worktree: `.worktrees/feat/3834-cold-busy-wait-bound` (branch from `origin/main` @ `984815753`).
 
-> **Scope of this document's code references and its review log.** This is a dated plan and review record.
-> Any `<file>.py:<line>` reference below is **as of the section that cites it** and is expected to drift as
-> the branch moves — a reading aid, not a maintained claim. The maintained statements live in the code
-> comments and docstrings, which this branch keeps **symbol-based** (no line numbers) so they cannot go
-> stale. Likewise, a `## Cycle-*` section or a plan-body sentence is the record **as it stood when written**
-> — including the mandated capped-exit disclosure and the reviewer/cycle tallies that belong to the
-> plan-review record. It is not updated retroactively, so where a later section corrects an earlier one, the
-> later section governs.
+> **Scope of this document's code references.** This is a dated plan and review record. Any
+> `<file>.py:<line>` reference below is **as of the section that cites it** and is expected to drift as
+> the branch moves — a reading aid, not a maintained claim. The comments and docstrings **this change adds
+> or rewrites** cite symbols rather than line numbers, so they cannot go stale. A `## Cycle-*` section or a
+> plan-body sentence is likewise the record **as it stood when written** — including the mandated
+> capped-exit disclosure and the plan-review tallies that belong to that record. Where a later section
+> corrects an earlier one, the later section governs.
 
 Design authority: `docs/plans/2026-09-18-3834-cold-busy-wait-bound-scope.md` (AC4 amended twice:
 cycle-7 and cycle-8). Domain **(not adversarial)**; complexity **standard**. The implementable unit is

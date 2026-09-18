@@ -266,7 +266,7 @@ class _CaptureSlot:
       request that extracts. The request's own ``release()`` is a no-op once
       the slot is handed off, so a cancelled request cannot free capacity
       while its worker still occupies a pool thread (the shape of
-      `quota.run_ask_bounded`, quota.py:791-816); or
+      `quota.run_ask_bounded`); or
     * the request's own teardown (`release()`) — for a replay / opt-out /
       quota / provider-503 path that never extracts. Without that release the
       reservation would leak and permanently burn capacity.
@@ -1679,9 +1679,9 @@ def _dream_key(org_id: str, graph_namespace: str | None) -> str:
 # builds its own SDK.
 #
 # NOT covered by this lock, recorded so it is not read as process-wide: the
-# capture path's `_apply_capture_ingest_ep` (sdk.py:1232) still runs
+# capture path's `_apply_capture_ingest_ep` still runs
 # `sdk.dream(mode="local", ...)` on the EVENT LOOP, from
-# `_capture_session_impl` (hosted_api.py:9166). It is on the loop, so taking a
+# `_capture_session_impl`. It is on the loop, so taking a
 # `threading.Lock` there would freeze the loop for a whole pass — the very
 # thing #3718 removes; moving that pass to the pool is the capture-path
 # residual tracked by #3086, not this change.

@@ -1439,7 +1439,7 @@ def tortoise_compute_confidence(factors: Any = None,
     # request-scoped SDK (mcp_auth.py:69) always has empty _dirty_roots, so
     # the no-arg path would silently return {} where today it runs whole-
     # graph EP (the #7288 timeout surface). Transport-aware branch lives in
-    # the handler (precedent: _transport_mode checks at mcp_server.py:962).
+    # the handler (precedent: `_transport_mode` checks).
     # #1163: the graph is now the dirty-state source of truth — hydrate the
     # request-scoped SDK's persisted dirty roots; the diagnostic only fires
     # when the graph is TRULY clean (no persisted dirty state).

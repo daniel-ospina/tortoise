@@ -467,7 +467,7 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         # cap (tortoise.pricing tier_limits) — counting Object+Subject
         # against it applies the plan's real node cap, not a Point-only cap.
         # #1844 interplay (recorded intent): the GitHub indexer is an
-        # UNGATED object writer (hosted_api.py:11097 — no points-quota
+        # UNGATED object writer (no points-quota
         # preflight, by design). Its minted Object nodes now count against
         # the cap, so an indexing-heavy org can be pushed past max_points,
         # after which all points-gated writes 402 until upgrade — the
