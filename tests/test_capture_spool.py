@@ -1542,3 +1542,220 @@ def test_session_drain_exits_zero_when_the_config_resolver_itself_raises(
     monkeypatch.setattr(cli, "_resolve_config_path", unreadable)
     assert cli.main(["session", "drain"]) == 0, (
         "the backgrounded drain must exit 0 even when the resolver raises")
+
+
+# ── (17) Cycle-8 review fixes (P1/P2/P3) ───────────────────────────────────
+
+
+def test_a_non_utf8_turn_log_is_recorded_not_a_crash(tmp_path, monkeypatch, capsys):
+    """A torn multi-byte character in the turn log is EXACTLY what a killed
+    partial append leaves (turns are written raw UTF-8 for CJK/emoji).
+    `UnicodeDecodeError` is a `ValueError`, NOT an `OSError` — it escaped the
+    read guard, so the per-turn `session spool` crashed with a traceback and the
+    drain wedged with NO ledger line, and the OTHER session's filing was lost.
+
+    MUTATION THAT REDS THIS: drop `UnicodeDecodeError` from the
+    `read_spool_turns` except clause.
+    """
+    from tortoise import __main__ as cli
+    from tortoise.capture_spool import _log_path
+
+    _isolate(monkeypatch, tmp_path)
+    root = tmp_path / "spool"
+    # A healthy entry that must still be filed, and a corrupt one sorted first.
+    write_spool_entry(root, _snapshot("aaa-corrupt"))
+    write_spool_entry(root, _snapshot("zzz-healthy"))
+    _log_path(root, "aaa-corrupt").write_bytes(
+        b'{"role":"user","content":"\xe4\xb8')  # a torn 3-byte codepoint
+
+    transcript = tmp_path / "t.claude.jsonl"
+    transcript.write_text("User: hi\nAssistant: hello\n", encoding="utf-8")
+    assert cli.main(["session", "spool", "--file", str(transcript),
+                     "--session-id", "sess-turn"]) == 0, (
+        "a corrupt log must not crash the per-turn capture")
+    assert "Traceback" not in capsys.readouterr().err
+
+    server = _Server()
+    monkeypatch.setattr(cli, "_session_post", lambda *a, **k: server.post)
+    assert cli.main(["session", "drain"]) == 0, "the drain must not wedge"
+    assert "zzz-healthy" in server.sessions, (
+        "a corrupt entry must not stop the sessions sorted after it from filing")
+    reasons = [d["reason"] for d in read_discards(root)]
+    assert "transcript_empty" in reasons, "the corrupt log is RECORDED, not silent"
+
+
+def test_a_corrupt_typed_meta_does_not_crash_or_wedge(tmp_path):
+    """A hand-edited/corrupt meta field must not raise out of the ordering or
+    the backoff read: a non-string `updated_at` raised `TypeError` out of
+    `session spool`, and a non-numeric `next_attempt_at_ms` raised `ValueError`
+    out of `flush_spool` (wedging the drain).
+
+    MUTATIONS THAT RED THIS: keep the raw `_age_key` tuple; drop the
+    `(TypeError, ValueError)` guard in `_backoff_ms`.
+    """
+    from tortoise.capture_spool import _age_key, _backoff_ms, _meta_path
+
+    write_spool_entry(tmp_path, _snapshot("sess-typed"))
+    meta_path = _meta_path(tmp_path, "sess-typed")
+    meta = read_spool_meta(tmp_path, "sess-typed")
+    meta["updated_at"] = 5            # int, not a string
+    meta["next_attempt_at_ms"] = "soon"  # not a number
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    assert _age_key(meta) == ("5", "5", "sess-typed") or _age_key(meta)[0] == "5"
+    assert _backoff_ms(meta) == 0.0, "an unusable backoff means 'retry now'"
+
+    server = _Server()
+    summary = flush_spool(tmp_path, server.post, now=1000.0)
+    assert summary.filed == 1, "the entry is still filed, not wedged"
+
+
+def test_the_turn_hook_records_an_unreadable_transcript(tmp_path):
+    """Execution, not grep: the per-turn hook must not skip an unreadable
+    transcript SILENTLY. The `[ -f ]` pre-check is false for EACCES/ENOTDIR, so
+    the turn (and every later turn) was dropped with no spool write and no
+    ledger line — the exact failure #3963 removes.
+
+    MUTATION THAT REDS THIS: restore the `[ -f "$TRANSCRIPT_PATH" ]` pre-check
+    (or swallow the conversion's failure).
+    """
+    assert SESSION_TURN.exists(), "the per-turn hook must ship"
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "t.jsonl").write_text(
+        '{"message": {"role": "user", "content": "hi"}}\n', encoding="utf-8")
+    locked.chmod(0o000)
+
+    spool = tmp_path / "spool"
+    env = dict(os.environ)
+    env["TORTOISE_CAPTURE_SPOOL_DIR"] = str(spool)
+    env["PATH"] = f"{_mock_cli(tmp_path, tmp_path / 'calls.log')}:{env.get('PATH', '')}"
+    env.pop("TORTOISE_SRC_DIR", None)
+    try:
+        r = subprocess.run(
+            ["bash", str(SESSION_TURN)],
+            input=json.dumps({"session_id": "sess-locked",
+                              "transcript_path": str(locked / "t.jsonl")}),
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+    finally:
+        locked.chmod(0o700)
+    assert r.returncode == 0, "the hook must never block a turn"
+    assert r.stdout == "", "stdout is injected into the user's prompt"
+    assert "unreadable" in r.stderr, "the loss must be visible on stderr"
+    reasons = [d["reason"] for d in read_discards(spool)]
+    assert "transcript_unreadable" in reasons, (
+        "an unreadable transcript must be RECORDED, never silently skipped")
+
+
+def test_the_hooks_record_a_TORN_BYTE_transcript(tmp_path):
+    """`UnicodeDecodeError` is a `ValueError`, NOT an `OSError` — so the hooks'
+    `except OSError` around the conversion did NOT catch a torn multi-byte
+    character (exactly what a kill mid-append leaves in a real Claude
+    transcript, which stores raw UTF-8). The traceback escaped, the
+    `transcript_unreadable` record never fired, and the turn (and every later
+    turn of the session) was dropped with no spool write and no ledger line.
+
+    MUTATION THAT REDS THIS: narrow the hooks' conversion catch back to
+    `except OSError`.
+    """
+    for hook in (SESSION_TURN, SESSION_END):
+        assert hook.exists(), f"{hook.name} must ship"
+        transcript = tmp_path / f"torn-{hook.name}.jsonl"
+        # A valid record, then a torn 3-byte codepoint (killed mid-append).
+        transcript.write_bytes(
+            b'{"message": {"role": "user", "content": "hi"}}\n'
+            b'{"message": {"role": "assistant", "content": "\xe4\xb8')
+        spool = tmp_path / f"spool-{hook.name}"
+        env = dict(os.environ)
+        env["TORTOISE_CAPTURE_SPOOL_DIR"] = str(spool)
+        env["PATH"] = f"{_mock_cli(tmp_path, tmp_path / 'calls.log')}:{env.get('PATH', '')}"
+        env.pop("TORTOISE_SRC_DIR", None)
+        r = subprocess.run(
+            ["bash", str(hook)],
+            input=json.dumps({"session_id": "sess-torn",
+                              "transcript_path": str(transcript)}),
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+        assert r.returncode == 0, f"{hook.name} must never block"
+        assert r.stdout == "", "stdout is injected into the user's prompt"
+        assert "Traceback" not in r.stderr, f"{hook.name}: {r.stderr}"
+        reasons = [d["reason"] for d in read_discards(spool)]
+        assert "transcript_unreadable" in reasons, (
+            f"{hook.name} dropped a torn-byte transcript silently")
+
+
+def test_the_session_end_hook_records_an_unreadable_transcript(tmp_path):
+    """The SessionEnd twin has the same silent-skip path (`[ -f ]` false on
+    EACCES), so the FINAL FLUSH would silently capture nothing.
+
+    MUTATION THAT REDS THIS: restore the `[ -f "$TRANSCRIPT_PATH" ]` pre-check
+    in session-end.sh.
+    """
+    assert SESSION_END.exists(), "session-end.sh must ship"
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "t.jsonl").write_text(
+        '{"message": {"role": "user", "content": "hi"}}\n', encoding="utf-8")
+    locked.chmod(0o000)
+
+    spool = tmp_path / "spool"
+    env = dict(os.environ)
+    env["TORTOISE_CAPTURE_SPOOL_DIR"] = str(spool)
+    env["PATH"] = f"{_mock_cli(tmp_path, tmp_path / 'calls.log')}:{env.get('PATH', '')}"
+    env.pop("TORTOISE_SRC_DIR", None)
+    try:
+        r = subprocess.run(
+            ["bash", str(SESSION_END)],
+            input=json.dumps({"session_id": "sess-locked",
+                              "transcript_path": str(locked / "t.jsonl")}),
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+    finally:
+        locked.chmod(0o700)
+    assert r.returncode == 0, "the final flush must never block session end"
+    assert "unreadable" in r.stderr
+    reasons = [d["reason"] for d in read_discards(spool)]
+    assert "transcript_unreadable" in reasons
+
+
+def test_a_non_utf8_meta_is_a_recorded_corrupt_entry(tmp_path):
+    """`UnicodeDecodeError` is a `ValueError`, so a non-UTF-8 meta escaped the
+    meta-scan guard and crashed the drain instead of being classified.
+
+    MUTATION THAT REDS THIS: drop `UnicodeDecodeError` from
+    `list_spool_metas`'s except clause.
+    """
+    from tortoise.capture_spool import _meta_path
+
+    write_spool_entry(tmp_path, _snapshot("sess-badmeta"))
+    _meta_path(tmp_path, "sess-badmeta").write_bytes(b"\xff\xfe not utf-8")
+    summary = flush_spool(tmp_path, _Server().post, now=1000.0)
+    assert [d["reason"] for d in summary.discarded] == ["corrupt_entry"]
+    assert read_discards(tmp_path)[-1]["reason"] == "corrupt_entry"
+
+
+def test_per_turn_spool_repairs_a_non_utf8_meta_instead_of_crashing(tmp_path,
+                                                                  monkeypatch,
+                                                                  capsys):
+    """The per-turn path reads the prior meta through `read_spool_meta`; a
+    non-UTF-8 meta must be treated as "no prior meta" (the snapshot then REPAIRS
+    it), not crash `session spool`.
+
+    MUTATION THAT REDS THIS: drop `UnicodeDecodeError` from `read_spool_meta`'s
+    except clause.
+    """
+    from tortoise import __main__ as cli
+    from tortoise.capture_spool import _meta_path
+
+    _isolate(monkeypatch, tmp_path)
+    root = tmp_path / "spool"
+    write_spool_entry(root, _snapshot("sess-fixmeta"))
+    _meta_path(root, "sess-fixmeta").write_bytes(b"\xff\xfe not utf-8")
+
+    transcript = tmp_path / "t.claude.jsonl"
+    transcript.write_text("User: hi\nAssistant: hello\n", encoding="utf-8")
+    assert cli.main(["session", "spool", "--file", str(transcript),
+                     "--session-id", "sess-fixmeta"]) == 0
+    assert "Traceback" not in capsys.readouterr().err
+    assert read_spool_meta(root, "sess-fixmeta") is not None, "the meta is repaired"

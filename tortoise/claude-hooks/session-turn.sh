@@ -49,13 +49,19 @@ TRANSCRIPT_PATH="$(printf '%s\n' "$META" | sed -n '1p')"
 SESSION_ID="$(printf '%s\n' "$META" | sed -n '2p')"
 
 [ -n "$TRANSCRIPT_PATH" ] || exit 0
-[ -f "$TRANSCRIPT_PATH" ] || exit 0
+# NO `[ -f "$TRANSCRIPT_PATH" ]` pre-check: `-f` is FALSE for an unreadable file
+# (EACCES) and for a non-traversable parent (ENOTDIR/EACCES), so it silently
+# skipped the turn — no spool write, no ledger line, for that turn and every
+# later one. The conversion below classifies it instead and the ledger records
+# `transcript_unreadable`; a MISSING transcript is not an error (there is simply
+# nothing yet).
 
 # Same Claude Code .jsonl → text-turn conversion as session-end.sh, so both
 # hooks feed `tortoise session spool`/`capture` the identical input.
 TMP="$(mktemp -t tortoise_session_turn.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
-python3 - "$TRANSCRIPT_PATH" "$TMP" << 'PYEOF'
+CONVERT_RC=0
+python3 - "$TRANSCRIPT_PATH" "$TMP" << 'PYEOF' || CONVERT_RC=$?
 import json, sys
 src, dst = sys.argv[1], sys.argv[2]
 out = []
@@ -83,11 +89,47 @@ try:
                 out.append("User: " + str(content))
             elif role == "assistant":
                 out.append("Assistant: " + str(content))
-except Exception:
-    pass
+except FileNotFoundError:
+    # No transcript yet is not an error, and not a loss.
+    raise SystemExit(3)
+except (OSError, UnicodeDecodeError) as exc:
+    # An unreadable source (EACCES, a directory, a non-traversable parent) is a
+    # LOSS, and a loss is never silent: fail so the hook records it below.
+    # `UnicodeDecodeError` is a `ValueError`, NOT an `OSError` — and a killed
+    # partial append leaves a torn MULTI-BYTE character in a real transcript,
+    # which is exactly the loss this hook must never drop on the floor.
+    # `os.path.exists()` must NOT be the test — it is FALSE for exactly these
+    # cases (and so classified a loss as "nothing to do").
+    print(f"unreadable transcript: {src}: {exc}", file=sys.stderr)
+    raise SystemExit(2)
 with open(dst, "w", encoding="utf-8") as f:
     f.write("\n".join(out))
 PYEOF
+
+if [ "$CONVERT_RC" -eq 2 ]; then
+  # Record the loss in the SAME ledger `tortoise session spool` writes to
+  # (`discarded.jsonl`, one JSON object per line — schema mirrors
+  # capture_spool.record_discard). Best-effort: the hook still exits 0.
+  python3 - "$SESSION_ID" "$TRANSCRIPT_PATH" << 'PYEOF' 2>/dev/null || true
+import datetime, json, os, sys
+sid, path = sys.argv[1], sys.argv[2]
+root = os.environ.get("TORTOISE_CAPTURE_SPOOL_DIR") or os.path.join(
+    os.path.expanduser("~"), ".tortoise", "capture-spool")
+try:
+    os.makedirs(root, exist_ok=True, mode=0o700)
+    with open(os.path.join(root, "discarded.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "session_id": sid or f"unknown:{os.path.basename(path)}",
+            "capture_key": None,
+            "reason": "transcript_unreadable",
+            "detail": f"{path}: the per-turn hook could not read the transcript",
+        }) + "\n")
+except OSError:
+    pass
+PYEOF
+  exit 0
+fi
 
 [ -s "$TMP" ] || exit 0  # nothing parseable yet — the next prompt retries
 

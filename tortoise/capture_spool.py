@@ -308,11 +308,18 @@ def read_spool_turns(root: Path, session_id: str) -> list[dict]:
     path = _log_path(root, session_id)
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         # An unreadable log (a directory in its place, EACCES, a partial-disk
         # error) must not escape the drain: the entry is reported as
         # `transcript_empty` and recorded, keeping `session drain`'s
         # always-exit-0 contract.
+        #
+        # `UnicodeDecodeError` is a `ValueError`, NOT an `OSError` — and a
+        # KILLED/partial append of a multi-byte character (CJK/emoji, written
+        # raw by `_serialise_turn`) leaves exactly that: a torn codepoint in the
+        # log. Without it here the per-turn `session spool` crashed with a
+        # traceback and the drain wedged with NO ledger line, which is the
+        # failure this whole change exists to remove.
         return []
     turns: list[dict] = []
     for line in text.splitlines():
@@ -331,7 +338,8 @@ def read_spool_turns(root: Path, session_id: str) -> list[dict]:
 def read_spool_meta(root: Path, session_id: str) -> dict | None:
     try:
         return json.loads(_meta_path(root, session_id).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        # `UnicodeDecodeError` is a `ValueError` — see `read_spool_turns`.
         return None
 
 
@@ -451,7 +459,9 @@ def list_spool_metas(root: Path) -> tuple[list[dict], list[dict]]:
         meta = None
         try:
             meta = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            # `UnicodeDecodeError` is a `ValueError`: a non-UTF-8 meta is a
+            # CORRUPT entry (recorded below), not a crash.
             meta = None
         if not isinstance(meta, dict) or not isinstance(meta.get("session_id"), str) \
                 or not meta["session_id"]:
@@ -605,7 +615,27 @@ def _age_key(meta: dict) -> tuple[str, str, str]:
     made eviction depend on directory order. `session_id` is the final,
     deterministic tiebreak (arbitrary among true ties, but stable).
     """
-    return (meta.get("updated_at", ""), meta.get("created_at", ""), meta.get("session_id", ""))
+    # `str(...)` coercion, not a raw tuple: a corrupt-typed `updated_at` (an int
+    # from a hand-edited file) raised `TypeError: '<' not supported between
+    # instances of 'int' and 'str'` and crashed `session spool`.
+    return (
+        str(meta.get("updated_at") or ""),
+        str(meta.get("created_at") or ""),
+        str(meta.get("session_id") or ""),
+    )
+
+
+def _backoff_ms(meta: dict) -> float:
+    """`next_attempt_at_ms` as a number, however corrupt the stored value is.
+
+    A non-numeric value ("soon", null, a nested dict) raised `ValueError` out of
+    `flush_spool` and wedged the drain; 0 means "retry now", which is the safe
+    reading.
+    """
+    try:
+        return float(meta.get("next_attempt_at_ms") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAULT_BOUNDS) -> list[dict]:
@@ -679,7 +709,7 @@ def flush_spool(
         if meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key"):
             summary.skipped += 1
             continue
-        if float(meta.get("next_attempt_at_ms") or 0) > now_ms:
+        if _backoff_ms(meta) > now_ms:
             summary.skipped += 1
             continue
 
