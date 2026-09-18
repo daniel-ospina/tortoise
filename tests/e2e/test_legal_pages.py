@@ -426,6 +426,23 @@ def _footer_links_present(content: str) -> None:
         assert href in content, f"footer link {href} missing"
 
 
+def _has_blog_entry(content: str) -> bool:
+    """True when the served HTML carries an ANCHOR into the blog (#3950).
+
+    Deliberately mirrors the static guard's predicate (`_offers_blog_entry` in
+    `tests/test_website_docs_consistency.py`): any host, path `/blog` **or**
+    `/blog/<slug>`. Both count as a way in — a post's own nav links back to the
+    index — and keeping the two layers' predicates identical means they cannot
+    disagree about what a way in is. `premiselabs.co/blog` (which 301s to the
+    tortoise host) is as valid as the absolute tortoise form; a
+    `<link rel="prefetch">` is not, because it is not an anchor.
+    """
+    paths = [urlsplit(h).path.rstrip("/")
+             for h in re.findall(
+                 r'<a\b[^>]*?\bhref\s*=\s*["\']([^"\']+)["\']', content, re.I)]
+    return any(p == "/blog" or p.startswith("/blog/") for p in paths)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # #1 privacy 200 + negation-safe block
 # ═══════════════════════════════════════════════════════════════════════════
@@ -602,6 +619,49 @@ def test_tortoise_host_footer_half(page: Page) -> None:
     body = resp.text()
     assert PRODUCT_ROOT_MARKER in body, "tortoise root does not serve product.html"
     _footer_links_present(body)
+
+
+# ── #3950: the blog is live but was unreachable — pin the SERVED entry points ──
+# These belong here (not only in the static guard) because the tortoise root is
+# served by `functions/_middleware.ts`, which fetches `/product.html`: the served
+# markup is Function-produced, so a repo-side assertion cannot prove what a
+# visitor receives. This suite runs against production post-deploy.
+
+
+def test_company_root_links_to_the_blog(page: Page) -> None:
+    """UNCONDITIONAL half (#3950): the company root must offer the blog.
+
+    `premiselabs.co/` serves `index.html`, which had no blog link at all. Asserted
+    on the SERVED page — "the link exists in the repo" is not the property; the
+    property is that a visitor can reach it.
+    """
+    body = _goto(page, BASE_URL + "/")
+    assert _has_blog_entry(body), (
+        "premiselabs.co/ carries no /blog entry point (#3950): the blog is live but "
+        "unreachable when nothing links it. Add the absolute "
+        "https://tortoise.premiselabs.co/blog to index.html's footer bar."
+    )
+
+
+@TORTOISE_HOST_SKIP
+def test_tortoise_root_links_to_the_blog(page: Page) -> None:
+    """TORTISE-HOST half (#3950): the page the owner actually complained about.
+
+    The middleware rewrites `/` to `product.html`, so this is the served landing
+    page. Gated by TORTISE_HOST_CHECK exactly like the footer half — a stale-DNS
+    run skips (green-with-annotation), never reddens.
+    """
+    host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
+    spoof = host if host.startswith("tortoise.") else "tortoise.premiselabs.co"
+    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
+    assert resp.status == 200, f"tortoise host root returned {resp.status}"
+    body = resp.text()
+    assert PRODUCT_ROOT_MARKER in body, "tortoise root does not serve product.html"
+    assert _has_blog_entry(body), (
+        "tortoise.premiselabs.co/ carries no /blog entry point (#3950) — this is the "
+        "exact page the owner reported as unreachable. It must offer the blog in the "
+        "hero's secondary-link row (above the fold) and in the footer."
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

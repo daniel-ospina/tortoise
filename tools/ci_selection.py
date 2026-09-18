@@ -141,6 +141,21 @@ SOURCE_PATTERNS = {
                    # mount path from its directory), so a change to the gate must
                    # run the guard too.
                    "website/functions/admin/[[path]].ts",
+                   # #3950: the blog-discoverability guard
+                   # (test_website_docs_consistency.py
+                   # ::test_every_in_scope_page_links_to_the_blog) covers all 12
+                   # public+indexable+served pages, not just docs/faq. An unlisted
+                   # page means a PR touching ONLY that page selects no surface
+                   # (surfaces=[], full=False) and the guard never runs — verified
+                   # before listing: `--changed-files website/tos.html` yielded
+                   # surfaces=[] while website/product.html yielded ['onboarding'].
+                   # That is the #1349/#3332 silent-drop class one more time: the
+                   # guard silently stops covering the page it was written for.
+                   # The ratchet test derives from this tuple, so a future page
+                   # added to the guard must be added here too.
+                   "website/security.html", "website/tos.html",
+                   "website/license.html", "website/dpa.html",
+                   "website/aviso-privacidad.html",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that

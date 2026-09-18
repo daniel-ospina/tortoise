@@ -30,13 +30,17 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEBSITE = REPO_ROOT / "website"
+FUNCTIONS = WEBSITE / "functions"
+PRODUCT = WEBSITE / "product.html"
 DOCS = WEBSITE / "docs.html"
 FAQ = WEBSITE / "faq.html"
+REDIRECTS = WEBSITE / "_redirects"
 SDK = REPO_ROOT / "tortoise" / "sdk.py"
 
 # Both public pages, for the parametrized guards.
@@ -209,13 +213,52 @@ def test_faq_toc_anchors_all_resolve() -> None:
     assert hrefs <= ids, f"website/faq.html TOC anchors with no target: {sorted(hrefs - ids)}"
 
 
+def _function_serves(path: str) -> bool:
+    """True when a Cloudflare Pages **Function** serves this route.
+
+    Not every route is a committed `.html` asset. `website/functions/` is the
+    Pages Functions tree, and a route it handles is a real page with no sibling
+    file — `/blog` (and every `/blog/<slug>`) is served by
+    `functions/blog/[[path]].ts`. Without this branch the resolver below reports
+    a live route as dangling, which is a false failure that would push someone
+    to "fix" a correct link.
+
+    A route is Function-served when the Functions tree holds a handler at or
+    above it: `functions/<path>.ts|js`, `functions/<path>/index.ts|js`, or an
+    ancestor catch-all `functions/<dir>/[[path]].ts|js` (Pages matches
+    `[[path]]` against zero or more segments, so it owns the bare parent route
+    too).
+
+    Scope: this is the subset of Pages routing THIS repo uses — a deliberate
+    subset, not the whole rule. Single-segment dynamic routes
+    (`functions/blog/[slug].ts`), `.jsx`/`.tsx` handlers and `_routes.json` are
+    not modelled, because none exist here. If one appears, this helper must
+    grow with it or a correct link would read as dangling; the `..` rejection
+    keeps a malformed href from escaping the tree either way.
+    """
+    parts = [p for p in path.strip("/").split("/") if p]
+    if not parts or ".." in parts:
+        return False
+    targets = [FUNCTIONS.joinpath(*parts)]
+    for depth in range(len(parts), 0, -1):
+        targets.append(FUNCTIONS.joinpath(*parts[:depth], "index"))
+        targets.append(FUNCTIONS.joinpath(*parts[:depth], "[[path]]"))
+    return any(t.with_name(t.name + ext).is_file()
+               for t in targets for ext in (".ts", ".js"))
+
+
 def test_faq_internal_links_point_at_real_pages() -> None:
-    """A relative link on the FAQ must resolve to a file that exists.
+    """A relative link on the FAQ must resolve to a real page.
 
     Catches a renamed or removed sibling page, and a typo'd route — the FAQ links
-    out to /docs, /self-hosted, /security, /tos, /dpa, /privacy and /license.
-    Fragment-bearing links are matched too (the fragment is split off and the path
-    resolved), so a `/#anchor` form cannot slip through unchecked.
+    out to /docs, /self-hosted, /security, /tos, /dpa, /privacy, /license and
+    /blog. Fragment-bearing links are matched too (the fragment is split off and
+    the path resolved), so a `/#anchor` form cannot slip through unchecked.
+
+    "Real page" is either a committed asset (`.html`, or the extensionless form)
+    or a route owned by the Pages Functions tree (`_function_serves`). `/blog` is
+    the latter, and is exactly as live as any static page — a resolver that only
+    knows about `.html` files would call the blog link dangling.
     """
     html = _read(FAQ)
     missing: list[str] = []
@@ -224,13 +267,27 @@ def test_faq_internal_links_point_at_real_pages() -> None:
         if path in ("", "/"):
             continue
         candidate = WEBSITE / path.lstrip("/")
-        if candidate.is_file() or candidate.with_suffix(".html").is_file():
+        if (candidate.is_file()
+                or candidate.with_suffix(".html").is_file()
+                or _function_serves(path)):
             continue
         missing.append(href)
     assert not missing, (
         f"website/faq.html links to route(s) with no page: {missing}. "
         f"Add the page, fix the link, or route it through website/_redirects."
     )
+
+
+def test_function_route_resolver_recognizes_both_route_kinds() -> None:
+    """Guard the guard: the resolver must accept a Function route and still
+    reject a typo — otherwise widening it to fix the blog link would have
+    silently disabled the check it exists to perform."""
+    assert _function_serves("/blog"), "the /blog Function route must resolve"
+    assert _function_serves("/blog/some-post"), "a post under the catch-all must resolve"
+    assert _function_serves("/welcome"), "/welcome is a Function at the route root"
+    assert _function_serves("/admin/any-panel"), "a nested catch-all route must resolve"
+    assert not _function_serves("/blogpost"), "/blogpost is NOT a Function route"
+    assert not _function_serves("/no-such-route"), "an unknown route must not resolve"
 
 
 def test_faq_avoids_root_relative_fragment_links() -> None:
@@ -247,4 +304,215 @@ def test_faq_avoids_root_relative_fragment_links() -> None:
         f"website/faq.html uses the bare root-fragment form {root_fragments}, which "
         f"breaks on premiselabs.co. Use the absolute canonical "
         f"https://tortoise.premiselabs.co/#<anchor> instead."
+    )
+
+
+# ── #3950: the blog is live but unreachable — pin every public page's way in ──
+#
+# The blog at /blog is live and crawler-discoverable (`robots.txt` cross-submits
+# `/blog/sitemap.xml`), but 0 of the site's public pages linked to it, so a
+# visitor could only reach it by typing the URL. The root cause was an OWNERSHIP
+# omission — the blog epic scoped discovery to crawlers and its human journey
+# *started at* /blog, so nothing ever owned arrival-from-the-site. A one-off
+# "add the link" fix would rot the same way, so the property is pinned here:
+# every public, indexable, served page must offer a way in.
+
+
+def _canonical_redirect_targets() -> dict[str, str]:
+    """`website/_redirects` as {source-path: target-path}, trailing slashes stripped.
+
+    Only `src  dst  [code]` rows are read; comments and blanks are skipped.
+    """
+    out: dict[str, str] = {}
+    for raw in REDIRECTS.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        out[parts[0].rstrip("/") or "/"] = parts[1].rstrip("/") or "/"
+    return out
+
+
+def _is_noindex(html: str) -> bool:
+    """True when the document declares `<meta name="robots" ... noindex>`.
+
+    Blind spot, stated rather than hidden: this reads the document only. A page
+    noindexed by an `X-Robots-Tag` header (`website/_headers`) rather than a meta
+    tag would be held in scope, and `_canonical_redirect_targets` likewise reads
+    only `website/_redirects` — a page whose route is redirected solely in
+    `functions/_middleware.ts` would too. Neither case exists today, and the
+    `_IN_SCOPE_AT_3950` pin turns either one into a loud failure (a pin edit with
+    a reason) instead of a silent scope change.
+    """
+    tag = re.search(r'<meta\s+name="robots"[^>]*>', html, re.I)
+    return bool(tag and "noindex" in tag.group(0).lower())
+
+
+def _in_scope_pages() -> list[Path]:
+    """The public, indexable, served pages — DERIVED from disk, never listed.
+
+    In scope = public AND indexable AND served. A page declares itself out by:
+      * `<meta name="robots" content="noindex...">` — `404.html`, `welcome.html`,
+        `invite-accept.html`; or
+      * its own clean route 301ing elsewhere in `website/_redirects` —
+        `signin.html`, whose `/signin` has no canonical URL of its own
+        (`/signin` → `/auth`), so a link there is unreachable by construction.
+
+    Derivation (not enumeration) is the point: a page added later is covered
+    WITHOUT editing a list, so it cannot be forgotten the way the blog was.
+    `test_blog_guard_covers_every_served_indexable_page` pins the result, so the
+    set cannot silently SHRINK either.
+
+    Deliberately NOT excluded: `docs.html` / `faq.html` / `self-hosted.html` are
+    `_redirects` SOURCES (their `.html` and trailing-slash forms 301 to the clean
+    URL) — but their own clean route is not redirected, so they are served
+    documents and stay in scope. The filter is "my route hands off to a different
+    document", not "I appear in _redirects".
+    """
+    redirects = _canonical_redirect_targets()
+    pages: list[Path] = []
+    for page in sorted(WEBSITE.glob("*.html")):
+        html = _read(page)
+        if _is_noindex(html):
+            continue
+        route = f"/{page.stem}"
+        if redirects.get(route, route) != route:
+            continue
+        pages.append(page)
+    return pages
+
+
+def _rendered_hrefs(html: str) -> list[str]:
+    """Hrefs of real anchors in rendered markup.
+
+    Comments, `<script>` and `<style>` are stripped first: a URL that appears
+    only inside those is not a link, so it must not be able to satisfy the guard.
+    """
+    for pattern in (r"<!--.*?-->", r"<script\b.*?</script\s*>", r"<style\b.*?</style\s*>"):
+        html = re.sub(pattern, "", html, flags=re.S | re.I)
+    return re.findall(r'<a\b[^>]*?\bhref\s*=\s*["\']([^"\']+)["\']', html, re.I)
+
+
+def _href_path(href: str) -> str:
+    return (urlparse(href).path or "/").rstrip("/") or "/"
+
+
+def _offers_blog_entry(page: Path) -> bool:
+    """True when the page has a real anchor that gets a visitor INTO the blog.
+
+    `/blog` (the index) and `/blog/<slug>` (an article — its own nav links back
+    to the index) both count as a way in, so a page is not faulted for linking a
+    post instead of the index. What does NOT count: a URL sitting in a comment,
+    a `<script>` or a `<style>` (`_rendered_hrefs` strips those first).
+
+    Presence, not visibility — an anchor hidden with `display:none` would still
+    satisfy this. The placement that actually matters is pinned separately by
+    `test_product_hero_offers_the_blog`.
+    """
+    return any(_href_path(h) == "/blog" or _href_path(h).startswith("/blog/")
+               for h in _rendered_hrefs(_read(page)))
+
+
+# The served+indexable page set as of #3950 (2026-09-18). This pins the
+# DERIVATION'S OUTPUT (not an allowlist the guard consults): if a page later
+# leaves the public surface, that is a decision someone must take deliberately,
+# not a page that quietly disappears from coverage.
+_IN_SCOPE_AT_3950 = frozenset({
+    "aviso-privacidad.html", "docs.html", "dpa.html", "faq.html", "index.html",
+    "license.html", "privacy.html", "product.html", "security.html",
+    "self-hosted.html", "signup.html", "tos.html",
+})
+
+
+def test_every_in_scope_page_links_to_the_blog() -> None:
+    """#3950: every public, indexable, served page must offer a way to the blog.
+
+    A page that loses its link fails HERE — that is the whole point. Before this
+    guard, deleting the link left every test green (nothing asserted its
+    existence), which is how the blog became unreachable in the first place.
+    """
+    missing = [
+        page.name
+        for page in _in_scope_pages()
+        if not _offers_blog_entry(page)
+    ]
+    assert not missing, (
+        f"public page(s) with no path to the blog: {missing}. #3950 — the blog is "
+        f"live but was unreachable because nothing linked it; add an "
+        f'<a href="/blog"> to the page chrome (root-relative on the tortoise host, '
+        f"the absolute tortoise URL on index.html, whose host 301s /blog)."
+    )
+
+
+def test_blog_guard_covers_every_served_indexable_page() -> None:
+    """Guard the guard: `_in_scope_pages()` must not silently shrink.
+
+    A narrow derivation would make the test above pass by covering less, so the
+    derivation's output is pinned. Adding a page is free (derivation); removing
+    one requires updating this pin in the same PR and saying why.
+    """
+    got = {page.name for page in _in_scope_pages()}
+    assert got == set(_IN_SCOPE_AT_3950), (
+        f"the blog guard's page set changed: "
+        f"missing={sorted(_IN_SCOPE_AT_3950 - got)} added={sorted(got - _IN_SCOPE_AT_3950)}. "
+        f"If a page genuinely left the public surface (new noindex, or its route "
+        f"now 301s elsewhere), update `_IN_SCOPE_AT_3950` in the same PR and say why."
+    )
+
+
+def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
+    """Guard the guard: the extractor must not be satisfiable by a non-link.
+
+    `href="/blog"` sitting in a comment, a `<script>` string or a CSS comment is
+    not a way in. If the extractor counted those, the link could be "lost" while
+    the guard above stayed green.
+    """
+    assert _rendered_hrefs('<a href="/blog">Blog</a>') == ["/blog"]
+    assert _rendered_hrefs('<a class="x" href="/blog">Blog</a>') == ["/blog"]
+    assert _rendered_hrefs('<!-- <a href="/blog">Blog</a> -->') == []
+    assert _rendered_hrefs('<script>const u = "/blog";</script>') == []
+    assert _rendered_hrefs('<style>/* a { url: "/blog" } */</style>') == []
+    assert _href_path("/blog") == "/blog"
+    assert _href_path("https://tortoise.premiselabs.co/blog") == "/blog"
+    assert _href_path("https://tortoise.premiselabs.co/blog/") == "/blog"
+
+
+def test_product_hero_offers_the_blog() -> None:
+    """#3950: the served homepage must offer the blog ABOVE THE FOLD.
+
+    The owner's complaint is "cannot find the blog", so a link at the bottom of a
+    630vh scroll narrative is a weak answer on the one page that matters. The
+    hero already carries a secondary-link row (`Browse the docs -> . Design FAQ ->`,
+    `website/product.html:332`) that is clickable from first paint (`.beat.pe-on`
+    on the `i === 0` beat), so the blog goes there — no new CSS, and no change to
+    the #1288 login-only top menu.
+
+    Pinned on the container so a redesign cannot quietly demote the affordance
+    back to footer-only. `#beat-hero` is a load-bearing id (CSS + the GSAP beat
+    list), so it is stable to pin.
+
+    Scope of the claim: the hero is clickable at first paint only while the GSAP
+    script loads — `.beat` is `pointer-events: none` and `.beat.pe-on` (added by
+    the inline GSAP init for the `i === 0` beat) re-enables it. That dependency is
+    pre-existing (the hero CTA has it too); the FOOTER link is the no-JS
+    fallback, which is part of why the footer link is kept as well.
+    """
+    hero = re.search(r'<section id="beat-hero".*?</section>', _read(PRODUCT), re.S)
+    assert hero, "website/product.html lost its #beat-hero section"
+    # Guard the fixture: the non-greedy match stops at the FIRST `</section>`, so
+    # a nested <section> would silently truncate the checked region — and a
+    # truncated region could fail (or vacuously pass) for the wrong reason.
+    assert "<section" not in hero.group(0)[len("<section"):], (
+        "the #beat-hero region now contains a nested <section>, so the "
+        "first-`</section>` extraction may stop before the link. Re-scope this "
+        "assertion (e.g. to the secondary-link row) rather than trusting a "
+        "possibly-truncated region."
+    )
+    assert "/blog" in {_href_path(h) for h in _rendered_hrefs(hero.group(0))}, (
+        "the served homepage no longer offers the blog above the fold. #3950: the "
+        "owner's report was 'cannot find the blog or how to reach it' — a footer "
+        "link at the end of the scroll narrative is not a sufficient answer on the "
+        "landing page. Keep the hero's secondary-link row entry."
     )
