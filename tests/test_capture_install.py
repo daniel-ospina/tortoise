@@ -1099,6 +1099,52 @@ def test_codex_dry_run_writes_nothing(tmp_path):
     assert not (home / ".codex").exists()
 
 
+def test_codex_install_then_status_is_clean_and_upgrade_is_a_no_op(home):
+    """The Codex seam ships the SAME version-marker/settings contract as
+    Claude, so it is covered by the layout registry — not an install-only
+    fork: `detect_install` reads the produced state as current and
+    `upgrade_install` changes nothing.
+
+    Mutation: drop the codex entry from `hook_install.HARNESS_LAYOUTS` —
+    `get_layout("codex")` raises `unknown harness 'codex'`, so a stale
+    installed hook is never flagged or repaired, and this REDs."""
+    layout = hook_install.get_layout("codex")
+    assert hook_install.contract_version(layout) == 1, (
+        "the shipped codex hook carries no readable install contract")
+
+    res = install_capture("codex", home=home)
+    assert res.ok, res.error
+    codex_root = capture_install.codex_home(home)
+
+    assert hook_install.detect_install(codex_root, "codex") == [], (
+        "the installer produced state the drift detector calls drifted")
+    upgrade = hook_install.upgrade_install(codex_root, "codex")
+    assert upgrade.refused is None, upgrade.refused
+    assert upgrade.actions == [], (
+        f"upgrade was not a no-op on a fresh install: {upgrade.actions}")
+
+    again = install_capture("codex", home=home)
+    assert again.ok and again.changed is False, (
+        "re-installing over a status-current install was not a clean no-op")
+
+
+def test_codex_hooks_status_reports_the_install_as_current(cli):
+    """`tortoise hooks status --harness codex` names the harness instead of
+    rejecting it, and reads a fresh install as current.
+
+    Mutation: remove the codex layout — the CLI exits 1 with `unknown harness
+    'codex'` and this REDs."""
+    run, _root, home = cli
+    assert install_capture("codex", home=home).ok
+
+    r = run("hooks", "status", "--harness", "codex",
+            "--dir", str(capture_install.codex_home(home)))
+
+    assert r.returncode == 0, r.stderr
+    assert "unknown harness" not in (r.stdout + r.stderr), r.stderr
+    assert "are current" in r.stdout, r.stdout
+
+
 # ── the CLI surface (`tortoise install <harness>`) ──────────────────────
 
 
@@ -1130,6 +1176,13 @@ def test_cli_install_codex_installs_capture_into_the_codex_home(tmp_path):
     # the read half still lands in the project
     read = json.loads((root / ".codex" / "hooks.json").read_text())
     assert "UserPromptSubmit" in read["hooks"]
+
+    # P1-3: the trust guidance must name the ACTUAL effective capture file
+    # ($CODEX_HOME/hooks.json), not the dead project-local one — following the
+    # wrong hint leaves the HOME-scoped hook untrusted and captures nothing.
+    assert str(codex_home / "hooks.json") in r.stdout, r.stdout
+    assert "$CODEX_HOME/hooks.json" in r.stdout, r.stdout
+    assert "TRUST" in r.stdout, r.stdout
 
 
 def test_cli_install_codex_second_run_is_a_no_op(cli):

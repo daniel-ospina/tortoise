@@ -922,6 +922,21 @@ def _packs_env_isolation(monkeypatch):
     domain_loader._PACKS_DIR = None
 
 
+# ── #3818 (P1-2): ambient CODEX_HOME isolation ───────────────────────────
+# `capture_install.codex_home()` honors `$CODEX_HOME` for the whole tree, so a
+# developer/CI/operator machine that exports it would send every direct
+# `install_capture("codex", home=...)` — and every codex test in the suite —
+# into the REAL `~/.codex` (the probe run wrote hooks.json +
+# hooks/tortoise-session-end.sh there). Cleared per test so no codex test can
+# mutate the machine it runs on; the sentinel is what the guard test in
+# test_codex_capture_hook.py reads to prove the scrub ran.
+@pytest.fixture(autouse=True)
+def _codex_home_isolation(monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("TORTOISE_TEST_CODEX_HOME_SCRUBBED", "1")
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _disable_embedder_autowarmup(monkeypatch):
     """#2952: keep the engine-init embedder warm-up out of the test suite.

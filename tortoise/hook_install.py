@@ -60,6 +60,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import stat
 import tempfile
@@ -200,17 +201,31 @@ def count_canonical_markers(path: str | os.PathLike[str]) -> int:
 
 @dataclass(frozen=True)
 class HookScriptSpec:
-    """One installed script artifact and the settings entry it requires."""
+    """One installed script artifact and the settings entry it requires.
+
+    ``timeout`` is ``None`` for a harness that resolves no per-hook timeout
+    key (Codex reads no ``timeout``): an entry WITHOUT one is then current,
+    not drift.  ``source_subdir``/``source_name`` name the shipped artifact
+    when it differs from the installed ``name`` (Codex installs the shipped
+    ``session-end.sh`` as ``tortoise-session-end.sh``); ``None`` keeps the
+    historical ``claude-hooks/<name>`` default (resolved through the module
+    global so a test can point it elsewhere).
+    """
 
     name: str
     event: str
-    timeout: int
+    timeout: int | None
     rel_command: str
+    source_subdir: str | None = None
+    source_name: str | None = None
 
     @property
     def source(self) -> Path:
         """The shipped (repo) copy of this script — the install source."""
-        return _HOOKS_SOURCE_DIR / self.name
+        shipped = self.source_name or self.name
+        if self.source_subdir is None:
+            return _HOOKS_SOURCE_DIR / shipped
+        return Path(__file__).resolve().parent / self.source_subdir / shipped
 
 
 @dataclass(frozen=True)
@@ -220,18 +235,40 @@ class HarnessLayout:
     ``settings_file=None`` describes a scripts-only harness (no JSON settings
     merge) — the reason the settings logic is an adapter, not a Claude
     assumption.  ``hooks_dir``/``settings_file`` are install-root-relative.
+
+    ``absolute_command`` registers the script's ABSOLUTE path (Codex runs the
+    command from the session's cwd, so a relative path never resolves);
+    ``matcher`` is False for a harness whose event entry is a bare group with
+    no ``matcher`` key (Codex's nested shape).  Both default to the Claude
+    shape so the existing layout is untouched.
     """
 
     harness: str
     hooks_dir: str
     scripts: tuple[HookScriptSpec, ...]
     settings_file: str | None = None
+    absolute_command: bool = False
+    matcher: bool = True
 
     def hooks_root(self, root: Path) -> Path:
         return root / self.hooks_dir
 
     def settings_path(self, root: Path) -> Path | None:
         return (root / self.settings_file) if self.settings_file else None
+
+
+def _spec_command(layout: HarnessLayout, spec: HookScriptSpec,
+                  root: str | os.PathLike[str] | None) -> str:
+    """The command string an entry for ``spec`` must carry under ``layout``.
+
+    Claude's is the root-relative ``rel_command``; a harness with
+    ``absolute_command`` (Codex) needs the script's absolute path, quoted the
+    ONE way the installer quotes it (``shlex.quote``) so the drift detector,
+    ``upgrade`` and ``capture_install._install_codex`` agree byte-for-byte.
+    """
+    if not layout.absolute_command or root is None:
+        return spec.rel_command
+    return shlex.quote(str(layout.hooks_root(Path(root)) / spec.name))
 
 
 _CLAUDE_HOOKS_DIR = ".claude/hooks"
@@ -255,9 +292,38 @@ def _claude_layout() -> HarnessLayout:
     )
 
 
-#: Shipped layouts.  Cursor (#3819) and Codex (#3818) add entries here.
+def _codex_layout() -> HarnessLayout:
+    """The Codex capture seam as a layout (#3818) — NOT a fork of the logic.
+
+    Unlike Claude, Codex resolves NO ``timeout`` key (its SessionEnd budget is
+    a hard ~1 s the shipped hook detaches past), registers the script's
+    ABSOLUTE path (Codex runs the command from the session cwd), and nests the
+    handler under a bare ``{"hooks": [...]}`` group with no ``matcher``.
+    ``root`` for every ``detect_install``/``upgrade_install`` call is the
+    resolved ``$CODEX_HOME`` (``capture_install.codex_home``), where
+    ``hooks/`` and ``hooks.json`` live.
+    """
+    return HarnessLayout(
+        harness="codex",
+        hooks_dir="hooks",
+        settings_file="hooks.json",
+        absolute_command=True,
+        matcher=False,
+        scripts=(
+            HookScriptSpec(
+                "tortoise-session-end.sh", "SessionEnd", None,
+                "hooks/tortoise-session-end.sh",
+                source_subdir="codex-hooks", source_name="session-end.sh",
+            ),
+        ),
+    )
+
+
+#: Shipped layouts.  Cursor (#3819) adds an entry here; Codex (#3818) already
+#: has one, so its seam is drift-checked and upgradeable like Claude's.
 HARNESS_LAYOUTS: dict[str, HarnessLayout] = {
     "claude": _claude_layout(),
+    "codex": _codex_layout(),
 }
 
 
@@ -1098,6 +1164,15 @@ def _is_timeout_budget(value: object) -> bool:
         return False
 
 
+def _expected_entry(layout: HarnessLayout, spec: HookScriptSpec,
+                    root: str | os.PathLike[str] | None) -> str:
+    """Human hint for the entry ``_merge_settings`` would write."""
+    command = _spec_command(layout, spec, root)
+    if spec.timeout is None:
+        return command
+    return f"{command} with timeout {spec.timeout}"
+
+
 def _settings_findings(layout: HarnessLayout, data: dict,
                        root: str | os.PathLike[str] | None = None,
                        ) -> list[Finding]:
@@ -1105,11 +1180,12 @@ def _settings_findings(layout: HarnessLayout, data: dict,
     findings: list[Finding] = []
     for spec in layout.scripts:
         entries = hooks.get(spec.event)
+        expected_entry = _expected_entry(layout, spec, root)
         if entries is None:
             findings.append(Finding(
                 "missing-hook-entry",
                 f"no {spec.event} hook entry in settings (expected "
-                f"{spec.rel_command} with timeout {spec.timeout})",
+                f"{expected_entry})",
                 script=spec.name, event=spec.event,
             ))
             continue
@@ -1126,13 +1202,31 @@ def _settings_findings(layout: HarnessLayout, data: dict,
             findings.append(Finding(
                 "missing-hook-entry",
                 f"{spec.event} has no entry invoking {spec.name} (expected "
-                f"timeout {spec.timeout})",
+                f"{expected_entry})",
                 script=spec.name, event=spec.event,
             ))
             continue
+        expected_command = _spec_command(layout, spec, root)
         for entry in ours:
             for inner in _entry_command_dicts(entry, spec.name,
                                               layout.hooks_dir, root):
+                # Codex runs the command from its own cwd, so a relative or
+                # stale-path registration is a silent no-capture — flag it as
+                # drift `upgrade` repairs (Claude's ``$CLAUDE_PROJECT_DIR``
+                # form is deliberately left alone, so this is gated on the
+                # absolute-command layout).
+                if (layout.absolute_command
+                        and inner.get("command") != expected_command):
+                    findings.append(Finding(
+                        "settings-stale-command",
+                        f"{spec.event} entry for {spec.name} runs "
+                        f"{inner.get('command')!r}; expected the absolute "
+                        f"path {expected_command!r} (Codex resolves the "
+                        "command from the session cwd)",
+                        script=spec.name, event=spec.event,
+                    ))
+                if spec.timeout is None:
+                    continue  # this harness resolves no timeout key
                 timeout = inner.get("timeout")
                 if not _is_timeout_budget(timeout):
                     findings.append(Finding(
@@ -1403,9 +1497,11 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
                     ) -> bool:
     """Ensure each script's settings entry exists with the required timeout.
 
-    Merges in place: only the specific entry's ``timeout`` is written; every
-    other key, event, and entry is preserved byte-for-byte after the JSON
-    round-trip.  Returns True when the document changed.
+    Merges in place: only the specific entry's ``timeout`` is written (and,
+    for an ``absolute_command`` harness, a relative/stale command is repaired
+    to the absolute path); every other key, event, and entry is preserved
+    byte-for-byte after the JSON round-trip.  Returns True when the document
+    changed.
     """
     changed = False
     hooks = data.get("hooks")
@@ -1420,23 +1516,37 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
         ours = [e for e in entries
                 if _entry_is_ours(e, spec.name, layout.hooks_dir, root)]
         if not ours:
-            entries.append({
-                "matcher": "",
-                "hooks": [{
-                    "type": "command",
-                    "command": spec.rel_command,
-                    "timeout": spec.timeout,
-                }],
-            })
-            actions.append(
-                f"settings: added {spec.event} entry for {spec.name} "
-                f"(timeout {spec.timeout})"
-            )
+            inner = {"type": "command",
+                     "command": _spec_command(layout, spec, root)}
+            if spec.timeout is not None:
+                inner["timeout"] = spec.timeout
+            fresh: dict = {"hooks": [inner]}
+            if layout.matcher:
+                fresh["matcher"] = ""
+            entries.append(fresh)
+            if spec.timeout is None:
+                actions.append(
+                    f"settings: added {spec.event} entry for {spec.name}")
+            else:
+                actions.append(
+                    f"settings: added {spec.event} entry for {spec.name} "
+                    f"(timeout {spec.timeout})")
             changed = True
             continue
+        expected_command = _spec_command(layout, spec, root)
         for entry in ours:
             for inner in _entry_command_dicts(entry, spec.name,
                                               layout.hooks_dir, root):
+                if (layout.absolute_command
+                        and inner.get("command") != expected_command):
+                    actions.append(
+                        f"settings: repaired {spec.event} command for "
+                        f"{spec.name} ({inner.get('command')!r} -> "
+                        f"{expected_command!r})")
+                    inner["command"] = expected_command
+                    changed = True
+                if spec.timeout is None:
+                    continue
                 timeout = inner.get("timeout")
                 if (not _is_timeout_budget(timeout)
                         or timeout < spec.timeout):

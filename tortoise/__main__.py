@@ -2580,6 +2580,22 @@ def _install_capture_seam(args, install_capture) -> int:
         # be a lie (the action lines already said what WOULD happen).
         claim = "Pi capture extension installed. " if result.changed else ""
         print(f"{claim}{_PI_MCP_GUIDANCE}")
+    if args.harness == "codex" and not getattr(args, "dry_run", False):
+        # #3818 P1-3: the capture registration is HOME-scoped ($CODEX_HOME/
+        # hooks.json — the ONE hook source Codex 0.154.0 reads). Codex refuses
+        # to RUN an untrusted hook, so a user who only trusts the (dead)
+        # project-local .codex/hooks.json captures nothing while the install
+        # prints success. Name the ACTUAL effective file.
+        from tortoise.capture_install import codex_home
+        codex_root = codex_home(_P.home())
+        print(
+            f"Codex runs a hook only after you TRUST it. The capture hook "
+            f"registered in {codex_root / 'hooks.json'} is HOME-scoped: "
+            "trust it from the Hooks menu on the next interactive `codex` run "
+            "(non-interactive runs need `codex exec "
+            "--dangerously-bypass-hook-trust`). Trusting a project-local "
+            ".codex/hooks.json does NOT cover it - Codex reads hook "
+            "registrations from $CODEX_HOME/hooks.json.")
     return 0
 
 
@@ -3321,6 +3337,48 @@ def _cmd_session_probe(args, api_key: str, api_url: str) -> int:
     return 0
 
 
+def _capture_error_file(harness: str) -> Path:
+    """Local breadcrumb for a capture attempt that never wrote a receipt.
+
+    The dashboard's ``session_capture_last_error_{harness}`` is SERVER state,
+    so a pre-POST failure (an unreachable host, no config, 0 parsed turns)
+    never reaches it and the panel reads healthy while the session is lost.
+    This file is the local companion: ``tortoise sessions import`` writes it
+    on failure and removes it on a 2xx, so a silent no-capture is at least
+    observable on the machine that produced it (the rollout survives on disk
+    for a ``sessions import`` backfill).
+    """
+    import os
+    receipt_dir = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts")))
+    return receipt_dir.parent / "capture-errors" / f"{harness}.json"
+
+
+def _record_capture_error(harness: str, detail: str) -> None:
+    """Write the local capture-failure breadcrumb. Best-effort only — a
+    breadcrumb write must never break the capture path it observes."""
+    import json as _json
+    import time
+    path = _capture_error_file(harness)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps({
+            "harness": harness,
+            "detail": detail,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_capture_error(harness: str) -> None:
+    """Remove the failure breadcrumb after a 2xx receipt lands."""
+    import contextlib
+    with contextlib.suppress(OSError):
+        _capture_error_file(harness).unlink()
+
+
 def _cmd_sessions_import(args) -> int:
     """T2 backfill (#1727 Slice 2, Task 15): import a historical session
     transcript from a harness store (codex / claude-desktop / pi).
@@ -3337,6 +3395,12 @@ def _cmd_sessions_import(args) -> int:
     (`MAX_SESSION_TURNS`, tortoise/quota.py — the SAME bound the live Pi
     capture extension applies) keeping the most recent turns, with the
     truncation reported — never a silent drop.
+
+    Every failure that does NOT reach a 2xx also writes a local breadcrumb
+    (``_record_capture_error``), and a 2xx clears it: a pre-POST failure
+    (unreachable host, no config, 0 turns) otherwise leaves the dashboard's
+    server-side failure key unset, so the panel would read healthy over a
+    session that was never captured.
     """
     import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
@@ -3346,20 +3410,25 @@ def _cmd_sessions_import(args) -> int:
     from tortoise.session_import import MAX_TURNS, parse_transcript, window_turns
 
     file_path = Path(args.file)
-    if not file_path.exists():
-        print(f"Session file not found: {args.file}", file=_sys.stderr)
-        return 1
     # CLI alias: --harness desktop ⇒ wire harness claude-desktop (canonical
     # SessionRequest Literal member — receipt key session_capture_receipt_
-    # claude-desktop).
+    # claude-desktop). Resolved BEFORE the existence check so a missing file
+    # still records its breadcrumb under the right harness.
     harness = {"desktop": "claude-desktop"}.get(args.harness, args.harness)
+    if not file_path.exists():
+        print(f"Session file not found: {args.file}", file=_sys.stderr)
+        _record_capture_error(harness, f"session file not found: {args.file}")
+        return 1
     try:
         turns = parse_transcript(str(file_path), harness)
     except ValueError as e:
         print(f"parse failed: {e}", file=_sys.stderr)
+        _record_capture_error(harness, f"parse failed: {e}")
         return 1
     if not turns:
         print("No conversation turns parsed from session file.", file=_sys.stderr)
+        _record_capture_error(
+            harness, f"no conversation turns parsed from {file_path.name}")
         return 1
 
     # The bound is the HANDLER's `MAX_SESSION_TURNS` (tortoise/quota.py) — not
@@ -3396,10 +3465,14 @@ def _cmd_sessions_import(args) -> int:
     except _ConfigError as e:
         print(f"Invalid config at {e} — fix or delete it, or run "
               "'tortoise init --api-key <key>'.", file=_sys.stderr)
+        _record_capture_error(harness, f"invalid config at {e}")
         return 1
     if api_key is None:
         print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.",
               file=_sys.stderr)
+        _record_capture_error(
+            harness, "no .tortoise config found (run 'tortoise init "
+                     "--api-key <key>')")
         return 1
 
     payload = {"harness": harness, "session_id": session_id,
@@ -3419,9 +3492,12 @@ def _cmd_sessions_import(args) -> int:
         body = e.read().decode() if e.fp else ""
         # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
+        _record_capture_error(harness, f"import failed (HTTP {e.code}): {body}")
         return 1
     except URLError as e:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        _record_capture_error(
+            harness, f"cannot reach API at {api_url}: {e.reason}")
         return 1
 
     # Any 2xx is a success — the server stored the Session and wrote its
@@ -3435,7 +3511,9 @@ def _cmd_sessions_import(args) -> int:
             or result.get("extraction_mode")), file=_sys.stderr)
 
     # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
-    # state key; this LOCAL marker makes re-import a cheap no-op).
+    # state key; this LOCAL marker makes re-import a cheap no-op) and the
+    # local failure breadcrumb is cleared.
+    _clear_capture_error(harness)
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt.write_text(_json.dumps({
         "session_id": result.get("session_id", session_id),

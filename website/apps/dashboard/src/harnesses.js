@@ -237,18 +237,19 @@ export const CODEX_CAPTURE_INSTALL = `# Session capture (#3818): recording is on
 # SessionEnd hook files every session to Tortoise Cloud unless your
 # organization switches it off (Memory sources > Agent sessions — the server
 # returns a 409 while disabled). Codex reads hook registrations from
-# $CODEX_HOME/hooks.json (~/.codex/hooks.json) — NOT from a project .codex/ —
-# so this seam is home-scoped. Install from your Tortoise checkout
+# $CODEX_HOME/hooks.json — the CODEX_HOME override moves the whole config
+# tree, default ~/.codex — and NOT from a project .codex/, so this seam is
+# home-scoped. Install from your Tortoise checkout
 # (github.com/daniel-ospina/tortoise):
-mkdir -p ~/.codex/hooks
-cp <path-to-tortoise>/tortoise/codex-hooks/session-end.sh ~/.codex/hooks/tortoise-session-end.sh
-chmod +x ~/.codex/hooks/tortoise-session-end.sh
-# then merge a SessionEnd command hook into ~/.codex/hooks.json (create the
-# file if missing). The command MUST be the script's ABSOLUTE path — Codex
-# runs the hook from the session's cwd — and the entry is Codex's nested
-# matcher-group shape (the exact JSON is in the shipped hook's header). Codex
-# resolves no "timeout" key; the shipped hook detaches its capture POST and
-# returns immediately, which is what fits Codex's ~1 s SessionEnd budget.
+mkdir -p "\${CODEX_HOME:-$HOME/.codex}/hooks"
+cp <path-to-tortoise>/tortoise/codex-hooks/session-end.sh "\${CODEX_HOME:-$HOME/.codex}/hooks/tortoise-session-end.sh"
+chmod +x "\${CODEX_HOME:-$HOME/.codex}/hooks/tortoise-session-end.sh"
+# then merge a SessionEnd command hook into "\${CODEX_HOME:-$HOME/.codex}/hooks.json"
+# (create the file if missing). The command MUST be the script's ABSOLUTE path
+# — Codex runs the hook from the session's cwd — and the entry is Codex's
+# nested matcher-group shape (the exact JSON is in the shipped hook's header).
+# Codex resolves no "timeout" key; the shipped hook detaches its capture POST
+# and returns immediately, which is what fits Codex's ~1 s SessionEnd budget.
 # Codex runs a hook only after you trust it: the first interactive run shows a
 # review prompt (Hooks menu). Non-interactive runs need
 #   codex exec --dangerously-bypass-hook-trust
