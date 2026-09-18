@@ -8466,6 +8466,59 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                        f"for this capture exceeds {max_points}. Upgrade your plan.",
             )
 
+        # #3665 (lane B7): the COHORT COST CAP — the pre-spend gate. It lives
+        # in the SAME guard as the points estimate for the same reason: a
+        # replay (``session_existed``, capture_ok) writes no nodes and runs no
+        # extraction, so it spends nothing and must never be 402-blocked
+        # (#1727's lesson); a TRUE-retry (#2335 WI-2b) re-runs extraction and
+        # therefore CAN be refused. Placed here — before the turn-write loop
+        # and both extraction calls — so a trip refuses the capture before the
+        # capture's OWN writes: no Session MERGE, no turn Points, no
+        # ``capture_ok``, no receipt, and the transcript stays on the user's
+        # machine, retryable verbatim. (The 402 itself still records the
+        # per-harness ``session_capture_last_error_*`` key in the wrapper, the
+        # same as every other refusal, and files an incident — neither is
+        # capture data.) Refusing anywhere later would leave ``capture_ok``
+        # NULL and turn the next same-``session_id`` POST into a silent
+        # zero-extract replay (the hazard ``_reserve_capture_slot`` documents).
+        #
+        # The error pair is the house contract: a ``QuotaExceededError``
+        # subclass → 402 (REST) / ``ERR_QUOTA`` (MCP); ``QuotaCheckError`` →
+        # 500, fail-closed, never a silent pass.
+        #
+        # Off the event loop: the cap's resolution reads the control plane with
+        # a synchronous ``httpx`` client, and this API runs a single uvicorn
+        # worker — pricing a cohort inline would stall every concurrent request
+        # for two round-trips (the #2988/#3498 class, same as the analytics
+        # emit below). ``to_thread`` copies the contextvars, so the
+        # selfhost-transport exemption still applies inside the worker.
+        from tortoise.cohort_cost import (
+            CohortCostCapExceeded,
+            enforce_cohort_cost_cap,
+            file_cohort_cost_incident,
+        )
+        try:
+            await asyncio.to_thread(enforce_cohort_cost_cap, org)
+        except CohortCostCapExceeded as e:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "cohort_cost_cap_refusal org=%r cohort_since=%r spent=%.6f "
+                "cap=%.2f period=%r harness=%r",
+                org.get("org_id"), e.incident_detail.get("cohort_since"),
+                e.incident_detail.get("spent_usd", 0.0),
+                e.incident_detail.get("cap_usd", 0.0),
+                e.incident_detail.get("period"), body.harness)
+            # The incident is network-bound (GitHub issue + Telegram) — filed
+            # OFF the event loop. This API runs a single uvicorn worker, so an
+            # inline synchronous POST here would stall every concurrent
+            # request for the round-trip (the #2988/#3498 sync-HTTP class).
+            await asyncio.to_thread(
+                file_cohort_cost_incident, org["org_id"], e.incident_detail)
+            raise HTTPException(status_code=402, detail=str(e)) from None
+        except QuotaCheckError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Quota check failed: {e}") from None
+
     _check_org_limit(org, "sessions")
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
@@ -8929,6 +8982,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         try:
             _cost_props = _capture_cost_props(session_id, meta)
             if _cost_props is not None:
+                # #3665 (lane B7): the SAME measured cost onto the durable
+                # per-period LEDGER, beside the analytics row it already
+                # writes. #3359's analytics row is a measurement, not a
+                # ledger: nothing keyed by org+period, so a spend CEILING
+                # could only read it by scanning every capture row in the
+                # period. The ledger row is one per (org, period) — the read
+                # side `cohort_cost.enforce_cohort_cost_cap` gates on.
+                # Best-effort by contract (record_capture_usage swallows its
+                # own failures): metering never blocks a committed capture.
+                # Off the event loop for the same reason as the emit below —
+                # the Supabase RPC and the embedded registry write are both
+                # blocking I/O and this API runs a single uvicorn worker.
+                from tortoise.metering import record_capture_usage
+                await asyncio.to_thread(
+                    record_capture_usage, org["org_id"],
+                    cost_usd=float(_cost_props.get("cost_usd") or 0.0))
                 # Off the event loop: `_track_analytics_event` POSTs
                 # synchronously (`httpx.Client`), and this API runs a single
                 # uvicorn worker — calling it inline stalls EVERY concurrent
@@ -23342,6 +23411,16 @@ def _webhook_apply_event(sdk, org_id: str, event: dict) -> tuple[str | None, str
             updates["subscription_id"] = data["id"]
         if data.get("current_period_end"):
             updates["current_period_end"] = data["current_period_end"]
+        # #3825 / D10: the METER WINDOW ANCHOR. The cost meter totals usage
+        # over the subscription's OWN billing period so it reconciles with the
+        # invoice line, and only the period END was persisted — leaving the
+        # window half-known, which ``metering._current_period`` refuses to
+        # guess at (a derived start is wrong for annual plans and plan
+        # changes, and a calendar-month fallback would put a paying org's
+        # spend on a row the cap's window read never looks at). This event
+        # carries the authoritative start next to the end already written here.
+        if data.get("current_period_start"):
+            updates["current_period_start"] = data["current_period_start"]
         if status:
             updates["subscription_status"] = status
         # review fix 11: canceled surfacing via .updated (deleted event may be

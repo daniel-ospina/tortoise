@@ -3214,7 +3214,16 @@ def tortoise_session_capture(conversation: list[dict],
                 and detail != _CAPTURE_SESSION_IN_FLIGHT_DETAIL):
             with contextlib.suppress(Exception):
                 _record_capture_last_error(org_id, harness, str(detail))
-        return {"error": str(detail), "status": status}
+        # #3665: a 402 from the shared capture impl is ALWAYS a quota refusal
+        # — the points-estimate gate, the cohort cost cap, or the
+        # ``_check_org_limit(org, "sessions")`` limit — so carry the shared
+        # ERR_QUOTA code rather than making the caller interpret a bare status.
+        # One mapping site covers every 402 this impl can raise, so REST and
+        # MCP cannot drift on the class of a refusal.
+        out = {"error": str(detail), "status": status}
+        if status == 402:
+            out["code"] = ERR_QUOTA
+        return out
 
 
 def tortoise_graph_set_recording(recording: bool | None,

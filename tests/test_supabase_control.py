@@ -1997,27 +1997,38 @@ class TestPerRequestTimeout:
 class TestMeteringSeam:
     """metering_records read/increment via the seam (the registry path is
     deleted post-flip; these cover the Supabase branches the reviewer noted
-    had zero direct tests)."""
+    had zero direct tests).
+
+    #3825: the ledger key is the WINDOW START (``period_start``), a
+    ``timestamptz`` — not a ``'YYYY-MM'`` month label. The literals below are
+    ISO-8601 UTC instants, exactly the shape ``metering._current_period``
+    hands the seam.
+    """
+
+    #: ``[start, end)`` for the window these tests write to.
+    W1 = ("2026-08-01T00:00:00+00:00", "2026-09-01T00:00:00+00:00")
 
     def test_metering_get_absent_is_zero(self):
         from tortoise.supabase_control import metering_get  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
         fake = FakeControlPlane({"metering_records": []})
-        assert metering_get(fake, "team-1", "2026-08") == 0
+        assert metering_get(fake, "team-1", self.W1[0]) == 0
 
     def test_metering_increment_creates_and_reads_back(self):
         from tortoise.supabase_control import metering_get, metering_increment  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
+        start, end = self.W1
         fake = FakeControlPlane({"metering_records": []})
-        n = metering_increment(fake, "team-1", "2026-08", 3)
+        n = metering_increment(fake, "team-1", start, end, 3)
         assert n == 3
-        assert metering_get(fake, "team-1", "2026-08") == 3
+        assert metering_get(fake, "team-1", start) == 3
         # increment again → 5
-        assert metering_increment(fake, "team-1", "2026-08", 2) == 5
-        # different period isolated
-        assert metering_get(fake, "team-1", "2026-07") == 0
+        assert metering_increment(fake, "team-1", start, end, 2) == 5
+        # a different WINDOW is isolated — the key is the window start, not the
+        # month label
+        assert metering_get(fake, "team-1", "2026-07-01T00:00:00+00:00") == 0
 
     def test_metering_rpc_called_with_args(self):
         """The atomic increment goes through the RPC path (not GET-PATCH)."""
@@ -2031,30 +2042,37 @@ class TestMeteringSeam:
 
             def rpc(self, fn, body):
                 self.rpc_calls.append((fn, body))
-                # emulate the SQL function: upsert + increment
+                # emulate the SQL function: upsert + increment on the WINDOW
+                # START (#3825), the real PK
                 rows = self.tables["metering_records"]
                 row = next((r for r in rows
                             if r["org_id"] == body["p_org_id"]
-                            and r["period"] == body["p_period"]), None)
+                            and r.get("period_start")
+                            == body["p_period_start"]), None)
                 if row:
                     row["write_ops"] += body["p_n"]
                 else:
                     rows.append({"org_id": body["p_org_id"],
-                                 "period": body["p_period"],
+                                 "period_start": body["p_period_start"],
+                                 "period_end": body["p_period_end"],
                                  "write_ops": body["p_n"]})
                 return None  # PostgREST minimal — no echo
 
         spy = _Spy()
-        assert metering_increment(spy, "team-1", "2026-08", 2) == 2
-        assert metering_increment(spy, "team-1", "2026-08", 4) == 6
+        start, end = self.W1
+        assert metering_increment(spy, "team-1", start, end, 2) == 2
+        assert metering_increment(spy, "team-1", start, end, 4) == 6
         # #953: the RPC body carries p_nodes_written (epic #909 W-4 commit
-        # cost driver; default 0 on plain increments).
+        # cost driver; default 0 on plain increments). #3825: the month label
+        # is replaced by the half-open WINDOW.
         assert spy.rpc_calls == [
             ("metering_increment", {"p_org_id": "team-1",
-                                    "p_period": "2026-08", "p_n": 2,
+                                    "p_period_start": start,
+                                    "p_period_end": end, "p_n": 2,
                                     "p_nodes_written": 0}),
             ("metering_increment", {"p_org_id": "team-1",
-                                    "p_period": "2026-08", "p_n": 4,
+                                    "p_period_start": start,
+                                    "p_period_end": end, "p_n": 4,
                                     "p_nodes_written": 0}),
         ]
 
@@ -2073,10 +2091,12 @@ class TestMeteringSeam:
                 return None
 
         spy = _Spy()
-        metering_increment(spy, "team-1", "2026-08", 3, nodes_written=5)
+        start, end = self.W1
+        metering_increment(spy, "team-1", start, end, 3, nodes_written=5)
         assert spy.rpc_calls == [
             ("metering_increment", {"p_org_id": "team-1",
-                                    "p_period": "2026-08", "p_n": 3,
+                                    "p_period_start": start,
+                                    "p_period_end": end, "p_n": 3,
                                     "p_nodes_written": 5}),
         ]
 
@@ -2108,7 +2128,7 @@ class TestMeteringSeam:
                 return super().query(table, *args, **kwargs)
 
         fake = _ReadbackFails()
-        n = metering_increment(fake, "team-1", "2026-08", 3)
+        n = metering_increment(fake, "team-1", self.W1[0], self.W1[1], 3)
         assert n == 3
         # the atomic increment really did land server-side
         assert fake.tables["metering_records"][0]["write_ops"] == 3
@@ -2122,7 +2142,8 @@ class TestMeteringSeam:
         from tests.fake_control_plane import ErrorControlPlane
 
         with pytest.raises(RuntimeError):
-            metering_increment(ErrorControlPlane(), "team-1", "2026-08", 1)
+            metering_increment(ErrorControlPlane(), "team-1", self.W1[0],
+                               self.W1[1], 1)
 
 
 # ── resolve_org_limits Supabase mode (PR #911 review P2) ───────────────────
