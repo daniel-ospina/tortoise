@@ -94,6 +94,27 @@ bindings:
     envs: [production]
     note: blog/api/generate-cover.ts, blog/api/generate-seo.ts.
 
+  # The public contact form (issue #2409). Absent -> ``503 not_configured``
+  # from functions/api/contact.ts, which is the LOUD failure mode by design:
+  # the visitor is told delivery is unconfigured and given the direct mailto
+  # fallback, and nothing is silently dropped.
+  #
+  # `recommended`, NOT `required`, and that is deliberate: `required` reds the
+  # deploy, which would block the very deploy that ships the form (the secret
+  # does not exist yet). The feature degrades visibly while the rest of the
+  # site serves normally, so absence is a warning, not an outage. Promote this
+  # to `required` only once the key is bound — at that point its removal SHOULD
+  # be an outage.
+  - name: RESEND_API_KEY
+    kind: recommended
+    type: env_vars
+    envs: [production]
+    note: >-
+      functions/api/contact.ts — the send credential for the website contact
+      form. Same Resend key the waitlist-subscribe edge function uses. The
+      companion sender is RESEND_FROM_EMAIL (in-code default
+      noreply@premiselabs.co, so it needs no binding).
+
   # Deliberately NOT required: blog/_shared/cloudflare-purge.ts is a best-effort
   # cache purge that returns boolean `false` and logs a warning when these are
   # absent (lines 37-38, 41-42). A missing purge token degrades staleness; it

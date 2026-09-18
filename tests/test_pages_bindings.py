@@ -727,6 +727,11 @@ EXPECTED_CLASSIFICATION = {
     # recommended: cloudflare-purge.ts is best-effort and fail-open by design
     "CF_API_TOKEN": ("recommended", ["production"]),
     "CF_ZONE_ID": ("recommended", ["production"]),
+    # #2409 contact form: absent → the endpoint answers 503 not_configured
+    # (loud, actionable) while the rest of the site serves normally. Deliberately
+    # NOT `required`: that would red every deploy — including the one shipping
+    # the form — until the secret is bound. Promote it once bound.
+    "RESEND_API_KEY": ("recommended", ["production"]),
 }
 
 
