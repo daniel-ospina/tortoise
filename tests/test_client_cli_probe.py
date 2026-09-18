@@ -15,7 +15,7 @@ This supersedes #526's exit-0 clause **for the CLI probe only**.
 from `ok` / `tortoise_unavailable` / `not_configured` to the four recorded terms
 (roadmap §7 item 9: `available | empty | degraded | unconfigured`) because the
 CONTRACT changed — the pre-#3805 words are translated by
-`tortoise_client.vocabulary`, never asserted. Per #3832's own rule the pins were
+`tortoise.status_vocabulary`, never asserted. Per #3832's own rule the pins were
 NOT widened to accept both spellings: a pin that accepts both cannot catch the
 regression it exists to catch.
 """

@@ -31,7 +31,7 @@ makes it physically true — the license boundary moves to the network.
 | Component | Distribution | License | Content |
 |---|---|---|---|
 | **Server** | `tortoise-graph` (existing, 0.2.0) | BSL-1.1 | engine (sdk, projection, EP), daemon, MCP server, hosted/self-host APIs, CLIs (`tortoise`, `tortoise-serve`, `tortoise-ingest`) |
-| **Client** | `tortoise-client` (new) | Apache-2.0 | thin MCP driver (`tortoise/mcp_client.py`), shared config + error types, minimal CLI |
+| **Client** | `tortoise-client` (new) | Apache-2.0 | thin MCP driver (`tortoise/mcp_client.py`), shared config + error types, the recorded status vocabulary (`tortoise/status_vocabulary.py`, #3805), minimal CLI |
 
 Industry precedent (verified 2026-08-13, issue comment): **MongoDB** (server
 SSPL, all drivers Apache-2.0 — an app using the driver is "a separate
