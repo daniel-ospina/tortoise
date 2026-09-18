@@ -40,6 +40,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 import tortoise
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (SignupVelocityTracker)
+from tortoise.alert_store import OpenOutcome, ResolveOutcome  # #3820 resolve/open tri-state
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
     first_api_call,
@@ -19647,11 +19648,11 @@ _ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
 # was that the earlier "first fallback after a success" arm opened an incident
 # on ONE event, contradicting this decision's own rationale; a saturated
 # stream still reaches the threshold within ~15s. `dropped` — the event is
-# unrecoverable — alerts at once. `_ANALYTICS_INCIDENT_OPEN` is the in-process
-# latch that keeps it to ONE incident per episode; the AlertStore's own dedup
-# cannot substitute, because a per-event call costs an R2 conditional PUT + a
-# GitHub search + Telegram on EVERY event of an outage (seconds each, once
-# per event).
+# unrecoverable — alerts at once. The in-process gate that keeps it to ONE
+# incident per episode is the `_ANALYTICS_RESOLVE_NOT_BEFORE` arm (see the
+# state table below); the AlertStore's own dedup cannot substitute, because a
+# per-event call costs an R2 conditional PUT + a GitHub search + Telegram on
+# EVERY event of an outage (seconds each, once per event).
 #
 # #3820 (D5b — the ABSENCE half is DEFERRED, and recorded here rather than
 # dropped): D5b also asks for a sink that silently STOPS emitting to be caught
@@ -19663,18 +19664,82 @@ _ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
 # transition INTO degradation (the next write) is covered by the streak below.
 # TRACKED: #3944 — the deferral must not evaporate with the #3820 branch.
 _ANALYTICS_FALLBACK_ALERT_AFTER = 3
-_ANALYTICS_INCIDENT_OPEN = False
+# The alert-trigger streak — NOT part of the resolve state below: it counts
+# consecutive degraded writes and is reset by a delivered one.
 _ANALYTICS_DEGRADED_STREAK = 0
-# #3820 (cycle-4 P1-1): the recovery resolve cannot rely on the latch alone.
-# `_ANALYTICS_INCIDENT_OPEN` is PROCESS-LOCAL, but the incident is durable (the
-# AlertStore's dedup object outlives the process). After a restart — every `fly
-# deploy` — the latch is `False` while the issue is still open, so a
-# latch-only resolve never fires and every later degradation is absorbed into
-# the stale issue: the silent-loss class, reintroduced through the alert
-# channel. `_ANALYTICS_RESOLVE_PROBED` makes the DETECTION durable instead: the
-# first delivered write of each process probes the store once (one R2 read per
-# STARTUP, not per event), so a recovered sink resolves even across a restart.
-_ANALYTICS_RESOLVE_PROBED = False
+# #3820 (cycle-7): the resolve state machine is TWO globals, not five. The
+# previous shape carried `_ANALYTICS_INCIDENT_OPEN` + `_ANALYTICS_RESOLVE_
+# PROBED` + `_ANALYTICS_RESOLVE_ATTEMPTS` + `_ANALYTICS_RESOLVE_RETRY_AT` +
+# `_ANALYTICS_FIRST_DELIVERED_AT` — five coupled flags encoding ONE intention,
+# "an incident may be open and there may have to be a resolve". No test could
+# pin their cross-product, and each fix to one path broke the invariant the
+# others assumed: the same P1 class (an episode silently absorbed) reappeared
+# inside the fix for the previous one, four cycles running (latch → probe →
+# release → skip). The cross-product is gone; the whole state is these two:
+#
+#   PENDING     NOT_BEFORE    meaning
+#   ───────────────────────────────────────────────────────────────────────
+#   False       None          CLEAN. Nothing known open; an alert may file.
+#   True        None          UNKNOWN. A pre-restart incident MAY exist and no
+#                             resolve has run yet. The next delivered write
+#                             probes; an alert may file (the store dedups).
+#   True        t             OPEN. An incident is (or may be) open in the
+#                             store. Alerts are suppressed for this episode;
+#                             a resolve is eligible once `monotonic() >= t`.
+#
+# The invariant that replaces the cross-product: **`NOT_BEFORE is not None` ⇒
+# this process has RECORDED an incident open**. One direction only, deliberately:
+# the UNKNOWN row above and a pre-restart CLEAN state both carry `NOT_BEFORE is
+# None` while an incident MAY still exist in the store — a stored fact this
+# process has not read. What the gate can trust is what this process has SEEN:
+# arming it (at a completed alert dispatch, with `t = now` so the resolve stays
+# immediately eligible) is what keeps a degradation episode to ONE dispatch —
+# the in-process gate the per-event R2 PUT + GitHub search + Telegram cost
+# requires — and it doubles as the read bound. NOTHING is ever retired: a
+# delayed resolve is never a lost one.
+#
+# `PENDING` (bool) is the only "is there something to resolve" flag — set at
+# process start (a restart must probe the DURABLE incident the dead process
+# left open) and whenever `_analytics_open_incident` completes. It is cleared
+# ONLY by the store's own report that nothing is open (`RESOLVED` / `ABSENT`),
+# never by a guess — driving it from a guess is what re-absorbed the episode.
+_ANALYTICS_RESOLVE_PENDING = True
+# `NOT_BEFORE` (monotonic deadline | None) is the only bound: the earliest a
+# resolve may be attempted. `None` additionally means "nothing on record".
+_ANALYTICS_RESOLVE_NOT_BEFORE = None
+# The ONE window, and the pre-fix burst is gone. With an incident on record,
+# an inconclusive attempt re-arms ``NOT_BEFORE`` this far ahead, so the RESOLVE
+# reads the store at most once per window — where the old code allowed
+# `_ANALYTICS_RESOLVE_MAX_ATTEMPTS` reads per window while the comment above it
+# claimed one. #3820 (cycle-11 P2): a delivered write on the MOVED-window path
+# (the stale-fact guard) adds ONE more read-only presence check
+# (``AlertStore.incident_open``), so the honest bound is "the resolve reads at
+# most once per window" — NOT "at most once per delivered write", which holds
+# only when the window did not move under the resolve. The single exception is
+# the process-start UNKNOWN state, where a failed read arms nothing (the window
+# doubles as the alert gate): there a delivered write retries until the store
+# answers, and each retry pays a fresh store CONSTRUCTION plus one read
+# (`_analytics_alert_store()` rebuilds the channel and `_backup_storage()`
+# builds a new object-store client per attempt) — not the R2 PUT + GitHub
+# search + Telegram a dispatch costs. An honest bound, chosen over a window
+# that would silence a real episode.
+_ANALYTICS_RESOLVE_BACKOFF_S = 300
+# #3820 (cycle-8 P1): the resolve is serialized by its OWN lock — separate from
+# `_ANALYTICS_ALERT_LOCK` so the claim cannot be blocked by the counters or the
+# degradation gate. The claim is taken under this lock and the store call runs
+# without it, so a second concurrent delivered write sees `INFLIGHT` and skips
+# rather than acting on a decision taken before the first writer's arm. Lock
+# order is resolve -> alert everywhere; never the reverse.
+_ANALYTICS_RESOLVE_LOCK = threading.Lock()
+# #3820 (cycle-9 P2-2): the resolve MUST NOT hold `_ANALYTICS_RESOLVE_LOCK`
+# across its store call. That call is an R2 read whose boto3 client sets no
+# explicit timeout (`hosted_backup.py` `R2Storage._s3()` — botocore defaults
+# 60 s connect / 60 s read), so holding the lock across it serialized EVERY
+# concurrent delivered write — the OAuth-callback path — behind one hang.
+# `INFLIGHT` carries the serialization instead: set under the lock, checked
+# under the lock, cleared in a `finally` so a raise cannot wedge the resolve.
+# The lock is then held for microseconds, never across I/O.
+_ANALYTICS_RESOLVE_INFLIGHT = False
 # #3820 (cycle-4 P2-2): DERIVED from the declared vocabulary — never re-typed.
 # A hand-written dict here (or a hand-written key list in
 # `_analytics_incident_detail`) means adding a fifth outcome raises `KeyError`
@@ -19852,35 +19917,235 @@ def _analytics_note_success() -> str:
     #3820 (D4): the resolve is what makes the NEXT loss a NEW incident. The
     AlertStore resolves by delete, so leaving an incident open means every
     later degradation is absorbed into a stale issue — the silent-loss class,
-    reintroduced through the alert channel. ``AlertStore.resolve_incident``
-    begins with an R2 download, so this is NOT called per event: it runs when
-    the in-process ``_ANALYTICS_INCIDENT_OPEN`` latch says an incident is open,
-    OR once per process (``_ANALYTICS_RESOLVE_PROBED``) — the latch alone
-    cannot survive a restart, and a latch-only resolve left an incident opened
-    by a PREVIOUS process permanently open (cycle-4 P1-1).
+    reintroduced through the alert channel. ``resolve_incident`` begins with an
+    R2 download, so this is NOT called per event: it runs while
+    ``_ANALYTICS_RESOLVE_PENDING`` says there is (or may be) something to
+    resolve, bounded by the single ``_ANALYTICS_RESOLVE_NOT_BEFORE`` window so
+    a delivered write inside a just-spent window costs nothing.
+
+    #3820 (cycle-8 P1): the resolve is SERIALIZED by an in-flight claim taken
+    under ``_ANALYTICS_RESOLVE_LOCK`` — the decision and the claim are one
+    atomic step, so two concurrent delivered writes cannot both read the store.
+    The lock is NOT held across the store call (cycle-9 P2-2): that call is an
+    R2 read botocore bounds only at its 60 s defaults, and holding the lock
+    across it serialized every delivered write behind one hang. The claim is
+    cleared in a ``finally``. Without any serialization, a reader that saw
+    ``ABSENT`` before a fresh incident was filed could land after the
+    ``SKIPPED_FRESH`` completion armed the window and clear it: an incident
+    open in the store with ``PENDING=False``, and the next episode deduped into
+    it (the D4/#3677 absorbed-episode class).
+
+    #3820 (cycle-9 P1): the ``armed_at_decision`` guard is not taken on faith.
+    When the window moved during the store call, the CLEAR is withheld only if
+    an incident is still ON RECORD — a concurrent degradation may have DEDUPED
+    onto the very incident this resolve then deleted, so the moved arm would
+    otherwise hold the alert gate shut with nothing behind it and a still-
+    degraded sink would file nothing, indefinitely (D4 again). The withheld
+    clear therefore asks the store, read-only, whether the incident still
+    exists (``AlertStore.incident_open``) and clears when it does not. A
+    residual same-process ordering — a degradation that arms AFTER this clear,
+    having deduped an object the resolve then deleted — is NOT closed by it;
+    it is pre-existing (same rate in the cycle-8 shape) and tracked as #3969.
+
+    #3820 (cycle-7): the outcome of the store's resolve DRIVES the state — it
+    is never inferred. ``resolve_incident_state`` reports WHICH fact holds:
+
+    * ``RESOLVED`` / ``ABSENT`` — nothing is open any more → CLEAN
+      (``PENDING=False``, ``NOT_BEFORE=None``).
+    * ``SKIPPED_FRESH`` — an incident IS open; it was filed at/after this
+      attempt's bound, so it was deliberately left alone. The state STAYS
+      pending and the next attempt is a window away. The pre-collapse code
+      cleared the episode latch here, so the fresh incident was never resolved
+      by this process and the following episode was absorbed into it (cycle-7
+      P1).
+    * a raise, or no usable store — the truth is unknown → also stay pending.
+      When an incident is already on record the attempt re-arms the window
+      (bounded reads); from the process-start UNKNOWN state nothing is armed,
+      so the next delivered write retries. That asymmetric arm is deliberate:
+      the window is ALSO the alert gate, and an uncertainty must never close
+      it — see ``_analytics_note_degradation``. Nothing is ever retired on a
+      failure: a delayed resolve is not a lost one.
+
+    The ``before`` bound is the instant this attempt DECIDED to resolve (not a
+    once-per-process stamp): an incident that predates the decision is the one
+    this attempt may close, and anything filed after it is a fresh episode the
+    Store reports back as ``SKIPPED_FRESH``. That keeps the cross-restart
+    resolve (cycle-4 P1-1) and the fresh-incident guard (cycle-5 P1-2) in ONE
+    rule instead of a latch/probe split.
     """
-    global _ANALYTICS_INCIDENT_OPEN, _ANALYTICS_DEGRADED_STREAK
-    global _ANALYTICS_RESOLVE_PROBED
+    global _ANALYTICS_DEGRADED_STREAK, _ANALYTICS_RESOLVE_PENDING
+    global _ANALYTICS_RESOLVE_NOT_BEFORE, _ANALYTICS_RESOLVE_INFLIGHT
     with _ANALYTICS_ALERT_LOCK:
         _ANALYTICS_COUNTS["supabase"] += 1
         _ANALYTICS_DEGRADED_STREAK = 0
-        # Resolve when this process KNOWS an incident is open, OR once per
-        # process to catch an incident opened before a restart (P1-1): the
-        # latch is process-local, the incident is not.
-        resolve = _ANALYTICS_INCIDENT_OPEN or not _ANALYTICS_RESOLVE_PROBED
-        _ANALYTICS_RESOLVE_PROBED = True
-        if resolve:
-            _ANALYTICS_INCIDENT_OPEN = False
     _analytics_count_outcome("supabase")
-    if resolve:
+    # #3820 (cycle-8 P1 / cycle-9 P2-2): the resolve is SERIALIZED by an
+    # IN-FLIGHT claim taken under `_ANALYTICS_RESOLVE_LOCK` — never by holding
+    # that lock across the store call. Without serialization, N concurrent
+    # delivered writes all evaluate the decision against an UNSPENT window and
+    # all read the store, so a reader that saw `ABSENT` before a fresh incident
+    # was filed could land AFTER the `SKIPPED_FRESH` completion armed the window
+    # and clear it — an incident open with `PENDING=False` and the alert gate
+    # open, so the next episode is deduped into the stale incident (the
+    # D4/#3677 absorbed-episode class). Taking the claim under the lock makes
+    # the second writer see it and SKIP.
+    #
+    # The lock is held for the CLAIM ONLY (microseconds), not across the store
+    # call: that call is an R2 read whose boto3 client sets no explicit timeout
+    # (botocore defaults 60 s connect / 60 s read), so holding the lock across
+    # it serialized every delivered write — the OAuth-callback path — behind
+    # one hang (cycle-9 P2-2). The flag carries the serialization instead and
+    # is cleared in a `finally`, so a raise cannot wedge the resolve forever.
+    # Lock order is always resolve → alert (never the reverse), and the only
+    # nested acquisition is the claim below, so the pair cannot deadlock.
+    with _ANALYTICS_RESOLVE_LOCK, _ANALYTICS_ALERT_LOCK:
+        # ONE decision, from the single pending flag and the single bound.
+        # ``time.monotonic`` is read once, under the claim lock.
+        resolve = _ANALYTICS_RESOLVE_PENDING and (
+            _ANALYTICS_RESOLVE_NOT_BEFORE is None
+            or time.monotonic() >= _ANALYTICS_RESOLVE_NOT_BEFORE)
+        # A second concurrent delivered write must re-read the state under
+        # the lock and SKIP — but it must not BLOCK: the claim, not the
+        # lock, is what serializes the store call.
+        claimed = resolve and not _ANALYTICS_RESOLVE_INFLIGHT
+        if claimed:
+            _ANALYTICS_RESOLVE_INFLIGHT = True
+            before = datetime.now(UTC)
+            # The state this decision was taken against. The CLEAR below is
+            # applied only if nothing moved the window while the store call
+            # was in flight: a DEGRADATION can file an incident and arm the
+            # window during that call, and `_analytics_open_incident` is not
+            # — and must not be — serialized on the resolve lock, because it
+            # does network I/O and holding the lock across it would block
+            # the analytics write path.
+            armed_at_decision = _ANALYTICS_RESOLVE_NOT_BEFORE
+        else:
+            before = None
+            armed_at_decision = None
+    if not claimed:
+        # Either nothing is eligible, or another delivered write holds the
+        # in-flight claim and is performing exactly this resolve — so skip.
+        return "supabase"
+    try:
+        outcome = None
+        store = None
         try:
             store = _analytics_alert_store()
             if store is not None:
-                store.resolve_incident(_ANALYTICS_INCIDENT_KIND, "")
-                _logger.info("analytics sink recovered — %s resolved",
-                             _ANALYTICS_INCIDENT_KIND)
+                outcome = store.resolve_incident_state(
+                    _ANALYTICS_INCIDENT_KIND, "", before=before)
+                if outcome is ResolveOutcome.RESOLVED:
+                    _logger.info("analytics sink recovered — %s resolved",
+                                 _ANALYTICS_INCIDENT_KIND)
+                elif outcome is ResolveOutcome.SKIPPED_FRESH:
+                    _logger.info(
+                        "analytics sink resolve skipped a FRESH %s — it "
+                        "stays open, keeping the resolve pending",
+                        _ANALYTICS_INCIDENT_KIND)
         except Exception as e:  # best-effort, never raises
             _logger.warning("analytics sink resolve failed: %s", e)
+        # The CLEAR is applied only if the fact is not STALE. `armed_at_decision`
+        # is the window the decision was taken against; a DEGRADATION can arm
+        # the window (and file or dedup an incident) while the store call is in
+        # flight. An unconditional clear there leaves an incident OPEN in the
+        # store with `PENDING=False`, which no delivered write would ever
+        # resolve (cycle-8 criterion 2, pinned by T34).
+        clear = False
+        check_presence = False
+        # #3820 (cycle-11 P1): the window value the CLEAR below is validated
+        # against. `time.monotonic()` never repeats, so a late arm always
+        # changes it — which is what makes the clear ATOMIC with the arm
+        # instead of merely concurrent with it.
+        moved_to = None
+        with _ANALYTICS_ALERT_LOCK:
+            if (outcome is ResolveOutcome.RESOLVED
+                    or outcome is ResolveOutcome.ABSENT):
+                if armed_at_decision == _ANALYTICS_RESOLVE_NOT_BEFORE:
+                    # The store's OWN report: nothing is open. This is the only
+                    # way the pending flag is cleared — never a guess. The
+                    # value is re-checked against `moved_to` under the lock
+                    # before the write, because the two lock acquisitions are
+                    # not one atomic step: a degradation can arm in between.
+                    clear = True
+                    moved_to = _ANALYTICS_RESOLVE_NOT_BEFORE
+                else:
+                    # The window moved while this attempt was in flight, so the
+                    # fact it established is STALE. The arm belongs to a
+                    # concurrent degradation — but that degradation may have
+                    # DEDUPED onto the very incident this resolve just deleted,
+                    # so confirm an incident is still on record before keeping
+                    # the arm. Keeping it on faith would leave the alert gate
+                    # shut with NOTHING on record, and a still-degraded sink
+                    # would file nothing, indefinitely (cycle-9 P1; D4/#3677
+                    # absorbed-episode class). The presence read is read-only
+                    # and is taken OFF the alert lock, below.
+                    #
+                    # #3820 (cycle-11 P1): this is the value the presence
+                    # check is a fact ABOUT. The read below runs off-lock, so
+                    # a late arm can move the window again before the CLEAR
+                    # writes; snapshotting the mover's value lets the write
+                    # detect exactly that.
+                    check_presence = True
+                    moved_to = _ANALYTICS_RESOLVE_NOT_BEFORE
+            else:
+                # SKIPPED_FRESH means an incident IS open; a raise or a
+                # missing store leaves the truth UNKNOWN. Either way the
+                # resolve stays PENDING. Arm the ONE window only when an
+                # incident is on record — SKIPPED_FRESH just established
+                # one, or NOT_BEFORE was already armed by a dispatch. From
+                # the process-start UNKNOWN state nothing is armed, because
+                # `NOT_BEFORE is not None` is ALSO the alert gate
+                # (`_analytics_note_degradation`): an uncertainty must not
+                # silence a real episode, so that state retries on the next
+                # delivered write instead.
+                if (outcome is ResolveOutcome.SKIPPED_FRESH
+                        or _ANALYTICS_RESOLVE_NOT_BEFORE is not None):
+                    _ANALYTICS_RESOLVE_NOT_BEFORE = (
+                        time.monotonic() + _ANALYTICS_RESOLVE_BACKOFF_S)
+        if check_presence:
+            # Read-only presence check, OFF every lock: the alert lock must not
+            # be held across a store read (the same I/O rule as the resolve
+            # lock above). The value CAN move while this read is in flight —
+            # the arm site takes its `known_open` DECISION under the alert
+            # lock, but its WRITE lands only after `_analytics_open_incident`
+            # returns (a GitHub search, a file, a Telegram push), so the two
+            # are not atomic with this read. The CLEAR below is therefore
+            # re-validated against `moved_to` under the lock (cycle-11 P1);
+            # #3969 tracks the durable epoch/generation fix for the whole
+            # class. A raise or a store without the probe keeps the arm: an
+            # unknown is never treated as CLEAN.
+            probe = getattr(store, "incident_open", None) if store else None
+            if probe is None:
+                clear = False
+            else:
+                try:
+                    clear = not probe(_ANALYTICS_INCIDENT_KIND, "")
+                except Exception as e:  # unknown → keep the arm
+                    clear = False
+                    _logger.warning(
+                        "analytics sink resolve presence check failed: %s", e)
+        if clear:
+            with _ANALYTICS_ALERT_LOCK:
+                # #3820 (cycle-11 P1): the clear is applied ONLY if the value it
+                # was established against still holds. The presence probe above
+                # runs OFF every lock, and the arm site does NOT re-check
+                # `NOT_BEFORE is None`, so a degradation whose `should_alert`
+                # decision was taken while the window was UNSET (`NOT_BEFORE is
+                # None`) can file and arm after the probe's read and before
+                # this write — a scheduler preemption across an I/O-free gap is
+                # enough. Clearing then leaves an incident open in the store
+                # with `PENDING=False`, which no delivered write ever resolves
+                # and the next episode dedups into (cycle-8 criterion 2,
+                # pinned by T34/T37). `moved_to` re-validation keeps BOTH the
+                # arm and the object behind it.
+                if _ANALYTICS_RESOLVE_NOT_BEFORE == moved_to:
+                    _ANALYTICS_RESOLVE_PENDING = False
+                    _ANALYTICS_RESOLVE_NOT_BEFORE = None
+    finally:
+        # The claim is released on EVERY exit — a raise in the store call or in
+        # the presence probe must not leave the resolve wedge-closed.
+        with _ANALYTICS_RESOLVE_LOCK:
+            _ANALYTICS_RESOLVE_INFLIGHT = False
     return "supabase"
 
 
@@ -19917,12 +20182,28 @@ def _analytics_note_degradation(outcome: str, reason: str = "") -> str:
     #3820 (D2/P2-1): ``fallback`` needs a STREAK of
     ``_ANALYTICS_FALLBACK_ALERT_AFTER`` consecutive degraded writes; ``dropped``
     is unrecoverable and alerts on the first one. ``unconfigured`` never alerts.
-    #3820 (P2-2): the episode latch is set only when the dispatch actually
-    SUCCEEDED — it used to be set before the dispatch, so a raising
+    #3820 (P2-2): the episode gate is armed only when the dispatch actually
+    SUCCEEDED — it used to be armed before the dispatch, so a raising
     ``open_incident`` (or an unavailable channel) silenced the whole episode and
     the store's own retry never got a second call.
+    #3820 (cycle-7): the gate is the ONE state global — ``NOT_BEFORE is not
+    None`` means this process has RECORDED an incident open (see the state
+    table at the globals; the UNKNOWN row and a pre-restart CLEAN state carry
+    ``NOT_BEFORE is None`` with an incident possibly still in the store).
+    Arming it with ``t = now`` keeps the resolve immediately eligible
+    while closing the alert gate, so one episode pays for exactly one dispatch
+    (R2 PUT + GitHub search + Telegram) and the resolve still fires on the
+    recovered write. There is no separate latch to go stale: a resolve that
+    ends CLEAN disarms it, which is exactly when a new episode must file.
+    #3820 (cycle-8 P2-1): the arm happens only when the store reports an
+    incident IS on record. A paused kind creates NOTHING, so arming on that
+    path left the gate closed with no incident behind it — and if the pause
+    were lifted while the sink was still degraded, nothing could ever reopen
+    it (only a delivered write disarms the gate, and a writing sink is the
+    one thing the outage forbids).
     """
-    global _ANALYTICS_INCIDENT_OPEN, _ANALYTICS_DEGRADED_STREAK
+    global _ANALYTICS_DEGRADED_STREAK, _ANALYTICS_RESOLVE_PENDING
+    global _ANALYTICS_RESOLVE_NOT_BEFORE
     with _ANALYTICS_ALERT_LOCK:
         _ANALYTICS_COUNTS[outcome] += 1
         if outcome == "unconfigured":
@@ -19930,28 +20211,36 @@ def _analytics_note_degradation(outcome: str, reason: str = "") -> str:
             should_alert = False
         else:
             _ANALYTICS_DEGRADED_STREAK += 1
+            # An incident is on record open ⇒ this episode has been filed and
+            # must not re-pay the alert cost per event.
+            known_open = _ANALYTICS_RESOLVE_NOT_BEFORE is not None
             if outcome == "dropped":
                 # Unrecoverable: the event is gone. Alert at once, but still
                 # only once per episode.
-                should_alert = not _ANALYTICS_INCIDENT_OPEN
+                should_alert = not known_open
             else:  # "fallback" — the event is safe on disk; wait for a streak
                 should_alert = (
-                    not _ANALYTICS_INCIDENT_OPEN
+                    not known_open
                     and _ANALYTICS_DEGRADED_STREAK
                     >= _ANALYTICS_FALLBACK_ALERT_AFTER)
     _analytics_count_outcome(outcome)
     if should_alert and _analytics_open_incident(outcome, reason):
         with _ANALYTICS_ALERT_LOCK:
-            _ANALYTICS_INCIDENT_OPEN = True
+            _ANALYTICS_RESOLVE_PENDING = True
+            # Eligible to resolve NOW (t = now), but the alert gate above is
+            # closed until a resolve reports the incident CLEAN.
+            _ANALYTICS_RESOLVE_NOT_BEFORE = time.monotonic()
     return outcome
 
 
 def _analytics_open_incident(outcome: str, reason: str) -> bool:
     """Best-effort ``ANALYTICS_SINK_DEGRADED`` incident. Never raises (#3820).
 
-    Returns ``True`` only when the dispatch completed without raising — the
-    caller uses that to latch the episode (P2-2), so a failure leaves the next
-    event free to retry rather than silencing the episode.
+    Returns ``True`` only when an incident is ON RECORD — the dispatch
+    completed without raising AND the store did not decline because the kind
+    is paused. The caller uses that to arm the episode gate (P2-2), so a
+    failure, or a suppressed kind, leaves the next event free to retry rather
+    than closing the gate on nothing (cycle-8 P2-1).
 
     The alert does NOT ride the failing sink (an analytics event filed through
     ``_track_analytics_event`` would land in the same ephemeral file #3677's
@@ -19974,11 +20263,53 @@ def _analytics_open_incident(outcome: str, reason: str) -> bool:
                 "%s",
                 outcome, f"/{reason}" if reason else "", detail)
             return False
-        store.open_incident(_ANALYTICS_INCIDENT_KIND, "", detail)
-        _logger.warning("analytics sink degraded (%s%s) — filed %s: %s",
-                        outcome, f"/{reason}" if reason else "",
-                        _ANALYTICS_INCIDENT_KIND, detail)
-        return True
+        # #3820 (cycle-5 P1-3): `open_incident` returns False on a DEDUP hit
+        # (the dedup object already exists). Ignoring that boolean made the
+        # audit trail claim `filed` on EVERY dedup path, not only the restart
+        # one — it must distinguish a new issue from an already-open one.
+        # #3820 (cycle-6 P2-1): False is AMBIGUOUS — a SUPPRESSED kind (a
+        # pause in `ops/suppression.json`) also returns it, with NO issue and
+        # NO dedup object. Reporting that as `already open (dedup)` sent an
+        # operator who set a pause hunting for an issue that does not exist.
+        # #3820 (cycle-8 P2-2): ask the store for the FACT, in one call.
+        # Re-asking `suppression_active` at a LATER instant can disagree with
+        # the decision `open_incident` already made (a pause withdrawn in
+        # between), which reports a dedup hit for an incident that was never
+        # created; `open_incident_state` reads the predicate once, at the
+        # instant that matters. The `getattr` fallback keeps a store without
+        # the probe (test doubles) working; the calls sit inside the
+        # never-raise try.
+        opener = getattr(store, "open_incident_state", None)
+        if opener is not None:
+            fact = opener(_ANALYTICS_INCIDENT_KIND, "", detail)
+        else:
+            probe = getattr(store, "suppression_active", None)
+            if store.open_incident(_ANALYTICS_INCIDENT_KIND, "", detail):
+                fact = OpenOutcome.FILED
+            elif probe is not None and probe(_ANALYTICS_INCIDENT_KIND):
+                fact = OpenOutcome.SUPPRESSED
+            else:
+                fact = OpenOutcome.DEDUP
+        if fact is OpenOutcome.FILED:
+            disposition = "filed"
+        elif fact is OpenOutcome.SUPPRESSED:
+            disposition = "suppressed (kind paused)"
+        else:
+            disposition = "already open (dedup)"
+        _logger.warning(
+            "analytics sink degraded (%s%s) — %s %s: %s",
+            outcome, f"/{reason}" if reason else "",
+            disposition,
+            _ANALYTICS_INCIDENT_KIND, detail)
+        # #3820 (cycle-8 P2-1): the gate may be armed ONLY when an incident is
+        # on record. The store's own fact says which: SUPPRESSED created no
+        # object, so the caller must not set `NOT_BEFORE` (the alert gate) on
+        # that path — a paused kind would otherwise hold the gate shut with
+        # nothing behind it, and a pause lifted mid-outage could never be
+        # reopened (only a delivered write disarms the gate, which is exactly
+        # what a degraded sink cannot produce). FILED and DEDUP both mean an
+        # incident IS on record, so both arm it.
+        return fact is not OpenOutcome.SUPPRESSED
     except Exception as e:  # the write path must never raise
         _logger.warning("analytics sink alert failed (%s): %s", outcome, e)
         return False
