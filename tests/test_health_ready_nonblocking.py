@@ -361,9 +361,12 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     the only external bound is the TCP replacement — whose 5s timeout is
     documented as headroom, not a latency budget, and cannot serve as a
     ceiling. When no http_check budget exists the test asserts instead that the
-    documented replacement (``[[services.tcp_checks]]``) IS present and that no
-    top-level ``[checks]`` table has appeared — so removing or altering the
-    checks block reds here rather than silently passing.
+    documented replacement (``[[services.tcp_checks]]``) IS present, that the
+    top-level ``[checks.loop_liveness]`` entry this repo now ships IS present
+    and carries its own documented bounds (and is NOT the readiness ceiling),
+    and that no OTHER top-level ``[checks]`` entry has appeared — so removing,
+    altering or shadowing the checks block reds here rather than silently
+    passing.
     """
     import httpx
 
