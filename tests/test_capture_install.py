@@ -74,6 +74,10 @@ def cli(tmp_path, home):
         "HOME": str(home),
         "TORTOISE_DB_URI": "",
         "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+        # Hermetic: a CODEX_HOME in the ambient env would send the codex
+        # capture install into the REAL ~/.codex. Empty ⇒ ~/.codex under the
+        # temp HOME.
+        "CODEX_HOME": "",
     }
     return lambda *argv: _run(argv, env, root), root, home
 
@@ -913,6 +917,235 @@ def test_pi_install_fails_loudly_when_a_legacy_disable_would_destroy_state(home)
     assert (ext_dir / capture_install.PI_DISABLED_DIRNAME / "keep.ts").exists()
 
 
+# ── codex: the artifact + the $CODEX_HOME registration (#3818) ──────────
+
+
+def _codex_json(home: Path) -> dict:
+    return json.loads((home / ".codex" / "hooks.json").read_text())
+
+
+def _codex_commands(home: Path) -> list[str]:
+    entries = _codex_json(home)["hooks"][capture_install.CODEX_EVENT]
+    return [h["command"] for e in entries for h in e.get("hooks", [])]
+
+
+def test_codex_install_writes_the_hook_and_merges_the_absolute_command(home):
+    """The Codex seam: the shipped hook into ``$CODEX_HOME/hooks/`` (0755) and
+    a ``SessionEnd`` registration in ``$CODEX_HOME/hooks.json`` whose command
+    is the script's ABSOLUTE path.
+
+    Mutation: register a relative command (Codex runs the hook from the
+    session's cwd, so it never resolves) — this REDs."""
+    res = install_capture("codex", home=home)
+
+    assert res.ok, res.error
+    installed = home / ".codex" / "hooks" / capture_install.CODEX_SCRIPT_NAME
+    assert installed.read_bytes() == (
+        _REPO_ROOT / "tortoise" / "codex-hooks" / "session-end.sh").read_bytes()
+    assert installed.stat().st_mode & stat.S_IXUSR
+    assert _codex_commands(home) == [str(installed)], _codex_json(home)
+    assert os.path.isabs(_codex_commands(home)[0])
+
+
+def test_codex_install_honors_codex_home(tmp_path, monkeypatch):
+    """Codex's whole config tree moves with ``$CODEX_HOME`` — an install that
+    ignored it would register the hook in a file Codex never reads on every
+    non-default setup.
+
+    Mutation: resolve ``~/.codex`` unconditionally — this REDs."""
+    home = tmp_path / "home"
+    codex_home = tmp_path / "elsewhere"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    res = install_capture("codex", home=home)
+
+    assert res.ok, res.error
+    assert (codex_home / "hooks.json").is_file()
+    assert (codex_home / "hooks" / capture_install.CODEX_SCRIPT_NAME).is_file()
+    assert not (home / ".codex").exists()
+
+
+def test_codex_install_is_home_scoped_not_project_scoped(tmp_path):
+    """VERIFIED LIVE (Codex CLI 0.154.0, #3818): only ``$CODEX_HOME/hooks.json``
+    is a hook source — a project-local ``<repo>/.codex/hooks.json`` fires
+    nothing (with or without project trust). The installer must therefore
+    write HOME-scoped even when a project ``root`` is supplied.
+
+    Mutation: write the registration into ``root/.codex/hooks.json`` — the
+    install reports success while Codex never reads it, and this REDs."""
+    home = tmp_path / "home"
+    proj = tmp_path / "proj"
+    home.mkdir()
+    proj.mkdir()
+
+    res = install_capture("codex", root=proj, home=home)
+
+    assert res.ok, res.error
+    assert (home / ".codex" / "hooks.json").is_file()
+    assert not (proj / ".codex").exists(), (
+        "the capture seam must not be written to the dead project-local path")
+
+
+def test_codex_install_is_a_clean_no_op_on_rerun(home):
+    """Re-running is the upgrade path and must be a byte-level no-op.
+
+    Mutation: append the registration unconditionally (a second run then
+    emits a duplicate ``SessionEnd`` entry)."""
+    assert install_capture("codex", home=home).ok
+    json_path = home / ".codex" / "hooks.json"
+    script = home / ".codex" / "hooks" / capture_install.CODEX_SCRIPT_NAME
+    before = (json_path.stat().st_mtime_ns, script.stat().st_mtime_ns)
+
+    again = install_capture("codex", home=home)
+
+    assert again.ok and again.changed is False, again.actions
+    assert (json_path.stat().st_mtime_ns, script.stat().st_mtime_ns) == before
+    assert len(_codex_commands(home)) == 1, _codex_json(home)
+
+
+def test_codex_install_preserves_foreign_keys_events_and_hooks(home):
+    """Merge, never overwrite: an unrelated top-level key, another event, and
+    a foreign hook in the SAME ``SessionEnd`` list all survive.
+
+    Mutation: write the document wholesale (the foreign hook is lost)."""
+    doc = {
+        "model": "gpt-5.6-terra",
+        "hooks": {
+            "PermissionRequest": [{"hooks": [
+                {"type": "command", "command": "/bin/other"}]}],
+            "SessionEnd": [{"hooks": [
+                {"type": "command", "command": "/bin/other-end"}]}],
+        },
+    }
+    path = home / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(doc))
+
+    assert install_capture("codex", home=home).ok
+
+    merged = _codex_json(home)
+    assert merged["model"] == "gpt-5.6-terra"
+    assert merged["hooks"]["PermissionRequest"][0]["hooks"][0]["command"] \
+        == "/bin/other"
+    assert "/bin/other-end" in _codex_commands(home)
+    assert len(_codex_commands(home)) == 2, merged
+
+
+def test_codex_install_repairs_a_stale_relative_command_in_place(home):
+    """A registration of ours whose command is relative/stale must be repaired
+    to the absolute path, not left as a silent no-capture.
+
+    Mutation: skip the repair loop in ``merge_codex_capture_hooks`` — the
+    stale command survives and this REDs."""
+    script = home / ".codex" / "hooks" / capture_install.CODEX_SCRIPT_NAME
+    script.parent.mkdir(parents=True)
+    script.write_bytes((_REPO_ROOT / "tortoise" / "codex-hooks"
+                        / "session-end.sh").read_bytes())
+    (home / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {
+        capture_install.CODEX_EVENT: [{"hooks": [{
+            "type": "command",
+            "command": f"hooks/{capture_install.CODEX_SCRIPT_NAME}"}]}],
+    }}))
+
+    assert install_capture("codex", home=home).ok
+
+    assert _codex_commands(home) == [str(script)], _codex_json(home)
+
+
+def test_codex_install_refuses_a_foreign_script_and_keeps_it(home):
+    """A foreign file at OUR script path is another product's — refuse whole,
+    never clobber.
+
+    Mutation: write through the foreign file (it is destroyed while the
+    install reports success)."""
+    script = home / ".codex" / "hooks" / capture_install.CODEX_SCRIPT_NAME
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n# someone else's hook\nexit 0\n")
+
+    res = install_capture("codex", home=home)
+
+    assert not res.ok and "does not look like a Tortoise artifact" in res.error
+    assert "someone else's hook" in script.read_text()
+
+
+def test_codex_install_refuses_invalid_hooks_json(home):
+    """An unparsable ``hooks.json`` must never be clobbered.
+
+    Mutation: fall back to ``{}`` on a parse error — the user's file is
+    destroyed and this REDs."""
+    path = home / ".codex" / "hooks.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json")
+
+    res = install_capture("codex", home=home)
+
+    assert not res.ok and "not valid JSON" in res.error
+    assert path.read_text() == "{ not json"
+
+
+def test_codex_dry_run_writes_nothing(tmp_path):
+    """``--dry-run`` is write-free.
+
+    Mutation: drop the ``dry_run`` gate on the script/settings writes — files
+    appear on disk and this REDs."""
+    home = tmp_path / "home"
+    home.mkdir()
+
+    res = install_capture("codex", home=home, dry_run=True)
+
+    assert res.ok, res.error
+    assert res.changed is True
+    assert not (home / ".codex").exists()
+
+
+# ── the CLI surface (`tortoise install <harness>`) ──────────────────────
+
+
+def test_cli_install_codex_installs_capture_into_the_codex_home(tmp_path):
+    """The CLI installs BOTH codex halves: the per-turn read hook in the
+    project and the capture seam in ``$CODEX_HOME``.
+
+    Mutation: leave codex out of the capture dispatch in
+    ``_cmd_install_hooks`` — no ``SessionEnd`` registration, this REDs."""
+    root = tmp_path / "proj"
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex"
+    root.mkdir()
+    home.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+
+    r = _run(("install", "codex", "--dir", str(root)), env, root)
+
+    assert r.returncode == 0, r.stderr
+    assert (codex_home / "hooks" / capture_install.CODEX_SCRIPT_NAME).is_file()
+    reg = json.loads((codex_home / "hooks.json").read_text())
+    assert reg["hooks"][capture_install.CODEX_EVENT]
+    # the read half still lands in the project
+    read = json.loads((root / ".codex" / "hooks.json").read_text())
+    assert "UserPromptSubmit" in read["hooks"]
+
+
+def test_cli_install_codex_second_run_is_a_no_op(cli):
+    """A second run reports the no-op instead of re-installing.
+
+    Mutation: reopen the settings write unconditionally — the CLI prints the
+    install line again and this REDs."""
+    run, root, _home = cli
+    run("install", "codex", "--dir", str(root))
+
+    r = run("install", "codex", "--dir", str(root))
+
+    assert r.returncode == 0, r.stderr
+    assert "already installed" in r.stdout, r.stdout
+
+
 # ── the CLI surface (`tortoise install <harness>`) ──────────────────────
 
 
@@ -1120,6 +1353,10 @@ def test_cli_install_codex_directory_hooks_json_is_a_populated_error(cli):
     assert "Traceback" not in r.stderr, r.stderr
     assert "Install failed" in r.stderr, r.stderr
     assert "IsADirectoryError" in r.stderr, r.stderr
+    # #3818: the read half is validated before the capture half writes, so a
+    # refused install leaves NOTHING on disk — no capture seam in $CODEX_HOME.
+    assert not (_home / ".codex").exists(), (
+        "a read-half refusal must not leave the capture seam behind")
 
 
 def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):

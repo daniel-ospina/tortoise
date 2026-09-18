@@ -24,6 +24,19 @@ What it installs, per harness
     ``<home>/.pi/agent/extensions/tortoise-capture.ts``, after the
     non-destructive legacy guard from #3713 (see below).
 
+``codex``
+    ``tortoise/codex-hooks/session-end.sh`` into ``<codex_home>/hooks/``
+    (mode 0755), and **merges** — never overwrites — the ``SessionEnd``
+    registration into ``<codex_home>/hooks.json``. ``<codex_home>`` is
+    ``$CODEX_HOME`` when set, else ``~/.codex``. This is deliberately
+    HOME-scoped, not project-scoped: **verified live against Codex CLI
+    0.154.0 (#3818), ``$CODEX_HOME/hooks.json`` is the only hook source the
+    CLI reads** — a project-local ``<repo>/.codex/hooks.json`` (the file the
+    read-hook installer writes) and ``<repo>/.codex/config.toml [hooks]``
+    both fire nothing, with or without project trust. The registered command
+    is the script's absolute path, because Codex runs it from the session's
+    cwd.
+
 Idempotent by construction — this is also the upgrade path
 ----------------------------------------------------------
 Every target is compared before it is written: a script/extension whose bytes
@@ -113,6 +126,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shlex
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -131,11 +145,24 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 #: the dashboard's ``harnesses.test.js`` pins the two together.
 CAPTURE_SEAM: dict[str, str] = {
     "claude": "tortoise/claude-hooks/session-end.sh",
+    "codex": "tortoise/codex-hooks/session-end.sh",
     "pi": "tortoise/pi-hooks/tortoise-capture.ts",
 }
 
 #: Claude Code hook scripts → ``.claude/hooks/``.
 CLAUDE_SCRIPTS: tuple[str, ...] = ("session-start.sh", "session-end.sh")
+
+#: Codex's shipped capture hook (one script) and the event it registers.
+CODEX_SCRIPT_NAME = "tortoise-session-end.sh"
+CODEX_EVENT = "SessionEnd"
+
+#: Codex hook registrations live in ``$CODEX_HOME/hooks.json`` — the ONE hook
+#: source Codex CLI 0.154.0 actually reads (verified live, #3818): neither the
+#: project-local ``<repo>/.codex/hooks.json`` nor ``<repo>/.codex/config.toml
+#: [hooks]`` fires, with or without project trust. ``$CODEX_HOME`` is the
+#: environment override (default ``~/.codex``).
+CODEX_REGISTRATION_FILE = "hooks.json"
+CODEX_HOOKS_SUBDIR = "hooks"
 
 #: The per-hook budget #3754 established and #3801 identified as the
 #: load-bearing half of the contract: Claude Code cancels a SessionEnd hook at
@@ -528,6 +555,184 @@ def _load_settings(path: Path) -> tuple[dict | None, str]:
     return parsed, ""
 
 
+def codex_home(home: Path) -> Path:
+    """Resolve Codex's config root: ``$CODEX_HOME`` when set, else ``~/.codex``.
+
+    Codex honors ``CODEX_HOME`` for its whole config/auth tree, so an install
+    that ignored it would register the hook in a file Codex never reads on
+    every non-default setup. ``home`` is the user home (injectable for tests).
+    """
+    env = os.environ.get("CODEX_HOME", "").strip()
+    return Path(env) if env else home / ".codex"
+
+
+def merge_codex_capture_hooks(data: dict, *, command: str,
+                              root: str | os.PathLike[str] = ".",
+                              hooks_dir: str = CODEX_HOOKS_SUBDIR) -> dict:
+    """Merge the Codex ``SessionEnd`` capture registration into a
+    ``hooks.json`` document, in place, and return it.
+
+    Merge, never overwrite: every unrelated key, every other event, and any
+    foreign hook already registered under ``SessionEnd`` survive untouched (a
+    foreign hook is *appended after*, never replaced). An existing
+    registration of ours is repaired in place to the current ``command`` —
+    Codex resolves the command string relative to its own cwd, so a relative
+    or stale-path registration is a silent no-capture; the absolute path the
+    installer emits is the fix.
+
+    The emitted entry is the nested matcher-group shape Codex 0.154.0 accepts
+    (``[{hooks: [{type: "command", command: …}]}]`` — the same shape
+    ``hook_install._entry_command_dicts`` reads; a flat event-level
+    ``{type, command}`` is silently ignored by Codex).
+
+    Raises :class:`ValueError` for a shape that cannot be merged safely.
+    """
+    root_path = Path(root)
+    hooks = data.get("hooks")
+    if hooks is None:
+        hooks = {}
+        data["hooks"] = hooks
+    if not isinstance(hooks, dict):
+        raise ValueError('"hooks" is not a JSON object')
+    entries = hooks.get(CODEX_EVENT)
+    if entries is None:
+        entries = []
+        hooks[CODEX_EVENT] = entries
+    if not isinstance(entries, list):
+        raise ValueError(f'"{CODEX_EVENT}" entries are not a list')
+    registered: list[dict] = []
+    for entry in entries:
+        registered.extend(hook_install._entry_command_dicts(
+            entry, CODEX_SCRIPT_NAME, hooks_dir, root_path))
+    if registered:
+        for existing in registered:
+            existing["command"] = command
+            existing.setdefault("type", "command")
+        return data
+    entries.append({"hooks": [{"type": "command", "command": command}]})
+    return data
+
+
+def _install_codex(home: Path, *, dry_run: bool) -> InstallResult:
+    """Install the Codex capture seam into ``$CODEX_HOME`` (#3818).
+
+    The registration file is ``$CODEX_HOME/hooks.json`` — the only hook source
+    Codex CLI 0.154.0 reads — and the shipped script is copied to
+    ``$CODEX_HOME/hooks/``. The registered command is the script's ABSOLUTE
+    path: Codex runs the command string from the session's cwd, so a relative
+    path would not resolve.
+    """
+    harness = "codex"
+    root = codex_home(home)
+    hooks_dir = root / CODEX_HOOKS_SUBDIR
+    dst = hooks_dir / CODEX_SCRIPT_NAME
+    settings_path = root / CODEX_REGISTRATION_FILE
+
+    src = PACKAGE_DIR / "codex-hooks" / "session-end.sh"
+    if not src.is_file():
+        return InstallResult(harness, error=(
+            f"shipped capture hook not found at {src} — this install is "
+            "incomplete (broken package?). Reinstall tortoise."))
+    payload = src.read_bytes()
+
+    for target in (dst, settings_path):
+        escape = _symlink_escape(root, target, label="Codex config dir")
+        if escape:
+            return InstallResult(harness, error=f"Refusing: {escape}")
+    non_regular = _refuse_non_regular(dst)
+    if non_regular:
+        return InstallResult(harness, error=non_regular)
+    foreign = _foreign_install_refusal(dst, payload)
+    if foreign:
+        return InstallResult(harness, error=foreign)
+
+    data, refusal = _load_settings(settings_path)
+    if refusal:
+        return InstallResult(harness, error=f"Refusing: {refusal}")
+    if data is None:  # unreachable (a refusal is set whenever data is None)
+        return InstallResult(harness, error=(
+            f"Refusing: {settings_path} could not be read — refusing to touch "
+            "it. Merge manually."))
+    before = json.dumps(data, sort_keys=True)
+    command = shlex.quote(str(dst))
+    try:
+        merge_codex_capture_hooks(data, command=command, root=root)
+    except ValueError as e:
+        return InstallResult(harness, error=(
+            f"Refusing: {settings_path} has {e} — refusing to touch it. "
+            "Merge manually."))
+
+    unwritable = _preflight_probe([hooks_dir, settings_path.parent])
+    if not unwritable and not dry_run:
+        unwritable = _preflight_writable([hooks_dir, settings_path.parent])
+    if unwritable:
+        return InstallResult(harness, error=f"Refusing: {unwritable}")
+
+    actions: list[str] = []
+    changed = _install_script(dst, payload, dry_run=dry_run, actions=actions)
+
+    if before != json.dumps(data, sort_keys=True):
+        if dry_run:
+            actions.append(f"[dry-run] would merge the {CODEX_EVENT} capture "
+                           f"hook into {settings_path}")
+        else:
+            _atomic_bytes(settings_path,
+                          (json.dumps(data, indent=2) + "\n").encode("utf-8"),
+                          0o644 if not settings_path.exists()
+                          else settings_path.stat().st_mode & 0o777)
+            actions.append(f"merged the {CODEX_EVENT} capture hook into "
+                           f"{settings_path}")
+        changed = True
+
+    return InstallResult(harness, changed=changed, actions=tuple(actions))
+
+
+def _install_script(dst: Path, payload: bytes, *, dry_run: bool,
+                    actions: list[str]) -> bool:
+    """Write/repair one hook script at ``dst``; return whether it changed.
+
+    Shared by the Claude and Codex halves so the two seams cannot drift:
+
+    * bytes already current ⇒ no write, but an unchanged script that lost its
+      OWNER exec bit is repaired — Claude Code / Codex execute the hook
+      directly, and the fail-open script swallows the permission error, so a
+      `cp`-without-`chmod` hook files nothing while the install reports
+      success. The predicate is the ONE ``hook_install._has_owner_exec_bit``
+      ``status``/``upgrade`` also use (a non-owner exec bit is not enough,
+      #4000).
+    * a differing copy that passed the ownership guard is a stale/edited
+      Tortoise hook — preserved as ``<name>.bak`` before the shipped bytes
+      replace it (exactly as ``tortoise hooks upgrade`` does).
+    """
+    if _is_regular_unchanged(dst, payload):
+        if hook_install._has_owner_exec_bit(dst.stat().st_mode):
+            return False
+        repaired = (dst.stat().st_mode & 0o777) | stat.S_IXUSR
+        if dry_run:
+            actions.append(f"[dry-run] would restore the exec bit on {dst} "
+                           f"(mode {repaired:o})")
+        else:
+            os.chmod(dst, repaired)
+            actions.append(f"restored the exec bit on {dst} "
+                           f"(mode {repaired:o})")
+        return True
+    mode = 0o755
+    if dst.exists() and dst.is_file() and not dst.is_symlink():
+        mode = (dst.stat().st_mode & 0o777) | 0o111
+        backup = _backup_path(dst)
+        if dry_run:
+            actions.append(f"[dry-run] would back up {dst} → {backup}")
+        else:
+            _atomic_bytes(backup, dst.read_bytes(), 0o600)
+            actions.append(f"backed up {dst} → {backup}")
+    if dry_run:
+        actions.append(f"[dry-run] would install {dst} (mode {mode:o})")
+    else:
+        _atomic_bytes(dst, payload, mode)
+        actions.append(f"installed {dst}")
+    return True
+
+
 def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
     harness = "claude"
     hooks_dir = root / ".claude" / "hooks"
@@ -592,53 +797,12 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
         return InstallResult(harness, error=f"Refusing: {unwritable}")
 
     for name in CLAUDE_SCRIPTS:
-        dst = hooks_dir / name
-        data_bytes = payloads[name]
-        if _is_regular_unchanged(dst, data_bytes):
-            # Bytes are current — but a hook that LOST its exec bit is not
-            # installed: Claude Code executes `.claude/hooks/<name>` directly,
-            # and the fail-open script swallows the permission error, so the
-            # session files nothing while the install reports success.  This
-            # is the `cp`-without-`chmod` legacy state the installer exists to
-            # repair, so an unchanged-bytes hook is not automatically a no-op.
-            # The test is the OWNER's bit, not any exec bit (#4000), and it is
-            # the ONE predicate `hook_install._has_owner_exec_bit` defines —
-            # shared with status/upgrade so the two halves of the seam cannot
-            # disagree about whether a hook is runnable.  Claude Code runs as
-            # the owner, so a hook at `0o601`/`0o410` (group or others exec
-            # only) is unrunnable while `st_mode & 0o111` reads it as already
-            # correct — the silent false success this repair exists to
-            # prevent, and the bit the tests already assert (`stat.S_IXUSR`).
-            if hook_install._has_owner_exec_bit(dst.stat().st_mode):
-                continue
-            repaired = (dst.stat().st_mode & 0o777) | stat.S_IXUSR
-            if dry_run:
-                actions.append(f"[dry-run] would restore the exec bit on "
-                               f"{dst} (mode {repaired:o})")
-            else:
-                os.chmod(dst, repaired)
-                actions.append(f"restored the exec bit on {dst} "
-                               f"(mode {repaired:o})")
+        # The exec-bit repair / stale-backup rules live in the ONE
+        # ``_install_script`` the Codex half shares, so the two seams cannot
+        # disagree about what "installed" means (#4000).
+        if _install_script(hooks_dir / name, payloads[name],
+                           dry_run=dry_run, actions=actions):
             changed = True
-            continue
-        mode = 0o755
-        if dst.exists() and dst.is_file() and not dst.is_symlink():
-            mode = (dst.stat().st_mode & 0o777) | 0o111
-            # A differing copy that passed the ownership guard is a stale or
-            # locally edited Tortoise hook — preserve it before the shipped
-            # bytes replace it (exactly as ``tortoise hooks upgrade`` does).
-            backup = _backup_path(dst)
-            if dry_run:
-                actions.append(f"[dry-run] would back up {dst} → {backup}")
-            else:
-                _atomic_bytes(backup, dst.read_bytes(), 0o600)
-                actions.append(f"backed up {dst} → {backup}")
-        if dry_run:
-            actions.append(f"[dry-run] would install {dst} (mode {mode:o})")
-        else:
-            _atomic_bytes(dst, data_bytes, mode)
-            actions.append(f"installed {dst}")
-        changed = True
 
     if before != json.dumps(data, sort_keys=True):
         if dry_run:
@@ -805,6 +969,15 @@ def install_capture(
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
+    if harness == "codex":
+        try:
+            return _install_codex(
+                Path(home) if home is not None else Path.home(),
+                dry_run=dry_run)
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            return _install_failed(harness, e)
     try:
         return _install_pi(Path(home) if home is not None else Path.home(),
                            dry_run=dry_run)
@@ -818,7 +991,12 @@ __all__ = [
     "CAPTURE_SEAM",
     "CLAUDE_SCRIPTS",
     "CLAUDE_TIMEOUT",
+    "CODEX_EVENT",
+    "CODEX_REGISTRATION_FILE",
+    "CODEX_SCRIPT_NAME",
     "InstallResult",
+    "codex_home",
     "install_capture",
     "merge_capture_hooks",
+    "merge_codex_capture_hooks",
 ]

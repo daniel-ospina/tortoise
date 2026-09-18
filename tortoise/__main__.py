@@ -2458,8 +2458,9 @@ def _cmd_install_hooks(args) -> int:
 
     * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude / cline;
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
-      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry) and pi
-      (the in-repo capture extension).
+      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
+      codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
+      hooks.json`` registration), and pi (the in-repo capture extension).
 
     Capture used to be a copy-paste block in the dashboard: the installer gave
     a user the read path and nothing that files a session — and because the
@@ -2512,14 +2513,14 @@ def _cmd_install_hooks(args) -> int:
         return rc
 
     # Validate the read half BEFORE the capture half writes.  `tortoise install
-    # claude` installs two halves; if the read half refuses (a malformed
-    # ``UserPromptSubmit``, a symlink that escapes the root, a foreign cline
-    # hook) the command must fail with NOTHING written, not leave a project
-    # with capture installed and the read registration refused.  The read
-    # half's own dry run performs the exact checks the real run does and
-    # writes nothing.  Only claude has BOTH halves: ``pi`` has no read hook,
-    # ``codex``/``cline`` no capture.
-    if harness == "claude":
+    # claude` and `tortoise install codex` each install two halves; if the read
+    # half refuses (a malformed ``UserPromptSubmit``, a symlink that escapes the
+    # root, a foreign cline hook) the command must fail with NOTHING written,
+    # not leave a project with capture installed and the read registration
+    # refused.  The read half's own dry run performs the exact checks the real
+    # run does and writes nothing.  ``pi`` has no read hook; ``cline`` no
+    # capture.
+    if harness in ("claude", "codex"):
         refusal = _read_hook_refusal(args)
         if refusal != 0:
             return refusal
@@ -2528,7 +2529,7 @@ def _cmd_install_hooks(args) -> int:
     # shape/symlink checks above, or the capture half's own pre-flight), the
     # command fails with NOTHING written rather than leave a project with a
     # read hook and a silently-absent capture step.
-    if harness in ("claude", "pi"):
+    if harness in ("claude", "codex", "pi"):
         rc = _install_capture_seam(args, install_capture)
         if rc != 0:
             return rc
@@ -2677,7 +2678,9 @@ def _install_read_hook_impl(args) -> int:
         print("Installable harness seams (per-turn volunteering-memory hook "
               "+ capture):")
         print("  tortoise install codex   → <dir>/.codex/hooks.json "
-              "(UserPromptSubmit → volunteer-turn.sh codex)")
+              "(UserPromptSubmit → volunteer-turn.sh codex) + capture: "
+              "tortoise-session-end.sh into <codex-home>/hooks with a merged "
+              "SessionEnd entry in <codex-home>/hooks.json")
         print("  tortoise install claude  → <dir>/.claude/settings.json "
               "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
               "session-start.sh / session-end.sh into <dir>/.claude/hooks "
