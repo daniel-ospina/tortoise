@@ -22509,10 +22509,17 @@ def _drill_execute(
     except Exception:
         pass
     within_rto = duration_s <= _DRILL_RTO_S
+    # #3845: surface a wedge distinctly — "fork slot wedged" must never be
+    # readable as a plain "copy failed". Absent on the clean path, so a healthy
+    # drill record is unchanged.
+    detail = {k: v for k, v in (
+        ("restored", result.get("restored")),
+        ("fork_slot", result.get("fork_slot")),
+    ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",
         org_id=org_id, graph_id=graph_id, backup_key=backup_key,
-        duration_s=duration_s, detail={"restored": result.get("restored")},
+        duration_s=duration_s, detail=detail,
     )
     _write_drill_record(storage, record)
     return {

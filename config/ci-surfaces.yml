@@ -99,6 +99,12 @@ surfaces:
   # tortoise/hosted_backup.py's restore/import swap; hosted_backup.py is
   # therefore added to SOURCE_PATTERNS["api"] + CORE_ALSO so both an api-only
   # and a hosted_backup.py-only change select it (the #2938 precedent).
+  # #3845: a hung GRAPH.COPY fork child holds its server's module-fork slot
+  # forever, so every later redisFork fails EEXIST and the whole DR/drill family
+  # blocks on a server that can never fork again. Pins tortoise/fork_slot.py
+  # against the hosted_backup.py copy sites, so it owns to `api` for the same
+  # reason as test_graphcopy_boolean_index_3154.py below (#2159 first-match).
+  - test_fork_slot_wedge_3845.py
   - test_graphcopy_boolean_index_3154.py
   - test_hosted_api.py
   # #3359: per-session provider-cost measurement — the hosted emit path
