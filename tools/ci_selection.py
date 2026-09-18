@@ -136,6 +136,23 @@ SOURCE_PATTERNS = {
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
                    "website/apps/blog-admin/dist/index.html",
+                   # #3523: the dashboard's unknown-address guard
+                   # (tests/test_dashboard_unknown_address.py) reads the Pages
+                   # routing inputs for app.premiselabs.co plus the app's
+                   # location.pathname branches. `website/` sits in
+                   # NON_PYTHON_PREFIXES and neither path is under a Python
+                   # package prefix, so without these entries a PR that deletes
+                   # 404.html, adds a `/* / 200` catch-all, or adds an unrouted
+                   # pathname branch selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the
+                   # #1349/#3332/#3616 silent-drop class, which registration
+                   # alone does not fix (registration only makes the file
+                   # CLASSIFIED; selection is what makes it RUN). `src/` is a
+                   # directory because the anti-drift check scans every non-test
+                   # source module for pathname branches, not just main.jsx.
+                   "website/apps/dashboard/public/_redirects",
+                   "website/apps/dashboard/public/404.html",
+                   "website/apps/dashboard/src/",
                    # The guard also reads the gate Function itself (it extracts
                    # returnToPath/gateDecision from it, and derives the console's
                    # mount path from its directory), so a change to the gate must
