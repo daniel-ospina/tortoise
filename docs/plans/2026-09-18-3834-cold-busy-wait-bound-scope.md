@@ -33,7 +33,7 @@ an attempt count + a deadline; it is not a fail-open gate.)
 | Fixed here | NOT fixed here (named, so the PR cannot over-claim) |
 |---|---|
 | The ask lane's wait deadline (`_ASK_TIMEOUT_S`) is set to the owner's Option-C product choice, under the fleet's narrowest client budget with headroom. | The **startup/connect** stall and the zero-byte 503 on the MCP connect path — the auth plane (#3144 → #3851); the general cold-start case is **#3498 / #3284**. |
-| The bound-breach refusal becomes machine-actionable on hosted REST, selfhost REST and MCP (`Retry-After` + `retry_after` + `message`). | The **MCP client's** retry itself — Pi's `mcp-client`, a different repo: **agent-infra #1174**. The boundary (an advertised delay in the tool result) ships here. |
+| The bound-breach refusal becomes machine-actionable on hosted REST and selfhost REST (`Retry-After` + `retry_after` + `message`) and on MCP (`retry_after` + `message` — a tool result has no HTTP response, so no header). | The **MCP client's** retry itself — Pi's `mcp-client`, a different repo: **agent-infra #1174**. The boundary (an advertised delay in the tool result) ships here. |
 | A bounded, jittered, deadline-guarded retry ships for the ask REST lane (`_post_ask`), recovering **transient/queued** slowness. | Tail recovery on the **measured MCP transport** (depends on #1174) and the **10–60 s genuinely-slow band**, which Option C deliberately refuses (see C.1/C.3). |
 | The ask lane's wall-clock becomes persisted (off the response path) so the bound is re-derivable. | The absent perf lane (#3992) — this does not become that lane. |
 
@@ -260,7 +260,8 @@ no endpoint.
    documented in code and the PR. The value's derivation (and the exact 1-of-573 count) is recorded in
    code + PR with the transport caveat.
 2. The bound breach returns **504 + `Retry-After` + a body carrying `code`, `retry_after` and a static
-   actionable `message`** on hosted REST, selfhost REST and MCP; a test pins all three, so it cannot
+   actionable `message`** on hosted REST and selfhost REST (header + body) and on MCP (body only —
+   a tool result has no HTTP response); a test pins all three, so it cannot
    silently revert to a bare 504.
 3. `_post_ask` retries an **advertised** refusal through `tortoise/retry.py::call_with_predicate` with
    `retries = ASK_RETRY_ATTEMPTS - 1`; tests prove (a) it retries and honours `Retry-After` as a **floor**

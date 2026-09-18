@@ -833,3 +833,56 @@ The plan-review cycle was **capped at the owner-authorized single cycle** (Optio
 cycle's 6 P1 + 12 P2 + 6 advisory findings and the subsequent fold were **not re-reviewed** — the
 authorization was for one cycle, and no second cycle was run. Everything in §1 was found by *tests*,
 not by review.
+
+---
+
+## Cycle-6 code review (commit-workflow Step 2) — findings, dispositions, cycle log
+
+Dispatched 6 reviewers in parallel on PR #4020 (4 always-on: Guidance, Bug two-pass, History +
+prior comments, Security; 2 surface-matched: Architecture, Data/Schema). Two findings were
+independently confirmed by DISJOINT reviewers (#1+#3 on the stale comment; #2+#11 on the
+`OverflowError` hole), which is the strongest evidence in this cycle.
+
+### Fixed in this cycle
+
+| # | Sev | Where | Finding | Fix |
+|---|---|---|---|---|
+| 1 | P2 (×2: #1, #3) | `sdk.py` 504 arm comment | The comment still said the finite filter is "Written with the ``inf`` builtin" — i.e. it recommended the exact construct whose `NameError` this PR fixes, and contradicted the comment 18 lines below it. | Rewritten to name `_ASK_RETRY_AFTER_CEILING_S` and to state that `inf` is **not** a builtin. |
+| 2 | P2 (×2: #2, #11) | `sdk.py` 504 body parse (and the 429 sibling) | `float()` on a **JSON integer** is arbitrary-precision: `float(int("9"*400))` raises `OverflowError`, which is an `ArithmeticError` and **not** a `ValueError`, so it escaped the `except (TypeError, ValueError)` and left `ask()` as an untyped error instead of the documented typed `AskTimeout`. Mechanism verified (`isinstance(e, ValueError) is False`). | `OverflowError` added to both parses; regression row added with a 400-digit body `retry_after`. |
+| 3 | P2 (#2) | `retry.py` `delay_for` clamp | Same hole in the shared primitive, whose docstring promises "a malformed hint never escapes". | `OverflowError` added; a `10**400` row added to the malformed-hint test. |
+| 4 | P2 (#1) | `hosted_api.py` `_emit_ask_latency_off_path` | Both `except` branches called `_logger.warning(...)` **outside** any suppression — the only statements in a documented "NEVER RAISES" function not inside a swallowing guard, so a raising handler/stream would escape (turn the pinned 504 into a 500). The same PR suppresses exactly this hazard for the strip log. Two standards for one hazard in one file. | Both wrapped in `contextlib.suppress(Exception)`, matching the strip log. |
+| 5 | P2 (×2: #6, #7) | `schemas.ASK_BUSY_MESSAGE` | The message told the reader to retry "after the delay in the Retry-After header" — but it also ships as the **MCP tool error**, which has no HTTP response and therefore no header. On exactly the surface the measurement came from, the primary instruction named a field that cannot exist. | Reworded transport-neutrally (names the advertised value, then says where it lives per surface); still digit-free, so `ASK_BUSY_RETRY_AFTER_S` stays the single source. |
+| 6 | P2 (#7) | 1987 doc: 12 `SUPERSEDED` markers + AMENDMENT; scope doc ×2 | The docs claimed the refusal "carries `Retry-After` … on hosted REST, selfhost REST **and MCP**" — a header is structurally impossible on MCP. A future reader would test for something that cannot exist. | Corrected in all 14 places: header on the two REST surfaces, body-only on MCP. |
+| 7 | **P1** (#3) | `quota.py` bound rationale | The comment said the max "sits **above** the 15s budget … converts an **opaque client-side timeout**" and then, two lines later, said the 15s is the **CONNECT** budget and "explicitly **not** an ask caller's per-call timeout" — a self-contradiction, and the scope record had marked the abandonment reading **Withdrawn**. | The owner's memo directs that this framing be preserved, so it is **kept** — but the following paragraph now scopes it explicitly (the 15s is the narrowest client's CONNECT budget; the max is *inside* every ask caller's per-call budget and was a **successful** slow ask; nothing claims a per-call abandonment). The claim no longer contradicts itself. See the decision note below. |
+| 8 | P2 (#7) | `tests/test_ask_api.py` | I had added a `set(props) <= _ALLOWED_ANALYTICS_PROPS` line next to the exact-set assertion. A subset check is a **tautology** after the allowlist filter has run — it cannot fail for the reason its comment claims. | Dropped; the exact-set assertion (which can fail) is kept. |
+
+### Dispositioned, not fixed (with reason)
+
+| Where | Finding | Disposition |
+|---|---|---|
+| `hosted_api` vs `mcp_server` emitters | Two divergent off-path telemetry pumps (counter+sync-drain vs future-set+async-drain, `BaseException` vs `Exception` swallows, two retention registries); neither drain sees the other's writes, and a fix to one does not reach the other — demonstrated by this PR having to fix a swallow in only one of them. | **Filed #4023.** Extracting a shared cross-module emitter is a refactor of `mcp_server`'s telemetry machinery, which is beyond the owner's R5-1 scope ("reuse the module's own `_retain_feed_task`; not scope growth"). |
+| Three refusal builders + the coercion asymmetry | `int(float(header))` truncates on the two REST surfaces while MCP emits the raw constant, so the "single source" is only nominal for a non-integral value. | **Appended to #4013** (the filed R5-3 home), with the asymmetry and a suggested canonical-type fix. R5-3 was explicitly not to be folded. |
+
+### Decision note — the withdrawn 15 s claim (P1 #7)
+
+The scope doc marks the "60 > 15 ⇒ the client abandons" reading **Withdrawn** (the 15 s is the
+narrowest client's CONNECT budget; the ask caller's own budget is wider: 75 s SDK, unbounded MCP).
+The owner's work order for this implementation directs that the *framing* travel verbatim:
+"the 21.759 s max sits above the 15 s client budget, so a bound converts an opaque client-side
+timeout into a legible refusal while the server stops burning the work." **The owner ruling wins
+over the scope doc's withdrawal** — a recorded decision outranks a prior artifact — so the framing
+is preserved in the PR body as directed, and the code comment now carries it *plus* the measurement
+scoping in one coherent paragraph rather than two contradictory ones. The ten-second bound itself
+does not rest on this: it is justified from the distribution (above the p99, cutting only the single
+long tail) and from D-12.
+
+### Clean in this cycle (checked, not reported)
+
+Retry primitive additivity (`ingest_v2.py` callers byte-identical); exactly-once counter discipline
+under a 50-emit concurrency probe; the predicate rejecting bare 504 / client-fired timeout / 429 /
+502; the deadline clamping the sleep rather than sleeping past it; retention self-pruning; the
+constant relations (`10 > 5 > 0`, `10 + 2 < 15`, `75 > 10`) and `SLO_MS = 300` untouched; no
+header-injection or tenant leak on the new body/header mirror; the four surviving-schema consumers
+filtering by `event_name` so the new `ask_request` rows never enter their populations; and all four
+prior artifacts the change amends verified to exist and to say what the PR claims (#4013, #4015,
+#4017, #4018).

@@ -666,8 +666,9 @@ def test_ask_analytics_writer_sends_only_allowlisted_props(monkeypatch):
     with open(path) as f:
         rows = [json.loads(ln) for ln in f.read().splitlines() if ln.strip()]
     row = rows[-1]
+    # EXACT set (not a subset — a subset assertion is a tautology after the
+    # allowlist filter has run, so it cannot detect the loss class this guards).
     assert row["properties"] == {"status": "ok"}, row
-    assert set(row["properties"]) <= ha_mod._ALLOWED_ANALYTICS_PROPS
 
 
 def test_ask_emission_daemon_thread_start_failure(monkeypatch):

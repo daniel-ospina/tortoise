@@ -33,10 +33,18 @@ _ASK_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 #: ``assert not any(ch.isdigit() for ch in ASK_BUSY_MESSAGE)`` (the digit form is
 #: what the pin can actually enforce; a *spelled-out* number would still pass it,
 #: which is recorded rather than over-claimed).
+#:
+#: **Transport-neutral by design** (code-review #6/#7): this one constant ships
+#: on THREE surfaces, and the MCP tool result has no HTTP response and therefore
+#: no ``Retry-After`` header — a message naming "the header" as the primary
+#: instruction would misdirect the agent on exactly the surface the measurement
+#: came from. So it names the advertised value, then says where to find it per
+#: surface.
 ASK_BUSY_MESSAGE = (
     "Tortoise is busy or still waking up and could not answer this question "
-    "within its wait budget. Retry after the delay in the Retry-After header "
-    "(also the retry_after field of this body)."
+    "within its wait budget. Retry after the advertised back-off — the "
+    "`retry_after` field of this body (also the `Retry-After` header on HTTP "
+    "responses)."
 )
 
 import datetime as _dt  # noqa: E402

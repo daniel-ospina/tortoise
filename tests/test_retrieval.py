@@ -1018,6 +1018,10 @@ def test_no_deadline_is_inert_for_every_existing_caller(monkeypatch):
     ("abc", 0.0),        # unparseable → coerced, never escapes as ValueError
     (float("nan"), 0.0),  # the argument-order pin: max(0.0, nan) IS 0.0
     (-5.0, 0.0),         # negative → floored at 0
+    # A huge int raises OverflowError from float() — an ArithmeticError, NOT a
+    # ValueError — so this row goes RED if the clamp catches only
+    # (TypeError, ValueError) and the hint then escapes the primitive.
+    (10 ** 400, 0.0),
 ])
 def test_malformed_advertised_hint_never_reaches_sleep(monkeypatch, bad, expected):
     """A malformed/hostile hint must never raise out of the primitive and must

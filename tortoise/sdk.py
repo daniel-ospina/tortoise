@@ -14518,14 +14518,16 @@ class TortoiseSDK:
             if header_ra is not None:
                 try:
                     retry_after = float(header_ra)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     retry_after = None
             if retry_after is None:
                 body_ra = err.get("retry_after") if isinstance(err, dict) else None
                 if body_ra is not None:
                     try:
                         retry_after = float(body_ra)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
+                        # OverflowError: an arbitrary-precision JSON int beyond
+                        # float range (see the 504 arm's note).
                         retry_after = None
             raise AskQuotaExceeded("ask quota exceeded",
                                    retry_after=retry_after,
@@ -14541,16 +14543,23 @@ class TortoiseSDK:
             # the body field (mirroring the 429 parse above) — and admit it
             # ONLY when finite and >= 0. THIS filter is what keeps an
             # unparseable / hostile / fake-server hint out of the retry
-            # predicate and out of the primitive's sleep. Written with the
-            # ``inf`` builtin because this module has no ``import math`` (a
-            # ``math.isfinite`` call would be a NameError); a NaN fails
-            # ``0 <= ra`` so it is rejected without a special case.
+            # predicate and out of the primitive's sleep. The comparison is
+            # against the module constant ``_ASK_RETRY_AFTER_CEILING_S``
+            # (defined at module scope because ``inf`` is **not** a builtin and
+            # this module does not import ``math``); a NaN fails ``0 <= ra`` so
+            # it is rejected without a special case.
+            #
+            # ``OverflowError`` is caught alongside the value errors: ``r.json()``
+            # parses a JSON integer into an arbitrary-precision ``int`` and
+            # ``float()`` on one beyond ~1.8e308 raises ``OverflowError`` (an
+            # ``ArithmeticError``, NOT a ``ValueError``). Uncaught it escaped as
+            # an untyped error instead of the documented typed ``AskTimeout``.
             retry_after = None
             header_ra = r.headers.get("Retry-After")
             if header_ra is not None:
                 try:
                     retry_after = float(header_ra)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     retry_after = None
             if retry_after is None:
                 body_ra = (err.get("retry_after")
@@ -14558,7 +14567,7 @@ class TortoiseSDK:
                 if body_ra is not None:
                     try:
                         retry_after = float(body_ra)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         retry_after = None
             # ``inf`` is a module constant here (NOT a builtin): the finite/NaN
             # filter is ``0 <= ra < _ASK_RETRY_AFTER_CEILING_S``, which rejects

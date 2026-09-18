@@ -179,7 +179,10 @@ def call_with_predicate(fn: Callable[[], Any], *, predicate: Callable[[BaseExcep
       hint is coerced to ``0.0`` and never escapes: the value is clamped with
       ``max(0.0, min(float(x), cap))``, whose **argument order is
       load-bearing** (``max(nan, 0.0) is nan`` → ``time.sleep(nan)`` raises an
-      untyped ``ValueError``; ``max(0.0, nan) == 0.0`` is safe).
+      untyped ``ValueError``; ``max(0.0, nan) == 0.0`` is safe), and the
+      coercion catches ``OverflowError`` as well as ``TypeError``/
+      ``ValueError`` — ``float()`` on a huge ``int`` raises it, and it is an
+      ``ArithmeticError``, not a ``ValueError``.
     - ``deadline`` is a ``_monotonic()`` instant. No retry sleep **begins**
       at/after it, and a sleep's END is clamped to it. **The deadline clamp
       WINS over ``delay_for``'s floor**: with less than ``floor`` remaining the
@@ -208,7 +211,11 @@ def call_with_predicate(fn: Callable[[], Any], *, predicate: Callable[[BaseExcep
                         # max(0.0, ...) OUTSIDE min(...): `max(nan, 0.0)` is nan
                         # (and time.sleep(nan) raises), `max(0.0, nan)` is 0.0.
                         floor = max(0.0, min(float(advertised), cap))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
+                        # OverflowError too: a hint that is a huge int/Decimal
+                        # raises it from float(), and it is an ArithmeticError —
+                        # NOT a ValueError — so omitting it broke this seam's
+                        # stated "a malformed hint never escapes" contract.
                         floor = 0.0  # a malformed hint never escapes
                     wait = floor + random.random() * floor
             if deadline is not None:

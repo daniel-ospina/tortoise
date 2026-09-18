@@ -19883,8 +19883,14 @@ def _emit_ask_latency_off_path(org_id: str | None, duration_ms: int,
             # its cancellation) owns the single decrement.
             if fut is None:
                 _ask_telemetry_decrement()
-            _logger.warning("ask latency telemetry schedule failed",
-                            exc_info=True)
+            # The log is itself inside a suppression: it is the one statement
+            # in this function NOT already inside a swallowing guard, and a
+            # raising handler/stream would escape — i.e. the never-raise
+            # contract would hold only incidentally (the same hazard the
+            # strip-log at `_track_analytics_event` suppresses for).
+            with contextlib.suppress(Exception):
+                _logger.warning("ask latency telemetry schedule failed",
+                                exc_info=True)
             return
     # Defensive mirror, unreachable from the async route. A Thread has no
     # ``add_done_callback`` and needs no retention (``threading._active`` holds
@@ -19901,8 +19907,9 @@ def _emit_ask_latency_off_path(org_id: str | None, duration_ms: int,
         t.start()
         started = True
     except BaseException:
-        _logger.warning("ask latency telemetry thread start failed",
-                        exc_info=True)
+        with contextlib.suppress(Exception):
+            _logger.warning("ask latency telemetry thread start failed",
+                            exc_info=True)
     finally:
         if not started:
             _ask_telemetry_decrement()

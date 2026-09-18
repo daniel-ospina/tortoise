@@ -1100,6 +1100,11 @@ def test_ask_retry_deadline_stops_further_attempts(monkeypatch):
     ("inf", None, False),
     ("Wed, 21 Oct 2015 07:28:00 GMT", None, False),  # HTTP-date (RFC 7231)
     (None, None, False),
+    # A JSON integer is arbitrary-precision in Python: `float()` on one beyond
+    # ~1.8e308 raises OverflowError (an ArithmeticError, NOT a ValueError), so
+    # this row goes RED if the parse catches only (TypeError, ValueError) — it
+    # escaped as an untyped OverflowError instead of the typed AskTimeout.
+    (None, int("9" * 400), False),
     # A finite 3h advertisement IS admitted (the value is honest, the
     # primitive's `cap` bounds the actual sleep, not the parse).
     ("10800", None, True),

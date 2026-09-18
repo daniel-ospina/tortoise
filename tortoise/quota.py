@@ -673,12 +673,18 @@ class AskBoundedTimeoutError(Exception):
 #:
 #: Why a bound at all, given only a small tail exceeds it: the measured max
 #: (21.759s) sits **above** the 15s budget the narrowest hosted client exposes,
-#: so for that tail a server bound does NOT cause an abandonment that would
-#: otherwise have succeeded. It converts an **opaque client-side timeout into a
-#: legible refusal** while the server stops burning the work. The 15s figure is
-#: the **narrowest budget any hosted client exposes — its CONNECT budget (the
-#: D-12 anchor)** — and is explicitly **not** an ask caller's per-call timeout
-#: (the SDK's is 75s and the MCP client's ask call is effectively unbounded).
+#: so a bound converts an **opaque client-side timeout into a legible refusal**
+#: while the server stops burning the work.
+#:
+#: Precision on that sentence, so the comment does not read as two claims that
+#: cancel (code-review #3 flagged the earlier self-contradiction): the 15s is the
+#: **narrowest budget any hosted client exposes — its CONNECT budget (the D-12
+#: anchor)** — and is explicitly **not** an ask caller's per-call timeout (the
+#: SDK's is 75s and the MCP client's ask call is effectively unbounded). The max
+#: is therefore **inside** every ask caller's per-call budget and was a
+#: *successful* slow ask, so NOTHING here claims a successful per-call ask was
+#: abandoned at 15s. What the bound buys on that tail is stated above: the
+#: refusal is legible and the server stops burning the work.
 #:
 #: ``SLO_MS = 300`` (volunteer.py) governs ``/v1/context`` and is a DIFFERENT
 #: decision — deliberately not moved here, and not a precedent for this number.
