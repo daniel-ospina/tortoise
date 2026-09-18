@@ -739,8 +739,10 @@ def ask_in_flight_capacity(org_id: str | None) -> bool:
 async def run_ask_bounded(fn, org_id: str | None, *args, **kwargs):
     """Shared bounded ask runner (#1987 Task 7/8/9) — the ONE wrapper the
     hosted HTTP handler, the hosted MCP handler, and the selfhost REST
-    handler all awaited (all three removed in #3849, so this is currently
-    UNCALLED — see the RETIRED note on this cluster).
+    handler all awaited (all three removed in #3849, so no product caller
+    reaches it any more; its one remaining caller is ``tests/test_quota.py``,
+    which pins the exec-floor guarantee — see the RETIRED note on this
+    cluster).
 
     Bounds: global ``asyncio.Semaphore(8)`` + ``asyncio.wait_for(_ASK_TIMEOUT_S)``
     wrapping the FULL bounded section (semaphore acquire + the to_thread
