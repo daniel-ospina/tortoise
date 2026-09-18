@@ -48,8 +48,15 @@ def _props(sdk: TortoiseSDK, pid: str) -> dict:
 # ── T1: supersede_point stamps the window (contiguity + fallback matrix) ──
 
 def test_supersede_valid_from_is_the_sole_source_when_successor_is_undated(sdk):
-    """The ``valid_from`` kwarg is the window-end source (contiguity) — and
-    the SOLE source, because this successor carries no stored ``validFrom``.
+    """The ``valid_from`` kwarg is the window-END source — and the SOLE source,
+    because this successor carries no stored ``validFrom``.
+
+    ⚠️ This scenario produces an OVERLAP, not contiguity: an undated successor
+    has an open window start, so ``_covers`` treats it as covering every
+    instant and the predecessor's kwarg-written ``validTo`` cannot meet it
+    (ONTOLOGY.md §4.7; tracked as #3985). Contiguity from the kwarg is
+    demonstrated by ``test_supersede_successor_valid_from_contiguity``, where
+    the successor IS dated.
 
     Name pinned to that condition: the kwarg is refused when it DISAGREES with
     a stored ``validFrom`` (see the disagreement tests below), so "explicit
