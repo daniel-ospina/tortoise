@@ -29,7 +29,8 @@ from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
-from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
+from .retrieval import (DEFAULT_POOL_SIZE, _distinct_session_ids,
+                        _safe_session_tag, resolve_pool_size)
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
@@ -12538,6 +12539,20 @@ class TortoiseSDK:
             together for the per-session dedup — P2-20), else the hit's own
             value unchanged.
 
+        ⛔ POOL SAFETY (D3 #1540): this method must NOT introduce a NEW
+        session source. Every ``session_id`` it attaches becomes the ask
+        lane's ``dedup_pool`` bucket key, so widening the join (e.g. adding
+        the ``:Session`` ``CONTAINS`` edge — the eval ingest writes those
+        with INTERNAL ``lme:{qid}:s{si}`` ids) re-buckets the pool and
+        changes which hits fit the 8k/32KiB reader window. D3's session
+        identity is derived downstream by ``retrieval.hit_session_id`` from
+        the hit's own ``sessionId`` (populated by the point fetch from the
+        Point prop / ``:Session`` edge) / ``session_id``. That derivation does
+        NOT re-bucket the pool — but it does widen rendered blocks, so it
+        changes 32 KiB byte-cap admission (see the ``retrieved_session_ids``
+        row in ``docs/product/answer-surface.md``), unlike widening THIS join,
+        which is what re-buckets the pool.
+
         D8 supersession/validity keys are ALREADY attached to point hits by
         ``tortoise_fts_query`` via ``fetch_point_epistemic_state`` — this
         method MUST NOT re-fetch them; they ride through untouched (no drift
@@ -13162,12 +13177,42 @@ class TortoiseSDK:
         entity_data: dict[str, dict] = {}
         try:
             if entity_type == "point":
+                # D3 session identity: the point fetch carries the session
+                # identity so ``SearchResult.session_id`` / the wire
+                # ``sessionId`` is populated for points (it was hardcoded ""
+                # — the capture-metadata columns were only read for
+                # entity_type="document"). Two ordered graph-derived sources,
+                # never a guess: the Point's own camel ``sessionId`` prop,
+                # else the ``:Session`` ``CONTAINS`` edge the capture loop
+                # writes for every turn Point (whose ``:Session`` id IS the
+                # session identity for a captured session); a Point contained
+                # by several ``:Session`` nodes resolves to the deterministic
+                # minimum of them.
+                #
+                # ⛔ Deliberately NOT read: the snake ``n.session_id`` prop.
+                # It is the identity ``create_point(session_id=…`` writes, but
+                # reading it changes the rendered evidence of the R17
+                # assembly goldens (``tests/test_assembly_sdk.py``, whose
+                # ``_FROZEN_CHUNKS`` content record is contractually never
+                # re-captured) — a separate, policy-governed change. Tracked
+                # as #3804; this PR stays identity-only for the captured-turn
+                # surface the defect measured.
                 rows = graph.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
+                    "OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n) "
                     "RETURN n.id, n.content, n.pointKind, "
-                    "       coalesce(n.has_answer, false)",
+                    "       coalesce(n.has_answer, false), n.sessionId, "
+                    "       sess.id",
                     params={"ids": result_ids},
                 ).result_set
+                # A Point contained by MORE THAN ONE :Session yields one row
+                # per Session and the engine's row order is unspecified, so
+                # the edge ids are collected and a deterministic minimum is
+                # taken below — the wire identity must not depend on plan
+                # order. (The previous lock-free form also served as the
+                # last-resort id-prefix derivation; that inference is gone —
+                # see ``retrieval.hit_session_id``.)
+                edge_sids: dict[str, list[str]] = {}
                 for row in rows:
                     pid = row[0]
                     entity_data[pid] = {
@@ -13175,9 +13220,33 @@ class TortoiseSDK:
                         "kind": row[2],
                         # A5 (#2070): the stored evidence mark rides the hit
                         # payload (mirrors the eval's point_props_for_hits)
-                        # so the ask lane's evidence boost has material.
+                        # so the lane's evidence boost has material.
                         "has_answer": bool(row[3]),
+                        "sessionId": (row[4] or "") if len(row) > 4 else "",
                     }
+                    edge_sid = (row[5] or "") if len(row) > 5 else ""
+                    if edge_sid:
+                        edge_sids.setdefault(pid, []).append(edge_sid)
+                for pid, entry in entity_data.items():
+                    # D3: no fabrication, and an EXPLICIT identity wins: the
+                    # Point's own ``sessionId`` prop is taken when it is
+                    # renderable, else the deterministic minimum of the
+                    # :Session CONTAINS edge ids (sanitized BEFORE the pick —
+                    # a lexicographic minimum over raw ids could select an
+                    # unrenderable one and blank a value that had a perfectly
+                    # good sibling). The wire is filtered through the SAME
+                    # sanitizer the reader tag uses: ``/v1/search`` output is
+                    # agent-consumed and may be re-embedded into a
+                    # line-oriented prompt, so it must not hand back a
+                    # structure-breaking id.
+                    own = _safe_session_tag(entry["sessionId"])
+                    if own:
+                        entry["sessionId"] = own
+                    else:
+                        cands = [s for s in
+                                 (_safe_session_tag(v) for v in
+                                  (edge_sids.get(pid) or [])) if s]
+                        entry["sessionId"] = min(cands) if cands else ""
             elif entity_type == "event":
                 rows = graph.query(
                     "MATCH (n:Event) WHERE n.eventId IN $ids RETURN n.eventId, n.subject, n.eventKind",
@@ -13214,7 +13283,13 @@ class TortoiseSDK:
                         "kind": row[2] or "",
                         "topics": row[3] or [],
                         "summary": row[4] or "",
-                        "sessionId": row[5] or "",
+                        # D3: the SAME sanitizer as the ask-path identity and
+                        # the point branch — this branch is reachable from the
+                        # agent-consumed MCP ``tortoise_search``
+                        # (``entity_type='document'``) and ``sessionId`` is
+                        # client/ingest-writable, so a structure-breaking value
+                        # must not be handed back here either.
+                        "sessionId": _safe_session_tag(row[5]),
                         "eventId": row[6] or "",
                         "sourcePath": row[7] or "" if len(row) > 7 else "",
                     }
@@ -13782,13 +13857,27 @@ class TortoiseSDK:
             — recall surface unchanged, hermetic no-dupe tests prove the
             ON path is byte-identical on duplicate-free pools.
 
-        Returns the 12-field response shape: ``{answer, abstained,
+        Returns the 13-field response shape: ``{answer, abstained,
         question_type, question_date, evidence, context_tokens, model,
         provider, route, cost_estimate_usd, duration_ms,
-        retrieval_degraded}``. ``question_date`` is ALWAYS the RESOLVED value
+        retrieval_degraded, retrieved_session_ids}``. ``question_date`` is
+        ALWAYS the RESOLVED value
         (server-now-UTC ``YYYY-MM-DD`` default when omitted; the caller
         override when provided). No retrieval time-travel v1 — the pool stays
-        the live graph.
+        the live graph. ``retrieved_session_ids`` (D3 session identity) lists
+        the DISTINCT session ids of the assembled evidence in the order the
+        evidence presents them — the structured counterpart of the DERIVED
+        ``[session <id>]`` tags; empty when no hit's identity could be derived
+        (never fabricated). It is the
+        honest set of identities the retrieved hits carry, NOT a mirror of the
+        tags: a hit on the eval lane (``lme_session_index``) keeps its
+        historical tag whatever id it carries — a rendering index may name no
+        id, or render the index while still naming its id, and a
+        non-rendering index still renders ``[session ?]``. The derived tag is
+        also part of the BYTE accounting, so a pool already at the 32 KiB byte
+        ceiling can admit slightly fewer hits than pre-change (the 8K token
+        cap is unaffected — the tag adds bytes, not whitespace words). See
+        ``docs/product/answer-surface.md``.
 
         Raises: ``AskValidationError`` (input), ``AskRetrievalUnavailable``
         (retrieval/annotation/assembly raise), ``AskReaderUnavailable``
@@ -14060,7 +14149,7 @@ class TortoiseSDK:
 
         # W4 (#2101): additive why-layer entries for the evidence pool the
         # reader saw (flag-gated — the ``why`` key is ABSENT with the flag
-        # OFF, keeping the 12-field response byte-identical). The hits
+        # OFF, keeping the response byte-identical for the flag-only key). The hits
         # already carry the search-path enrichment; projection is a pure
         # dict op (zero extra graph reads). Fail-open: any error → ``[]``.
         why_entries: list[dict] = []
@@ -14076,6 +14165,17 @@ class TortoiseSDK:
                 why_entries = []
         serving = getattr(model, "last_route", None) or \
             getattr(model, "route", None)
+        # D3 session identity: the DISTINCT derived session ids of the
+        # assembled evidence, in the order the evidence presents them (this
+        # lane's post-dedup ranking order — post-boost, and when enabled
+        # post-rerank (A7) / post-package (A8) — NOT raw RRF once
+        # ``apply_evidence_boost`` has reordered the pool). Derived from the
+        # SAME hits the reader window contains, in the same order, so the field
+        # and the evidence cover exactly the same hits; the TAG each hit
+        # shows can still differ when the hit carries ``lme_session_index``
+        # (that lane's index tag wins — see ``_render_block``). Hits whose
+        # identity cannot be derived contribute nothing (never fabricated).
+        retrieved_session_ids = _distinct_session_ids(assembled)
         duration_ms = int((_time.monotonic() - t0) * 1000)
         try:
             # #2069: the response's cost_estimate_usd uses the SERVING lane's
@@ -14103,10 +14203,11 @@ class TortoiseSDK:
             "cost_estimate_usd": cost_estimate,
             "duration_ms": duration_ms,
             "retrieval_degraded": degraded,
+            "retrieved_session_ids": retrieved_session_ids,
         }
         # W4 (#2101): additive why-layer entries — emitted ONLY with the W4
-        # flag ON (absent otherwise — the 12-field response stays
-        # byte-identical).
+        # flag ON (absent otherwise — every non-`why` field, including the
+        # D3 `retrieved_session_ids`, stays byte-identical).
         if w4_enrichment_enabled():
             resp["why"] = why_entries
         return resp

@@ -100,6 +100,7 @@ from tortoise.sdk import (
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
+from tortoise.supabase_control import _service_key  # #3677
 from tortoise.transport import ask_exposure_enabled
 
 _logger = logging.getLogger(__name__)
@@ -19690,15 +19691,33 @@ _ALLOWED_ANALYTICS_PROPS = {
 
 _ANALYTICS_FALLBACK_PATH = None
 
+# #3677: bounded POST timeout. It is asserted (not merely tuned): a timeout
+# short enough to expire in production makes EVERY write fall through to the
+# ephemeral JSONL — #3677's symptom reached by a different route.
+_ANALYTICS_POST_TIMEOUT_S = 5
+
 
 def _track_analytics_event(org_id: str, event_name: str,
                            properties: dict | None = None) -> None:
     """Record a funnel event. PII-free; graceful when Supabase is unconfigured.
 
-    Writes to Supabase analytics_events when SUPABASE_URL + SUPABASE_SERVICE_KEY
-    are set; otherwise appends to a local JSONL fallback. Never raises — the
-    onboarding flow must not break because analytics failed.
+    Writes to Supabase analytics_events when SUPABASE_URL + a service key are
+    set (either name in ``supabase_control._SERVICE_KEY_ENV``); otherwise
+    appends to a local JSONL fallback. Never raises — the onboarding flow must
+    not break because analytics failed.
+
+    #3677: this site read ONLY the legacy ``SUPABASE_SERVICE_KEY`` while the
+    hosted deployment sets ``SUPABASE_SERVICE_ROLE_KEY`` — so in production
+    the key was never found, every event fell through to the JSONL fallback on
+    an ephemeral VM, and the whole analytics stream was silently discarded
+    (2,464 events were found in that file on the production machine, and none
+    of them in ``analytics_events``).
     """
+    if not isinstance(properties, dict):
+        # The contract is never-raise; a non-dict would raise AttributeError
+        # from `.items()` straight out of it. Every in-repo caller passes a
+        # dict — this pins the contract for callers added later.
+        properties = None
     props = {k: v for k, v in (properties or {}).items()
              if k in _ALLOWED_ANALYTICS_PROPS}
     event = {
@@ -19708,27 +19727,44 @@ def _track_analytics_event(org_id: str, event_name: str,
         "created_at": datetime.now(UTC).isoformat(),
     }
     url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    # The service-key names and their precedence come from one seam
+    # (`supabase_control._service_key()`): #3677 was exactly this site reading a
+    # name the hosted deployment never sets. Older sibling sites still
+    # hand-roll the same pair — see #3677's sibling audit.
+    key = _service_key()
     if url and key:
         try:
             import httpx
-            with httpx.Client(timeout=5) as client:
-                client.post(
+            with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
+                resp = client.post(
                     f"{url}/rest/v1/analytics_events",
                     json=event,
                     headers={"apikey": key, "Authorization": f"Bearer {key}",
                              "Content-Type": "application/json",
                              "Prefer": "return=minimal"},
                 )
-            return
+            # #3677: a REJECTED write is still a lost event. `post` does not
+            # raise on a 4xx/5xx, so without this check the event was silently
+            # discarded — the #3677 loss class, reachable whenever the key is
+            # revoked or INSERT-denied (a 401 returns no exception). Fall
+            # through to the local JSONL instead of dropping it.
+            if 200 <= resp.status_code < 300:
+                return
         except Exception:
             pass  # fall through to JSONL
     # JSONL fallback (~/.tortoise/analytics_fallback.jsonl)
     global _ANALYTICS_FALLBACK_PATH
     if _ANALYTICS_FALLBACK_PATH is None:
-        fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
-        os.makedirs(fallback_dir, exist_ok=True)
-        _ANALYTICS_FALLBACK_PATH = os.path.join(fallback_dir, "analytics_fallback.jsonl")
+        # Directory creation belongs INSIDE the best-effort guard: it used to
+        # sit outside it, so a read-only HOME raised straight out of a function
+        # documented never to raise (and into the GitHub OAuth callback).
+        try:
+            fallback_dir = os.path.join(os.path.expanduser("~"), ".tortoise")
+            os.makedirs(fallback_dir, exist_ok=True)
+            _ANALYTICS_FALLBACK_PATH = os.path.join(
+                fallback_dir, "analytics_fallback.jsonl")
+        except Exception:
+            return  # no fallback disk available — still never raises
     try:
         import json as _json
         with open(_ANALYTICS_FALLBACK_PATH, "a") as f:
@@ -22542,10 +22578,17 @@ def _drill_execute(
     except Exception:
         pass
     within_rto = duration_s <= _DRILL_RTO_S
+    # #3845: surface a wedge distinctly — "fork slot wedged" must never be
+    # readable as a plain "copy failed". Absent on the clean path, so a healthy
+    # drill record is unchanged.
+    detail = {k: v for k, v in (
+        ("restored", result.get("restored")),
+        ("fork_slot", result.get("fork_slot")),
+    ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",
         org_id=org_id, graph_id=graph_id, backup_key=backup_key,
-        duration_s=duration_s, detail={"restored": result.get("restored")},
+        duration_s=duration_s, detail=detail,
     )
     _write_drill_record(storage, record)
     return {

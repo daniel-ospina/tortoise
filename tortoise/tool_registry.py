@@ -54,6 +54,21 @@ def _idem() -> ToolAnnotations:
 # ── Registry Entries ────────────────────────────────────────────
 # Maintained in the same order as mcp_server.py for diffability.
 # New tools: add one entry here → both surfaces pick it up.
+#
+# ⛔ AN ENTRY HERE EXPANDS THE AGENT-FACING SURFACE, AND THAT NEEDS EXPLICIT
+#    HUMAN APPROVAL (#3863). `tools/surface-guard.py` — CI job `surface-guard`,
+#    part of `python-ci-gate` — compares this registry against the approved
+#    baseline in `config/surface-manifest.yml` and fails closed on ANY added
+#    tool, removed tool, changed SDK binding, or an exemption that has become
+#    reachable.
+#
+#    To propose an addition: change the registry, run
+#    `uv run python tools/surface_manifest.py cut` to fold it into the baseline,
+#    run `... render` to regenerate `docs/product/mcp-sdk-surface.md`, then get
+#    the owner's approval recorded per-row in `approval:`. A baseline that no
+#    longer matches this registry, or an approval that is absent, is a red build
+#    by design — that red IS the gate. Do not "fix" it by editing the baseline
+#    to match; see docs/product/mcp-sdk-surface.md for the curated list.
 
 TOOL_REGISTRY: list[ToolDefinition] = [
     # ── Core CRUD ─────────────────────────────────────────────────

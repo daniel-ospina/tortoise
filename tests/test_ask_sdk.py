@@ -251,11 +251,12 @@ def test_local_lane_pipeline(monkeypatch):
     ])
     fake = _install_fake(sdk, monkeypatch)
     result = sdk.ask("what is the gym schedule?", question_date="2026-08-29")
-    # the full 12-field shape
+    # the full 13-field shape
     assert set(result) == {"answer", "abstained", "question_type",
                            "question_date", "evidence", "context_tokens",
                            "model", "provider", "route", "cost_estimate_usd",
-                           "duration_ms", "retrieval_degraded"}
+                           "duration_ms", "retrieval_degraded",
+                           "retrieved_session_ids"}
     assert result["answer"] == "The gym schedule is Monday and Wednesday."
     assert result["abstained"] is False
     assert result["question_date"] == "2026-08-29"  # resolved value

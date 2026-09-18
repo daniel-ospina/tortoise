@@ -432,7 +432,7 @@ def ask_lane_rerank(
     cached scorer, and reranks the deduped pool to ``top_k``. Every failure
     path returns ``(hits, stats)`` with ``applied: False`` + a reason — the
     caller keeps the untouched pool (degrade-to-current). Returns the
-    rerank stats for logging; the response shape (12 fields) is unchanged.
+    rerank stats for logging; the ask response shape is unchanged.
 
     Budget guard (issue #2976): the measured rerank lever costs ~6.6x
     context, so when ``max_context_tokens`` / ``max_context_bytes`` are

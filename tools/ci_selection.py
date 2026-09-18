@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import math
 import os
 import re
 import sys
@@ -54,7 +55,36 @@ WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 # #1266: the test (a)/(b) halves must stay count-balanced within this delta.
 # A tilt beyond it means someone added files to one half without rebalancing
 # (the exact drift that pushed half (a) over the watchdog cap).
+# #3400: this is now the FALLBACK invariant, used only when the manifest
+# carries no `durations` map at all. Once measured durations exist the
+# balance invariant is DURATION (below) — LPT packs by weight, and a correct
+# pack can legitimately carry very different file counts (the real pool
+# splits 195/325 while both halves weigh 28.0m: one 855s file on one side,
+# ~130 sub-second files on the other).
 HALF_IMBALANCE_TOLERANCE = 3
+
+# #3400: with measured durations, the halves must stay DURATION-balanced
+# within this ratio. Index parity on the same pool leaves a=18.8m vs b=37.1m
+# (1.97x); the LPT pack lands at 1.00x. 1.25 is loose enough for run-to-run
+# noise and
+# tight enough that a reversion to parity (1.97x on the real pool) reds.
+HALF_DURATION_IMBALANCE_RATIO = 1.25
+
+# #1473: weight for a fast file with no measured duration. The pack can only
+# be as good as its weights, hence the coverage guard (#3400).
+DEFAULT_FAST_WEIGHT = 2.0
+
+# #3400: `durations` rotted to 15 entries for 500 fast files (97% packed at
+# the flat default), which silently degenerated the duration-aware pack into
+# a count-based one. Floor the coverage so it cannot rot back. The check is
+# skipped entirely for an ABSENT/EMPTY map (a repo that has not adopted
+# durations is not failed) and bites once the map is populated: 90% leaves
+# ~52 files of headroom on the current 520-file pool (actual: 96.5%, after the
+# merge of main grew the pool from 500 — the 18 unmeasured files carry no hand
+# entry: 16 are main-added tests, 2 (test_helpers.py,
+# test_provenance_extractedfrom_3263.py) were already unmeasured on the branch.
+# They pack at DEFAULT_FAST_WEIGHT).
+DURATION_COVERAGE_MIN = 0.90
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
 NL = chr(10)
@@ -95,6 +125,22 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #3952: the blog-admin console SPA's build config and its
+                   # committed build snapshot own the guard tests added in
+                   # tests/test_admin_return_to.py (the build base, and
+                   # document-independent resolution of the shell's asset refs).
+                   # Neither path is under a Python package prefix, so without
+                   # these entries a PR that reverts `base: '/admin/'` to the
+                   # relative form selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the same
+                   # #3616 pattern these entries sit next to, one level up.
+                   "website/apps/blog-admin/vite.config.ts",
+                   "website/apps/blog-admin/dist/index.html",
+                   # The guard also reads the gate Function itself (it extracts
+                   # returnToPath/gateDecision from it, and derives the console's
+                   # mount path from its directory), so a change to the gate must
+                   # run the guard too.
+                   "website/functions/admin/[[path]].ts",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that
@@ -645,10 +691,27 @@ def carve_out_files(manifest: dict) -> set[str]:
     return set(manifest.get("carve_out", []))
 
 
+def fast_pool(manifest: dict) -> list[str]:
+    """#3400: the full-matrix fast pool — every manifest-classified file that
+    is not slow, env-broken, or carve-out. Single source of truth for the
+    push halves (push_legs) AND the durations-coverage guard, so the two can
+    never disagree about which files need a weight."""
+    slow = set(manifest.get("slow_files", []))
+    carve_out = carve_out_files(manifest)
+    classified = set()
+    for s, files in manifest["surfaces"].items():  # noqa: B007
+        classified.update(files)
+    classified.update(manifest.get("tier1", []))
+    classified.update(slow)
+    return sorted(f for f in classified
+                  if f not in slow and f not in ENV_BROKEN_FILES
+                  and f not in carve_out)
+
+
 def push_legs(manifest: dict) -> dict:
     """#1472: partition every manifest-classified file into exactly one push
-    leg (half_a / half_b / slow / env_broken / carve_out), parity-split the
-    fast set.
+    leg (half_a / half_b / slow / env_broken / carve_out), duration-balanced
+    across the two fast halves (#3400).
 
     Single source of truth for the workflow's push matrix: registration in
     the manifest is sufficient — no manual matrix edit. Returns .py-less
@@ -659,18 +722,21 @@ def push_legs(manifest: dict) -> dict:
     """
     slow = set(manifest.get("slow_files", []))
     carve_out = carve_out_files(manifest)
-    classified = set()
-    for s, files in manifest["surfaces"].items():  # noqa: B007
-        classified.update(files)
-    classified.update(manifest.get("tier1", []))
-    classified.update(slow)
-    fast = sorted(f for f in classified
-                  if f not in slow and f not in ENV_BROKEN_FILES
-                  and f not in carve_out)
-    half_a = fast[0::2]
-    half_b = fast[1::2]
-    # #1485: distribute push_extra (bench files) EVENLY so the halves stay
-    # within the #1266 ±3 tolerance (all-bench-in-half-b caused 135 vs 139).
+    fast = fast_pool(manifest)
+    # #3400: pack the push halves by measured duration (#1473 LPT) instead of
+    # the duration-blind index-parity split this used to be (`fast[0::2]` /
+    # `fast[1::2]`). Parity on the real pool put 37.1m of work in half (b)
+    # against 18.8m in half (a) — 1.97x — and blew the 55m watchdog. LPT is
+    # deterministic (ties break on name) and lands the same pool at 28.0m /
+    # 28.0m. split_fast_gate returns `tests/`-prefixed names; the workflow's
+    # matrix format is bare, so strip the prefix.
+    fast_a, fast_b = split_fast_gate(fast,
+                                     _durations_map(manifest))
+    half_a = [f[len("tests/"):] for f in fast_a]
+    half_b = [f[len("tests/"):] for f in fast_b]
+    # #1485: distribute push_extra (bench files) evenly across the halves.
+    # Durations now drive the balance (#3400), but even spreading keeps this
+    # neutral rather than dumping the whole bench set on one half.
     for i, f in enumerate(manifest.get("push_extra", [])):
         (half_a if i % 2 == 0 else half_b).append(f.replace(".py", ""))
     strip = lambda xs: sorted(x.replace(".py", "") for x in xs)  # noqa: E731
@@ -822,7 +888,37 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
                 issues.append(f"half entry {f} is in BOTH halves (double-run, #1266)")
             seen.add(f)
     counts = {h: len(fs) for h, fs in halves.items()}
-    if abs(counts.get("a", 0) - counts.get("b", 0)) > HALF_IMBALANCE_TOLERANCE:
+    # #3400: the balance invariant is DURATION once measured weights exist.
+    # LPT packs by weight, so a heavy file dumped entirely on one half is
+    # caught even when the counts look even — and a correct duration pack may
+    # legitimately carry very different counts (195 vs 325 on the real pool).
+    # The ±3 count check would red that correct split, so it now applies only
+    # to manifests with no durations map at all (e.g. the small test
+    # fixtures, or a repo that has not adopted durations).
+    durations = _durations_map(manifest)
+    if durations:
+        weights = {h: sum(_duration_weight(durations.get(
+                            f if f.endswith(".py") else f + ".py"))
+                          for f in fs)
+                   for h, fs in halves.items()}
+        lo, hi = min(weights.values()), max(weights.values())
+        # P2 (#3407 review): compute the ratio BEFORE the f-string. `lo <= 0`
+        # short-circuits the comparison but the message still evaluated
+        # `hi / lo`, so the one branch written to CATCH a zero-weight half died
+        # with ZeroDivisionError while formatting its own diagnosis. A
+        # single-sided pack is reachable (a 1-file pool, or an all-zero
+        # measured map) and this is the only check that catches it —
+        # `leg_coverage_issues()` and `fast_files_absent_from_halves()` both
+        # pass when one half is empty.
+        ratio = float("inf") if lo <= 0 else hi / lo
+        if lo <= 0 or ratio > HALF_DURATION_IMBALANCE_RATIO:
+            issues.append(
+                f"matrix halves duration-imbalanced: "
+                f"{ {h: round(w / 60, 1) for h, w in weights.items()} } min "
+                f"(ratio {ratio:.2f}x, tolerance "
+                f"{HALF_DURATION_IMBALANCE_RATIO:.2f}x) — rebalance the "
+                f"durations map (#3400)")
+    elif abs(counts.get("a", 0) - counts.get("b", 0)) > HALF_IMBALANCE_TOLERANCE:
         issues.append(
             f"matrix halves imbalanced: a={counts.get('a', 0)} vs "
             f"b={counts.get('b', 0)} (tolerance ±{HALF_IMBALANCE_TOLERANCE}) — "
@@ -848,7 +944,38 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
     return sorted(f for f in fast if f[:-3] not in halfset)
 
 
-def split_fast_gate(files, durations: dict, default_weight: float = 2.0):
+def _duration_weight(value, default: float = DEFAULT_FAST_WEIGHT) -> float:
+    """#3407 review: a malformed `durations` value must never crash a consumer.
+
+    `split_fast_gate`'s sort key negates the weight, so a `None`/string value
+    raised `TypeError: bad operand type for unary -` deep inside the sort —
+    which killed `--integrity` in `leg_coverage_issues()` *before*
+    `duration_issues()` was ever called, so the gate that exists to NAME the bad
+    entry tracebacked instead. A `NaN` was worse: every comparison is False, so
+    it passed both the value check and the imbalance check and silently
+    produced a maximally single-sided pack with a green exit.
+
+    Coercing to the default here means every consumer degrades safely, while
+    `duration_issues()` still names the offending entry and fails the gate.
+    `bool` is excluded explicitly (`isinstance(True, int)` is True).
+
+    #3407 review cycle 3: the finiteness probe must be TOTAL. `math.isfinite`
+    converts to float, so an int beyond float range (>=309 digits) raised
+    `OverflowError` — i.e. the probe introduced to stop a crash could itself
+    crash. A negative duration is impossible data and is likewise coerced.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:  # an int beyond float range
+        finite = False
+    if not finite or value < 0:
+        return default
+    return value
+
+
+def split_fast_gate(files, durations: dict, default_weight: float = DEFAULT_FAST_WEIGHT):
     """#1473: LPT greedy pack of the selected fast-gate files across halves
     a/b by measured duration — deterministic (ties -> a; assignment order).
     Raises ValueError on non-list input (guards the 'ALL' full-mode string).
@@ -858,7 +985,8 @@ def split_fast_gate(files, durations: dict, default_weight: float = 2.0):
     weighted = []
     for f in files:
         name = f[len("tests/"):] if f.startswith("tests/") else f
-        weighted.append((name, durations.get(name, default_weight)))
+        weighted.append((name, _duration_weight(
+            durations.get(name, default_weight), default_weight)))
     a, b = [], []
     ta = tb = 0.0
     for name, w in sorted(weighted, key=lambda x: (-x[1], x[0])):
@@ -871,10 +999,35 @@ def split_fast_gate(files, durations: dict, default_weight: float = 2.0):
     return a, b
 
 
+def _durations_map(manifest: dict) -> dict:
+    """`durations` as a mapping, or `{}` — never a non-mapping. (#3407 c4)
+
+    `None`/absent is the documented "this repo has not adopted the duration
+    gate" state and collapses to `{}` (a PASS, per `duration_coverage_issues`).
+    A non-mapping is malformed and is NAMED by `duration_issues` before it gets
+    here; this exists so a PRODUCER path (`--split`) can never crash either.
+    """
+    raw = manifest.get("durations")
+    return raw if isinstance(raw, dict) else {}
+
+
 def duration_issues(manifest: dict) -> list[str]:
     """#1473: every durations key must be classified and non-slow."""
     issues = []
-    durations = manifest.get("durations", {})
+    # #3407 review cycle 4 (pre-existing): this site and `--split` below used
+    # `.get("durations", {})`, which returns a present-but-NULL `durations:` key
+    # as `None` — the empty-map state `duration_coverage_issues` documents as
+    # "NOT a failure" — and crashed with a raw TypeError instead.
+    #
+    # The precise predicate: `None`/absent means "this repo has not adopted the
+    # duration gate" and is a PASS. ANY other non-mapping (`0`, a string, a
+    # list) is a malformed declaration and must be NAMED — collapsing it into
+    # the empty case with `or {}` would have turned a wrong crash into a silent
+    # wrong pass.
+    raw = manifest.get("durations")
+    if raw is not None and not isinstance(raw, dict):
+        return [f"durations is not a mapping: {type(raw).__name__}"]
+    durations = _durations_map(manifest)
     slow = set(manifest.get("slow_files", []))
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
@@ -885,7 +1038,64 @@ def duration_issues(manifest: dict) -> list[str]:
             issues.append(f"durations key {name} is a slow file (must be fast-gate)")
         if name not in classified:
             issues.append(f"durations key {name} is not classified in the manifest")
+        # P2 (#3407 review): validate the VALUE, not just the key. Both guards
+        # iterated keys only, so a hand-edit typo in a now-505-line map passed
+        # `--integrity` silently and then crashed `push_legs` with a TypeError
+        # inside `split_fast_gate`'s sort key — the gate's whole job is to name
+        # the bad entry instead of tracebacking on it. `bool` is excluded
+        # explicitly: it is an `int` subclass and would slip through.
+        v = durations[name]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            issues.append(f"durations value for {name} is not numeric: {v!r}")
+        else:
+            # #3407 review P2: a NaN passed the type check AND was invisible to
+            # the imbalance guard (every comparison is False), so it produced a
+            # maximally single-sided pack with a green exit. Type-checking is
+            # necessary but not sufficient — finiteness is the real predicate.
+            # Cycle 3: the probe must be TOTAL (`math.isfinite` raises
+            # OverflowError on an int beyond float range), and a negative
+            # duration is impossible data that otherwise exited 0.
+            try:
+                finite = math.isfinite(v)
+            except OverflowError:
+                finite = False
+            if not finite:
+                issues.append(f"durations value for {name} is not finite: {v!r}")
+            elif v < 0:
+                issues.append(f"durations value for {name} is negative: {v!r}")
     return issues
+
+
+def duration_coverage_issues(manifest: dict,
+                             threshold: float = DURATION_COVERAGE_MIN) -> list[str]:
+    """#3400: the `durations` map must cover (almost) the whole fast pool.
+
+    A fast file with no measured duration is packed at DEFAULT_FAST_WEIGHT,
+    so a mostly-empty map silently turns `split_fast_gate` back into a
+    count-based pack — the exact rot that left 15 weights for 500 fast files
+    (#1266/#1473) and left the push halves duration-blind. Fail-closed once
+    the map is populated; an ABSENT or EMPTY map is NOT a failure, so a repo
+    that has not adopted durations is never hard-failed by this guard.
+    """
+    durations = _durations_map(manifest)
+    if not durations:
+        return []
+    fast = fast_pool(manifest)
+    if not fast:
+        return []
+    missing = sorted(f for f in fast if f not in durations)
+    coverage = (len(fast) - len(missing)) / len(fast)
+    if coverage < threshold:
+        return [
+            f"durations coverage {coverage:.1%} "
+            f"({len(fast) - len(missing)}/{len(fast)} fast files) is below the "
+            f"{threshold:.0%} floor — {len(missing)} file(s) pack at the flat "
+            f"{DEFAULT_FAST_WEIGHT}s default, so the push split is effectively "
+            f"count-based (#3400). Refresh config/ci-surfaces.yml `durations` "
+            f"from tools/ci_timing.py / the CI junit artifacts. Example: "
+            f"{missing[:5]}"
+        ]
+    return []
 
 
 # ── #2938: surface audit (report-only, non-blocking) ─────────────────────
@@ -1609,8 +1819,15 @@ def main() -> int:
 
     if args.integrity:
         missing = integrity(manifest)
+        # #3407 review P1: `duration_issues` must run BEFORE `leg_coverage_issues`.
+        # The latter calls `push_legs()` -> `split_fast_gate()`, so a malformed
+        # durations value used to raise inside the packer before the check that
+        # names it had run — fail-closed, but with no diagnosis. (Belt and
+        # braces: `_duration_weight` also coerces, so the packer can no longer
+        # raise at all.)
         problems = missing + slow_file_issues(manifest) \
-            + leg_coverage_issues(manifest) + duration_issues(manifest)
+            + duration_issues(manifest) + leg_coverage_issues(manifest) \
+            + duration_coverage_issues(manifest)
         # #1472: the matrix rows must come from the selector derivation
         # (space-joined matrix_* outputs) — when they do, the #1266
         # halves-parse tie check is
@@ -1677,7 +1894,7 @@ def main() -> int:
         # every tier-2 PR (json.loads('') raises).
         raw = sys.stdin.read().strip()
         files = json.loads(raw) if raw else []
-        a, b = split_fast_gate(files, manifest.get("durations", {}))
+        a, b = split_fast_gate(files, _durations_map(manifest))
         result = {"a": a, "b": b}
         out_dir = Path(os.environ.get("CI_SELECTION_ARTIFACT_DIR", REPO / ".ci-selection"))
         out_dir.mkdir(exist_ok=True)
