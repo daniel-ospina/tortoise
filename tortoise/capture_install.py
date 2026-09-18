@@ -235,8 +235,20 @@ def _symlink_escape(root: Path, target: Path, *, label: str) -> str:
     symlink (``.claude/hooks/session-end.sh`` → an in-root file) IS accepted:
     ``_atomic_bytes`` replaces the link with a regular file, so the resulting
     state is one ``status`` reads as current.
+
+    A symlink LOOP (``Path.resolve()`` raises ``RuntimeError`` on Py3.12, not
+    ``OSError``) is returned as this same refusal message rather than
+    escaping ``install_capture`` as a traceback (#3808 R17).
     """
-    root_r = root.resolve()
+    try:
+        root_r = root.resolve()
+    except (OSError, RuntimeError) as e:
+        # Py3.12 ``Path.resolve()`` raises ``RuntimeError`` (deliberately, not
+        # ``OSError``) on a symlink cycle; the module promises a populated
+        # result, so a cyclic root is a refusal, never a traceback.
+        return (f"{root} cannot be resolved ({e.__class__.__name__}: {e}) — "
+                f"the {label} contains a symlink loop. Fix the symlink chain "
+                "and re-run.")
     try:
         rel_parts = target.relative_to(root).parts
     except ValueError:
@@ -246,7 +258,14 @@ def _symlink_escape(root: Path, target: Path, *, label: str) -> str:
         cur = cur / part
         if not cur.is_symlink():
             continue
-        resolved = cur.resolve()
+        try:
+            resolved = cur.resolve()
+        except (OSError, RuntimeError) as e:
+            return (
+                f"{cur} cannot be resolved ({e.__class__.__name__}: {e}) — "
+                f"a symlink loop in the {label}. Fix the symlink chain "
+                "(unlink the cyclic link first) and re-run."
+            )
         if resolved != root_r and root_r not in resolved.parents:
             return (
                 f"{cur} resolves to {resolved} — outside the {label} "

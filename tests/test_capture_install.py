@@ -483,6 +483,29 @@ def test_claude_install_refuses_a_settings_symlink_that_escapes_the_root(tmp_pat
     assert outside.read_text() == '{"hooks": {}}'
 
 
+def test_claude_install_refuses_a_symlink_loop_instead_of_raising(tmp_path):
+    """A symlink cycle under the install root is a refusal, not a traceback.
+
+    Py3.12 ``Path.resolve()`` raises ``RuntimeError`` (deliberately, not
+    ``OSError``) on a symlink loop, and ``install_capture`` only caught
+    ``OSError`` — so a project whose ``.claude`` links to itself escaped the
+    module's documented populated-error contract as a CLI traceback.
+
+    Mutation: remove the ``except (OSError, RuntimeError)`` guard around
+    ``_symlink_escape``'s ``resolve()`` — this call raises ``RuntimeError``
+    instead of returning ``ok=False`` with a populated error."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / ".claude").symlink_to(".claude")  # a self-loop
+
+    res = install_capture("claude", root=root)
+
+    assert not res.ok, "a symlink loop reported success"
+    assert "Refusing" in res.error, res.error
+    assert "symlink loop" in res.error, res.error
+    assert (root / ".claude").is_symlink(), "the cyclic link was replaced"
+
+
 def test_claude_install_fails_loudly_when_the_hooks_path_is_not_a_directory(tmp_path):
     """An install that cannot write the hook must NOT report success.
 
@@ -1197,6 +1220,54 @@ def test_non_finite_timeout_is_never_a_budget(tmp_path, literal):
     # surfaces read (last, so a regression reports the SURFACE that failed).
     assert not hook_install._is_timeout_budget(float(literal)), (
         f"_is_timeout_budget accepted {literal}")
+
+
+def test_int_timeout_larger_than_a_double_is_never_a_budget(tmp_path):
+    """A JSON integer too large for a double is not a budget on ANY surface,
+    and the predicate must return a verdict instead of raising.
+
+    ``json.loads`` parses an integer literal of any magnitude as an
+    arbitrary-precision ``int`` (no float coercion), and ``math.isfinite``
+    coerces to a C double, so a >308-digit ``timeout`` raises
+    ``OverflowError`` out of ``hooks status``, ``hooks upgrade`` and
+    ``install_capture`` — a CLI traceback on valid JSON, and a regression the
+    float non-finite gate introduced.
+
+    Mutation: restore the bare ``and math.isfinite(value)`` return — the
+    predicate call raises ``OverflowError`` and every surface below dies
+    rather than rewriting the value to 60."""
+    huge = 10 ** 400
+    settings = json.dumps({"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+        {"type": "command", "command": ".claude/hooks/session-end.sh",
+         "timeout": huge}]}]}})
+
+    # 1. the shared predicate itself — a verdict, not an exception.
+    assert hook_install._is_timeout_budget(huge) is False
+
+    # 2. hooks status — drift, not a budget.
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(settings)
+    findings = hook_install.detect_install(tmp_path, "claude")
+    assert [f for f in findings if f.kind == "settings-no-timeout"], (
+        f"status accepted a >double-int timeout: {findings}")
+
+    # 3. hooks upgrade — rewritten to the required budget.
+    upgrade = hook_install.upgrade_install(tmp_path, "claude")
+    assert upgrade.refused is None, upgrade.refused
+    after = _settings(tmp_path)["hooks"]["SessionEnd"][0]["hooks"][0]
+    assert after["timeout"] == CLAUDE_TIMEOUT, (
+        f"upgrade left a >double-int timeout in place: {upgrade.actions}")
+
+    # 4. the installer — the same, into a fresh project.
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(settings)
+    res = install_capture("claude", root=proj)
+    assert res.ok, res.error
+    merged = _settings(proj)["hooks"]["SessionEnd"][0]["hooks"][0]
+    assert merged["timeout"] == CLAUDE_TIMEOUT, (
+        f"the installer preserved a >double-int timeout: {res.actions}")
 
 
 # ── the seam map is one map (drift guards) ──────────────────────────────

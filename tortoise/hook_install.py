@@ -1053,9 +1053,22 @@ def _is_timeout_budget(value: object) -> bool:
     budgeted" and left the hook to Claude Code's 1.5 s default (#3808 R15).
     Passing the widened float gate without this check is what made the
     non-finite form survive every surface that shares this predicate.
+
+    An ``int`` larger than a double must ALSO come back ``False``, not raise:
+    ``json.loads`` parses an integer literal of any magnitude as an
+    arbitrary-precision ``int``, and ``math.isfinite`` coerces its argument to
+    a C double, so a >308-digit ``"timeout"`` raises ``OverflowError`` — a
+    CLI traceback out of install/status/upgrade on a perfectly valid
+    ``settings.json``.  A budget no double can hold is not a budget (Claude
+    Code's own ``JSON.parse`` reads it as ``Infinity``), and the shared
+    predicate is the single gate all three surfaces read (#3808 R16).
     """
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value))
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _settings_findings(layout: HarnessLayout, data: dict,
