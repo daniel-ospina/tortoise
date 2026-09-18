@@ -951,6 +951,114 @@ def _disable_embedder_autowarmup(monkeypatch):
     yield
 
 
+# ── #3820 (cycle-2 P1): the analytics-alert channel is OFF for every test ───
+# The write path now has a terminal outcome, and three of its four exits can
+# reach the alert leg (`dropped` at once, `fallback` once the streak crosses
+# `_ANALYTICS_FALLBACK_ALERT_AFTER`, and the resolve on a recovered write).
+# Unpatched, that leg builds the REAL `AlertStore` from whatever the process
+# env carries: on a machine holding production secrets (an ambient
+# `DR_ISSUES_PAT` + `R2_*`, or `SUPABASE_SERVICE_ROLE_KEY` with `SUPABASE_URL`
+# deleted — which the P1-2 arm classifies as `fallback`) a suite run PUTs to
+# prod R2, searches and can CREATE a real `[DR] ANALYTICS_SINK_DEGRADED` GitHub
+# issue, and pushes Telegram. The per-file guard this replaces covered only
+# `tests/test_analytics_write_path_resolution.py`; this one covers EVERY test.
+# `_ANALYTICS_DEGRADED_STREAK` / `_ANALYTICS_RESOLVE_PENDING` /
+# `_ANALYTICS_RESOLVE_NOT_BEFORE` are
+# process globals with no other reset, the outcome counter is a process-global
+# Prometheus `Counter`, and `_ANALYTICS_COUNTS` is the in-process dict the
+# incident detail reads — all are reset per test.
+#
+# The LOCAL JSONL SINK is the fifth write path and is isolated here too: with
+# `_ANALYTICS_FALLBACK_PATH` left as the module default (`None`) the writer
+# resolves `~/.tortoise/analytics_fallback.jsonl` — the REAL file, and on the
+# production box the DR runbook's recovery source (`docs/ops/registry-backup-dr.md`).
+# Only four test files ever set the path, so every other emit path appended
+# test-fixture ids to the real file. Redirecting it to `tmp_path` closes that
+# suite-wide.
+_REAL_ANALYTICS_ALERT_STORE = None
+# The production module-level ``_ANALYTICS_COUNTS`` object, captured before the
+# isolation replaces the attribute. The replacement is a fresh derivation each
+# test, which is right for isolation but HIDES whether the real dict is itself
+# derived — a test pinning that derivation must read this captured object.
+_REAL_ANALYTICS_COUNTS = None
+
+
+@pytest.fixture(autouse=True)
+def _analytics_alert_isolation(monkeypatch, tmp_path):
+    """Never let a test build a real analytics sink incident (#3820 P1).
+
+    Patches the documented indirection seam ``_analytics_alert_store`` to a
+    no-op and clears the episode latch, the degraded streak, the outcome
+    counter and the in-process outcome counts. The local JSONL sink is
+    redirected into the test's ``tmp_path`` as well, so no test can append to
+    the REAL ``~/.tortoise/analytics_fallback.jsonl``. Tests that mean to
+    exercise the store install their own fake via ``monkeypatch.setattr`` in
+    the test body (that runs later, so it wins); the few that pin the REAL
+    construction leg opt back in with the ``real_analytics_alert_store``
+    fixture.
+    """
+    global _REAL_ANALYTICS_ALERT_STORE, _REAL_ANALYTICS_COUNTS
+    import tortoise.hosted_api as ha
+    import tortoise.monitoring as mon
+
+    if _REAL_ANALYTICS_ALERT_STORE is None:
+        _REAL_ANALYTICS_ALERT_STORE = ha._analytics_alert_store
+    monkeypatch.setattr(ha, "_analytics_alert_store", lambda: None)
+    monkeypatch.setattr(ha, "_ANALYTICS_DEGRADED_STREAK", 0)
+    # `PENDING=True, NOT_BEFORE=None` is the process-start state: an incident
+    # may have been left open by a dead process, so the first delivered write
+    # probes (the CLEAN state omits the probe).
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_PENDING", True)
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_NOT_BEFORE", None)
+    # #3820 cycle-9 P2-2: the resolve's in-flight claim. A leaked ``True`` from
+    # one test would make every later test's resolve SKIP, so the suite-wide
+    # isolation resets it with the rest of the resolve state.
+    monkeypatch.setattr(ha, "_ANALYTICS_RESOLVE_INFLIGHT", False)
+    if _REAL_ANALYTICS_COUNTS is None:
+        _REAL_ANALYTICS_COUNTS = ha._ANALYTICS_COUNTS
+    monkeypatch.setattr(ha, "_ANALYTICS_COUNTS",
+                        {o: 0 for o in ha._ANALYTICS_OUTCOMES})
+    monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH",
+                        str(tmp_path / "analytics_fallback.jsonl"))
+    mon.ANALYTICS_OUTCOME_COUNT.clear()
+
+
+@pytest.fixture
+def real_analytics_alert_store(monkeypatch, _analytics_alert_isolation):
+    """Opt out of ``_analytics_alert_isolation`` for the REAL store leg.
+
+    Only for tests that pin what the real builder does (T14/T15 in
+    ``tests/test_analytics_fallback_alert.py``). Those replace the object store
+    (``_backup_storage`` -> ``MemoryStorage``) and both egress endpoints, so
+    restoring the real builder cannot reach R2, GitHub or Telegram.
+
+    This fixture does NOT itself patch the object store or the egress
+    callables — a requester that restores the real builder without them can
+    reach real infrastructure. Every requester must install both (as T14 and
+    T15 do).
+    """
+    import tortoise.hosted_api as ha
+
+    real = _REAL_ANALYTICS_ALERT_STORE
+    assert real is not None, "real builder not captured — check fixture order"
+    monkeypatch.setattr(ha, "_analytics_alert_store", real)
+    return real
+
+
+@pytest.fixture
+def real_analytics_counts(_analytics_alert_isolation):
+    """The production module-level ``_ANALYTICS_COUNTS`` object.
+
+    ``_analytics_alert_isolation`` REPLACES the module attribute with a fresh
+    derivation each test. That is right for isolation, but it masks whether the
+    REAL module-level dict is itself derived: a test pinning the derivation
+    must read this captured object instead of the replacement.
+    """
+    assert _REAL_ANALYTICS_COUNTS is not None, (
+        "real counts not captured — check fixture order")
+    return _REAL_ANALYTICS_COUNTS
+
+
 @pytest.fixture
 def force_sparse_tfidf(monkeypatch):
     """#2573/#2772: pin the sparse TF-IDF fallback (no embedder) for the test.
