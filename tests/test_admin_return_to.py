@@ -24,15 +24,23 @@ regex test would miss the three defects the review cycles actually caught:
 
 Node is optional (the repo's convention — see test_cross_subdomain_cookie_sync):
 the test skips cleanly when node is unavailable.
+
+#3952 extends the subject from reachability to RENDERABILITY: the URL the gate
+returns you to must be able to load its own bundle. The console SPA is built
+with an absolute `base: '/admin/'`; a relative base resolved against the
+document URL, so the extensionless `/admin` (the form the gate emits in
+`next=`) requested `/assets/index-*.js` and rendered blank. The two #3952 tests
+at the end of this file pin the config and the committed build snapshot.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import pytest
 
@@ -572,4 +580,100 @@ def test_console_spa_carries_the_return_to() -> None:
     assert "window.location.pathname" in body, "the helper does not use the pathname"
     assert "window.location.search" not in body, (
         "the helper appends the query, which /auth rejects — dropping the return-to (#3080)"
+    )
+
+
+# ── #3952 — the console the gate returns you to must actually RENDER ──────
+
+DIST_INDEX = REPO_ROOT / "website" / "apps" / "blog-admin" / "dist" / "index.html"
+VITE_CONFIG = REPO_ROOT / "website" / "apps" / "blog-admin" / "vite.config.ts"
+
+_ASSET_REF = re.compile(r'(?:src|href)="([^"]+)"')
+
+
+def _console_asset_refs() -> list[str]:
+    """Vite-emitted asset refs in the COMMITTED console shell.
+
+    Scoped to the refs Vite owns (`assets/...`) so a hand-authored reference in
+    the shell template — a favicon, an `<a href>`, a `#/route` fragment — cannot
+    red this test with a message about the bundle.
+    """
+    html = DIST_INDEX.read_text(encoding="utf-8")
+    refs = [
+        m
+        for m in _ASSET_REF.findall(html)
+        if "assets/" in m and not m.startswith(("http://", "https://", "//", "data:"))
+    ]
+    assert refs, f"no Vite asset references in {DIST_INDEX} — the shell would render nothing"
+    return refs
+
+
+@pytest.mark.parametrize(
+    "doc_url",
+    [
+        # The canonical console URL — and the exact form the gate's next= emits.
+        # BROKEN with the old relative base (prefix '/').
+        f"{ORIGIN}/admin",
+        # Trailing-slash form — renders today; must not regress.
+        f"{ORIGIN}/admin/",
+        # Even-depth shell route — happened to resolve correctly with './' too.
+        f"{ORIGIN}/admin/blog",
+        # Odd-depth shell route — BROKEN with the old relative base
+        # (prefix '/admin/blog/' → '/admin/blog/assets/...').
+        f"{ORIGIN}/admin/blog/edit",
+    ],
+)
+def test_console_bundle_resolves_under_admin_from_every_entry_path(doc_url: str) -> None:
+    """#3952: every entry path that serves the shell must be able to load its bundle.
+
+    A RELATIVE base ('./') resolves against the DOCUMENT URL (RFC 3986 §5.2.3
+    "Merge Paths"), so whether it worked depended on the document's segment depth.
+    At `/admin/` and
+    `/admin/blog` the base prefix is `/admin/`, so `./assets/...` resolved to the
+    real bundle. At the extensionless `/admin` — the canonical console URL, and the
+    very form the gate emits in its own `next=` — the prefix is `/`, so the shell
+    requested `/assets/index-...js`, which is never deployed (CI stages the SPA into
+    website/admin/, so the bundle exists only at /admin/assets/). Odd-depth forms
+    like `/admin/blog/edit` failed the same way. Result: `<div id="root"></div>`
+    with no script = blank page.
+
+    Scope of this assertion: it pins the COMMITTED build snapshot. It is not the
+    byte-identical deployed bundle — CI rebuilds with VITE_* env substitution, so
+    the deployed JS filename differs. The deployed build is covered by
+    `test_vite_base_is_the_console_public_path` below, which pins the config that
+    build derives from.
+    """
+    for ref in _console_asset_refs():
+        resolved = urlparse(urljoin(doc_url, ref)).path
+        # The invariant is DOCUMENT-INDEPENDENCE: the bundle lives at one place,
+        # so resolving a reference from any entry path must name that same place.
+        # (Asserting merely "starts with /admin/" is too weak — under the old
+        # relative base `/admin/blog/edit` resolved to `/admin/blog/assets/...`,
+        # which is still under /admin/ but is not where the bundle is deployed.)
+        canonical = urlparse(urljoin(f"{ORIGIN}/admin/", ref)).path
+        assert canonical.startswith("/admin/"), (
+            f"{ref!r} does not resolve under /admin/ — the console bundle is never "
+            "deployed outside /admin/assets/ (#3952)"
+        )
+        assert resolved == canonical, (
+            f"{doc_url} → {ref!r} resolves to {resolved!r}, but the bundle is deployed "
+            f"at {canonical!r} — resolution depends on the entry path, so a 404 and a "
+            "blank console are possible (#3952)"
+        )
+
+
+def test_vite_base_is_the_console_public_path() -> None:
+    """#3952: the base must be ABSOLUTE /admin/ — where CI stages the build.
+
+    The base path is known and fixed (deploy-pages.yml copies `dist/*` into
+    `website/admin/`), so the absolute form is the documented treatment. Vite only
+    documents relative base as the fallback "if you don't know the base path in
+    advance" (vite.dev/guide/build.html → "Relative base").
+    """
+    cfg = VITE_CONFIG.read_text(encoding="utf-8")
+    m = re.search(r"^\s*base:\s*['\"]([^'\"]*)['\"]", cfg, re.MULTILINE)
+    assert m, "no `base` in vite.config.ts — the SPA inherits the default '/'"
+    assert m.group(1) == "/admin/", (
+        f"vite base is {m.group(1)!r}, must be the absolute '/admin/' that CI stages "
+        "into; a relative base re-breaks the extensionless /admin entry path (#3952)"
     )
