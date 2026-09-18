@@ -712,11 +712,8 @@ ERR_INVALID = -32003
 # denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
-_SERVER_MANAGED_PROPS = frozenset({
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated",
-    # #3947 review: envelope-level capture directive (the rebuild restores the
-    # `(:Session)-[:CONTAINS]->(:Point)` fold from it) — never a tenant prop.
-    "contains_session"})
+_SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
