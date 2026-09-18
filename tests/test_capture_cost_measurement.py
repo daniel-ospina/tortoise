@@ -335,9 +335,9 @@ def test_capture_cost_props_none_only_for_a_genuinely_call_free_capture():
     assert props["by_stage"] == {}
 
     # Junk evidence must not fabricate a row inside a best-effort emit —
-    # including a fraction, a non-finite value, and an absurd magnitude (the
-    # reader's own ``_as_int`` rejects those, so the emitter must agree or it
-    # writes a row the report then reads as ``excluded_no_calls``).
+    # including a fraction, a non-finite value, and an absurd magnitude. A
+    # call count is a whole number: anything else is malformed and is treated
+    # as absent rather than truncated into a row.
     for junk in (0, -1, None, "3", True, 2.5e-1, float("nan"),
                  float("inf"), 2.5, 10**400):
         assert ha._capture_cost_props(

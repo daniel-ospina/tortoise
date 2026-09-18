@@ -20107,11 +20107,11 @@ def _as_call_count(value) -> int:
     A producer is free to hand over ``None``/missing/negative/a
     fraction/a non-finite or absurd-magnitude value; none of those may become
     a phantom nonzero disclosure, and none may raise inside the capture
-    handler's best-effort emit. The integrality + magnitude bounds mirror the
-    reader's own guard (``tools/longmem_eval/costing.py::_as_int``) so the
-    emitter and the reader agree on what junk is — a value one accepts and
-    the other rejects would write a row the report then reads as
-    ``excluded_no_calls``, dropping the very disclosure #3824 adds.
+    handler's best-effort emit. A call count is a WHOLE number, so a
+    fractional one is malformed and is treated as absent rather than
+    truncated into a phantom count. The magnitude bound matches the reader's
+    own ``_as_int`` (``tools/longmem_eval/costing.py``), so a magnitude the
+    emitter accepts is one the report cannot later read as junk.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0
