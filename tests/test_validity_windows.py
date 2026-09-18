@@ -229,8 +229,12 @@ def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
 def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     """The contract is the same INSTANT, not the same calendar day.
 
-    Every literal here carries an explicit time and offset, so nothing depends
-    on the host timezone. Three properties, and the file needs all of them:
+    The two literals the GUARD COMPARES — the kwarg and the successor's stored
+    ``validFrom`` — carry an explicit time and offset, so nothing depends on the
+    host timezone. (The predecessors' date-only ``validFrom`` above is never
+    passed to the guard; date-only parses as LOCAL midnight, the #3982
+    behaviour, so it is deliberately kept out of the comparison.) Three
+    properties, and the file needs all of them:
 
       * same day, different instant → REFUSED. Without this, a guard weakened
         to CALENDAR-DAY equality (``epoch // 86400``) would accept it. The
@@ -243,6 +247,10 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
         (``abs(kwarg - stored) < 1.0``) or whole-second truncation
         (``int(x)``) survives every other test in this file, because the
         smallest gap it pins otherwise is 12 hours.
+      * disagreement of ONE MICROSECOND → also REFUSED (case (e)), and a zero
+        difference with a DIFFERENT fractional encoding → accepted (case (f)).
+        Together they pin exactness rather than a tolerance: case (c) alone
+        leaves any tolerance below 0.8 s alive.
       * same instant, DIFFERENT non-zero offsets → ACCEPTED, and the value the
         caller passed is what gets persisted (``str(valid_from)``, not the
         stored form). Cases (b) and (d) exercise ``_created_sort_key``'s offset
@@ -279,6 +287,24 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
                         valid_from="2026-06-10T08:00:00.100000-04:00")
     assert (_props(sdk, old2["id"])["validTo"]
             == "2026-06-10T08:00:00.100000-04:00")
+
+    # (e) ONE MICROSECOND later → refused (exactness, not a tolerance)
+    old3 = _make_point(sdk, content="claim v5", validFrom="2026-06-01")
+    new3 = _make_point(sdk, content="claim v6",
+                       validFrom="2026-06-10T12:00:00.000001+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old3["id"], new3["id"],
+                            valid_from="2026-06-10T12:00:00+00:00")
+    assert "validTo" not in _props(sdk, old3["id"])
+
+    # (f) zero difference, DIFFERENT fractional encoding (`.000000` vs none) →
+    # accepted; both key to the same float instant
+    old4 = _make_point(sdk, content="claim v7", validFrom="2026-06-01")
+    new4 = _make_point(sdk, content="claim v8",
+                       validFrom="2026-06-10T12:00:00.000000+00:00")
+    sdk.supersede_point(old4["id"], new4["id"],
+                        valid_from="2026-06-10T12:00:00+00:00")
+    assert _props(sdk, old4["id"])["validTo"] == "2026-06-10T12:00:00+00:00"
 
 
 def test_supersede_numeric_epoch_kwarg_refused(sdk):
@@ -350,6 +376,36 @@ def test_supersede_unparseable_valid_from_refused(sdk):
     with pytest.raises(ValueError, match="disagrees"):
         sdk.supersede_point(old["id"], new["id"], valid_from="not-a-date")
     assert "validTo" not in _props(sdk, old["id"])
+
+
+def test_supersede_numeric_stored_valid_from_agrees_with_iso_kwarg(sdk):
+    """The guard keys the STORED value AS STORED, matching ``_covers``.
+
+    A numeric epoch is a supported stored form (``_created_sort_key`` documents
+    it and seeded corpora carry it), and it keys RAW as ``(0, float)``. Passing
+    it through ``str()`` first — a natural-looking edit — would key it as
+    unparseable ``(1, text)`` (no ``-``/``T``), so the guard would REFUSE an
+    instant ``_covers`` orders fine, and the write path would stop matching the
+    read path's contiguity boundary. Every other test pairs a numeric stored
+    value only with a STRING kwarg, which refuses for an unrelated reason — so
+    this hole is invisible without the agreeing case below.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2", validFrom=1781049600.0)
+    assert _props(sdk, new["id"])["validFrom"] == 1781049600.0
+    # numeric stored + ISO kwarg naming the SAME instant → accepted
+    sdk.supersede_point(old["id"], new["id"],
+                        valid_from="2026-06-10T00:00:00+00:00")
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10T00:00:00+00:00"
+
+    # numeric stored + NUMERIC kwarg of the same epoch → still refused: the
+    # value the write persists is `str(1781049600.0)`, which `_covers` cannot
+    # order, so the agreeing key is not enough (see the conjunct test).
+    old2 = _make_point(sdk, content="claim v3", validFrom="2026-06-01")
+    new2 = _make_point(sdk, content="claim v4", validFrom=1781049600.0)
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old2["id"], new2["id"], valid_from=1781049600.0)
+    assert "validTo" not in _props(sdk, old2["id"])
 
 
 def test_supersede_both_sides_unparseable_refused(sdk):
