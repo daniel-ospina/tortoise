@@ -18,8 +18,10 @@
  *  - setItem: writes the cookie, and keeps the localStorage copy only when the
  *    cookie verifiably took the value (a refused/oversized write drops the
  *    local copy rather than leaving a session the gate cannot see).
- *  - removeItem: clears both (sign-out), and the cookie is really gone — see
- *    clearCookie for why the old attribute list kept it.
+ *  - removeItem: clears both (sign-out) — BOTH cookie identities, because a
+ *    host-only shadow of the same name survives a domain-only clear — and the
+ *    cookie is really gone; see clearCookie for why the old attribute list kept
+ *    it.
  *
  * Keys other than STORAGE_KEY never touch the cookie: supabase-js stores
  * auxiliary values (e.g. a PKCE code verifier) under `<storageKey>-*`, and the
@@ -74,7 +76,12 @@ function cookieScope(): string[] {
   const parts = ['path=/', 'samesite=lax'];
   if (typeof window !== 'undefined') {
     const host = window.location.hostname;
-    if (host !== 'localhost' && host !== '127.0.0.1' && host.endsWith('premiselabs.co')) {
+    // Parity with the site bridge's isPremiselabsHost(): the leading dot is the
+    // boundary. `host.endsWith('premiselabs.co')` also matched evilpremiselabs.co,
+    // where the browser then REJECTS the Domain attribute (RFC 6265 domain-match)
+    // and the session write is silently dropped — fail-closed, but wrong.
+    const isPremiselabsHost = host === 'premiselabs.co' || host.endsWith('.premiselabs.co');
+    if (host !== 'localhost' && host !== '127.0.0.1' && isPremiselabsHost) {
       parts.push('domain=.premiselabs.co');
     }
     if (window.location.protocol === 'https:') parts.push('secure');
@@ -95,8 +102,18 @@ function writeCookie(value: string): void {
  * why the scope list above excludes it.
  */
 function clearCookie(): void {
-  const attrs = ['max-age=0', ...cookieScope()];
-  document.cookie = `${STORAGE_KEY}=; ${attrs.join('; ')}`;
+  const scope = cookieScope();
+  document.cookie = `${STORAGE_KEY}=; ${['max-age=0', ...scope].join('; ')}`;
+  // Cookie identity is (name, domain, path), so the parent-domain clear above does
+  // NOT touch a HOST-ONLY cookie of the same name. That shadow is still sent to
+  // this host — so the gate still sees it and the SPA stays "signed in" after
+  // sign-out, and the next autoRefreshToken re-mints the parent-domain copy: the
+  // resurrection this adapter exists to prevent (#3485 review). Clear the
+  // host-only identity explicitly whenever the write used a Domain attribute.
+  if (scope.some((p) => p.startsWith('domain='))) {
+    document.cookie =
+      `${STORAGE_KEY}=; ${['max-age=0', ...scope.filter((p) => !p.startsWith('domain='))].join('; ')}`;
+  }
 }
 
 function readLocal(key: string): string | null {
@@ -142,12 +159,16 @@ export const authStorage: SupportedStorage = {
       return;
     }
     writeCookie(value);
-    // Keep the local copy ONLY when the cookie verifiably holds the value.
-    // Otherwise the session would be visible to this SPA and invisible to the
-    // gate — and autoRefreshToken would later re-mint it from the refresh
-    // token, resurrecting a sign-out the server already performed.
-    if (readCookie() === value) writeLocal(key, value);
-    else removeLocal(key);
+    // Keep the local copy ONLY when the cookie verifiably holds the value, and only
+    // in dev. Otherwise the session would be visible to this SPA and invisible to
+    // the gate — and autoRefreshToken would later re-mint it from the refresh
+    // token, resurrecting a sign-out the server already performed. In production
+    // nothing reads that copy (getItem's fallback is DEV-gated), so writing it
+    // would leave a credential at rest for no functional reason.
+    if (readCookie() === value) {
+      if (import.meta.env.DEV) writeLocal(key, value);
+      else removeLocal(key);
+    } else removeLocal(key);
   },
   removeItem: (key: string) => {
     removeLocal(key);

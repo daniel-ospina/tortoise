@@ -95,4 +95,53 @@ describe('#3485 session adapter — the cookie is the source of truth', () => {
     // holds the SESSION, so a verifier read must not return the session blob.
     expect(authStorage.getItem(`${KEY}-code-verifier`)).toBeNull();
   });
+
+  it('removeItem drops a NON-session key without clearing the session cookie', () => {
+    document.cookie = `${KEY}=${encodeURIComponent(SESSION_COOKIE)}; path=/`;
+    // supabase-js removes the PKCE verifier through removeItem(`${key}-code-verifier`).
+    // Without the key guard that removal clears the live session cookie and signs
+    // the user out mid-flow.
+    authStorage.removeItem(`${KEY}-code-verifier`);
+    expect(authStorage.getItem(KEY)).toBe(SESSION_COOKIE);
+  });
+
+  it('production: never writes the session to localStorage (nothing reads it there)', () => {
+    env.DEV = false;
+    authStorage.setItem(KEY, SESSION_COOKIE);
+    // The cookie took the value, so the local copy would be the ONLY reason a
+    // credential sits at rest in a production browser — and getItem's fallback is
+    // DEV-gated, so nothing would ever read it back.
+    expect(authStorage.getItem(KEY)).toBe(SESSION_COOKIE);
+    expect(localStorage.getItem(KEY)).toBeNull();
+  });
+
+  it('sign-out clears BOTH cookie scopes (a host-only shadow survives a domain-only clear)', () => {
+    // On a real host the adapter writes with `domain=.premiselabs.co`. Cookie
+    // identity is (name, domain, path), so clearing ONLY that scope leaves a
+    // HOST-ONLY cookie of the same name — still sent to this host, so the gate
+    // still sees it, the SPA stays signed in after sign-out, and the next
+    // autoRefreshToken re-mints the parent-domain copy.
+    const writes: string[] = [];
+    const descriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie')!;
+    Object.defineProperty(document, 'cookie', {
+      configurable: true,
+      get: () => '',
+      set: (v: string) => {
+        writes.push(String(v));
+      },
+    });
+    vi.stubGlobal('window', { location: { hostname: 'tortoise.premiselabs.co', protocol: 'https:' } });
+    try {
+      authStorage.removeItem(KEY);
+    } finally {
+      vi.unstubAllGlobals();
+      Object.defineProperty(document, 'cookie', descriptor);
+    }
+    const clears = writes.filter((w) => w.startsWith(`${KEY}=`));
+    const withDomain = clears.filter((w) => w.includes('domain=.premiselabs.co'));
+    const hostOnly = clears.filter((w) => !w.includes('domain='));
+    expect(withDomain, 'the parent-domain copy is cleared').toHaveLength(1);
+    expect(hostOnly, 'the host-only shadow is cleared too').toHaveLength(1);
+    expect(hostOnly[0]).toContain('max-age=0');
+  });
 });
