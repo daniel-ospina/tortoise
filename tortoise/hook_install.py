@@ -1034,6 +1034,20 @@ def _target_mode(installed: Path) -> int:
     return 0o755
 
 
+def _is_timeout_budget(value: object) -> bool:
+    """True when ``value`` is a usable per-hook timeout budget.
+
+    A ``float`` counts: ``120.0`` is a real budget.  The ONE predicate both
+    surfaces share — ``_settings_findings``/``_merge_settings`` here and
+    ``capture_install.merge_capture_hooks`` — because testing ``int`` alone
+    made ``tortoise hooks status`` report BLOCKING drift on a float timeout
+    the installer deliberately preserved, and ``tortoise hooks upgrade`` then
+    LOWERED it to 60: the opposite of the module's "never lowered" promise.
+    ``bool`` is excluded explicitly (``True`` is an ``int``).
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _settings_findings(layout: HarnessLayout, data: dict,
                        root: str | os.PathLike[str] | None = None,
                        ) -> list[Finding]:
@@ -1070,10 +1084,10 @@ def _settings_findings(layout: HarnessLayout, data: dict,
             for inner in _entry_command_dicts(entry, spec.name,
                                               layout.hooks_dir, root):
                 timeout = inner.get("timeout")
-                if not isinstance(timeout, int) or isinstance(timeout, bool):
+                if not _is_timeout_budget(timeout):
                     findings.append(Finding(
                         "settings-no-timeout",
-                        f"{spec.event} entry for {spec.name} has no integer "
+                        f"{spec.event} entry for {spec.name} has no numeric "
                         f'"timeout" (#3754: Claude Code cancels the hook at '
                         f"its 1.5s default) — expected {spec.timeout}",
                         script=spec.name, event=spec.event,
@@ -1374,7 +1388,7 @@ def _merge_settings(layout: HarnessLayout, data: dict, actions: list[str],
             for inner in _entry_command_dicts(entry, spec.name,
                                               layout.hooks_dir, root):
                 timeout = inner.get("timeout")
-                if (not isinstance(timeout, int) or isinstance(timeout, bool)
+                if (not _is_timeout_budget(timeout)
                         or timeout < spec.timeout):
                     inner["timeout"] = spec.timeout
                     actions.append(

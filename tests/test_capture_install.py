@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from tortoise import capture_install
+from tortoise import capture_install, hook_install
 from tortoise.capture_install import (
     CAPTURE_SEAM,
     CLAUDE_TIMEOUT,
@@ -450,21 +450,36 @@ def test_claude_install_refuses_to_clobber_invalid_settings(tmp_path):
 
 
 def test_claude_install_refuses_a_settings_symlink_that_escapes_the_root(tmp_path):
-    """Mutation: remove the `_symlink_escape` call — the write goes THROUGH the
-    symlink into a file outside the project."""
+    """A symlinked settings.json pointing outside the project is refused.
+
+    Mutation: remove the `_symlink_escape` call — the symlink is silently
+    REPLACED by a project-local regular file, detaching the user's shared
+    (e.g. global) settings file.  The guard is NOT what protects the outside
+    file from being written THROUGH: `_atomic_bytes` writes a same-dir temp and
+    `os.replace`s it onto the path, which swaps the directory entry and never
+    follows the link (contrast the read-hook install, whose
+    `target.write_text` DOES follow a symlink).  What the guard prevents is the
+    silent severance — the link becomes a stale local copy while the real
+    shared config keeps diverging."""
     outside = tmp_path / "outside" / "settings.json"
     outside.parent.mkdir()
     outside.write_text('{"hooks": {}}')
     root = tmp_path / "proj"
-    (root / ".claude").mkdir(parents=True)
-    (root / ".claude" / "settings.json").symlink_to(outside)
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.symlink_to(outside)
 
     res = install_capture("claude", root=root)
 
     assert not res.ok
     assert "Refusing" in res.error
     assert "session-end.sh" in res.error or "settings.json" in res.error
-    assert outside.read_text() == '{"hooks": {}}', "wrote through the symlink"
+    # The symlink survives the refusal...
+    assert settings.is_symlink(), "the symlink was replaced by a regular file"
+    assert settings.resolve() == outside
+    # ...and the outside file is untouched (it was never at risk from the write
+    # itself — the guard prevents the severance, not a write-through).
+    assert outside.read_text() == '{"hooks": {}}'
 
 
 def test_claude_install_fails_loudly_when_the_hooks_path_is_not_a_directory(tmp_path):
@@ -709,6 +724,180 @@ def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
     assert r.returncode == 0, r.stderr
     assert "pi has no shell-hook read seam" in r.stdout
     assert cline.read_text() == original, "the cline hook file was modified"
+
+
+# ── #3915: the capture-install contract is pinned against #3866 (parity) ─
+#
+# `capture_install` (installs the seam) and `hook_install` (status/upgrade)
+# must answer "is this entry ours?" identically.  Since the fix they share ONE
+# classifier (`hook_install._invokes_script`); these tests pin the observable
+# contract across both modules so a future re-split cannot reintroduce a silent
+# divergence — the pre-fix copy diverged on 10 of 21 command forms (a duplicate
+# SessionEnd registration for `/bin/sh <hook>`, fail-open for `sudo -u <hook>`).
+
+
+_CLASSIFIER_PARITY_FORMS = [
+    # forms that REALLY execute the hook — "ours" in both modules
+    ".claude/hooks/session-end.sh",
+    "bash .claude/hooks/session-end.sh",
+    "/bin/bash .claude/hooks/session-end.sh",
+    "/bin/sh .claude/hooks/session-end.sh",
+    "timeout 5 .claude/hooks/session-end.sh",
+    "timeout -s KILL 60 .claude/hooks/session-end.sh",
+    "nice -n 5 .claude/hooks/session-end.sh",
+    "xargs .claude/hooks/session-end.sh",
+    "sudo -u root .claude/hooks/session-end.sh",
+    "if true; then .claude/hooks/session-end.sh; fi",
+    "A=/x/y .claude/hooks/session-end.sh",
+    "env -u FOO .claude/hooks/session-end.sh",
+    "true; .claude/hooks/session-end.sh",
+    "bash -c 'true; .claude/hooks/session-end.sh'",
+    "2>/dev/null .claude/hooks/session-end.sh",
+    "$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.sh",
+    # forms that must stay FOREIGN in both modules
+    "cat .claude/hooks/session-end.sh",
+    "cat $CLAUDE_PROJECT_DIR/.claude/hooks/session-end.sh",
+    "command -v .claude/hooks/session-end.sh",
+    "sudo -u .claude/hooks/session-end.sh",  # path is sudo's -u VALUE
+    "vendor/.claude/hooks/session-end.sh",
+]
+
+
+def test_classifier_parity_with_hook_install(tmp_path):
+    """`capture_install._is_our_script_command` and
+    `hook_install._invokes_script` return the SAME verdict for every form.
+
+    Mutation: reintroduce a local classifier (the pre-fix copy) — any launcher
+    form above (`/bin/sh`, `nice -n`, `sudo -u root`, …) diverges and REDs."""
+    for command in _CLASSIFIER_PARITY_FORMS:
+        ours = capture_install._is_our_script_command(
+            command, "session-end.sh", ".claude/hooks", tmp_path)
+        theirs = hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", tmp_path)
+        assert ours == theirs, (
+            f"classifier divergence on {command!r}: "
+            f"capture_install={ours}, hook_install={theirs}")
+
+
+def test_install_then_status_is_clean_and_upgrade_is_a_no_op(tmp_path):
+    """An install this module produces is one `tortoise hooks status` reads as
+    current, and `tortoise hooks upgrade` changes nothing.
+
+    Mutation: emit a settings shape #3866 classifies as foreign (flat
+    event-level `{type, command}`, a missing `type`, a foreign path) —
+    `detect_install` then reports `missing-hook-entry` and this REDs."""
+    res = install_capture("claude", root=tmp_path)
+    assert res.ok, res.error
+
+    assert hook_install.detect_install(tmp_path, "claude") == [], (
+        "the installer produced state the drift detector calls drifted")
+    upgrade = hook_install.upgrade_install(tmp_path, "claude")
+    assert upgrade.refused is None, upgrade.refused
+    assert upgrade.actions == [], (
+        f"upgrade was not a no-op on a fresh install: {upgrade.actions}")
+
+    again = install_capture("claude", root=tmp_path)
+    assert again.ok and again.changed is False, (
+        "re-installing over a status-current install was not a clean no-op")
+
+
+def test_upgrade_then_install_agrees_in_the_other_direction(tmp_path):
+    """The reverse direction: after #3866's `upgrade_install` repairs a stale
+    install, `capture_install` is itself a clean no-op.
+
+    Mutation: emit or expect a settings/script shape the two modules disagree
+    on — the installer rewrites what upgrade just repaired (changed=True)."""
+    hooks = tmp_path / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    # A stale, unversioned copy (the pre-#3795 population — it must still LOOK
+    # like a Tortoise hook, or upgrade refuses it as foreign) + a timeoutless
+    # registration: upgrade repairs both halves.
+    for name in ("session-start.sh", "session-end.sh"):
+        (hooks / name).write_text("#!/bin/sh\n# tortoise session capture\nexit 0\n")
+        os.chmod(hooks / name, 0o644)
+    (tmp_path / ".claude" / "settings.json").write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [{"matcher": "", "hooks": [
+                {"type": "command",
+                 "command": ".claude/hooks/session-start.sh"}]}],
+            "SessionEnd": [{"matcher": "", "hooks": [
+                {"type": "command",
+                 "command": ".claude/hooks/session-end.sh"}]}],
+        }}))
+
+    upgrade = hook_install.upgrade_install(tmp_path, "claude")
+    assert upgrade.refused is None, upgrade.refused
+    assert upgrade.actions, "upgrade repaired nothing on a stale install"
+
+    res = install_capture("claude", root=tmp_path)
+    assert res.ok, res.error
+    assert res.changed is False, (
+        f"installer rewrote a state upgrade had just repaired: {res.actions}")
+
+
+@pytest.mark.parametrize("command", [
+    "cat .claude/hooks/session-end.sh",
+    "cat $CLAUDE_PROJECT_DIR/.claude/hooks/session-end.sh",
+    "command -v .claude/hooks/session-end.sh",
+    "vendor/.claude/hooks/session-end.sh",
+    "sudo -u .claude/hooks/session-end.sh",
+])
+def test_foreign_shapes_are_not_ours_in_both_modules(tmp_path, command):
+    """The shapes #3866 classifies as NOT ours are not "repaired" here either
+    — repairing one would leave the project capturing nothing while reporting
+    success.
+
+    Mutation: accept any token naming our basename (a timeout is stamped on a
+    foreign command and no real registration is appended)."""
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"hooks": {"SessionEnd": [{"matcher": "",
+        "hooks": [{"type": "command", "command": command,
+                   "timeout": 60}]}]}}))
+
+    install_capture("claude", root=tmp_path)
+
+    entries = _settings(tmp_path)["hooks"]["SessionEnd"]
+    foreign = [h for e in entries for h in e.get("hooks", [])
+               if h.get("command") == command]
+    assert len(foreign) == 1, "the foreign entry was dropped"
+    assert len(entries) == 2, (
+        f"no proper registration appended for a foreign command: {entries}")
+    ours = [h for e in entries for h in e.get("hooks", [])
+            if h.get("command") == ".claude/hooks/session-end.sh"]
+    assert len(ours) == 1 and ours[0]["timeout"] == CLAUDE_TIMEOUT
+    assert hook_install.detect_install(tmp_path, "claude") == []
+
+
+def test_float_timeout_parity_between_install_and_status(tmp_path):
+    """A float timeout is preserved by BOTH sides: the installer leaves 120.0
+    alone and #3866 neither reports it as drift nor lowers it on upgrade.
+
+    Mutation: restore the int-only predicate in `hook_install`'s
+    `_settings_findings`/`_merge_settings` — status reports
+    `settings-no-timeout` and upgrade rewrites 120.0 → 60."""
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({"hooks": {"SessionEnd": [{"matcher": "",
+        "hooks": [{"type": "command",
+                   "command": ".claude/hooks/session-end.sh",
+                   "timeout": 120.0}]}]}}))
+
+    res = install_capture("claude", root=tmp_path)
+    assert res.ok, res.error
+    inner = _settings(tmp_path)["hooks"]["SessionEnd"][0]["hooks"][0]
+    assert inner["timeout"] == 120.0, "the installer lowered a float timeout"
+
+    findings = hook_install.detect_install(tmp_path, "claude")
+    assert not [f for f in findings
+                if f.kind in ("settings-no-timeout",
+                              "settings-low-timeout")], (
+        f"status treats the preserved float as drift: {findings}")
+    upgrade = hook_install.upgrade_install(tmp_path, "claude")
+    assert upgrade.refused is None, upgrade.refused
+    after = _settings(tmp_path)["hooks"]["SessionEnd"][0]["hooks"][0]
+    assert after["timeout"] == 120.0, (
+        f"upgrade lowered the float timeout: {upgrade.actions}")
 
 
 # ── the seam map is one map (drift guards) ──────────────────────────────

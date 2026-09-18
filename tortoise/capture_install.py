@@ -66,13 +66,18 @@ upgrade`` — #3808 is the mechanism #3795/#3801 operate through.  There is one
 version contract, and it lives in the shipped script.
 
 Because the two modules answer the same question — "is this entry ours?" —
-:func:`_executable_tokens` / :func:`_is_our_script_command` here mirror #3866's
-executable-position and install-confinement rules rather than re-deciding them.
-A foreign path that merely shares our basename, a hook named only as an
-argument (``cat .claude/hooks/session-end.sh``), a flat event-level
-``{type, command}`` (which Claude Code ignores), and a handler missing its
-``type`` are all **not** ours in both modules; treating any of them as ours
-would leave a project capturing nothing while reporting a successful install.
+:func:`_is_our_script_command` here **delegates** to #3866's
+:func:`tortoise.hook_install._invokes_script` rather than re-implementing it:
+one classifier, two callers, so the surfaces cannot drift apart.  The earlier
+hand-mirrored copy diverged from #3866 on 10 of 21 command forms — it appended
+a duplicate registration for ``/bin/sh .claude/hooks/session-end.sh`` (the hook
+then ran twice) and reported ``sudo -u <hook>`` as ours, the fail-open shape
+#3808 exists to close.  A foreign path that merely shares our basename, a hook
+named only as an argument (``cat .claude/hooks/session-end.sh``), a flat
+event-level ``{type, command}`` (which Claude Code ignores), and a handler
+missing its ``type`` are all **not** ours in both modules; treating any of them
+as ours would leave a project capturing nothing while reporting a successful
+install.
 One intentional difference: #3866 refuses *any* symlink below the install root,
 while :func:`_symlink_escape` refuses only those that leave it — a symlink whose
 target is inside the project is replaced by a real file rather than refused.
@@ -84,11 +89,11 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import re
-import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from tortoise import hook_install
 
 #: Where the shipped artifacts live, resolved from this package (so a
 #: site-packages/wheel install resolves them — they are declared in
@@ -254,118 +259,27 @@ def _preflight_writable(dirs: list[Path]) -> str:
     return ""
 
 
-#: Tokens that RUN the token after them rather than being the command
-#: themselves: ``bash .claude/hooks/session-end.sh`` registers the hook, and so
-#: does a bare ``.claude/hooks/session-end.sh``.  Mirrors the launcher set
-#: ``tortoise/hook_install.py`` (#3866) applies to the same question, so the two
-#: surfaces agree on which command lines count as a registration — a
-#: disagreement would make ``tortoise hooks status`` report drift on an install
-#: this module considers current.
-_LAUNCHERS = frozenset({
-    "bash", "sh", "zsh", "dash", "ksh", "env", "exec", "nohup", "time",
-    "timeout", "setsid", "nice", "sudo", "command", "eval", ".", "source",
-})
-
-#: Shell separators that end one command and begin the next — the token after
-#: one of these is again in executable position.
-_SEPARATORS = frozenset({";", "&&", "||", "|", "&"})
-
-#: A bare redirection operator redirects to the NEXT token, which is a filename
-#: and never an executed command.  An operator carrying its target
-#: (``2>/dev/null``) is matched by :data:`_REDIRECT_RE` and skips nothing.
-_REDIRECT_OPERATORS = frozenset({">", ">>", "<", "<<", "&>", "<>"})
-_REDIRECT_RE = re.compile(r"^[0-9]*(?:&?>>?|&?>&|<>)")
-
-#: An environment-assignment prefix (``A=/x/y``) — not the command.
-_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-#: A launcher operand that is a number/duration (``timeout 5 …``).
-_LAUNCHER_OPERAND_RE = re.compile(r"^[0-9]+(\.[0-9]+)?[smhd]?$")
-
-
-def _executable_tokens(command: str) -> list[str] | None:
-    """The tokens of ``command`` that are in EXECUTABLE position.
-
-    ``None`` for an unterminated quote — a command bash would reject executes
-    nothing.  Only the command itself (or the operand of a launcher such as
-    ``bash`` / ``timeout`` / ``env``) is returned, so a token that merely
-    NAMES our hook (``cat .claude/hooks/session-end.sh``) or queries it
-    (``command -v …``) is never mistaken for a registration.  Deliberately a
-    compact mirror of ``tortoise/hook_install.py::_invokes_script`` (#3866):
-    the two must agree, or ``tortoise hooks status`` reports drift on an
-    install this module produced.
-    """
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return None
-    executable: list[str] = []
-    expect_cmd = True
-    skip_operand = False
-    launcher: str | None = None
-    for token in tokens:
-        if token in _SEPARATORS:
-            expect_cmd, launcher, skip_operand = True, None, False
-            continue
-        if skip_operand:
-            skip_operand = False
-            continue
-        if _REDIRECT_RE.match(token):
-            skip_operand = token in _REDIRECT_OPERATORS
-            continue
-        if not expect_cmd:
-            continue
-        if launcher == "command" and token in ("-v", "-V"):
-            return []  # ``command -v <path>`` asks a question; it runs nothing
-        if token in _LAUNCHERS:
-            launcher = token
-            continue
-        if token.startswith("-"):
-            continue  # an option (of a launcher, or of the command itself)
-        if _ASSIGNMENT_RE.match(token):
-            continue
-        if launcher == "timeout" and _LAUNCHER_OPERAND_RE.match(token):
-            continue  # ``timeout 5`` — the duration, not the command
-        executable.append(token)
-        expect_cmd, launcher = False, None
-    return executable
-
-
 def _is_our_script_command(command: str, script_name: str,
                            hooks_dir: str, root: Path) -> bool:
     """True when ``command`` EXECUTES this project's hook ``script_name``.
 
-    Confined to the install: a token resolving to a DIFFERENT file — a vendored
-    ``vendor/.claude/hooks/session-end.sh``, an absolute path outside ``root`` —
-    is somebody else's hook, and stamping our ``timeout`` on it would leave this
-    project with no working capture while the install reported success (the
-    silent-loss shape #3808 exists to close).  A ``$VAR`` token
+    Delegates to :func:`tortoise.hook_install._invokes_script` — the ONE
+    classifier the drift/repair path (``tortoise hooks status|upgrade``) also
+    uses.  A second copy here, however carefully mirrored, drifted from it on
+    10 of 21 command forms (``/bin/sh <hook>`` was appended a SECOND
+    registration, so the hook ran twice; ``sudo -u <hook>`` was read as ours,
+    which is the fail-open shape that stamps a timeout with no real
+    registration).  Delegation enforces the contract structurally: one
+    function, two callers, no copy to diverge.
+
+    Confinement to the install is provided by ``hook_install`` itself — a
+    token resolving to a DIFFERENT file (a vendored
+    ``vendor/.claude/hooks/session-end.sh``, an absolute path outside
+    ``root``) is somebody else's hook, while a ``$VAR`` token
     (``$CLAUDE_PROJECT_DIR/.claude/hooks/…``, the form Claude Code documents)
-    cannot be resolved, so it falls back to the directory-suffix rule — the same
-    carve-out ``hook_install._token_is_our_script`` makes (#3866).
+    falls back to the shared directory-suffix rule.
     """
-    tokens = _executable_tokens(command)
-    if not tokens:
-        return False
-    want_dir = Path(hooks_dir).parts
-    expected = root / hooks_dir / script_name
-    for token in tokens:
-        if Path(token).name != script_name:
-            continue
-        if "$" not in token:
-            candidate = Path(token)
-            if not candidate.is_absolute():
-                candidate = root / candidate
-            try:
-                if candidate.resolve() == expected.resolve():
-                    return True
-            except (OSError, ValueError, RuntimeError):
-                pass
-            continue  # resolved somewhere else — not ours
-        parts = Path(token).parent.parts
-        if len(parts) >= len(want_dir) and parts[-len(want_dir):] == want_dir:
-            return True
-    return False
+    return hook_install._invokes_script(command, script_name, hooks_dir, root)
 
 
 def _our_command_dicts(entry: object, script_name: str, hooks_dir: str,
@@ -446,12 +360,14 @@ def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
             # downgrade a higher one.
             for existing in registered:
                 current = existing.get("timeout")
-                # ``float`` counts as a real budget too: ``not isinstance(120.0,
-                # int)`` is True, so testing ``int`` alone silently LOWERED a
-                # deliberate 120.0 to 60 (the docstring's "never lowered"
-                # promise).
-                if (not isinstance(current, (int, float))
-                        or isinstance(current, bool) or current < timeout):
+                # Share ONE predicate with ``hook_install`` (#3866): a ``float``
+                # counts as a real budget too, so testing ``int`` alone here
+                # silently LOWERED a deliberate 120.0 to 60 (the docstring's
+                # "never lowered" promise) — and the same divergence made
+                # ``tortoise hooks status`` report blocking drift on the state
+                # this installer preserves.
+                if (not hook_install._is_timeout_budget(current)
+                        or current < timeout):
                     existing["timeout"] = timeout
                 existing.setdefault("type", "command")
             continue
