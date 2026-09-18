@@ -54,8 +54,9 @@ class TestResolveTeamLimits:
         tid = _find_org_id(reg_sdk)
         limits = resolve_org_limits(tid)
         # team_create writes max_api_keys from pricing.json free tier (=2),
-        # but NOT max_points / max_sessions — defaults apply (points from
-        # pricing max_graph_nodes=10000; sessions are UNLIMITED per #4010).
+        # but NOT max_points — the pricing default applies (max_graph_nodes
+        # = 10000). max_sessions has no default at all: it is UNLIMITED per
+        # #4010 (present-but-None).
         assert limits["max_points"] == 10000
         assert limits["max_api_keys"] == 2
         assert limits["max_sessions"] is None

@@ -455,9 +455,10 @@ def apply_limits(sdk, org_id: str, tier: str) -> None:
     GAP-B mapping: ``max_points := tier_limits(tier)["max_graph_nodes"]`` —
     the points quota counter counts graph nodes (see module docstring).
     ``max_sessions`` is written as **NULL (unlimited)** for every tier: the
-    1000-session cap was never decided and was removed in #4010. Writing the
-    NULL here also CLEARS any stored cap on the next tier change — the data
-    half of the same fix (one-shot sweep: graph-scripts/clear_max_sessions_4010.py).
+    flat 1000 was a recorded v1 decision that #4010 REOPENED and SUPERSEDED
+    (see the module comment in ``tortoise/quota.py``). Writing the NULL here
+    also CLEARS any stored cap on the next tier change — the data half of the
+    same fix (one-shot sweep: graph-scripts/clear_max_sessions_4010.py).
 
     #771 review P1: Supabase mode PATCHes the orgs row (tier + the quota
     columns 0006 carries: max_users/max_graphs/ops_allowance/graph_size_cap;

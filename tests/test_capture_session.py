@@ -4187,6 +4187,38 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     assert st.get("session_capture_receipt_pi") is None
 
 
+def test_mcp_capture_missing_max_sessions_fails_closed(tmp_path, monkeypatch):
+    """#4010: the capture bridge carries `max_sessions` only when it is
+    actually PRESENT, so a keyless limits dict reaches the sessions gate and
+    fails closed (#310 GAP-B) rather than being normalized to unlimited.
+
+    This is the degraded `mcp_auth` shape — `{"org_id": ...}` after a
+    registry resolution failure. Mutation this REDs:
+    `org["max_sessions"] = limits.get("max_sessions")`, which would turn a
+    failed resolution into a SUCCESSFUL unlimited capture — the exact
+    fail-open class #4010 removes, and it would make MCP succeed where REST
+    returns 500 for the same dict.
+    """
+    from tortoise.mcp_auth import _current_org_id, _current_org_limits
+    from tortoise.mcp_server import tortoise_session_capture
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    with patched_tortoise_sdk(str(tmp_path / "mcp-keyshape.db")):
+        _provision_team("team-1727-keyshape")
+        tok_t = _current_org_id.set("team-1727-keyshape")
+        # `max_sessions` deliberately ABSENT — not set to None.
+        tok_l = _current_org_limits.set(
+            {"org_id": "team-1727-keyshape", "tier": "free",
+             "max_points": 100000})
+        try:
+            result = tortoise_session_capture(
+                conversation=_CONV, harness="pi", session_id="s-keyshape")
+        finally:
+            _current_org_id.reset(tok_t)
+            _current_org_limits.reset(tok_l)
+    assert result.get("status") == 500, result
+    assert "max_sessions" in str(result.get("error", "")), result
+
+
 def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
     """Task 13: stdio (no team context / selfhost) → honest 'requires hosted
     mode' error — no local fallback that bypasses the gates."""

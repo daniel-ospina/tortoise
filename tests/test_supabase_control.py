@@ -2162,6 +2162,14 @@ class TestResolveTeamLimitsSupabase:
         assert limits["tier"] == "free"
         assert limits["max_users"] == 1
         assert limits["max_points"] == 10000
+        # #4010: the Supabase branch must carry EVERY resource key and
+        # sessions has no cap at all. (This branch is the one the registry-
+        # forced contract test in tests/test_issue_4010_sessions_unlimited.py
+        # cannot reach — it is the resolver the guard used to miss.)
+        from tortoise.quota import _RESOURCE_LIMIT_KEYS
+        missing = [k for k in _RESOURCE_LIMIT_KEYS.values() if k not in limits]
+        assert not missing, f"Supabase resolve_org_limits is missing {missing}"
+        assert limits["max_sessions"] is None
 
     def test_supabase_mode_preserves_none_as_unlimited(self, monkeypatch):
         """NULL max_users/max_graphs = UNLIMITED (registry parity, PR #911

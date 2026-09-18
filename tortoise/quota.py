@@ -584,9 +584,10 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
         # stored null) — skip enforcement (#683). Distinguish from a MISSING
         # key, which is fail-closed (#310 GAP-B): never silently fall back to
         # lenient caps.
-        # #4010: sessions is no longer the exception to that rule. Its cap
-        # was never decided, so it has no constant to fall back to and its
-        # resolved value is always the explicit None above — the lenient
+        # #4010: sessions is no longer the exception to that rule. Its flat
+        # v1 1000 cap was REOPENED and SUPERSEDED by #4010 (see the module
+        # comment above), so it has no constant to fall back to and its
+        # resolved value is always the explicit None — the lenient
         # `if resource == "sessions": limit = DEFAULT_MAX_SESSIONS` branch is
         # deleted, not relocated.
         if limit_key in limits:

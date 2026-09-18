@@ -12,7 +12,9 @@ DE2E suite legs owned by this slice:
 - DE2E-7  L1 replay (duplicate:true, zero writes, zero write-ops billed),
           L2 supersede re-capture (supersede_point), Sessions A/B/C budget
           (soft-15 WARN, >25 held, >50 402, ceiling-only re-submission),
-          sessions quota (41st commit → 402), Layer-1 400/422 (incl.
+          sessions count = :Session nodes with the **41st commit LANDING**
+          (the old "41st → 402" leg was the flat 1000 cap, reopened and
+          superseded by #4010), Layer-1 400/422 (incl.
           commit_id_mismatch + calibration_mismatch + 51-point cap), 401,
           500 fail-closed
 - DE2E-10 byte-level privacy (no raw conversation in payload/telemetry/graph;

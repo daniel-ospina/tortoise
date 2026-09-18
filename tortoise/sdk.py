@@ -16079,10 +16079,11 @@ class TortoiseSDK:
             # an org at cap can be upgraded (no REST surface exists yet — the
             # fields are SDK/registry-level; get_current_org honors them).
             # #4010: max_sessions is the EXCEPTION — retained here only until
-            # #3863 retires it (removing a field narrows the frozen SDK
-            # surface). It is no longer a relief mechanism: every resolver
-            # returns an unlimited None and DELIBERATELY ignores a stored
-            # value, so a write here is accepted and has no quota effect.
+            # the surface cutting pass retires it (#3994, the live successor
+            # to the now-executed #3863). It is no longer a relief mechanism:
+            # every resolver returns an unlimited None and DELIBERATELY
+            # ignores a stored value, so a write here is accepted and has no
+            # quota effect.
             "max_points", "max_api_keys", "max_sessions",
         }
         invalid = set(fields.keys()) - allowed

@@ -3218,11 +3218,12 @@ async def get_current_org(request: Request) -> dict:
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                # #4010: sessions are UNLIMITED for every tier. `_ms` (the
-                # stored t.max_sessions) is read so the deliberate departure is
-                # visible at the exact site, and then NOT honoured as a cap —
-                # a stored 1000 must never re-cap an org after the constant is
-                # gone.
+                # #4010: sessions are UNLIMITED for every tier — the flat v1
+                # 1000 cap was REOPENED and SUPERSEDED (see the module comment
+                # in tortoise/quota.py). `_ms` (the stored t.max_sessions) is
+                # read so the deliberate departure is visible at the exact
+                # site, and then NOT honoured — a stored 1000 must never
+                # re-cap an org after the constant is gone.
                 "max_sessions": None,
                 # #1748: key creator's user UUID rides the org dict (Supabase
                 # resolve_api_key parity) so session-user-owned endpoints can
@@ -10026,19 +10027,19 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     422 field reasons incl. commit_id_mismatch + calibration_mismatch;
     retry-once semantics documented) → [2] L1 replay via :CommitRecord
     (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
-    [3] L2 reconciliation IN MEMORY → [4] sessions quota (402) + budget
-    adjudication on the reconciled net-new delta (soft 15 → WARN telemetry;
-    >25 first-adjudication → held[], NOT written; >50 → 402) → [5] the
-    four-node chain + entities + operators + supersede_point + Session
-    counters → [6] metering (write_ops +1 non-duplicate; nodes_written
-    += net-new; held bills 0 → write_ops_billed:0) + content-free telemetry.
+    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract +
+    budget adjudication on the reconciled net-new delta (soft 15 → WARN
+    telemetry; >25 first-adjudication → held[], NOT written; >50 → 402) →
+    [5] the four-node chain + entities + operators + supersede_point +
+    Session counters → [6] metering (write_ops +1 non-duplicate;
+    nodes_written += net-new; held bills 0 → write_ops_billed:0) +
+    content-free telemetry.
 
     Response contract (§6.1): 200 {session_id, commit_id, nodes_created,
     nodes_merged, held[], duplicate} · 400 missing required fields ·
-    401 bad/missing key (get_current_org) · 402 budget ceiling or sessions
-    quota · 422 Layer-1 (retry once; code calibration_mismatch /
-    commit_id_mismatch) · 429 dedicated 300/min/key bucket (R-13) ·
-    500 fail-closed, redacted.
+    401 bad/missing key (get_current_org) · 402 budget ceiling · 422 Layer-1
+    (retry once; code calibration_mismatch / commit_id_mismatch) · 429
+    dedicated 300/min/key bucket (R-13) · 500 fail-closed, redacted.
     """
     # #1927: commit_session is a session-content write surface that needs NO
     # consent gate — session_recording is default-ON (ToS-covered) with an
@@ -10117,8 +10118,12 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     if plan.duplicate:
         return _commit_response(payload, duplicate=True, warnings=warnings)
 
-    # [4a] Sessions quota (post-fix count — 402). Replays already returned
-    # above: quota never gates a duplicate (zero writes).
+    # [4a] Sessions presence contract — NOT a cap. #4010 made sessions
+    # unlimited for every tier, so every resolver supplies an explicit None
+    # and this call cannot 402; it remains the fail-closed presence check
+    # (#310 GAP-B) that a limits dict built without the key does not slip
+    # past. Replays already returned above: quota never gates a duplicate
+    # (zero writes).
     _check_org_limit(org, "sessions")
 
     # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.

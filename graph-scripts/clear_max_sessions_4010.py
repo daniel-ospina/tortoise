@@ -106,8 +106,17 @@ def _supabase_lane_refusal() -> str | None:
     """
     try:
         from tortoise.supabase_control import is_supabase_enabled
-    except Exception:  # pragma: no cover - import failure is not a reason to write
-        return None
+    except Exception as exc:  # pragma: no cover - exercised via monkeypatch
+        # FAIL CLOSED. "Could not determine the mode" must never mean "not
+        # Supabase": `tortoise.sdk` imports `supabase_control` lazily, so a
+        # broken import still lets `main()` reach the registry namespace and
+        # DELETE properties on a deployment that may be Supabase-backed —
+        # i.e. it would auto-create the graph the #669 flip removed and then
+        # report "graph is clean" about it. Refuse instead.
+        return ("control plane mode could not be determined "
+                f"({type(exc).__name__}: {exc}) — refusing to open the "
+                "registry graph. Re-run once tortoise.supabase_control "
+                "imports.")
     if is_supabase_enabled():
         return ("control plane is Supabase — the registry graph does not exist "
                 "(there is no max_sessions column either). Refusing to open "
@@ -168,9 +177,8 @@ def main() -> int:
     try:
         reg = sdk._get_registry()
         target = getattr(reg, "name", "control_plane")
-        # The guard runs on the graph that is actually written, not the URI
-        # path (`_base_graph_name` is the in-URI graph name, which the registry
-        # namespace derivation never uses).
+        # path — `TortoiseSDK(namespace="registry")` derives the registry name
+        # from the NAMESPACE, not from the URI path.
         test_guard(target, args.yes)
         print(f"Registry graph (SDK-resolved): {target}")
         report = clear_stored_max_sessions(reg, dry_run=args.dry_run)

@@ -48,7 +48,14 @@ _GRAPH_SCRIPTS = str(Path(__file__).resolve().parent.parent / "graph-scripts")
 if _GRAPH_SCRIPTS not in sys.path:
     sys.path.insert(0, _GRAPH_SCRIPTS)
 
-from clear_max_sessions_4010 import clear_stored_max_sessions  # noqa: E402
+# `test_guard` is reached as a MODULE attribute (not imported by name): a bare
+# `test_guard` import would be COLLECTED by pytest as a test, since the helper's
+# name matches the test pattern.
+import clear_max_sessions_4010 as sweep  # noqa: E402
+from clear_max_sessions_4010 import (  # noqa: E402
+    _supabase_lane_refusal,
+    clear_stored_max_sessions,
+)
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
@@ -193,6 +200,41 @@ class TestStoredValueIsNotHonoured:
                 "the #4010 trap is open")
         finally:
             reg.close()
+
+
+class TestSweepSafetyGuards:
+    """The one-shot sweep DELETES a property irreversibly, so its two guards
+    are load-bearing: the #669 resurrection refusal (opening the registry
+    namespace in Supabase mode auto-creates the graph the flip deleted) and
+    the resolved-graph `--yes` gate."""
+
+    def test_supabase_mode_refuses(self, monkeypatch):
+        import tortoise.supabase_control as sc
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        assert _supabase_lane_refusal() is not None
+
+    def test_registry_mode_proceeds(self, monkeypatch):
+        import tortoise.supabase_control as sc
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+        assert _supabase_lane_refusal() is None
+
+    def test_undeterminable_mode_fails_closed(self, monkeypatch):
+        """An import failure must REFUSE, not proceed: `tortoise.sdk` imports
+        `supabase_control` lazily, so a broken import still lets the sweep
+        reach the registry namespace and write."""
+        import sys
+        monkeypatch.setitem(sys.modules, "tortoise.supabase_control", None)
+        refusal = _supabase_lane_refusal()
+        assert refusal is not None and "could not be determined" in refusal
+
+    def test_guard_requires_yes_on_the_resolved_graph(self):
+        """The registry graph is never test-prefixed, so a real write must
+        always pass `--yes` — the guard is fed the SDK-resolved name, not the
+        URI path (a `tortoise_test_*` URI path used to auto-approve it)."""
+        with pytest.raises(SystemExit):
+            sweep.test_guard("registry_control_plane", yes=False)
+        sweep.test_guard("registry_control_plane", yes=True)  # explicit consent
+        sweep.test_guard("tortoise_test_4010")  # test-scoped, no consent
 
 
 # ── DATA half: clearing the stored rows, idempotently ───────────────────────
