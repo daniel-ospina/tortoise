@@ -88,9 +88,9 @@ primary_region = "iad"
   #
   # NOTE: [[services.*_checks]] has NO `port` key — a service check always rides
   # the service's internal_port (8000 here). It cannot be pointed at 9090. The
-  # 9090/healthz signal is a top-level [checks] entry, which is NOT in this PR:
-  # it is deferred to a follow-up PR (see the DEFERRED block below and
-  # docs/infra-runbook.md §6.0 for the merge-order precondition). A top-level
+  # 9090/healthz signal is a top-level [checks] entry, which IS present in this
+  # file ([checks.loop_liveness], reinstated 2026-09-17 below; the DEFERRED
+  # placeholder it replaced is gone). A top-level
   # check never affects routing, but it DOES gate flyctl's deploy health wait.
   #
   # timeout=5s against a 15s interval (was 15s/15s — a 1:1 ratio with zero
@@ -125,10 +125,14 @@ primary_region = "iad"
 # present. Decision record and sources: issue #3447.
 #
 # This check does NOT affect request routing — the proxy ignores top-level
-# checks when choosing where to send traffic. It exists so a STALLED EVENT LOOP
-# is visible to an operator even though a stall can no longer take the app
-# offline (#3062). It points at the app's dedicated 9090 /healthz listener
-# (200 progressing / 503 stalled).
+# checks when choosing where to send traffic. It exists so a stalled event loop
+# can be surfaced to an operator even though a stall can no longer take the app
+# offline (#3062). It points at the app's dedicated 9090 /healthz listener.
+#
+# ⚠️ The listener's predicate is `503 if (stale AND idle) else 200`
+# (tortoise/monitoring.py) — a stale loop WITH a request in flight still
+# reports 200, so this check does NOT reliably surface a true wedge; it errs
+# toward 200, which is the safe direction for the deploy gate it feeds.
 #
 # ⚠️ DEPLOY-BLOCKING BY DESIGN: flyctl's deploy health wait counts top-level
 # checks (WaitForHealthchecksToPass requires every reported check to pass — no
