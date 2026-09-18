@@ -229,20 +229,27 @@ def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
 def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     """The contract is the same INSTANT, not the same calendar day.
 
-    Both literals carry an explicit time and offset, so nothing here depends on
-    the host timezone. Two properties, and the file needs BOTH:
+    Every literal here carries an explicit time and offset, so nothing depends
+    on the host timezone. Three properties, and the file needs all of them:
 
       * same day, different instant → REFUSED. Without this, a guard weakened
-        to date-granularity equality would accept it and stamp a predecessor
-        ``validTo`` inside the successor's window — the GAP/OVERLAP class the
-        guard exists to prevent.
+        to CALENDAR-DAY equality (``epoch // 86400``) would accept it. The
+        direction of the disagreement decides the damage: an EARLIER kwarg
+        leaves a GAP between the predecessor's end and the successor's start,
+        a LATER one an OVERLAP — see case (a) and the parent
+        ``test_supersede_disagreeing_valid_from_refused`` for both.
+      * sub-second disagreement → REFUSED (case (c), 0.8 s apart). This is what
+        bounds the comparison's resolution: a tolerance-based equality
+        (``abs(kwarg - stored) < 1.0``) or whole-second truncation
+        (``int(x)``) survives every other test in this file, because the
+        smallest gap it pins otherwise is 12 hours.
       * same instant, DIFFERENT non-zero offsets → ACCEPTED, and the value the
         caller passed is what gets persisted (``str(valid_from)``, not the
-        stored form). This exercises ``_created_sort_key``'s offset arithmetic
-        through the guard; every other literal in this file is date-only, ``Z``
-        or ``+00:00``, which never reaches it.
+        stored form). Cases (b) and (d) exercise ``_created_sort_key``'s offset
+        arithmetic through the guard; every other literal in this file is
+        date-only, ``Z`` or ``+00:00``, which never reaches it.
     """
-    # (a) same day, 12 hours apart → refused
+    # (a) same day, 12 hours EARLIER → refused (would leave a GAP)
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2",
                       validFrom="2026-06-10T12:00:00+00:00")
@@ -257,6 +264,21 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     sdk.supersede_point(old["id"], new["id"],
                         valid_from="2026-06-10T08:00:00-04:00")
     assert _props(sdk, old["id"])["validTo"] == "2026-06-10T08:00:00-04:00"
+
+    # (c) 0.8 s LATER, same offset → refused (would OVERLAP by 0.8 s)
+    old2 = _make_point(sdk, content="claim v3", validFrom="2026-06-01")
+    new2 = _make_point(sdk, content="claim v4",
+                       validFrom="2026-06-10T12:00:00.100000+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old2["id"], new2["id"],
+                            valid_from="2026-06-10T12:00:00.900000+00:00")
+    assert "validTo" not in _props(sdk, old2["id"])
+
+    # (d) same instant, fractional seconds AND a non-zero offset → accepted
+    sdk.supersede_point(old2["id"], new2["id"],
+                        valid_from="2026-06-10T08:00:00.100000-04:00")
+    assert (_props(sdk, old2["id"])["validTo"]
+            == "2026-06-10T08:00:00.100000-04:00")
 
 
 def test_supersede_numeric_epoch_kwarg_refused(sdk):
@@ -317,13 +339,37 @@ def test_supersede_falsey_but_present_stored_valid_from_refused(sdk):
 
 def test_supersede_unparseable_valid_from_refused(sdk):
     """An unparseable kwarg cannot be shown to name the stored instant, and
-    ``_covers`` cannot order it — refused rather than written."""
+    ``_covers`` cannot order it — refused rather than written.
+
+    This covers the MIXED pair (unparseable kwarg vs a parseable stored start).
+    The BOTH-unparseable pair is covered by
+    ``test_supersede_both_sides_unparseable_refused``."""
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2",
                       validFrom="2026-06-10T00:00:00+00:00")
     with pytest.raises(ValueError, match="disagrees"):
         sdk.supersede_point(old["id"], new["id"], valid_from="not-a-date")
     assert "validTo" not in _props(sdk, old["id"])
+
+
+def test_supersede_both_sides_unparseable_refused(sdk):
+    """The guard requires BOTH sides to be parseable — not merely equal.
+
+    Byte-identical unparseable values are still refused: a key of ``(1, text)``
+    is an *unorderable* start wherever it sits, so writing one would leave the
+    predecessor's window without an orderable end. This pins the guard's
+    parseability conjunct (``k_kwarg[0] == 0 and k_stored[0] == 0``), which is
+    otherwise load-bearing but invisible: the mixed-pair tests still fail under a
+    guard that drops it, because a parseable key's payload is a ``float`` and an
+    unparseable one's is a ``str``, so ``float == str`` is False anyway.
+    """
+    for bad in ("", "not-a-date"):
+        old = _make_point(sdk, content=f"claim v1 {bad!r}",
+                          validFrom="2026-06-01")
+        new = _make_point(sdk, content=f"claim v2 {bad!r}", validFrom=bad)
+        with pytest.raises(ValueError, match="disagrees"):
+            sdk.supersede_point(old["id"], new["id"], valid_from=bad)
+        assert "validTo" not in _props(sdk, old["id"])
 
 
 def test_invalidate_point_stamps_withdrawal(sdk):
