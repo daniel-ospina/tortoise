@@ -2474,7 +2474,6 @@ def _cmd_install_hooks(args) -> int:
     harness = getattr(args, "harness", None)
     listing = getattr(args, "list", False) or not harness
     uninstall = getattr(args, "uninstall", False)
-    dry = getattr(args, "dry_run", False)
 
     # `--uninstall` is scoped to the read-hook registration (its documented
     # contract) and never removes the capture scripts out from under a project.
@@ -2490,7 +2489,27 @@ def _cmd_install_hooks(args) -> int:
         return 0
     # `--list` / no harness prints the catalogue.
     if listing or uninstall:
-        return _install_read_hook(args)
+        rc = _install_read_hook(args)
+        if uninstall and harness == "claude":
+            # Claude is the one harness with a SECOND half: the capture seam
+            # (`session-start.sh` / `session-end.sh` + their
+            # SessionStart/SessionEnd entries). `--uninstall` is scoped to the
+            # read-hook registration and never deletes a project's capture
+            # scripts, so the run must SAY that instead of leaving a user to
+            # conclude "Uninstalled volunteer-turn.sh" meant the seam was
+            # gone while the capture registrations stayed live (#3808 R14).
+            from pathlib import Path as _P
+
+            root = _P(getattr(args, "dir", "."))
+            print(
+                "Note: `--uninstall` removes only the per-turn read hook "
+                "(volunteer-turn.sh). If the capture seam is installed it is "
+                "left in place — .claude/hooks/session-start.sh and "
+                "session-end.sh plus their SessionStart/SessionEnd entries in "
+                f"{root / '.claude' / 'settings.json'} are untouched. Delete "
+                "those to uninstall capture."
+            )
+        return rc
 
     # Capture first: if any half of the seam cannot be installed, the command
     # must fail with NOTHING written rather than leave a project with a read
@@ -2501,21 +2520,31 @@ def _cmd_install_hooks(args) -> int:
             return rc
     if harness == "pi":
         # Pi has no shell-hook read seam — its only seam is the capture
-        # extension. The MCP config + skills come from the dashboard/
-        # `tortoise setup`; restart Pi from a NEW terminal to load the key.
-        # Under `--dry-run` nothing was written, so the success sentence would
-        # be a lie (the action lines already said what WOULD happen).
-        if not dry:
-            print("Pi capture extension installed. The Tortoise MCP config "
-                  "comes from the dashboard's Pi setup (or `tortoise setup`); "
-                  "restart Pi from a NEW terminal — a /reload keeps the old "
-                  "environment.")
+        # extension; `_install_capture_seam` already reported the install,
+        # the no-op, and the MCP/restart guidance.
         return 0
     return _install_read_hook(args)
 
 
+#: Pi's capture seam is its whole install; the MCP wiring is set up by the
+#: dashboard (or ``tortoise setup``), and the extension only loads in a fresh
+#: Pi process. Printed after a real (non-dry-run) run, whether or not that run
+#: wrote the file.
+_PI_MCP_GUIDANCE = (
+    "The Tortoise MCP config comes from the dashboard's Pi setup (or "
+    "`tortoise setup`); restart Pi from a NEW terminal — a /reload keeps the "
+    "old environment."
+)
+
+
 def _install_capture_seam(args, install_capture) -> int:
-    """Install the capture seam for ``args.harness`` and report honestly."""
+    """Install the capture seam for ``args.harness`` and report honestly.
+
+    The success sentence is printed ONLY by a run that actually changed
+    something: ``install_capture`` is idempotent, so a re-run (which is also
+    the upgrade path) must report the no-op — never "installed" over a run
+    that wrote nothing (#3808 R13).
+    """
     from pathlib import Path as _P
 
     result = install_capture(
@@ -2531,6 +2560,11 @@ def _install_capture_seam(args, install_capture) -> int:
         print(action)
     if not result.changed:
         print(f"{args.harness} capture seam already installed — nothing to do.")
+    if args.harness == "pi" and not getattr(args, "dry_run", False):
+        # Under `--dry-run` nothing was written, so the success sentence would
+        # be a lie (the action lines already said what WOULD happen).
+        claim = "Pi capture extension installed. " if result.changed else ""
+        print(f"{claim}{_PI_MCP_GUIDANCE}")
     return 0
 
 
@@ -6356,7 +6390,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Print the registration file(s) without writing")
     inst.add_argument(
         "--uninstall", action="store_true",
-        help="Remove the hook registration for the harness")
+        help="Remove the per-turn read-hook (volunteer-turn.sh) registration "
+             "for the harness — the capture seam is left in place")
     # tortoise hooks — capture-hook install drift + in-place upgrade (#3795,
     # #3801). `status` reports a stale/un-timed install; `upgrade` repairs it
     # (re-copies the scripts AND merges the settings.json timeout). Also

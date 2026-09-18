@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import os
 import re
 import stat
@@ -849,8 +850,81 @@ def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
     assert cline.read_text() == original, "the cline hook file was modified"
 
 
+def test_cli_install_pi_rerun_does_not_claim_installed(cli):
+    """A second `tortoise install pi` is a no-op: it must report the no-op and
+    NOT claim it installed the extension.
+
+    Mutation: print the pi success sentence unconditionally on the non-dry
+    path (the re-run prints "already installed — nothing to do." AND "Pi
+    capture extension installed" — the false-success class `--dry-run` already
+    fixed) — the second stdout assertion turns RED on that one line."""
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_EXTENSION_NAME)
+
+    first = run("install", "pi")
+    assert first.returncode == 0, first.stderr
+    assert "Pi capture extension installed" in first.stdout, first.stdout
+    before = ext.stat().st_mtime_ns
+
+    second = run("install", "pi")
+
+    assert second.returncode == 0, second.stderr
+    assert "pi capture seam already installed" in second.stdout, second.stdout
+    assert "Pi capture extension installed" not in second.stdout, second.stdout
+    assert ext.stat().st_mtime_ns == before, "a re-run rewrote the extension"
+
+
+def test_cli_install_claude_uninstall_discloses_the_live_capture_seam(cli):
+    """`--uninstall` is scoped to the read-hook registration, so claude's
+    capture seam stays live and the run must SAY so rather than printing only
+    "Uninstalled volunteer-turn.sh".
+
+    Mutation: drop the disclosure print after `_install_read_hook` (the output
+    reads as a full uninstall while `session-start.sh`/`session-end.sh` and
+    their SessionStart/SessionEnd registrations remain live), or delete those
+    artifacts (the disclosure becomes false) — either way this turns RED."""
+    run, root, _home = cli
+    first = run("install", "claude", "--dir", str(root))
+    assert first.returncode == 0, first.stderr
+
+    r = run("install", "claude", "--dir", str(root), "--uninstall")
+
+    assert r.returncode == 0, r.stderr
+    assert "Uninstalled volunteer-turn.sh" in r.stdout, r.stdout
+    # The disclosure names the surviving seam and where it lives.
+    assert "left in place" in r.stdout, r.stdout
+    assert "session-start.sh" in r.stdout and "session-end.sh" in r.stdout, (
+        r.stdout)
+    assert "settings.json" in r.stdout, r.stdout
+    # ...and it is TRUE: only the read-hook half was removed.
+    hooks = root / ".claude" / "hooks"
+    assert (hooks / "session-start.sh").is_file()
+    assert (hooks / "session-end.sh").is_file()
+    cfg = _settings(root)["hooks"]
+    assert "SessionStart" in cfg and "SessionEnd" in cfg, cfg
+    assert "UserPromptSubmit" not in cfg, "the read hook was not removed"
+
+
+def test_install_uninstall_help_does_not_overpromise(cli):
+    """`tortoise install --help` must not describe `--uninstall` as removing
+    "the hook registration" — the capture seam survives it.
+
+    Mutation: revert the help string to "Remove the hook registration for the
+    harness" (the promise the live capture seam contradicts)."""
+    run, _root, _home = cli
+
+    r = run("install", "--help")
+
+    assert r.returncode == 0, r.stderr
+    # argparse wraps help to the terminal width — compare unwrapped text.
+    help_text = " ".join(r.stdout.split())
+    assert "capture seam is left in place" in help_text, help_text
+    assert "Remove the hook registration for the harness" not in help_text, (
+        help_text)
+
+
 # ── #3915: the capture-install contract is pinned against #3866 (parity) ─
-#
 # `capture_install` (installs the seam) and `hook_install` (status/upgrade)
 # must answer "is this entry ours?" identically.  Since the fix they share ONE
 # classifier (`hook_install._invokes_script`); these tests pin the observable
@@ -1072,6 +1146,57 @@ def test_float_timeout_parity_between_install_and_status(tmp_path):
     after = _settings(tmp_path)["hooks"]["SessionEnd"][0]["hooks"][0]
     assert after["timeout"] == 120.0, (
         f"upgrade lowered the float timeout: {upgrade.actions}")
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_timeout_is_never_a_budget(tmp_path, literal):
+    """A JSON ``NaN``/``Infinity`` timeout is not a budget on ANY surface.
+
+    ``json.loads`` accepts a bare ``NaN``/``Infinity`` literal, and the float
+    arm of ``_is_timeout_budget`` accepts it too, so a non-finite value read as
+    "already budgeted": ``nan < 60`` is False, meaning the low-timeout check
+    missed it as well, ``hooks status`` reported nothing, ``hooks upgrade``
+    refused to lower it, and the installer preserved it — leaving the hook on
+    Claude Code's 1.5 s default, the exact fail-open the ``timeout`` exists to
+    prevent (the int-only predicate this float arm replaced flagged it).
+
+    Mutation: drop the ``math.isfinite(value)`` clause — every assertion below
+    turns RED and the ``nan`` ends up on disk."""
+    settings = ('{"hooks": {"SessionEnd": [{"matcher": "", "hooks": '
+                '[{"type": "command", "command": '
+                '".claude/hooks/session-end.sh", "timeout": ' + literal
+                + '}]}]}}')
+
+    # 1. hooks status — the non-finite value is drift, not a budget.
+    target = tmp_path / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(settings)
+    findings = hook_install.detect_install(tmp_path, "claude")
+    assert [f for f in findings if f.kind == "settings-no-timeout"], (
+        f"status accepted a {literal} timeout: {findings}")
+
+    # 2. hooks upgrade — it is rewritten to the required budget.
+    upgrade = hook_install.upgrade_install(tmp_path, "claude")
+    assert upgrade.refused is None, upgrade.refused
+    after = _settings(tmp_path)["hooks"]["SessionEnd"][0]["hooks"][0]
+    assert after["timeout"] == CLAUDE_TIMEOUT, (
+        f"upgrade left a {literal} timeout in place: {upgrade.actions}")
+
+    # 3. the installer — the same, into a fresh project.
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").write_text(settings)
+    res = install_capture("claude", root=proj)
+    assert res.ok, res.error
+    merged = _settings(proj)["hooks"]["SessionEnd"][0]["hooks"][0]
+    assert merged["timeout"] == CLAUDE_TIMEOUT, (
+        f"the installer preserved a {literal} timeout: {res.actions}")
+    assert math.isfinite(merged["timeout"]), merged
+
+    # ...and the shared predicate itself, which is the single gate all three
+    # surfaces read (last, so a regression reports the SURFACE that failed).
+    assert not hook_install._is_timeout_budget(float(literal)), (
+        f"_is_timeout_budget accepted {literal}")
 
 
 # ── the seam map is one map (drift guards) ──────────────────────────────

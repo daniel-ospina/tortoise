@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1044,8 +1045,17 @@ def _is_timeout_budget(value: object) -> bool:
     the installer deliberately preserved, and ``tortoise hooks upgrade`` then
     LOWERED it to 60: the opposite of the module's "never lowered" promise.
     ``bool`` is excluded explicitly (``True`` is an ``int``).
+
+    The value must also be FINITE: ``json.loads`` happily accepts a bare
+    ``NaN``/``Infinity`` literal, and a NaN budget is not a budget — nothing
+    can be compared against it (``nan < 60`` is False), so the old
+    ``isinstance``-only test let a ``"timeout": NaN`` through as "already
+    budgeted" and left the hook to Claude Code's 1.5 s default (#3808 R15).
+    Passing the widened float gate without this check is what made the
+    non-finite form survive every surface that shares this predicate.
     """
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
 
 
 def _settings_findings(layout: HarnessLayout, data: dict,
