@@ -368,29 +368,53 @@ def test_claude_install_accepts_the_project_dir_variable_form(tmp_path):
     assert inner["timeout"] == CLAUDE_TIMEOUT
 
 
-def test_claude_install_repairs_a_missing_exec_bit(tmp_path):
-    """Bytes identical but no exec bit is NOT "already installed".
+#: Modes that are all "not installed" for a hook Claude Code, the OWNER,
+#: must execute directly.  `0o644` has no exec bit at all; `0o601` is owner-rw
+#: + OTHERS-exec (the exact reproduction in #4000); `0o410` is owner-read +
+#: GROUP-exec, i.e. a non-owner exec bit is the ONLY exec bit.  The last two
+#: are what made "any exec bit" (`st_mode & 0o111`) a silent false success: the
+#: owner still cannot run the hook while the installer reports it already
+#: correct.  `0o410` rather than a bare `0o010` because an owner-unreadable
+#: file never reaches the repair path — the foreign-install guard cannot verify
+#: its bytes and refuses it (#4000 scoping note).
+_UNRUNNABLE_HOOK_MODES = (0o644, 0o601, 0o410)
+
+
+@pytest.mark.parametrize("mode", _UNRUNNABLE_HOOK_MODES,
+                         ids=[f"{m:o}" for m in _UNRUNNABLE_HOOK_MODES])
+def test_claude_install_repairs_a_missing_exec_bit(tmp_path, mode):
+    """Bytes identical but no OWNER exec bit is NOT "already installed".
 
     Claude Code executes `.claude/hooks/<name>` directly, and the fail-open
     script swallows the permission error — so a hook that lost its exec bit
     (a `cp` without `chmod`, a zip/tarball checkout) files nothing while the
     install reports success.
 
-    Mutation: treat identical bytes as unchanged without checking the mode
-    (the `continue` skips the `os.chmod` repair; `changed` stays False and the
-    hook is left unrunnable)."""
+    The repair must test the OWNER's bit (`stat.S_IXUSR`), the same bit the
+    assertion below makes: an any-exec-bit test (`st_mode & 0o111`) passes for
+    `0o601`/`0o410`, where a non-owner exec bit is the only exec bit and
+    `os.access(hook, os.X_OK)` is False, so the second install returns
+    ``changed=False, actions=()`` on an unexecutable hook (#4000).
+
+    Mutation: change the guard back to `st_mode & 0o111` — the `0o601`/`0o410`
+    cases RED (`changed` stays False); or treat identical bytes as unchanged
+    without checking the mode at all — every case REDs."""
     install_capture("claude", root=tmp_path)
     hooks = [tmp_path / ".claude" / "hooks" / name
              for name in ("session-start.sh", "session-end.sh")]
     for hook in hooks:
-        os.chmod(hook, 0o644)
+        os.chmod(hook, mode)
 
     res = install_capture("claude", root=tmp_path)
 
     assert res.ok, res.error
-    assert res.changed is True, "the lost exec bit was not repaired"
+    assert res.changed is True, (
+        f"the lost owner exec bit was not repaired from mode {mode:o}")
     for hook in hooks:
         assert hook.stat().st_mode & stat.S_IXUSR, f"{hook.name} is still unrunnable"
+        assert os.access(hook, os.X_OK), (
+            f"{hook.name} is not executable by its owner (mode "
+            f"{hook.stat().st_mode & 0o777:o})")
         assert hook.read_bytes() in (_START, _END)
 
 
@@ -553,8 +577,15 @@ def test_claude_install_refuses_a_symlink_loop_instead_of_raising(tmp_path):
 def test_claude_install_fails_loudly_when_the_hooks_path_is_not_a_directory(tmp_path):
     """An install that cannot write the hook must NOT report success.
 
-    Mutation: swallow the OSError / skip `_preflight_writable` — the call
-    returns ok=True with no hooks installed (the silent-loss shape)."""
+    The guard that carries this test's signal is ``_preflight_probe``'s
+    ``is_dir`` refusal (the write-free probe), NOT ``_preflight_writable``.
+
+    Mutation: neutralize ``_preflight_probe``'s ``is_dir`` refusal — the
+    refusal then falls through to ``_preflight_writable``'s ``mkdir``
+    ``FileExistsError`` ("cannot create …"), and ``"not a directory"``
+    REDs.  Swallowing the ``OSError`` in ``_preflight_writable`` (or skipping
+    it entirely) does NOT RED this test, because the probe refuses first —
+    naming that mutation was #4001 R29."""
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / "hooks").write_text("")  # a FILE where the dir goes
 
@@ -610,7 +641,7 @@ def test_claude_install_turns_a_write_time_oserror_into_a_populated_error(
     res = install_capture("claude", root=tmp_path)
 
     assert not res.ok, "a failed write reported success"
-    assert "write failed" in res.error, res.error
+    assert "install failed" in res.error, res.error
     assert "PermissionError" in res.error, res.error
     assert "NOT fully installed" in res.error, res.error
     # The dangerous half is REAL: both scripts were written and chmodded
@@ -622,6 +653,54 @@ def test_claude_install_turns_a_write_time_oserror_into_a_populated_error(
         assert script.stat().st_mode & 0o111, f"{name} is not executable"
     # The registration write failed, so no settings.json was left behind.
     assert not settings_path.exists()
+
+
+def test_capture_install_turns_a_deep_json_recursionerror_into_a_populated_error(
+        tmp_path):
+    """``install_capture`` called DIRECTLY on a deeply nested
+    ``settings.json`` must not raise — the failure is a populated
+    ``InstallResult.error``.
+
+    ``json.loads`` raises ``RecursionError`` (a ``RuntimeError``, not an
+    ``OSError``) on a deeply nested document, and ``_load_settings`` catches
+    ``ValueError`` only, so the failure reaches ``install_capture``'s boundary
+    — which caught ``OSError`` alone and let it escape the public API,
+    contradicting the module's "every failure path populates
+    ``InstallResult.error``" contract (#3999).
+
+    GAP THIS CLOSES: the ``deep-json-recursionerror`` case in
+    ``tests/test_platform_seams.py`` runs through ``_read_hook_refusal`` (the
+    READ half's boundary), so it cannot RED for THIS module.  This test calls
+    ``install_capture`` directly.
+
+    Mutation: narrow the boundary back to ``except OSError`` — ``RecursionError``
+    escapes and this call raises instead of returning a populated error."""
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_bytes(b"[" * 100_000 + b"]" * 100_000)
+
+    res = install_capture("claude", root=tmp_path)
+
+    assert not res.ok, "a RecursionError was reported as a successful install"
+    assert res.error, "the RecursionError path returned no populated error"
+    assert "RecursionError" in res.error, res.error
+
+
+def test_capture_install_reraises_memory_error(tmp_path, monkeypatch):
+    """``MemoryError`` is the one failure a refusal is the wrong answer for
+    (the refusal message itself allocates), so the boundary re-raises it
+    rather than converting it — the SAME form the read half's boundary uses.
+
+    Mutation: drop the ``except MemoryError: raise`` clause — the following
+    ``except Exception`` swallows it into a populated error and this
+    ``pytest.raises`` REDs."""
+    def _oom(*_args, **_kwargs):
+        raise MemoryError("pretend the process cannot allocate")
+
+    monkeypatch.setattr(capture_install, "_install_claude", _oom)
+
+    with pytest.raises(MemoryError):
+        install_capture("claude", root=tmp_path)
 
 
 def test_claude_write_failure_is_loud_at_the_cli_seam(tmp_path, monkeypatch, capsys):
@@ -645,7 +724,7 @@ def test_claude_write_failure_is_loud_at_the_cli_seam(tmp_path, monkeypatch, cap
     captured = capsys.readouterr()
     assert rc == 1, f"a failed install exited {rc}"
     assert "Capture install FAILED" in captured.err, captured.err
-    assert "write failed" in captured.err, captured.err
+    assert "install failed" in captured.err, captured.err
     assert not (tmp_path / ".claude" / "settings.json").exists()
 
 
@@ -758,8 +837,16 @@ def test_pi_install_is_a_clean_no_op_on_rerun(home):
 
 
 def test_pi_install_fails_loudly_when_the_extensions_path_is_a_file(home):
-    """Mutation: swallow the mkdir OSError — the install reports success with
-    no extension on disk (Pi then captures nothing, silently)."""
+    """An install into a home whose extensions path is a FILE must not report
+    success (Pi then captures nothing, silently).
+
+    As with the claude case above, the guard carrying the signal is
+    ``_preflight_probe``'s ``is_dir`` refusal, not the ``mkdir`` OSError.
+
+    Mutation: neutralize ``_preflight_probe``'s ``is_dir`` refusal — the
+    refusal falls through to ``_preflight_writable``'s ``mkdir``
+    ``FileExistsError`` ("cannot create …") and ``"not a directory"`` REDs.
+    Swallowing the ``mkdir`` ``OSError`` does NOT RED this test (#4001 R29)."""
     (home / ".pi" / "agent").mkdir(parents=True)
     (home / ".pi" / "agent" / "extensions").write_text("")
 

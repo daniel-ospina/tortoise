@@ -599,19 +599,15 @@ def _loop_leaf(root: Path) -> None:
 
 
 _BOUNDARY_CASES = [
-    # TypeError — valid JSON of the wrong SHAPE.  `{"hooks": null}` is not
-    # invalid JSON, so the JSONDecodeError guard never sees it, and the old
-    # `(OSError, RuntimeError)` boundary did not either (#3987).
-    ("hooks-null-typeerror", "claude",
-     lambda r: _write_bytes(r / ".claude" / "settings.json",
-                            b'{"hooks": null}'),
-     ["Install failed:", "TypeError"]),
     # UnicodeDecodeError — a non-UTF-8 settings.json.  A ValueError, so the
-    # old boundary let it escape as a traceback (#3988).
+    # old boundary let it escape as a traceback (#3988).  The assertion is the
+    # OBSERVABLE contract (a populated refusal, no traceback), not the class
+    # name: pinning "UnicodeDecodeError" would RED the day a local
+    # UTF-8 guard emits its own message (#4001 R32).
     ("non-utf8-unicodedecodeerror", "claude",
      lambda r: _write_bytes(r / ".claude" / "settings.json",
                             b'{"hooks": {"note": "\xff\xfe"}}'),
-     ["Install failed:", "UnicodeDecodeError"]),
+     ["Install failed:"]),
     # RuntimeError — a symlink cycle, where Path.resolve() raises RuntimeError
     # (deliberately, not OSError) on CPython.
     ("symlink-loop-runtimeerror", "claude", _loop_leaf,
@@ -651,6 +647,33 @@ def test_read_half_boundary_refuses_every_raise_set_member(
     assert "Traceback" not in r.stderr, (case_id, r.stderr)
     for token in tokens:
         assert token in r.stderr, (case_id, token, r.stderr)
+
+
+def test_read_half_wrong_shape_hooks_null_is_never_a_traceback(tmp_path):
+    """A valid-JSON ``{"hooks": null}`` must reach a DEFINED state — a clean
+    populated refusal OR a clean install — never an uncaught traceback.
+
+    This asserts the OBSERVABLE contract, not the internal exception class
+    (#4001 R32).  It was previously a ``_BOUNDARY_CASES`` entry asserting
+    ``"Install failed:"`` + ``TypeError``.  But the ``TypeError`` is the
+    DEFECT, not the contract: #3987's own stated fix
+    (``existing_json["hooks"] = hooks`` — write the normalized hooks back)
+    makes the read half install over ``{"hooks": null}``, exactly as
+    ``tortoise hooks upgrade`` already does, so there is no refusal and no
+    ``TypeError`` to name — and the old guard turned RED under that fix, i.e.
+    it pinned the defect (a correct fix breaks the test written to protect
+    it).  Both outcomes below satisfy the boundary's real contract; a
+    traceback never does.
+
+    Mutation: revert the read-half boundary to the old
+    ``(OSError, RuntimeError)`` tuple — the ``TypeError`` escapes as a
+    traceback and ``"Traceback" not in r.stderr`` REDs."""
+    _write_bytes(tmp_path / ".claude" / "settings.json", b'{"hooks": null}')
+    r = _run(["install", "claude", "--dir", str(tmp_path)], _install_env())
+    assert "Traceback" not in r.stderr, r.stderr
+    assert r.returncode in (0, 1), (r.returncode, r.stdout, r.stderr)
+    if r.returncode == 1:
+        assert "Install failed:" in r.stderr, r.stderr
 
 
 def test_read_half_boundary_permission_error(tmp_path):

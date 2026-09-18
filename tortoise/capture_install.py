@@ -45,12 +45,19 @@ clobbered).  A differing copy that DOES look like ours is preserved as
 ``<name>.bak`` before the shipped bytes replace it — the same rule
 ``tortoise hooks upgrade`` applies.  Writes are atomic (temp file +
 ``os.replace``) so a failed write cannot leave a half-written
-``settings.json`` behind.  A **write-time**
+``settings.json`` behind.  **ANY** failure inside the install — a write-time
 ``OSError`` (an immutable target, ``EROFS``/``ENOSPC``/``EDQUOT``, a directory
-that lost its mode) is caught at the :func:`install_capture` boundary and
-returned as a populated ``error`` — never raised out of the module into a CLI
-traceback — because a write that fails silently at the seam is exactly the
+that lost its mode), a ``RecursionError`` from ``json.loads`` on a deeply
+nested document, a ``RuntimeError`` from a symlink loop, or an unenumerated
+member a future path adds — is caught at the :func:`install_capture` boundary
+and returned as a populated ``error`` — never raised out of the module into a
+CLI traceback — because a failure that escapes the seam is exactly the
 half-install (scripts on disk, no registration) this module exists to prevent.
+The boundary is ONE catch-all with an explicit ``MemoryError`` re-raise (the
+refusal message itself allocates), deliberately not an ``except (A, B, ...)``
+tuple: a finite enumeration is refutable by the next member it omits, which is
+how ``TypeError`` (#3987) and ``UnicodeDecodeError`` (#3988) escaped the read
+half's previous ``(OSError, RuntimeError)`` tuple.
 
 Relationship to ``tortoise/hook_install.py`` (PR #3866)
 -------------------------------------------------------
@@ -97,6 +104,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -584,9 +592,15 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
             # session files nothing while the install reports success.  This
             # is the `cp`-without-`chmod` legacy state the installer exists to
             # repair, so an unchanged-bytes hook is not automatically a no-op.
-            if dst.stat().st_mode & 0o111:
+            # The test is the OWNER's bit, not any exec bit (#4000): Claude
+            # Code runs as the owner, so a hook at `0o601`/`0o410` (group or
+            # others exec only) is unrunnable while `st_mode & 0o111` reads it
+            # as already correct — the silent false success this repair exists
+            # to prevent, and the bit the tests already assert
+            # (`stat.S_IXUSR`).
+            if dst.stat().st_mode & stat.S_IXUSR:
                 continue
-            repaired = (dst.stat().st_mode & 0o777) | 0o111
+            repaired = (dst.stat().st_mode & 0o777) | stat.S_IXUSR
             if dry_run:
                 actions.append(f"[dry-run] would restore the exec bit on "
                                f"{dst} (mode {repaired:o})")
@@ -717,24 +731,30 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     return InstallResult(harness, changed=changed, actions=tuple(actions))
 
 
-def _write_failed(harness: str, e: OSError) -> InstallResult:
-    """The populated failure result for a write-time ``OSError``.
+def _install_failed(harness: str, e: Exception) -> InstallResult:
+    """The populated failure result for ANY failure inside the install.
 
-    The pre-flight proves the DIRECTORY is writable; it cannot prove the
-    TARGET can be replaced — an immutable file (``chflags uchg``), a
-    filesystem that went read-only, ``ENOSPC``/``EDQUOT``, or a mode change
-    between the probe and the write all reach ``_atomic_bytes``/
-    ``chmod``/``unlink``/``rename`` and raise.  Returning this instead of
-    letting the exception escape keeps the module's stated contract: every
-    failure path populates :attr:`InstallResult.error`, and the CLI then prints
-    ``Capture install FAILED`` with a non-zero exit rather than a traceback.
+    The install runs behind ONE catch-all (see :func:`install_capture`), so
+    this is not keyed to a write-time ``OSError``: a ``RecursionError`` from
+    ``json.loads`` on a deeply nested ``settings.json`` (#3999), a
+    ``RuntimeError`` from a symlink loop, a ``TypeError`` from a wrong-shape
+    document, a ``UnicodeDecodeError`` from a non-UTF-8 one, or anything
+    unenumerated a future read/parse/pre-flight/write path adds are all routed
+    here.  Keying the boundary to one class is exactly the defect that let
+    those members escape (a finite ``except (A, B, ...)`` tuple is refutable by
+    the next unenumerated member).
+
+    ``where`` is the failing filename when the exception carries one (every
+    ``OSError`` does) and the install target otherwise.  ``NOT fully
+    installed`` is load-bearing: the capture hook is fail-open, so a
+    half-install files no sessions and says nothing — this string is the ONLY
+    signal that the seam is incomplete.
     """
     where = getattr(e, "filename", None) or "the install target"
     return InstallResult(harness, error=(
-        f"write failed at {where}: {e.__class__.__name__}: {e} — the capture "
-        "seam is NOT fully installed. Fix the path (permissions, immutable "
-        "flag, free space) and re-run; `tortoise hooks status` reports what "
-        "is on disk."))
+        f"install failed at {where}: {e.__class__.__name__}: {e} — the capture "
+        "seam is NOT fully installed. Re-run once the cause is fixed; "
+        "`tortoise hooks status` reports what is on disk."))
 
 
 def install_capture(
@@ -751,6 +771,17 @@ def install_capture(
     the running user's home, i.e. what ``~`` resolves to).  Idempotent: a
     second call against an already-current install writes nothing and reports
     ``changed=False``.
+
+    The whole install runs inside ONE catch-all so EVERY failure path
+    populates :attr:`InstallResult.error` (non-empty stderr + non-zero exit at
+    the CLI) instead of escaping as a traceback: ``except MemoryError: raise``
+    first (resource exhaustion is not a refusal; the handler allocates), then
+    ``except Exception``.  Deliberately NOT an ``except (A, B, ...)`` tuple —
+    a finite enumeration is refutable by the next unenumerated member, which
+    is how ``RecursionError`` (a ``RuntimeError`` from ``json.loads`` on a
+    deeply nested document, #3999) escaped the previous ``except OSError``.
+    ``KeyboardInterrupt``/``SystemExit`` are ``BaseException``, outside
+    ``except Exception``, and still propagate.
     """
     if harness not in CAPTURE_SEAM:
         known = ", ".join(sorted(CAPTURE_SEAM))
@@ -759,13 +790,17 @@ def install_capture(
     if harness == "claude":
         try:
             return _install_claude(Path(root), dry_run=dry_run)
-        except OSError as e:
-            return _write_failed(harness, e)
+        except MemoryError:
+            raise  # resource exhaustion is not a refusal; the handler allocates
+        except Exception as e:
+            return _install_failed(harness, e)
     try:
         return _install_pi(Path(home) if home is not None else Path.home(),
                            dry_run=dry_run)
-    except OSError as e:
-        return _write_failed(harness, e)
+    except MemoryError:
+        raise  # resource exhaustion is not a refusal; the handler allocates
+    except Exception as e:
+        return _install_failed(harness, e)
 
 
 __all__ = [
