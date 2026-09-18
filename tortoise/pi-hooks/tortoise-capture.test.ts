@@ -550,6 +550,9 @@ test("replaying a spooled session twice produces one session and posts once", as
 });
 
 test("the capture key is content-addressed: changed turns get a new key, a replay does not", () => {
+  // MUTATION THAT REDS THIS: drop `session_id` (or the content digest) from
+  // `captureKey` → a changed conversation reuses the old key and its new turns
+  // are short-circuited as "already filed".
   const a = captureKey("s1", [{ role: "user", content: "one" }]);
   assert.equal(a, captureKey("s1", [{ role: "user", content: "one" }]), "stable across replays");
   assert.notEqual(a, captureKey("s1", [{ role: "user", content: "two" }]), "content-sensitive");
@@ -663,6 +666,8 @@ test("a network failure defers the entry (retry with backoff), it is never lost"
 });
 
 test("backoff grows exponentially and is capped", () => {
+  // MUTATION THAT REDS THIS: return a constant (no growth) or drop the cap →
+  // either the retry storm or an unbounded wait.
   assert.ok(backoffDelay(2) > backoffDelay(1));
   assert.ok(backoffDelay(3) > backoffDelay(2));
   assert.ok(backoffDelay(100) <= 6 * 60 * 60 * 1000);
@@ -746,6 +751,8 @@ test("a history rewrite (window shift) never leaves stale turns fused onto the l
 });
 
 test("a growing session appends and reconstructs every turn in order", () => {
+  // MUTATION THAT REDS THIS: always rewrite the log from the LATER snapshot
+  // only (drop the append/prefix check) → the earlier turns are lost.
   const spool = tmpSpool();
   writeSpoolEntry(spool, { ...snapshot("sess-grow"), turns: [{ role: "user", content: "a" }] });
   writeSpoolEntry(spool, {
@@ -765,6 +772,9 @@ test("a growing session appends and reconstructs every turn in order", () => {
 // ── (7) The live session is never filed mid-conversation ───────────────────
 
 test("agent_end drains OTHER sessions but never the live one", async () => {
+  // MUTATION THAT REDS THIS: drop `excludeSessionId` from the `agent_end`
+  // flush → the live session is filed mid-conversation and the server replays
+  // it, freezing extraction.
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-old"));
   const pi = mockPi();

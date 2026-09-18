@@ -3072,12 +3072,16 @@ def _spool_transcript(args) -> dict:
     from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
     transcript_path = Path(args.file)
-    if not transcript_path.exists():
-        print(f"Transcript file not found: {args.file}", file=_sys.stderr)
-        return {"rc": 1}
-
+    # NO `transcript_path.exists()` pre-check: `Path.exists()` RAISES
+    # `PermissionError` when a parent directory lacks traverse permission (the
+    # same class as the spool-ROOT bug), so the guard below was unreachable and
+    # the CLI exited 1 with a traceback and no record. The read classifies it:
+    # ENOENT is "not found", every other failure is a recorded loss.
     try:
         text = transcript_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print(f"Transcript file not found: {args.file}", file=_sys.stderr)
+        return {"rc": 1}
     except (OSError, UnicodeDecodeError) as exc:
         # `session spool` documents "always exits 0" because it is the per-turn
         # mechanism of record: an unreadable or non-UTF-8 transcript must not
@@ -3262,23 +3266,22 @@ def _cmd_session_drain_best_effort(args) -> int:
     """
     import sys as _sys
 
+    # ONE blanket try around EVERYTHING — including the config resolver. That is
+    # deliberate: `_resolve_config_path()` calls `Path.is_file()`, which RAISES
+    # `PermissionError` (not `_ConfigError`) when `~/.tortoise` is unreadable, so
+    # a resolver-only outside the belt still let the backgrounded drain exit 1
+    # with a traceback. The drain is backgrounded from SessionStart: whatever
+    # goes wrong, its contract is exit 0 with the reason on stderr.
     try:
         _cfg_path, _config, api_key, api_url = _resolve_config_path()
-    except _ConfigError as e:
-        print(f"spool drain: invalid config at {e} — nothing to file",
-              file=_sys.stderr)
-        return 0
-    if api_key is None:
-        print("spool drain: no .tortoise config — nothing to file", file=_sys.stderr)
-        return 0
-    try:
+        if api_key is None:
+            print("spool drain: no .tortoise config — nothing to file",
+                  file=_sys.stderr)
+            return 0
         return _cmd_session_drain(api_key, api_url,
                                   getattr(args, "exclude_session_id", None))
     except Exception as e:
-        # The drain is backgrounded from SessionStart: WHATEVER goes wrong (an
-        # unreadable spool, a bug in a new transport) it must not surface as a
-        # crashed hook. The root causes are fixed above; this is the belt.
-        print(f"spool drain: unexpected failure — {e}", file=_sys.stderr)
+        print(f"spool drain: nothing filed — {e}", file=_sys.stderr)
         return 0
 
 

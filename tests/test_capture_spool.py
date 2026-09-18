@@ -1474,3 +1474,71 @@ def test_session_drain_never_crashes_on_an_unexpected_failure(monkeypatch):
 
     monkeypatch.setattr(cli, "_cmd_session_drain", boom)
     assert cli.main(["session", "drain"]) == 0, "a crashed drain is still exit 0"
+
+
+# ── (16) Cycle-7 review fixes (P2) ─────────────────────────────────────────
+
+
+def test_spool_exits_zero_when_the_transcript_parent_is_unreadable(tmp_path,
+                                                                 monkeypatch,
+                                                                 capsys):
+    """`Path.exists()` RAISES `PermissionError` when a PARENT directory lacks
+    traverse permission — the same class as the spool-ROOT bug. The old
+    `if not transcript_path.exists(): ...` pre-check therefore escaped as a
+    traceback (exit 1, no record) instead of being classified, contradicting the
+    per-turn capture's "always exits 0" contract.
+
+    MUTATION THAT REDS THIS: restore the `transcript_path.exists()` pre-check.
+    """
+    from tortoise import __main__ as cli
+
+    _isolate(monkeypatch, tmp_path)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "t.jsonl").write_text("User: hi\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        assert cli.main(["session", "spool", "--file",
+                         str(locked / "t.jsonl")]) == 0, (
+            "an unreadable parent must not break the exit-0 contract")
+    finally:
+        locked.chmod(0o700)
+    assert "unreadable" in capsys.readouterr().err
+    assert read_discards(tmp_path / "spool")[-1]["reason"] == "transcript_unreadable"
+
+
+def test_the_spool_command_reports_not_found_for_a_missing_transcript(tmp_path,
+                                                                    monkeypatch,
+                                                                    capsys):
+    """The ENOENT case still gets its own message (the classification moved into
+    the read, but "not found" must not be reported as "unreadable").
+
+    MUTATION THAT REDS THIS: drop the `except FileNotFoundError` arm.
+    """
+    from tortoise import __main__ as cli
+
+    _isolate(monkeypatch, tmp_path)
+    assert cli.main(["session", "spool", "--file",
+                     str(tmp_path / "nope.jsonl")]) == 0
+    assert "not found" in capsys.readouterr().err
+
+
+def test_session_drain_exits_zero_when_the_config_resolver_itself_raises(
+        monkeypatch):
+    """The config resolver can RAISE something that is not `_ConfigError`:
+    `_resolve_config_path()` calls `Path.is_file()`, which raises
+    `PermissionError` when `~/.tortoise` is unreadable. The resolver therefore
+    has to sit INSIDE the blanket try, or the backgrounded drain exits 1 with a
+    traceback.
+
+    MUTATION THAT REDS THIS: move `_resolve_config_path()` above the
+    `except Exception` belt (catch only `_ConfigError`).
+    """
+    from tortoise import __main__ as cli
+
+    def unreadable():
+        raise PermissionError(13, "Permission denied", "/home/u/.tortoise")
+
+    monkeypatch.setattr(cli, "_resolve_config_path", unreadable)
+    assert cli.main(["session", "drain"]) == 0, (
+        "the backgrounded drain must exit 0 even when the resolver raises")
