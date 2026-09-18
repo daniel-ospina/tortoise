@@ -14,6 +14,7 @@ aboutObjects: tortoise
 | Area | Path |
 | --- | --- |
 | Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
+| **MCP tool surface + public SDK methods** — the curated list: every tool and public method, what it does, what uses it, a recommendation and its rationale; the approved baseline (`config/surface-manifest.yml`) and the gate that blocks unapproved expansion (#3863) | `docs/product/mcp-sdk-surface.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
 | Hosted platform **infra runbook** — provisioning, secrets rotation, rollback, health checks, machine topology + autostop policy (§6), and the out-of-band availability watchdog with self-healing + alert dedupe (§7) (#2850) | `docs/infra-runbook.md` |
 | Temporal measurement runbook + gate output (2×2 attribution + widening ablation, #2578) | `docs/runbook/2578-temporal-measurement.md` |
