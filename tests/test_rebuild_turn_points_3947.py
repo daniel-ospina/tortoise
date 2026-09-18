@@ -764,10 +764,16 @@ def test_session_only_sidecar_write_failure_aborts_before_the_wipe(captured):
     assert "aborted BEFORE the graph wipe" in msg
     # The refusal enumerates the session-only population and NONE of the
     # three #3010 populations — the exact shape the F5 split misjudged.
-    assert "0 graph-only Point event(s)" in msg
-    assert "0 :Batch marker(s)" in msg
-    assert "0 batch link(s)" in msg
-    assert ":Session container(s)" in msg and "session link(s)" in msg
+    # Anchor the counts with their preceding words: a bare `"0 <words>"`
+    # also matches `"10 <words>"`, so an unanchored form would silently stop
+    # pinning the session-only shape once the fixture grew. The session
+    # counts are asserted POSITIVELY and exactly — the template words alone
+    # are unconditional, so `":Session container(s)" in msg` is true even
+    # when the count is 0 and pins nothing (review G6 follow-up).
+    assert "destroy 0 graph-only Point event(s)" in msg
+    assert ", 0 :Batch marker(s)" in msg
+    assert ", 0 batch link(s)" in msg
+    assert "1 :Session container(s) and 4 session link(s)" in msg
     # The wipe never ran: the sentinel, every turn Point and every CONTAINS
     # edge are still here.
     assert proj.g.query(
