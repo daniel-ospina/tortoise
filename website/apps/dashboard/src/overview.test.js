@@ -227,7 +227,7 @@ test('#2361 vocab anchor: LIVE surfaces (main.jsx) do not drift back to "point"'
   // overlap fails with a named message instead of a confusing count mismatch.
   const ALLOW = [
     [/\/v1\/graphs\/trash\/[^`]*points\$\{q\}/, 1], // main.jsx:4990
-    [/\/v1\/points/, 5],                            // snippet const, overview seed call, build-fork curl, done-step endpoint, dashboard curl
+    [/\/v1\/points/, 4],                            // snippet const, overview seed call, build-fork curl, done-step endpoint (#3890: the D5 empty-state curl moved to overviewEmptyAction.js)
     [/points=\{team\.point_count \?\? 0\}/, 1],     // main.jsx:7456
     [/overviewDigest\(points\)/, 1],                // main.jsx:298
     [/\{\s*points\s*\}/, 1],                        // main.jsx:297
