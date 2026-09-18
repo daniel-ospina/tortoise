@@ -299,18 +299,24 @@ fetch_runs() { # reads $RUN_TMP/window_days.txt -> TSV "day<TAB>conclusion" in $
       printf 'TRUNCATED: slice %s returned %s of %s reported\n' "$day" "$slice_returned" "$slice_total" > "$RUN_TMP/fetch_integrity.txt"
       return 1
     fi
-    # A run with a missing created_at cannot be PLACED on a UTC day. It is not
-    # bucketed into "today" (an unknown day is not a sample) and it is not
-    # DROPPED either: dropping it would shrink the denominator the published
-    # availability figure is computed over — OVERSTATING availability when the
-    # dropped run was a failure — while the marker still certified the pre-drop
-    # count. It is therefore an INSTRUMENT FAILURE, exactly like every other run
-    # this fetch cannot fully account for: why, on stderr; non-zero exit; NOTHING
-    # published. (The real API always sends created_at, so this is a defensive
-    # path, not a live one.)
+    # A run whose created_at cannot be placed on a UTC day cannot be PLACED at
+    # all. That covers BOTH a missing created_at AND one that is present but is
+    # not a `YYYY-MM-DD` UTC date — whitespace, "not-a-date", or any other shape
+    # whose first 10 characters are not a date. The old filter tested only
+    # `!= ""`, so `created_at: " "` and `created_at: "not-a-date"` sailed
+    # through, were bucketed under a day this window never renders, and were
+    # DROPPED from the body while the marker still certified the pre-drop count
+    # (#3810 P2-1). The run is not bucketed into "today" (an unknown day is not a
+    # sample) and is not silently excluded either: dropping it would shrink the
+    # denominator the published availability figure is computed over —
+    # OVERSTATING availability when the dropped run was a failure. It is
+    # therefore an INSTRUMENT FAILURE, exactly like every other run this fetch
+    # cannot fully account for: why, on stderr; non-zero exit; NOTHING published.
+    # (The real API always sends a well-formed created_at, so this is a
+    # defensive path, not a live one.)
     if ! printf '%s' "$out" | jq -rs '
         [ .[].workflow_runs[]? ]
-        | map(select((.created_at // "") != ""))
+        | map(select((.created_at // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}")))
         | .[]
         | [ (.created_at[0:10]), (.conclusion // "inconclusive") ]
         | @tsv' > "$RUN_TMP/slice.tsv" 2>"$RUN_TMP/runs.jq.err"; then
@@ -319,8 +325,8 @@ fetch_runs() { # reads $RUN_TMP/window_days.txt -> TSV "day<TAB>conclusion" in $
     fi
     slice_lines="$(awk 'END { print NR + 0 }' "$RUN_TMP/slice.tsv")"
     if [ "$slice_lines" -lt "$slice_returned" ]; then
-      fail "INSTRUMENT FAILURE — the ${day} slice returned $((slice_returned - slice_lines)) run(s) with no created_at, so their UTC day cannot be determined. Dropping them would shrink the denominator the published figure is computed over and would OVERSTATE availability if any was a failure. This window CANNOT be trusted and no record is published. This is a FETCH failure, NOT a gap."
-      printf 'INCOMPLETE: slice %s dropped %s of %s run(s) with no created_at\n' "$day" "$((slice_returned - slice_lines))" "$slice_returned" > "$RUN_TMP/fetch_integrity.txt"
+      fail "INSTRUMENT FAILURE — the ${day} slice returned $((slice_returned - slice_lines)) run(s) with no created_at that is a usable UTC date (YYYY-MM-DD), so their UTC day cannot be determined. Dropping them would shrink the denominator the published figure is computed over and would OVERSTATE availability if any was a failure. This window CANNOT be trusted and no record is published. This is a FETCH failure, NOT a gap."
+      printf 'INCOMPLETE: slice %s dropped %s of %s run(s) with no created_at that is a usable UTC date\n' "$day" "$((slice_returned - slice_lines))" "$slice_returned" > "$RUN_TMP/fetch_integrity.txt"
       return 1
     fi
     cat "$RUN_TMP/slice.tsv" >> "$RUN_TMP/runs.tsv"
@@ -458,8 +464,21 @@ render_record() { # <days> <now>
   case "${i_slices:-}" in ''|*[!0-9]*) i_slices=0 ;; esac
   [ -n "${i_cap:-}" ] || i_cap="$RUN_FETCH_CAP"
   # The window's day count, so the marker can be held to covering all of it.
-  local window_day_count refusal=""
+  local window_day_count window_enum refusal=""
   window_day_count="$(awk 'END { print NR + 0 }' "$RUN_TMP/window_days.txt" 2>/dev/null || printf 0)"
+  # ── every enumerated run must land on a day this render SUMS (#3810 P2-1) ──
+  # fetch_runs proves each slice's enumeration matches the API's own count and
+  # that every returned run carries a placeable UTC day. It does NOT prove the
+  # day is one this render will SUM: the per-day table iterates window_days.txt,
+  # so a run whose (valid) created_at falls OUTSIDE the window is counted by the
+  # marker — "COMPLETE — N enumerated" — and then has NO row. The body would
+  # print zero delivery for every day while the marker certified the pre-drop
+  # count: a false-absence claim over a dropped FAILURE run, the SAME class as a
+  # missing created_at (#3896), one stage later. Reconcile the marker's
+  # enumeration against the runs that actually land on a rendered day, and refuse
+  # when they disagree, like every other instrument failure.
+  window_enum="$(awk -F'\t' 'NR == FNR { w[$1] = 1; next } w[$1] { n++ } END { print n + 0 }' \
+    "$RUN_TMP/window_days.txt" "$RUN_TMP/runs.tsv" 2>/dev/null || printf 0)"
   if [ "$marker_malformed" = "1" ]; then
     refusal="the fetch-integrity marker is missing or malformed (expected COMPLETE<TAB>enumerated<TAB>reported<TAB>slices<TAB>cap, all numeric): '${integrity:-<none>}'"
   elif [ "$i_status" != "COMPLETE" ]; then
@@ -468,6 +487,8 @@ render_record() { # <days> <now>
     refusal="the fetch-integrity marker is internally inconsistent: $i_enum run(s) enumerated but $i_rep reported by the API"
   elif [ "$i_slices" -ne "$window_day_count" ]; then
     refusal="the fetch-integrity marker covers $i_slices slice(s) but the window has $window_day_count UTC day(s)"
+  elif [ "$window_enum" -ne "$i_enum" ]; then
+    refusal="the fetch enumerated $i_enum run(s) but only $window_enum fall on a UTC day this window renders — publishing would drop $((i_enum - window_enum)) enumerated run(s) from the body while the marker certified the higher count"
   fi
   if [ -n "$refusal" ]; then
     printf 'availability record — INSTRUMENT FAILURE, NOT A READING (#3810 / #3896)\n'

@@ -56,6 +56,13 @@
 #       pre-drop count, so the body could print "COMPLETE — N enumerated" beside
 #       an availability figure computed over the reduced set (OVERSTATED when the
 #       dropped run was a failure). The overstatement is REMOVED, not annotated.
+#  23.  (#3810 P2-1) a returned run whose created_at is a VALID date OUTSIDE the
+#       window — or a created_at that is present but unusable (whitespace /
+#       garbage) — cannot reach a rendered row. The render reconciles the
+#       marker's enumeration against the runs that land on a window day and
+#       refuses; the fetch drops an unusable created_at closed. Otherwise the
+#       marker certifies "COMPLETE — N enumerated" while the body asserts zero
+#       delivery: the same false-absence claim, one stage later.
 #
 # Fixtures are simulated; the real recorder is the script under test.
 
@@ -717,6 +724,54 @@ assert_not_contains "$OUT" "RECORD-ONLY baseline" "no record is rendered from a 
 assert_not_contains "$OUT" "100.0%" "the overstated 100.0% figure is never printed"
 assert_eq "$(count_calls 'GH POST repos/daniel-ospina/tortoise/issues$')" "0" "a dropped run publishes nothing"
 assert_eq "$(count_calls 'GH PATCH')" "0" "a dropped run patches nothing"
+
+# ── 23: a run dated OUTSIDE the window fails the render CLOSED (#3810 P2-1) ──
+# fetch_runs' checks are about the ENUMERATION, not about the window this render
+# sums: a run whose created_at is a VALID date outside the window passes every
+# slice check (returned == reported, under the cap, placeable) and is then
+# counted by the marker while the per-day table — which iterates window_days.txt
+# — gives it no row. The body would print zero delivery for every day while the
+# marker certified "COMPLETE — N enumerated": a false-absence claim over a
+# dropped (here, FAILURE) run, the same class as test 22 one stage later. The
+# render now reconciles the marker against the runs that land on a rendered day.
+echo
+echo "23. a run dated OUTSIDE the window is refused, never rendered as absence"
+reset_case
+# STUB_RUNS_RAW bypasses the stub's own `created` filter — the live API is
+# range-tight, so this forges a return that violates its OWN slice. That is the
+# defence-in-depth case: every slice check passes, and only the render-time
+# reconciliation can see that the enumerated run never reaches a row.
+export STUB_RUNS_RAW='{"total_count":1,"workflow_runs":[{"conclusion":"failure","created_at":"2026-09-01T02:00:00Z"}]}' \
+       STUB_LEDGER_SEARCH_JSON='{"items":[]}'
+run_record 3 --print-only
+assert_eq "$RC" "1" "a run enumerated but outside the window exits non-zero (nothing published)"
+assert_contains "$OUT" "INSTRUMENT FAILURE, NOT A READING" "the mismatch is reported as an INSTRUMENT FAILURE"
+assert_contains "$OUT" "only 0 fall on a UTC day this window renders" "the refusal names the enumerated-vs-rendered mismatch"
+assert_not_contains "$OUT" "run fetch integrity: COMPLETE" "the record never certifies a fetch whose runs have no row"
+assert_not_contains "$OUT" "zero-delivery days: 3 of 3" "the false-absence body is never printed"
+assert_not_contains "$OUT" "RECORD-ONLY baseline" "no record is rendered from a fetch that drops a run"
+assert_eq "$(count_calls 'GH POST repos/daniel-ospina/tortoise/issues$')" "0" "an out-of-window run publishes nothing"
+assert_eq "$(count_calls 'GH PATCH')" "0" "an out-of-window run patches nothing"
+
+# The same class, one stage earlier: a created_at that is PRESENT but is not a
+# usable UTC date is an UNPLACEABLE run — a fetch failure — not a quiet drop.
+echo
+echo "23b. a whitespace or garbage created_at is an unplaceable run, not a drop"
+reset_case
+export STUB_RUNS_RAW='{"total_count":2,"workflow_runs":[{"conclusion":"failure","created_at":" "},{"conclusion":"success","created_at":"2026-09-17T02:00:00Z"}]}' \
+       STUB_LEDGER_SEARCH_JSON='{"items":[]}'
+run_record 1 --print-only
+assert_eq "$RC" "1" "a whitespace created_at exits non-zero (nothing published)"
+assert_contains "$ERR" "no created_at that is a usable UTC date" "the refusal names the unusable created_at"
+assert_not_contains "$OUT" "RECORD-ONLY baseline" "a whitespace created_at renders no record"
+
+reset_case
+export STUB_RUNS_RAW='{"total_count":2,"workflow_runs":[{"conclusion":"failure","created_at":"not-a-date"},{"conclusion":"success","created_at":"2026-09-17T02:00:00Z"}]}' \
+       STUB_LEDGER_SEARCH_JSON='{"items":[]}'
+run_record 1 --print-only
+assert_eq "$RC" "1" "a garbage created_at exits non-zero (nothing published)"
+assert_contains "$ERR" "no created_at that is a usable UTC date" "the refusal names the unusable created_at"
+assert_not_contains "$OUT" "RECORD-ONLY baseline" "a garbage created_at renders no record"
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "availability-record.test.sh: $PASS passed, 0 failed ✅"
