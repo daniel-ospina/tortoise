@@ -141,6 +141,54 @@ SOURCE_PATTERNS = {
                    # mount path from its directory), so a change to the gate must
                    # run the guard too.
                    "website/functions/admin/[[path]].ts",
+                   # #3950: the blog-discoverability guard
+                   # (test_website_docs_consistency.py
+                   # ::test_every_in_scope_page_links_to_the_blog) covers all 12
+                   # public+indexable+served pages, not just docs/faq. An unlisted
+                   # page means a PR touching ONLY that page selects no surface
+                   # (surfaces=[], full=False) and the guard never runs — verified
+                   # before listing: `--changed-files website/tos.html` yielded
+                   # surfaces=[] while website/product.html yielded ['onboarding'].
+                   # That is the #1349/#3332 silent-drop class one more time: the
+                   # guard silently stops covering the page it was written for.
+                   # The ratchet is now two-directional, so adding a guarded page
+                   # without listing it here FAILS a test instead of silently
+                   # shrinking coverage: `test_every_source_pattern_is_selectable`
+                   # (tests/test_ci_selection.py) checks entry -> runs, and
+                   # `test_every_in_scope_page_is_selectable_by_ci`
+                   # (tests/test_website_docs_consistency.py) checks the reverse —
+                   # that every page in the blog guard's derived set reaches a
+                   # surface through this tuple.
+                   "website/security.html", "website/tos.html",
+                   "website/license.html", "website/dpa.html",
+                   "website/aviso-privacidad.html",
+                   # The shared href extractor both blog-guard layers call
+                   # (tests/test_website_docs_consistency.py here, and
+                   # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
+                   # job, which CI runs on every PR regardless of selection).
+                   # Without this entry, editing ONLY the extractor selects core
+                   # and does NOT run the static guard — so the file implementing
+                   # the guard's rule could be changed without running
+                   # `test_rendered_hrefs_ignores_non_rendered_markup`, the test
+                   # that pins that rule. Same #1349/#3332/#3616 class as the
+                   # pages above, one level up: the helper needs the same
+                   # reachability guarantee as the pages it serves.
+                   # Deliberately NARROW rather than promoted to SHARED_MODULES:
+                   # this file has a single matrix consumer, and the full matrix
+                   # would buy nothing the E2E consumer is not already given.
+                   "tests/_html_links.py",
+                   # #3950 review: two more inputs the guard DERIVES its scope from,
+                   # so each changes guard coverage without changing a page.
+                   # `website/_redirects` is what `_canonical_redirect_targets()`
+                   # reads to drop redirected pages from scope, and
+                   # `website/functions/blog/[[path]].ts` is the Function
+                   # `_function_serves()` resolves the blog link against. A
+                   # routing-only PR could therefore silently shrink or break the
+                   # guard while selecting NO surface (surfaces=[], full=False) —
+                   # the same #1349/#3332/#3616 silent-drop class, applied to the
+                   # derivation's own inputs rather than to its output.
+                   "website/_redirects",
+                   "website/functions/blog/[[path]].ts",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that
