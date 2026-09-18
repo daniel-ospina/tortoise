@@ -1859,6 +1859,13 @@ assert_contains "$(created_json)" "PROD DEGRADED" "auth status mismatch: PROD DE
 assert_contains "$(patched_body)" "disarmed" "auth status mismatch: the body says self-healing is disarmed"
 assert_not_contains "$(patched_body)" "authenticated API route" "auth status mismatch: the heal note does NOT call the Pages route an API route (P3)"
 assert_contains "$(patched_body)" "No restart attempted" "auth status mismatch: the heal note still explains why nothing restarted"
+# The heal note's status example must be the OBSERVED code, not a hardcoded
+# class: `/auth/start` expects 302, so `3xx` is the NORMAL answer and `404` is
+# impossible there — the old enumeration contradicted the `http_code=200` in
+# the evidence two paragraphs above (review P3).
+assert_not_contains "$(patched_body)" "3xx" "auth status mismatch: the heal note never names 3xx (normal for /auth/start) as the failure (P3)"
+assert_not_contains "$(patched_body)" "404" "auth status mismatch: the heal note never names 404 (impossible for /auth/start) as the failure (P3)"
+assert_contains "$(patched_body)" "HTTP 200" "auth status mismatch: the heal note names the ACTUAL observed status, not a hypothetical one (P3)"
 assert_eq "$(count_calls 'FLYCTL')" "0" "auth status mismatch: no restart attempt"
 
 # ── 99b: the API target's status mismatch KEEPS the API-route guidance ──────

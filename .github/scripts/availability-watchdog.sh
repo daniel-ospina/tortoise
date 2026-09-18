@@ -1944,8 +1944,12 @@ A restart is a **symptom fix** — if this recurs, the root cause is still live 
           # operators the incident body is the primary diagnostic — and the
           # auth target is a Cloudflare Pages route, not an API route. Keyed
           # on RESTARTABILITY (the same discriminator render_body uses), not on
-          # the presence of an expectation knob.
-          heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`404\`/\`3xx\` on the probed production route \`$(redact_url "$PROBE_URL")\` — a Cloudflare Pages surface with no Fly machine behind it — usually means a bad deploy or a moved route, not a wedged process: check the Pages deployment and the route."
+          # the presence of an expectation knob. The status example is the
+          # ACTUAL observed code, not a hardcoded class: `/auth/start` EXPECTS a
+          # 302, so a `3xx` there is the NORMAL case and a `404` cannot occur —
+          # the old `404`/`3xx` enumeration contradicted the evidence line above
+          # it (review P3).
+          heal_note="⛔ **No restart attempted** — the app ANSWERED (an unexpected status, not silence), so a process restart is not the remediation. An unexpected \`HTTP ${PROBE_CODE}\` on the probed production route \`$(redact_url "$PROBE_URL")\` — a Cloudflare Pages surface with no Fly machine behind it — usually means a bad deploy or a moved route, not a wedged process: check the Pages deployment and the route."
         fi
         transition_kind="disarmed"
         ;;
