@@ -1001,7 +1001,7 @@ def synthesize_hits(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# #2165 Task 6 — _assemble_connected (R5/R6/R11/R14/R17): the product seam.
+# #2165 Task 6 — _assemble_connected (R5/R6/R11/R14/R17): the eval-only ask seam.
 # One single-source fired path shared by run_ask_lane()'s pre-retrieval
 # branch and the public run_ask_assembled(). R14 drift pin: this function
 # is imported ONLY by the two eval-lane entry points (tortoise/ask_lane.py)

@@ -16,7 +16,13 @@ ownedBy: epistemic-team
 
 ---
 
-## PRODUCT DECISION (2026-08-30, PR #2013) — ask exposure gated, reader shipped
+## PRODUCT DECISION (2026-08-30, PR #2013) — ask exposure was gated, reader shipped
+
+> **Superseded by #3849:** the gate no longer exists. Ask was REMOVED from the
+> product surfaces (MCP / SDK / REST) and survives as the EVAL-ONLY lane
+> `tortoise/ask_lane.py`. This section is the 2026-08-30 record of the decision
+> as it stood then; the surface table below already carries the current
+> REMOVED / EVAL-ONLY state per row.
 
 > **The (d) gate is MOOT by product decision.** The reader over-abstention
 > class is FIXED (#2027, below) — that was the gate-d blocker. The remaining

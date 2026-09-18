@@ -171,8 +171,8 @@ _CAPTURE_EXECUTOR = ThreadPoolExecutor(
 # deadline, retried) and every later capture then waits forever while holding
 # its stored-window transcript (~MBs) on a 4GB VM, up to fly.toml's
 # hard_limit. Reject instead of enqueueing: at capacity the request fails fast
-# with 429 + Retry-After (the ask lane's quota 429 precedent,
-# `CODE_QUOTA_EXCEEDED` — its in-flight-limit 429 carries no Retry-After).
+# with 429 + Retry-After (the 429+Retry-After convention the pre-#3849 ask
+# lane set — both of its 429 paths were removed with the product surface).
 # Counting is a plain locked int, NOT an asyncio.Semaphore — the latter binds
 # to the first event loop it waits on (mixins._LoopBoundMixin), which breaks
 # across the per-test loops.
