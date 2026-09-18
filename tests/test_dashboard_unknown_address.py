@@ -48,6 +48,24 @@ REVIEWED_404_SCRIPT = (
     'location.pathname+(location.search||"");'
 )
 
+# Elements that can execute or navigate on their own. A not-found page needs
+# none of them, and `<iframe srcdoc="<script>top.location.replace('/')</script>">`
+# navigated a real browser past every other check (#4006 review, cycle 6).
+FORBIDDEN_ELEMENTS = frozenset({
+    "iframe", "object", "embed", "applet", "frame", "frameset", "portal",
+    "svg", "math",
+})
+
+# Attributes whose value a browser resolves as a URL. A scheme check must
+# normalize the way the URL parser does: ASCII tab/newline/CR are STRIPPED
+# before the scheme is read, so `java\tscript:…` IS `javascript:…` (#4006
+# review, cycle 6).
+URL_ATTRS = frozenset({
+    "href", "src", "srcdoc", "data", "action", "formaction", "poster",
+    "ping", "background", "cite", "longdesc", "usemap", "manifest",
+    "xlink:href",
+})
+
 
 def _rules() -> list[tuple[str, str, int]]:
     """Parse `[source] [destination] [code]` lines, ignoring comments."""
@@ -83,7 +101,8 @@ class _NotFoundDoc(HTMLParser):
         self.forms: list[str] = []
         self.event_handlers: list[str] = []
         self.script_srcs: list[str] = []
-        self.javascript_urls: list[str] = []
+        self.blocked_elements: list[str] = []
+        self.url_attrs: list[tuple[str, str, str]] = []
         self.scripts: list[str] = []
         self._buf: list[str] = []
         self._in_script = False
@@ -94,13 +113,16 @@ class _NotFoundDoc(HTMLParser):
         return self._in_script
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in FORBIDDEN_ELEMENTS:
+            self.blocked_elements.append(f"<{tag}>")
         for name, value in attrs:
+            lowered = name.lower()
             # HTMLParser lowercases attribute names, so `ONLOAD` is caught too.
-            if name.lower().startswith("on"):
+            if lowered.startswith("on"):
                 self.event_handlers.append(f"<{tag} {name}>")
-            if name.lower() == "href" and (value or "").strip().lower().startswith("javascript:"):
-                self.javascript_urls.append(f"<{tag} href={value!r}>")
-            if name.lower() == "src" and tag == "script":
+            if lowered in URL_ATTRS:
+                self.url_attrs.append((tag, lowered, value or ""))
+            if lowered == "src" and tag == "script":
                 # A script that carries its body out-of-band has no text to pin,
                 # and the empty entry vanished from the joined string — so
                 # `<script src="data:text/javascript,location.replace('/')">`
@@ -201,10 +223,25 @@ def test_top_level_404_html_exists() -> None:
         "and a `data:` URL executes on a page with no CSP: "
         f"{doc.script_srcs!r} (#4006 review)"
     )
-    assert not doc.javascript_urls, (
-        "404.html links to a `javascript:` URL — a click on a not-found page's "
-        f"own link must not run code: {doc.javascript_urls!r} (#4006 review)"
+    assert not doc.blocked_elements, (
+        "404.html carries an element that can execute or navigate on its own "
+        f"(<iframe srcdoc>, <object data>, SVG script…): {doc.blocked_elements!r} "
+        "— a not-found page needs none of them (#4006 review)"
     )
+    unsafe_urls = [
+        (tag, attr, value)
+        for tag, attr, value in doc.url_attrs
+        # Normalize as the URL parser does BEFORE reading the scheme: tab,
+        # newline and CR are stripped, so `java\tscript:…` is `javascript:…`.
+        if re.sub(r"[\t\n\r\x00]", "", value).strip().lower().startswith(
+            ("javascript:", "vbscript:")
+        )
+    ]
+    assert not unsafe_urls, (
+        "404.html links to a scripting URL — a click on the not-found page's own "
+        f"link must not run code: {unsafe_urls!r} (#4006 review)"
+    )
+    joined = "\n".join(doc.scripts)
     # EXACTLY one script, and it is the reviewed inline snippet. Counting matters:
     # `<script src=…>` contributes an EMPTY entry, and the whitespace strip below
     # erased it, so a source-only script rode the pin (#4006 review, cycle 5).
@@ -216,11 +253,21 @@ def test_top_level_404_html_exists() -> None:
         "404.html has an unterminated <script> — its body never reaches the pin "
         "(#4006 review)"
     )
+    # NO `<` anywhere in script data. A browser's script-data ESCAPED / DOUBLE-
+    # ESCAPED states do not close the element at the same `</script>` this
+    # parser does, so `REVIEWED + "<!--<script></script>\ntop.location=…"`
+    # executed in Chromium while the pin saw only the reviewed text (#4006
+    # review, cycle 6). The reviewed snippet contains no `<`, so banning it
+    # removes the whole state family by construction rather than by enumeration.
+    assert "<" not in joined, (
+        "404.html's script contains `<` — HTML-like script data can keep the "
+        "element open in the browser past the point this parser closes it "
+        f"(#4006 review): {joined.strip()!r}"
+    )
     # The page's scripting surface is EXACTLY one reviewed, read-only snippet
     # (it names the requested address so the visitor can see what was not
     # found). Comments and whitespace are ignored; ANY other change fails, which
     # is what closes the families that carry no `location` token to match.
-    joined = "\n".join(doc.scripts)
     compact = re.sub(r"//[^\n]*", "", joined)
     compact = re.sub(r"\s+", "", compact)
     assert compact == REVIEWED_404_SCRIPT, (
