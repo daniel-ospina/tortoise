@@ -46,6 +46,22 @@
   var COOKIE_LIMIT = 4096; // bytes of `name` + '=' + `value`
   var SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1; // largest value we may write
 
+  // #3485 review (cycle 5, P1): the shape THIS bridge accepts must be the shape the
+  // destination CONSUMER accepts. supabase-js's own _isValidSession additionally
+  // requires a `refresh_token` KEY, and its load path _removeSession()s the stored
+  // session when that key is missing. The dashboard mounts supabase-js
+  // (website/apps/dashboard/src/main.jsx getSession()), so a value the gate accepts
+  // but the consumer DELETES is a live redirect loop: the head gate passes, the
+  // mount gate wipes the cookie, the app bounces to /auth, and the migration
+  // re-creates the same cookie from the legacy key — kept precisely because the
+  // unconfirmable write never dropped it. Requiring the key here makes that state
+  // unreachable. (storeSession() already required it, which is why the two agree.)
+  var isConsumableSession = function (v) {
+    return !!v && typeof v === 'object' &&
+      typeof v.access_token === 'string' && v.access_token.length > 0 &&
+      typeof v.refresh_token === 'string' && v.refresh_token.length > 0;
+  };
+
   var isLocal = function () {
     var h = window.location.hostname;
     // localhost + loopback IPs (v4/v6) + RFC1918 private ranges — no
@@ -158,8 +174,7 @@
       var legacyOk = false, legacyExp = 0, cookieOk = false, cookieExp = 0;
       try {
         var lo = JSON.parse(legacy);
-        legacyOk = !!lo && typeof lo === 'object' &&
-          typeof lo.access_token === 'string' && lo.access_token.length > 0;
+        legacyOk = isConsumableSession(lo);
         legacyExp = (lo && lo.expires_at) || 0;
       } catch (e) { /* not JSON — not a session */ }
       if (!legacyOk) {
@@ -185,8 +200,7 @@
         // keep the newer one before clearing the legacy key.
         try {
           var co = JSON.parse(alreadyShared);
-          cookieOk = !!co && typeof co === 'object' &&
-            typeof co.access_token === 'string' && co.access_token.length > 0;
+          cookieOk = isConsumableSession(co);
           cookieExp = (co && co.expires_at) || 0;
         } catch (e) { /* unusable cookie */ }
         // #3485 review P2 (cycles 3-4): an expired or absent-expiry legacy session
@@ -288,15 +302,15 @@
       // key that no current path reads.
       var existing = readCookie(COOKIE_NAME);
       // #3485 review P3: parse the legacy value ONCE and require a real session
-      // shape (non-empty access_token) in BOTH branches. Object-ness alone is
+      // shape (a non-empty access_token AND refresh_token — isConsumableSession)
+      // in BOTH branches. Object-ness alone is
       // not a session: a {"expires_at":N} blob written to the shared cookie
       // would outrank — and cause the deletion of — a valid session under the
       // second legacy key.
       var legacyExp = 0, legacyOk = false;
       try {
         var lo = JSON.parse(legacy);
-        legacyOk = !!lo && typeof lo === 'object' &&
-          typeof lo.access_token === 'string' && lo.access_token.length > 0;
+        legacyOk = isConsumableSession(lo);
         legacyExp = (lo && lo.expires_at) || 0;
       } catch (e) { /* not JSON — not a session */ }
       if (!existing) {
@@ -320,8 +334,7 @@
         var cookieExp = 0, cookieOk = false;
         try {
           var co = JSON.parse(existing);
-          cookieOk = !!co && typeof co === 'object' &&
-            typeof co.access_token === 'string' && co.access_token.length > 0;
+          cookieOk = isConsumableSession(co);
           cookieExp = (co && co.expires_at) || 0;
         } catch (e) { /* unusable cookie */ }
         // The expiry test applies only where it would DISPLACE a usable cookie.
@@ -364,7 +377,10 @@
       var raw = readCookie(COOKIE_NAME);
       if (!raw) return null;
       var s = JSON.parse(raw);
-      if (!s || !s.access_token) return null;
+      // #3485 review (cycle 5, P1): require the same shape the CONSUMER requires.
+      // A cookie carrying access_token + unexpired expires_at but no refresh_token
+      // is deleted by supabase-js on mount, which re-arms the app ⇄ /auth loop.
+      if (!isConsumableSession(s)) return null;
       // Strict validity: missing or past expires_at = INVALID (presence is
       // not auth — the stale-session leak class).
       if (!s.expires_at || s.expires_at * 1000 <= Date.now()) return null;
@@ -471,7 +487,8 @@
       // round-tripped). refresh_token is part of the identity too: a prior cookie
       // sharing the access_token but carrying a stale refresh_token is still NOT
       // this write. And the result must be USABLE by the destination gate — the
-      // same strict predicate readValidSession() applies — so storeSession() ===
+      // same strict predicate readValidSession() applies (access_token +
+      // refresh_token + unexpired) — so storeSession() ===
       // true can never promise a session the gate rejects and bounces back to
       // /auth. That bounce is the loop this change exists to remove (#3485 P1).
       var raw = readCookie(COOKIE_NAME);

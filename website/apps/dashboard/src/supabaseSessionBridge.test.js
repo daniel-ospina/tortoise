@@ -233,12 +233,38 @@ test('#3485: an expired, expiry-less, unparseable, or token-less cookie session 
     ['no expires_at', JSON.stringify({ access_token: 'a', refresh_token: 'r' })],
     ['not JSON', 'this-is-not-json'],
     ['no access_token', JSON.stringify({ expires_at: futureExpiry() })],
+    ['no refresh_token', JSON.stringify({ access_token: 'a', expires_at: futureExpiry() })],
   ]
   for (const [label, raw] of cases) {
     const sb = makeSandbox()
     seedCookie(sb, raw)
     assert.equal(sb.window.readValidSession(), null, `${label}: must yield null`)
   }
+})
+
+// The cycle-5 P1 (found by a fresh reviewer): supabase-js's own _isValidSession
+// additionally requires a `refresh_token` KEY, and its load path _removeSession()s
+// the stored session when it is missing. The dashboard mounts supabase-js, so a
+// cookie this bridge ACCEPTS but that consumer DELETES is a live loop: the head
+// gate passes, the mount gate wipes the cookie, the app bounces to /auth, and the
+// migration re-creates the same cookie from the legacy key kept because the
+// unconfirmable write never dropped it. The gate must accept only what the
+// consumer accepts.
+test('#3485: a cookie without a refresh_token is NOT a session (the consumer would delete it)', () => {
+  const sb = makeSandbox()
+  seedCookie(sb, JSON.stringify({ access_token: 'access-1', expires_at: futureExpiry() }))
+  assert.equal(sb.window.readValidSession(), null,
+    'a cookie supabase-js would delete must never be reported as a session')
+  // The same shape in localStorage is junk: it must not reach the shared cookie,
+  // and it must not survive to be re-migrated on the next bounce.
+  const sb2 = makeSandbox()
+  sb2.ls.api.setItem(PROD_LEGACY_KEY,
+    JSON.stringify({ access_token: 'access-2', expires_at: futureExpiry() }))
+  assert.equal(sb2.window.readValidSession(), null, 'no refresh_token is still no session')
+  assert.equal(cookieValue(sb2, COOKIE_NAME), null,
+    'an unusable legacy value must never reach the parent-domain cookie')
+  assert.equal(sb2.ls.api.getItem(PROD_LEGACY_KEY), null,
+    'the unusable legacy key is dropped rather than re-migrated forever')
 })
 
 // ── (3) storeSession round-trip ─────────────────────────────────────────────
