@@ -4789,6 +4789,13 @@ class TortoiseSDK:
         back to now — monotone, never a gap). Additive-only: no behavior
         change for callers that don't pass the kwarg.
 
+        The kwarg is a CLAIM about the successor's window start, so when the
+        successor carries a stored ``validFrom`` the two must name the SAME
+        instant (compared by instant, not string form). A disagreement raises
+        ``ValueError`` BEFORE any mutation: a predecessor ``validTo`` that
+        disagrees either leaves a GAP (a query instant covered by neither
+        window) or an OVERLAP (two covering candidates ⇒ ``ambiguous``).
+
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx
           - Plain structural edges (aboutSubject, aboutObject, aboutAction,
@@ -4841,19 +4848,62 @@ class TortoiseSDK:
         # E6 (#1538) D2: resolve the successor's validFrom (window contiguity
         # source) BEFORE the emit so the event payload carries the same
         # values the stamp block writes (read-only — no ordering impact).
+        #
+        # The resolution ORDER below is the documented one and is unchanged
+        # (ONTOLOGY.md §4.1/§4.7 `validTo` row: `valid_from` kwarg →
+        # successor validFrom → successor createdAt → now). What IS new is a
+        # PRECONDITION on the kwarg: trusting it verbatim broke chain
+        # contiguity silently in BOTH directions — an EARLIER kwarg left a
+        # GAP (a query instant covered by neither window, so
+        # `restore_point_at` reports honest absence for a period that was in
+        # fact covered) and a LATER kwarg left an OVERLAP (two covering
+        # candidates ⇒ every instant inside it reads `ambiguous`). The
+        # successor's STORED validFrom is the value every read path computes
+        # its window start from (`restore_point_at` → `_covers`), so a
+        # disagreeing kwarg can only ever make the chain wrong. Refuse it
+        # BEFORE any mutation rather than pick a winner: picking the store
+        # would invert the documented order, picking the kwarg re-creates the
+        # defect. Instant-level comparison via ``_created_sort_key`` — the
+        # SAME mixed-format primitive ``_covers`` uses — so a cosmetic format
+        # difference ("2026-06-10" vs "2026-06-10T00:00:00+00:00") reads as
+        # agreement, never as a false refusal.
+        vf_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
+            params={"id": new_id},
+        ).result_set
+        stored_vf = vf_rows[0][0] if vf_rows else None
+        if valid_from is not None and stored_vf:
+            from .search_engine import _created_sort_key
+            k_stored = _created_sort_key(stored_vf)
+            k_kwarg = _created_sort_key(valid_from)
+            if k_stored[0] == 0 and k_kwarg[0] == 0:  # both parseable
+                # Compare by INSTANT — the same mixed-format measure
+                # ``_covers`` uses. A merely cosmetic difference
+                # ("…T00:00:00Z" vs "…T00:00:00+00:00", or epoch vs ISO)
+                # is agreement, never a false refusal.
+                agrees = k_stored[1] == k_kwarg[1]
+            else:
+                # An unparseable side cannot be shown to name the same
+                # instant, and the two would not compare alike in
+                # ``_covers`` either — accept only a byte-identical value.
+                agrees = (k_stored[0] == k_kwarg[0]
+                          and str(stored_vf) == str(valid_from))
+            if not agrees:
+                raise ValueError(
+                    f"supersede_point: valid_from {valid_from!r} disagrees "
+                    f"with successor {new_id}'s stored validFrom "
+                    f"{stored_vf!r} — the two must name the same instant, "
+                    f"else the predecessor's validTo gaps or overlaps the "
+                    f"chain (read paths use the stored window start)"
+                )
         if valid_from is not None:
             succ_vf = str(valid_from)
+        elif stored_vf:
+            succ_vf = stored_vf
+        elif vf_rows and vf_rows[0][1]:
+            succ_vf = vf_rows[0][1]
         else:
-            vf_rows = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
-                params={"id": new_id},
-            ).result_set
-            if vf_rows and vf_rows[0][0]:
-                succ_vf = vf_rows[0][0]
-            elif vf_rows and vf_rows[0][1]:
-                succ_vf = vf_rows[0][1]
-            else:
-                succ_vf = now  # monotone fallback — never a gap
+            succ_vf = now  # monotone fallback — never a gap
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the

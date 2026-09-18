@@ -121,6 +121,83 @@ def test_supersede_successor_created_at_valid_from_contiguity(sdk):
     assert _props(sdk, new["id"])["validFrom"] == "2026-06-10"
 
 
+def test_supersede_disagreeing_valid_from_refused(sdk):
+    """A ``valid_from`` kwarg that disagrees with the successor's STORED
+    ``validFrom`` is refused BEFORE any mutation.
+
+    Trusting the kwarg verbatim let it pick the predecessor's window end,
+    which broke chain contiguity silently in BOTH directions:
+      * EARLIER kwarg → GAP: neither window covers [kwarg, stored), so
+        ``restore_point_at`` reports honest absence for a covered period;
+      * LATER kwarg → OVERLAP: both windows cover [stored, kwarg], so every
+        instant inside it reads ``ambiguous``.
+
+    Fail-closed: the refusal is raised in the resolution block (after the
+    lifecycle guards, before the PointSuperseded emit and every write), so
+    the graph is left untouched and the agreeing path still works."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
+
+    # (a) kwarg EARLIER than the stored value → would GAP [06-05, 06-10)
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-05")
+    # (b) kwarg LATER than the stored value → would OVERLAP [06-10, 06-20]
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-20")
+
+    # Fail-closed: no mutation on either refusal.
+    op = _props(sdk, old["id"])
+    assert op.get("status") != "superseded"
+    assert not op.get("outdated")
+    assert "validTo" not in op
+    assert "expiredAt" not in op
+    assert sdk._get_proj().g.query(
+        "MATCH (a:Point {id:$n})-[:CORRECTS]->(b:Point {id:$o}) RETURN a.id",
+        params={"n": new["id"], "o": old["id"]}).result_set == []
+
+    # The agreeing kwarg still works (documented resolution order preserved)
+    # and the chain it writes is CONTIGUOUS — the gap instant resolves to the
+    # predecessor, the post-transition instant resolves to the successor with
+    # no ambiguity.
+    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-10")
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10"
+    at_gap = sdk.restore_point_at(new["id"], "2026-06-07")
+    assert at_gap["found"] is True
+    assert at_gap["valid_point"]["id"] == old["id"]
+    at_overlap = sdk.restore_point_at(new["id"], "2026-06-15")
+    assert at_overlap["found"] is True
+    assert at_overlap.get("ambiguous") is not True
+    assert at_overlap["valid_point"]["id"] == new["id"]
+
+
+def test_supersede_valid_from_format_difference_is_agreement(sdk):
+    """Instant-level, not string-level, comparison via ``_created_sort_key``
+    — the same mixed-format primitive ``restore_point_at``'s ``_covers``
+    uses to decide coverage. A format-only difference ("…Z" vs "…+00:00")
+    names the same instant and must not be refused."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T00:00:00Z")
+    sdk.supersede_point(old["id"], new["id"],
+                        valid_from="2026-06-10T00:00:00+00:00")
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10T00:00:00+00:00"
+
+
+def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
+    """A disagreement ACROSS formats (date-only kwarg vs offset-aware stored
+    value) is still caught — the guard is not a raw string compare.
+
+    The two dates are a full day apart, deliberately: a date-only value parses
+    as LOCAL midnight, so a same-day pair would compare equal on a UTC host and
+    unequal elsewhere — a host-timezone-dependent assertion is not a test.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T00:00:00+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-09")
+
+
 def test_invalidate_point_stamps_withdrawal(sdk):
     """invalidate_point stamps validTo == expiredAt == now (withdrawal
     terminates the window at withdrawal time — E7 DELETE-soft posture)."""
