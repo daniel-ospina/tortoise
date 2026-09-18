@@ -506,12 +506,17 @@ class _EntityHandlers:
         # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
         # member of the deferred generic direct-edge replay (#1048: caller-
         # authored `create_direct_edge` descriptors stay unaligned on
-        # rebuild): it carries no caller attrs, and the ONE producer that
-        # JOURNALS it is the capture turn loop, on the turn's own PointAdded.
-        # (The extractor-minted points are also wired into the Session by raw
-        # CONTAINS writes — sdk.py:3965/4209, hosted_api.py:9916 — but those
-        # carry no journal record, so a journal-only `rebuild()` still drops
-        # them. That gap is #3664/#3722's scope, not this fold's.)
+        # rebuild): it carries no caller attrs, and it is the capture TURN LOOP
+        # ALONE that journals the link, on the turn's own PointAdded (the only
+        # two `contains_session=` emission sites are the SDK and hosted turn
+        # loops). The extractor-minted points are wired into the Session by
+        # OTHER, raw CONTAINS writes scattered through the capture/extraction
+        # path — every one of them unjournaled — so a journal-only `rebuild()`
+        # still drops those edges; only `rebuild_all`'s `:Session` snapshot
+        # restores them. That gap is #3664/#3722's scope. Do NOT read this fold
+        # as covering it: the list of unjournaled writers is deliberately not
+        # enumerated here, because line-number inventories rot (an earlier
+        # draft of this comment cited three and missed two).
         if isinstance(contains_session, str) and contains_session:
             self._link_session(contains_session, p["id"])
         # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
