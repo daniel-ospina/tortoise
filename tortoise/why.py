@@ -730,7 +730,7 @@ def project_item(item: dict, block: dict) -> dict:
 def item_to_why_entry(item: dict) -> dict | None:
     """Project an enriched item back to the canonical §3.1.4 why entry.
 
-    Used by the ask surface (its pool hits flow through the search-path
+    Used by the ask lane (its pool hits flow through the search-path
     enrichment) — zero extra graph reads. Returns None when the item was
     not enriched (no W4 data).
     """

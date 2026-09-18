@@ -112,7 +112,7 @@ stays `openrouter:deepseek/deepseek-v4-flash` — #1525). Requires an
 `OPENROUTER_API_KEY` (and `OPENAI_API_KEY` for the official GPT-4o judge);
 no keys were present at record time, so this config is verified up to spec
 parse + mock-run only, not executed. Cost re-measure + provider routing for
-the PRODUCT ask lane (deepseek-direct 400s on non-deepseek specs) remain the
+the ask lane (eval-only; deepseek-direct 400s on non-deepseek specs) remain the
 tracked follow-up (1) above.
 
 ---

@@ -521,7 +521,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
                 fusion_k=fusion_k)
         except AskRetrievalUnavailable:
             raise
-        except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
+        except Exception as e:  # noqa: BLE001, RUF100 — map to the ask error vocabulary
             raise AskRetrievalUnavailable(
                 f"retrieval unavailable: {type(e).__name__}") from e
 
@@ -606,7 +606,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     try:
         evidence = render_context(assembled, question_date=question_date)
         context_tokens = estimate_tokens_ask(evidence)
-    except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
+    except Exception as e:  # noqa: BLE001, RUF100 — map to the ask error vocabulary
         raise AskRetrievalUnavailable(
             f"context rendering unavailable: {type(e).__name__}") from e
     try:

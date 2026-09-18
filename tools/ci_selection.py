@@ -162,7 +162,7 @@ SOURCE_PATTERNS = {
             # transport.py is dual-wired with api: its only direct unit test
             # is test_metering.py::test_selfhost_transport_exemption.
             "tortoise/schemas.py", "tortoise/transport.py",
-            # #2071: the spot-check tools are the product ask-lane QA — a
+            # #2071: the spot-check tools are the eval-lane ask QA — a
             # spot-check-only PR selects the sdk surface (its tests live
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",

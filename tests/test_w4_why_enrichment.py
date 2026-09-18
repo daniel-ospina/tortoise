@@ -261,7 +261,7 @@ def test_flag_off_emission_byte_identical(monkeypatch):
         for h in rec:
             for k in W4_KEYS:
                 assert k not in h, f"recall flag-off leak: {k}"
-        # ask surface: 13-field response WITHOUT the why key; the reader is
+        # the ask lane: 13-field response WITHOUT the why key; the reader is
         # called EXACTLY once (zero-LLM — enrichment adds no reader calls).
         import tortoise.ask_lane as sdk_mod
         fake = _FakeReader()
@@ -630,7 +630,7 @@ def test_flag_drift_all_four_surfaces(w4_flag, monkeypatch):
         assert fake.calls == 1, \
             f"ask lane made {fake.calls} reader calls — W4 enrichment must add zero (zero-LLM)"
         ask_why = ask.get("why") or []
-        assert ask_why, "ask surface must emit why entries with the flag ON"
+        assert ask_why, "the ask lane must emit why entries with the flag ON"
         ask_entry = next((e for e in ask_why if e.get("point_id") == g["claim"]), None)
         assert ask_entry is not None, "ask why must include the contested point's block"
         assert ask_entry["conflicts"]["contested"] is True, \
