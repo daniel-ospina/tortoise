@@ -262,7 +262,15 @@ SOURCE_PATTERNS = {
             # tier-1 smoke only) and both guards ran nowhere — the same
             # #1349/#3332/#3910 silent-drop class, on the file that
             # manufactures the graph those guards read.
-            "tools/gen_ask_transcripts.py"),
+            "tools/gen_ask_transcripts.py",
+            # B6 objective 4: the answer-shape instrument is the ask-lane's
+            # shape measurement (it drives sdk.ask, build_reader_model and
+            # the shipping tortoise_search/tortoise_recall handlers to
+            # compute shape_rate). Same family and same silent-drop trap as
+            # the entries above: the flat "tools/" prefix would swallow a
+            # shape-rate-only PR into tier-1 smoke and the ask-lane tests
+            # would not run where the measurement changed.
+            "tools/ask_shape_rate.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
@@ -378,6 +386,10 @@ TOOL_CARVEOUTS = (
     # tests/test_ask_seed_shape.py + tests/test_ask_regression_llm.py pin —
     # same carve-out as the spot-check harnesses above.
     "tools/gen_ask_transcripts.py",
+    # B6 objective 4: the answer-shape instrument — same carve-out reason
+    # as gen_ask_transcripts.py above (without it the flat "tools/" prefix
+    # silently drops the path to tier-1 smoke).
+    "tools/ask_shape_rate.py",
     # #2159 review P2-3: the diff-gate selector itself must never classify
     # as docs-only (the two gated legs would skip AND the wiring pins in
     # tests/test_ci_selection.py would never run on the PR that owns them).
