@@ -966,14 +966,34 @@ decrement logs *before* it can raise, and only on the branch where no decrement 
 
 ### Convergence note
 
-The MCP-header over-claim took **three cycles** to remove (cycle 6 corrected the doc copies it searched
-and claimed completeness; cycle 7 found a further mis-stated count; cycle 8 found the last site, which
-was in **production code** — the `AskBoundedTimeoutError` docstring). The durable lesson, and the reason
-this is recorded as a rule rather than a story: **enumerate the set before claiming completeness over
-it.** Each cycle's assertion was true of the files it had searched and false of the set it had not.
+**Enumerate the set before claiming completeness over it.** An assertion can be true of the files that
+were searched and false of the set that was not.
 
 ### Not re-litigated
 
 All cycle-7 dispositions stand; the `header="inf", body=42 → None` case is pre-existing and consistent
 with the settled 504-arm ordering (no usable value is lost — the pre-delta code kept `inf` and never
 consulted the body either).
+
+---
+
+## Cycle-10 code review (re-review of the cycle-9 fix commit) — findings, dispositions
+
+Three targeted reviewers on the 1-file doc delta (`7ad8f1f45..db41c4cbf`), plus a whole-PR comment audit. One
+returned **NO ISSUES FOUND**; the other two found four P2s, all fixed.
+
+| # | Sev | Where | Finding | Fix |
+|---|---|---|---|---|
+| 1 | P2 | plan doc, convergence note | The cycle-9 rewrite still narrated the journey and still claimed completeness ("took three cycles", "cycle 8 found **the last site**"). That is the class the repo's own rule forbids — a claim about process has no artifact to check it against, so it can only re-stale, and the fix is deletion, not better narration. | Reduced to the rule alone: enumerate the set before claiming completeness over it. No cycle accounting, no completeness claim. |
+| 2 | P2 | `tests/test_ask_api.py` | The comment cited `hosted_api.py:23469` for the Stripe analytics caller. That number was correct at the base commit; this PR's own insertions moved the call to `23712`, so the reference went stale **because of this change**. | Replaced with the symbol and the call shape (durable). |
+| 3 | P2 | `tests/test_selfhost_rest.py` | Same class: `sdk.py:13950` for the `TORTOISE_API_URL` remote delegation, stale by +8 for the same reason. | Replaced with the expression (`if os.environ.get("TORTOISE_API_URL")` in `sdk.ask`). |
+| 4 | P2 | `tortoise/hosted_api.py` | Same class: `mcp_server.py:188-224` for the telemetry "never raises" contract, stale by one line (this PR adds an import to `mcp_server.py`). | Replaced with the symbol name (`_emit_mcp_tool_call_telemetry`). |
+
+**Enumeration, to avoid repeating the cycle-8 mistake:** rather than fixing only the three that were
+reported, the set was enumerated — added lines across `tortoise/*.py` and `tests/*.py` filtered for
+`<file>.py:<line>` references — which returned **exactly those three**, now all symbol-based. No line number
+introduced by this PR remains.
+
+**Cycle count:** this is the code-review loop's **6th** cycle (10 including the preceding plan-review loop,
+whose cycles are numbered in this document's cycle-4/5 sections). The skill's own safety cap is **10**, so
+this is not a cap exit.

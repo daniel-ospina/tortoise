@@ -19845,7 +19845,8 @@ def _emit_ask_latency_off_path(org_id: str | None, duration_ms: int,
     immediately. BOTH dispatch branches swallow and log: telemetry must never
     change a status code — propagating a dispatch failure would turn the pinned
     504 into a 500 (or a 200 into a 500), which is exactly the harm this guard
-    exists to prevent (``mcp_server.py:188-224``'s contract).
+    exists to prevent (``mcp_server.py``'s ``_emit_mcp_tool_call_telemetry``
+    carries the same contract).
 
     The counter is incremented exactly once here, and decremented exactly once
     — by the worker's own ``finally``, or by whichever branch failed to hand

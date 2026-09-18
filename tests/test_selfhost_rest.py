@@ -17,7 +17,9 @@ def _client_for_env(monkeypatch, tmp_path, **env):
 
     # HERMETICITY (#3834/#3993): the fleet shell exports
     # TORTOISE_API_URL=https://api.premiselabs.co, and ``sdk.ask()`` delegates
-    # to the REMOTE ``_post_ask`` whenever that var is set (sdk.py:13950) — so
+    # to the REMOTE ``_post_ask`` whenever that var is set
+    # (``if os.environ.get("TORTOISE_API_URL"): return self._post_ask(...)``
+    # in ``sdk.ask``) — so
     # every ask test in this file POSTed REAL requests at PRODUCTION and
     # never resolved its fake reader seam (the ambient shell, not this repo's
     # .env, which carries no such var). Cleared here for the whole file.

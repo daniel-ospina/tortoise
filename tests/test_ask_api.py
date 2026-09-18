@@ -641,7 +641,9 @@ def test_ask_analytics_writer_never_raises_and_is_audible(caplog):
     """R5-4: the allowlist's silent strip is now logged at WARNING, and the
     never-raise contract survives it.
 
-    The Stripe caller (``hosted_api.py:23469``) passes ``plan``/``tier``,
+    The Stripe caller (``_track_analytics_event(org_id, notify_kind, {"plan":
+    tier, "tier": tier, "status": etype})`` in the Stripe webhook handler)
+    passes ``plan``/``tier``,
     neither of which is allowlisted — so this branch runs on REAL traffic, and
     a raise here would 500 a webhook whose event marker was already claimed
     (dropping the billing notification permanently).
