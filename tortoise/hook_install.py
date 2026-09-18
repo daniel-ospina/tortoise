@@ -308,7 +308,9 @@ class Finding:
 #: non-option token is in executable position (``bash script.sh``,
 #: ``timeout 5 script.sh``).  ``command`` is handled specially (``-v`` is a
 #: query).  A backtick starts a command substitution, so the token after it is
-#: in executable position.
+#: in executable position.  Membership is tested on the token's BASENAME, so a
+#: path-qualified launcher (``/bin/bash``, ``/usr/bin/env``) is recognised the
+#: same as the bare name — see :func:`_as_launcher`.
 _LAUNCHERS = frozenset({
     "bash", "sh", "zsh", "dash", "ksh", "env", "exec", "nohup", "sudo",
     "time", "timeout", "setsid", "nice", "ionice", "xargs", "firejail",
@@ -318,6 +320,11 @@ _LAUNCHERS = frozenset({
 
 #: Shells whose ``-n``/``--noexec`` flag means "parse only, execute nothing".
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh"})
+
+#: Shell flags whose NEXT token is a command string to be re-parsed (and thus
+#: executed), not an option value.  Only valid for :data:`_SHELLS`: ``sudo -c``
+#: is ``--close-from`` (an option VALUE) and must not be recursed into.
+_SHELL_COMMAND_FLAGS = frozenset({"-c", "-lc", "-cl", "-ic"})
 
 #: Shell separators that start a new command within a compound command line.
 _SEPARATORS = frozenset({"&&", "||", ";", "|", "&"})
@@ -334,20 +341,95 @@ _REDIRECT_RE = re.compile(r"^[0-9]*(?:&?>>?|&?>&|<>)")
 #: ends at ``)``/``}``.
 _GROUP = frozenset({"(", ")", "{", "}"})
 
-#: Options that take a SEPARATE argument (``sudo -u root cmd``,
-#: ``timeout -s KILL 60 cmd``) — the following token is the option's value, not
-#: a command.
-_OPTION_FLAGS_WITH_ARG = frozenset({
-    "-u", "--user", "-s", "--signal", "-k", "--kill-after", "-n",
-    "--adjustment", "-o", "--output", "-C", "--chdir", "-g", "--group",
-    "-p", "--preserve-env", "-e", "--env",
-})
+#: Options that take a SEPARATE argument, keyed by the launcher's basename —
+#: the following token is the option's VALUE, never the executed command.
+#:
+#: A single flat table cannot be right: ``-n`` is sudo's boolean
+#: ``--non-interactive`` flag but nice/ionice/xargs' argument-taking adjustment,
+#: and ``-s`` is timeout's ``--signal`` value but sudo's boolean ``--shell``
+#: flag.  A flat set therefore makes ``sudo -u <hook>`` and ``sudo -n <hook>``
+#: agree when bash disagrees about which token is the command, and the wrong
+#: side is a FAIL-OPEN (the hook is never run, yet the matcher says current).
+_OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
+    # Shells: ``-c`` (command string) and ``-o``/``-O`` (option name) take a
+    # separate word; ``-n`` is the no-execute flag handled above.
+    "bash": frozenset({"-c", "-o", "+o", "-O", "+O",
+                       "--rcfile", "--init-file"}),
+    "sh": frozenset({"-c", "-o", "+o"}),
+    "dash": frozenset({"-c", "-o", "+o"}),
+    "zsh": frozenset({"-c", "-o", "+o"}),
+    "ksh": frozenset({"-c", "-o", "+o"}),
+    # env (GNU + BSD): ``-u``/``-C``/``-S``/``-P``/``--argv0`` take a word;
+    # ``-i``/``-0``/``-v`` do not.
+    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S",
+                      "--split-string", "-P", "--path", "--argv0"}),
+    # sudo: every option that names a user/group/dir/role/host/prompt takes a
+    # word; ``-n``/``-s``/``-k``/``-i``/``-E``/``-S``/``-b``/``-A``/``-H`` are
+    # booleans.
+    "sudo": frozenset({
+        "-a", "--auth-type", "-C", "--close-from", "-D", "--chdir",
+        "-g", "--group", "-h", "--host", "-p", "--prompt", "-R",
+        "--chroot", "-r", "--role", "-t", "--type", "-T",
+        "--command-timeout", "-u", "--user", "-U", "--other-user",
+    }),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "ionice": frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid",
+                         "-P", "--pgid", "-u", "--uid"}),
+    "exec": frozenset({"-a"}),
+    "xargs": frozenset({
+        "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof", "-I",
+        "--replace", "-L", "--max-lines", "-n", "--max-args", "-P",
+        "--max-procs", "-s", "--max-chars",
+    }),
+    "firejail": frozenset(),
+}
 
 #: An environment assignment prefix (``A=/x/y``, ``PATH=$PATH:/bin``).
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 #: A launcher operand that is a number/duration (``timeout 5``, ``nice -n 7``).
 _LAUNCHER_OPERAND_RE = re.compile(r"^[0-9]+(\.[0-9]+)?[smhd]?$")
+
+
+def _as_launcher(tok: str) -> str | None:
+    """The launcher basename for ``tok``, or ``None`` when it is not one.
+
+    ``/bin/sh``, ``/usr/bin/env`` and ``./bash`` exec exactly the program the
+    bare name does, so they are launchers too: recognising only the bare name
+    made ``/bin/bash <hook>`` look like a foreign entry, which reported a
+    working install as ``missing-hook-entry`` and appended a DUPLICATE
+    registration (the hook then ran twice per event).  The first check keeps
+    the non-path launchers (``.``, ``!``, ```` ` ````) which ``Path`` mangles.
+    """
+    if tok in _LAUNCHERS:
+        return tok
+    name = Path(tok).name
+    return name if name in _LAUNCHERS else None
+
+
+def _arithmetic_expansion_end(command: str, start: int) -> int | None:
+    """End index (exclusive) of the ``$((…))`` opening at ``start``, or None.
+
+    ``$((`` opens an ARITHMETIC expansion — its contents are operands, not
+    commands — so ``echo $((<hook>))`` (and ``x=$((<hook>))``) executes
+    nothing, while ``echo $(<hook>)`` (single paren: command substitution)
+    really does run the hook.  Nesting is counted so a ``$(…)`` inside the
+    arithmetic closes the right paren; an unterminated expansion is a bash
+    syntax error that executes nothing, reported as ``None``.
+    """
+    i, n = start + 3, len(command)  # past ``$((``, depth starts at 2
+    depth = 2
+    while i < n:
+        ch = command[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
 
 
 def _split_command(command: str) -> list[tuple[str, bool]] | None:
@@ -359,8 +441,11 @@ def _split_command(command: str) -> list[tuple[str, bool]] | None:
     quoted ``'('`` or ``';'`` is an ARGUMENT, never a boundary (treating it as
     one is how ``grep -e '(' .claude/hooks/session-end.sh`` was mistaken for an
     executed hook).  ``${VAR}`` is consumed atomically (its braces are not
-    grouping punctuation).  Returns ``None`` for an unterminated quote — a
-    command bash would reject executes nothing.
+    grouping punctuation) and a ``$((…))`` arithmetic expansion is dropped —
+    its contents are operands, never executed commands (a ``$(…)`` command
+    substitution, by contrast, keeps its ``(`` so its contents are).  Returns
+    ``None`` for an unterminated quote or expansion — a command bash would
+    reject executes nothing.
     """
     tokens: list[tuple[str, bool]] = []
     i, n = 0, len(command)
@@ -400,6 +485,19 @@ def _split_command(command: str) -> list[tuple[str, bool]] | None:
         quoted = False
         while i < n and not command[i].isspace() and command[i] not in ";|&(){}\\`":
             ch = command[i]
+            if ch == "$" and command.startswith("$((", i):
+                # Arithmetic expansion: an OPERAND, not a command.  Flush the
+                # word so far and DROP the expansion — its contents are never
+                # executed (unlike ``$(…)``, whose contents are).
+                if buf:
+                    tokens.append(("".join(buf), quoted))
+                    buf = []
+                    quoted = False
+                j = _arithmetic_expansion_end(command, i)
+                if j is None:
+                    return None  # unterminated ``$((`` — bash executes nothing
+                i = j
+                continue
             if ch == "'":
                 quoted = True
                 i += 1
@@ -434,7 +532,8 @@ def _split_command(command: str) -> list[tuple[str, bool]] | None:
             else:
                 buf.append(ch)
                 i += 1
-        tokens.append(("".join(buf), quoted))
+        if buf or quoted:
+            tokens.append(("".join(buf), quoted))
     return tokens
 
 
@@ -477,16 +576,25 @@ def _invokes_script(command: str, script_name: str,
                     root: str | os.PathLike[str] | None = None) -> bool:
     """True when a command line EXECUTES our script under ``hooks_dir``.
 
-    The matching token must be in EXECUTABLE position — the command itself, or
-    the argument of a launcher such as ``bash``/``timeout``/``env``.  Options
-    (``-u``) and their separate arguments, environment assignments, launcher
-    numeric operands, and grouping/separator punctuation are skipped, so a
-    token that is merely an argument (``echo .claude/hooks/session-end.sh``,
-    ``cat …``, ``command -v …``) is not mistaken for a registration.  A BARE
-    filename is rejected because it resolves to the project root, and an
-    absolute path is accepted only when it resolves to THIS project's hook.
-    Each false positive would suppress our own registration while reporting a
-    healthy install; each false negative appends a DUPLICATE registration.
+    THE RULE: walk the token stream and ask, at each position, whether the token
+    that BASH would resolve as an executed command names our hook.  A token is in
+    executable position at the start of a command (the first token, after a
+    separator/group-open, or inside a command substitution ``$(…)``/backtick);
+    after a recognised launcher it remains executable, because a launcher
+    (``env``/``sudo``/``timeout``/``bash`` …) runs its first non-option operand.
+    Skipped before executable position: a launcher's own options and the separate
+    VALUE of any option the launcher's per-launcher table declares argument-taking
+    (``sudo -u root cmd``, ``timeout -s KILL 60 cmd``), environment-assignment
+    prefixes, redirection operators and their targets, ``timeout``'s numeric
+    duration operand, and ``$((…))`` arithmetic contents (operands, never
+    commands).  A shell's ``-c`` argument is RECURSED into as a nested command
+    line.  A launcher is matched by BASENAME, so ``/bin/sh -c '…'`` behaves as
+    ``sh -c '…'``.
+
+    A BARE filename is rejected because it resolves to the project root, and an
+    absolute path is accepted only when it resolves to THIS project's hook.  Each
+    false positive would suppress our own registration while reporting a healthy
+    install; each false negative appends a DUPLICATE registration.
     """
     tokens = _split_command(command)
     if tokens is None or not tokens:
@@ -495,7 +603,7 @@ def _invokes_script(command: str, script_name: str,
         return False  # leading separator: a syntax error, nothing executes
     heredoc: str | None = None
     expect_cmd = True
-    skip_next = False  # option argument (may be our script — safety net below)
+    skip_next = False  # separate argument of an argument-taking launcher option
     skip_operand = False  # redirection target (never a command)
     recurse_next = False  # previous token was ``-c`` (a shell command string)
     launcher_word: str | None = None  # the launcher that governs operands
@@ -537,37 +645,37 @@ def _invokes_script(command: str, script_name: str,
             continue
         if skip_next:
             skip_next = False
-            # A launcher option-argument: an option may (``bash -eux``) or may
-            # not take one — if the "argument" is our hook, it is executed.
-            # A shell's ``-c`` may also surface here (``bash -e -c '…'``):
-            # recurse into the command string instead of consuming it.
-            if not quoted and tok in ("-c", "-lc", "-cl", "-ic"):
-                recurse_next = True
-                continue
-            if _token_is_our_script(tok, script_name, hooks_dir, root):
-                return True
+            # A launcher option's separate argument is a VALUE, never the
+            # executed command (``sudo -u <user>``, ``timeout -s <signal>``,
+            # ``bash -o <option-name>``).  Which options take one is decided by
+            # the launcher's own table, so nothing here may be executed — the
+            # old blanket "if it is our hook, it ran" safety net was the
+            # fail-open: it fired for ``sudo -u <hook>`` where bash consumes the
+            # path as a username.
             continue
         if not quoted and tok == "command":
             launcher_word = "command"
             continue
         if not quoted and tok in ("-v", "-V") and launcher_word == "command":
             return False  # ``command -v <path>`` is a query, not an execution
-        if not quoted and tok in _LAUNCHERS:
-            launcher_word = tok
-            continue
-        if not quoted and tok in ("-c", "-lc", "-cl", "-ic"):
-            recurse_next = True
-            continue
+        if not quoted:
+            launcher = _as_launcher(tok)
+            if launcher is not None:
+                launcher_word = launcher
+                continue
         if not quoted and tok.startswith("-"):
             if launcher_word in _SHELLS and (
                     tok == "--noexec"
                     or (not tok.startswith("--") and "n" in tok[1:])):
                 return False  # ``bash -n`` / ``sh -n``: syntax check only
-            if tok in _OPTION_FLAGS_WITH_ARG:
+            options = _OPTIONS_WITH_ARG.get(launcher_word or "", frozenset())
+            if launcher_word in _SHELLS and tok in _SHELL_COMMAND_FLAGS:
+                # A shell's ``-c`` argument is a command STRING to re-parse.
+                recurse_next = True
+            elif tok in options:
                 skip_next = True
             elif (len(tok) > 2 and not tok.startswith("--")
-                    and any(("-" + ch) in _OPTION_FLAGS_WITH_ARG
-                            for ch in tok[1:])):
+                    and any(("-" + ch) in options for ch in tok[1:])):
                 # combined short flags hide a separate value (``-euxo pipefail``)
                 skip_next = True
             continue

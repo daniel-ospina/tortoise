@@ -1533,3 +1533,144 @@ class TestUpgradeDocs:
         assert ".claude/settings.json" in section
         assert '"timeout": 60' in section   # the settings half, as a command
         assert "tortoise hooks upgrade" in section
+
+
+# ── 8. declared threat surface: argv / path resolution (#3866) ──────────
+#
+# ``_invokes_script`` is gate/enforcement code whose correctness is "an
+# attacker cannot make it fail open" (AGENTS.md, adversarial domain).  Its
+# bound is the DECLARED threat surface — the two classes below — and acceptance
+# is every declared class covered by a test that REDs when its guard is
+# removed, not "the reviewer ran out of ideas".
+
+
+class TestDeclaredThreatSurface:
+    """One test per declared class; each names the mutation that REDs it."""
+
+    @pytest.mark.parametrize("command", [
+        # A launcher option whose separate VALUE is our path.  none of these
+        # commands executes the hook:
+        #   sudo -u <hook>     -> the path is read as a USERNAME
+        #   sudo -g <hook>     -> the path is read as a GROUP
+        #   timeout -s <hook>  -> the path is read as a SIGNAL NAME
+        #   bash -o <hook>     -> the path is read as an OPTION NAME
+        #   env -u <hook>      -> the path is read as a VARIABLE NAME
+        #   nice -n <hook>     -> the path is read as an ADJUSTMENT
+        "sudo -u {abs}",
+        "sudo -g {abs}",
+        "timeout -s {abs}",
+        "bash -o {abs}",
+        "env -u {abs}",
+        "nice -n {abs}",
+    ])
+    def test_consumed_option_argument_is_not_a_registration(
+            self, tmp_path, command):
+        """CLASS 1 (fail-open): a launcher option's consumed argument must
+        never count as the executed command.
+
+        A single flat option table cannot be right for every launcher: ``-n``
+        is sudo's boolean non-interactive flag but nice's argument-taking
+        adjustment, and ``-s`` is timeout's signal value but sudo's boolean
+        shell flag.  The old table's blanket "if the argument is our hook, it
+        ran" safety net then reported a healthy install while bash never ran
+        the hook — a silent no-capture.
+
+        MUTATION: restore the ``skip_next`` safety net
+        (``if _token_is_our_script(tok, …): return True``) → the consumed value
+        is judged executed → no ``missing-hook-entry`` → no real entry is
+        added → RED.
+        """
+        root = tmp_path / "project"
+        abs_hook = root / ".claude" / "hooks" / "session-end.sh"
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command",
+             "command": command.format(abs=str(abs_hook))}]}]}}
+        root = _old_install(tmp_path, settings=doc, root=root)
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(root))
+        upgrade_install(root)
+        entries = _settings(root)["hooks"]["SessionEnd"]
+        assert len(entries) == 2  # the consumed-argument entry + our real one
+        ours = _our_entry(_settings(root), "SessionEnd", "session-end.sh")
+        assert ours["timeout"] == 60
+
+    @pytest.mark.parametrize("command", [
+        "echo $(({abs}))",    # arithmetic: operands, never executed
+        "x=$(({abs}))",       # arithmetic inside an assignment value
+    ])
+    def test_arithmetic_operand_is_not_a_registration(self, tmp_path, command):
+        """CLASS 1 (fail-open), second reproduction: ``$((…))`` is an
+        ARITHMETIC expansion — its contents are operands — while ``$(…)``
+        (single paren) is command substitution, whose contents ARE executed.
+        Treating the two alike lets ``echo $((<hook>))`` count as our
+        registration while bash runs nothing.
+
+        MUTATION: drop the ``$((`` branch from ``_split_command`` → the two
+        ``(`` tokens reset executable position → the operand is judged
+        executed → no ``missing-hook-entry`` → RED.
+        """
+        root = tmp_path / "project"
+        abs_hook = root / ".claude" / "hooks" / "session-end.sh"
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command",
+             "command": command.format(abs=str(abs_hook))}]}]}}
+        root = _old_install(tmp_path, settings=doc, root=root)
+        assert any(
+            f.kind == "missing-hook-entry" and f.script == "session-end.sh"
+            for f in detect_install(root))
+        upgrade_install(root)
+        assert len(_settings(root)["hooks"]["SessionEnd"]) == 2
+
+    def test_boolean_option_leaves_hook_in_command_position(self, tmp_path):
+        """The other half of CLASS 1: a launcher option that is BOOLEAN does
+        not consume the next word.  ``sudo -n`` is sudo's non-interactive flag
+        (not nice's adjustment), so ``sudo -n <hook>`` really runs the hook and
+        must not be judged foreign.
+
+        MUTATION: list ``-n`` in sudo's ``_OPTIONS_WITH_ARG`` entry (or use one
+        flat table for every launcher) → the token after ``-n`` is consumed →
+        no registration is found → a DUPLICATE is appended → RED.
+        """
+        root = tmp_path / "project"
+        abs_hook = root / ".claude" / "hooks" / "session-end.sh"
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command",
+             "command": "sudo -n " + str(abs_hook)}]}]}}
+        root = _old_install(tmp_path, settings=doc, root=root)
+        assert not [f for f in detect_install(root)
+                    if f.kind == "missing-hook-entry"
+                    and f.script == "session-end.sh"]
+        upgrade_install(root)
+        assert len(_settings(root)["hooks"]["SessionEnd"]) == 1
+        ours = _our_entry(_settings(root), "SessionEnd", "session-end.sh")
+        assert ours["timeout"] == 60
+
+    @pytest.mark.parametrize("command", [
+        "/bin/bash {abs}",
+        "/usr/bin/env bash {abs}",
+        "/bin/sh -c '{abs}'",
+    ])
+    def test_path_qualified_launcher_is_recognised(self, tmp_path, command):
+        """CLASS 2 (false negative): a path-qualified launcher execs the hook
+        exactly as the bare name does.  Recognising only the bare name judged
+        a working install ``missing-hook-entry`` and appended a DUPLICATE
+        registration — the hook then ran twice per event.
+
+        MUTATION: match launchers with ``tok in _LAUNCHERS`` instead of
+        basename-aware ``_as_launcher`` → the path-qualified form is foreign →
+        ``missing-hook-entry`` + a duplicate entry → RED.
+        """
+        root = tmp_path / "project"
+        abs_hook = root / ".claude" / "hooks" / "session-end.sh"
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command",
+             "command": command.format(abs=str(abs_hook))}]}]}}
+        root = _old_install(tmp_path, settings=doc, root=root)
+        assert not [f for f in detect_install(root)
+                    if f.kind == "missing-hook-entry"
+                    and f.script == "session-end.sh"]
+        upgrade_install(root)
+        assert len(_settings(root)["hooks"]["SessionEnd"]) == 1
+        ours = _our_entry(_settings(root), "SessionEnd", "session-end.sh")
+        assert ours["timeout"] == 60
