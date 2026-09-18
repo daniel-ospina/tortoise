@@ -1567,41 +1567,61 @@ def test_a_malformed_funnel_row_yields_unavailable_not_a_500(client, monkeypatch
     assert "org_graph_unavailable" in body["integrity"], body["integrity"]
 
 
-def test_out_of_window_rows_refuse_recall_any_on_the_no_memory_path():
-    """The window re-check must cover `detail.recall_attempted_any` on the
-    no-memory path too — otherwise that key means "window-verified count" on
-    one path and "unverified whole-history count" on another, and the
-    no-memory path is today's production state. The STAGE precedence is
-    deliberately unchanged: an org with no memory stays `not_measurable`, it
-    does not become `unavailable`."""
+def test_recall_any_is_exact_or_absent_on_every_path():
+    """`detail.recall_attempted_any` must mean the same thing everywhere: the
+    allowlisted count over the WINDOW, emitted only when it is EXACT (window
+    verified, page not truncated, every row placeable/classifiable).
+    Otherwise it is withheld AND the exclusion counters name the reason. The
+    STAGE precedence is unchanged: an org with no memory stays `not_measurable`,
+    it does not become `unavailable`."""
     from tortoise.activation_scorecard import recall_stages
     window = ("2026-09-16T00:00:00+00:00", "2026-09-17T00:00:00+00:00")
-    rows = [
-        {"properties": {"tool_name": "tortoise_search"},
-         "created_at": "2026-09-16T13:00:00+00:00"},
-        {"properties": {"tool_name": "tortoise_recall"},
-         "created_at": "2027-01-01T00:00:00+00:00"},
-    ]
+    clean = [{"properties": {"tool_name": "tortoise_search"},
+              "created_at": "2026-09-16T13:00:00+00:00"}]
+    rows = [*clean, {"properties": {"tool_name": "tortoise_recall"},
+                     "created_at": "2027-01-01T00:00:00+00:00"}]
+
+    # Out-of-window row: the window failure is named, the count withheld.
     stage, detail = recall_stages(rows, None, memory_sessions=0, window=window)
     assert stage["state"] == "not_measurable", stage
     assert stage["reason"] == "no_memory_produced_in_lifetime", stage
     assert detail["analytics_window_out_of_range"] == 1, detail
     assert detail["recall_attempted_any"] is None, detail
-    # Legitimate form: with no out-of-window row the raw count IS reported.
-    clean = [rows[0]]
+
+    # Exact read: the raw count IS reported.
     _, ok = recall_stages(clean, None, memory_sessions=0, window=window)
     assert ok["recall_attempted_any"] == 1, ok
-    assert ok["analytics_window_out_of_range"] == 0, ok
-    # ...but an unverifiable count is withheld: unparseable timestamp,
-    # non-mapping row, and no window at all.
+
+    # Unplaceable rows: withheld, and the COUNTER names why.
     bad_stamp = [{"properties": {"tool_name": "tortoise_search"},
                   "created_at": "not-a-timestamp"}]
     _, s1 = recall_stages(bad_stamp, None, memory_sessions=0, window=window)
     assert s1["recall_attempted_any"] is None, s1
+    assert s1["unparseable_analytic_rows"] == 1, s1
     _, s2 = recall_stages([42, *clean], None, memory_sessions=0, window=window)
     assert s2["recall_attempted_any"] is None, s2
-    _, s3 = recall_stages(clean, None, memory_sessions=0)
+    assert s2["unclassifiable_analytic_rows"] == 1, s2
+
+    # A truncated page is a lower bound, not a count.
+    _, s3 = recall_stages(clean * 1000, None, memory_sessions=0,
+                          window=window, truncated=True)
     assert s3["recall_attempted_any"] is None, s3
+    # A missing window is never a count.
+    _, s4 = recall_stages(clean, None, memory_sessions=0)
+    assert s4["recall_attempted_any"] is None, s4
+
+    # The COUNTING path holds the same rule: an unplaceable row refuses the
+    # stage AND withholds the unconditioned count (it used to report it).
+    stage5, s5 = recall_stages(bad_stamp, "2026-09-16T01:00:00+00:00",
+                               memory_sessions=1, window=window)
+    assert stage5["state"] == "unavailable", stage5
+    assert stage5["reason"] == "unparseable_analytic_rows", stage5
+    assert s5["recall_attempted_any"] is None, s5
+    # ...and the measured path still reports it.
+    stage6, s6 = recall_stages(clean, "2026-09-16T01:00:00+00:00",
+                               memory_sessions=1, window=window)
+    assert stage6["state"] == "measured", stage6
+    assert s6["recall_attempted_any"] == 1, s6
 
 
 def test_the_graph_read_is_dispatched_off_the_shared_default_executor(client,

@@ -460,9 +460,14 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     is REQUIRED before any count is emitted: reading rows without re-checking
     that they fall inside the window is the silent-dropped-bound class this PR
     fixed in ``SupabaseControlPlane.query``. A ``None`` window on the counting
-    path fails closed (``analytics_window_not_supplied``); on the no-memory
-    path the raw count is WITHHELD (left ``None``) rather than emitted
-    unverified.
+    path fails closed (``analytics_window_not_supplied``).
+
+    ``detail.recall_attempted_any`` is the allowlisted count over the WINDOW,
+    and is emitted only when it is EXACT — the window verified, the page not
+    truncated, and every fetched row placeable and classifiable. Otherwise it
+    stays ``None`` and the exclusion counters (``unparseable_analytic_rows``,
+    ``unclassifiable_analytic_rows``, ``analytics_window_out_of_range``) say
+    why.
     """
     # EVERY counter is initialised here, not only on the failure paths: the
     # detail key set is identical on every return path, so a consumer read of
@@ -533,19 +538,21 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         # with a NULL min means memory EXISTS but carries no timestamp — a data
         # gap, not an absence. Reading that as "no memory was ever produced"
         # would report nothing-to-measure for an org that has memory.
-        if window is not None and not window_failed:
-            # `recall_attempted_any` is only emitted when it is a WINDOWED,
-            # fully-placeable count. A missing window, any out-of-range row, or
-            # any row whose timestamp / tool_name cannot be read makes the
-            # count unverifiable — and an unverifiable count is not reported.
-            # The STAGE is unaffected: an org with no memory stays
-            # `not_measurable`, it does not become `unavailable`.
+        if window is not None and not window_failed and not truncated:
+            # `recall_attempted_any` is emitted only when it is EXACT: the
+            # window is verified, the page was not truncated, and every fetched
+            # row is placeable and classifiable. The exclusion counters are
+            # published either way, so a withheld count names its reason. The
+            # STAGE is unaffected: an org with no memory stays `not_measurable`,
+            # it does not become `unavailable`.
             since_at = _coerce_created_at(window[0])
             if since_at is not None:
-                total, unparsable, unclassifiable = _count_allowlisted(
-                    rows, since_at)
-                if not (unparsable or unclassifiable):
-                    detail["recall_attempted_any"] = total
+                any_total, any_unparseable, any_unclassifiable = (
+                    _count_allowlisted(rows, since_at))
+                detail["unparseable_analytic_rows"] = any_unparseable
+                detail["unclassifiable_analytic_rows"] = any_unclassifiable
+                if not (any_unparseable or any_unclassifiable):
+                    detail["recall_attempted_any"] = any_total
         if memory_sessions:
             return _stage(None, "calls", "first_memory_at_missing"), detail
         # No memory has ever been produced, so no retrieval can have been
@@ -593,7 +600,6 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     detail["unclassifiable_analytic_rows_wide"] = wide_unclassifiable
     detail["recall_attempted_after_memory"] = narrow
     detail["recall_attempted_after_memory_wide"] = wide
-    detail["recall_attempted_any"] = _count_allowlisted(rows, None)[0]
     if unparseable or wide_unparseable:
         # An allowlisted call whose timestamp will not parse cannot be placed
         # relative to first_memory_at, so it is excluded from the count — which
@@ -607,6 +613,16 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         # cannot rule OUT of the retrieval set. Excluding it silently would
         # again make the count a lower bound — the number would look exact.
         return _stage(None, "calls", "unclassifiable_analytic_rows"), detail
+    # The unconditioned count, computed over the WINDOW (not over the whole
+    # history) and only after every exclusion above has been ruled out — so it
+    # means the same thing here as on the no-memory path, where an unplaceable
+    # row withholds it instead of counting it.
+    since_at = _coerce_created_at(window[0])
+    if since_at is not None:
+        any_total, any_unparseable, any_unclassifiable = _count_allowlisted(
+            rows, since_at)
+        if not (any_unparseable or any_unclassifiable):
+            detail["recall_attempted_any"] = any_total
     return _stage(narrow, "calls"), detail
 
 
@@ -730,7 +746,9 @@ LIMITATIONS: tuple[str, ...] = (
     "COUNTS an org-wide stream. A multi-graph org that produced memory only in "
     "a non-default graph can read `not_measurable` "
     "(`no_memory_produced_in_lifetime`) even though its windowed recall calls "
-    "are counted in `detail.recall_attempted_any`. The state is graph-scoped, "
+    "are counted in `detail.recall_attempted_any` when that count is exact"
+    "(a windowed, untruncated, fully-placeable read; otherwise it is None and "
+    "the exclusion counters name why). The state is graph-scoped, "
     "the count is org-wide. Surfacing the ambiguity is #4039.",
     "`detail.first_memory_at` is the earliest memory-bearing SESSION's capture "
     "time (`min(s.created_at)`), NOT the creation time of the first extracted "
