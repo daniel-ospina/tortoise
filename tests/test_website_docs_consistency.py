@@ -524,12 +524,20 @@ def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     # stripping removed, so they would prove nothing (review finding, #3962).
     assert _rendered_hrefs('<script>const t = \'<a href="/blog">B</a>\';</script>') == []
     assert _rendered_hrefs('<style>/* <a href="/blog">B</a> */</style>') == []
-    # An `href=` inside ANOTHER attribute's value is not this tag's href. A regex
-    # with an optional quote reported one here (review finding, #3962); the shared
-    # parser must not.
+    # An `href=` that is part of ANOTHER attribute is not this tag's href —
+    # neither in another attribute's VALUE (`title="see href=/blog"`,
+    # `onclick="location.href=/blog"`) nor the tail of another attribute's NAME
+    # (`data-href`). A regex with an optional quote reported all three (review
+    # finding, #3962); the shared parser must not.
     assert _rendered_hrefs('<a title="see href=/blog">x</a>') == []
     assert _rendered_hrefs('<a onclick="location.href=/blog">x</a>') == []
     assert _rendered_hrefs('<a data-href="/blog">x</a>') == []
+    # Duplicate attributes: the tokenizer keeps the FIRST, so the second must not
+    # be reported as a link the browser does not have (review finding, #3962).
+    assert _rendered_hrefs('<a href="#" href="/blog">x</a>') == ["#"]
+    assert _rendered_hrefs('<a href="" href="/blog">x</a>') == []
+    # Inert containers are parsed but not rendered.
+    assert _rendered_hrefs('<template><a href="/blog">x</a></template>') == []
     # Not a link: a non-anchor element, and a valueless or empty href.
     assert _rendered_hrefs('<link rel="prefetch" href="/blog">') == []
     assert _rendered_hrefs("<a href>x</a>") == []

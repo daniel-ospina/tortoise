@@ -102,6 +102,13 @@ SHARED_MODULES = (
     "tortoise/projection/",
     "tests/conftest.py",
     "tests/fake_control_plane.py",
+    # Shared by BOTH blog-guard layers (#3950): the static guard
+    # (tests/test_website_docs_consistency.py, surface "onboarding") and the
+    # production check (tests/e2e/test_legal_pages.py). An edit here that did NOT
+    # run the static guard would be the #1349/#3332/#3616 silent-drop class again
+    # — a helper-only change selects no surface of its own, so the guard's own
+    # pin test (test_rendered_hrefs_ignores_non_rendered_markup) would not run.
+    "tests/_html_links.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",

@@ -71,8 +71,6 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from tests._html_links import extract_anchor_hrefs
-
 # ── Opt-in short-circuit (cycle-4 P1-1) — FIRST executable statement. ──────
 # A plain module-level runtime call: pytest.skip() in module code skips the
 # whole module at collection WITHOUT erroring. NEVER pytest.exit().
@@ -87,6 +85,13 @@ if (BASE_URL.startswith("https://") or TORTISE_HOST.startswith("https://")) and 
         "no production assertions pre-merge — set ALLOW_PROD=1 to test production",
         allow_module_level=True,
     )
+
+# Imported here rather than with the stdlib block above ON PURPOSE: the two opt-in
+# skips immediately above are this module's pinned harness contract ("FIRST
+# executable statement"), so bare collection must reach them before anything that
+# could fail to import. The helper is pure stdlib today, but the contract is what
+# keeps collection error-free in every lane, so it does not depend on that.
+from tests._html_links import extract_anchor_hrefs  # noqa: E402
 
 # ── Signup-flow mode discrimination (#1190) ────────────────────────────────
 # The deployed form is SERVER-FIRST on the hosted site (#801) but runs the
