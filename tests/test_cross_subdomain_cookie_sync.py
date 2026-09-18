@@ -539,13 +539,40 @@ def test_sync_legacy_migration_is_present_and_confirm_before_clear() -> None:
     assert "typeof co.access_token === 'string'" in body, (
         "a present-but-unusable cookie must not outrank a valid legacy session (#3485 review P3)"
     )
+    # #3485 review P1 (cycle 2): the both-present branch's guard must NAMED-ly
+    # include legacyOk. Pinning only `typeof lo.access_token` (above) leaves the
+    # branch itself unpinned: dropping `legacyOk &&` lets a junk legacy blob
+    # ({"expires_at":1e11}) overwrite a VALID parent-domain cookie, after which
+    # its legacy key is deleted — logging the user out of both subdomains.
+    assert "if (legacyOk && (!cookieOk || legacyExp > cookieExp)) {" in body, (
+        "the both-present branch must still require a real legacy session before it "
+        "may overwrite the cookie (#3485 review P1)"
+    )
+    # #3485 review P2 (cycle 2): a host-only cookie SHARES NOTHING, so a
+    # "confirmed" write on a *.pages.dev preview is not evidence of sharing and
+    # must not cost the legacy copy — the last copy would be destroyed while the
+    # session stays invisible to the other origin and to the server gate.
+    assert "if (!isLocal() && !isPremiselabsHost()) continue;" in body, (
+        "the migration must not clear the legacy key on a host where the cookie is "
+        "host-only (#3485 review P2)"
+    )
     # The sibling writer for the SAME keys (createTortoiseSupabaseClient path —
     # reached when the head gate is skipped, e.g. the ?error early return) must
     # not be a second, unguarded way to write a non-session into the cookie.
     mig = text[text.index("var migrateLegacySession = function") :]
     mig = mig[: mig.index("\n  };\n")]
-    assert "if (readCookie(COOKIE_NAME) !== legacy) return;" in mig, (
-        "migrateLegacySession must confirm its write before dropping the legacy key (#3485 review)"
+    # COUNT, not presence (#3485 review P1, cycle 2): migrateLegacySession has
+    # TWO confirm sites (cookie-absent, and both-present-newer). A presence check
+    # is satisfied by the else-branch copy alone, so deleting one site leaves a
+    # size-guard-stripped write falling through to removeItem(legacyKey) — the
+    # only surviving copy destroyed.
+    assert mig.count("if (readCookie(COOKIE_NAME) !== legacy) return;") == 2, (
+        "both migrateLegacySession write branches must confirm the round-trip before "
+        "dropping the legacy key (#3485 review P1)"
+    )
+    assert "if (!isLocal() && !isPremiselabsHost()) return;" in mig, (
+        "migrateLegacySession must not clear the legacy key on a host where the cookie "
+        "is host-only (#3485 review P2)"
     )
     assert "typeof lo.access_token === 'string'" in mig and "!legacyOk" in mig, (
         "migrateLegacySession must refuse to share a non-session (#3485 review)"
@@ -557,12 +584,33 @@ def test_sync_legacy_migration_is_present_and_confirm_before_clear() -> None:
     assert "return readValidSession()" not in store, (
         "storeSession must not re-enter the migrating accessor to verify its write (#3485 review)"
     )
-    assert "readCookie(COOKIE_NAME)" in store, (
-        "storeSession must verify the cookie it just wrote (#3485 review)"
+    # The verification must check the RESULT, not merely that readCookie was
+    # called: a bare `readCookie(COOKIE_NAME); return true;` satisfies a presence
+    # check while reporting success for a write the browser refused
+    # (#3485 review P1, cycle 2).
+    assert "stored.access_token === session.access_token" in store, (
+        "storeSession must confirm the cookie now carries THE session it just wrote — "
+        "reading back a stale pre-existing value reports success for a write the "
+        "browser actually refused (#3485 review P1)"
+    )
+    assert "stored.expires_at && stored.expires_at * 1000 > Date.now()" in store, (
+        "storeSession must apply the same strict validity predicate as "
+        "readValidSession, or it reports success for a session the destination gate "
+        "will reject and bounce back to /auth (#3485 review P1)"
     )
     read_body = _read_valid_session_body()
+    # ORDER, not presence (#3485 review P1, cycle 2): a presence check passes with
+    # the call moved INSIDE the absent-cookie branch — which reinstates the very
+    # defect this pins (a present-but-unparseable cookie skips the migration,
+    # readValidSession returns null, then migrateLegacySession() deletes the only
+    # valid localStorage copy). The migration must run before the first read.
     assert "migrateLegacyKeysToCookie();" in read_body, (
         "readValidSession must migrate unconditionally — a present-but-unparseable "
         "cookie must not skip the migration and lose the legacy copy (#3485 review P2)"
+    )
+    _first_read = read_body.index("readCookie(COOKIE_NAME)")
+    assert read_body.index("migrateLegacyKeysToCookie();") < _first_read, (
+        "the migration must run BEFORE the first cookie read, not inside the "
+        "cookie-absent branch (#3485 review P1)"
     )
     assert "LEGACY_KEYS" in body, "migration must iterate the hardcoded LEGACY_KEYS"

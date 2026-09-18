@@ -149,6 +149,10 @@
         try { window.localStorage.removeItem(legacyKey); } catch (e) { /* ignore */ }
         return;
       }
+      // #3485 review P2: the same rule as migrateLegacyKeysToCookie — on a host
+      // where the cookie cannot be parent-domain, a confirmed write is NOT a
+      // shared write, and buying it with the only legacy copy is a net loss.
+      if (!isLocal() && !isPremiselabsHost()) return;
       if (!alreadyShared) {
         // Copy + confirm write before clearing (never destroy the only copy).
         // readCookie returns the DECODED value; equality holds unless the size
@@ -238,6 +242,16 @@
       var legacy = null;
       try { legacy = window.localStorage.getItem(LEGACY_KEYS[i]); } catch (e) { continue; }
       if (!legacy) continue;
+      // #3485 review P2: a host-only cookie SHARES NOTHING. On a public origin
+      // that is neither premiselabs.co nor a local dev host (e.g. a *.pages.dev
+      // preview) `domainAttr()` is empty, so the write below lands host-only —
+      // invisible to the other subdomain and to the server gate — while the
+      // equality check still passes and the legacy copy is then dropped: the last
+      // copy destroyed, and exactly the mismatch this migration exists to remove.
+      // Leave the legacy key alone there (readValidSession still returns null, so
+      // the visitor signs in again instead of looping); junk keys are left in
+      // place too, since on such a host nothing is shared and nothing destroyed.
+      if (!isLocal() && !isPremiselabsHost()) continue;
       var existing = readCookie(COOKIE_NAME);
       // #3485 review P3: parse the legacy value ONCE and require a real session
       // shape (non-empty access_token) in BOTH branches. Object-ness alone is
@@ -391,7 +405,17 @@
       var raw = readCookie(COOKIE_NAME);
       if (!raw) return false;
       var stored = JSON.parse(raw);
-      return !!(stored && stored.access_token);
+      // The write must have LANDED: the cookie must now carry THIS session, not a
+      // stale value the browser kept because it refused the write (an oversized
+      // session is silently rejected, so reading back whatever cookie was already
+      // there would report success for a session that never round-tripped).
+      // …and the result must be USABLE by the destination gate — the same strict
+      // predicate readValidSession() applies, so storeSession() === true can never
+      // promise a session the gate will reject and bounce back to /auth. That
+      // bounce is the loop this change exists to remove (#3485 review P1).
+      return !!(stored && stored.access_token === session.access_token &&
+        stored.refresh_token &&
+        stored.expires_at && stored.expires_at * 1000 > Date.now());
     } catch (e) { return false; }
   };
 

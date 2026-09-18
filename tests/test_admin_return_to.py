@@ -707,6 +707,9 @@ def test_vite_base_is_the_console_public_path() -> None:
         f"vite base is {m.group(1)!r}, must be the absolute {mount!r} — the path the "
         "gate Function mounts the console at. A relative base re-breaks the "
         "extensionless /admin entry path (#3952)"
+    )
+
+
 def test_email_password_success_paths_carry_the_return_to() -> None:
     """#3485: the email/password success paths must name the explicit return-to
     rather than rely on WELCOME_URL. At this base the two resolve to the SAME
