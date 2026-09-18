@@ -46,6 +46,22 @@
   var COOKIE_LIMIT = 4096; // bytes of `name` + '=' + `value`
   var SIZE_CAP = COOKIE_LIMIT - COOKIE_NAME.length - 1; // largest value we may write
 
+  // #3485 review (cycle 5, P1): the shape THIS bridge accepts must be the shape the
+  // destination CONSUMER accepts. supabase-js's own _isValidSession additionally
+  // requires a `refresh_token` KEY, and its load path _removeSession()s the stored
+  // session when that key is missing. The dashboard mounts supabase-js
+  // (website/apps/dashboard/src/main.jsx getSession()), so a value the gate accepts
+  // but the consumer DELETES is a live redirect loop: the head gate passes, the
+  // mount gate wipes the cookie, the app bounces to /auth, and the migration
+  // re-creates the same cookie from the legacy key — kept precisely because the
+  // unconfirmable write never dropped it. Requiring the key here makes that state
+  // unreachable. (storeSession() already required it, which is why the two agree.)
+  var isConsumableSession = function (v) {
+    return !!v && typeof v === 'object' &&
+      typeof v.access_token === 'string' && v.access_token.length > 0 &&
+      typeof v.refresh_token === 'string' && v.refresh_token.length > 0;
+  };
+
   var isLocal = function () {
     var h = window.location.hostname;
     // localhost + loopback IPs (v4/v6) + RFC1918 private ranges — no
@@ -152,6 +168,26 @@
       try { legacy = window.localStorage.getItem(legacyKey); } catch (e) { return; }
       if (!legacy) return;
       var alreadyShared = readCookie(COOKIE_NAME);
+      // #3485 review: the shared cookie may only ever receive a real session,
+      // and every write is confirmed (readCookie equality) before the legacy
+      // key is dropped — the same discipline as migrateLegacyKeysToCookie.
+      var legacyOk = false, legacyExp = 0, cookieOk = false, cookieExp = 0;
+      try {
+        var lo = JSON.parse(legacy);
+        legacyOk = isConsumableSession(lo);
+        legacyExp = (lo && lo.expires_at) || 0;
+      } catch (e) { /* not JSON — not a session */ }
+      if (!legacyOk) {
+        // Not a session and therefore never a credential — never share it with
+        // the parent domain; drop the junk.
+        try { window.localStorage.removeItem(legacyKey); } catch (e) { /* ignore */ }
+        return;
+      }
+      // Host-only origins are handled correctly here too, for the same reason as
+      // migrateLegacyKeysToCookie (#3485 review cycle 3): the cookie is written
+      // and read on the SAME host, and the write is confirmed below before the
+      // legacy key is dropped. Do not reinstate a host-only guard here — it
+      // bounces preview users who are signed in and protects nothing.
       if (!alreadyShared) {
         // Copy + confirm write before clearing (never destroy the only copy).
         // readCookie returns the DECODED value; equality holds unless the size
@@ -163,12 +199,18 @@
         // hold a NEWER legacy session than the cookie — compare expires_at and
         // keep the newer one before clearing the legacy key.
         try {
-          var legacyExp = JSON.parse(legacy).expires_at || 0;
-          var cookieExp = JSON.parse(alreadyShared).expires_at || 0;
-          if (legacyExp > cookieExp) {
-            supabaseStorage.setItem(COOKIE_NAME, legacy);
-          }
-        } catch (e) { /* malformed JSON — keep cookie, drop legacy below */ }
+          var co = JSON.parse(alreadyShared);
+          cookieOk = isConsumableSession(co);
+          cookieExp = (co && co.expires_at) || 0;
+        } catch (e) { /* unusable cookie */ }
+        // #3485 review P2 (cycles 3-4): an expired or absent-expiry legacy session
+        // must not displace a USABLE cookie — that cookie is what the server gate
+        // reads. When the cookie is unusable the legacy session is the only
+        // candidate, so it is carried over regardless of freshness.
+        if (!cookieOk || (legacyExp * 1000 > Date.now() && legacyExp > cookieExp)) {
+          supabaseStorage.setItem(COOKIE_NAME, legacy);
+          if (readCookie(COOKIE_NAME) !== legacy) return;
+        }
       }
       // Stale-secret hygiene: the new client never reads the legacy key; drop
       // it whether or not a cookie was already present.
@@ -234,17 +276,111 @@
     'sb-127-auth-token',                  // local CLI host (e2e seeds both)
   ];
 
-  var readValidSession = function () {
+  // #3485: SYNCHRONOUS legacy→cookie migration for the hardcoded LEGACY_KEYS.
+  // The head gate (signup.html) calls readValidSession() BEFORE the body runs
+  // createTortoiseSupabaseClient(), so migrateLegacySession() (which needs a
+  // supabaseUrl to derive the key) has not run yet. A visitor whose only
+  // session lives in origin-scoped localStorage therefore looked signed in to
+  // THIS origin while app.premiselabs.co and the server /admin gate saw no
+  // cookie — tortoise → app → tortoise, forever (#3485, 393 loads/8s).
+  // LEGACY_KEYS are hardcoded, so the migration needs no supabaseUrl and can
+  // run at gate time. Never throws: storage may be blocked or the value corrupt.
+  var migrateLegacyKeysToCookie = function () {
     try {
-      var raw = readCookie(COOKIE_NAME);
-      if (!raw) {
-        for (var i = 0; i < LEGACY_KEYS.length && !raw; i++) {
-          try { raw = window.localStorage.getItem(LEGACY_KEYS[i]); } catch (e) {}
+      for (var i = 0; i < LEGACY_KEYS.length; i++) {
+      var legacy = null;
+      try { legacy = window.localStorage.getItem(LEGACY_KEYS[i]); } catch (e) { continue; }
+      if (!legacy) continue;
+      // Host-only origins are handled correctly here, and this was checked
+      // (#3485 review cycle 3): on a host that is not premiselabs.co the cookie is
+      // written AND read on the SAME host — `website/functions/` deploys with the
+      // `premise-labs` Pages project, so a *.pages.dev preview runs the same gate
+      // and reads this very cookie — and the write below is CONFIRMED by
+      // readCookie equality, so a host-only cookie is a faithful copy rather than
+      // a lost one. Declining to migrate here would instead bounce a preview user
+      // who had been signed in and working, while leaving behind a localStorage
+      // key that no current path reads.
+      var existing = readCookie(COOKIE_NAME);
+      // #3485 review P3: parse the legacy value ONCE and require a real session
+      // shape (a non-empty access_token AND refresh_token — isConsumableSession)
+      // in BOTH branches. Object-ness alone is
+      // not a session: a {"expires_at":N} blob written to the shared cookie
+      // would outrank — and cause the deletion of — a valid session under the
+      // second legacy key.
+      var legacyExp = 0, legacyOk = false;
+      try {
+        var lo = JSON.parse(legacy);
+        legacyOk = isConsumableSession(lo);
+        legacyExp = (lo && lo.expires_at) || 0;
+      } catch (e) { /* not JSON — not a session */ }
+      if (!existing) {
+        if (!legacyOk) {
+          // Not a session, so never a credential — never share it with the
+          // parent domain; drop the junk.
+          try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) { /* ignore */ }
+          continue;
+        }
+        // Copy + confirm the write BEFORE clearing the only copy. readCookie
+        // returns the DECODED value; equality fails when the size guard
+        // stripped provider tokens — then keep the legacy copy.
+        supabaseStorage.setItem(COOKIE_NAME, legacy);
+        if (readCookie(COOKIE_NAME) !== legacy) continue;
+      } else {
+        // Both present (review P3-3): a stale cached tab may hold a NEWER
+        // legacy session — compare expires_at and keep the newer one before
+        // clearing the legacy key. #3485 review P2: the write is CONFIRMED
+        // (readCookie equality) before the legacy copy is dropped, and a
+        // legacy value that is not a session never overwrites the cookie.
+        var cookieExp = 0, cookieOk = false;
+        try {
+          var co = JSON.parse(existing);
+          cookieOk = isConsumableSession(co);
+          cookieExp = (co && co.expires_at) || 0;
+        } catch (e) { /* unusable cookie */ }
+        // The expiry test applies only where it would DISPLACE a usable cookie.
+        // With an unusable cookie the legacy session is the only candidate and
+        // must still be carried over — it may hold a valid `refresh_token`, which
+        // supabase-js can exchange. Demanding freshness there deletes a
+        // recoverable credential and forces a fresh sign-in (#3485 review,
+        // cycle 4).
+        if (legacyOk && (!cookieOk ||
+            (legacyExp * 1000 > Date.now() && legacyExp > cookieExp))) {
+          supabaseStorage.setItem(COOKIE_NAME, legacy);
+          if (readCookie(COOKIE_NAME) !== legacy) continue;
         }
       }
+      // The new client never reads the legacy key — drop it once it is shared.
+      try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) { /* ignore */ }
+    }
+    } catch (e) {
+      // Never throws (#3485 review cycle 3): a corrupt legacy value — e.g. one
+      // whose JSON parses but carries an unpaired surrogate, which makes
+      // encodeURIComponent throw URIError — must not stop the caller
+      // (readValidSession) from reading the cookie, or a visitor with a perfectly
+      // valid parent-domain cookie would be reported as having no session.
+    }
+  };
+
+  // #3485: trust ONLY the parent-domain cookie — the credential both
+  // subdomains and the server can actually see. A localStorage-only session
+  // is migrated synchronously first; if it still cannot be shared, return null
+  // and let the visitor sign in again rather than report a session the
+  // destination cannot see (that report IS the redirect loop).
+  var readValidSession = function () {
+    try {
+      // #3485 review P2: ALWAYS migrate — migration is idempotent, and calling
+      // it only when the cookie is ABSENT skipped the case where the cookie is
+      // present but unparseable: readValidSession returned null, then the
+      // body's migrateLegacySession() deleted the only valid copy from
+      // localStorage. Migrating first repairs the cookie, closing that path.
+      migrateLegacyKeysToCookie();
+      var raw = readCookie(COOKIE_NAME);
       if (!raw) return null;
       var s = JSON.parse(raw);
-      if (!s || !s.access_token) return null;
+      // #3485 review (cycle 5, P1): require the same shape the CONSUMER requires.
+      // A cookie carrying access_token + unexpired expires_at but no refresh_token
+      // is deleted by supabase-js on mount, which re-arms the app ⇄ /auth loop.
+      if (!isConsumableSession(s)) return null;
       // Strict validity: missing or past expires_at = INVALID (presence is
       // not auth — the stale-session leak class).
       if (!s.expires_at || s.expires_at * 1000 <= Date.now()) return null;
@@ -257,6 +393,15 @@
       document.cookie = COOKIE_NAME + '=;' + domainAttr() + '; Path=' + COOKIE_PATH +
         '; SameSite=Lax' + secureAttr() + '; Max-Age=0';
     } catch (e) {}
+    // The blog-admin SPA persists the session under the SAME name in
+    // localStorage, and its client refreshes tokens from there — a copy the
+    // server gate never saw. That SPA clears its own key on sign-out (its adapter
+    // half is PR #4016); this line covers any caller on an origin where the key
+    // does exist, and is a harmless no-op elsewhere — localStorage is
+    // per-origin, and the dashboard SPA that calls this function runs on a
+    // different origin from the console that writes that key (#3485 review,
+    // cycle 4).
+    try { window.localStorage.removeItem(COOKIE_NAME); } catch (e) {}
     for (var i = 0; i < LEGACY_KEYS.length; i++) {
       try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) {}
     }
@@ -325,23 +470,30 @@
   // GoTrue /user) which is neither instant nor mockable in the exchange flow.
   var storeSession = function (session) {
     if (!session || !session.access_token || !session.refresh_token) return false;
+    // Refuse an UNUSABLE session BEFORE writing (#3485 review, cycle 4): the write
+    // would otherwise replace a valid cookie with an expired session and only
+    // then return false — leaving the visitor with a dead session in place of a
+    // working one, on the credential the server gate actually reads.
+    if (!session.expires_at || session.expires_at * 1000 <= Date.now()) return false;
     try {
       supabaseStorage.setItem(COOKIE_NAME, JSON.stringify(session));
       // Prove THIS write — not merely that SOME valid session is readable.
-      // readValidSession() accepts a still-valid PREVIOUS cookie AND falls back
-      // to the legacy localStorage keys, so a REFUSED write could look like
-      // success: the caller then stripped the fragment, destroying the NEW
-      // credential while the user stayed signed in as the OLD account (and the
-      // cross-subdomain cookie the dashboard reads was never written). Read the
-      // COOKIE itself and compare the pair just written — the
-      // migrateLegacySession value-comparison precedent. refresh_token is part
-      // of the identity too: a prior cookie that happens to share the
-      // access_token but carries a stale refresh_token is still NOT this write.
-      // The setItem token-stripping path never removes refresh_token, so this
-      // comparison is exact. Keep the strict expiry check.
-      var storedRaw = readCookie(COOKIE_NAME);
-      if (!storedRaw) return false;
-      var stored = JSON.parse(storedRaw);
+      // Read the COOKIE directly, not via readValidSession(): that helper also
+      // migrates legacy keys and could prefer a NEWER legacy session over the one
+      // just stored (#3485 review). The write must have LANDED — the cookie must
+      // now carry THIS session, not a stale value the browser kept because it
+      // refused the write (an over-cap write is a silent no-op, so reading back
+      // whatever was already there would report success for a session that never
+      // round-tripped). refresh_token is part of the identity too: a prior cookie
+      // sharing the access_token but carrying a stale refresh_token is still NOT
+      // this write. And the result must be USABLE by the destination gate — the
+      // same strict predicate readValidSession() applies (access_token +
+      // refresh_token + unexpired) — so storeSession() ===
+      // true can never promise a session the gate rejects and bounces back to
+      // /auth. That bounce is the loop this change exists to remove (#3485 P1).
+      var raw = readCookie(COOKIE_NAME);
+      if (!raw) return false;
+      var stored = JSON.parse(raw);
       return !!(stored && stored.access_token === session.access_token &&
         stored.refresh_token === session.refresh_token &&
         stored.expires_at && stored.expires_at * 1000 > Date.now());
@@ -377,9 +529,12 @@
       if (pt) session.provider_token = pt;
       var prt = p.get('provider_refresh_token');
       if (prt) session.provider_refresh_token = prt;
-      // Strip the fragment ONLY when the credential is safely stored: when
-      // storeSession() fails the fragment is the ONLY copy left, and erasing
-      // it strands the user on /auth with no credential anywhere (#3503).
+      // Strip the fragment ONLY when the credential is safely stored (#3503;
+      // #3485 review cycle 2 P1): this fragment is the only copy of the NEW
+      // credential, and storeSession() returns false both when the write was
+      // refused (an over-cap session) and when the cookie still holds a different
+      // one — erasing it then strands the user on /auth with no credential
+      // anywhere, or leaves them signed in as the previous account.
       if (storeSession(session)) {
         // Strip the fragment to prevent supabase-js from redundantly
         // re-processing the same fragment (which may log console errors).

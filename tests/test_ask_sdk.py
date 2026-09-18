@@ -30,6 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tools.ask_spotcheck import merge_capture_session
 from tortoise.exceptions import (
     AskInFlightLimit,
     AskQuotaExceeded,
@@ -89,9 +90,41 @@ class FakeReader:
 
 # ── Task 4: annotate_ask_hits ──────────────────────────────────────────────
 
+#: The session `_seed_event_graph`'s extracted claims belong to. Capture
+#: CONTAINS-wires its EXTRACTED Points to the session too (the extraction
+#: loops in `tortoise/sdk.py`: `MATCH (s:Session {id:$sid}),
+#: (p:Point {id:$pid}) MERGE (s)-[:CONTAINS]->(p)`), not just its turns.
+SEEDED_EVENT_SESSION = "sess-extracted"
+
+
 def _seed_event_graph(sdk: TortoiseSDK, turns: list[dict]) -> list[dict]:
-    """Seed points + Events; return the tortoise_fts_query hits."""
+    """Seed EXTRACTED-claim points + Events; return the ``tortoise_fts_query``
+    hits.
+
+    These Points model capture's EXTRACTED claims, and both halves of the
+    shape they carry are written here: capture stamps ``n.eventId`` on an
+    extracted claim (so the ``:Event`` join that produces ``session_date`` —
+    this fixture's subject, #1987 Task 4 — reaches it) AND wires it to the
+    session node with ``MERGE (s)-[:CONTAINS]->(p)`` (the extraction loops in
+    ``tortoise/sdk.py``). The shipping point fetch resolves an extracted
+    claim's identity from that edge.
+
+    What it must NOT write is the ``p.sessionId`` PROP. Capture never writes
+    one — on claims or on turns — and the fetch PREFERS a renderable
+    ``p.sessionId`` over the CONTAINS edge, so a prop is the only provenance
+    this fixture could carry that the graph cannot legitimately hold, and the
+    only thing a forgery in it would satisfy. Pre-#3914 this helper had a
+    ``t.get("sessionId")`` branch writing exactly that, with no ``(:Session)``
+    node and no edge; ``test_seed_event_graph_ignores_a_session_id_key`` pins
+    that a passed key is IGNORED, so re-adding the branch reds the build.
+    """
     proj = sdk._get_proj()
+    # The session node carries capture's own prop set — a bare-id Session is a
+    # node shape no product writer produces, and consumers reading
+    # `s.turn_count` / `s.is_episodic` would see None. This fixture models no
+    # TURN stream, so `turn_count` counts the claims seeded here: the prop SET
+    # is capture's, that one VALUE is the fixture's placeholder.
+    merge_capture_session(sdk, SEEDED_EVENT_SESSION, len(turns))
     for i, t in enumerate(turns):
         point = sdk.create_point("statement", t["content"])
         eid = t.get("eventId", f"ev-{i}")
@@ -101,9 +134,6 @@ def _seed_event_graph(sdk: TortoiseSDK, turns: list[dict]) -> list[dict]:
         )
         sets = ["p.eventId = $eid"]
         params = {"pid": point["id"], "eid": eid}
-        if t.get("sessionId"):
-            sets.append("p.sessionId = $sid")
-            params["sid"] = t["sessionId"]
         if t.get("speaker"):
             sets.append("p.speaker = $spk")
             params["spk"] = t["speaker"]
@@ -111,7 +141,52 @@ def _seed_event_graph(sdk: TortoiseSDK, turns: list[dict]) -> list[dict]:
             "MATCH (p:Point {id: $pid}) SET " + ", ".join(sets),
             params=params,
         )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+            "MERGE (s)-[:CONTAINS]->(p)",
+            params={"sid": SEEDED_EVENT_SESSION, "pid": point["id"]},
+        )
     return sdk.tortoise_fts_query("gym", limit=40, include_terminal=True)
+
+
+def test_seed_event_graph_ignores_a_session_id_key():
+    """#3914: an extracted-claim fixture must NOT forge the ``sessionId`` PROP.
+
+    The removed branch wrote ``p.sessionId = $sid`` — no ``(:Session)`` node,
+    no ``CONTAINS`` edge — the one provenance the graph cannot legitimately
+    carry and the one the shipping fetch PREFERS over the edge. A passed key
+    must now be a no-op AND the identity must still resolve, from the edge the
+    fixture does write, so re-adding the branch OR dropping the edge reds it.
+    """
+    sdk = _new_sdk()
+    hits = _seed_event_graph(sdk, [
+        {"content": "the gym schedule is Monday", "eventId": "ev1",
+         "session_date": "2026-08-01", "speaker": "user",
+         "sessionId": "forged-sess"},
+    ])
+    assert hits, "fixture must retrieve"
+    proj = sdk._get_proj()
+    points = proj.g.query(
+        "MATCH (p:Point) RETURN p.id, p.sessionId, p.eventId").result_set
+    assert points, points
+    for pid, sess_prop, _ev_prop in points:
+        assert sess_prop is None, (pid, sess_prop)
+    edges = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) RETURN p.id",
+        params={"sid": SEEDED_EVENT_SESSION}).result_set
+    assert [r[0] for r in edges] == [r[0] for r in points], edges
+    # The Session side is part of the shape too — capture writes all three.
+    sess = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.created_at, s.turn_count, "
+        "s.is_episodic", params={"sid": SEEDED_EVENT_SESSION}).result_set
+    assert len(sess) == 1, sess
+    created_at, turn_count, is_episodic = sess[0]
+    assert created_at, sess
+    assert turn_count == len(points), sess
+    assert is_episodic is True, sess
+    # The wire identity comes from that edge — never from the forged key.
+    assert all(h.get("sessionId") == SEEDED_EVENT_SESSION for h in hits), hits
+    sdk.close()
 
 
 def test_annotate_session_date_and_speaker():

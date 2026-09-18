@@ -35,10 +35,15 @@
 # 2026-09-16: preview does carry SESSIONS.)
 #
 # This file is a deploy config, not a public asset. It lives in `config/` for
-# that reason: `wrangler pages deploy .` uploads EVERYTHING under `website/`, and
-# `.wranglerignore` is NOT honoured by `wrangler pages deploy` (verified live —
-# https://tortoise.premiselabs.co/.wranglerignore itself returns 200, and
-# `apps/`, though listed, is served). Anything under `website/` WILL be served.
+# that reason: before #3620, `wrangler pages deploy .` uploaded EVERYTHING under
+# `website/`, and `.wranglerignore` is NOT honoured by the Pages upload path (a
+# hardcoded IGNORE_LIST, no ignore-file read — verified live, the file itself
+# returned 200). #3620 replaced that with a staged DENYLIST copy, so the paths
+# the deploy step excludes are no longer published. A NEW top-level entry under
+# `website/` is still staged unless it is excluded, which is why the deploy job
+# now runs the classification preflight and `tests/test_pages_bindings.py` pins
+# the table. Keeping this binding inventory in `config/` is what makes it immune
+# to that residual risk.
 
 project: premise-labs
 
@@ -130,14 +135,16 @@ bindings:
       Supabase redirect_to. Defaults to <origin>/auth/callback, which is the
       colocated-topology decision (ADR-001).
 
-  # Recommended, NOT required: /api/v1/* answers 503 proxy_not_configured
-  # without it, but that proxy has ZERO client callers today (it is scaffolding
-  # for the #3559 client-surface migration). It becomes `required` the moment a
-  # client calls it.
+  # Required: /api/v1/* answers `503 proxy_not_configured` without it, and the
+  # proxy at website/functions/api/v1/[[path]].ts depends on it. It is SET in
+  # production and preview as of 2026-09-16 — verified live: /api/v1/teams now
+  # returns 401 `not_signed_in` instead of the old 503. Flip back to
+  # `recommended` only if the proxy loses its callers again.
   - name: API_ORIGIN
-    kind: recommended
+    kind: required
     type: env_vars
     envs: [production]
     note: >-
-      Upstream for the /api/v1 Token Handler proxy. Must be set before #3559
-      lands; today nothing calls the proxy.
+      Upstream for the /api/v1 Token Handler proxy
+      (website/functions/api/v1/[[path]].ts). Without it the proxy answers
+      503 proxy_not_configured.
