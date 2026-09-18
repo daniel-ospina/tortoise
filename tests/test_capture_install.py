@@ -1,10 +1,7 @@
 """#3808 — the installer must install CAPTURE, per harness, idempotently.
 
-The capture seam used to be a copy-paste block in the dashboard:
-``grep -rn "HARNESS_INSTALL" tortoise/`` returned nothing, so ``tortoise
-install claude`` gave a user the READ hook and no capture at all — and the
-capture hook is fail-open, so a missing or mistyped install filed no sessions
-and reported no error.
+The capture hook is fail-open, so a missing or mistyped install files no
+sessions and reports no error.
 
 Every test here drives the REAL installer (``tortoise.capture_install``) or the
 REAL CLI and asserts the **resolved outcome on disk** — file bytes, mode, the
@@ -433,6 +430,53 @@ def test_claude_install_refuses_a_non_regular_file_at_a_hook_path(tmp_path):
     assert blocker.is_dir()
 
 
+def test_claude_install_refuses_a_foreign_hook_and_keeps_it(tmp_path):
+    """A differing, non-Tortoise ``session-end.sh`` is another product's
+    hook: refuse the WHOLE install (nothing written) instead of silently
+    replacing it — exactly what ``hook_install.upgrade_install`` does on the
+    same tree.
+
+    Mutation: drop the ``_foreign_install_refusal`` preflight — the foreign
+    bytes are overwritten by the shipped script and the call reports success."""
+    hooks = tmp_path / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    foreign = hooks / "session-end.sh"
+    foreign.write_text("#!/bin/sh\necho not-tortoise\n")
+
+    res = install_capture("claude", root=tmp_path)
+
+    assert not res.ok, "a foreign hook was silently replaced"
+    assert "does not look like a Tortoise artifact" in res.error, res.error
+    assert foreign.read_text() == "#!/bin/sh\necho not-tortoise\n", (
+        "the foreign hook's bytes were destroyed")
+    # The refusal is atomic — the other script was not written either, and no
+    # ``.bak`` was created for a file we never touched.
+    assert not (hooks / "session-start.sh").exists()
+    assert not (hooks / "session-end.sh.bak").exists()
+
+
+def test_claude_install_backs_up_a_stale_tortoise_hook(tmp_path):
+    """A differing copy that IS a Tortoise hook (an older or locally edited
+    install) is preserved as ``<name>.bak`` before the shipped bytes replace
+    it — the ``hook_install.upgrade_install`` contract.
+
+    Mutation: remove the backup write from the install loop — the old bytes
+    are destroyed silently."""
+    hooks = tmp_path / ".claude" / "hooks"
+    hooks.mkdir(parents=True)
+    stale = _END + b"\n# locally edited - still a Tortoise hook\n"
+    (hooks / "session-end.sh").write_bytes(stale)
+
+    res = install_capture("claude", root=tmp_path)
+
+    assert res.ok, res.error
+    backup = hooks / "session-end.sh.bak"
+    assert backup.exists(), res.actions
+    assert backup.read_bytes() == stale, "the differing copy was not preserved"
+    assert (hooks / "session-end.sh").read_bytes() == _END
+    assert any("backed up" in a for a in res.actions), res.actions
+
+
 # ── claude: failure modes (fail LOUDLY) ─────────────────────────────────
 
 
@@ -725,6 +769,45 @@ def test_pi_install_fails_loudly_when_the_extensions_path_is_a_file(home):
     assert "not a directory" in res.error
 
 
+def test_pi_install_refuses_a_foreign_extension_and_keeps_it(home):
+    """A differing, non-Tortoise ``tortoise-capture.ts`` at the destination
+    is refused (nothing written) instead of silently replaced.
+
+    Mutation: drop the ``_foreign_install_refusal`` preflight — a user's own
+    same-named extension is overwritten and the install reports success."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    foreign = ext_dir / "tortoise-capture.ts"
+    foreign.write_text("// someone else's extension\nexport default 1\n")
+
+    res = install_capture("pi", home=home)
+
+    assert not res.ok, "a foreign extension was silently replaced"
+    assert "does not look like a Tortoise artifact" in res.error, res.error
+    assert foreign.read_text() == (
+        "// someone else's extension\nexport default 1\n")
+    assert not (ext_dir / "tortoise-capture.ts.bak").exists()
+
+
+def test_pi_install_backs_up_a_stale_extension(home):
+    """A differing copy that IS the Tortoise extension is preserved as
+    ``<name>.bak`` before the shipped bytes replace it.
+
+    Mutation: remove the backup write — the stale extension is destroyed."""
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    stale = _PI + b"\n// locally edited - still ours (tortoise session)\n"
+    (ext_dir / "tortoise-capture.ts").write_bytes(stale)
+
+    res = install_capture("pi", home=home)
+
+    assert res.ok, res.error
+    backup = ext_dir / "tortoise-capture.ts.bak"
+    assert backup.exists(), res.actions
+    assert backup.read_bytes() == stale, "the differing copy was not preserved"
+    assert (ext_dir / "tortoise-capture.ts").read_bytes() == _PI
+
+
 def test_pi_install_fails_loudly_when_a_legacy_disable_would_destroy_state(home):
     """Both the legacy entry AND its disabled name exist → refuse loudly
     rather than clobber or silently leave two producers registered.
@@ -852,6 +935,66 @@ def test_cli_install_claude_dry_run_writes_nothing(cli):
         r.stdout)
 
 
+def test_cli_install_claude_read_half_refusal_writes_nothing(cli):
+    """A malformed read-half registration (``UserPromptSubmit: {}``) must fail
+    the WHOLE install with NOTHING written — not leave the capture scripts and
+    their SessionStart/SessionEnd entries on disk while exiting 1.
+
+    Mutation: drop the ``_read_hook_refusal`` preflight in
+    ``_cmd_install_hooks`` — capture runs first, so the command exits 1 with
+    the capture seam already installed and this REDs on the not-exists
+    assertions."""
+    run, root, _home = cli
+    settings = root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"hooks": {"UserPromptSubmit": {}}}))
+
+    r = run("install", "claude")
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "UserPromptSubmit" in r.stderr, r.stderr
+    # Nothing of EITHER half landed...
+    assert not (root / ".claude" / "hooks").exists(), (
+        "the capture scripts were written before the read half refused")
+    # ...and the malformed file is exactly as the user left it.
+    assert json.loads(settings.read_text()) == {
+        "hooks": {"UserPromptSubmit": {}}}
+
+
+def test_cli_install_codex_directory_hooks_json_is_a_populated_error(cli):
+    """A directory at ``<root>/.codex/hooks.json`` must be a populated error,
+    never an uncaught ``IsADirectoryError`` traceback.
+
+    Mutation: drop the ``(OSError, RuntimeError)`` boundary in
+    ``_install_read_hook`` — the CLI prints a traceback with
+    ``IsADirectoryError`` and no ``Install failed`` line."""
+    run, root, _home = cli
+    (root / ".codex" / "hooks.json").mkdir(parents=True)
+
+    r = run("install", "codex")
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "Install failed" in r.stderr, r.stderr
+    assert "IsADirectoryError" in r.stderr, r.stderr
+
+
+def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):
+    """A ``.codex`` symlink loop must be a populated error, never an uncaught
+    ``RuntimeError`` traceback (``Path.resolve()`` raises on a cycle).
+
+    Mutation: drop the ``(OSError, RuntimeError)`` boundary — a traceback
+    escapes instead of ``Install failed``."""
+    run, root, _home = cli
+    (root / ".codex").symlink_to(".codex")  # self-loop
+
+    r = run("install", "codex")
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    assert "Install failed" in r.stderr, r.stderr
+
+
 def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
     """`pi` has no read hook — `--uninstall` must not fall through to the
     cline target and rewrite `.cline/hooks/UserPromptSubmit`.
@@ -956,44 +1099,60 @@ def test_install_uninstall_help_does_not_overpromise(cli):
 # SessionEnd registration for `/bin/sh <hook>`, fail-open for `sudo -u <hook>`).
 
 
+# (command, expected "ours?" verdict in BOTH modules).  The first 16 forms
+# REALLY execute the hook ("ours"); the last 5 must stay foreign in both.  The
+# expected verdict is asserted DIRECTLY — comparing the two call sites alone
+# cannot give this test signal, because `capture_install._is_our_script_command`
+# is a one-line delegation to `hook_install._invokes_script`, so both sides of
+# the comparison move together under any mutation.
 _CLASSIFIER_PARITY_FORMS = [
     # forms that REALLY execute the hook — "ours" in both modules
-    ".claude/hooks/session-end.sh",
-    "bash .claude/hooks/session-end.sh",
-    "/bin/bash .claude/hooks/session-end.sh",
-    "/bin/sh .claude/hooks/session-end.sh",
-    "timeout 5 .claude/hooks/session-end.sh",
-    "timeout -s KILL 60 .claude/hooks/session-end.sh",
-    "nice -n 5 .claude/hooks/session-end.sh",
-    "xargs .claude/hooks/session-end.sh",
-    "sudo -u root .claude/hooks/session-end.sh",
-    "if true; then .claude/hooks/session-end.sh; fi",
-    "A=/x/y .claude/hooks/session-end.sh",
-    "env -u FOO .claude/hooks/session-end.sh",
-    "true; .claude/hooks/session-end.sh",
-    "bash -c 'true; .claude/hooks/session-end.sh'",
-    "2>/dev/null .claude/hooks/session-end.sh",
-    "$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.sh",
+    (".claude/hooks/session-end.sh", True),
+    ("bash .claude/hooks/session-end.sh", True),
+    ("/bin/bash .claude/hooks/session-end.sh", True),
+    ("/bin/sh .claude/hooks/session-end.sh", True),
+    ("timeout 5 .claude/hooks/session-end.sh", True),
+    ("timeout -s KILL 60 .claude/hooks/session-end.sh", True),
+    ("nice -n 5 .claude/hooks/session-end.sh", True),
+    ("xargs .claude/hooks/session-end.sh", True),
+    ("sudo -u root .claude/hooks/session-end.sh", True),
+    ("if true; then .claude/hooks/session-end.sh; fi", True),
+    ("A=/x/y .claude/hooks/session-end.sh", True),
+    ("env -u FOO .claude/hooks/session-end.sh", True),
+    ("true; .claude/hooks/session-end.sh", True),
+    ("bash -c 'true; .claude/hooks/session-end.sh'", True),
+    ("2>/dev/null .claude/hooks/session-end.sh", True),
+    ("$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.sh", True),
     # forms that must stay FOREIGN in both modules
-    "cat .claude/hooks/session-end.sh",
-    "cat $CLAUDE_PROJECT_DIR/.claude/hooks/session-end.sh",
-    "command -v .claude/hooks/session-end.sh",
-    "sudo -u .claude/hooks/session-end.sh",  # path is sudo's -u VALUE
-    "vendor/.claude/hooks/session-end.sh",
+    ("cat .claude/hooks/session-end.sh", False),
+    ("cat $CLAUDE_PROJECT_DIR/.claude/hooks/session-end.sh", False),
+    ("command -v .claude/hooks/session-end.sh", False),
+    ("sudo -u .claude/hooks/session-end.sh", False),  # path is sudo's -u VALUE
+    ("vendor/.claude/hooks/session-end.sh", False),
 ]
 
 
 def test_classifier_parity_with_hook_install(tmp_path):
     """`capture_install._is_our_script_command` and
-    `hook_install._invokes_script` return the SAME verdict for every form.
+    `hook_install._invokes_script` return the SAME verdict for every corpus
+    form — and that verdict is the expected one.
 
-    Mutation: reintroduce a local classifier (the pre-fix copy) — any launcher
-    form above (`/bin/sh`, `nice -n`, `sudo -u root`, …) diverges and REDs."""
-    for command in _CLASSIFIER_PARITY_FORMS:
+    Mutation: make `hook_install._invokes_script` `return False` — the 16
+    positive corpus forms RED here.  Asserting the expected verdict directly
+    is what gives this test signal; the parity comparison alone is a
+    self-identity assertion because `capture_install._is_our_script_command`
+    delegates to the same function."""
+    for command, expected in _CLASSIFIER_PARITY_FORMS:
         ours = capture_install._is_our_script_command(
             command, "session-end.sh", ".claude/hooks", tmp_path)
         theirs = hook_install._invokes_script(
             command, "session-end.sh", ".claude/hooks", tmp_path)
+        assert ours is expected, (
+            f"capture_install misclassified {command!r}: "
+            f"got {ours}, expected {expected}")
+        assert theirs is expected, (
+            f"hook_install misclassified {command!r}: "
+            f"got {theirs}, expected {expected}")
         assert ours == theirs, (
             f"classifier divergence on {command!r}: "
             f"capture_install={ours}, hook_install={theirs}")

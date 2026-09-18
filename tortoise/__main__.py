@@ -2511,9 +2511,23 @@ def _cmd_install_hooks(args) -> int:
             )
         return rc
 
-    # Capture first: if any half of the seam cannot be installed, the command
-    # must fail with NOTHING written rather than leave a project with a read
-    # hook and a silently-absent capture step.
+    # Validate the read half BEFORE the capture half writes.  `tortoise install
+    # claude` installs two halves; if the read half refuses (a malformed
+    # ``UserPromptSubmit``, a symlink that escapes the root, a foreign cline
+    # hook) the command must fail with NOTHING written, not leave a project
+    # with capture installed and the read registration refused.  The read
+    # half's own dry run performs the exact checks the real run does and
+    # writes nothing.  Only claude has BOTH halves: ``pi`` has no read hook,
+    # ``codex``/``cline`` no capture.
+    if harness == "claude":
+        refusal = _read_hook_refusal(args)
+        if refusal != 0:
+            return refusal
+
+    # Capture first: if any half of the seam is REFUSED (the read half's
+    # shape/symlink checks above, or the capture half's own pre-flight), the
+    # command fails with NOTHING written rather than leave a project with a
+    # read hook and a silently-absent capture step.
     if harness in ("claude", "pi"):
         rc = _install_capture_seam(args, install_capture)
         if rc != 0:
@@ -2569,6 +2583,45 @@ def _install_capture_seam(args, install_capture) -> int:
 
 
 def _install_read_hook(args) -> int:
+    """`tortoise install <harness>` read half — the read-hook registration.
+
+    A thin boundary around :func:`_install_read_hook_impl`: the whole read
+    half runs inside one ``(OSError, RuntimeError)`` catch, so a directory at
+    a registration path (``<root>/.codex/hooks.json``), a symlink loop in the
+    install tree, or a write that fails at the last moment is a populated
+    ``Install failed`` message with a non-zero exit — never an uncaught
+    ``IsADirectoryError``/``RuntimeError`` traceback out of the CLI (#3808
+    R23).  The capture half carries the same boundary in
+    :func:`capture_install.install_capture`.
+    """
+    try:
+        return _install_read_hook_impl(args)
+    except (OSError, RuntimeError) as e:
+        print(f"Install failed: {e.__class__.__name__}: {e}",
+              file=sys.stderr)
+        return 1
+
+
+def _read_hook_refusal(args) -> int:
+    """Validate the read half with a write-free dry run, discarding its report.
+
+    Returns the read half's status (0 = it will install or no-op; non-zero =
+    it refuses).  ``_cmd_install_hooks`` calls this BEFORE the capture half
+    writes, so a read-half refusal fails the install with NOTHING on disk
+    instead of leaving the capture scripts and their registrations installed
+    (#3808 R20).  The dry run runs the same checks on the same files as the
+    real run; only its ``[dry-run] would …`` stdout is swallowed.
+    """
+    import contextlib
+    import io
+
+    probe = argparse.Namespace(**vars(args))
+    probe.dry_run = True
+    with contextlib.redirect_stdout(io.StringIO()):
+        return _install_read_hook(probe)
+
+
+def _install_read_hook_impl(args) -> int:
     """Agent-first harness seam onboarding (epic #2080 #2123/#2124).
 
     Writes the per-harness UserPromptSubmit hook registration pointing at the

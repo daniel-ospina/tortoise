@@ -2,19 +2,12 @@
 
 Why this exists
 ---------------
-The capture seam was delivered as **copy-paste instructions**.  The dashboard
-shipped ``HARNESS_CAPTURE_INSTALL.claude`` / ``.pi`` (and the matching blocks
-inside ``HARNESS_INSTALL``) and the user performed the install by hand: copy
-the hook scripts into ``.claude/hooks/``, ``chmod +x``, then hand-merge a
-``settings.json`` fragment — or copy ``tortoise-capture.ts`` into
-``~/.pi/agent/extensions/``.  ``grep -rn "HARNESS_INSTALL" tortoise/`` returned
-nothing: **no CLI path installed capture at all**, so ``tortoise install
-claude`` gave a user the read hook and no capture.
-
-A manual step that fails silently is indistinguishable from a working one —
-and the capture hook is deliberately fail-open (``2>/dev/null || exit 0``), so
-a missing or mistyped install files no sessions and reports no error.  That is
-the gap this module closes: the product now installs its own seam.
+The capture hook is deliberately fail-open (``2>/dev/null || exit 0``): a
+missing or mistyped install files no sessions and reports no error.  This
+module installs the seam itself — ``tortoise install claude`` writes the
+session-start/session-end scripts plus their merged registration, and
+``tortoise install pi`` writes the capture extension — so the product never
+depends on a hand-copied script or a hand-merged settings fragment.
 
 What it installs, per harness
 -----------------------------
@@ -47,8 +40,12 @@ failure path returns a populated :attr:`InstallResult.error` (non-empty
 stderr + non-zero exit at the CLI): a missing shipped artifact, a symlinked
 target that escapes the install root, an unparsable/invalid ``settings.json``
 (never clobbered), an unwritable directory, a destination that is not a
-regular file.  Writes are atomic (temp file + ``os.replace``) so a failed
-write cannot leave a half-written ``settings.json`` behind.  A **write-time**
+regular file, a foreign artifact at a hook/extension path (refused, never
+clobbered).  A differing copy that DOES look like ours is preserved as
+``<name>.bak`` before the shipped bytes replace it — the same rule
+``tortoise hooks upgrade`` applies.  Writes are atomic (temp file +
+``os.replace``) so a failed write cannot leave a half-written
+``settings.json`` behind.  A **write-time**
 ``OSError`` (an immutable target, ``EROFS``/``ENOSPC``/``EDQUOT``, a directory
 that lost its mode) is caught at the :func:`install_capture` boundary and
 returned as a populated ``error`` — never raised out of the module into a CLI
@@ -215,6 +212,43 @@ def _refuse_non_regular(dst: Path) -> str:
         return ""
     return (f"Refusing: {dst} exists but is not a regular file — move it "
             "aside and re-run")
+
+
+def _backup_path(dst: Path) -> Path:
+    """The ``<name>.bak`` path a differing install target is preserved to.
+
+    Mirrors :func:`tortoise.hook_install.upgrade_install`: the first free
+    ``<name>.bak``, then ``<name>.bak.N``.  A dangling symlink at a candidate
+    name is skipped (``exists()`` is False for it, but it would be followed),
+    so the backup never writes through a planted link.
+    """
+    candidate = dst.with_suffix(dst.suffix + ".bak")
+    n = 1
+    while candidate.exists() or candidate.is_symlink():
+        candidate = dst.with_suffix(dst.suffix + f".bak.{n}")
+        n += 1
+    return candidate
+
+
+def _foreign_install_refusal(dst: Path, data: bytes) -> str:
+    """Refusal when ``dst`` is a differing file that is not a Tortoise artifact.
+
+    The sibling ``hook_install.upgrade_install`` refuses the same file rather
+    than silently deactivating another product's hook.  A file whose bytes
+    already match the shipped artifact is never foreign (and is handled as an
+    unchanged install); a symlink is not inspected here — it is replaced, not
+    written through.  Returns ``""`` when ``dst`` is missing, matches, is a
+    symlink, or looks like one of ours.
+    """
+    if dst.is_symlink() or not dst.is_file():
+        return ""
+    if _is_regular_unchanged(dst, data):
+        return ""
+    if hook_install._looks_like_our_script(dst):
+        return ""
+    return (f"Refusing: {dst} exists but does not look like a Tortoise "
+            "artifact — move it aside and re-run, so a foreign file is not "
+            "silently replaced")
 
 
 def _symlink_escape(root: Path, target: Path, *, label: str) -> str:
@@ -473,6 +507,15 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
         non_regular = _refuse_non_regular(hooks_dir / name)
         if non_regular:
             return InstallResult(harness, error=non_regular)
+    # Ownership guard, mirroring ``hook_install.upgrade_install``: a differing
+    # file at OUR path that does not look like a Tortoise hook is another
+    # product's — refuse it whole (before anything is written) instead of
+    # clobbering it.  A differing copy that DOES look like ours is a
+    # stale/edited install: it is preserved as ``<name>.bak`` below.
+    for name in CLAUDE_SCRIPTS:
+        foreign = _foreign_install_refusal(hooks_dir / name, payloads[name])
+        if foreign:
+            return InstallResult(harness, error=foreign)
 
     # Refuse an unusable settings file BEFORE writing the scripts, so a
     # refusal leaves the project exactly as it was found.
@@ -523,6 +566,15 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
         mode = 0o755
         if dst.exists() and dst.is_file() and not dst.is_symlink():
             mode = (dst.stat().st_mode & 0o777) | 0o111
+            # A differing copy that passed the ownership guard is a stale or
+            # locally edited Tortoise hook — preserve it before the shipped
+            # bytes replace it (exactly as ``tortoise hooks upgrade`` does).
+            backup = _backup_path(dst)
+            if dry_run:
+                actions.append(f"[dry-run] would back up {dst} → {backup}")
+            else:
+                _atomic_bytes(backup, dst.read_bytes(), 0o600)
+                actions.append(f"backed up {dst} → {backup}")
         if dry_run:
             actions.append(f"[dry-run] would install {dst} (mode {mode:o})")
         else:
@@ -565,6 +617,13 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     non_regular = _refuse_non_regular(dst)
     if non_regular:
         return InstallResult(harness, error=non_regular)
+    # Ownership guard, mirroring the claude half and
+    # ``hook_install.upgrade_install``: a differing, foreign extension at this
+    # path is never silently replaced.  It is refused BEFORE the legacy
+    # disable below, so a refusal leaves the whole home untouched.
+    foreign = _foreign_install_refusal(dst, payload)
+    if foreign:
+        return InstallResult(harness, error=foreign)
 
     actions: list[str] = []
     changed = False
@@ -602,6 +661,16 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
         changed = True
 
     if not _is_regular_unchanged(dst, payload):
+        if dst.exists() and dst.is_file() and not dst.is_symlink():
+            # A differing copy that passed the ownership guard is a stale or
+            # locally edited Tortoise extension — preserve it before the
+            # shipped bytes replace it (mirrors ``tortoise hooks upgrade``).
+            backup = _backup_path(dst)
+            if dry_run:
+                actions.append(f"[dry-run] would back up {dst} → {backup}")
+            else:
+                _atomic_bytes(backup, dst.read_bytes(), 0o600)
+                actions.append(f"backed up {dst} → {backup}")
         if dry_run:
             actions.append(f"[dry-run] would install {dst}")
         else:
