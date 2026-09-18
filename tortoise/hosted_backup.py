@@ -1384,8 +1384,9 @@ _RESTORE_SWAP_TIMEOUT_DEFAULT_S = 120.0
 #: restore headroom, by choice. The DEFAULT (120s) is what supplies the
 #: headroom the swap exists for.
 _RESTORE_SWAP_TIMEOUT_MIN_S = 60.0
-#: Ceiling: keeps a wedged copy bounded, and sits inside the scheduled drill's
-#: committed ≤15 min RTO.
+#: Ceiling: keeps a wedged copy bounded. It is NOT inside the scheduled
+#: drill's committed RTO — the copy bounded here can itself outlive the
+#: 900s (``hosted_api._DRILL_RTO_S``) drill RTO.
 _RESTORE_SWAP_TIMEOUT_MAX_S = 3600.0
 
 
@@ -1536,8 +1537,17 @@ def _graph_copy_with_restore_bound(db, src_name: str, dst_name: str, *,
             ) from e
         raise
     finally:
-        try:  # noqa: SIM105
+        try:
+            # redis-py's ``Redis.close()`` is a NO-OP for the socket when a
+            # pool was supplied to the constructor (it returns early on
+            # ``auto_close_connection_pool=False``), releasing only a cached
+            # ``self.connection`` — which ``close()`` here never set. The
+            # derived pool owns the socket, so disconnect it deterministically;
+            # otherwise each derived client (one per copy attempt — the
+            # pre-restore and swap sites together can build up to 2 ×
+            # ``_FORK_COPY_ATTEMPTS`` per restore) leaks its socket until GC.
             client.close()
+            client.connection_pool.disconnect()
         except Exception:
             pass
 

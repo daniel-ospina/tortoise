@@ -1800,6 +1800,76 @@ class TestRestoreSwapReadBound:
         assert temp_name in graphs, (temp_name, graphs)
         assert target_name not in graphs, (target_name, graphs)
 
+    def test_restore_timeout_is_never_reaped_as_a_wedge(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """AC3 (#3813 x #3845) — a restore COPY TIMEOUT is never classified as
+        a fork-slot wedge, even when the wedge EVIDENCE is on.
+
+        Both branches are live on the restore path and their inputs are
+        independent: the copy can raise its own ``RestoreCopyTimeoutError``
+        while our daemon is genuinely carrying a lingering module-fork child.
+        On that overlap the TIMEOUT must win — reaping the child and re-issuing
+        the copy would start a SECOND server-side fork while the first may
+        still be running (the reason the branch exists at all, #3813).
+
+        Both wedge signals are forced ON here. On a plain docker-lane run
+        ``fork_slot_is_wedged`` is always False and the #3845 guards inject a
+        ``ResponseError`` — never a ``RestoreCopyTimeoutError`` — so round 1's
+        suite left this branch unpinned (dropping the guard kept it green).
+        Forcing the signals is what makes the assertion non-vacuous.
+
+        RED (mutation): replace the guard with ``if False and isinstance(...)``
+        — the forced wedge signals then match, ``recover_fork_slot`` runs, and
+        this fails on the call-count and on the status/detail.
+        """
+        import tortoise.hosted_backup as hb
+        from tortoise.fork_slot import ForkSlotRecovery
+
+        _seed_team("team_x", nodes=2)
+        key = _default_drill_key(client, mem_storage)
+
+        # The masked shape the embedded lane produced: the redis client read
+        # timeout chained behind the parser's ValueError.
+        def masked_timeout(redis_client, src_name, dst_name):
+            try:
+                raise redis.exceptions.TimeoutError(
+                    "Timeout reading from socket")
+            except redis.exceptions.TimeoutError:
+                raise ValueError("I/O operation on closed file.")  # noqa: B904
+
+        monkeypatch.setattr(hb, "_issue_graph_copy", masked_timeout)
+        # Force BOTH wedge-evidence signals ON: a wedge classifier that is
+        # consulted AT ALL would call this copy a wedge. Reaching either one is
+        # the bug under test.
+        monkeypatch.setattr(hb, "is_fork_refusal", lambda exc: True)
+        monkeypatch.setattr(hb, "fork_slot_is_wedged", lambda *a, **kw: True)
+
+        recoveries: list = []
+
+        def spy_recover(*args, **kwargs):
+            recoveries.append(args)
+            return ForkSlotRecovery(
+                wedged=True, recovered=True, killed_pids=[4242],
+                detail="reaped 1 hung child")
+
+        monkeypatch.setattr(hb, "recover_fork_slot", spy_recover)
+
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post("/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+                        json={"org_id": "team_x", "backup_key": key})
+
+        # The TIMEOUT is the verdict — never a wedge.
+        assert r.status_code == 503, r.text
+        body = r.text.lower()
+        detail = r.json()["detail"]
+        assert "timed out" in detail.lower(), detail
+        assert "not restored" in detail.lower(), detail
+        assert "wedge" not in body, detail
+        assert "fork slot" not in body, detail
+        # The wedge recovery was NEVER invoked: no child was reaped, and no
+        # second server-side fork was issued while the first may still run.
+        assert recoveries == [], recoveries
+
     def test_dead_connection_is_reported_differently_from_a_timeout(
             self, client, dr_env, mem_storage, monkeypatch):
         """AC2 (mirror) — a genuinely unusable connection is NOT reported as a
