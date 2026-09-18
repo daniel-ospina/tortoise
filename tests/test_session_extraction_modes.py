@@ -357,6 +357,9 @@ def test_cmd_session_capture_mode_error_exits_1(tmp_path, monkeypatch):
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3963: the CLI now spools before it uploads — isolate the spool so this
+    # test never writes into the developer machine's real capture spool.
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
     f = tmp_path / "transcript.txt"
     f.write_text("User: we decided to ship it\nAssistant: agreed\n")
     assert _parse_transcript(f.read_text()), "transcript must parse to turns"
@@ -388,6 +391,8 @@ def test_cmd_session_capture_mode_empty_exits_1(tmp_path, monkeypatch):
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3963: spool isolation (see the mode-error test above).
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
     f = tmp_path / "transcript.txt"
     f.write_text("User: we decided to ship it\nAssistant: agreed\n")
     assert _parse_transcript(f.read_text())
@@ -419,6 +424,8 @@ def test_cmd_session_capture_success_still_returns_0(tmp_path, monkeypatch, caps
 
     from tortoise.__main__ import _cmd_session_capture, _parse_transcript
 
+    # #3963: spool isolation (see the mode-error test above).
+    monkeypatch.setenv("TORTOISE_CAPTURE_SPOOL_DIR", str(tmp_path / "spool"))
     f = tmp_path / "transcript.txt"
     f.write_text("User: we decided to ship it\nAssistant: agreed\n")
     assert _parse_transcript(f.read_text())

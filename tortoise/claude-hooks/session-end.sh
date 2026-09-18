@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tortoise-hook-version: 3
+# tortoise-hook-version: 4
 # Tortoise session capture for Claude Code — SessionEnd hook (#564).
 #
 # The `tortoise-hook-version` marker above is the install-contract generation
@@ -10,6 +10,17 @@
 # Fires when a Claude Code session ends: converts the session transcript
 # (Claude Code's .jsonl) into Tortoise's text-turn format (User:/Assistant:)
 # and files it via `tortoise session capture` (hosted /v1/sessions).
+#
+# #3963: this hook is NO LONGER the mechanism of record — it is the final
+# flush. The MECHANISM is session-turn.sh (UserPromptSubmit), which copies the
+# conversation into the durable local spool (~/.tortoise/capture-spool) at
+# every user prompt with NO network call. This hook then does the costly half:
+# `tortoise session capture` spools again (no-op when unchanged) and files.
+# A CANCELED SessionEnd (Claude Code's ~1.5s default, #3754) or a killed
+# process therefore loses at most the in-flight turn, and the SessionStart
+# hook's `tortoise session drain` files whatever is still pending. The explicit
+# "timeout": 60 below is still load-bearing for the final flush — it is just no
+# longer the only chance to capture.
 # This is the exit-side counterpart to session-start.sh's memory injection —
 # together they close the loop: memory in at session start, session filed at
 # session end.
@@ -50,12 +61,16 @@ TRANSCRIPT_PATH="$(printf '%s\n' "$META" | sed -n '1p')"
 SESSION_ID="$(printf '%s\n' "$META" | sed -n '2p')"
 
 [ -n "$TRANSCRIPT_PATH" ] || exit 0
-[ -f "$TRANSCRIPT_PATH" ] || exit 0
+# NO `[ -f "$TRANSCRIPT_PATH" ]` pre-check (#3963, mirrors session-turn.sh): `-f`
+# is FALSE for an unreadable file or a non-traversable parent, so an unreadable
+# transcript was skipped SILENTLY — no capture, no ledger line. The conversion
+# classifies it and the ledger records `transcript_unreadable`.
 
 # Convert the Claude Code .jsonl transcript into text turns (User:/Assistant:).
 TMP="$(mktemp -t tortoise_session_end.XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
-python3 - "$TRANSCRIPT_PATH" "$TMP" << 'PYEOF'
+CONVERT_RC=0
+python3 - "$TRANSCRIPT_PATH" "$TMP" << 'PYEOF' || CONVERT_RC=$?
 import json, sys
 src, dst = sys.argv[1], sys.argv[2]
 out = []
@@ -83,11 +98,46 @@ try:
                 out.append("User: " + str(content))
             elif role == "assistant":
                 out.append("Assistant: " + str(content))
-except Exception:
-    pass
+except FileNotFoundError:
+    # No transcript yet is not an error, and not a loss.
+    raise SystemExit(3)
+except (OSError, UnicodeDecodeError) as exc:
+    # An unreadable source (EACCES, a directory, a non-traversable parent) is a
+    # LOSS, and a loss is never silent: fail so the hook records it below.
+    # `UnicodeDecodeError` is a `ValueError`, NOT an `OSError` — and a killed
+    # partial append leaves a torn MULTI-BYTE character in a real transcript,
+    # which is exactly the loss this hook must never drop on the floor.
+    # `os.path.exists()` must NOT be the test — it is FALSE for exactly these
+    # cases (and so classified a loss as "nothing to do").
+    print(f"unreadable transcript: {src}: {exc}", file=sys.stderr)
+    raise SystemExit(2)
 with open(dst, "w", encoding="utf-8") as f:
     f.write("\n".join(out))
 PYEOF
+
+if [ "$CONVERT_RC" -eq 2 ]; then
+  # Record the loss in the SAME ledger `tortoise session capture` writes to
+  # (schema mirrors capture_spool.record_discard). Best-effort: still exit 0.
+  python3 - "$SESSION_ID" "$TRANSCRIPT_PATH" << 'PYEOF' 2>/dev/null || true
+import datetime, json, os, sys
+sid, path = sys.argv[1], sys.argv[2]
+root = os.environ.get("TORTOISE_CAPTURE_SPOOL_DIR") or os.path.join(
+    os.path.expanduser("~"), ".tortoise", "capture-spool")
+try:
+    os.makedirs(root, exist_ok=True, mode=0o700)
+    with open(os.path.join(root, "discarded.jsonl"), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "session_id": sid or f"unknown:{os.path.basename(path)}",
+            "capture_key": None,
+            "reason": "transcript_unreadable",
+            "detail": f"{path}: the SessionEnd hook could not read the transcript",
+        }) + "\n")
+except OSError:
+    pass
+PYEOF
+  exit 0
+fi
 
 [ -s "$TMP" ] || exit 0  # nothing parseable — skip silently
 
