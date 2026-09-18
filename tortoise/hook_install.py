@@ -473,7 +473,8 @@ _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _LAUNCHER_OPERAND_RE = re.compile(r"^[0-9]+(\.[0-9]+)?[smhd]?$")
 
 
-def _as_launcher(tok: str, quoted: bool = False) -> str | None:
+def _as_launcher(tok: str, quoted: bool = False,
+                 root: str | os.PathLike[str] | None = None) -> str | None:
     """The launcher basename for ``tok``, or ``None`` when it is not one.
 
     ``/bin/sh``, ``/usr/bin/env`` and ``./bash`` exec exactly the program the
@@ -488,9 +489,20 @@ def _as_launcher(tok: str, quoted: bool = False) -> str | None:
     reserved word, so it must not open an operand position.  The final check
     keeps the exact unquoted non-path launchers (``.``, ``!``, ```` ` ````)
     which ``Path`` mangles.
+
+    A PATH-QUALIFIED launcher is accepted only when bash can actually find it.
+    A nonexistent path (``./bash``, ``/opt/nope/bash``) runs nothing, so
+    recognising it would leave the hook as a mere operand and FAIL OPEN —
+    reporting the install current while bash ran nothing.
     """
     name = tok if tok in _LAUNCHERS else Path(tok).name
     if name in _OPTIONS_WITH_ARG:
+        if "/" in tok:
+            path = Path(tok)
+            if not path.is_absolute() and root is not None:
+                path = Path(root) / tok
+            if not (path.is_file() and os.access(path, os.X_OK)):
+                return None
         return name  # a real launcher program: path-qualified and quoted both run it
     if not quoted and tok in _LAUNCHERS:
         return tok   # exact unquoted shell keyword/builtin (never path-qualified)
@@ -766,7 +778,7 @@ def _invokes_script(command: str, script_name: str,
             continue
         if not quoted and tok in ("-v", "-V") and launcher_word == "command":
             return False  # ``command -v <path>`` is a query, not an execution
-        launcher = _as_launcher(tok, quoted)
+        launcher = _as_launcher(tok, quoted, root)
         if launcher is not None:
             launcher_word = launcher
             continue

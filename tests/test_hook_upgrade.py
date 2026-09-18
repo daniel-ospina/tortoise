@@ -1719,3 +1719,32 @@ class TestDeclaredThreatSurface:
         assert len(_settings(root)["hooks"]["SessionEnd"]) == 1
         ours = _our_entry(_settings(root), "SessionEnd", "session-end.sh")
         assert ours["timeout"] == 60
+
+    @pytest.mark.parametrize("command", [
+        "./bash {abs}",
+        "./bin/bash {abs}",
+        "/nonexistent/bin/bash {abs}",
+    ])
+    def test_nonexistent_path_qualified_launcher_is_not_ours(
+            self, tmp_path, command):
+        """A PATH-QUALIFIED launcher must actually EXIST to be one: bash runs
+        nothing for a path it cannot find, so treating the hook as its operand
+        would FAIL OPEN (report current while the hook never runs).  The entry
+        must be reported missing and REPAIRED.
+
+        MUTATION: drop the ``path.is_file() and os.access(path, X_OK)`` gate
+        from :func:`_as_launcher` → ``./bash <hook>`` is read as the launcher
+        with the hook in operand position → no ``missing-hook-entry`` → RED.
+        """
+        root = tmp_path / "project"
+        abs_hook = root / ".claude" / "hooks" / "session-end.sh"
+        doc = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [
+            {"type": "command",
+             "command": command.format(abs=str(abs_hook))}]}]}}
+        root = _old_install(tmp_path, settings=doc, root=root)
+        missing = [f for f in detect_install(root)
+                   if f.kind == "missing-hook-entry"
+                   and f.script == "session-end.sh"]
+        assert missing
+        upgrade_install(root)
+        assert len(_settings(root)["hooks"]["SessionEnd"]) == 2
