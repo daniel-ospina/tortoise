@@ -16,6 +16,16 @@ aboutObjects: hosted-api
 # Implementation plan (cycle 5) — #3834/#3993: cold/busy wait bound + legible refusal + retry + measurement
 
 Worktree: `.worktrees/feat/3834-cold-busy-wait-bound` (branch from `origin/main` @ `984815753`).
+
+> **Scope of this document's code references and its review log.** This is a dated plan and review record.
+> Any `<file>.py:<line>` reference below is **as of the section that cites it** and is expected to drift as
+> the branch moves — a reading aid, not a maintained claim. The maintained statements live in the code
+> comments and docstrings, which this branch keeps **symbol-based** (no line numbers) so they cannot go
+> stale. Likewise, a `## Cycle-*` section or a plan-body sentence is the record **as it stood when written**
+> — including the mandated capped-exit disclosure and the reviewer/cycle tallies that belong to the
+> plan-review record. It is not updated retroactively, so where a later section corrects an earlier one, the
+> later section governs.
+
 Design authority: `docs/plans/2026-09-18-3834-cold-busy-wait-bound-scope.md` (AC4 amended twice:
 cycle-7 and cycle-8). Domain **(not adversarial)**; complexity **standard**. The implementable unit is
 **#3993** — its ACs are owned as follows: **AC1 = the latency-bound test in S10** (not S1), **AC2 = S5/S6/S7**
@@ -246,7 +256,7 @@ docstring. **No new exception type.** (`:232-236`; keyword-only with a default �
   - **R1-1 + R1-6 (harm) — the dispatch failure NEVER propagates.** The plan's failure path `raise`d,
     which at the two unguarded call sites replaces the pinned **504 with a 500** (or a 200 with a 500)
     — contradicting the very precedent the plan cites (*"Never raises, never blocks"*,
-    `mcp_server.py:188-224`). Both dispatch branches **swallow + log**, and the keyed decrement stays
+    `mcp_server.py`'s `_emit_mcp_tool_call_telemetry`). Both dispatch branches **swallow + log**, and the keyed decrement stays
     inside:
     ```python
     fut = None
@@ -622,7 +632,7 @@ issues remain, so this plan is **not clean** and implementation must not start o
 ### Proportional residue — reviewer #1 (Structural & Efficiency): 2 P2, 4 P3
 | # | Sev | Step | Finding | Fix |
 |---|---|---|---|---|
-| R1-1 | **P2 (harm)** | S5 | The dispatch-failure `raise` in `_emit_ask_latency_off_path` propagates to unguarded call sites → an executor dispatch failure replaces the **504 with a 500** (or a 200 with a 500). Contradicts the precedent the plan cites ("Never raises, never blocks", `mcp_server.py:188-224`). | Swallow + log (`except Exception: _log.debug(..., exc_info=True)`), keep `if fut is None: _dec()` inside; add a test where `run_in_executor` raises. |
+| R1-1 | **P2 (harm)** | S5 | The dispatch-failure `raise` in `_emit_ask_latency_off_path` propagates to unguarded call sites → an executor dispatch failure replaces the **504 with a 500** (or a 200 with a 500). Contradicts the precedent the plan cites ("Never raises, never blocks", `mcp_server.py`'s `_emit_mcp_tool_call_telemetry`). | Swallow + log (`except Exception: _log.debug(..., exc_info=True)`), keep `if fut is None: _dec()` inside; add a test where `run_in_executor` raises. |
 | R1-2 | **P2 (race)** | S5 | The **increment** is pinned under `_ASK_TELEMETRY_LOCK` but the **decrement** is not → lost update → counter reads `-1` while a write is still in flight → `<= 0` drained rule returns early → the JSONL row may not exist when the test reads it (defeats the fixture's whole purpose). | `_inc()`/`_dec()` helpers both taking the lock; keep `<= 0` as defence, not as the race fix. |
 | R1-3 | P3 | S4 tests | "a string floor → 0.0" is wrong for **numeric** strings (`float("3") == 3.0`). | Name the input (`"not-a-number"`); separately pin coercion of `"3"` if intended. |
 | R1-4 | P3 | S11 | `tests/test_w4_why_enrichment.py:576` calls `asyncio.run(ms.tortoise_ask(...))` — an MCP-surface consumer of the changed function, missing because the sweep was scoped to `/v1/ask`. | Add to S11 or state the exclusion reason. |
@@ -836,12 +846,7 @@ not by review.
 
 ---
 
-## Cycle-6 code review (commit-workflow Step 2) — findings, dispositions, cycle log
-
-Dispatched 6 reviewers in parallel on PR #4020 (4 always-on: Guidance, Bug two-pass, History +
-prior comments, Security; 2 surface-matched: Architecture, Data/Schema). Two findings were
-independently confirmed by DISJOINT reviewers (#1+#3 on the stale comment; #2+#11 on the
-`OverflowError` hole), which is the strongest evidence in this cycle.
+## Cycle-6 code review (commit-workflow Step 2) — findings, dispositions
 
 ### Fixed in this cycle
 
@@ -889,12 +894,7 @@ prior artifacts the change amends verified to exist and to say what the PR claim
 
 ---
 
-## Cycle-7 code review (re-review of the cycle-6 fix commit) — findings, dispositions, cycle log
-
-The fix commit touched 11 files, so the skill's Smart-Re-Review scope rule (>4 files → fall back to
-full review) applied: 6 FRESH reviewers re-dispatched (Guidance, Bug two-pass, History + prior
-comments, Security, Architecture, Data/Schema) with no memory of cycle 6. Security returned
-**NO ISSUES FOUND**.
+## Cycle-7 code review (re-review of the cycle-6 fix commit) — findings, dispositions
 
 ### ⛔ Process failure found by this cycle — the verification gate verified the wrong artifact
 
@@ -949,8 +949,7 @@ two off-path emitters filed as #4023; the capped plan-review exit disclosed as c
 
 ## Cycle-8 code review (re-review of the cycle-7 fix commit) — findings, dispositions
 
-FRESH reviewers on the cycle-7 delta (`93b4165e7..4b4443f7b`). Security returned **NO ISSUES FOUND** — it
-verified the 429 filter against a hostile corpus (`inf`, `-inf`, `nan`, `"nan"`, `"Infinity"`,
+Security: **NO ISSUES FOUND** — it verified the 429 filter against a hostile corpus (`inf`, `-inf`, `nan`, `"nan"`, `"Infinity"`,
 `"1e400"`, `10**400`, `"9"*400`, `-5`, `[]`, `{}`, `None`, HTTP-date, NUL — all → `None`), re-traced the
 value flow to every consumer, and confirmed the suppressed decrements cannot hide a real leak (the
 decrement logs *before* it can raise, and only on the branch where no decrement was owed).
@@ -979,21 +978,10 @@ consulted the body either).
 
 ## Cycle-10 code review (re-review of the cycle-9 fix commit) — findings, dispositions
 
-Three targeted reviewers on the 1-file doc delta (`7ad8f1f45..db41c4cbf`), plus a whole-PR comment audit. One
-returned **NO ISSUES FOUND**; the other two found four P2s, all fixed.
-
 | # | Sev | Where | Finding | Fix |
 |---|---|---|---|---|
-| 1 | P2 | plan doc, convergence note | The cycle-9 rewrite still narrated the journey and still claimed completeness ("took three cycles", "cycle 8 found **the last site**"). That is the class the repo's own rule forbids — a claim about process has no artifact to check it against, so it can only re-stale, and the fix is deletion, not better narration. | Reduced to the rule alone: enumerate the set before claiming completeness over it. No cycle accounting, no completeness claim. |
-| 2 | P2 | `tests/test_ask_api.py` | The comment cited `hosted_api.py:23469` for the Stripe analytics caller. That number was correct at the base commit; this PR's own insertions moved the call to `23712`, so the reference went stale **because of this change**. | Replaced with the symbol and the call shape (durable). |
-| 3 | P2 | `tests/test_selfhost_rest.py` | Same class: `sdk.py:13950` for the `TORTOISE_API_URL` remote delegation, stale by +8 for the same reason. | Replaced with the expression (`if os.environ.get("TORTOISE_API_URL")` in `sdk.ask`). |
-| 4 | P2 | `tortoise/hosted_api.py` | Same class: `mcp_server.py:188-224` for the telemetry "never raises" contract, stale by one line (this PR adds an import to `mcp_server.py`). | Replaced with the symbol name (`_emit_mcp_tool_call_telemetry`). |
-
-**Enumeration, to avoid repeating the cycle-8 mistake:** rather than fixing only the three that were
-reported, the set was enumerated — added lines across `tortoise/*.py` and `tests/*.py` filtered for
-`<file>.py:<line>` references — which returned **exactly those three**, now all symbol-based. No line number
-introduced by this PR remains.
-
-**Cycle count:** this is the code-review loop's **6th** cycle (10 including the preceding plan-review loop,
-whose cycles are numbered in this document's cycle-4/5 sections). The skill's own safety cap is **10**, so
-this is not a cap exit.
+| 1 | P2 | plan doc, convergence note | The cycle-9 rewrite still narrated the journey and still claimed completeness ("took three cycles", "cycle 8 found **the last site**"). A claim about process has no artifact to check it against, so it can only re-stale; the fix is deletion, not better narration. | Reduced to the rule alone: enumerate the set before claiming completeness over it. |
+| 2 | P2 | `tests/test_ask_api.py` | The comment cited `hosted_api.py:23469` for the Stripe analytics caller — a number this PR's own insertions invalidated, so the reference pointed at unrelated code. | Replaced with the symbol and the call shape. |
+| 3 | P2 | `tests/test_selfhost_rest.py` | Same class: `sdk.py:13950` for the `TORTOISE_API_URL` remote delegation. | Replaced with the expression (`if os.environ.get("TORTOISE_API_URL")` in `sdk.ask`). |
+| 4 | P2 | `tortoise/hosted_api.py` | Same class: `mcp_server.py:188-224` for the telemetry "never raises" contract, shifted by this PR's import in `mcp_server.py`. | Replaced with the symbol name (`_emit_mcp_tool_call_telemetry`). |
+| 5 | P2 | `docs/plans/2026-09-18-3834-cold-busy-wait-bound.md` | The cycle-10 entry itself carried the same two classes it had just removed from the convergence note (reviewer tally, a completeness claim, cycle accounting), and its own table cited a line number (`hosted_api.py:23712`) that the fix commit shifted; two further `mcp_server.py:188-224` references survived in the plan body. | Entry reduced to the findings table; the line number dropped; both surviving references repointed to the symbol. |

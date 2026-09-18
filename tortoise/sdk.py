@@ -14673,7 +14673,8 @@ class TortoiseSDK:
             cap=ASK_RETRY_CAP_S,
             marker_armed=False,
             delay_for=_ask_advertised_delay,
-            # ``monotonic as _monotonic`` is bound at module scope (:21) —
+            # ``monotonic as _monotonic`` is bound at module scope
+            # (``from time import monotonic as _monotonic``) —
             # there is no module-level ``import time`` to call here.
             deadline=_monotonic() + ASK_RETRY_DEADLINE_S,
         )
