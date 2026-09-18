@@ -170,11 +170,11 @@
             typeof co.access_token === 'string' && co.access_token.length > 0;
           cookieExp = (co && co.expires_at) || 0;
         } catch (e) { /* unusable cookie */ }
-        // #3485 review P2 (cycle 3): same usability rule as the gate-time
-        // migration — an expired legacy session must not displace a valid
-        // cookie (or an unusable one) just because it carries a later
-        // expires_at value.
-        if (legacyExp * 1000 > Date.now() && (!cookieOk || legacyExp > cookieExp)) {
+        // #3485 review P2 (cycles 3-4): an expired or absent-expiry legacy session
+        // must not displace a USABLE cookie — that cookie is what the server gate
+        // reads. When the cookie is unusable the legacy session is the only
+        // candidate, so it is carried over regardless of freshness.
+        if (!cookieOk || (legacyExp * 1000 > Date.now() && legacyExp > cookieExp)) {
           supabaseStorage.setItem(COOKIE_NAME, legacy);
           if (readCookie(COOKIE_NAME) !== legacy) return;
         }
@@ -295,13 +295,14 @@
             typeof co.access_token === 'string' && co.access_token.length > 0;
           cookieExp = (co && co.expires_at) || 0;
         } catch (e) { /* unusable cookie */ }
-        // #3485 review P2 (cycle 3): the legacy session must also still be USABLE
-        // before it may displace a cookie. An expired localStorage session (or one
-        // with no expires_at) must never overwrite a valid parent-domain cookie —
-        // that cookie is the session the server gate reads, and swapping it for a
-        // dead one silently signs the visitor out of both subdomains.
-        if (legacyOk && legacyExp * 1000 > Date.now() &&
-            (!cookieOk || legacyExp > cookieExp)) {
+        // The expiry test applies only where it would DISPLACE a usable cookie.
+        // With an unusable cookie the legacy session is the only candidate and
+        // must still be carried over — it may hold a valid `refresh_token`, which
+        // supabase-js can exchange. Demanding freshness there deletes a
+        // recoverable credential and forces a fresh sign-in (#3485 review,
+        // cycle 4).
+        if (legacyOk && (!cookieOk ||
+            (legacyExp * 1000 > Date.now() && legacyExp > cookieExp))) {
           supabaseStorage.setItem(COOKIE_NAME, legacy);
           if (readCookie(COOKIE_NAME) !== legacy) continue;
         }
@@ -348,11 +349,13 @@
         '; SameSite=Lax' + secureAttr() + '; Max-Age=0';
     } catch (e) {}
     // The blog-admin SPA persists the session under the SAME name in
-    // localStorage (website/apps/blog-admin/src/lib/supabase.ts) and its client
-    // refreshes tokens from there — so clearing only the cookie lets the console
-    // re-write the cookie from an origin-scoped copy the server gate never saw,
-    // resurrecting the session just signed out of (#3485 review, successor
-    // cycle). Clear that key too.
+    // localStorage, and its client refreshes tokens from there — a copy the
+    // server gate never saw. That SPA clears its own key on sign-out (its adapter
+    // half is PR #4016); this line covers any caller on an origin where the key
+    // does exist, and is a harmless no-op elsewhere — localStorage is
+    // per-origin, and the dashboard SPA that calls this function runs on a
+    // different origin from the console that writes that key (#3485 review,
+    // cycle 4).
     try { window.localStorage.removeItem(COOKIE_NAME); } catch (e) {}
     for (var i = 0; i < LEGACY_KEYS.length; i++) {
       try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) {}
@@ -422,6 +425,11 @@
   // GoTrue /user) which is neither instant nor mockable in the exchange flow.
   var storeSession = function (session) {
     if (!session || !session.access_token || !session.refresh_token) return false;
+    // Refuse an UNUSABLE session BEFORE writing (#3485 review, cycle 4): the write
+    // would otherwise replace a valid cookie with an expired session and only
+    // then return false — leaving the visitor with a dead session in place of a
+    // working one, on the credential the server gate actually reads.
+    if (!session.expires_at || session.expires_at * 1000 <= Date.now()) return false;
     try {
       supabaseStorage.setItem(COOKIE_NAME, JSON.stringify(session));
       // Verify the cookie just written DIRECTLY — not via readValidSession(),

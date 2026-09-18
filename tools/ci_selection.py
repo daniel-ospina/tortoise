@@ -116,6 +116,16 @@ SOURCE_PATTERNS = {
                    "website/self-hosted.html", "website/product.html",
                    "website/index.html", "website/signup.html",
                    "website/signin.html", "website/privacy.html",
+                   # #3485: the shared cross-subdomain session bridge is a
+                   # website asset whose guard test
+                   # (test_cross_subdomain_cookie_sync.py) reads it directly.
+                   # Without this entry a bridge-only PR matched no pattern,
+                   # fell into NON_PYTHON_PREFIXES -> changed == [] -> tier-1
+                   # smoke, and the guard for the file under review never ran
+                   # (the #1349/#3332/#3616 silent-drop class). The file is
+                   # dual-registered: this surface owns the website guards,
+                   # `api` keeps its existing membership.
+                   "website/assets/supabase-session.js",
                    # #3332: the public pages that own a guard test in this surface.
                    # docs.html + faq.html -> test_website_docs_consistency.py;
                    # product.html + welcome.html -> test_website_static.py;
