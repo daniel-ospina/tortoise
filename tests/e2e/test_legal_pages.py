@@ -429,17 +429,29 @@ def _footer_links_present(content: str) -> None:
 def _has_blog_entry(content: str) -> bool:
     """True when the served HTML carries an ANCHOR into the blog (#3950).
 
-    Deliberately mirrors the static guard's predicate (`_offers_blog_entry` in
-    `tests/test_website_docs_consistency.py`): any host, path `/blog` **or**
-    `/blog/<slug>`. Both count as a way in — a post's own nav links back to the
-    index — and keeping the two layers' predicates identical means they cannot
-    disagree about what a way in is. `premiselabs.co/blog` (which 301s to the
-    tortoise host) is as valid as the absolute tortoise form; a
-    `<link rel="prefetch">` is not, because it is not an anchor.
+    Extracts from RENDERED markup, with the same two rules the static guard uses
+    (`_rendered_hrefs` in `tests/test_website_docs_consistency.py`): comments,
+    `<script>` and `<style>` are stripped first, and a quoted OR unquoted href
+    value is accepted. Those rules are what make the two layers agree about what
+    a way in is — an anchor that exists only inside a comment or a `<script>`
+    string satisfies neither, so the production check cannot stay green while the
+    static guard correctly reports the link as lost. (Before this was mirrored the
+    two could disagree: the E2E half counted a commented-out anchor the static
+    half rejected — review finding on PR #3962.)
+
+    `href="/blog"` (the index) and `/blog/<slug>` (a post — its own nav links
+    back) both count. Any host is accepted, so `premiselabs.co/blog` (which 301s
+    to the tortoise host) is as valid as the absolute tortoise form; and because
+    the match is on the anchor, a `<link rel="prefetch">` is not a way in.
+
+    The extraction rule is duplicated here rather than imported because this is a
+    separate suite with its own harness gates; if you change the patterns in one,
+    change them in the other.
     """
-    paths = [urlsplit(h).path.rstrip("/")
-             for h in re.findall(
-                 r'<a\b[^>]*?\bhref\s*=\s*["\']([^"\']+)["\']', content, re.I)]
+    for pattern in (r"<!--.*?-->", r"<script\b.*?</script\s*>", r"<style\b.*?</style\s*>"):
+        content = re.sub(pattern, "", content, flags=re.S | re.I)
+    paths = [urlsplit(h).path.rstrip("/") for h in re.findall(
+        r'<a\b[^>]*?\bhref\s*=\s*["\']?([^"\'\s>]+)', content, re.I)]
     return any(p == "/blog" or p.startswith("/blog/") for p in paths)
 
 

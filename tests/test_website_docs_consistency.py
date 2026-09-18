@@ -29,12 +29,17 @@ HTML, matching the harness contract of `tests/test_signup_form_safety.py`.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:  # tools/ is not an installed package
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.ci_selection import load_manifest, select  # noqa: E402, I001
 WEBSITE = REPO_ROOT / "website"
 FUNCTIONS = WEBSITE / "functions"
 PRODUCT = WEBSITE / "product.html"
@@ -389,10 +394,17 @@ def _rendered_hrefs(html: str) -> list[str]:
 
     Comments, `<script>` and `<style>` are stripped first: a URL that appears
     only inside those is not a link, so it must not be able to satisfy the guard.
+
+    The href value may be quoted or unquoted — HTML5 permits both, and an
+    unquoted `<a href=/blog>` is a working link in every browser. Requiring quotes
+    would turn correct markup into a mystifying red whose cause (a missing quote,
+    not a missing link) is invisible in the failure message. `tests/e2e/
+    test_legal_pages.py::_has_blog_entry` carries the same two rules on purpose:
+    the static guard and the production check must agree about what a way in is.
     """
     for pattern in (r"<!--.*?-->", r"<script\b.*?</script\s*>", r"<style\b.*?</style\s*>"):
         html = re.sub(pattern, "", html, flags=re.S | re.I)
-    return re.findall(r'<a\b[^>]*?\bhref\s*=\s*["\']([^"\']+)["\']', html, re.I)
+    return re.findall(r'<a\b[^>]*?\bhref\s*=\s*["\']?([^"\'\s>]+)', html, re.I)
 
 
 def _href_path(href: str) -> str:
@@ -415,7 +427,7 @@ def _offers_blog_entry(page: Path) -> bool:
                for h in _rendered_hrefs(_read(page)))
 
 
-# The served+indexable page set as of #3950 (2026-09-18). This pins the
+# The served+indexable page set as of #3950 (2026-09-17). This pins the
 # DERIVATION'S OUTPUT (not an allowlist the guard consults): if a page later
 # leaves the public surface, that is a decision someone must take deliberately,
 # not a page that quietly disappears from coverage.
@@ -450,8 +462,12 @@ def test_blog_guard_covers_every_served_indexable_page() -> None:
     """Guard the guard: `_in_scope_pages()` must not silently shrink.
 
     A narrow derivation would make the test above pass by covering less, so the
-    derivation's output is pinned. Adding a page is free (derivation); removing
-    one requires updating this pin in the same PR and saying why.
+    derivation's output is pinned. The pin is deliberately an EQUALITY, not a
+    superset: a page entering the public surface also requires touching this pin
+    in the same PR, so the addition is a decision someone takes rather than a
+    page that quietly changes what "covered" means. Removal is the same edit with
+    a stated reason. Adding is not "free" — it is free of *derivation* work, which
+    is the point of deriving the set in the first place.
     """
     got = {page.name for page in _in_scope_pages()}
     assert got == set(_IN_SCOPE_AT_3950), (
@@ -459,6 +475,37 @@ def test_blog_guard_covers_every_served_indexable_page() -> None:
         f"missing={sorted(_IN_SCOPE_AT_3950 - got)} added={sorted(got - _IN_SCOPE_AT_3950)}. "
         f"If a page genuinely left the public surface (new noindex, or its route "
         f"now 301s elsewhere), update `_IN_SCOPE_AT_3950` in the same PR and say why."
+    )
+
+
+def test_every_in_scope_page_is_selectable_by_ci() -> None:
+    """Close the REVERSE direction of the CI-selection ratchet (#1349/#3332).
+
+    A page held to this guard with no matching `SOURCE_PATTERNS` entry selects no
+    surface at all, so a PR touching ONLY that page never runs this file — the
+    guard silently stops covering the page it was written for. That is the
+    #1349/#3332 silent-drop class, and it bit this guard on arrival: 5 of the 12
+    in-scope pages (`security`, `tos`, `license`, `dpa`, `aviso-privacidad`) were
+    absent from the `onboarding` entry, so `--changed-files website/tos.html`
+    selected `surfaces=[]`.
+
+    `tests/test_ci_selection.py::test_every_source_pattern_is_selectable` checks
+    the OPPOSITE direction (entry -> runs) and states in its own docstring that it
+    does not check this one, so nothing covered it. This drives the real
+    `select()` rather than re-deriving the matcher, so it tracks the selector's
+    actual behaviour instead of a copy of it.
+    """
+    manifest = load_manifest()
+    unselectable = [
+        f"website/{page.name}"
+        for page in sorted(_in_scope_pages())
+        if not select([f"website/{page.name}"], "pull_request", manifest)["surfaces"]
+    ]
+    assert not unselectable, (
+        f"page(s) held to the blog guard that select NO test surface: {unselectable}. "
+        f"A PR touching only such a page runs nothing, so this guard cannot fail — "
+        f"the #1349/#3332 silent-drop class. Add them to "
+        f"SOURCE_PATTERNS['onboarding'] in tools/ci_selection.py."
     )
 
 
@@ -471,9 +518,14 @@ def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     """
     assert _rendered_hrefs('<a href="/blog">Blog</a>') == ["/blog"]
     assert _rendered_hrefs('<a class="x" href="/blog">Blog</a>') == ["/blog"]
+    # Unquoted href values are valid HTML5 and must count as links, not vanish.
+    assert _rendered_hrefs("<a href=/blog>Blog</a>") == ["/blog"]
+    assert _rendered_hrefs("<a href = '/blog'>Blog</a>") == ["/blog"]
     assert _rendered_hrefs('<!-- <a href="/blog">Blog</a> -->') == []
-    assert _rendered_hrefs('<script>const u = "/blog";</script>') == []
-    assert _rendered_hrefs('<style>/* a { url: "/blog" } */</style>') == []
+    # These MUST carry a real anchor: without one they return [] even with the
+    # stripping removed, so they would prove nothing (review finding, #3962).
+    assert _rendered_hrefs('<script>const t = \'<a href="/blog">B</a>\';</script>') == []
+    assert _rendered_hrefs('<style>/* <a href="/blog">B</a> */</style>') == []
     assert _href_path("/blog") == "/blog"
     assert _href_path("https://tortoise.premiselabs.co/blog") == "/blog"
     assert _href_path("https://tortoise.premiselabs.co/blog/") == "/blog"

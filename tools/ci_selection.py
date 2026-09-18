@@ -151,8 +151,14 @@ SOURCE_PATTERNS = {
                    # surfaces=[] while website/product.html yielded ['onboarding'].
                    # That is the #1349/#3332 silent-drop class one more time: the
                    # guard silently stops covering the page it was written for.
-                   # The ratchet test derives from this tuple, so a future page
-                   # added to the guard must be added here too.
+                   # The ratchet is now two-directional, so adding a guarded page
+                   # without listing it here FAILS a test instead of silently
+                   # shrinking coverage: `test_every_source_pattern_is_selectable`
+                   # (tests/test_ci_selection.py) checks entry -> runs, and
+                   # `test_every_in_scope_page_is_selectable_by_ci`
+                   # (tests/test_website_docs_consistency.py) checks the reverse —
+                   # that every page in the blog guard's derived set reaches a
+                   # surface through this tuple.
                    "website/security.html", "website/tos.html",
                    "website/license.html", "website/dpa.html",
                    "website/aviso-privacidad.html",
