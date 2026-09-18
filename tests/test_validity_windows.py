@@ -250,17 +250,16 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
       * disagreement of ONE MICROSECOND → also REFUSED (case (e)), and a zero
         difference with a DIFFERENT fractional encoding → accepted (case (f)).
         Together they pin exactness rather than a tolerance down to the 1 µs
-        ISO floor: case (c) alone leaves any tolerance below 0.8 s alive, and
-        case (e) any tolerance of 1 µs or more. The floor BELOW 1 µs — which
+        ISO floor: case (c) alone leaves tolerances below 0.8 s alive, and
+        case (e) kills those of 1 µs or more. The floor BELOW 1 µs — which
         ISO literals cannot express, since ``datetime.fromisoformat`` truncates
         beyond 6 fractional digits — is pinned by
         ``test_supersede_valid_from_below_microsecond_disagreement_refused``.
-      * same instant, DIFFERENT non-zero offsets → ACCEPTED, and the value the
-        caller passed is what gets persisted (``str(valid_from)``, not the
-        stored form). Cases (b) and (d) are the only guard inputs here whose
-        literals carry an explicit non-zero UTC offset; a raw string comparison
-        would refuse both, so they pin instant-level — not string-level —
-        agreement.
+      * same instant, DIFFERENT offset encodings (an explicit non-zero offset
+        on the kwarg, ``+00:00`` on the stored successor) → ACCEPTED, and the
+        value the caller passed is what gets persisted (``str(valid_from)``,
+        not the stored form). A raw string comparison would refuse both, so
+        cases (b) and (d) pin instant-level — not string-level — agreement.
     """
     # (a) same day, 12 hours EARLIER → refused (would leave a GAP)
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
