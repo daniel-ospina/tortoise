@@ -173,7 +173,7 @@ measurement justifies a change.
 
 - **Per-query cost ≤ $0.01 target is structural:** 8000-token context cap +
   40-item cap + 500-token output cap (the 60/min/team LLM budget was
-  retired with the product surface in #3849 — see *Cost & budget* above).
+  retired with the product surface in #3849 — see *Budget* below).
   Worst case ~$0.0014–0.0023/query at the over-covered rate (5–7× under
   target).
 - **Rates:** `ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m":
@@ -207,11 +207,12 @@ measurement justifies a change.
   (`ask_lane.run_ask_lane`) is unbudgeted. The orphaned
   `quota.py`/`metering.py` ask cluster is retained pending the #3849 §7 D5
   purge follow-up.
-- **Metering:** per-query record via `record_ask_usage` (best-effort,
-  non-fatal — metering failures never block the answer). Recorded when the
-  SDK call completes successfully (the single call site: the SDK local lane
-  with an explicit `org_id`); zero records when the reader/retrieval call
-  FAILS. Selfhost (HTTP MCP + REST + stdio) records nothing — the
+- **Metering (retained mechanism, no lane caller passes an org):** per-query
+  record via `record_ask_usage` (best-effort, non-fatal — metering failures
+  never block the answer). The single call site is now
+  `ask_lane.run_ask_lane` (the SDK held it before #3849); the eval-only lane
+  passes no `org_id`, so nothing is metered today. Zero records when the
+  reader/retrieval call FAILS. Selfhost records nothing — the
   transport-keyed `_selfhost_transport` exemption, never a value-keyed
   "selfhost" check (a hosted team literally named "selfhost" records usage
   and is budget-charged).
@@ -256,7 +257,8 @@ with it.
   extraction lane is unchanged (default None).
 - **Standalone context (`GET /v1/context`, G7)** is the documented follow-up
   — `evidence` in the ask response delivers the trust property today.
-- **Tier-based ask budgets are OUT of v1** — the budget is per-team-flat.
+- **Tier-based ask budgets were OUT of v1** — the budget was per-team-flat
+  (60/min). RETIRED with the product surface in #3849 — see *Budget* above.
 - **Abstention measurement:** the graded `_abs` eval run is the census
   authority (product `abstained` label count + the judge-marker subset
   both reported); see `docs/runbook/1987-ask-abstention-check.md`.

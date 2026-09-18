@@ -142,8 +142,12 @@ class Phase2Error(ValueError):
 # The wire-body half of that contract is gone: the hosted /v1/ask route and
 # its path-scoped translation were removed in #3849.
 
-# Canonical error-code vocabulary (10 codes; the first six are the lane's,
-# the last four are the retired wire vocabulary — retained, no raiser).
+# Canonical error-code vocabulary (10 codes; SIX are still carried by the
+# eval-only lane — reader_unavailable, retrieval_unavailable, and the four
+# validation codes invalid_question / invalid_question_type /
+# invalid_question_date / question_too_long — and FOUR are the retired wire
+# vocabulary with no raiser — unauthorized, quota_exceeded, in_flight_limit,
+# timeout).
 CODE_UNAUTHORIZED = "unauthorized"
 CODE_QUOTA_EXCEEDED = "quota_exceeded"
 CODE_IN_FLIGHT_LIMIT = "in_flight_limit"
@@ -206,12 +210,14 @@ class AskInFlightLimit(RuntimeError):
 
 class AskReaderUnavailable(RuntimeError):
     """502 ``reader_unavailable`` — the LLM reader failed with no surviving
-    lane. Also used for the code-less variants that must never be
-    mislabeled ``invalid_question``: a code-less 402 (SERVER-side
-    provider-billing condition, P2-3), a code-less 404 (the hosted ask
-    surface no longer exists — removed in #3849), and the
-    pre-existing connection-refused ``status_code=None`` case (hosted ask
-    server unreachable)."""
+    lane (the ask lane raises it on reader build failure, empty output after
+    the bounded retry, or a reader exception).
+
+    The code-less variants the removed SDK ``_post_ask`` client used to map
+    here (a code-less 402 provider-billing condition, a code-less 404 for the
+    gone hosted ask surface, and the connection-refused ``status_code=None``
+    case) have NO raiser since #3849; ``status_code`` is kept for the
+    vocabulary."""
 
     code = CODE_READER_UNAVAILABLE
 

@@ -706,6 +706,11 @@ surfaces:
   - test_website_static.py
   - test_website_docs_consistency.py  # #3332: checks each public page against its canonical source (status vocab, EP mechanism, ontology link)
   sdk:
+  # #3849: the ask_lane-only selection leg. `tortoise/ask_lane.py` maps to
+  # `sdk`, so these two must be dual-registered here or they stop running on
+  # an ask_lane-only PR (a SOURCE_PATTERNS match REPLACES the core fallback).
+  - test_ask_eval_only.py    # the removal contract incl. N7 (the lane's hosted-mode refusal)
+  - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm — drives ask_lane.run_ask_assembled/run_ask_lane (also under `eval`)
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
   - test_ask_sdk.py
@@ -737,7 +742,7 @@ surfaces:
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
-  - test_assembly_sdk.py  # #2165 Task 6: ask() connected-assembly branch + ask_assembled + byte goldens (docker-lane)
+  - test_assembly_sdk.py  # #2165 Task 6: ask_lane.run_ask_lane()/run_ask_assembled() connected-assembly branch + byte goldens (docker-lane)
   - test_retrieval.py
   - test_sdk.py
   - test_sdk_dedup.py

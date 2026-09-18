@@ -418,8 +418,10 @@ def test_local_lane_validation_first_zero_calls(monkeypatch):
         ("a\x00b", {}, CODE_INVALID_QUESTION),
         ("\u200b", {}, CODE_INVALID_QUESTION),
         ("q", {"question_date": 20230101},
-         CODE_INVALID_QUESTION_DATE),  # non-str date → str()-coerced like the
-                                       # hosted AskRequest validator (P2)
+         CODE_INVALID_QUESTION_DATE),  # non-str date → str()-coerced by
+                                       # ask_lane._ask_validate (the removed
+                                       # hosted AskRequest validator behaved
+                                       # identically — P2)
     ]:
         with pytest.raises(AskValidationError) as ei:
             run_ask_lane(sdk, bad, **kw)

@@ -243,7 +243,8 @@ def test_llmreader_answer_strips_raw_completion() -> None:
 
 def test_build_reader_user_message_direct() -> None:
     """Direct unit pin of the single-sourced user-message template — the
-    SDK local lane and LLMReader.answer share ONE copy (no parallel
+    eval-only ask lane (``ask_lane.run_ask_lane``) and ``LLMReader.answer``
+    share ONE copy (no parallel
     template drift); the render path is cross-pinned above."""
     assert build_reader_user_message("[user] hi", "what changed?") == \
         "Memory context:\n[user] hi\n\nQuestion: what changed?\n\nAnswer:"

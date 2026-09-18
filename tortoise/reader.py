@@ -300,8 +300,8 @@ def build_reader_user_message(evidence: str, question: str) -> str:
     """The reader's user-message template (#1987 Task 5) — single-sourced
     so the eval-only ask lane (``ask_lane.run_ask_lane``) and
     ``LLMReader.answer`` share ONE copy (no
-    parallel template drift: the eval measures ``LLMReader.answer``, the
-    product lane ships it)."""
+    parallel template drift: the eval measures ``LLMReader.answer``, this
+    lane ships it)."""
     return f"Memory context:\n{evidence}\n\nQuestion: {question}\n\nAnswer:"
 
 #: Official gen.py default generation length for non-CoT runs (the reader's
