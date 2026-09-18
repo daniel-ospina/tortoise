@@ -358,13 +358,35 @@ def default_root(layout: HarnessLayout, home: Path) -> Path:
     only from the HOME-scoped ``hooks.json``: a cwd default would inspect and
     "upgrade" the dead project-local path this seam replaces, and report
     success while nothing is captured (#3818).
+
+    The returned root is ALWAYS absolute and ``~``-expanded.  Returning the
+    env value verbatim registered a command Codex could never resolve: a
+    literal ``CODEX_HOME=~/.codex`` (a tilde written into a config file is
+    never shell-expanded) stayed a literal ``~`` directory, and a relative
+    ``CODEX_HOME=relcodex`` registered ``relcodex/hooks/...`` — which Codex
+    resolves against the SESSION cwd, so it silently captured nothing while
+    ``install`` printed success.  A relative env value is anchored at the same
+    HOME-scoped base the documented fallback uses, so the root is
+    deterministic and ``install``/``status`` can never disagree (#3818).
     """
     if layout.root_env is None:
         return Path(".")
+    home = Path(home).expanduser()
     env = os.environ.get(layout.root_env, "").strip()
-    if env:
-        return Path(env)
-    return home / (layout.root_home_default or "")
+    root = (Path(env).expanduser() if env
+            else home / (layout.root_home_default or ""))
+    if not root.is_absolute():
+        root = home / root
+    if not root.is_absolute():
+        # Truly unresolvable (not even the supplied home is absolute) —
+        # refuse loudly rather than register a cwd-relative command that
+        # Codex will resolve somewhere unknowable.
+        raise ValueError(
+            f"cannot resolve an absolute install root for the {layout.harness} "
+            f"capture hook from ${layout.root_env}="
+            f"{os.environ.get(layout.root_env)!r} and home {home!r} — set "
+            f"${layout.root_env} to an absolute path")
+    return root
 
 
 def contract_version(layout: HarnessLayout) -> int | None:

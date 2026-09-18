@@ -929,6 +929,41 @@ def _codex_commands(home: Path) -> list[str]:
     return [h["command"] for e in entries for h in e.get("hooks", [])]
 
 
+def _codex_session_end_entries(*roots: Path) -> list[dict]:
+    """Every ``SessionEnd`` capture entry under ``roots``, wherever the
+    installer actually wrote it — so a mutation that resolves the root wrongly
+    REDs on the assertion (a relative command / a duplicate), not on a
+    hard-coded path the test happened to guess."""
+    entries: list[dict] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for hooks_json in sorted(root.rglob("hooks.json")):
+            data = json.loads(hooks_json.read_text())
+            entries.extend((data.get("hooks") or {}).get(
+                capture_install.CODEX_EVENT) or [])
+    return entries
+
+
+def _codex_session_end_commands(*roots: Path) -> list[str]:
+    return [h["command"] for e in _codex_session_end_entries(*roots)
+            for h in e.get("hooks", [])]
+
+
+def _cli_env(home: Path, codex_home: str) -> dict:
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "CODEX_HOME": codex_home,
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+
+
+def _resolved_codex_root(home: Path, codex_home: str) -> Path:
+    return (home / ".codex") if codex_home.startswith("~") else (home / codex_home)
+
+
 def test_codex_install_writes_the_hook_and_merges_the_absolute_command(home):
     """The Codex seam: the shipped hook into ``$CODEX_HOME/hooks/`` (0755) and
     a ``SessionEnd`` registration in ``$CODEX_HOME/hooks.json`` whose command
@@ -964,6 +999,97 @@ def test_codex_install_honors_codex_home(tmp_path, monkeypatch):
     assert (codex_home / "hooks.json").is_file()
     assert (codex_home / "hooks" / capture_install.CODEX_SCRIPT_NAME).is_file()
     assert not (home / ".codex").exists()
+
+
+@pytest.mark.parametrize("codex_home", [None, "", "   ", "relcodex", "~/.codex"])
+def test_codex_default_root_is_absolute_and_expanded(tmp_path, monkeypatch,
+                                                     codex_home):
+    """The ONE ``$CODEX_HOME`` resolver always returns an ABSOLUTE, expanded
+    root — the layout's ``absolute_command`` invariant cannot hold otherwise.
+
+    Verbatim, ``CODEX_HOME=relcodex`` registered ``relcodex/hooks/...``
+    (Codex resolves it against the SESSION cwd — a silent no-capture) and a
+    literal ``CODEX_HOME=~/.codex`` (a tilde written into a config file is
+    never shell-expanded) made a literal ``~`` directory.  ``status`` then
+    double-prepended the relative root, never recognized our own registration,
+    and every reinstall appended a duplicate.
+
+    Mutation: return ``Path(env)`` / ``home / default`` verbatim — the
+    relative and tilde cases are non-absolute and this REDs."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))  # hermetic `~` expansion
+    if codex_home is None:
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+    else:
+        monkeypatch.setenv("CODEX_HOME", codex_home)
+    layout = hook_install.get_layout("codex")
+
+    root = hook_install.default_root(layout, home)
+
+    assert root == {
+        None: home / ".codex",
+        "": home / ".codex",
+        "   ": home / ".codex",
+        "relcodex": home / "relcodex",
+        "~/.codex": home / ".codex",
+    }[codex_home], codex_home
+    assert root.is_absolute(), root
+
+
+@pytest.mark.parametrize("codex_home", ["relcodex", "~/.codex"])
+def test_codex_relative_or_tilde_codex_home_registers_absolute_and_status_clean(
+        tmp_path, codex_home):
+    """A relative or literal-tilde ``$CODEX_HOME`` still registers the script's
+    ABSOLUTE path, and ``status`` recognizes that same registration in the same
+    run (exit 0, not ``missing-hook-entry``).
+
+    Mutation: resolve ``$CODEX_HOME`` verbatim — the registered command is not
+    absolute and ``status`` double-prepends the root, exits 1 with
+    ``missing-hook-entry``, and this REDs."""
+    root = tmp_path / "proj"
+    home = tmp_path / "home"
+    root.mkdir()
+    home.mkdir()
+    env = _cli_env(home, codex_home)
+    resolved = _resolved_codex_root(home, codex_home)
+
+    r = _run(("install", "codex", "--dir", str(root)), env, root)
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    registered = _codex_session_end_commands(home, root)
+    assert registered == [
+        str(resolved / "hooks" / capture_install.CODEX_SCRIPT_NAME)], registered
+    assert os.path.isabs(registered[0]), registered
+    s = _run(("hooks", "status", "--harness", "codex"), env, root)
+    assert s.returncode == 0, s.stdout + s.stderr
+    assert "are current" in s.stdout, s.stdout
+
+
+@pytest.mark.parametrize("codex_home", ["relcodex", "~/.codex"])
+def test_codex_reinstall_with_a_relative_or_tilde_codex_home_does_not_duplicate(
+        tmp_path, codex_home):
+    """Installing twice from a relative or literal-tilde ``$CODEX_HOME``
+    leaves ONE ``SessionEnd`` registration.
+
+    Mutation: resolve ``$CODEX_HOME`` verbatim — ``status`` does not recognize
+    our own (relative) registration, so the second install appends a second
+    entry and the count grows → this REDs."""
+    root = tmp_path / "proj"
+    home = tmp_path / "home"
+    root.mkdir()
+    home.mkdir()
+    env = _cli_env(home, codex_home)
+    resolved = _resolved_codex_root(home, codex_home)
+
+    for _ in range(2):
+        r = _run(("install", "codex", "--dir", str(root)), env, root)
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    entries = _codex_session_end_entries(home, root)
+    assert len(entries) == 1, entries
+    commands = _codex_session_end_commands(home, root)
+    assert commands == [
+        str(resolved / "hooks" / capture_install.CODEX_SCRIPT_NAME)], commands
 
 
 def test_codex_install_is_home_scoped_not_project_scoped(tmp_path):
