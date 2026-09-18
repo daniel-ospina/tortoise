@@ -667,6 +667,123 @@ def test_resolver_docker_alias_leg(_docker_sdk, force_sparse_tfidf):
 
 
 @_docker_only
+def test_resolver_docker_excludes_retracted_object(_docker_sdk,
+                                                   force_sparse_tfidf):
+    """#3317: a RETRACTED Object must not resolve through ANY resolver leg.
+
+    Pre-fix every leg was status-blind — the exact (name/id) and alias
+    (anchored search_keys) legs carried no status conjunct, and the FTS leg's
+    terminal exclusion is gated on ``label == 'Point'`` in ``search_engine``,
+    so Object hits pass it — and ``ask()`` resolved and rendered the retracted
+    Object. Post-fix ``_RESOLVER_UNRESOLVABLE_OBJECT_STATUSES``
+    (``retracted``) is excluded at all three legs.
+
+    The exclusion must stay NARROW: the SUPERSEDED couch in this same fixture
+    still resolves (its state render IS the answer) — pinned by
+    ``test_resolver_docker_exact_and_both_halves`` and
+    ``test_resolver_docker_alias_leg``, which RED if the read-surface object
+    tuple (which contains ``superseded``) is used here instead.
+
+    ``force_sparse_tfidf`` pins the leg decomposition (#3095): with the
+    embedder live the hybrid FTS leg swallows the alias term before the alias
+    leg is reached.
+
+    DECIDED — the ladder's fall-through is NOT short-circuited (a term whose
+    exact name matched only an unresolvable Object does not become
+    "unresolved"; the weaker legs still run). The contract this test pins is
+    that the retracted Object is gone from every leg — a DIFFERENT, live
+    Object resolving is the ladder's documented degrade, not this defect. In
+    the sparse lane that shows up as ``"the couch"`` reaching the alias leg
+    and resolving the live ``sofa`` (low confidence) through the point
+    ``pB-couch-sold`` ("sold the old couch and ordered a new sofa", whose
+    search_keys name both); with the embedder live the hybrid FTS leg is
+    broad for ANY term (the #3223 divergence), which is where an
+    "unmatched term resolves something" behaviour belongs. Stop-on-excluded-
+    match would be an abstention-semantics change to `both_halves_ok`,
+    outside this issue. The residual is owned by #4061 (which also owns the
+    FTS leg's post-truncation filter and its absent-`status` fail-open).
+    """
+    _ag.build_base_graph(_docker_sdk)
+    proj = _docker_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:'couch'}) SET o.status='retracted'")
+    couch_id = proj.g.query(
+        "MATCH (o:Object {name:'couch'}) RETURN o.id").result_set[0][0]
+    from tortoise.assembly import (
+        collect_slices,
+        docker_resolver_port,
+        docker_walker_port,
+    )
+    port = docker_resolver_port(_docker_sdk)
+
+    # leg 1 — exact (name / id): the retracted Object is not returned
+    assert couch_id not in {r["id"] for r in port.exact_objects(["couch"])}
+
+    # leg 2 — name-FTS (the leg search_engine's exclusion is Point-gated on):
+    # no other Object in this fixture bears a 'couch' name token
+    assert port.fts_objects("couch") == []
+
+    # leg 3 — alias amplifier (anchored search_keys)
+    assert couch_id not in {r["id"] for r in port.alias_objects("couch")}
+
+    # end-to-end through the ladder: no term returns the retracted Object —
+    # including the paraphrase that only the FTS/alias legs could match
+    for term in ("the couch", "couch", "the ikea purchase"):
+        got = resolve_subjects(port, [term],
+                               shape=AssemblyShape.CURRENT_STATE)
+        assert couch_id not in {c.object_id for c in got.candidates}, term
+
+    # LIVE control: the exclusion must not be over-broad
+    live = resolve_subjects(port, ["the dog bed"],
+                            shape=AssemblyShape.CURRENT_STATE)
+    assert [(c.name, c.source) for c in live.candidates] == \
+        [("dog bed", "exact")]
+
+    # boundary of the decision: a status OUTSIDE the excluded set keeps
+    # resolving and renders itself verbatim (never "current") — pinned here
+    # so widening the set later cannot pass silently
+    proj.g.query("MATCH (o:Object {name:'sofa'}) SET o.status='deprecated'")
+    dep = resolve_subjects(port, ["the sofa"],
+                           shape=AssemblyShape.CURRENT_STATE)
+    assert [(c.name, c.source) for c in dep.candidates] == \
+        [("sofa", "exact")]
+    dep_slices = collect_slices(
+        docker_walker_port(_docker_sdk),
+        [_cand(dep.candidates[0].object_id, "sofa", 0)],
+        shape=AssemblyShape.CURRENT_STATE)
+    assert [r["status"] for r in dep_slices.state_rows] == ["deprecated"]
+
+    # and the assembled payload never carries the retracted Object as a subject
+    from tortoise.assembly import _assemble_connected
+    block = _assemble_connected(
+        _docker_sdk, "what is the current status of the couch?")
+    assert couch_id not in {s["object_id"] for s in block.subjects}
+
+
+@_docker_only
+def test_walker_explicit_id_renders_retracted_status_verbatim(_docker_sdk):
+    """#3317 decision pin: the walker's state read is NOT a resolution leg.
+
+    Given an id EXPLICITLY (the WalkerPort contract), the state row carries
+    ``status`` VERBATIM — the retracted Object is rendered as
+    ``STATE (couch): retracted`` by ``docker_walker_port.state_rows``. Adding
+    a status conjunct there would not stop a retracted Object from being
+    resolved (resolution has already happened) — it would only erase the
+    honest state line of an admitted subject. The guard lives upstream, at
+    the resolver legs.
+    """
+    _ag.build_base_graph(_docker_sdk)
+    proj = _docker_sdk._get_proj()
+    proj.g.query("MATCH (o:Object {name:'couch'}) SET o.status='retracted'")
+    oid = proj.g.query(
+        "MATCH (o:Object {name:'couch'}) RETURN o.id").result_set[0][0]
+    from tortoise.assembly import collect_slices, docker_walker_port
+    slices = collect_slices(
+        docker_walker_port(_docker_sdk), [_cand(oid, "couch", 0)],
+        shape=AssemblyShape.CURRENT_STATE)
+    assert [r["status"] for r in slices.state_rows] == ["retracted"]
+
+
+@_docker_only
 @pytest.mark.xfail(
     strict=False,
     reason="#3223: with the vector leg live the hybrid FTS query matches a "
