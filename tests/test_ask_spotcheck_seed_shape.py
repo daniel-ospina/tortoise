@@ -56,8 +56,8 @@ QUESTION = {
 }
 
 #: The fixture's OWN session ids — the identity the seeded turns must carry
-#: (capture keys a session by the id the client supplied, never a synthetic
-#: ``sess-N``).
+#: (capture keys a session by a client-supplied id or its own server-minted
+#: ``session_<hex12>`` id, never a synthetic ``sess-N``).
 SID_0, SID_1 = QUESTION["haystack_session_ids"]
 TURNS_0 = [f"{SID_0}_t0", f"{SID_0}_t1"]
 ALL_TURNS = [*TURNS_0, f"{SID_1}_t0"]
