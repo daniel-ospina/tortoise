@@ -198,7 +198,16 @@ SOURCE_PATTERNS = {
                    # it. That is the #3616 pattern one level up: the thing that
                    # decides whether the gate works would not itself be gated.
                    "tools/check_pages_bindings.py",
-                   "config/required-bindings.yml"),
+                   "config/required-bindings.yml",
+                   # #3806: the ship-test instrument and its guard. The guard test
+                   # (tests/test_ship_test_onboarding.py) is registered in BOTH
+                   # `core` (its generic probe helpers) and `onboarding` (the
+                   # onboarding surface it measures). Without this entry a change
+                   # to the instrument alone selects NO surface (`tools/` is a
+                   # flat NON_PYTHON_PREFIXES entry, and the docs-only return
+                   # bypasses the `core` fallback) so its guard never runs on the
+                   # PR that edits it — the #3261/#3616/#3910 silent-drop class.
+                   "tools/ship_test_onboarding.py"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
