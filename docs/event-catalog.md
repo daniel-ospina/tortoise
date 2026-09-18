@@ -8,7 +8,7 @@
 
 | Type | Version | Emitted by | Payload fields | Producer surface |
 |---|---|---|---|---|
-| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit) | `id`, `kind`, `content_hash` | SDK (MCP, REST, local) |
+| `PointAdded` | 1 | `TortoiseSDK.create_point` (new point only — dedup hits do NOT emit); SDK `capture_session` / `hosted_api` capture turn loop (#3947 — one per `{session_id}_t{i}` turn Point, `is_episodic=true`) | `id`, `kind`, `content_hash` (both producers put the hash on the PAYLOAD, matching `create_point`); the capture turn adds the **envelope** key `contains_session` (the session-container link the replay fold restores — ontology §4.5), plus a `point` snapshot carrying `content`/`pointKind`/`speaker`/`is_episodic`/`status`/`createdAt`. `content_hash` is NOT in the `point` snapshot: `_emit_event` strips it (`content_hash` is derived — the replay recomputes it in `_upsert_point_props`, #2795) | SDK (MCP, REST, local) |
 | `OperatorAdded` | 1 | `TortoiseSDK.create_operator` | `id`, `op_type`, `source_id`, `target_ids` | SDK |
 | `PointRetracted` | 1 | `TortoiseSDK.retract_point` | `id` | SDK |
 | `PointSuperseded` | 1 | `TortoiseSDK.supersede_point` | `id` (old), `new_id` | SDK |

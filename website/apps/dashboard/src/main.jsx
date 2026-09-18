@@ -819,7 +819,15 @@ try {
       storageKey: COOKIE_NAME,
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: true,
+      // ONE fragment consumer (#3503): this page also loads the shared bridge
+      // (`/assets/supabase-session.js`, index.html), whose load-time IIFE
+      // consumes #access_token and writes this same cookie with this same
+      // adapter. supabase-js ingesting the fragment too is fully redundant —
+      // it reads the same hash and writes the same storage — and it clears
+      // window.location.hash BEFORE awaiting _saveSession(), so an over-cap
+      // session loses the fragment a SECOND time and the bridge-level
+      // retention is invisible in the product.
+      detectSessionInUrl: false,
     },
   })
 } catch (e) {
