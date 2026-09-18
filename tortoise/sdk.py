@@ -916,6 +916,16 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             raise ValueError(
                 f"{key!r} is a server-managed field and cannot be set via props."
             )
+    # #3947 review (security): `contains_session` is an ENVELOPE-level capture
+    # directive (it drives the `(:Session)-[:CONTAINS]->(:Point)` rebuild fold),
+    # never a Point property. Reject it here as the fail-closed boundary: a
+    # tenant-supplied prop of this name must not be able to reach a writer that
+    # could turn it into a structural graph fact on replay.
+    if "contains_session" in props:
+        raise ValueError(
+            "'contains_session' is a server-managed capture field and cannot "
+            "be set via props."
+        )
     # #1486 (code-review P1): is_episodic is the points-quota discriminator
     # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
     # setting it true via props would exclude their points from the quota —
@@ -3413,23 +3423,82 @@ class TortoiseSDK:
             # [:cap] here is the idempotent no-op keeping the store loop's own
             # window definition explicit (#1532 D1).
             turn_text = f"[{role}] {content[:5000]}"
-            proj.g.query(
+            _turn_rows = proj.g.query(
                 "MERGE (t:Point {id:$id}) "
                 "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
                 "    t.speaker=$speaker, "
                 "    t.is_episodic=true, "
                 "    t.status=coalesce(t.status, $s), "
                 "    t.createdAt=coalesce(t.createdAt, $now), "
-                "    t.updatedAt=$now, t.content_hash=$ch",
+                "    t.updatedAt=$now, t.content_hash=$ch "
+                "RETURN t.createdAt AS createdAt, t.status AS status",
                 params={"id": turn_id, "c": turn_text, "k": "event",
                         "speaker": role, "s": "draft", "now": now,
                         "ch": _content_hash(turn_text)},
-            )
+            ).result_set
+            # #3947 review (F4 + parity): the write's COALESCE decides what the
+            # graph holds — a RE-capture keeps the ORIGINAL createdAt AND the
+            # stored status (`coalesce(t.status, 'draft')`). Journal exactly
+            # what was stored: emitting the literal `now`/`draft` regresses a
+            # promoted turn back to draft on replay, and drifts createdAt on
+            # every re-capture. Read both back in the same statement.
+            turn_created_at = (
+                _turn_rows[0][0]
+                if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
+                else now)
+            turn_status = (
+                _turn_rows[0][1]
+                if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
+                else "draft")
             proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": session_id, "tid": turn_id},
             )
+            # #3947: journal the turn write so a rebuild can recreate it.
+            # The two Cypher writes above stay raw and un-reordered: their
+            # MERGE ordering + the deterministic `{session_id}_t{i}` id ARE
+            # the idempotency contract (#490 review P2-2), and the raw form
+            # keeps the live node shape unchanged.
+            #
+            # #3947 review (cycle 2, #3086): emit ONLY when a journal exists.
+            # On a lane with no `event_log_path` (`_make_sdk`/`_data_sdk` in
+            # hosted_api.py) the JSONL half is a no-op, and the `:GraphEvent`
+            # half is not a rebuild source — `rebuild()` wipes it with the rest
+            # of the graph. Paying `ensure_event_schema` + `next_seq` +
+            # `append_event` per turn there buys no durability on the very lane
+            # #3086 measures as already blocking the event loop (~4.75 s per
+            # 500-turn capture). Where a journal IS configured the record is
+            # what makes the rebuild possible, so it is emitted unconditionally.
+            #
+            # `contains_session` rides the EVENT ENVELOPE, not the point
+            # payload: the CONTAINS link is a capture-write structural fact
+            # (ONTOLOGY §4.5), so it is restored by the projection's edge fold
+            # without inventing a node property the live write never set —
+            # and without becoming a caller-forgeable prop.
+            if self._get_event_log() is not None:
+                self._emit_event(
+                    # Parity with `create_point`'s emission (#3947 review F5):
+                    # the PAYLOAD carries `content_hash`. It belongs here and
+                    # NOT in the `point` snapshot, which `_emit_event` strips
+                    # it from (`content_hash` is derived, and the replay
+                    # recomputes it in `_upsert_point_props`) — an earlier
+                    # draft put it in the snapshot, where nothing would ever
+                    # read it.
+                    "PointAdded",
+                    {"id": turn_id, "kind": "event",
+                     "content_hash": _content_hash(turn_text)},
+                    point={
+                        "id": turn_id,
+                        "content": turn_text,
+                        "pointKind": "event",
+                        "speaker": role,
+                        "is_episodic": True,
+                        "status": turn_status,
+                        "createdAt": turn_created_at,
+                    },
+                    contains_session=session_id,
+                )
 
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with

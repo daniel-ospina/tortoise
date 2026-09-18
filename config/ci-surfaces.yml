@@ -344,6 +344,7 @@ surfaces:
   - test_capture_loop_responsiveness.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
+  - test_rebuild_turn_points_3947.py
   - test_restore_container_recovery.py
   - test_session_attribution.py
   - test_ci_selection.py
