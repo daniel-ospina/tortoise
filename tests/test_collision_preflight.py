@@ -53,6 +53,25 @@ for a in "$@"; do
   if [ "$prev" = "--state" ]; then state="$a"; fi
   prev="$a"
 done
+repo=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--repo" ]; then repo="$a"; fi
+  prev="$a"
+done
+json_args=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--json" ]; then json_args="$a"; fi
+  prev="$a"
+done
+
+# `gh api user -q .login` -> the current account (ownership attribution).
+if [ "$1 $2" = "api user" ]; then
+  if [ -f "$d/user.txt" ]; then cat "$d/user.txt"; else echo "test-agent"; fi
+  exit 0
+fi
+
 case "$1 $2" in
   "pr list")
     # #3587: the `gh pr list` GraphQL path for CLOSED PRs resets on this host
@@ -63,9 +82,29 @@ case "$1 $2" in
       echo "gh-stub: read tcp 127.0.0.1:1->20.26.156.210:443: read: connection reset by peer" >&2
       exit 1
     fi
+    # The target repo is sent EXPLICITLY (#4027): record it so a test can
+    # prove the selector reached gh rather than being inferred from the cwd.
+    printf '%s\n' "$@" > "$d/pr-list-argv.txt"
     f="$d/${state:-open}_prs.json" ;;
   "api --paginate") f="$d/closed_prs.json"; printf '%s\n' "$@" > "$d/api-argv.txt" ;;
-  "issue view") f="$d/issue.json" ;;
+  "issue view")
+    # A number ABSENT from the target repo is not "no in-flight work" (#4027).
+    if [ "${GH_STUB_ISSUE_ABSENT:-0}" = "1" ]; then
+      echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2
+      exit 1
+    fi
+    # Probe form (the cross-repo ambiguity check asks for `--json number` only).
+    if [ "$json_args" = "number" ]; then
+      if [ -f "$d/probe_unqueried.txt" ] && grep -qx "$repo" "$d/probe_unqueried.txt"; then
+        echo "gh-stub: could not connect to api.github.com" >&2; exit 1
+      fi
+      if [ -f "$d/probe_holds.txt" ] && grep -qx "$repo" "$d/probe_holds.txt"; then
+        echo "{\"number\": $3}"; exit 0
+      fi
+      echo "GraphQL: Could not resolve to an issue or pull request with the number of $3. (repository.issue)" >&2
+      exit 1
+    fi
+    f="$d/issue.json"; printf '%s\n' "$@" > "$d/issue-argv.txt" ;;
   *) echo "gh-stub: unexpected argv: $*" >&2; exit 64 ;;
 esac
 if [ ! -f "$f" ]; then echo "gh-stub: no fixture: $f" >&2; exit 1; fi
@@ -77,6 +116,12 @@ if [ "$1 $2" = "api --paginate" ] && [ "${GH_STUB_API_FAIL_AFTER_OUTPUT:-0}" = "
   exit 1
 fi
 """
+
+# A Python stand-in for the fleet's `map-sessions.py` was written for a
+# fleet-session surface (#1233) and then deliberately NOT shipped: its
+# prescribed discipline cannot tell a session that holds an issue from one that
+# has merely read the fleet board. See the module docstring of
+# tools/collision_preflight.py.
 
 GIT_STUB = r"""#!/usr/bin/env bash
 set -u
@@ -101,6 +146,8 @@ SURFACE_ROWS = (
     "issue keywords",
 )
 
+DEFAULT_TEST_SESSION = "01a0b01d-ab9f-74d8-bbe1-1e218fc752b2"
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True,
@@ -122,6 +169,11 @@ class CollisionPreflightTest(unittest.TestCase):
         _git(self.repo, "init", "-q", "-b", "main", "--template=")
         _git(self.repo, "config", "user.email", "test@example.com")
         _git(self.repo, "config", "user.name", "Test")
+        # The GitHub target is DERIVED OFFLINE from the git remote (#4027), so
+        # every gh call can be sent an explicit `--repo owner/name` without a
+        # network round-trip.
+        _git(self.repo, "remote", "add", "origin",
+             "https://github.com/test-owner/test-repo.git")
         (self.repo / "seed.txt").write_text("seed\n")
         _git(self.repo, "add", "seed.txt")
         _git(self.repo, "commit", "-qm", "seed")
@@ -129,6 +181,9 @@ class CollisionPreflightTest(unittest.TestCase):
         self.gh_dir = self.tmp / "ghstub"
         self.gh_dir.mkdir()
         self.gh = _write_exec(self.gh_dir / "gh", GH_STUB)
+        (self.gh_dir / "user.txt").write_text("test-agent")
+        self.session_id = DEFAULT_TEST_SESSION
+        self.lane = "W0"
         # Default: every GitHub surface is queryable and empty.
         self.gh_fixtures(open_prs=[], closed_prs=[], issue=self.issue_payload())
 
@@ -138,14 +193,24 @@ class CollisionPreflightTest(unittest.TestCase):
     # ── fixtures ────────────────────────────────────────────────────────────
 
     def issue_payload(self, title="florfenicol dosing audit", assignees=(),
-                      comments=(), state="OPEN") -> dict:
+                      comments=(), state="OPEN", comment_author=None) -> dict:
+        """`comments` items are body strings (author "someone") or
+        `(author_login, body)` tuples — attribution is the whole point of
+        defect 3, so the author must be controllable."""
+        rendered = []
+        for comment in comments:
+            if isinstance(comment, tuple):
+                author, body = comment
+            else:
+                author, body = (comment_author or "someone"), comment
+            rendered.append({"author": {"login": author}, "body": body})
         return {
             "number": ISSUE,
             "title": title,
             "state": state,
             "url": f"https://example.invalid/issues/{ISSUE}",
             "assignees": [{"login": a} for a in assignees],
-            "comments": [{"author": {"login": "someone"}, "body": c} for c in comments],
+            "comments": rendered,
         }
 
     def gh_fixtures(self, open_prs=None, closed_prs=None, issue=None) -> None:
@@ -175,19 +240,29 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def run_tool(self, issue: int = ISSUE, keywords: str | None = None,
                  git_bin: Path | None = None, env_extra: dict | None = None,
-                 extra_args: list[str] | None = None):
+                 extra_args: list[str] | None = None,
+                 repo_arg: object = "__default__", cwd: Path | None = None,
+                 gh_bin: Path | None = None):
         env = dict(os.environ)
         env["GH_STUB_DIR"] = str(self.gh_dir)
+        env["COLLISION_PREFLIGHT_LANE"] = self.lane
+        env["PI_SESSION_ID"] = self.session_id
         if env_extra:
             env.update({k: str(v) for k, v in env_extra.items()})
-        cmd = [PYTHON, str(TOOL), str(issue), "--repo", str(self.repo), "--gh", str(self.gh)]
+        cmd = [PYTHON, str(TOOL), str(issue)]
+        if repo_arg == "__default__":
+            cmd += ["--repo", str(self.repo)]
+        elif repo_arg is not None:
+            cmd += ["--repo", str(repo_arg)]
+        cmd += ["--gh", str(gh_bin or self.gh)]
         if keywords:
             cmd += ["--keywords", keywords]
         if git_bin:
             cmd += ["--git", str(git_bin)]
         if extra_args:
             cmd += [str(a) for a in extra_args]
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=90)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                              cwd=str(cwd) if cwd else None, timeout=90)
         return proc.returncode, proc.stdout + proc.stderr
 
     def assert_all_surface_rows(self, out: str) -> None:
@@ -475,15 +550,8 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_min_keywords_one_opts_into_single_keyword_hits(self):
         _git(self.repo, "branch", "fix/florfenicol-unrelated")
-        env = dict(os.environ)
-        env["GH_STUB_DIR"] = str(self.gh_dir)
-        proc = subprocess.run(
-            [PYTHON, str(TOOL), str(ISSUE), "--repo", str(self.repo),
-             "--gh", str(self.gh), "--min-keywords", "1"],
-            capture_output=True, text=True, env=env, timeout=90,
-        )
-        out = proc.stdout + proc.stderr
-        self.assertNotEqual(proc.returncode, 0, out)
+        rc, out = self.run_tool(extra_args=["--min-keywords", "1"])
+        self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION (keyword-only)", out)
 
     def test_remote_branch_keyword_scan_is_disabled(self):
@@ -669,6 +737,176 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn("state=closed", argv)
         self.assertIn("--paginate", argv)
         self.assertIn("headRefName: .head.ref", argv)
+
+    # ── target repo: never certify a scope you did not establish (#4027) ────
+
+    def test_output_always_names_resolved_repo_and_full_title(self):
+        # The cheap high-value half of #4027: a verdict that does not name what
+        # it measured cannot be trusted, so the repo AND the full title appear
+        # on every path, including the verdict line itself.
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("repo: test-owner/test-repo", out)
+        self.assertIn("title: florfenicol dosing audit", out)
+        self.assertIn("for #3061 in test-owner/test-repo", out)
+
+        rc, out = self.run_tool(extra_args=["--keywords", "florfenicol,dosing"])
+        self.assertIn("repo: test-owner/test-repo", out)
+        self.assertIn("title: florfenicol dosing audit", out)
+
+    def test_target_repo_is_sent_on_every_gh_call(self):
+        # The exact mechanism of the cross-repo false CLEAN: gh resolving the
+        # repo from the CWD instead of the intended target. Every gh surface
+        # must carry the explicit selector; the REST path must be literal
+        # (gh api has no --repo flag, so `{owner}/{repo}` placeholders would
+        # again resolve from the cwd).
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("test-owner/test-repo",
+                      (self.gh_dir / "issue-argv.txt").read_text())
+        self.assertIn("test-owner/test-repo",
+                      (self.gh_dir / "pr-list-argv.txt").read_text())
+        api = (self.gh_dir / "api-argv.txt").read_text()
+        self.assertIn("repos/test-owner/test-repo/pulls", api)
+        self.assertNotIn("{owner}", api)
+        self.assertNotIn("{repo}", api)
+
+    def test_absent_issue_fails_closed_exit_2_not_clean(self):
+        # "Not found here" is NOT "no in-flight work". Before #4027 an absent
+        # issue was indistinguishable from CLEAN.
+        rc, out = self.run_tool(env_extra={"GH_STUB_ISSUE_ABSENT": "1"})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("issue-absent", out)
+        self.assertIn("does not exist in test-owner/test-repo", out)
+
+    def _sibling_repo(self, name: str, slug: str) -> Path:
+        other = self.tmp / name
+        other.mkdir()
+        _git(other, "init", "-q", "-b", "main", "--template=")
+        _git(other, "config", "user.email", "test@example.com")
+        _git(other, "config", "user.name", "Test")
+        _git(other, "remote", "add", "origin", f"https://github.com/{slug}.git")
+        (other / "seed.txt").write_text("seed\n")
+        _git(other, "add", "seed.txt")
+        _git(other, "commit", "-qm", "seed")
+        return other
+
+    def test_owner_name_selector_targets_that_repo_and_its_local_clone(self):
+        other = self._sibling_repo("other-repo", "other-owner/other-repo")
+        rc, out = self.run_tool(repo_arg="other-owner/other-repo", cwd=self.repo)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("repo: other-owner/other-repo", out)
+        # The git surfaces describe the TARGET repo, never the cwd's repo.
+        # (tmpdir paths are symlinked on macOS; compare real paths.)
+        self.assertIn(f"local checkout: {os.path.realpath(other)}", out)
+        self.assertIn("VERDICT: CLEAN", out)
+
+    def test_selector_without_a_local_clone_leaves_git_surfaces_incomplete(self):
+        rc, out = self.run_tool(repo_arg="other-owner/no-such-clone", cwd=self.repo)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertIn("no-local-clone", out)
+
+    def test_omitted_repo_refuses_when_number_resolves_in_two_repos(self):
+        self._sibling_repo("other-repo", "other-owner/other-repo")
+        (self.gh_dir / "probe_holds.txt").write_text(
+            "test-owner/test-repo\nother-owner/other-repo\n")
+        rc, out = self.run_tool(repo_arg=None, cwd=self.repo)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("AMBIGUOUS", out)
+        self.assertIn("refusing to guess", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_omitted_repo_refuses_when_number_resolves_elsewhere_only(self):
+        self._sibling_repo("other-repo", "other-owner/other-repo")
+        (self.gh_dir / "probe_holds.txt").write_text("other-owner/other-repo\n")
+        rc, out = self.run_tool(repo_arg=None, cwd=self.repo)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("does NOT exist in test-owner/test-repo", out)
+        self.assertIn("re-run with --repo other-owner/other-repo", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_omitted_repo_refuses_when_a_candidate_cannot_be_probed(self):
+        self._sibling_repo("other-repo", "other-owner/other-repo")
+        (self.gh_dir / "probe_unqueried.txt").write_text("other-owner/other-repo\n")
+        rc, out = self.run_tool(repo_arg=None, cwd=self.repo)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("could not be probed", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    # ── defect 3: attribute claims, never just "a claim-shaped match" ───────
+
+    def test_own_lane_marked_claim_is_own_footprint_not_a_collision(self):
+        # Same account as us (test-agent), marked with OUR lane. Lanes share one
+        # GitHub login, so authorship alone cannot establish this — the lane
+        # marker can, and then the lane's own claim must NOT block its own unit.
+        self.gh_fixtures(issue=self.issue_payload(comments=[
+            ("test-agent", "Owner: lane W0 — claiming this for W0."),
+        ]))
+        rc, out = self.run_tool(env_extra={"COLLISION_PREFLIGHT_LANE": "W0"})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("OWN FOOTPRINT", out)
+        self.assertNotIn("do NOT dispatch", out)
+
+    def test_own_claim_marked_with_our_session_id_is_own_footprint(self):
+        sid = "01a0b01d-ab9f-74d8-bbe1-1e218fc752b2"
+        self.gh_fixtures(issue=self.issue_payload(comments=[
+            ("test-agent", f"claiming this (session {sid})."),
+        ]))
+        rc, out = self.run_tool(env_extra={"PI_SESSION_ID": sid})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertIn("OWN FOOTPRINT", out)
+
+    def test_second_party_claim_still_collides(self):
+        # The other direction, and the one that must never weaken: a claim by a
+        # DIFFERENT party still blocks, loudly — for every genuine claim
+        # phrasing, so tightening the regex cannot quietly disable the surface.
+        for body in ("/claim", "I'll take this", "working on this now",
+                     "dispatching #3061", "taking this", "Claiming this.",
+                     "I will implement this", "assigned to me"):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("other-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"body={body!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn("claim-style comment", out)
+                self.assertIn("other-agent", out)
+
+    def test_same_account_unmarked_claim_fails_closed(self):
+        # RESIDUAL, deliberately: another lane can share our account and post an
+        # unmarked claim. "We cannot tell whose it is" must never read as "ours".
+        self.gh_fixtures(issue=self.issue_payload(comments=[
+            ("test-agent", "I will handle this."),
+        ]))
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn("unknown attribution", out)
+
+    def test_prose_that_matches_the_old_regex_is_not_a_claim(self):
+        # The real #3827 wording, verbatim: every one of these matched the old
+        # regex and forced a false COLLISION on the lane's own artifact.
+        for body in (
+            "the config comment claiming a carve_out pin that does not exist",
+            "was a claim about the hour",
+            "a green on it would be a vacuous certificate",
+            "A coverage claim must be stated PER ITEM, not counted.",
+        ):
+            with self.subTest(body=body):
+                self.gh_fixtures(issue=self.issue_payload(comments=[
+                    ("test-agent", body),
+                ]))
+                rc, out = self.run_tool()
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VERDICT: CLEAN", out)
+                self.assertNotIn("do NOT dispatch", out)
 
     # ── partial-run prevention ──────────────────────────────────────────────
 
