@@ -1,4 +1,4 @@
-"""#3849 — the ask lane is EVAL-ONLY: surface-removal contract (N1-N6).
+"""#3849 — the ask lane is EVAL-ONLY: surface-removal contract (N1-N7).
 
 Owner-directed surface curation (plan objectives 5 and 9): ``ask`` is not an
 intended product surface. It must not appear in the MCP surface (registry →

@@ -28,7 +28,7 @@ Key contracts:
   * ``detect_question_type`` (deterministic, ordered precedence
     temporal-reasoning → knowledge-update → multi-session →
     single-session-preference → None) supplies the type fragments on the
-    product path; callers may override with an explicit ``question_type``.
+    lane's path; callers may override with an explicit ``question_type``.
   * ``_looks_abstained`` is the best-effort heuristic abstained label
     (measurement/UX sugar, NEVER a gate — the two-phase prompt is
     authoritative). ``LLMReader.answer`` returns the raw stripped

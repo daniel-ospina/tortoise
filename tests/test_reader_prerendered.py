@@ -177,7 +177,8 @@ def test_empty_evidence_matches_empty_context_exactly():
     """Arm D sends NO evidence. ``evidence=""`` must reproduce
     ``answer(context_hits=[])`` byte-for-byte — including the raw
     ``Memory context:\\n\\n\\nQuestion:`` shape and NO
-    ``NO_EVIDENCE_TEXT`` substitution (that is the SDK lane's job).
+    ``NO_EVIDENCE_TEXT`` substitution (that is the ask lane's job —
+    ``ask_lane.run_ask_lane``).
 
     Note the actual empty-context render: with ``question_date=None``
     ``render_context([])`` is the empty string, so the pre-rendered call is

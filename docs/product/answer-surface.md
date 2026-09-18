@@ -31,9 +31,9 @@ aboutObjects: tortoise-ask, tortoise-search
 
 | Surface | Where | Notes |
 |---|---|---|
-| `tortoise/ask_lane.py` (eval-only lane) | `tortoise/ask_lane.py` | **The ONLY home of the ask pipeline (#3849).** `run_ask_lane(sdk, …)` (13-field response) + `run_ask_assembled(sdk, …)` (connected assembly). Local graph only — hosted client mode (`TORTOISE_API_URL`) raises. Callers: the LongMemEval A/B arm + `tools/ask_spotcheck.py` |
+| `tortoise/ask_lane.py` (eval-only lane) | `tortoise/ask_lane.py` | **The ONLY home of the ask pipeline (#3849).** `run_ask_lane(sdk, …)` (13-field response) + `run_ask_assembled(sdk, …)` (connected assembly). Local graph only — hosted client mode (`TORTOISE_API_URL`) raises. Callers: eval/test code only — the LongMemEval A/B arm, `tools/ask_spotcheck.py` and the lane's own suites |
 | `POST /v1/ask` (hosted) | — | **REMOVED (#3849)** — no route, no handler, no path-scoped error translation |
-| `TortoiseSDK.ask()` / `.ask_assembled()` | — | **REMOVED (#3849)** — the SDK holds no ask code; the names do not resolve |
+| `TortoiseSDK.ask()` / `.ask_assembled()` | — | **REMOVED (#3849)** — no ask ENTRY POINT: the names do not resolve. The ask-path helpers the lane calls (`annotate_ask_hits`, the A1/A4 retrieval knobs) remain in `tortoise/sdk.py` |
 | MCP ask tool | — | **REMOVED (#3849)** — no registry entry, so absent from `tools/list` and `tools/call`; the `"ask"` curation group is gone |
 | `POST /v1/ask` (self-host REST) | — | **REMOVED (#3849)** alongside the hosted route |
 | `GET /v1/team` ask-usage | `tortoise/hosted_api.py` | `ask_calls/ask_tokens_in/ask_tokens_out/ask_cost_usd` for the current period; zeros for fresh teams (telemetry-follow-up scope) |

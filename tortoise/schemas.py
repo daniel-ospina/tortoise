@@ -122,8 +122,8 @@ ASK_ERROR_CODES: tuple[str, ...] = (
     CODE_INVALID_QUESTION_DATE, CODE_QUESTION_TOO_LONG,
 )
 
-#: Local-lane AskValidationError instance codes — pinned to the wire codes
-#: (P2-14): empty/whitespace → invalid_question, oversize →
+#: Local-lane AskValidationError instance codes — pinned to the canonical
+#: vocabulary constants (P2-14): empty/whitespace → invalid_question, oversize →
 #: question_too_long, bad type → invalid_question_type, bad date →
 #: invalid_question_date.
 VALIDATION_CODE_EMPTY = CODE_INVALID_QUESTION

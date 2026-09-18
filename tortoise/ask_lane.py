@@ -187,7 +187,7 @@ def _ask_reader_complete(model, *, system: str, user: str) -> tuple[str, int]:
     with ``finish_reason="length"`` (the reasoning-budget collapse class;
     the DeepSeekDirect variant is fixed by disabling thinking, #1790, but
     qwen refuses that knob). An empty model output is NEVER a legitimate
-    abstention — the two-phase prompt abstains in WRITING — so the product
+    abstention — the two-phase prompt abstains in WRITING — so the lane
     must not read a collapsed call as "no evidence" (the pre-#2280 behavior
     silently fabricated abstentions on answerable questions).
 
@@ -252,7 +252,7 @@ def _ask_validate(question: str, question_type: str | None,
     """Local-lane validation — the FIRST pipeline stage (P2-8: invalid
     inputs never reach retrieval — zero model calls AND zero retrieval
     calls). Raises ``AskValidationError`` with the pinned canonical
-    instance codes (matching the wire codes — P2-14)."""
+    instance codes (pinned to the canonical vocabulary constants — P2-14)."""
     from tortoise.schemas import (  # noqa: I001
         MAX_ASK_QUESTION_CHARS,
         ASK_QUESTION_TYPES,
@@ -307,9 +307,9 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     """EVAL-ONLY entry point — the LongMemEval A/B arm's reader path.
 
     ⛔ NOT A PRODUCT SURFACE (#3849): no MCP tool, no SDK method, no REST
-    route. Called only by the eval harness
-    (``tests/longmem_eval/test_assembly_arm.py``) and
-    ``tools/ask_spotcheck.py``. Requires a LOCAL graph: in hosted client
+    route. Called only from eval/test code — the LongMemEval arms,
+    ``tools/ask_spotcheck.py`` and the lane's own suites; no product
+    caller. Requires a LOCAL graph: in hosted client
     mode (``TORTOISE_API_URL`` set) it raises ``AskRetrievalUnavailable`` —
     the hosted ``/v1/ask`` surface no longer exists.
 
@@ -635,7 +635,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     # ``abstained`` is therefore ALWAYS the model's written abstention
     # decision, never a blank-output substitution. (The substitution is
     # retained as a defensive invariant for a future caller that skips
-    # the helper — it must never fire on the product path.)
+    # the helper — it must never fire on this lane's path.)
     if abstained and not answer:
         answer = NO_EVIDENCE_TEXT
 
@@ -737,7 +737,7 @@ def _ask_d8_decoration_unavailable(hits: list[dict]) -> bool:
     """D8-decoration-unavailable detection (P1-13/P1-5): terminal-status
     hits returned WITHOUT supersession keys when ``include_terminal=True``
     — the decoration silently failed to attach the markers, so the
-    evidence would render superseded content as current. 200 +
+    evidence would render superseded content as current — surfaced as
     ``retrieval_degraded=True`` (never a silent success)."""
     from tortoise.search_engine import TERMINAL_EXCLUDED_STATUSES
     for h in hits:
@@ -756,7 +756,7 @@ def run_ask_assembled(sdk: TortoiseSDK, question: str, *,
     """#2165 Task 6 — connected-assembly ask (the eval arm's reader path).
 
     ⛔ EVAL-ONLY (#3849) — not a product surface: no MCP tool, no SDK method,
-    no REST route. The LongMemEval B-arm is its only caller.
+    no REST route. Called only from eval/test code — no product caller.
 
     One fired pipeline (classify → resolve → walk → render → decorate →
     enrich → assemble) with a PURE-ASSEMBLY default: when no reader is
@@ -780,8 +780,8 @@ def run_ask_assembled(sdk: TortoiseSDK, question: str, *,
     if _os.environ.get("TORTOISE_API_URL"):
         raise AskRetrievalUnavailable(
             "ask_assembled requires a local graph (TORTOISE_API_URL is "
-            "set — the hosted /v1/ask surface does not expose the "
-            "connected-assembly branch)")
+            "set — the hosted /v1/ask surface was removed in #3849 and no "
+            "longer exists)")
     from tortoise.assembly import AssemblyAnswer as _AssemblyAnswer
     from tortoise.assembly import _assemble_connected
     from tortoise.reader import (

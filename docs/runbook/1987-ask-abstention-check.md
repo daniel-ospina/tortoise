@@ -72,7 +72,7 @@ Shipped as an optimisation loop (baseline → lever → measure → keep/revert)
 - **A3** ask-lane fusion weights/k knobs (default = shared global),
 - **A6** measurement-gated cap review (retrieval-window `limit` threaded in
   tandem with `context_item_cap`; default OFF = 40/40/8000),
-- **A7** product cross-encoder rerank behind `TORTOISE_ASK_RERANK` (default
+- **A7** eval-lane cross-encoder rerank behind `TORTOISE_ASK_RERANK` (default
   OFF, gated phase 2, degrade-to-untouched contract).
 
 **Measured baseline (embedded lane, `tools/ask_recall_bench.py`, seed 4):**
