@@ -361,8 +361,8 @@ _OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
     "ksh": frozenset({"-c", "-o", "+o"}),
     # env (GNU + BSD): ``-u``/``-C``/``-S``/``-P``/``--argv0`` take a word;
     # ``-i``/``-0``/``-v`` do not.
-    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S",
-                      "--split-string", "-P", "--path", "--argv0"}),
+    "env": frozenset({"-a", "--argv0", "-u", "--unset", "-C", "--chdir",
+                      "-S", "--split-string", "-P", "--path"}),
     # sudo: every option that names a user/group/dir/role/host/prompt takes a
     # word; ``-n``/``-s``/``-k``/``-i``/``-E``/``-S``/``-b``/``-A``/``-H`` are
     # booleans.
@@ -390,8 +390,8 @@ _OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
     "xargs": frozenset({
         "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof", "-i",
         "-I", "--replace", "-J", "-l", "-L", "--max-lines", "-n",
-        "--max-args", "-e", "-P", "--max-procs", "-R", "-s", "-S",
-        "--max-chars",
+        "--max-args", "-e", "-P", "--max-procs", "--process-slot-var",
+        "-R", "-s", "-S", "--max-chars",
     }),
     # Launchers whose option arity is DECLARED even when empty: an explicit
     # table keeps the coverage assertion below honest (every program launcher
@@ -729,6 +729,15 @@ def _invokes_script(command: str, script_name: str,
                 # A shell's ``-c`` argument is a command STRING to re-parse.
                 recurse_next = True
             elif tok in options:
+                skip_next = True
+            elif (len(tok) > 2 and tok.startswith("--") and "=" not in tok
+                    and any(o.startswith("--") and o.startswith(tok)
+                            for o in options)):
+                # GNU getopt_long accepts an unambiguous PREFIX of a long
+                # option (``timeout --sig`` == ``--signal``), so the option's
+                # value must be skipped even though ``--sig`` is not listed
+                # verbatim.  ``--`` (end of options) is excluded by length, as
+                # ``bash -- <hook>`` really runs the hook.
                 skip_next = True
             elif (len(tok) > 2 and not tok.startswith("--")
                     and any(("-" + ch) in options for ch in tok[1:])):

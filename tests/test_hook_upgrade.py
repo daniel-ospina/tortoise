@@ -1559,18 +1559,27 @@ class TestDeclaredThreatSurface:
         #   nice -n <hook>     -> the path is read as an ADJUSTMENT
         #   time -o <hook>     -> the path is read as the OUTPUT FILE
         #   xargs -J <hook>    -> the path is read as the REPLACEMENT STRING
+        #   env -a <hook>      -> the path is read as ARGV0
+        #   xargs --process-slot-var <hook> -> the path is read as the slot var
+        #   timeout --sig <hook> -> GNU getopt_long ABBREVIATION of --signal
         "sudo -u {abs}",
         "sudo -g {abs}",
         "sudo -c {abs}",
         "timeout -s {abs}",
+        "timeout --sig {abs}",
         "bash -o {abs}",
         "env -u {abs}",
+        "env -a {abs}",
+        "env --uns {abs}",
         "nice -n {abs}",
+        "nice --adj {abs}",
         "/usr/bin/time -o {abs}",
         "/usr/bin/time --output {abs}",
         "xargs -J {abs}",
         "xargs -R {abs}",
         "xargs -S {abs}",
+        "xargs --process-slot-var {abs}",
+        "xargs --max-a {abs}",
     ])
     def test_consumed_option_argument_is_not_a_registration(
             self, tmp_path, command):
@@ -1587,7 +1596,9 @@ class TestDeclaredThreatSurface:
         MUTATION: restore the ``skip_next`` safety net
         (``if _token_is_our_script(tok, …): return True``) → the consumed value
         is judged executed → no ``missing-hook-entry`` → no real entry is
-        added → RED.
+        added → RED.  The alias/abbreviation cases additionally RED if the
+        ``-a``/``--process-slot-var`` entries or the long-option prefix branch
+        are removed.
         """
         root = tmp_path / "project"
         abs_hook = root / ".claude" / "hooks" / "session-end.sh"
