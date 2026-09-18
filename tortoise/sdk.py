@@ -16078,12 +16078,15 @@ class TortoiseSDK:
             # #329 relief path: quota limits settable via the control plane so
             # an org at cap can be upgraded (no REST surface exists yet — the
             # fields are SDK/registry-level; get_current_org honors them).
-            # #4010: max_sessions is the EXCEPTION — retained here only until
-            # the surface cutting pass retires it (#3994, the live successor
-            # to the now-executed #3863). It is no longer a relief mechanism:
-            # every resolver returns an unlimited None and DELIBERATELY
-            # ignores a stored value, so a write here is accepted and has no
-            # quota effect.
+            # #4010: max_sessions is the EXCEPTION — retained here while the
+            # surface cutting pass decides the method's fate (#3994, the live
+            # successor to the now-executed #3863; `sdk:org_update` is one of
+            # its review rows, so a KEEP is possible). It is no longer a relief
+            # mechanism: every resolver returns an unlimited None and
+            # DELIBERATELY ignores a stored value, so a write here is accepted
+            # and has no quota effect. Even a kill removes the METHOD, not the
+            # graph property — the sweep stays the way a stored value is
+            # cleared.
             "max_points", "max_api_keys", "max_sessions",
         }
         invalid = set(fields.keys()) - allowed
