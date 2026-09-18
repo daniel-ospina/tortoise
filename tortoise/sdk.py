@@ -4892,15 +4892,26 @@ class TortoiseSDK:
         # host-independent verdict here would disagree with the read path.
         # #3982 owns the decision on date-only semantics.
         #
-        # A FALSEY stored validFrom ("") is treated as ABSENT — inherited
-        # from the resolution branch below and from `_covers`, never a new
-        # predicate; the guard's coverage claim is exactly that branch's.
+        # The guard's PRESENCE predicate is the read path's, not the
+        # resolution branch's. `_covers` gates on `vf is not None`, so a
+        # falsey-but-PRESENT stored value is a REAL window start there: `0`
+        # keys as the parseable epoch-0 instant, and `""` keys as an
+        # unparseable start that covers NOTHING (`_created_sort_key("")` =
+        # `(1, "")`, and `(1, x) > (0, y)` is always True). The resolution
+        # branch below gates on TRUTHINESS instead (`elif stored_vf:`), so for
+        # those two values it falls through to `createdAt`. The guard follows
+        # `_covers`: with a kwarg present it refuses rather than allow an
+        # unchecked window end against a start the read path treats as real
+        # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
+        # predecessor end the kwarg writes). The no-kwarg falsey case keeps
+        # the pre-existing truthiness fallback — its read/write divergence is
+        # real and tracked in #3985, not silently redefined here.
         vf_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
             params={"id": new_id},
         ).result_set
         stored_vf = vf_rows[0][0] if vf_rows else None
-        if valid_from is not None and stored_vf:
+        if valid_from is not None and stored_vf is not None:
             from .search_engine import _created_sort_key
             k_kwarg = _created_sort_key(str(valid_from))
             k_stored = _created_sort_key(stored_vf)

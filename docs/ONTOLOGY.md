@@ -34,7 +34,13 @@ doc_status: live
 >   whether the predecessor's `validTo` is orderable by `_covers` at all.
 >   A date-only value parses as **local** midnight, so the guard's verdict for a
 >   date-only-vs-offset-aware pair follows `_covers`'s own host-dependence
->   (issue **#3982**, which owns the date-only semantics decision). Deliberate
+>   (issue **#3982**, which owns the date-only semantics decision). The guard's
+>   **presence** predicate is also the read path's (`stored_vf is not None`), not
+>   the resolution branch's truthiness: a falsey-but-present stored `validFrom`
+>   is a real window start to `_covers` (`0` keys as the parseable epoch-0
+>   instant), so a kwarg against it is refused rather than written unchecked.
+>   The **no-kwarg** falsey case keeps the pre-existing truthiness fallback —
+>   that residual read/write divergence is tracked in **#3985**. Deliberate
 >   departure from the #1538 plan's unconditional "explicit `valid_from` kwarg
 >   wins" pin — recorded on #1538.
 >

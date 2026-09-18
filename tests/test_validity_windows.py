@@ -224,6 +224,34 @@ def test_supersede_numeric_epoch_kwarg_refused(sdk):
     assert "validTo" not in _props(sdk, old["id"])
 
 
+def test_supersede_falsey_but_present_stored_valid_from_refused(sdk):
+    """The guard's PRESENCE predicate is the read path's, not the resolution
+    branch's truthiness.
+
+    ``_covers`` gates on ``vf is not None``, so a falsey-but-present stored
+    ``validFrom`` is a real window start there: ``0`` keys as the parseable
+    epoch-0 instant and ``""`` keys as an unparseable start that covers
+    nothing. Trusting the kwarg in that case wrote a predecessor ``validTo``
+    INSIDE the successor's ``[epoch0, ∞)`` window ⇒ ``ambiguous`` — the exact
+    overlap this guard exists to prevent. Both forms are refused.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    # epoch-0: present AND parseable to the read path
+    new_zero = _make_point(sdk, content="claim v2", validFrom=0)
+    assert _props(sdk, new_zero["id"])["validFrom"] == 0
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new_zero["id"],
+                            valid_from="2026-06-10")
+    assert "validTo" not in _props(sdk, old["id"])
+    # empty string: present but unparseable ⇒ not orderable by _covers
+    new_empty = _make_point(sdk, content="claim v3", validFrom="")
+    assert _props(sdk, new_empty["id"])["validFrom"] == ""
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new_empty["id"],
+                            valid_from="2026-06-14")
+    assert "validTo" not in _props(sdk, old["id"])
+
+
 def test_supersede_unparseable_valid_from_refused(sdk):
     """An unparseable kwarg cannot be shown to name the stored instant, and
     ``_covers`` cannot order it — refused rather than written."""
