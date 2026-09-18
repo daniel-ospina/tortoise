@@ -71,6 +71,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from tests._html_links import extract_anchor_hrefs
+
 # ── Opt-in short-circuit (cycle-4 P1-1) — FIRST executable statement. ──────
 # A plain module-level runtime call: pytest.skip() in module code skips the
 # whole module at collection WITHOUT erroring. NEVER pytest.exit().
@@ -429,29 +431,20 @@ def _footer_links_present(content: str) -> None:
 def _has_blog_entry(content: str) -> bool:
     """True when the served HTML carries an ANCHOR into the blog (#3950).
 
-    Extracts from RENDERED markup, with the same two rules the static guard uses
-    (`_rendered_hrefs` in `tests/test_website_docs_consistency.py`): comments,
-    `<script>` and `<style>` are stripped first, and a quoted OR unquoted href
-    value is accepted. Those rules are what make the two layers agree about what
-    a way in is — an anchor that exists only inside a comment or a `<script>`
-    string satisfies neither, so the production check cannot stay green while the
-    static guard correctly reports the link as lost. (Before this was mirrored the
-    two could disagree: the E2E half counted a commented-out anchor the static
-    half rejected — review finding on PR #3962.)
+    Uses the SAME extractor the static guard uses (`extract_anchor_hrefs`, in
+    `tests/_html_links.py`), so the two layers cannot disagree about what a way
+    in is. That is not a stylistic preference: an earlier revision of this helper
+    scanned the raw document, so a commented-out or `<script>`-only anchor
+    satisfied the production check while the static guard correctly reported the
+    link as lost — and no test could catch the divergence, because importing this
+    module runs its module-level `pytest.skip`.
 
     `href="/blog"` (the index) and `/blog/<slug>` (a post — its own nav links
     back) both count. Any host is accepted, so `premiselabs.co/blog` (which 301s
     to the tortoise host) is as valid as the absolute tortoise form; and because
-    the match is on the anchor, a `<link rel="prefetch">` is not a way in.
-
-    The extraction rule is duplicated here rather than imported because this is a
-    separate suite with its own harness gates; if you change the patterns in one,
-    change them in the other.
+    the extractor reads anchors, a `<link rel="prefetch">` is not a way in.
     """
-    for pattern in (r"<!--.*?-->", r"<script\b.*?</script\s*>", r"<style\b.*?</style\s*>"):
-        content = re.sub(pattern, "", content, flags=re.S | re.I)
-    paths = [urlsplit(h).path.rstrip("/") for h in re.findall(
-        r'<a\b[^>]*?\bhref\s*=\s*["\']?([^"\'\s>]+)', content, re.I)]
+    paths = [urlsplit(h).path.rstrip("/") for h in extract_anchor_hrefs(content)]
     return any(p == "/blog" or p.startswith("/blog/") for p in paths)
 
 

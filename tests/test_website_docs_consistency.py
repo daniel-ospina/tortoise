@@ -40,6 +40,8 @@ if str(REPO_ROOT) not in sys.path:  # tools/ is not an installed package
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.ci_selection import load_manifest, select  # noqa: E402, I001
+from tests._html_links import extract_anchor_hrefs  # noqa: E402
+
 WEBSITE = REPO_ROOT / "website"
 FUNCTIONS = WEBSITE / "functions"
 PRODUCT = WEBSITE / "product.html"
@@ -392,19 +394,14 @@ def _in_scope_pages() -> list[Path]:
 def _rendered_hrefs(html: str) -> list[str]:
     """Hrefs of real anchors in rendered markup.
 
-    Comments, `<script>` and `<style>` are stripped first: a URL that appears
-    only inside those is not a link, so it must not be able to satisfy the guard.
-
-    The href value may be quoted or unquoted — HTML5 permits both, and an
-    unquoted `<a href=/blog>` is a working link in every browser. Requiring quotes
-    would turn correct markup into a mystifying red whose cause (a missing quote,
-    not a missing link) is invisible in the failure message. `tests/e2e/
-    test_legal_pages.py::_has_blog_entry` carries the same two rules on purpose:
-    the static guard and the production check must agree about what a way in is.
+    Thin wrapper over the shared extractor in `tests/_html_links.py`, which the
+    E2E layer also calls. That is deliberate: the two layers must agree about what
+    a way in is, and the E2E copy had already drifted (it did not strip comments,
+    `<script>` or `<style>`) with no test able to detect it — importing the E2E
+    module runs its module-level `pytest.skip`. One implementation removes the
+    drift class rather than documenting it.
     """
-    for pattern in (r"<!--.*?-->", r"<script\b.*?</script\s*>", r"<style\b.*?</style\s*>"):
-        html = re.sub(pattern, "", html, flags=re.S | re.I)
-    return re.findall(r'<a\b[^>]*?\bhref\s*=\s*["\']?([^"\'\s>]+)', html, re.I)
+    return extract_anchor_hrefs(html)
 
 
 def _href_path(href: str) -> str:
@@ -521,11 +518,22 @@ def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     # Unquoted href values are valid HTML5 and must count as links, not vanish.
     assert _rendered_hrefs("<a href=/blog>Blog</a>") == ["/blog"]
     assert _rendered_hrefs("<a href = '/blog'>Blog</a>") == ["/blog"]
+    assert _rendered_hrefs('<A HREF="/blog">Blog</A>') == ["/blog"]
     assert _rendered_hrefs('<!-- <a href="/blog">Blog</a> -->') == []
     # These MUST carry a real anchor: without one they return [] even with the
     # stripping removed, so they would prove nothing (review finding, #3962).
     assert _rendered_hrefs('<script>const t = \'<a href="/blog">B</a>\';</script>') == []
     assert _rendered_hrefs('<style>/* <a href="/blog">B</a> */</style>') == []
+    # An `href=` inside ANOTHER attribute's value is not this tag's href. A regex
+    # with an optional quote reported one here (review finding, #3962); the shared
+    # parser must not.
+    assert _rendered_hrefs('<a title="see href=/blog">x</a>') == []
+    assert _rendered_hrefs('<a onclick="location.href=/blog">x</a>') == []
+    assert _rendered_hrefs('<a data-href="/blog">x</a>') == []
+    # Not a link: a non-anchor element, and a valueless or empty href.
+    assert _rendered_hrefs('<link rel="prefetch" href="/blog">') == []
+    assert _rendered_hrefs("<a href>x</a>") == []
+    assert _rendered_hrefs('<a href="">x</a>') == []
     assert _href_path("/blog") == "/blog"
     assert _href_path("https://tortoise.premiselabs.co/blog") == "/blog"
     assert _href_path("https://tortoise.premiselabs.co/blog/") == "/blog"
