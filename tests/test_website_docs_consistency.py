@@ -672,6 +672,23 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     )
 
 
+def test_guard_reachable_helper_handles_the_full_selection_sentinel() -> None:
+    """Pin BOTH branches of `_guard_reachable_for`, including the unhit one.
+
+    Every path the two ratchets above pass resolves to `full=False`, so the
+    `full`-sentinel branch was UNPINNED: the pre-fix expression
+    (`"test_website_docs_consistency.py" not in "ALL"` -> True) still passed every
+    test in this file and in `test_ci_selection.py`, so the bug could have been
+    reintroduced silently (review finding, #3962). Both directions are asserted
+    here directly, which is the only place the sentinel is exercised.
+    """
+    # Full selection: `test_files` is the STRING "ALL", so a bare membership test
+    # reads as `not in "ALL"` -> True and would call a covered path unselectable.
+    assert _guard_reachable_for(".github/workflows/python-ci.yml") is True
+    # A path that selects no surface at all: genuinely not covered by this module.
+    assert _guard_reachable_for("website/blog/index.html") is False
+
+
 def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     """Guard the guard: the extractor must not be satisfiable by a non-link.
 
