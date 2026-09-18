@@ -1548,20 +1548,29 @@ class TestDeclaredThreatSurface:
     """One test per declared class; each names the mutation that REDs it."""
 
     @pytest.mark.parametrize("command", [
-        # A launcher option whose separate VALUE is our path.  none of these
+        # A launcher option whose separate VALUE is our path.  None of these
         # commands executes the hook:
         #   sudo -u <hook>     -> the path is read as a USERNAME
         #   sudo -g <hook>     -> the path is read as a GROUP
+        #   sudo -c <hook>     -> the path is read as a CLASS
         #   timeout -s <hook>  -> the path is read as a SIGNAL NAME
         #   bash -o <hook>     -> the path is read as an OPTION NAME
         #   env -u <hook>      -> the path is read as a VARIABLE NAME
         #   nice -n <hook>     -> the path is read as an ADJUSTMENT
+        #   time -o <hook>     -> the path is read as the OUTPUT FILE
+        #   xargs -J <hook>    -> the path is read as the REPLACEMENT STRING
         "sudo -u {abs}",
         "sudo -g {abs}",
+        "sudo -c {abs}",
         "timeout -s {abs}",
         "bash -o {abs}",
         "env -u {abs}",
         "nice -n {abs}",
+        "/usr/bin/time -o {abs}",
+        "/usr/bin/time --output {abs}",
+        "xargs -J {abs}",
+        "xargs -R {abs}",
+        "xargs -S {abs}",
     ])
     def test_consumed_option_argument_is_not_a_registration(
             self, tmp_path, command):
@@ -1598,6 +1607,7 @@ class TestDeclaredThreatSurface:
     @pytest.mark.parametrize("command", [
         "echo $(({abs}))",    # arithmetic: operands, never executed
         "x=$(({abs}))",       # arithmetic inside an assignment value
+        "(({abs}))",          # the arithmetic COMMAND form (no leading $)
     ])
     def test_arithmetic_operand_is_not_a_registration(self, tmp_path, command):
         """CLASS 1 (fail-open), second reproduction: ``$((…))`` is an
@@ -1606,9 +1616,9 @@ class TestDeclaredThreatSurface:
         Treating the two alike lets ``echo $((<hook>))`` count as our
         registration while bash runs nothing.
 
-        MUTATION: drop the ``$((`` branch from ``_split_command`` → the two
-        ``(`` tokens reset executable position → the operand is judged
-        executed → no ``missing-hook-entry`` → RED.
+        MUTATION: drop the ``$((`` branch from ``_split_command`` AND the
+        ``((`` arithmetic-command block → the parens reset executable position
+        → the operand is judged executed → no ``missing-hook-entry`` → RED.
         """
         root = tmp_path / "project"
         abs_hook = root / ".claude" / "hooks" / "session-end.sh"
@@ -1646,10 +1656,27 @@ class TestDeclaredThreatSurface:
         ours = _our_entry(_settings(root), "SessionEnd", "session-end.sh")
         assert ours["timeout"] == 60
 
+    def test_every_launcher_declares_its_option_arity(self):
+        """STRUCTURAL guard for the class-1 mechanism: the fix keys option
+        arity by launcher, so a launcher with NO key silently defaults to
+        "no option takes an argument" — exactly how ``time -o <hook>`` and
+        ``xargs -J <hook>`` stayed fail-open.  Every program launcher must
+        declare a table (possibly empty); only shell syntax may be declared
+        option-less.
+
+        MUTATION: drop the ``"time"`` key (or ``"setsid"``/``"nohup"``, or
+        add a new launcher to ``_LAUNCHERS`` without a table) → the launcher
+        is in neither declared set → RED.
+        """
+        declared = set(hook_install._OPTIONS_WITH_ARG) | set(
+            hook_install._OPTION_LESS_LAUNCHERS)
+        assert set(hook_install._LAUNCHERS) == declared
+
     @pytest.mark.parametrize("command", [
         "/bin/bash {abs}",
         "/usr/bin/env bash {abs}",
         "/bin/sh -c '{abs}'",
+        "'/bin/bash' {abs}",       # a QUOTED path-qualified launcher
     ])
     def test_path_qualified_launcher_is_recognised(self, tmp_path, command):
         """CLASS 2 (false negative): a path-qualified launcher execs the hook

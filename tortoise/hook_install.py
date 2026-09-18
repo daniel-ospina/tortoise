@@ -367,23 +367,53 @@ _OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
     # word; ``-n``/``-s``/``-k``/``-i``/``-E``/``-S``/``-b``/``-A``/``-H`` are
     # booleans.
     "sudo": frozenset({
-        "-a", "--auth-type", "-C", "--close-from", "-D", "--chdir",
-        "-g", "--group", "-h", "--host", "-p", "--prompt", "-R",
-        "--chroot", "-r", "--role", "-t", "--type", "-T",
-        "--command-timeout", "-u", "--user", "-U", "--other-user",
+        "-a", "--auth-type", "-c", "--class", "-C", "--close-from",
+        "-D", "--chdir", "-g", "--group", "-h", "--host", "-p",
+        "--prompt", "-R", "--chroot", "-r", "--role", "-t", "--type",
+        "-T", "--command-timeout", "-u", "--user", "-U", "--other-user",
     }),
     "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    # GNU/BSD ``time``: ``-o file``/``--output`` and GNU ``-f``/``--format``
+    # take the next word.  ``time`` is a LAUNCHER, so an unlisted argument-
+    # taking option (``time -o <hook>``) parsed ``<hook>`` as the timed command
+    # and reported a healthy install while BSD time consumed it as the output
+    # file and ran nothing.
+    "time": frozenset({"-o", "--output", "-f", "--format"}),
     "nice": frozenset({"-n", "--adjustment"}),
     "ionice": frozenset({"-c", "--class", "-n", "--classdata", "-p", "--pid",
                          "-P", "--pgid", "-u", "--uid"}),
     "exec": frozenset({"-a"}),
+    # GNU + BSD xargs: BSD adds ``-J``/``-R``/``-S`` (all take a word) and the
+    # optional-argument ``-i``/``-l``/``-e``.  Omitting ``-J``/``-R``/``-S``
+    # made ``xargs -J <hook>`` parse ``<hook>`` as the utility and report a
+    # healthy install while BSD xargs consumed it as the replacement string.
     "xargs": frozenset({
-        "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof", "-I",
-        "--replace", "-L", "--max-lines", "-n", "--max-args", "-P",
-        "--max-procs", "-s", "--max-chars",
+        "-a", "--arg-file", "-d", "--delimiter", "-E", "--eof", "-i",
+        "-I", "--replace", "-J", "-l", "-L", "--max-lines", "-n",
+        "--max-args", "-e", "-P", "--max-procs", "-R", "-s", "-S",
+        "--max-chars",
     }),
+    # Launchers whose option arity is DECLARED even when empty: an explicit
+    # table keeps the coverage assertion below honest (every program launcher
+    # declares its arity) instead of relying on a missing key defaulting to
+    # "nothing takes an argument" — the exact shape that hid ``time -o`` and
+    # ``xargs -J``.  ``setsid`` has no documented argument-taking option, but
+    # ``-t``/``--wait-timeout`` are listed defensively: real util-linux setsid
+    # rejects them (so bash runs nothing) and a future version that accepts
+    # them takes a word — either way the hook is not the program.
+    "setsid": frozenset({"-t", "--wait-timeout"}),
+    "nohup": frozenset(),
+    # firejail documents every value-taking option in the ``--opt=value`` form
+    # (there is no separate-argument form to skip); its bare long options are
+    # boolean.
     "firejail": frozenset(),
 }
+
+#: Launchers that are shell syntax, not programs, and so cannot have options.
+_OPTION_LESS_LAUNCHERS = frozenset({
+    "eval", "!", ".", "source", "if", "while", "until", "then", "do",
+    "else", "elif", "`",
+})
 
 #: An environment assignment prefix (``A=/x/y``, ``PATH=$PATH:/bin``).
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -392,34 +422,41 @@ _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _LAUNCHER_OPERAND_RE = re.compile(r"^[0-9]+(\.[0-9]+)?[smhd]?$")
 
 
-def _as_launcher(tok: str) -> str | None:
+def _as_launcher(tok: str, quoted: bool = False) -> str | None:
     """The launcher basename for ``tok``, or ``None`` when it is not one.
 
     ``/bin/sh``, ``/usr/bin/env`` and ``./bash`` exec exactly the program the
     bare name does, so they are launchers too: recognising only the bare name
     made ``/bin/bash <hook>`` look like a foreign entry, which reported a
     working install as ``missing-hook-entry`` and appended a DUPLICATE
-    registration (the hook then ran twice per event).  The first check keeps
-    the non-path launchers (``.``, ``!``, ```` ` ````) which ``Path`` mangles.
+    registration (the hook then ran twice per event).
+
+    A QUOTED single word that names a real launcher PROGRAM (``'/bin/bash'``,
+    ``'env'``) is also accepted — bash removes the quotes and runs the program
+    — but a quoted shell KEYWORD (``'if'``) is a plain command name, not the
+    reserved word, so it must not open an operand position.  The final check
+    keeps the exact unquoted non-path launchers (``.``, ``!``, ```` ` ````)
+    which ``Path`` mangles.
     """
-    if tok in _LAUNCHERS:
-        return tok
-    name = Path(tok).name
-    return name if name in _LAUNCHERS else None
+    name = tok if tok in _LAUNCHERS else Path(tok).name
+    if name in _OPTIONS_WITH_ARG:
+        return name  # a real launcher program: path-qualified and quoted both run it
+    if not quoted and tok in _LAUNCHERS:
+        return tok   # exact unquoted shell keyword/builtin (never path-qualified)
+    return None
 
 
-def _arithmetic_expansion_end(command: str, start: int) -> int | None:
-    """End index (exclusive) of the ``$((…))`` opening at ``start``, or None.
+def _balanced_parens_end(command: str, start: int, open_len: int,
+                        depth: int) -> int | None:
+    """End index (exclusive) of a balanced paren group, or ``None``.
 
-    ``$((`` opens an ARITHMETIC expansion — its contents are operands, not
-    commands — so ``echo $((<hook>))`` (and ``x=$((<hook>))``) executes
-    nothing, while ``echo $(<hook>)`` (single paren: command substitution)
-    really does run the hook.  Nesting is counted so a ``$(…)`` inside the
-    arithmetic closes the right paren; an unterminated expansion is a bash
-    syntax error that executes nothing, reported as ``None``.
+    ``open_len`` is the width of the opener (3 for ``$((``, 2 for ``((``) and
+    ``depth`` is how many ``(`` that opener contributes.  Used for the two
+    ARITHMETIC forms, whose contents are operands, never commands.  Nesting is
+    counted so a ``$(…)`` inside closes the right paren; an unterminated group
+    is a bash syntax error that executes nothing, reported as ``None``.
     """
-    i, n = start + 3, len(command)  # past ``$((``, depth starts at 2
-    depth = 2
+    i, n = start + open_len, len(command)
     while i < n:
         ch = command[i]
         if ch == "(":
@@ -430,6 +467,17 @@ def _arithmetic_expansion_end(command: str, start: int) -> int | None:
                 return i + 1
         i += 1
     return None
+
+
+def _arithmetic_expansion_end(command: str, start: int) -> int | None:
+    """End index (exclusive) of the ``$((…))`` opening at ``start``, or None.
+
+    ``$((`` opens an ARITHMETIC expansion — its contents are operands, not
+    commands — so ``echo $((<hook>))`` (and ``x=$((<hook>))``) executes
+    nothing, while ``echo $(<hook>)`` (single paren: command substitution)
+    really does run the hook.
+    """
+    return _balanced_parens_end(command, start, 3, 2)
 
 
 def _split_command(command: str) -> list[tuple[str, bool]] | None:
@@ -475,6 +523,15 @@ def _split_command(command: str) -> list[tuple[str, bool]] | None:
             else:
                 for ch in run:
                     tokens.append((ch, False))
+            i = j
+            continue
+        if c == "(" and command.startswith("((", i):
+            # ``((expr))`` is an arithmetic COMMAND: its contents are operands,
+            # never commands (the same family as ``$((…))``).  A lone ``(`` —
+            # or ``( (`` with a space — is a subshell and stays a boundary.
+            j = _balanced_parens_end(command, i, 2, 2)
+            if j is None:
+                return None  # unterminated ``((`` — bash executes nothing
             i = j
             continue
         if c in "(){}\\`":
@@ -658,11 +715,10 @@ def _invokes_script(command: str, script_name: str,
             continue
         if not quoted and tok in ("-v", "-V") and launcher_word == "command":
             return False  # ``command -v <path>`` is a query, not an execution
-        if not quoted:
-            launcher = _as_launcher(tok)
-            if launcher is not None:
-                launcher_word = launcher
-                continue
+        launcher = _as_launcher(tok, quoted)
+        if launcher is not None:
+            launcher_word = launcher
+            continue
         if not quoted and tok.startswith("-"):
             if launcher_word in _SHELLS and (
                     tok == "--noexec"
