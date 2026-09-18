@@ -234,7 +234,7 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
     host timezone. (The predecessors' date-only ``validFrom`` above is never
     passed to the guard; date-only parses as LOCAL midnight, the #3982
     behaviour, so it is deliberately kept out of the comparison.) Four
-    properties, and the file needs all of them:
+    properties:
 
       * same day, different instant → REFUSED. Without this, a guard weakened
         to CALENDAR-DAY equality (``epoch // 86400``) would accept it. The
@@ -242,11 +242,11 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
         leaves a GAP between the predecessor's end and the successor's start,
         a LATER one an OVERLAP — see case (a) and the parent
         ``test_supersede_disagreeing_valid_from_refused`` for both.
-      * sub-second disagreement → REFUSED (case (c), 0.8 s apart). This is what
-        bounds the comparison's resolution: a tolerance-based equality
+      * sub-second disagreement → REFUSED (case (c), 0.8 s apart). This case
+        refuses a difference below one second, which the coarsest weakened
+        guards would accept: a tolerance-based equality
         (``abs(kwarg - stored) < 1.0``) or whole-second truncation
-        (``int(x)``) survives every other test in this file, because the
-        smallest gap it pins otherwise is 12 hours.
+        (``int(x)``) treats these two instants as equal, so it fails here.
       * disagreement of ONE MICROSECOND → also REFUSED (case (e)), and a zero
         difference with a DIFFERENT fractional encoding → accepted (case (f)).
         Together they pin exactness rather than a tolerance down to the 1 µs
@@ -257,9 +257,13 @@ def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
         ``test_supersede_valid_from_below_microsecond_disagreement_refused``.
       * same instant, DIFFERENT non-zero offsets → ACCEPTED, and the value the
         caller passed is what gets persisted (``str(valid_from)``, not the
-        stored form). Cases (b) and (d) exercise ``_created_sort_key``'s offset
-        arithmetic through the guard; every other literal in this file is
-        date-only, ``Z`` or ``+00:00``, which never reaches it.
+        stored form). Cases (b) and (d) are the only literals in this file
+        carrying an EXPLICIT non-zero UTC offset, so they are the only ones
+        that exercise ``_created_sort_key``'s offset arithmetic through the
+        guard; every other ISO literal here is date-only or zero-offset
+        (``Z``/``+00:00``). The file's NON-ISO literals (numeric ``5e-10``,
+        ``1781049600.0``, ``0``; the strings ``""`` and ``"not-a-date"``)
+        never reach the ISO branch at all.
     """
     # (a) same day, 12 hours EARLIER → refused (would leave a GAP)
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
