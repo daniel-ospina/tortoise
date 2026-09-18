@@ -613,6 +613,14 @@ def test_wide_leg_exclusions_are_tracked_too(client, monkeypatch):
     body = client.get("/v1/activation/scorecard", params=WINDOW).json()
     assert body["stages"]["recall_attempted"]["state"] == "unavailable", body
     assert body["detail"]["unparseable_analytic_rows_wide"] == 1, body["detail"]
+    # The reason must name the counter that is actually dirty: a wide-only row
+    # is skipped by the NARROW pass, so `unparseable_analytic_rows` reads 0 and
+    # reporting the exclusion under that name would contradict it.
+    assert body["detail"]["unparseable_analytic_rows"] == 0, body["detail"]
+    assert (body["stages"]["recall_attempted"]["reason"]
+            == "unparseable_analytic_rows_wide"), body["stages"]
+    # A refused count is never published as a lower bound.
+    assert body["detail"]["recall_attempted_after_memory"] is None, body["detail"]
 
 
 def test_retrieval_allowlist_is_pinned_by_name_and_cannot_be_silently_widened():
@@ -1601,6 +1609,16 @@ def test_recall_any_is_exact_or_absent_on_every_path():
     _, s2 = recall_stages([42, *clean], None, memory_sessions=0, window=window)
     assert s2["recall_attempted_any"] is None, s2
     assert s2["unclassifiable_analytic_rows"] == 1, s2
+    # A WIDE-only unplaceable row withholds the count on the NO-MEMORY path
+    # too — the narrow pass skips it before reading its timestamp, so without
+    # the wide fold the key would be present here and absent on the counting
+    # path for the same input.
+    wide_bad = [{"properties": {"tool_name": "tortoise_query"},
+                 "created_at": "not-a-timestamp"}]
+    _, s2b = recall_stages(wide_bad, None, memory_sessions=0, window=window)
+    assert s2b["recall_attempted_any"] is None, s2b
+    assert s2b["unparseable_analytic_rows"] == 0, s2b
+    assert s2b["unparseable_analytic_rows_wide"] == 1, s2b
 
     # A truncated page is a lower bound, not a count.
     _, s3 = recall_stages(clean * 1000, None, memory_sessions=0,
@@ -1617,6 +1635,14 @@ def test_recall_any_is_exact_or_absent_on_every_path():
     assert stage5["state"] == "unavailable", stage5
     assert stage5["reason"] == "unparseable_analytic_rows", stage5
     assert s5["recall_attempted_any"] is None, s5
+    # ...and a WIDE-only unplaceable row names the WIDE counter, never the
+    # narrow one (which reads 0).
+    stage5b, s5b = recall_stages(wide_bad, "2026-09-16T01:00:00+00:00",
+                                 memory_sessions=1, window=window)
+    assert stage5b["reason"] == "unparseable_analytic_rows_wide", stage5b
+    assert s5b["unparseable_analytic_rows_wide"] == 1, s5b
+    assert s5b["unparseable_analytic_rows"] == 0, s5b
+    assert s5b["recall_attempted_after_memory"] is None, s5b
     # ...and the measured path still reports it.
     stage6, s6 = recall_stages(clean, "2026-09-16T01:00:00+00:00",
                                memory_sessions=1, window=window)

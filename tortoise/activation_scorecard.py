@@ -531,6 +531,27 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
                 "requested window [%s, %s) — the created_at predicate did not "
                 "apply", out_of_range, window[0], window[1])
 
+    # `recall_attempted_any` and its exclusion counters are computed ONCE, for
+    # EVERY path: the count is independent of the lifetime value, so a path
+    # that refuses the STAGE must not also discard an exact count or report
+    # false-zero exclusions. Emitted only when EXACT — the window verified (the
+    # scan above), the page not truncated, and every fetched row placeable and
+    # classifiable over BOTH allowlists (a WIDE-only unplaceable row makes the
+    # count a lower bound too). The counters are published either way, so a
+    # withheld count names its reason. The STAGE is unaffected.
+    if window is not None and not window_failed and not truncated:
+        since_at = _coerce_created_at(window[0])
+        if since_at is not None:
+            any_total, any_unp, any_unc = _count_allowlisted(rows, since_at)
+            _, any_unp_wide, any_unc_wide = _count_allowlisted(
+                rows, since_at, RETRIEVAL_TOOL_ALLOWLIST_WIDE)
+            detail["unparseable_analytic_rows"] = any_unp
+            detail["unclassifiable_analytic_rows"] = any_unc
+            detail["unparseable_analytic_rows_wide"] = any_unp_wide
+            detail["unclassifiable_analytic_rows_wide"] = any_unc_wide
+            if not (any_unp or any_unc or any_unp_wide or any_unc_wide):
+                detail["recall_attempted_any"] = any_total
+
     if first_memory_at is None:
         # Distinguish the two reasons `first_memory_at` can be NULL, because
         # they carry opposite meanings. `LIFETIME_MEMORY_QUERY` returns a
@@ -538,21 +559,6 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
         # with a NULL min means memory EXISTS but carries no timestamp — a data
         # gap, not an absence. Reading that as "no memory was ever produced"
         # would report nothing-to-measure for an org that has memory.
-        if window is not None and not window_failed and not truncated:
-            # `recall_attempted_any` is emitted only when it is EXACT: the
-            # window is verified, the page was not truncated, and every fetched
-            # row is placeable and classifiable. The exclusion counters are
-            # published either way, so a withheld count names its reason. The
-            # STAGE is unaffected: an org with no memory stays `not_measurable`,
-            # it does not become `unavailable`.
-            since_at = _coerce_created_at(window[0])
-            if since_at is not None:
-                any_total, any_unparseable, any_unclassifiable = (
-                    _count_allowlisted(rows, since_at))
-                detail["unparseable_analytic_rows"] = any_unparseable
-                detail["unclassifiable_analytic_rows"] = any_unclassifiable
-                if not (any_unparseable or any_unclassifiable):
-                    detail["recall_attempted_any"] = any_total
         if memory_sessions:
             return _stage(None, "calls", "first_memory_at_missing"), detail
         # No memory has ever been produced, so no retrieval can have been
@@ -598,31 +604,36 @@ def recall_stages(rows: Iterable[dict] | None, first_memory_at: str | None,
     # tracked too, so the bound cannot silently under-count the same way.
     detail["unparseable_analytic_rows_wide"] = wide_unparseable
     detail["unclassifiable_analytic_rows_wide"] = wide_unclassifiable
-    detail["recall_attempted_after_memory"] = narrow
-    detail["recall_attempted_after_memory_wide"] = wide
-    if unparseable or wide_unparseable:
+    # The reason names the COUNTER that is actually dirty: a WIDE-only
+    # exclusion must not be reported under the narrow counter's name while that
+    # counter reads 0. (`unclassifiable` is allowlist-independent, so narrow
+    # and wide agree there; `unparseable` is not, because a wide-only tool name
+    # is skipped by the narrow pass before its timestamp is read.)
+    if unparseable:
         # An allowlisted call whose timestamp will not parse cannot be placed
         # relative to first_memory_at, so it is excluded from the count — which
         # makes the count a LOWER BOUND. Reporting a lower bound as `measured`
         # is the same class of bug as counting an unverifiable row in the
         # window guard, so it is refused here for the same reason.
         return _stage(None, "calls", "unparseable_analytic_rows"), detail
-    if unclassifiable or wide_unclassifiable:
+    if wide_unparseable:
+        return _stage(None, "calls",
+                      "unparseable_analytic_rows_wide"), detail
+    if unclassifiable:
         # This store holds `mcp_tool_call` rows only (the read filters on
         # event_name), so a call whose tool_name cannot be read is a call we
         # cannot rule OUT of the retrieval set. Excluding it silently would
         # again make the count a lower bound — the number would look exact.
         return _stage(None, "calls", "unclassifiable_analytic_rows"), detail
-    # The unconditioned count, computed over the WINDOW (not over the whole
-    # history) and only after every exclusion above has been ruled out — so it
-    # means the same thing here as on the no-memory path, where an unplaceable
-    # row withholds it instead of counting it.
-    since_at = _coerce_created_at(window[0])
-    if since_at is not None:
-        any_total, any_unparseable, any_unclassifiable = _count_allowlisted(
-            rows, since_at)
-        if not (any_unparseable or any_unclassifiable):
-            detail["recall_attempted_any"] = any_total
+    if wide_unclassifiable:
+        return _stage(None, "calls",
+                      "unclassifiable_analytic_rows_wide"), detail
+    # Only now is the count EXACT. The memory-conditioned counts are emitted
+    # here and nowhere else, so they are never a lower bound that reads like a
+    # count (the unconditioned `recall_attempted_any` is computed once, above,
+    # on every path).
+    detail["recall_attempted_after_memory"] = narrow
+    detail["recall_attempted_after_memory_wide"] = wide
     return _stage(narrow, "calls"), detail
 
 
