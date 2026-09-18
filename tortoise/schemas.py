@@ -19,7 +19,7 @@ from __future__ import annotations
 MAX_ASK_QUESTION_CHARS = 2000
 
 #: The 4 fragment types + None (the closed question_type enum). Anything
-#: else → 400 ``invalid_question_type`` with the valid list.
+#: else → ``invalid_question_type`` with the valid list.
 ASK_QUESTION_TYPES: tuple[str | None, ...] = (
     "temporal-reasoning", "knowledge-update", "multi-session",
     "single-session-preference", None,
@@ -66,7 +66,7 @@ _PUNCT_CATEGORIES = frozenset(("Pc", "Pd", "Pe", "Pf", "Pi", "Po", "Ps"))
 
 
 def ask_question_is_punctuation_only(question: str) -> bool:
-    """Punctuation-only question → 400 ``invalid_question`` (P2-20): after
+    """Punctuation-only question → ``invalid_question`` (P2-20): after
     strip, every remaining char is a Unicode punctuation category or
     whitespace (so ".", "?!", "…" reject; "a.", digits-only, and
     emoji/Symbol questions pass). Empty-after-strip is the caller's empty
