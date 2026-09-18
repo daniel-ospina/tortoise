@@ -92,15 +92,21 @@ def test_top_level_404_html_exists() -> None:
     # It must not RE-REDIRECT the visitor home: a not-found page that bounces to
     # `/` discards the requested address exactly as the soft-404 did — the
     # symptom this change exists to remove, wearing a 404 status (#4006 review).
+    # Whitespace-NORMALIZED (#4006 review cycle 2): `window.location = "/"` and
+    # `window.location="/"` are the same redirect, so a space-sensitive
+    # substring list let the no-space form through. `location=` covers the
+    # assignment in every spelling (`window.`/`document.`/`top.`/bare), and the
+    # page's own `location.pathname` read does not contain it.
+    normalized = re.sub(r"\s+", "", body)
     redirect_markers = (
         'http-equiv="refresh"',
         "http-equiv='refresh'",
         "location.replace(",
         "location.assign(",
-        "location.href",
-        "window.location =",
+        "location.href=",
+        "location=",
     )
-    redirected = [m for m in redirect_markers if m in body]
+    redirected = [m for m in redirect_markers if m in normalized]
     assert not redirected, (
         "404.html must state that the address was not found, not redirect the "
         f"visitor away from it — found {redirected!r} (#4006 review)"
