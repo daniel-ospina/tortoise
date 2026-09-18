@@ -9,7 +9,8 @@ import {
   HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS,
   HARNESS_COPY_LABEL, HARNESS_CONTINUE_LABEL,
   HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON,
-  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT,
+  HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CAPTURE_SEAM,
+  PI_CAPTURE_INSTALL,
   HARNESS_OAUTH, CANONICAL_MCP_URL,
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
@@ -288,4 +289,60 @@ test('A0 rollback: legacy HARNESS_* exports preserved (archived #1643 wizard + c
   assert.equal(typeof HARNESS_CAPTURE_SUPPORT, 'object')
   // the legacy exports still render a per-harness command for the archived surface
   assert.match(HARNESS_INSTALL.claude(KEY), /claude mcp add/)
+})
+
+// #3575: the capture-INSTALL seam — `HARNESS_CAPTURE_SUPPORT[h] === true` is a
+// capability claim, and it is only honest when the product actually INSTALLS a
+// capture step. These pin the three legs (declared seam ⟺ in-repo artifact ⟺
+// install step) so the Pi false PASS — `pi: true` with no capture install —
+// cannot regress.
+test('#3575: capture support is derived from the seam, and every supported harness installs it', () => {
+  const seamHarnesses = Object.keys(HARNESS_CAPTURE_SEAM)
+  for (const h of HARNESS_ORDER) {
+    assert.equal(
+      HARNESS_CAPTURE_SUPPORT[h],
+      seamHarnesses.includes(h),
+      `${h}: HARNESS_CAPTURE_SUPPORT must equal seam presence (derived, not asserted)`,
+    )
+    if (!HARNESS_CAPTURE_SUPPORT[h]) continue
+    const artifact = HARNESS_CAPTURE_SEAM[h]
+    assert.match(artifact, /^tortoise\//, `${h}: seam artifact must be in-repo`)
+    const install = HARNESS_INSTALL[h](KEY)
+    assert.ok(
+      install.includes(artifact),
+      `HARNESS_INSTALL.${h} must install its declared seam ${artifact}`,
+    )
+  }
+})
+
+test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  assert.match(pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+  assert.match(pi, /\.pi\/agent\/extensions/)
+  // the Memory-sources inline row installs the SAME seam (one shared constant)
+  assert.equal(HARNESS_CAPTURE_INSTALL.pi, PI_CAPTURE_INSTALL)
+  assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
+})
+
+// #3713 P2-3 (review of #3721): Pi loads a top-level `tortoise-capture.ts` AND
+// a `tortoise-capture/index.ts` as TWO extensions (no basename dedupe), so a
+// pre-existing agent-infra `tortoise-capture/` double-POSTs every session_id
+// alongside the seam. The install step must disable the legacy entry, and it
+// must do so non-destructively. Structure-only: this pins the guard text, not
+// the shell's behaviour (the guard is a copy-paste snippet, not an executed
+// unit). Removing any leg REDs this test.
+test('#3713: the Pi install disables a pre-existing tortoise-capture/ (no double-register)', () => {
+  const pi = HARNESS_INSTALL.pi(KEY)
+  // the colliding legacy path is named...
+  assert.match(pi, /~\/\.pi\/agent\/extensions\/tortoise-capture\b/,
+    'the guard must name the legacy entry Pi loads as a second extension')
+  // ...a symlink (the usual agent-infra bootstrap shape) is unlinked...
+  assert.match(pi, /\[ -L ~\/\.pi\/agent\/extensions\/tortoise-capture \]/,
+    'the symlink leg must be guarded by -L (unlink the link, never the target)')
+  // ...and a real directory is renamed to a name the loader SKIPS (dotfile).
+  assert.match(pi, /\.tortoise-capture\.disabled/,
+    'a real directory must be renamed to a dot-prefixed name `collectAutoExtensionEntries` skips')
+  // non-negotiable: never recursively delete user files from the install snippet.
+  assert.doesNotMatch(pi, /rm\s+-/,
+    'the collision guard must never `rm` with flags — a bare `rm` can only unlink the symlink')
 })

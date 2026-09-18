@@ -8552,7 +8552,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # role normalization (None -> "unknown", truthy non-strings -> str()), and
     # the same `speaker` property write (delta 5 — hosted previously wrote no
     # speaker tag). Hosted additionally adds quota/auth bounds + a pre-write
-    # estimate. Keep the two in sync. The LLM extraction that follows the
+    # estimate. Keep the two in sync — and note the THIRD copy:
+    # tools/ask_spotcheck.py::_seed_memory mirrors this same per-turn store
+    # (id, `[role] ` framing, prop set, CONTAINS edge) to seed the QA
+    # spot-check fixture (#3910). #3551 tracks collapsing all three onto
+    # one shared primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
@@ -8575,23 +8579,68 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # create the whole path from scratch, duplicating the Point node.
         turn_id = f"{session_id}_t{i}"
         turn_text = f"[{role}] {content[:5000]}"
-        proj.g.query(
+        _turn_rows = proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
             "    t.speaker=$speaker, "
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
-            "    t.updatedAt=$now, t.content_hash=$ch",
+            "    t.updatedAt=$now, t.content_hash=$ch "
+            "RETURN t.createdAt AS createdAt, t.status AS status",
             params={"id": turn_id, "c": turn_text, "k": "event",
                     "speaker": role, "s": "draft", "now": now,
                     "ch": _content_hash(turn_text)},
-        )
+        ).result_set
+        # #3947 review (F4 + parity): the write's COALESCE owns the stored
+        # timestamp and status — a RE-capture keeps the original createdAt and
+        # any promoted status, so journal what the graph holds. Emitting the
+        # literal `now`/`draft` regresses a promoted turn to draft and drifts
+        # createdAt on every replay (parity with sdk.py's loop, #1532).
+        turn_created_at = (
+            _turn_rows[0][0]
+            if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
+            else now)
+        turn_status = (
+            _turn_rows[0][1]
+            if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
+            else "draft")
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
             "MERGE (s)-[:CONTAINS]->(t)",
             params={"sid": session_id, "tid": turn_id},
         )
+        # #3947: journal the turn write so a rebuild can recreate it (parity
+        # with sdk.capture_session's loop — the two are kept identical by
+        # design, #1532). The raw Cypher writes above are unchanged; this is
+        # the missing RECORD. `contains_session` rides the event envelope so
+        # the projection's edge fold restores the CONTAINS link without a
+        # node property the live write never sets.
+        #
+        # #3947 review (cycle 2, #3086): gated on a configured journal, exactly
+        # as in sdk.py — on this lane `_make_sdk`/`_data_sdk` pass no
+        # `event_log_path`, so the JSONL half is a no-op and the `:GraphEvent`
+        # half is not a rebuild source (the wipe takes it with the graph). The
+        # per-turn `ensure_event_schema` + `next_seq` + `append_event` cost was
+        # pure overhead on the lane #3086 measures as already blocking the
+        # event loop. The residual — hosted captures have no rebuild-durable
+        # turn record until a journal is wired here — is unchanged by this PR.
+        if sdk._get_event_log() is not None:
+            sdk._emit_event(
+                "PointAdded",
+                {"id": turn_id, "kind": "event",
+                 "content_hash": _content_hash(turn_text)},
+                point={
+                    "id": turn_id,
+                    "content": turn_text,
+                    "pointKind": "event",
+                    "speaker": role,
+                    "is_episodic": True,
+                    "status": turn_status,
+                    "createdAt": turn_created_at,
+                },
+                contains_session=session_id,
+            )
 
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
@@ -22906,10 +22955,17 @@ def _drill_execute(
     except Exception:
         pass
     within_rto = duration_s <= _DRILL_RTO_S
+    # #3845: surface a wedge distinctly — "fork slot wedged" must never be
+    # readable as a plain "copy failed". Absent on the clean path, so a healthy
+    # drill record is unchanged.
+    detail = {k: v for k, v in (
+        ("restored", result.get("restored")),
+        ("fork_slot", result.get("fork_slot")),
+    ) if v is not None}
     record = _drill_record(
         run=run, status="ok" if within_rto else "rto_breach",
         org_id=org_id, graph_id=graph_id, backup_key=backup_key,
-        duration_s=duration_s, detail={"restored": result.get("restored")},
+        duration_s=duration_s, detail=detail,
     )
     _write_drill_record(storage, record)
     return {

@@ -712,8 +712,8 @@ ERR_INVALID = -32003
 # denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
-_SERVER_MANAGED_PROPS = frozenset({
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated"})
+_SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -1183,7 +1183,7 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     call) returning an ANSWER (not ranked hits), with the full ask response
     shape: {answer, abstained, question_type, question_date, evidence,
     context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
-    retrieval_degraded}.
+    retrieval_degraded, retrieved_session_ids}.
 
     COST PROFILE (group="ask" — #2013-gated exposure): unlike tortoise_search
     (LLM-free), tortoise_ask consumes LLM tokens against the org's
