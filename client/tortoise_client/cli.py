@@ -32,7 +32,7 @@ deliberately UNCHANGED: it has two outcomes and no notion of a missing endpoint,
 so this probe supplies the missing fact and maps the driver's word onto the
 recorded set. The pre-#3805 words (`ok` / `tortoise_unavailable` /
 `not_configured`) are translated, never re-minted — see
-`status_vocabulary.LEGACY_WORDS`.
+`status_vocabulary.resolve` (and `LEGACY_WORDS` for the flat table).
 
 Only the `status` PROBE emits 3 and 4. `list-tools` and `call` are operations
 against a known endpoint, so any failure there (including an unreachable

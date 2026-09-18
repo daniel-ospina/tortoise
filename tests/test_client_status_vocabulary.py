@@ -86,8 +86,22 @@ class TestPublishedTermSet:
 
     def test_no_legacy_word_survives_as_a_term(self):
         """Negative: the superseded words are aliases, never first-class terms."""
-        assert set(vocabulary.LEGACY_WORDS) == {"ok", "tortoise_unavailable", "not_configured"}
+        assert set(vocabulary.LEGACY_WORDS) == {"ok", "not_configured"}
         assert not set(vocabulary.LEGACY_WORDS) & set(vocabulary.CLIENT_STATUS_TERMS)
+
+    def test_flat_table_carries_only_words_it_can_answer(self):
+        """Negative — the defect this pin exists for. `tortoise_unavailable`
+        names two conditions (configured/down vs never-configured), so it must
+        not be in a table that can only return one fixed value: a migrating
+        caller reading it there would map an unset endpoint onto `degraded`
+        (exit 3) instead of `unconfigured` (exit 4). It is published in the
+        config-dependent set instead, and the two sets are disjoint."""
+        assert "tortoise_unavailable" not in vocabulary.LEGACY_WORDS
+        assert "tortoise_unavailable" in vocabulary.LEGACY_WORDS_NEEDING_CONFIGURATION
+        assert not set(vocabulary.LEGACY_WORDS) & set(vocabulary.LEGACY_WORDS_NEEDING_CONFIGURATION)
+        assert not set(vocabulary.LEGACY_WORDS_NEEDING_CONFIGURATION) & set(
+            vocabulary.CLIENT_STATUS_TERMS
+        )
 
 
 # ── One term per condition — the real handler, positive AND negative ─────────
@@ -168,6 +182,17 @@ class TestDriverWordResolution:
         so the failure is a SET-UP gap. This split is the whole point."""
         assert vocabulary.resolve("tortoise_unavailable", configured=False) == UNCONFIGURED
 
+    def test_config_dependent_word_cannot_be_answered_by_the_table_alone(self):
+        """The migration path, asserted as BEHAVIOUR: the flat table has NO
+        answer for `tortoise_unavailable`, and the same word resolves to two
+        different terms depending on the configuration fact. Reading it as a
+        table lookup is therefore impossible, not merely discouraged."""
+        assert vocabulary.LEGACY_WORDS.get("tortoise_unavailable") is None
+        unset = vocabulary.resolve("tortoise_unavailable", configured=False)
+        declared = vocabulary.resolve("tortoise_unavailable", configured=True)
+        assert unset == UNCONFIGURED and declared == DEGRADED
+        assert unset != declared
+
     def test_legacy_not_configured_word_resolves_unconfigured(self):
         """Forward-compat: a driver that learns the split is believed."""
         assert vocabulary.resolve("not_configured", configured=False) == UNCONFIGURED
@@ -187,7 +212,14 @@ class TestDriverWordResolution:
 
     def test_resolver_never_invents_a_term(self):
         """Every branch lands inside the published set — a guard on the guard."""
-        for word in (*vocabulary.CLIENT_STATUS_TERMS, *vocabulary.LEGACY_WORDS, "wat", None, ""):
+        for word in (
+            *vocabulary.CLIENT_STATUS_TERMS,
+            *vocabulary.LEGACY_WORDS,
+            *vocabulary.LEGACY_WORDS_NEEDING_CONFIGURATION,
+            "wat",
+            None,
+            "",
+        ):
             for configured in (True, False):
                 assert (
                     vocabulary.resolve(word, configured=configured)

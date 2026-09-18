@@ -96,14 +96,30 @@ CONDITIONS: dict[str, str] = {
     STATUS_UNCONFIGURED: "no store / endpoint / provider key is configured (off by policy)",
 }
 
-#: The pre-#3805 client-boundary words this term set supersedes. Kept so the
-#: supersede is checkable and so a driver that still emits one is translated
-#: rather than treated as an unknown state.
+#: The pre-#3805 client-boundary words a FLAT table lookup can translate — kept
+#: so the supersede is checkable and so a driver that still emits one is
+#: translated rather than treated as an unknown state.
+#:
+#: ⛔ ``tortoise_unavailable`` is deliberately NOT in this table, and must not be
+#: added. ``tortoise/mcp_client.py`` reports it for *any* failure to answer and
+#: has no notion of a missing endpoint (it falls back to its default URL), so it
+#: covers both "configured, but down" and "never pointed at a memory". A single
+#: value here would make the documented migration path collapse the exact
+#: never-configured-vs-down split this contract exists to keep — an unset
+#: endpoint would read as ``degraded`` (exit 3) instead of ``unconfigured``
+#: (exit 4). Read that word through ``resolve(word, configured=...)`` only; it is
+#: named in ``LEGACY_WORDS_NEEDING_CONFIGURATION`` so the full superseded set
+#: stays discoverable.
 LEGACY_WORDS: dict[str, str] = {
     "ok": STATUS_AVAILABLE,
-    "tortoise_unavailable": STATUS_DEGRADED,
     "not_configured": STATUS_UNCONFIGURED,
 }
+
+#: The superseded words the table above CANNOT translate, because their term
+#: depends on the configuration fact (was an endpoint ever declared?). Together
+#: with ``LEGACY_WORDS`` this is the whole pre-#3805 word set; these resolve only
+#: through ``resolve(word, configured=...)``.
+LEGACY_WORDS_NEEDING_CONFIGURATION: tuple[str, ...] = ("tortoise_unavailable",)
 
 
 def classify(*, configured: bool, reached: bool, hits: int | None = None) -> str:
@@ -132,20 +148,23 @@ def classify(*, configured: bool, reached: bool, hits: int | None = None) -> str
 def resolve(word: str | None, *, configured: bool) -> str:
     """Resolve a driver's status word onto the recorded term set.
 
-    A word already in the set passes through. A legacy word (``ok`` /
-    ``not_configured``) is translated. One word **cannot** be translated without
-    the configuration fact: ``tortoise_unavailable`` — ``tortoise/mcp_client.py``
+    A word already in the set passes through. A legacy word that is unambiguous
+    on its own (``ok`` / ``not_configured``) is translated from
+    ``LEGACY_WORDS``. The one word **cannot** be translated without the
+    configuration fact: ``tortoise_unavailable`` — ``tortoise/mcp_client.py``
     reports it for *any* failure to answer (it has no notion of a missing
     endpoint and falls back to its default URL), so it covers both "configured,
     but down" and "never pointed at a memory". That collapse is exactly what the
-    client boundary removes here, which is why ``configured`` is a parameter.
+    client boundary removes here, which is why ``configured`` is a parameter —
+    and why the word is kept OUT of ``LEGACY_WORDS``, so a caller cannot even
+    be tempted to resolve it from the flat table.
 
     Anything unrecognised degrades to ``degraded``: fail loud, never silently
     report success for a state we do not know.
     """
     if word in CLIENT_STATUS_TERMS:
         return word
-    if word == "tortoise_unavailable":
+    if word in LEGACY_WORDS_NEEDING_CONFIGURATION:
         return classify(configured=configured, reached=False)
     legacy = LEGACY_WORDS.get(word or "")
     if legacy is not None:

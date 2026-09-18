@@ -103,8 +103,20 @@ not look empty, and a set-up gap must not blame the service.
 
 The words `ok` / `tortoise_unavailable` / `not_configured` — the pre-#3805
 payload words — are **superseded by these four** (the exit codes are unchanged).
-A caller that has not migrated can read them through
-`status_vocabulary.LEGACY_WORDS`; the probe still translates, never re-mints.
+A caller that has not migrated reads them through
+`status_vocabulary.resolve(word, configured=…)`; the probe still translates,
+never re-mints.
+
+`status_vocabulary.LEGACY_WORDS` publishes only the words a flat lookup can
+answer (`ok` → `available`, `not_configured` → `unconfigured`).
+`tortoise_unavailable` is deliberately **not** in that table: the driver reports
+it for *any* failure to answer and has no notion of a missing endpoint, so its
+term depends on whether an endpoint was ever declared and a table cannot carry
+it. Resolve it with the configuration fact (`LEGACY_WORDS_NEEDING_CONFIGURATION`
+names it): the same word is `unconfigured` (exit `4`) when no endpoint is
+declared and `degraded` (exit `3`) when one is — the never-configured vs
+configured-but-down split this contract exists to keep, and the reason a bare
+`LEGACY_WORDS` lookup must never be the documented path for it.
 
 **Both client surfaces speak these four terms**, from that ONE declaration
 (imported, not copied): this thin probe, and the S9 skill-wiring client
