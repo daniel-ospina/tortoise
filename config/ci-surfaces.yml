@@ -414,6 +414,12 @@ surfaces:
   - test_falkordb_compat.py
   - test_file_indexer.py
   - test_flip_gate.py
+  # #3845 part 2: the module-fork leak's producer + the fork-safe verbosity
+  # that keeps the GRAPH.COPY child off the macOS timezone rwlock. Owns to
+  # `core` (#2159 first-match) because what it pins — tortoise/fork_safety.py
+  # and the embedded choke point in tortoise/__init__.py — matches no named
+  # SOURCE_PATTERNS surface, so a change to either falls through to core.
+  - test_fork_safety_3845.py
   - test_fly_machines_guard.py
   - test_frontmatter_validator.py
   - test_gate_b_tooling.py

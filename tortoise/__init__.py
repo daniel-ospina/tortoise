@@ -40,6 +40,10 @@ except ModuleNotFoundError:  # pragma: no cover - dep-missing environment
     _OriginalFalkorDB = None  # type: ignore[assignment]
 
 from tortoise.config import RELATIVE_PATH_ERROR  # noqa: I001
+from tortoise.fork_safety import (
+    enforce_embedded_fork_safety,
+    fork_safe_serverconfig,
+)
 # #1371: eager import registers the batch atexit flush (module-import time,
 # before any client construction) so LIFO ordering runs it LAST.
 from tortoise.embedded_lifecycle import atexit_fast_close
@@ -112,7 +116,26 @@ if _OriginalFalkorDB is not None:
                     data_dir = os.path.dirname(path)
                     os.makedirs(data_dir or ".", exist_ok=True)
                     args = (path, *args[1:])
+            # #3845 part 2: keep the embedded daemon's verbosity above NOTICE
+            # so a GRAPH.COPY module-fork child cannot block on the macOS
+            # timezone rwlock it inherited held across fork(). See
+            # tortoise/fork_safety.py for the measured producer.
+            # host=/port= is redislite's server mode: no embedded daemon of
+            # ours, so nothing is injected there (its __init__ forwards the
+            # remaining kwargs straight to redis-py, which has no
+            # serverconfig).
+            embedded = "host" not in kwargs and "port" not in kwargs
+            if embedded:
+                kwargs["serverconfig"] = fork_safe_serverconfig(
+                    kwargs.get("serverconfig"))
             super().__init__(*args, **kwargs)
+            # #3845 part 2: serverconfig is a COLD-start setting only —
+            # redislite reuses a live daemon from its .settings registry
+            # without re-reading the config, so a daemon started before this
+            # fix (or by an older client) keeps NOTICE and stays exposed.
+            # Re-assert on the live connection; no-op when already correct.
+            if embedded:
+                enforce_embedded_fork_safety(self)
             import atexit as _atexit
             self._t_closed = False
             # #2203: track this client for the terminating-signal teardown
