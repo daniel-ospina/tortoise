@@ -584,6 +584,21 @@ def test_no_in_scope_page_makes_the_extractors_declared_limits_live() -> None:
     )
 
 
+def _guard_reachable_for(changed: str) -> bool:
+    """True when a PR touching `changed` alone would execute THIS module.
+
+    The predicate is the guard's own reachability, not "some surface ran": a path
+    that selects a different surface keeps `surfaces` non-empty while this file
+    never runs. `select(...)["test_files"]` is the STRING `"ALL"` on the
+    full-selection path, so a bare membership test against it is a substring test —
+    and `not in "ALL"` is always True, which would report a false failure exactly
+    when the full matrix (which does run this file) was selected. Branch on the
+    sentinel (review finding, #3962).
+    """
+    sel = select([changed], "pull_request", load_manifest())
+    return bool(sel["full"]) or "test_website_docs_consistency.py" in sel["test_files"]
+
+
 def test_every_in_scope_page_is_selectable_by_ci() -> None:
     """Close the REVERSE direction of the CI-selection ratchet (#1349/#3332).
 
@@ -607,12 +622,10 @@ def test_every_in_scope_page_is_selectable_by_ci() -> None:
     `select()` rather than re-deriving the matcher, so it tracks the selector's
     actual behaviour instead of a copy of it.
     """
-    manifest = load_manifest()
     unselectable = [
         f"website/{page.name}"
         for page in sorted(_in_scope_pages())
-        if "test_website_docs_consistency.py"
-        not in select([f"website/{page.name}"], "pull_request", manifest)["test_files"]
+        if not _guard_reachable_for(f"website/{page.name}")
     ]
     assert not unselectable, (
         f"page(s) held to the blog guard whose PR does not run this file: "
@@ -641,7 +654,6 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     deletes its own only case (review finding, #3962). These paths are therefore
     pinned explicitly here.
     """
-    manifest = load_manifest()
     unselectable = [
         path
         for path in (
@@ -649,8 +661,7 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
             "website/_redirects",
             "website/functions/blog/[[path]].ts",
         )
-        if "test_website_docs_consistency.py"
-        not in select([path], "pull_request", manifest)["test_files"]
+        if not _guard_reachable_for(path)
     ]
     assert not unselectable, (
         f"guard input(s) whose PR does not run this file: {unselectable}. A PR "
