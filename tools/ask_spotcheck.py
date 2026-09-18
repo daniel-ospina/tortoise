@@ -107,7 +107,13 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     reproduces the turn-store sub-step of ``TortoiseSDK.capture_session`` /
     ``hosted_api._capture_session_impl`` and nothing else:
 
-      * ``MERGE (s:Session {id:$session_id})``;
+      * ``MERGE (s:Session {id:$session_id})`` with capture's own
+        ``created_at`` (coalesce — an idempotent re-capture preserves the
+        original time), ``turn_count`` and ``is_episodic=true``. A bare-id
+        Session is a node shape capture never writes, so leaving those off
+        would make every fixture seeded through this helper unusable for the
+        consumers that read them (the hosted session listing reads
+        ``s.turn_count``; commit reads ``s.is_episodic``);
       * per windowed turn, a ``:Point`` with the deterministic
         ``f"{session_id}_t{i}"`` id, ``pointKind='event'``,
         ``is_episodic=true``, ``is_operator=false``, a role-normalized
@@ -136,7 +142,12 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
         return []
     proj = sdk._get_proj()
     now = now or datetime.now(timezone.utc).isoformat()  # noqa: UP017
-    proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": session_id})
+    proj.g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.created_at=coalesce(s.created_at, $now), "
+        "    s.turn_count=$tc, s.is_episodic=true",
+        params={"sid": session_id, "now": now, "tc": len(windowed)},
+    )
     turn_ids: list[str] = []
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
