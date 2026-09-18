@@ -44,6 +44,10 @@ answer path for search.
 
 ## Question schema (eval-only lane)
 
+> **Status codes in this section are the retired wire framing.** The eval-only
+> lane is a Python entry point and never returns an HTTP status — it raises
+> `AskValidationError` carrying the same code as `.code`.
+
 ```json
 { "question": "what did we decide about the API?",   // required, 1..2000 chars
   "question_type": "temporal-reasoning",             // optional closed enum
@@ -102,9 +106,11 @@ answer path for search.
   absence, #1775) IS the no-evidence answer. `abstained` is best-effort
   heuristic sugar, NEVER a gate. **Do not market abstention as a trust
   guarantee before the Task 12 gate passes.**
-- **429 is quota, explicitly NOT an abstention.** The abstention census is
-  the graded `_abs` eval run only; production 429s/abstained labels never
-  pollute it.
+- **No production 429 path exists any more** — the 60/min ask budget retired
+  with the product surface (#3849; the machinery's purge is tracked as §7
+  D5), so `quota_exceeded`/`in_flight_limit` have no raiser. The abstention
+  census is the graded `_abs` eval run only; `abstained` labels never pollute
+  it.
 - The `abstained` heuristic has two error modes: a false positive (a
   confident answer whose phrasing hits the phrase list) and a false
   negative (a genuine abstention phrased off-list). Treat the label as
@@ -228,7 +234,7 @@ and its path-scoped 400/429/502/504 translation were removed in #3849.
 
 | Status | Code | Meaning |
 |---|---|---|
-| 400 | `invalid_question` | *(lane)* empty/whitespace/missing/wrong-type/control-char/malformed-JSON question |
+| 400 | `invalid_question` | *(lane)* empty/whitespace/missing/wrong-type/control-char question |
 | 400 | `question_too_long` | *(lane)* > 2000 chars |
 | 400 | `invalid_question_type` | *(lane)* unknown question_type (valid list included) |
 | 400 | `invalid_question_date` | *(lane)* malformed/calendar-impossible date |

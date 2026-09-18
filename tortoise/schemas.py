@@ -81,14 +81,16 @@ def ask_question_is_punctuation_only(question: str) -> bool:
     )
 
 
-# ── Canonical error-code vocabulary + SDK exception re-export ──────────────
+# ── Canonical error-code vocabulary + typed exception re-export ────────────
 # (one import surface for Tasks 9/11)
 # The CODE_* constants live in ``tortoise/exceptions.py`` — the typed ask
 # exception ``code`` class attributes reference them there — and are
-# re-exported here so the wire body and the SDK exception share ONE
-# vocabulary (a drift between the two surfaces is impossible by
+# re-exported here so the lane's validators and the exception ``code``
+# attributes share ONE vocabulary (a drift between the two is impossible by
 # construction; the previous literal duplication here was the manual drift
-# invariant). The typed ask exceptions are re-exported too.
+# invariant). The retired half of the vocabulary — the /v1/ask wire body —
+# went with the product surface (#3849); see ASK_ERROR_CODES below. The typed
+# ask exceptions are re-exported too.
 
 from tortoise.exceptions import (  # noqa: E402
     CODE_IN_FLIGHT_LIMIT,

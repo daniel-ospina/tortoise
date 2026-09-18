@@ -6,11 +6,11 @@ legacy caps (each pins a pre-registered Task-6/7 delta's A-half BEFORE the
 later task's capture — Task 6 and Task 7 are forbidden from editing the
 substrate, so a vacuous arm must be impossible to discover late):
 
-* R16(b): flag-OFF legacy ask() at DEFAULT caps admits ≥1 of the
+* R16(b): flag-OFF legacy run_ask_lane() at DEFAULT caps admits ≥1 of the
   out-of-subgraph gold (the canary compares couch vs dog bed — the gold on
   the THIRD object bookshelf is outside BOTH resolved subgraphs, so the
   assembled arm's B=0 is structurally reachable).
-* R9: flag-OFF legacy ask() at DEFAULT caps admits FEWER than 2 of the two
+* R9: flag-OFF legacy run_ask_lane() at DEFAULT caps admits FEWER than 2 of the two
   deep-rank golds (the 87-row corpus ranks both golds BELOW the default
   pool-40 cutoff and INSIDE a widened 120-row fetch). #3095 re-measurement
   (post-#3018): the engine's opaque fulltext order moved while the corpus
@@ -125,7 +125,8 @@ def _n_rows(evidence: str) -> int:
 
 
 def _legacy_ask(sdk, monkeypatch, question: str, *, flag_off: bool = True):
-    """Deterministic flag-OFF legacy ask() with a FakeReader — hermetic:
+    """Deterministic flag-OFF legacy run_ask_lane() with a FakeReader —
+    hermetic:
     the assembly master flag is pinned OFF (never the ambient default), so
     the calibration cannot silently route through the Task-6 fired branch
     once it lands."""
@@ -273,7 +274,8 @@ def test_malformed_date_row(sdk):
 
 
 def test_out_of_subgraph_gold_calibration(sdk, monkeypatch):
-    """R16(b) calibration (Task 1 Step 4): flag-OFF legacy ask() at DEFAULT
+    """R16(b) calibration (Task 1 Step 4): flag-OFF legacy run_ask_lane() at
+    DEFAULT
     caps ADMITS ≥1 of the out-of-subgraph gold — guarantees the A≥1 half of
     the pre-registered A≥1/B=0 delta before Task 6 capture.
 

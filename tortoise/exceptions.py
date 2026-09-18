@@ -228,7 +228,10 @@ class AskReaderUnavailable(RuntimeError):
 
 class AskRetrievalUnavailable(RuntimeError):
     """502 ``retrieval_unavailable`` — retrieval/annotation/context
-    assembly failed wholesale (never an untyped 500 on the ask surface)."""
+    assembly failed wholesale, or (also raised by the lane) the eval-only
+    entry point was handed a hosted client (``TORTOISE_API_URL`` set) and
+    refuses it. No HTTP status ships it any more (#3849): the ``status_code``
+    default is retained vocabulary."""
 
     code = CODE_RETRIEVAL_UNAVAILABLE
 

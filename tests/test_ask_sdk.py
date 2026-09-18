@@ -316,7 +316,7 @@ def test_cost_estimate_default_rates_for_deepseek_serving_reader(monkeypatch):
 
 
 def test_ask_record_path_uses_strong_rates(monkeypatch):
-    """#2069: the ask() metering RECORD call site (step 7 — the pinned
+    """#2069: the run_ask_lane() metering RECORD call site (step 7 — the pinned
     record path) meters the cost_usd at the SERVING lane's STRONG rates — a
     strong-lane query's cost_usd record never uses the deepseek envelope."""
     import tortoise.ask_lane as sdk_mod
@@ -493,7 +493,7 @@ def test_reader_raise_maps_reader_unavailable(monkeypatch):
 
 
 def test_tokens_race_same_cached_instance(monkeypatch):
-    """2-3 concurrent ask() calls through ONE cached model instance → each
+    """2-3 concurrent run_ask_lane() calls through ONE cached model instance → each
     call's captured usage matches its own completion (the per-instance lock
     makes inner complete() + capture atomic)."""
     import tortoise.ask_lane as sdk_mod

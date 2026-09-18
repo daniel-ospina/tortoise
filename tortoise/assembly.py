@@ -1032,7 +1032,7 @@ class _AssembledBlock:
     slices: dict
     admission: dict
     post_cap_lines: list
-    # NOTE: evidence/context_tokens are NOT computed here — ask()/the
+    # NOTE: evidence/context_tokens are NOT computed here — run_ask_lane()/the
     # assembled path render post_cap_lines through the SHARED
     # render_context/estimate path so the alignment invariant
     # (context_tokens == estimate_tokens(evidence)) holds by construction.
@@ -1089,7 +1089,8 @@ def _probe_visible_successors(sdk, slices: AssemblySlices) -> frozenset[str]:
 
 def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
                         caps: dict | None = None) -> _AssembledBlock:
-    """The fired content pipeline (env-gated at the CALLER — ask() reads
+    """The fired content pipeline (env-gated at the CALLER —
+    run_ask_lane() reads
     TORTOISE_ASK_CONNECTED_ASSEMBLY BEFORE calling; this function assumes
     the gate already passed and fires when the question routes).
 
@@ -1097,8 +1098,8 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
     render (synthesize_hits) -> decorate real rows (annotate_ask_hits —
     synthesized rows have no id and are untouched) -> explicit
     why.enrich_items when W4 is on (R5/R17; id-less rows skipped by the
-    guard) -> assemble_context(caps). NEVER raises untyped: the ask()
-    envelope maps any raise to AskRetrievalUnavailable.
+    guard) -> assemble_context(caps). NEVER raises untyped: the
+    run_ask_lane() envelope maps any raise to AskRetrievalUnavailable.
     """
     from tortoise.retrieval import assemble_context
     if caps is None:

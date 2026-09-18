@@ -126,7 +126,7 @@ def _n_rows(evidence: str) -> int:
 
 
 def _legacy(sdk, monkeypatch, question, *, widen=False):
-    """A-arm: flag-OFF legacy ask() (DEFAULT or WIDENED caps) with the stub
+    """A-arm: flag-OFF legacy run_ask_lane() (DEFAULT or WIDENED caps) with the stub
     FakeReader — evidence text is reader-independent (metric a)."""
     from tests.test_ask_sdk import _install_fake
     monkeypatch.delenv("TORTOISE_ASK_CONNECTED_ASSEMBLY", raising=False)

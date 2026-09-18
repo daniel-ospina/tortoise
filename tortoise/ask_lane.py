@@ -796,7 +796,8 @@ def run_ask_assembled(sdk: TortoiseSDK, question: str, *,
         render_context,
         resolve_ask_retrieval_caps,
     )
-    # validation FIRST (same canonical codes as ask()); date resolved to
+    # validation FIRST (same canonical codes as run_ask_lane()); date
+    # resolved to
     # server-now-UTC when omitted (identical default semantics)
     _ask_validate(question, question_type, question_date)
     if question_date is None:

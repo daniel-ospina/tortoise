@@ -200,7 +200,7 @@ def test_llmreader_answer_guards_none_completion() -> None:
     """answer() must NOT crash when the model returns None (a provider
     response with empty content — refusal/empty generation observed live
     2026-09-02 on qwen via OpenRouter, question 830ce83f): the None-guard
-    mirrors the product ask()'s ``(raw or "").strip()`` so the eval's
+    mirrors the ask lane's ``(raw or "").strip()`` so the eval's
     direct LLMReader path surfaces "" instead of AttributeError on
     None.strip()."""
     class _NoneModel:

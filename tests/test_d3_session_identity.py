@@ -8,7 +8,7 @@ by the capture loop with the deterministic id ``f"{session_id}_t{i}"`` and a
 ``(:Session)-[:CONTAINS]->(:Point)`` edge — but with NO ``sessionId`` prop and
 NO ``eventId``. ``annotate_ask_hits`` only joined ``Event.eventId`` and
 ``Point.sessionId`` (both empty for turn Points), and ``_render_block`` read
-only ``lme_session_index`` (absent on the product lane) — so the one surviving
+only ``lme_session_index`` (absent on the ask lane) — so the one surviving
 identity (the id prefix / the CONTAINS edge) was never read.
 
 These tests assert on the VALUE the surface CARRIES — never a grep of source
@@ -534,14 +534,16 @@ def test_field_order_tracks_the_evidence_not_the_raw_retrieval_order(
     (the pool ``assemble_context`` was handed), so the test cannot pass
     vacuously on an empty pool.
 
-    ❌ MUTATION KILLED: ``_distinct_session_ids(hits)`` in ``ask()`` instead of
+    ❌ MUTATION KILLED: ``_distinct_session_ids(hits)`` in ``run_ask_lane()``
+    instead of
     ``_distinct_session_ids(assembled)`` → ``['<A>', '<B>']``, RED.
     """
     sdk = _new_sdk()
     _seed_captured_session(sdk, SID_A, TURNS_A)
     _seed_captured_session(sdk, SID_B, TURNS_B)
 
-    # ``assemble_context`` is a function-local import inside ``ask()``, so the
+    # ``assemble_context`` is a function-local import inside
+    # ``run_ask_lane()``, so the
     # seam to patch is the retrieval module attribute it rebinds from.
     real_assemble = retrieval.assemble_context
     captured: dict = {}

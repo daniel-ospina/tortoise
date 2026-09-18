@@ -1,4 +1,4 @@
-"""#2165 Task 6 — ask() connected-assembly branch + ask_assembled (docker-lane).
+"""#2165 Task 6 — run_ask_lane() connected-assembly branch + run_ask_assembled (docker-lane).
 
 Golden-evidence record (R17): the EVIDENCE STRINGS below were CAPTURED from
 the deterministic flag-OFF legacy lane and the flag-ON fired lane on the

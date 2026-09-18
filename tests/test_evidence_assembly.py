@@ -319,7 +319,7 @@ def test_eval_retrieval_seam_off_by_default_signature():
 
 
 def test_ask_lane_knob_failsafe_off_by_default():
-    """The SDK ask lane reads ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` with a
+    """The eval-only ask lane reads ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` with a
     False default (fail-safe) — unset/garbage → OFF, only explicit truthy
     arms; a typo never flips the knob."""
     import os

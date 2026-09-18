@@ -292,7 +292,7 @@ def test_retrieval_degraded_honest_when_embedder_absent():
         _seed(sdk, q)
         from tortoise.embeddings import EmbeddingModel
         assert EmbeddingModel.get() is None  # the honest precondition
-        # the degraded flag is resolved by the ask() surface from leg_trace;
+        # the degraded flag is resolved by the ask lane from leg_trace;
         # the existing test_ask_sdk retrieval_degraded tests pin that path.
         # Here we pin the lever knobs' default-off posture:
         from tortoise.retrieval import resolve_ask_retrieval_caps
