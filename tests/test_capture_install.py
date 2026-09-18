@@ -1317,6 +1317,41 @@ def test_codex_hooks_upgrade_defaults_to_codex_home_not_the_cwd(cli):
     assert not (root / "hooks").exists(), r.stdout
 
 
+@pytest.mark.parametrize("hooks_cmd", ["status", "upgrade"])
+def test_codex_hooks_refuses_a_non_absolute_home_as_a_populated_error(
+        tmp_path, hooks_cmd):
+    """A NON-absolute ``HOME`` (``Path.home()`` returns it verbatim — it does
+    NOT raise) leaves ``default_root`` no root it can make absolute, so it
+    refuses.  That refusal must reach the CLI as a populated message and a
+    non-zero exit, exactly like every other refusal in this command — never an
+    uncaught traceback.  ``_cmd_hooks`` is shared by BOTH ``hooks status`` and
+    ``hooks upgrade``, and it called `default_root` outside any try/except, so
+    both commands printed a raw ``ValueError`` traceback (#4024 P2-1).
+
+    Mutation: drop the ``try/except ValueError`` around the root resolution in
+    ``_cmd_hooks`` — the CLI prints a ``Traceback`` ending in the raw
+    ``ValueError`` and this REDs."""
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = {
+        **os.environ,
+        "HOME": "relhome",          # NON-absolute on purpose
+        "CODEX_HOME": "",
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+
+    r = _run(("hooks", hooks_cmd, "--harness", "codex"), env, cwd)
+
+    assert r.returncode != 0, (r.returncode, r.stdout, r.stderr)
+    assert "Traceback" not in r.stderr, r.stderr
+    # a populated refusal, not a bare exit — with the repair path.
+    assert "cannot resolve an absolute install root" in r.stderr, r.stderr
+    assert "to repair" in r.stderr, r.stderr
+    # the refusal is read-only: nothing was written into the relative root.
+    assert not (cwd / "relhome").exists(), r.stdout + r.stderr
+
+
 # ── the CLI surface (`tortoise install <harness>`) ──────────────────────
 
 

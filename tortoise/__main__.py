@@ -3047,8 +3047,26 @@ def _cmd_hooks(args) -> int:
     # `✅ ... upgraded.` while leaving the real install untouched — the silent
     # no-capture this seam exists to prevent (#3818).
     explicit_dir = getattr(args, "dir", None)
-    root = (_P(explicit_dir) if explicit_dir is not None
-            else default_root(layout, _P.home()))
+    try:
+        root = (_P(explicit_dir) if explicit_dir is not None
+                else default_root(layout, _P.home()))
+    except ValueError as e:
+        # `default_root` refuses when the root cannot be made absolute — a
+        # relative `$HOME`, which `Path.home()` returns VERBATIM (it does not
+        # raise).  Surface it the way every other failure in this command is
+        # surfaced: a populated message on stderr plus a non-zero exit, never
+        # an uncaught traceback (#4024 P2-1).  The sibling call sites are
+        # already guarded (`capture_install`'s catch-all, `doctor`'s
+        # `except Exception`); this one was not.
+        print(str(e), file=_sys.stderr)
+        # Same repair-hint shape as the drift refusal below.  It names a
+        # PLACEHOLDER dir rather than a concrete one: the root is exactly what
+        # could not be resolved, so echoing one back would teach a path that
+        # is itself unresolvable.
+        print("\nRun `tortoise hooks upgrade"
+              f"{'' if args.harness == 'claude' else ' --harness ' + args.harness}"
+              " --dir <absolute-dir>` to repair.", file=_sys.stderr)
+        return 1
 
     if args.hooks_cmd == "status":
         try:
