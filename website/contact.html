@@ -142,7 +142,7 @@
     <header>
       <p class="doc-type">Contact</p>
       <h1>Talk to us</h1>
-      <p class="lede">Questions about the product, licensing, privacy or a data request — this form reaches the same channel our <a href="/privacy">privacy policy</a>, <a href="/dpa">DPA</a> and <a href="/tos">terms</a> name: <strong>hello@premiselabs.co</strong>. For account access issues, use the address associated with your account.</p>
+      <p class="lede">Questions about the product, licensing, privacy or a data request — this form reaches the same channel our <a href="/privacy">privacy policy</a>, <a href="/dpa">DPA</a> and <a href="/tos">terms</a> name: <a href="mailto:hello@premiselabs.co"><strong>hello@premiselabs.co</strong></a>. You can also write to that address directly. For account access issues, use the address associated with your account.</p>
     </header>
 
     <main>
@@ -219,7 +219,7 @@
 
     function directFallback(status) {
       if (status === 503) {
-        return 'Email delivery is not configured on this deployment, so your message was not sent. Please email hello@premiselabs.co directly — we are sorry for the detour.';
+        return 'Our message intake is not configured on this deployment, so your message was not sent. Please email hello@premiselabs.co directly — we are sorry for the detour.';
       }
       if (status === 429) {
         return 'Too many messages from this connection. Please wait a few minutes, or email hello@premiselabs.co directly.';

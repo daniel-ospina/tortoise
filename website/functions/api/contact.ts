@@ -3,32 +3,41 @@
  *
  * DELIVERY TARGET IS SETTLED (owner ruling, issue #2409, 2026-09-18):
  *   "for outside product should be hello@ for inside product should be support@"
- * The website is the outside-product surface, so this function delivers to
+ * The website is the outside-product surface, so the message must reach
  * `hello@premiselabs.co` — the same address the legal pages already name as the
- * designated channel (privacy §1, DPA §15, ToS §15.5, aviso-privacidad). The
- * recipient is a CODE CONSTANT, never a request field: that is what keeps this
- * form from being an open relay.
+ * designated channel (privacy §1, DPA §15, ToS §15.5, aviso-privacidad). It is a
+ * CODE CONSTANT, never a request field: that is what keeps this form from being
+ * an open relay. Routing the queued item to it is the intake endpoint's job;
+ * this surface only guarantees the visitor is told the decided address.
  *
- * ⚠️  THE TRANSPORT IS NOT SETTLED (pending owner decision, #2409). This file
- * therefore knows NOTHING about how delivery happens: no provider name, no
- * credential variable, no endpoint, no wire format. The actual send lives
- * behind ONE seam, `deliver()` in `../_shared/contact-transport.ts`, whose
- * payload and result types are provider-neutral; swapping transport is a
- * change to that module alone. This file's job is the transport-independent
- * half: validation, honeypot, rate limit, cross-site refusal — and mapping the
- * seam's outcome to HTTP.
+ * ⚠️  THE TRANSPORT IS AN OPEN DECISION (a queue vs. email; #2409). This file
+ * knows NOTHING about how a submission travels onward: no provider name, no
+ * credential, no email sender, no endpoint, no wire format. The one network
+ * call lives behind ONE seam, `enqueue()` in `../_shared/contact-transport.ts`,
+ * whose item shape (name, replyTo, message, receivedAt, source) and result
+ * types are transport-neutral; swapping transport is a change to that module
+ * alone. This file's job is the transport-independent half: validation,
+ * honeypot, rate limit, cross-site refusal — and mapping the seam's outcome to
+ * HTTP.
  *
- * FAIL LOUDLY WHEN UNCONFIGURED. If the transport is unconfigured the seam
- * reports `not_configured` and this function answers a visible 503 the visitor
- * can act on — never a 200 that drops the message on the floor. The contact
- * page surfaces the 503 message, which points at the direct mailto fallback.
+ * WHY THERE IS NO EMAIL LEG: the product's outbound email sender is already
+ * over budget (`premise-labs#393` — at 200% of its daily quota on two
+ * consecutive days; objective is zero quota-rejected sends). A second producer
+ * on a saturated sender would fail exactly when a customer needs it, so this
+ * form does not send email and no credential may be provisioned to make it.
+ *
+ * FAIL LOUDLY WHEN UNCONFIGURED. If the intake endpoint is unconfigured the
+ * seam reports `not_configured` and this function answers a visible 503 the
+ * visitor can act on — never a 200 that drops the message on the floor. The
+ * contact page surfaces the 503 message, which points at the direct mailto
+ * fallback.
  *
  * This response is built here, not by `_headers`: Cloudflare does NOT apply
  * `_headers` rules to Pages Function responses, so HSTS is stamped manually
  * (same contract as functions/_middleware.ts).
  */
 
-import { deliver } from "../_shared/contact-transport";
+import { enqueue } from "../_shared/contact-transport";
 
 /** The Pages `env`, handed to the transport seam untouched. */
 interface ContactEnv {
@@ -247,13 +256,13 @@ async function handlePost(request: Request, env: ContactEnv): Promise<Response> 
     );
   }
 
-  // ── Delivery (the one transport seam) ───────────────────────────────────
-  // Everything provider-specific lives behind `deliver()`; this file only maps
-  // its provider-neutral outcome to HTTP. The gate that decides
+  // ── Intake (the one transport seam) ─────────────────────────────────────
+  // Everything transport-specific lives behind `enqueue()`; this file only maps
+  // its transport-neutral outcome to HTTP. The gate that decides
   // `not_configured` lives INSIDE the seam (it is transport-specific), and it
-  // precedes the send there, so a silent success on the unconfigured path is
-  // structurally impossible.
-  const outcome = await deliver({ to: CONTACT_TO, replyTo: email, name, message }, env);
+  // precedes the network call there, so a silent success on the unconfigured
+  // path is structurally impossible.
+  const outcome = await enqueue({ name, replyTo: email, message }, env);
 
   if (outcome.status === "not_configured") {
     // Visible and actionable, and honest about the cause. The visitor gets the
@@ -262,20 +271,23 @@ async function handlePost(request: Request, env: ContactEnv): Promise<Response> 
     return fail(
       503,
       "not_configured",
-      "Email delivery is not configured on this deployment, so your message was not sent. " +
-        "Please email hello@premiselabs.co directly — we are sorry for the detour.",
+      "Our message intake is not configured on this deployment, so your message was not sent. " +
+        `Please email ${CONTACT_TO} directly — we are sorry for the detour.`,
     );
   }
 
   if (outcome.status === "failed") {
     return fail(
       502,
-      "delivery_failed",
-      "We could not deliver your message, so it was not sent. Please try again, or email hello@premiselabs.co directly.",
+      "intake_failed",
+      `We could not accept your message, so it was not sent. Please try again, or email ${CONTACT_TO} directly.`,
     );
   }
 
-  return json({ ok: true, message: "Thanks — your message is on its way. We'll reply to the address you gave." }, 200);
+  return json(
+    { ok: true, message: "Thanks — we've received your message. We'll reply to the address you gave." },
+    200,
+  );
 }
 
 /**

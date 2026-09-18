@@ -96,28 +96,33 @@ bindings:
 
   # The public contact form (issue #2409). Absent -> ``503 not_configured``
   # from functions/api/contact.ts, which is the LOUD failure mode by design:
-  # the visitor is told delivery is unconfigured and given the direct mailto
+  # the visitor is told intake is unconfigured and given the direct mailto
   # fallback, and nothing is silently dropped.
   #
+  # NO CREDENTIAL, DELIBERATELY. The form has no email leg: the product's
+  # outbound email sender is already over budget (premise-labs#393 — Resend at
+  # 200% of quota on two consecutive days; objective is zero quota-rejected
+  # sends), so adding a second producer would ship a form that fails exactly
+  # when a customer needs it. The transport is an OPEN decision (queue vs.
+  # email) and this binding names only the queue-shaped intake endpoint. Do not
+  # provision a send-capable credential to "restore" an email leg.
+  #
   # `recommended`, NOT `required`, and that is deliberate: `required` reds the
-  # deploy, which would block the very deploy that ships the form (the secret
+  # deploy, which would block the very deploy that ships the form (the endpoint
   # does not exist yet). The feature degrades visibly while the rest of the
   # site serves normally, so absence is a warning, not an outage. Promote this
-  # to `required` only once the key is bound — at that point its removal SHOULD
-  # be an outage.
-  - name: RESEND_API_KEY
+  # to `required` only once the endpoint is bound — at that point its removal
+  # SHOULD be an outage.
+  - name: CONTACT_INTAKE_URL
     kind: recommended
     type: env_vars
     envs: [production]
     note: >-
-      functions/_shared/contact-transport.ts — the delivery credential for the
-      website contact form. The transport is PENDING the owner's decision
-      (#2409), so this binding names the CURRENT placeholder provider only;
-      when the transport is decided, this entry moves with the seam (which is
-      the sole source file that touches a provider). Same Resend key the
-      waitlist-subscribe edge function uses. The companion sender is
-      RESEND_FROM_EMAIL (in-code default noreply@premiselabs.co, so it needs no
-      binding).
+      functions/_shared/contact-transport.ts — the intake endpoint for the
+      website contact form, and its ONLY configuration. A plain URL; no
+      credential is read or sent. The transport is an OPEN decision (#2409),
+      so when it is settled this entry moves with the seam (which is the sole
+      source file that performs the network call).
 
   # Deliberately NOT required: blog/_shared/cloudflare-purge.ts is a best-effort
   # cache purge that returns boolean `false` and logs a warning when these are

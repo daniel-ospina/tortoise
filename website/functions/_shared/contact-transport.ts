@@ -1,48 +1,55 @@
 /**
- * The contact form's delivery TRANSPORT SEAM — issue #2409.
+ * The contact form's delivery seam — issue #2409.
  *
- * ⚠️  PENDING OWNER DECISION — THE TRANSPORT IS **NOT SETTLED**.
+ * ⚠️  OPEN DECISION — THE TRANSPORT IS **NOT SETTLED**: a queue vs. email.
  *
- * There is no owner ruling on which mail provider the website contact form
- * should deliver through. Nothing here may be read as that decision, and
- * nothing outside this file may name a provider: the point of this module is
- * that the choice is still OPEN.
+ * The owner has not chosen how a contact submission travels onward. Nothing
+ * here may be read as that decision, and nothing outside this file may name a
+ * provider or an email sender: the point of this module is that the choice is
+ * still OPEN.
  *
- * The body below implements one provider (Resend) as the PLACEHOLDER that
- * keeps `/api/contact` exercisable end-to-end today. It is deliberately the
- * ONLY place in the website codebase that knows a provider's name, credential
- * variable, endpoint or wire format. Swapping transport later is a change to
- * THIS FILE ONLY — `deliver()` is the sole entry point, and its payload/result
- * types are provider-neutral.
+ * THE EMAIL LEG WAS REMOVED, AND THIS IS WHY — the product's outbound email
+ * sender is ALREADY over budget. `premise-labs#393` records it at 200% of its
+ * daily quota on two consecutive days, and its own objective is ZERO
+ * quota-rejected sends. Pointing this form at that sender would add a second
+ * producer to a saturated sender, and would ship a form that fails exactly when
+ * a customer needs it. So this seam DOES NOT SEND EMAIL: it enqueues. That "no
+ * send-capable key exists on this host" is a DESIGN SIGNAL, not an ops gap to
+ * work around — no credential may be provisioned to restore an email leg.
+ *
+ * WHAT THIS SEAM IS, THEN — QUEUE-SHAPED. One submission becomes ONE JSON item
+ * posted to a configurable intake endpoint, and that is the whole transport:
+ *
+ *     { name, replyTo, message, receivedAt, source }
+ *
+ * `enqueue()` is the SOLE entry point. It is the only place in the form's path
+ * that performs a network call, and the intake URL is its only configuration.
+ * When the transport decision lands, swapping it is a change to THIS FILE ONLY
+ * — the item shape and the three-value outcome vocabulary stay as they are.
  *
  * Owner decisions that ARE settled, and stay settled here:
  *   - RECIPIENT: `hello@premiselabs.co` (owner ruling, issue #2409,
- *     2026-09-18). It arrives in `msg.to` from the caller — this module never
- *     chooses the address, and never reads one from the request.
- *   - FAIL LOUDLY: a missing credential is a visible failure
+ *     2026-09-18). It is a code constant in the caller, never a request field,
+ *     and — deliberately — not part of the queued item: the intake endpoint is
+ *     the routing point and owns the destination.
+ *   - FAIL LOUDLY: a missing intake endpoint is a visible failure
  *     (`status: "not_configured"` → the caller's 503), never a silent success.
  *
- * Environment names match the product's established convention, set by
- * `tortoise/email_notify.py` (the invite/OTP/onboarding sender): the same
- * `RESEND_API_KEY` + `RESEND_FROM_EMAIL` credential serves both surfaces, so
- * ops has one thing to bind. (`EMAIL_LINK_BASE_URL` is that file's link-host
- * variable — the contact form builds no links, so it has no use for it.) When
- * the transport is decided, the variable(s) it needs move to the new
- * provider's convention here and nowhere else.
- *
- * SECRET HANDLING: the key is read from `env` and used only as an
- * `Authorization` header. It is never logged, never echoed in a response, and
- * never placed in a URL — a bearer token in a URL lands in access logs.
+ * SECRET HANDLING: there is no secret. The intake endpoint is a plain URL read
+ * from `env`; this module sends no credential and no authorization header,
+ * because none exists and none may be provisioned while the decision is open.
  */
 
-/** A message to deliver. Provider-neutral: the seam decides the wire format. */
+/**
+ * A submission ready to be enqueued. Provider-neutral and destination-free: the
+ * caller decides the recipient, the intake endpoint owns routing, and the seam
+ * owns the wire item (`receivedAt` and `source` are stamped below).
+ */
 export interface ContactMessage {
-  /** Decided destination (`hello@premiselabs.co`). */
-  to: string;
-  /** The submitter's validated address — Reply-To, never the destination. */
-  replyTo: string;
   /** Already control-character-stripped by the caller's validation. */
   name: string;
+  /** The submitter's validated address — Reply-To, never the destination. */
+  replyTo: string;
   message: string;
 }
 
@@ -53,105 +60,73 @@ export interface TransportEnv {
 
 /**
  * The seam's whole result vocabulary. The caller maps each case to HTTP; it
- * never learns a provider status code, error body or credential name.
+ * never learns an upstream status code, error body or endpoint name.
  */
-export type DeliveryOutcome =
-  | { status: "sent" }
+export type IntakeOutcome =
+  | { status: "enqueued" }
   | { status: "not_configured" }
   | { status: "failed" };
 
-// ── Current placeholder implementation (PENDING — see the header) ──────────
-// Everything below this line is the swap surface. Replacing the provider means
-// replacing `sendViaTransport()` (and the two env reads in `deliver()`); the
-// `deliver()` signature and the outcome vocabulary stay as they are.
+// ── Current shape: one JSON item, one configurable intake endpoint ─────────
 
-const TRANSPORT_URL = "https://api.resend.com/emails";
-const TRANSPORT_KEY_ENV = "RESEND_API_KEY";
-const TRANSPORT_FROM_ENV = "RESEND_FROM_EMAIL";
-const FROM_DEFAULT = "noreply@premiselabs.co";
+/** The intake endpoint — the seam's ONLY configuration. No credential. */
+const INTAKE_URL_ENV = "CONTACT_INTAKE_URL";
+/** Which surface produced the item. Lets the endpoint route by producer. */
+export const INTAKE_SOURCE = "website/contact";
 
 function envString(env: TransportEnv, name: string): string {
   const v = env[name];
   return typeof v === "string" ? v.trim() : "";
 }
 
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/** The provider call — the single place the transport's wire format lives. */
-async function sendViaTransport(msg: ContactMessage, apiKey: string, from: string): Promise<Response> {
-  const subject = `Website contact — ${msg.name.slice(0, 60)}`;
-  const text =
-    `New message from the website contact form.\n\n` +
-    `Name:    ${msg.name}\n` +
-    `Reply-to: ${msg.replyTo}\n\n` +
-    `Message:\n${msg.message}\n`;
-  const html =
-    `<h2 style="font-family:system-ui,sans-serif;">New website contact message</h2>` +
-    `<p style="font-family:system-ui,sans-serif;"><strong>Name:</strong> ${escapeHtml(msg.name)}<br>` +
-    `<strong>Reply-to:</strong> ${escapeHtml(msg.replyTo)}</p>` +
-    `<pre style="font-family:ui-monospace,monospace;white-space:pre-wrap;">${escapeHtml(msg.message)}</pre>` +
-    `<p style="font-family:system-ui,sans-serif;color:#666;font-size:12px;">` +
-    `Sent from the contact form at premiselabs.co. Reply directly to this email to answer ${escapeHtml(msg.name)}.</p>`;
-  return fetch(TRANSPORT_URL, {
-    method: "POST",
-    headers: {
-      // The key travels as a header, never in the URL (URLs are logged).
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from,
-      to: [msg.to],
-      reply_to: msg.replyTo,
-      subject,
-      text,
-      html,
-    }),
-  });
-}
-
 /**
- * Deliver one contact message through the currently configured transport.
+ * Enqueue one contact submission to the configured intake endpoint.
  *
- * The credential gate is HERE, and it precedes the send call: without it there
- * is no send-capable credential, and the outcome must be a visible
- * `not_configured` the caller turns into a 503 — never a success that drops the
- * message on the floor. (Pinning the ordering in-source is what the test suite
- * checks; the naming of the variable is operator-facing only — the visitor
+ * The configuration gate is HERE, and it precedes the network call: without an
+ * intake endpoint there is nowhere to enqueue, and the outcome must be a
+ * visible `not_configured` the caller turns into a 503 — never a success that
+ * drops the message on the floor. (Pinning the ordering in-source is what the
+ * test suite checks; the variable's name is operator-facing only — the visitor
  * message the caller builds never names it.)
  */
-export async function deliver(msg: ContactMessage, env: TransportEnv): Promise<DeliveryOutcome> {
-  const apiKey = envString(env, TRANSPORT_KEY_ENV);
-  if (apiKey === "") {
+export async function enqueue(msg: ContactMessage, env: TransportEnv): Promise<IntakeOutcome> {
+  const intakeUrl = envString(env, INTAKE_URL_ENV);
+  if (intakeUrl === "") {
     // Visible to an operator: the ABSENCE of the variable is the condition, and
     // naming it is what lets them fix it. No secret value is involved.
-    console.error(`contact: ${TRANSPORT_KEY_ENV} is unset — contact form cannot deliver`);
+    console.error(`contact: ${INTAKE_URL_ENV} is unset — contact form cannot accept submissions`);
     return { status: "not_configured" };
   }
 
-  const from = envString(env, TRANSPORT_FROM_ENV) || FROM_DEFAULT;
+  // The item is built here, whole: exactly the five agreed fields, with the
+  // receipt time the seam observed and the producing surface. No request field
+  // beyond the validated name/reply-to/message ever reaches the wire.
+  const item = {
+    name: msg.name,
+    replyTo: msg.replyTo,
+    message: msg.message,
+    receivedAt: new Date().toISOString(),
+    source: INTAKE_SOURCE,
+  };
 
   let upstream: Response;
   try {
-    upstream = await sendViaTransport(msg, apiKey, from);
+    upstream = await fetch(intakeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(item),
+    });
   } catch (err) {
-    console.error("contact: transport request failed:", err instanceof Error ? err.message : "network error");
+    console.error("contact: intake request failed:", err instanceof Error ? err.message : "network error");
     return { status: "failed" };
   }
 
   if (!upstream.ok) {
-    // Log the transport's status + message (never the key, never the body).
+    // Log the intake status + message (never a body's contents).
     const detail = await upstream.text().catch(() => "");
-    console.error(`contact: transport rejected the send (${upstream.status}): ${detail.slice(0, 300)}`);
+    console.error(`contact: intake rejected the submission (${upstream.status}): ${detail.slice(0, 300)}`);
     return { status: "failed" };
   }
 
-  return { status: "sent" };
+  return { status: "enqueued" };
 }

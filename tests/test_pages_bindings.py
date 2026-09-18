@@ -730,8 +730,10 @@ EXPECTED_CLASSIFICATION = {
     # #2409 contact form: absent → the endpoint answers 503 not_configured
     # (loud, actionable) while the rest of the site serves normally. Deliberately
     # NOT `required`: that would red every deploy — including the one shipping
-    # the form — until the secret is bound. Promote it once bound.
-    "RESEND_API_KEY": ("recommended", ["production"]),
+    # the form — until the endpoint is bound. Promote it once bound. It is a
+    # plain intake URL, not a credential: the form has no email leg by design
+    # (premise-labs#393 — the outbound sender is over its daily quota).
+    "CONTACT_INTAKE_URL": ("recommended", ["production"]),
 }
 
 

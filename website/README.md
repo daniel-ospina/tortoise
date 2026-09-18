@@ -46,36 +46,41 @@ policy).
 ## Contact form (#2409)
 
 `/contact` (`website/contact.html`) is the public contact channel. It posts to
-a Pages Function, `functions/api/contact.ts`, which delivers to
+a Pages Function, `functions/api/contact.ts`, which hands the message to the
+transport seam as ONE queued item. The decided address
 **`hello@premiselabs.co`** — the address the legal pages already name as the
 designated outside-product channel (privacy §1, DPA §15, ToS §15.5,
-aviso-privacidad). The recipient is a **code constant**, never a request
-field, which is what keeps the form from being an open relay.
+aviso-privacidad) — is shown plainly on the page (lede, and the direct-mailto
+fallback below the form), not only in an error path.
 
 ```text
-contact.html ──POST JSON──▶ /api/contact ──▶ deliver() ──▶ hello@premiselabs.co
+contact.html ──POST JSON──▶ /api/contact ──▶ enqueue() ──▶ CONTACT_INTAKE_URL
    fields: name, email (Reply-To), message      honeypot (hp) + per-IP rate limit
-                                         └─ transport seam (PENDING) → functions/_shared/contact-transport.ts
+      └─ one JSON item: {name, replyTo, message, receivedAt, source}
+         seam: functions/_shared/contact-transport.ts
 ```
 
-**Transport — ⚠️ PENDING the owner's decision; NOT SETTLED.** The owner has
-not chosen which mail provider the contact form delivers through, so nothing
-here is that choice. The actual send is isolated behind ONE seam —
-`functions/_shared/contact-transport.ts`, entry point `deliver()` — whose
-payload and result types are provider-neutral. That module currently
-implements Resend as the placeholder that keeps the endpoint exercisable, and
-it is the only source file that names a provider, endpoint, credential
-variable or wire format — so swapping transport is a change to that module
-alone. The recipient above **is** decided: a code constant in
-`functions/api/contact.ts`, never a request field.
+**Transport — ⚠️ OPEN DECISION; NOT SETTLED (a queue vs. email).** The owner
+has not chosen how a submission travels onward, so nothing here is that
+choice. The one network call is isolated behind ONE seam —
+`functions/_shared/contact-transport.ts`, entry point `enqueue()` — whose item
+shape (name, replyTo, message, receivedAt, source) and result types are
+transport-neutral. Swapping transport is a change to that module alone.
 
-**Credential:** the seam reads `RESEND_API_KEY` (Pages project env var), plus
-`RESEND_FROM_EMAIL` (optional; in-code default `noreply@premiselabs.co`). These
-are the product's established names — the same ones `tortoise/email_notify.py`
-uses, so one key serves both surfaces. **Fail-loud contract:** with the key
+**There is no email leg — and that is a constraint, not a gap.** The product's
+outbound email sender is already over budget: `premise-labs#393` records Resend
+at **200% of its daily quota on two consecutive days**, with an objective of
+zero quota-rejected sends. Pointing this form at that sender would add a second
+producer to a saturated sender and would fail exactly when a customer needs it,
+so the seam **does not send email**. Do **not** provision a send-capable
+credential to restore one; the absence of a sending key is the intended state
+until the transport decision says otherwise.
+
+**Configuration:** the seam reads exactly one variable, `CONTACT_INTAKE_URL`
+(Pages project env var) — the URL the JSON item is POSTed to. **It is not a
+secret**, and no authorization header is sent. **Fail-loud contract:** with it
 unset the endpoint returns `503 not_configured` and the page shows the visitor
-the direct-mailto fallback — it never returns a silent success. Never logged,
-never echoed, never placed in a URL.
+the direct-mailto fallback — it never returns a silent success.
 
 **Spam:** hidden `hp` honeypot field (a filled one is answered with a generic
 success so a bot learns nothing) plus a per-isolate rate limit (5 submissions /
@@ -97,13 +102,15 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/api/conta
 1. **Supabase secrets** (set via
    `supabase secrets set --project-ref ybetwichurajbfswfeqa`):
    `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `TURNSTILE_SECRET_KEY`.
-2. **Pages env var for the contact form** — bind `RESEND_API_KEY` on the
-   `premise-labs` Cloudflare Pages project (production). This is the ONE step
-   that makes `/contact` deliver through the current placeholder transport;
-   until it is bound the endpoint answers `503 not_configured` exactly as
-   designed. It is the `RESEND_API_KEY` entry in
-   `config/required-bindings.yml`. (When the transport decision lands, this
-   binding moves with it — see the seam note above.)
+2. **Pages env var for the contact form** — bind `CONTACT_INTAKE_URL` on the
+   `premise-labs` Cloudflare Pages project (production) to the intake endpoint
+   the owner chooses. This is the step that makes `/contact` accept
+   submissions; until it is bound the endpoint answers `503 not_configured`
+   exactly as designed. It is the `CONTACT_INTAKE_URL` entry in
+   `config/required-bindings.yml`. **Do not bind a send-capable email
+   credential** — the form has no email leg by design (see
+   `premise-labs#393` below). (When the transport decision lands, this binding
+   moves with the seam — see the seam note above.)
 3. **Turnstile site key** → paste into the `TURNSTILE_SITE_KEY` constant in
    `index.html`.
 4. **Deploy** — see `supabase/README.md` (CI workflow does it on merge once

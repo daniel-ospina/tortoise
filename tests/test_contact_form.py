@@ -3,26 +3,33 @@
 Guards the contract the form exists to honour — at the repo level, no network:
 
   1. DELIVERY TARGET IS SETTLED. The owner ruling (issue #2409, 2026-09-18) puts
-     the outside-product channel at `hello@premiselabs.co`. The recipient is a
-     CODE CONSTANT in the Pages Function, never a request field — that is what
-     keeps the form from being an open relay. A future edit that made the
-     recipient configurable, or drifted it to another address, fails here.
-  2. FAIL LOUDLY WHEN UNCONFIGURED. With the transport's credential absent the
-     endpoint must answer 503 `not_configured` with a human-actionable message —
-     never a 200. This is the #3616 lesson applied to a second surface: a
-     requirement that can only be read cannot fail. (The live proof is the curl
-     probe in website/README.md; this pins the source that produces it.)
-  3. THE SECRET IS READ FROM ENV AND NEVER LOGGED/ECHOED. The transport seam
-     reads it; the key goes out as an Authorization header, never in a URL, and
-     never reaches a log line or a response body.
-  4. THE FORM IS SURFACED. `/contact` is a real page, linked from the company
-     landing page, the product footer, the FAQ footer and the docs next-steps,
-     and the trailing-slash / .html variants redirect to it.
+     the outside-product channel at `hello@premiselabs.co`. It is a CODE
+     CONSTANT in the Pages Function, never a request field — that is what keeps
+     the form from being an open relay. A future edit that made the recipient
+     configurable, or drifted it to another address, fails here.
+  2. FAIL LOUDLY WHEN UNCONFIGURED. With the intake endpoint absent the endpoint
+     must answer 503 `not_configured` with a human-actionable message — never a
+     200. This is the #3616 lesson applied to a second surface: a requirement
+     that can only be read cannot fail. (The live proof is the curl probe in
+     website/README.md; this pins the source that produces it.)
+  3. THERE IS NO EMAIL LEG — AND NO PROVIDER CALL. The product's outbound email
+     sender is already over budget (`premise-labs#393`: Resend at 200% of its
+     daily quota on two consecutive days; objective is zero quota-rejected
+     sends). The form therefore sends NO email: no `RESEND_*` read, no provider
+     endpoint, no `Authorization`/`Bearer` header, and no send-capable
+     credential — anywhere in the form's path. The absence of a sending key is
+     the intended state, not an ops gap.
+  4. THE FORM IS SURFACED, AND `hello@` IS VISIBLE. `/contact` is a real page,
+     linked from the company landing page, the product footer, the FAQ footer
+     and the docs next-steps, and the trailing-slash / .html variants redirect
+     to it. The decided address is shown plainly on the outside surface (lede
+     and direct-mailto fallback), not hidden behind an error path.
   5. THE TRANSPORT IS A SINGLE, PROVIDER-NEUTRAL SEAM — AND IT IS UNRESOLVED.
-     Every provider-specific detail (endpoint, credential variable, wire format)
-     lives in `functions/_shared/contact-transport.ts`, behind `deliver()`; no
-     other source file names a provider. The owner has NOT settled the
-     transport, so the pending decision must stay recorded in the code and in
+     One submission becomes one JSON item `{name, replyTo, message, receivedAt,
+     source}` posted to a configurable intake endpoint from
+     `functions/_shared/contact-transport.ts`, behind `enqueue()`. The owner has
+     NOT settled the transport (a queue vs. email), so the open decision and the
+     #393 reason the email leg was removed must stay recorded in the code and in
      website/README.md for the next reader.
 
 Run:  python -m pytest tests/test_contact_form.py -v
@@ -59,33 +66,42 @@ def test_recipient_is_the_decided_address() -> None:
 
 
 def test_recipient_is_not_taken_from_the_request() -> None:
-    """Open-relay guard: the To: address must never come from the payload.
+    """Open-relay guard: the destination must never come from the payload.
 
-    A `to`/`recipient` read off the body would let anyone send mail through this
+    A `to`/`recipient` read off the body would let anyone send through this
     domain to anyone. The only request-supplied address is the Reply-To, and it
-    is validated.
+    is validated and travels as `replyTo` — never as a destination.
     """
     src = _src(FUNCTION_TS)
-    assert "to: CONTACT_TO" in src, "the To: address must be the CONTACT_TO constant"
-    # No request field may be used as the delivery target.
+    # The function passes exactly the validated message fields to the seam; no
+    # destination is among them.
+    assert re.search(
+        r"enqueue\(\s*\{\s*name,\s*replyTo:\s*email,\s*message\s*\}", src
+    ), "the seam must receive name/replyTo/message only"
+    # No request field may be used as a destination.
     assert not re.search(r"to:\s*\[\s*(body|data)\.", src)
-    # The submitter's address is the Reply-To at the seam, sourced from the
-    # VALIDATED local — never from the raw body.
+    assert "to: CONTACT_TO" not in src, "the recipient belongs to routing, not to the queued item"
+
     tsrc = _src(TRANSPORT_TS)
-    assert "reply_to: msg.replyTo" in tsrc, "the submitter's address belongs in Reply-To"
-    assert "to: [msg.to]" in tsrc, "the transport delivers only to the caller's decided address"
+    # The queued item has no destination field at all — the intake endpoint
+    # owns routing, so the submitter cannot steer it.
+    assert "replyTo: msg.replyTo" in tsrc, "the submitter's address belongs in replyTo"
+    item = tsrc[tsrc.index("const item = {") : tsrc.index("body: JSON.stringify(item)")]
+    assert not re.search(r"\b(to|recipient|destination)\s*:", item), (
+        "the queued item must carry no destination"
+    )
 
 
 # ── 2. Fail-loud when unconfigured ────────────────────────────────────────
 
 
-def test_missing_key_returns_503_not_configured() -> None:
+def test_missing_endpoint_returns_503_not_configured() -> None:
     """The seam's `not_configured` outcome maps to a visible 503.
 
-    The credential gate is transport-specific, so it lives in the seam; the
+    The configuration gate is transport-specific, so it lives in the seam; the
     HTTP status lives in the function. Both halves of the unconfigured path are
     pinned: a 503 only because the outcome is mapped, and the outcome only
-    because the gate precedes the send call.
+    because the gate precedes the network call.
     """
     src = _src(FUNCTION_TS)
     assert re.search(r'if\s*\(\s*outcome\.status\s*===\s*"not_configured"\s*\)', src), (
@@ -99,17 +115,17 @@ def test_missing_key_returns_503_not_configured() -> None:
     # …and the mapping precedes the final success return, so a silent success on
     # the unconfigured path is structurally impossible. (rindex: the honeypot
     # branch's generic success legitimately appears earlier.)
-    assert src.index('outcome.status === "not_configured"') < src.rindex("return json({ ok: true")
+    assert src.index('outcome.status === "not_configured"') < src.rindex("return json(")
 
     tsrc = _src(TRANSPORT_TS)
-    # The credential comes from env, and its gate precedes the send attempt.
-    assert 'const TRANSPORT_KEY_ENV = "RESEND_API_KEY"' in tsrc
-    assert "envString(env, TRANSPORT_KEY_ENV)" in tsrc
-    assert re.search(r'if\s*\(\s*apiKey\s*===\s*""\s*\)', tsrc), "missing-key gate not found"
-    gate_pos = tsrc.index('apiKey === ""')
-    send_pos = tsrc.index("await sendViaTransport(")
-    assert gate_pos < send_pos, "the credential gate must precede the send"
-    gate = tsrc[gate_pos:send_pos]
+    # The intake endpoint comes from env, and its gate precedes the network call.
+    assert 'const INTAKE_URL_ENV = "CONTACT_INTAKE_URL"' in tsrc
+    assert "envString(env, INTAKE_URL_ENV)" in tsrc
+    assert re.search(r'if\s*\(\s*intakeUrl\s*===\s*""\s*\)', tsrc), "missing-endpoint gate not found"
+    gate_pos = tsrc.index('intakeUrl === ""')
+    fetch_pos = tsrc.index("await fetch(")
+    assert gate_pos < fetch_pos, "the configuration gate must precede the network call"
+    gate = tsrc[gate_pos:fetch_pos]
     assert 'status: "not_configured"' in gate
 
 
@@ -117,73 +133,111 @@ def test_unconfigured_message_gives_the_visitor_the_fallback() -> None:
     """A 503 the visitor cannot act on is a dead end, not a failure signal."""
     src = _src(FUNCTION_TS)
     branch = src[src.index('outcome.status === "not_configured"') : src.index('outcome.status === "failed"')]
-    assert "hello@premiselabs.co" in branch
+    assert "CONTACT_TO" in branch, "the fallback must name the decided address"
     assert "not been sent" in branch or "not sent" in branch
 
 
-# ── 3. Secret handling ───────────────────────────────────────────────────
+# ── 3. No email leg: no provider, no credential, no provider call ─────────
 
 
-def test_secret_is_a_bearer_header_never_a_url_or_a_log() -> None:
+def test_no_email_provider_or_credential_anywhere_in_the_form_path() -> None:
+    """The email leg is REMOVED, not merely unconfigured. `premise-labs#393`
+    (Resend at 200% of its daily quota on two consecutive days) is why: a second
+    producer on a saturated sender fails exactly when a customer needs it."""
+    for path in (FUNCTION_TS, TRANSPORT_TS):
+        src = _src(path)
+        low = src.lower()
+        assert "resend" not in low, f"{path.name} names an email provider"
+        assert "api.resend.com" not in low
+        assert "RESEND_" not in src, f"{path.name} reads a RESEND_* variable"
+        # No credential of any kind travels from the form.
+        assert "Bearer" not in src, f"{path.name} constructs a bearer header"
+        assert "Authorization" not in src, f"{path.name} sets an authorization header"
+
+    # Stronger: no source file under website/functions may name the sender or
+    # its endpoint — the form's path is not the only place a stray key could
+    # reappear.
+    for path in (WEBSITE_DIR / "functions").rglob("*.ts"):
+        text = path.read_text(encoding="utf-8")
+        assert "api.resend.com" not in text, f"{path.relative_to(REPO_ROOT)} names the provider endpoint"
+        assert "RESEND_" not in text, f"{path.relative_to(REPO_ROOT)} reads a RESEND_* variable"
+
+
+def test_the_only_configuration_is_the_intake_endpoint() -> None:
+    """The seam reads exactly one variable — a plain URL, no secret — and the
+    function reads none of its own."""
     tsrc = _src(TRANSPORT_TS)
-    assert "Authorization: `Bearer ${apiKey}`" in tsrc
-    assert "Authorization: `Bearer ${RESEND_API_KEY}`" not in tsrc
-    # `${apiKey}` must appear exactly once, in the Authorization header — never
-    # in a URL (URLs are logged; a bearer token in one is a leaked token).
-    assert tsrc.count("${apiKey}") == 1, f"${apiKey} used {tsrc.count('${apiKey}')} times"
-    for line in tsrc.splitlines():
-        if "${apiKey}" in line:
-            assert "Bearer" in line, f"key interpolated outside the auth header: {line.strip()}"
-    for m in re.finditer(r"console\.(?:log|error|warn)\(([^)]*)\)", tsrc, flags=re.S):
-        assert "apiKey" not in m.group(1), f"secret referenced in a log call: {m.group(0)[:80]}"
-    # Nothing outside the seam may touch the credential, either.
-    assert "RESEND" not in _src(FUNCTION_TS), "the provider leaks outside the transport seam"
-
-
-def test_secret_name_is_the_established_one() -> None:
-    """Same credential name `tortoise/email_notify.py` uses (RESEND_API_KEY /
-    RESEND_FROM_EMAIL), so one key serves both surfaces and ops has one thing to
-    bind. The names live in the seam, not the function."""
-    tsrc = _src(TRANSPORT_TS)
-    assert 'const TRANSPORT_KEY_ENV = "RESEND_API_KEY"' in tsrc
-    assert 'const TRANSPORT_FROM_ENV = "RESEND_FROM_EMAIL"' in tsrc
-    # The product convention is defined by email_notify.py — do not invent a new
-    # name here without changing it there first.
-    notify = _src(REPO_ROOT / "tortoise" / "email_notify.py")
-    assert '"RESEND_API_KEY"' in notify and '"RESEND_FROM_EMAIL"' in notify
+    assert 'const INTAKE_URL_ENV = "CONTACT_INTAKE_URL"' in tsrc
+    # Exactly one env read, and it is the intake endpoint.
+    assert tsrc.count("envString(env, INTAKE_URL_ENV)") == 1
+    assert _src(FUNCTION_TS).count("envString(") == 0
+    # Exactly one env-var-name constant, and it is not secret-shaped.
+    env_names = re.findall(r'^\s*const\s+\w*ENV\w*\s*=\s*"([^"]+)"', tsrc, flags=re.M)
+    assert env_names == ["CONTACT_INTAKE_URL"], f"unexpected env variables: {env_names}"
+    for forbidden in ("API_KEY", "SECRET", "TOKEN", "PASSWORD"):
+        assert forbidden not in env_names[0]
 
 
 # ── 5. The transport seam is singular, provider-neutral, and unresolved ───
 
 
-def test_the_send_is_isolated_behind_one_transport_seam() -> None:
+def test_the_enqueue_is_isolated_behind_one_seam() -> None:
     """Swapping transport must be a change to ONE module. The function imports
-    the seam and never names a provider, endpoint or credential."""
+    the seam, performs no network call of its own, and never names a provider or
+    an email sender."""
     src = _src(FUNCTION_TS)
     assert re.search(
-        r'import\s*\{\s*deliver\s*\}\s*from\s*"\.\./_shared/contact-transport"', src
+        r'import\s*\{\s*enqueue\s*\}\s*from\s*"\.\./_shared/contact-transport"', src
     ), "the function must import the transport seam"
-    assert "resend" not in src.lower(), "the provider's name leaks into the function"
+    assert "resend" not in src.lower(), "an email sender's name leaks into the function"
     assert "https://api." not in src, "a provider endpoint leaks into the function"
-    assert "deliver({" in src, "the function must route delivery through the seam"
+    assert "fetch(" not in src, "the function must not perform the network call itself"
+    assert "enqueue({" in src, "the function must route intake through the seam"
 
-
-def test_transport_is_marked_pending_the_owners_decision() -> None:
-    """The transport is deliberately unresolved … a reader must not mistake
-    today's placeholder implementation for the decision."""
     tsrc = _src(TRANSPORT_TS)
-    assert "PENDING OWNER DECISION" in tsrc
+    assert tsrc.count("fetch(") == 1, "the seam must be the single place a request is made"
+
+
+def test_queued_item_has_exactly_the_agreed_shape() -> None:
+    """One item: name, reply-to email, message, received-at, source."""
+    tsrc = _src(TRANSPORT_TS)
+    assert "name: msg.name" in tsrc
+    assert "replyTo: msg.replyTo" in tsrc
+    assert "message: msg.message" in tsrc
+    assert "receivedAt: new Date().toISOString()" in tsrc, "the item must carry a receipt time"
+    assert "source: INTAKE_SOURCE" in tsrc, "the item must carry its producing surface"
+    assert 'INTAKE_SOURCE = "website/contact"' in tsrc
+    # The item is POSTed as JSON to the configured endpoint.
+    assert re.search(r'headers:\s*\{\s*"Content-Type":\s*"application/json"\s*\}', tsrc)
+    assert "body: JSON.stringify(item)" in tsrc
+
+
+def test_transport_decision_is_marked_open_with_the_reason() -> None:
+    """The transport is deliberately unresolved, and the email leg was removed
+    for a stated reason … a reader must not mistake today's shape for the
+    decision, nor "helpfully" restore an email leg."""
+    tsrc = _src(TRANSPORT_TS)
+    assert "OPEN DECISION" in tsrc
     assert "NOT SETTLED" in tsrc
-    assert "placeholder" in tsrc.lower()
+    assert "393" in tsrc, "the reason the email leg was removed must be named"
+    assert "quota" in tsrc.lower(), "#393 is a quota constraint"
+    assert "no credential" in tsrc.lower() or "do not" in tsrc.lower(), (
+        "the seam must say a send-capable credential is not to be provisioned"
+    )
 
 
-def test_pending_transport_decision_is_recorded_in_the_readme() -> None:
+def test_open_decision_is_recorded_in_the_readme() -> None:
     """Recorded for the next reader, not only in the PR report."""
     readme = _src(README)
     section = readme[readme.index("## Contact form (#2409)") :]
     assert "hello@premiselabs.co" in section, "the decided recipient must be stated"
-    assert "PENDING" in section, "the undecided transport must be flagged as pending"
+    assert "OPEN DECISION" in section, "the undecided transport must be flagged as open"
     assert "contact-transport.ts" in section, "the seam's location must be named"
+    assert "393" in section and "quota" in section.lower(), (
+        "the #393 quota reason for removing the email leg must be recorded"
+    )
+    assert "CONTACT_INTAKE_URL" in section, "the seam's one configuration must be named"
+    assert "503" in section
 
 
 # ── 4. Abuse protection and validation ───────────────────────────────────
@@ -248,7 +302,7 @@ def test_reply_to_is_validated() -> None:
     assert "\\u0020" in validator or "\\r" in validator, "no CR/LF guard in validEmail"
 
 
-# ── 6. The page and its surfacing ────────────────────────────────────────
+# ── 6. The page, its surfacing, and hello@ visibility ─────────────────────
 
 
 def test_contact_page_posts_to_the_function() -> None:
@@ -261,10 +315,28 @@ def test_contact_page_posts_to_the_function() -> None:
     assert 'class="hp-field"' in html and 'aria-hidden="true"' in html
 
 
-def test_contact_page_reaches_the_decided_address_as_fallback() -> None:
-    """If delivery is unconfigured (503) the visitor still needs a way to reach
-    us from the page itself."""
-    assert CONTACT_TO in _src(CONTACT_HTML)
+def test_hello_is_visible_plainly_on_the_outside_surface() -> None:
+    """The owner ruling: where an outside surface shows an address it is
+    `hello@`. It must be visible up front, not only in an error path."""
+    html = _src(CONTACT_HTML)
+    # Visible in the lede — before the form, outside any error/fallback block.
+    lede = html[html.index('class="lede"') : html.index("<main>")]
+    assert CONTACT_TO in lede, "the decided address must be visible up front"
+    assert f'href="mailto:{CONTACT_TO}"' in lede, "the up-front address must be actionable"
+    # And as the direct-mailto fallback below the form.
+    fallback = html[html.index('class="fallback"') : html.index("<noscript>")]
+    assert f'href="mailto:{CONTACT_TO}"' in fallback, "the fallback must name the decided address"
+    # No other address may be shown on the outside surface.
+    assert "support@" not in html
+
+
+def test_hello_is_the_address_other_surfaces_show() -> None:
+    """`docs.html` names a contact channel — it must show `hello@`, and no
+    outside surface may show a competing address."""
+    docs = _src(WEBSITE_DIR / "docs.html")
+    assert f"mailto:{CONTACT_TO}" in docs
+    for rel in ("index.html", "product.html", "faq.html", "docs.html", "contact.html"):
+        assert "support@" not in _src(WEBSITE_DIR / rel), f"{rel} shows a non-hello@ address"
 
 
 def test_contact_is_surfaced_from_the_pages_visitors_land_on() -> None:
@@ -280,9 +352,9 @@ def test_contact_variants_redirect_to_the_canonical() -> None:
 
 
 def test_ops_step_is_documented() -> None:
-    """The one human action that makes delivery live must be written down where
+    """The one human action that makes intake live must be written down where
     an operator looks, not only in an issue."""
     readme = _src(README)
     assert "Contact form (#2409)" in readme
-    assert "RESEND_API_KEY" in readme
+    assert "CONTACT_INTAKE_URL" in readme
     assert "503" in readme
