@@ -9,10 +9,10 @@ Served by the admin gate Function (`website/functions/admin/[[path]].ts`) at `/a
 ```bash
 cp .env.example .env   # VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
 npm install
-npm run dev            # vite dev server (localhost:5173)
+npm run dev            # vite dev server → http://localhost:5173/admin/
 npm test               # vitest — markdown roundtrip invariant
 npm run typecheck      # tsc --noEmit
-npm run build          # tsc --noEmit && vite build → dist/ (base './', relative assets)
+npm run build          # tsc --noEmit && vite build → dist/ (base '/admin/', absolute assets)
 ```
 
 ## Auth model

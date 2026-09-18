@@ -171,7 +171,7 @@ def test_suspended_team_403_passthrough(client):
 # ── The happy path ─────────────────────────────────────────────────────────
 
 def test_ask_returns_answer(client, monkeypatch):
-    """test_ask_returns_answer pins the full 12-field shape + the RESOLVED
+    """test_ask_returns_answer pins the full 13-field shape + the RESOLVED
     question_date semantics (P2-15)."""
     _seed_point(client)
     fake = _FakeReaderFactory().install(monkeypatch)
@@ -181,7 +181,8 @@ def test_ask_returns_answer(client, monkeypatch):
     assert set(body) == {"answer", "abstained", "question_type",
                          "question_date", "evidence", "context_tokens",
                          "model", "provider", "route", "cost_estimate_usd",
-                         "duration_ms", "retrieval_degraded"}
+                         "duration_ms", "retrieval_degraded",
+                         "retrieved_session_ids"}
     assert body["answer"] == "The gym schedule is Monday and Wednesday."
     assert body["abstained"] is False
     assert body["question_date"]  # resolved value present

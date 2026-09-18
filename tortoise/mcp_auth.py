@@ -113,6 +113,33 @@ ERR_REGISTRY = -32005
 ERR_SUSPENDED = -32006
 
 
+# ── #3144 / #3812: the Retry-After contract on an auth-plane 503 ───────────
+# An org-resolution outage (control plane or registry unreachable) is a
+# RETRYABLE dependency condition, not a hard outage. Before this the 503
+# carried no ``Retry-After``, so an MCP client connecting at startup had no
+# instruction to back off — and the reported symptom is exactly that: Pi's
+# ``mcp-client`` connects eagerly with a 15s connect budget and NO retry, so a
+# single 503 during the startup connect silently costs the whole session its
+# Tortoise tools (#3144). The header (integer seconds, RFC 7231 §7.1.3) is what
+# turns an unrecoverable-looking failure into an actionable one.
+#
+# Env-overridable and clamped to a sane range: an operator may tune the
+# advertised back-off, but a misconfigured value can never advertise 0 seconds
+# (a busy-retry that hammers a down dependency) or an absurd window.
+#
+# Read at CALL time, not frozen in a module constant: ``mcp_server`` imports
+# this module BEFORE its ``_load_dotenv()`` runs, so an import-time read would
+# silently ignore a value set in ``.env`` (the #880 freeze class — the sibling
+# health-probe knobs are call-time reads for exactly this reason).
+def _resolve_auth_retry_after_s() -> int:
+    """Seconds advertised in ``Retry-After`` on the auth-plane 503 (clamped)."""
+    try:
+        v = int(os.environ.get("TORTOISE_MCP_AUTH_RETRY_AFTER", "5"))
+    except (TypeError, ValueError):
+        return 5
+    return max(1, min(v, 3600))
+
+
 def _jsonrpc_error(code: int, message: str, data: dict | None = None,
                    status: int = 400,
                    headers: dict[str, str] | None = None) -> JSONResponse:
@@ -364,11 +391,16 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
                         sdk = await self._get_registry_sdk()
                         org = sdk.apikey_verify(token)
             except Exception:
-                # Registry down → 503, never 500/stack-trace
+                # Registry/control plane down → 503, never 500/stack-trace.
+                # The 503 carries ``Retry-After`` (#3144/#3812): an auth-plane
+                # outage is retryable, and an MCP client that cannot read a
+                # back-off treats it as a hard outage and gives up on the
+                # startup connect.
                 return _jsonrpc_error(
                     ERR_REGISTRY,
                     "Authentication temporarily unavailable. Try again shortly.",
                     status=503,
+                    headers={"Retry-After": str(_resolve_auth_retry_after_s())},
                 )
             if org is None:
                 return _jsonrpc_error(
