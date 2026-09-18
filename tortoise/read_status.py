@@ -33,8 +33,8 @@ result.
 ⚠️ **A KNOWN CROSS-LANE CONFLICT, RAISED NOT RESOLVED HERE.** The read-path
 contract's home issue is #3805 (*the read-path failure contract — unavailable
 must be distinguishable from empty*), which stays open: this module implements
-only its status-vocabulary sub-item. Two other declarations of the SAME four
-words exist, and they do not agree:
+only its status-vocabulary sub-item. Two other status declarations exist, and
+they do not agree with this module or with each other:
 
 1. `157a3f8f3` (#3893 "D5") landed ``not_configured`` (never set up) and
    ``tortoise_unavailable`` (configured but unreachable) in
