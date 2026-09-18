@@ -2,9 +2,11 @@
 
 ⛔ The ask lane that consumes this reader is EVAL-ONLY (#3849): the reader
 still ships, but there is NO ``/v1/ask`` REST route, NO SDK ``ask()`` method
-and NO MCP ask tool. Its only callers are the eval-only lane
-(``tortoise/ask_lane.py``), the LongMemEval benchmark (which measures this
-reader directly) and the eval spot-check. Do NOT build product features on it.
+and NO MCP ask tool. Its direct importers are all eval/test-side: the
+eval-only lane (``tortoise/ask_lane.py``), the LongMemEval harness
+(``tools/longmem_eval/`` — which measures this reader directly), the eval
+spot-check (``tools/ask_spotcheck.py``) and the transcript generator
+(``tools/gen_ask_transcripts.py``). Do NOT build product features on it.
 
 The shipped reader for that eval-only lane: an LLM reader that answers
 questions about captured memory, built from the LongMemEval benchmarked
