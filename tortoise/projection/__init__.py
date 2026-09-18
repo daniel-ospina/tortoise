@@ -259,8 +259,16 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
 _PREWIPE_SNAPSHOT_VERSION = 1
+# #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
+# sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
+# container and its CONTAINS edges are RAW graph writes on the capture path
+# that ride no journal record on a pre-#3947 store, so the sidecar is their
+# only durable record once the wipe lands. On the sidecar-RECOVERY path the
+# live graph is already empty, so without them a retried rebuild recreates
+# every turn Point but silently destroys every container and link.
 _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
-                      "batch_point_links")
+                      "batch_point_links", "session_snapshot",
+                      "session_point_links")
 # The sidecar is read whole into memory before the wipe, so an unbounded file
 # (a planted one especially — the log dir is caller-supplied) would exhaust
 # memory on the recovery path. Nothing this writer produces comes close.
@@ -336,6 +344,24 @@ def _validate_batch_entry(entry) -> str | None:
     return None
 
 
+def _validate_session_entry(entry) -> str | None:
+    """Return a complaint about a ``session_snapshot`` entry, else None.
+
+    A `:Session` container is the same shape as a `:Batch` marker (a str
+    ``id`` plus primitive properties), so this mirrors
+    ``_validate_batch_entry`` with the container's own label in the message.
+    """
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    if not isinstance(entry.get("id"), str):
+        return f"session id {entry.get('id')!r} is not a string"
+    for key, value in entry.items():
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
 def _validate_link_entry(entry) -> str | None:
     """Return a complaint about a ``batch_point_links`` entry, else None.
 
@@ -353,6 +379,8 @@ _SNAPSHOT_ENTRY_CHECK = {
     "synthetic_events": _validate_point_entry,
     "batch_snapshot": _validate_batch_entry,
     "batch_point_links": _validate_link_entry,
+    "session_snapshot": _validate_session_entry,
+    "session_point_links": _validate_link_entry,
 }
 # Node properties a snapshot Point carries but `_upsert_point_props` does NOT
 # write (its SET list is fixed): restored verbatim in the pass-1b tail, because
@@ -530,6 +558,8 @@ def _clear_prewipe_snapshot(path: str) -> None:
             "synthetic_events": [],
             "batch_snapshot": [],
             "batch_point_links": [],
+            "session_snapshot": [],
+            "session_point_links": [],
         })
     except (OSError, TypeError, ValueError) as e:
         # ERROR, not warning: the pre-wipe payload is still on disk, so the
@@ -640,9 +670,10 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
         pid = p.get("id") if isinstance(p, dict) else None
         return pid if isinstance(pid, str) else None
 
-    def _batch_id(b):
-        bid = b.get("id") if isinstance(b, dict) else None
-        return bid if isinstance(bid, str) else None
+    def _container_id(entry):
+        """Dedup key for a :Batch / :Session container snapshot entry — id."""
+        cid = entry.get("id") if isinstance(entry, dict) else None
+        return cid if isinstance(cid, str) else None
 
     def _link_key(link):
         # exactly two, mirroring the restore loop's unpack (entry shapes are
@@ -657,13 +688,28 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
         + list(fresh["synthetic_events"]), _point_id, "synthetic_events")
     batches = _union(
         list(leftover.get("batch_snapshot") or [])
-        + list(fresh["batch_snapshot"]), _batch_id, "batch_snapshot")
+        + list(fresh["batch_snapshot"]), _container_id, "batch_snapshot")
     links = [tuple(entry[:2]) for entry in _union(
         list(leftover.get("batch_point_links") or [])
         + list(fresh["batch_point_links"]), _link_key, "batch_point_links")
         if _link_key(entry) is not None]
+    # #3947 × #3010: the :Session container snapshot rides the same sidecar,
+    # deduped the same way (containers on `id`, links on the (sid, pid) pair).
+    # `.get` on the fresh side keeps the union callable by a caller (e.g. an
+    # offline unit test) that predates these sections; absent means empty,
+    # which is exactly how the loader reads them.
+    session_containers = _union(
+        list(leftover.get("session_snapshot") or [])
+        + list(fresh.get("session_snapshot") or []),
+        _container_id, "session_snapshot")
+    session_links = [tuple(entry[:2]) for entry in _union(
+        list(leftover.get("session_point_links") or [])
+        + list(fresh.get("session_point_links") or []),
+        _link_key, "batch_point_links") if _link_key(entry) is not None]
     return {"synthetic_events": events, "batch_snapshot": batches,
-            "batch_point_links": links}
+            "batch_point_links": links,
+            "session_snapshot": session_containers,
+            "session_point_links": session_links}
 
 
 class _GuardedGraph:
@@ -2472,21 +2518,35 @@ class FalkorProjection(
         if leftover is not None:
             logger.warning(
                 "rebuild: found a leftover pre-wipe snapshot at %s (%d "
-                "graph-only point event(s), %d batch(es), %d batch link(s)) "
+                "graph-only point event(s), %d batch(es), %d batch link(s), "
+                "%d session container(s), %d session link(s)) "
                 "from an interrupted rebuild — merging it before this "
                 "wipe+replay",
                 snapshot_path,
                 len(leftover.get("synthetic_events") or []),
                 len(leftover.get("batch_snapshot") or []),
-                len(leftover.get("batch_point_links") or []))
+                len(leftover.get("batch_point_links") or []),
+                len(leftover.get("session_snapshot") or []),
+                len(leftover.get("session_point_links") or []))
         merged = _union_prewipe_snapshot(leftover, {
             "synthetic_events": synthetic_events,
             "batch_snapshot": batch_snapshot,
             "batch_point_links": batch_point_links,
+            "session_snapshot": session_snapshot,
+            "session_point_links": session_point_links,
         })
         synthetic_events = merged["synthetic_events"]
         batch_snapshot = merged["batch_snapshot"]
         batch_point_links = merged["batch_point_links"]
+        # #3947 × #3010: reassign the session sections from the MERGED snapshot
+        # BEFORE both consumers — the recovered-roster leg (b) below and the
+        # :Session restore loops after replay. On the sidecar-recovery path the
+        # live reads above returned nothing (the wipe already landed), so this
+        # reassignment is what makes the containers/links recoverable at all —
+        # and what lets the roster carry the session-linked turn ids the
+        # `covered` set (journal ∪ synthetic snapshot) cannot account for.
+        session_snapshot = merged["session_snapshot"]
+        session_point_links = merged["session_point_links"]
         events = list(synthetic_events) + journal_events
 
         # Guard the wipe BEFORE persisting the sidecar: a REFUSED wipe (a
@@ -2503,7 +2563,8 @@ class FalkorProjection(
         # rebuild rather than proceeding into an unrecoverable wipe (never
         # silently trade durability for convenience).
         snapshot_pending = bool(
-            synthetic_events or batch_snapshot or batch_point_links)
+            synthetic_events or batch_snapshot or batch_point_links
+            or session_snapshot or session_point_links)
         if snapshot_pending:
             try:
                 _write_prewipe_snapshot(snapshot_path, {
@@ -2513,15 +2574,20 @@ class FalkorProjection(
                     "batch_snapshot": batch_snapshot,
                     "batch_point_links": [list(link) for link in
                                           batch_point_links],
+                    "session_snapshot": session_snapshot,
+                    "session_point_links": [list(link) for link in
+                                            session_point_links],
                 })
             except (OSError, TypeError, ValueError) as e:
                 raise RuntimeError(
                     f"rebuild aborted BEFORE the graph wipe: could not persist "
                     f"the pre-wipe snapshot to {snapshot_path} ({e}). Wiping "
                     f"now would destroy {len(synthetic_events)} graph-only "
-                    f"Point event(s), {len(batch_snapshot)} :Batch marker(s) "
-                    f"and {len(batch_point_links)} batch link(s) with no "
-                    f"durable record (#2943). Fix the cause — write "
+                    f"Point event(s), {len(batch_snapshot)} :Batch marker(s), "
+                    f"{len(batch_point_links)} batch link(s), "
+                    f"{len(session_snapshot)} :Session container(s) and "
+                    f"{len(session_point_links)} session link(s) with no "
+                    f"durable record (#2943, #3947). Fix the cause — write "
                     f"permissions/space on the event-log directory, or a "
                     f"non-serializable Point property — and re-run."
                 ) from e

@@ -462,16 +462,33 @@ def test_rebuild_all_tolerates_a_journaled_hard_delete(tmp_path):
 # `_assert_episodic_points_recreatable` returns at its `if not before`
 # short-circuit — the invariant never fires on exactly the path it exists to
 # protect. The roster must therefore be recovered from the snapshot too.
+#
+# The `:Session` container/link sections are the other half: the durable
+# sidecar carries them (like #990's `:Batch` snapshot), so a retried rebuild
+# on an already-wiped graph can restore the containers AND hand the proof a
+# roster the replay cannot account for. Without that integration the re-point
+# is unevaluable on this path (the live session read is empty) and the
+# containers are silently destroyed by a recovery that reports success.
 
 
-def _pending_sidecar(log_dir, point_entries):
-    """Write a PENDING #3010 pre-wipe sidecar holding `point_entries`."""
+def _pending_sidecar(log_dir, point_entries, session_snapshot=(),
+                     session_point_links=()):
+    """Write a PENDING #3010 pre-wipe sidecar holding `point_entries`.
+
+    `session_snapshot` / `session_point_links` are the #3947 × #3010
+    integration: on the sidecar-recovery path (empty live graph) the durable
+    sidecar is the ONLY record of the `:Session` containers and their
+    CONTAINS edges, so a recovered roster leg (b) and the restore loops read
+    them from here.
+    """
     _write_prewipe_snapshot(prewipe_snapshot_path(str(log_dir)), {
         "version": 1,
         "created_at": "2026-01-01T00:00:00Z",
         "synthetic_events": point_entries,
         "batch_snapshot": [],
         "batch_point_links": [],
+        "session_snapshot": [dict(s) for s in session_snapshot],
+        "session_point_links": [list(pair) for pair in session_point_links],
     })
 
 
@@ -557,5 +574,96 @@ def test_sidecar_recovery_with_a_consistent_journal_proceeds(tmp_path):
         assert proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.is_episodic",
             params={"sid": SESSION_ID}).result_set[0][0] is True
+    finally:
+        sdk.close()
+
+
+def test_sidecar_recovery_refuses_a_turn_the_replay_cannot_recreate(tmp_path):
+    """THE PROTECTION. The durable sidecar promises a capture session holding
+    a turn T; the journal holds NO creation record for T and T is not in the
+    sidecar's ``synthetic_events``. ``rebuild_all`` must REFUSE before the
+    wipe instead of wiping and reporting success.
+
+    This is the *reachable* RED the roster re-point exists for: the recovered
+    roster (leg (b) — the episodic session's CONTAINS link) contains T while
+    ``covered`` (journal ∪ synthetic snapshot) cannot. Before the roster
+    re-point ``before`` arrived empty and the guard short-circuited at
+    ``if not before``; before the sidecar session sections landed, leg (b)
+    read an empty live graph — either way the guard never fired here.
+    """
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    turn = SESSION_ID + "_t0"
+    # NO creation record for `turn` anywhere in the journal.
+    (tmp / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+    _pending_sidecar(
+        tmp, [],
+        session_snapshot=[{"id": SESSION_ID, "is_episodic": True,
+                           "capture_ok": True, "turn_count": 1}],
+        session_point_links=[(SESSION_ID, turn)])
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
+        with pytest.raises(RebuildDroppedEpisodicPoints) as ei:
+            proj.rebuild_all(str(tmp))
+        assert turn in str(ei.value)
+        assert "NOT touched" in str(ei.value)
+        # #2943 "No loss without proof": the proof is PRE-wipe, so the store is
+        # exactly as empty as it was — nothing was destroyed to learn this.
+        assert proj.g.query(
+            "MATCH (n) RETURN count(n)").result_set[0][0] == 0
+    finally:
+        sdk.close()
+
+
+def test_sidecar_recovery_restores_the_session_container_and_link(tmp_path):
+    """F2 CLOSURE on the recovery path. The journal recreates the turn Point;
+    the durable sidecar is the ONLY record of the ``:Session`` container and
+    its CONTAINS edge (the journal record carries no ``contains_session``).
+    A recovery that reports success must restore BOTH, properties included.
+
+    Can only pass with the merged-session integration: the live graph is
+    empty, so the live ``:Session`` read returns nothing and the container
+    would otherwise be silently destroyed.
+    """
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    turn = SESSION_ID + "_t0"
+    (tmp / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z", "type": "PointAdded",
+        "initiated_by": "sdk", "projection_version": 2,
+        "point": {"id": turn, "content": "[user] hi", "pointKind": "event",
+                  "speaker": "user", "is_episodic": True, "status": "draft"},
+    }) + "\n", encoding="utf-8")
+    _pending_sidecar(
+        tmp, [],
+        session_snapshot=[{"id": SESSION_ID, "is_episodic": True,
+                           "capture_ok": True, "turn_count": 3}],
+        session_point_links=[(SESSION_ID, turn)])
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
+        counts = proj.rebuild_all(str(tmp))        # must NOT raise
+        assert counts["nodes"] >= 1
+        assert _turn_ids(proj) == [turn]
+        assert _contains(proj) == [turn], (
+            "the CONTAINS edge lives only in the sidecar — a success that "
+            "loses it is exactly the F2 false PASS")
+        rows = proj.g.query(
+            "MATCH (s:Session {id:$sid}) "
+            "RETURN s.capture_ok, s.turn_count, s.is_episodic",
+            params={"sid": SESSION_ID}).result_set
+        assert rows, "the :Session container must be restored"
+        assert rows[0] == [True, 3, True], (
+            "container properties come from the sidecar; a stub Session reads "
+            "as capture_ok=None (#2335 legacy presumed-captured)")
+        assert not os.path.exists(prewipe_snapshot_path(str(tmp))), (
+            "a completed recovery must retire the sidecar")
     finally:
         sdk.close()
