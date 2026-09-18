@@ -43,11 +43,17 @@ from __future__ import annotations
 
 import json
 import os
+from unittest import mock
 
 import pytest
 
 from tortoise.log import EventLog
-from tortoise.projection import RebuildDroppedEpisodicPoints
+from tortoise.projection import (
+    FalkorProjection,
+    RebuildDroppedEpisodicPoints,
+    _write_prewipe_snapshot,
+    prewipe_snapshot_path,
+)
 from tortoise.sdk import TortoiseSDK
 
 CONV = [
@@ -278,6 +284,14 @@ def test_snapshot_coverage_is_derived_from_what_replay_stages(tmp_path):
     gone with success reported — the exact false PASS this PR exists to
     remove. A non-object line in the journal is enough to trip it (the
     snapshot loop calls `ev.get` unguarded).
+
+    #3947 × #3010 (rebase): on this input the refusal now comes from #3010's
+    `capture_failed` gate — a failed capture refuses BEFORE the wipe — so the
+    assertion is on the shared contract (`RuntimeError`, whose
+    `RebuildDroppedEpisodicPoints` is a subclass) plus the untouched store,
+    not on which of the two pre-wipe refusals speaks first. #3010's gate is
+    strictly stronger here: it refuses even with no episodic Point at all, so
+    the silent-capture-failure class cannot reach the proof's coverage at all.
     """
     tmp = tmp_path / "events"
     tmp.mkdir()
@@ -296,7 +310,7 @@ def test_snapshot_coverage_is_derived_from_what_replay_stages(tmp_path):
             "t.pointKind='event', t.is_episodic=true, t.status='draft'",
             params={"id": pid},
         )
-        with pytest.raises(RebuildDroppedEpisodicPoints):
+        with pytest.raises(RuntimeError):
             proj.rebuild_all(str(tmp))
         # Pre-wipe ⇒ the store still holds the turn.
         assert _turn_ids(proj) == [pid]
@@ -436,5 +450,112 @@ def test_rebuild_all_tolerates_a_journaled_hard_delete(tmp_path):
         assert counts["events"] >= 1
         assert proj.g.query("MATCH (n:Point {id:$id}) RETURN count(n)",
                             params={"id": pid}).result_set[0][0] == 0
+    finally:
+        sdk.close()
+
+
+# ── #3947 × #3010: the SIDECAR-RECOVERY path ─────────────────────────────
+#
+# #3010 made a leftover pre-wipe sidecar the durable record of what an
+# interrupted rebuild saw before its wipe. On that path the live graph is
+# EMPTY, so the live `episodic_before` read is the empty set and
+# `_assert_episodic_points_recreatable` returns at its `if not before`
+# short-circuit — the invariant never fires on exactly the path it exists to
+# protect. The roster must therefore be recovered from the snapshot too.
+
+
+def _pending_sidecar(log_dir, point_entries):
+    """Write a PENDING #3010 pre-wipe sidecar holding `point_entries`."""
+    _write_prewipe_snapshot(prewipe_snapshot_path(str(log_dir)), {
+        "version": 1,
+        "created_at": "2026-01-01T00:00:00Z",
+        "synthetic_events": point_entries,
+        "batch_snapshot": [],
+        "batch_point_links": [],
+    })
+
+
+def _episodic_point_entry(pid, content="[user] hi"):
+    return {
+        "type": "PointAdded",
+        "projection_version": 2,
+        "point": {"id": pid, "content": content, "pointKind": "event",
+                  "speaker": "user", "is_episodic": True, "status": "draft"},
+    }
+
+
+def test_sidecar_recovery_proof_roster_comes_from_the_snapshot(tmp_path):
+    """The re-point: on the sidecar-recovery path the proof's ROSTER is the
+    recovered snapshot's episodic population, not the (empty) live graph.
+
+    Mutation-proofed — revert the `episodic_before | recovered_episodic` union
+    at the proof call site and this test fails: `before` arrives empty, which
+    is the short-circuit that disarms the guard here.
+    """
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    turn = SESSION_ID + "_t0"
+    # The journal has NO creation record for the turn — only an unrelated
+    # event. The sidecar is the sole record of what existed pre-wipe.
+    (tmp / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "IngestStarted"}) + "\n", encoding="utf-8")
+    _pending_sidecar(tmp, [_episodic_point_entry(turn)])
+
+    seen: dict = {}
+    real = FalkorProjection._assert_episodic_points_recreatable
+
+    def spy(self, before, events, snapshot_ids=()):
+        seen["before"] = set(before)
+        return real(self, before, events, snapshot_ids=snapshot_ids)
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
+        with mock.patch.object(FalkorProjection,
+                               "_assert_episodic_points_recreatable", spy):
+            proj.rebuild_all(str(tmp))  # must not short-circuit the proof
+        assert turn in seen.get("before", set()), (
+            "the proof's roster must come from the recovered snapshot: the "
+            "live graph is empty here, so an empty `before` IS the "
+            "short-circuit that disarms the guard on this path")
+        # The recovery itself is non-destructive: the turn comes back as a
+        # TURN (the sidecar carries the is_episodic marker).
+        assert proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.is_episodic",
+            params={"id": turn}).result_set[0][0] is True
+    finally:
+        sdk.close()
+
+
+def test_sidecar_recovery_with_a_consistent_journal_proceeds(tmp_path):
+    """Healthy-recovery control: the sidecar and the journal agree, so every
+    recovered episodic point IS recreatable and the rebuild must complete —
+    the re-point must not turn a good recovery into a false block (#2943)."""
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    turn = SESSION_ID + "_t0"
+    (tmp / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z", "type": "PointAdded",
+        "initiated_by": "sdk", "projection_version": 2,
+        "contains_session": SESSION_ID,
+        "point": {"id": turn, "content": "[user] hi", "pointKind": "event",
+                  "speaker": "user", "is_episodic": True, "status": "draft"},
+    }) + "\n", encoding="utf-8")
+    _pending_sidecar(tmp, [_episodic_point_entry(turn)])
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
+        counts = proj.rebuild_all(str(tmp))        # must NOT raise
+        assert counts["nodes"] >= 1
+        assert _turn_ids(proj) == [turn]
+        # The journaled `contains_session` envelope still rebuilds the link.
+        assert set(_turn_ids(proj)) <= set(_contains(proj))
+        assert proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.is_episodic",
+            params={"sid": SESSION_ID}).result_set[0][0] is True
     finally:
         sdk.close()

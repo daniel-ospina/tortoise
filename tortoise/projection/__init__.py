@@ -2539,11 +2539,49 @@ class FalkorProjection(
         # graph-only Point — the category-A false PASS this PR exists to
         # remove.
         snapshot_ids = self._journal_recreated_ids(synthetic_events)
+        # #3947 × #3010: the proof's ROSTER must survive the wipe too. On the
+        # sidecar-recovery path the live graph is EMPTY — the interrupted
+        # rebuild's wipe already landed — so `episodic_before`, the live read,
+        # is the empty set and `_assert_episodic_points_recreatable` returns at
+        # its `if not before` short-circuit: the invariant never even evaluates
+        # on exactly the path it exists to protect. The durable pre-wipe
+        # snapshot IS the record of what existed before that wipe, so union
+        # its episodic roster into `before`:
+        #   (a) snapshot Points carrying `is_episodic = true` — the graph-only
+        #       turns a pre-#3947 store holds nowhere else;
+        #   (b) the Points an EPISODIC `:Session` CONTAINed (ontology §4.5) —
+        #       the captured turns, which the Point snapshot does not record
+        #       as a roster, so the recovered set can exceed (a).
+        # This widens the ROSTER only, never `covered`: session membership is
+        # not a Point-recreation source (the link is restored from the
+        # snapshot, not staged by the replay), and folding the session-linked
+        # ids into coverage would make the proof green by construction — the
+        # vacuity this re-point removes.
+        recovered_episodic: set[str] = set()
+        for ev in synthetic_events:
+            snapshot_point = ev.get("point") if isinstance(ev, dict) else None
+            if not isinstance(snapshot_point, dict):
+                continue
+            if not snapshot_point.get("is_episodic"):
+                continue
+            recovered_id = snapshot_point.get("id")
+            if isinstance(recovered_id, str):
+                recovered_episodic.add(recovered_id)
+        episodic_session_ids = {
+            s.get("id") for s in session_snapshot
+            if isinstance(s, dict) and s.get("is_episodic")}
+        for sess_id, point_id in session_point_links:
+            if sess_id in episodic_session_ids and isinstance(point_id, str):
+                recovered_episodic.add(point_id)
         # The proof runs HERE — after every recreation source is assembled
         # (synthetic snapshot + every JSONL file) and BEFORE the first
-        # destructive statement.
+        # destructive statement. `episodic_before` is the live read taken
+        # before these snapshots, and both reads describe the same pre-wipe
+        # graph, so the union is the full pre-wipe episodic roster — including
+        # on the empty-live-graph recovery path, where it is no longer empty.
         self._assert_episodic_points_recreatable(
-            episodic_before, events, snapshot_ids=snapshot_ids)
+            episodic_before | recovered_episodic, events,
+            snapshot_ids=snapshot_ids)
 
         self.g.query("MATCH (n) DETACH DELETE n")
 
