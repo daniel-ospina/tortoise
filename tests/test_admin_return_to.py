@@ -29,8 +29,9 @@ the test skips cleanly when node is unavailable.
 returns you to must be able to load its own bundle. The console SPA is built
 with an absolute `base: '/admin/'`; a relative base resolved against the
 document URL, so the extensionless `/admin` (the form the gate emits in
-`next=`) requested `/assets/index-*.js` and rendered blank. The two #3952 tests
-at the end of this file pin the config and the committed build snapshot.
+`next=`) requested `/assets/index-*.js` and rendered blank. The three #3952 tests
+at the end of this file pin the build base, the committed snapshot's asset
+resolution, and that the referenced files actually exist.
 """
 
 from __future__ import annotations
