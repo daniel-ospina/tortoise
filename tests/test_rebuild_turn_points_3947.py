@@ -207,13 +207,11 @@ def test_rebuild_raises_when_turn_points_are_unjournaled(unjournaled):
 
 def test_invariant_is_the_falsifier_for_is_episodic_parity(unjournaled):
     """The pre-wipe proof must not be satisfiable by a node that only LOOKS
-    done: the check is on recreatability of the pre-wipe episodic set, so a
-    snapshot id that the replay will NOT re-flag still counts as covered only
-    because the parity clause (b) writes the flag.
+    done: the check is on recreatability of the pre-wipe episodic set.
 
     Stated the other way round, this is where ``rebuild_all`` REDs for fix
-    (b): its #548 snapshot always supplies the id (so the proof passes), and
-    the flag is then asserted by
+    (b): its #548 snapshot supplies the id (so the proof passes), and the flag
+    is then asserted by
     ``test_rebuild_all_restores_turn_points_and_session_link`` — whose
     ``_turn_ids`` filter is ``is_episodic = true``, i.e. it returns ``[]``
     without the parity clause.
@@ -221,14 +219,121 @@ def test_invariant_is_the_falsifier_for_is_episodic_parity(unjournaled):
     sdk, _ = unjournaled
     proj = sdk._get_proj()
     turn = f"{SESSION_ID}_t0"
-    # No journal record and no snapshot id → refuse.
+    # No recreation source at all → refuse.
     with pytest.raises(RebuildDroppedEpisodicPoints):
         proj._assert_episodic_points_recreatable({turn}, [], snapshot_ids=())
-    # Either recreation source is enough — including the #548 snapshot alone.
+    # Either recreation source is enough — the #548 snapshot alone, a journal
+    # PointAdded, or a promoted full snapshot.
     proj._assert_episodic_points_recreatable({turn}, [], snapshot_ids={turn})
-    proj._assert_episodic_points_recreatable({turn}, [{
-        "type": "PointAdded", "point": {"id": turn},
-    }])
+    for kind in ("PointAdded", "OperatorAdded", "PointPromoted",
+                 "OperatorPromoted"):
+        proj._assert_episodic_points_recreatable(
+            {turn}, [{"type": kind, "point": {"id": turn}}])
+
+
+def test_every_node_creating_journal_type_counts_as_recreatable(tmp_path):
+    """#3947 review (cycle 2): `apply()` creates a node from `PointPromoted`
+    and `OperatorPromoted` too, not just `PointAdded`/`OperatorAdded`. A proof
+    that missed them would REFUSE a rebuild the replay completes correctly —
+    the false block that makes a guard get ripped out. Exercises the real
+    `rebuild()` end of end: the promoted record is the only one in the
+    journal.
+    """
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    pid = SESSION_ID + "_t0"
+    (tmp / "sdk.jsonl").write_text(json.dumps({
+        "event_id": "e1", "ts": "2026-01-01T00:00:00Z",
+        "type": "PointPromoted", "initiated_by": "sdk",
+        "projection_version": 2,
+        "point": {"id": pid, "content": "[user] hi", "pointKind": "event",
+                  "is_episodic": True, "status": "live"},
+    }) + "\n", encoding="utf-8")
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.g.query(
+            "CREATE (t:Point {id:$id}) SET t.content='[user] hi', "
+            "t.pointKind='event', t.is_episodic=true, t.status='live'",
+            params={"id": pid},
+        )
+        proj.rebuild(EventLog(str(tmp / "sdk.jsonl")))  # must NOT raise
+        assert _turn_ids(proj) == [pid], (
+            "the promoted snapshot recreates the node — refusing it is a "
+            "false block on a healthy rebuild")
+    finally:
+        sdk.close()
+
+
+def test_snapshot_coverage_is_derived_from_what_replay_stages(tmp_path):
+    """#3947 review (cycle 2, category A): the proof's coverage must never be
+    larger than what the replay will actually stage.
+
+    The #548 snapshot block is best-effort (`except Exception: pass`). If an
+    error lands AFTER the id read but BEFORE/INSIDE the synthetic-event build,
+    an id-derived coverage set would still claim those ids are covered, the
+    proof would GREEN, the wipe would run, and every graph-only Point would be
+    gone with success reported — the exact false PASS this PR exists to
+    remove. A non-object line in the journal is enough to trip it (the
+    snapshot loop calls `ev.get` unguarded).
+    """
+    tmp = tmp_path / "events"
+    tmp.mkdir()
+    (tmp / "sdk.jsonl").write_text(
+        json.dumps({"event_id": "ok", "ts": "2026-01-01T00:00:00Z",
+                    "type": "IngestStarted"}) + "\n" + "123\n",
+        encoding="utf-8")
+
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        pid = SESSION_ID + "_t0"
+        proj.g.query(
+            "CREATE (t:Point {id:$id}) SET t.content='[user] hi', "
+            "t.pointKind='event', t.is_episodic=true, t.status='draft'",
+            params={"id": pid},
+        )
+        with pytest.raises(RebuildDroppedEpisodicPoints):
+            proj.rebuild_all(str(tmp))
+        # Pre-wipe ⇒ the store still holds the turn.
+        assert _turn_ids(proj) == [pid]
+    finally:
+        sdk.close()
+
+
+def test_recapture_journals_the_stored_status_not_a_literal_draft(tmp_path):
+    """#3947 review (cycle 2, parity): the live turn write is
+    `t.status = coalesce(t.status, 'draft')`, so a RE-capture preserves a
+    promoted status. Journalling a literal `draft` makes the replay REGRESS a
+    promoted turn (`apply()` folds in order, so the second PointAdded wins).
+    The record must carry what the graph holds, like `createdAt`.
+    """
+    log_path = str(tmp_path / "events" / "sdk.jsonl")
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
+    try:
+        sdk.capture_session(CONV, session_id=SESSION_ID)
+        proj = sdk._get_proj()
+        pid = f"{SESSION_ID}_t0"
+        proj.g.query("MATCH (t:Point {id:$id}) SET t.status='live'",
+                     params={"id": pid})
+        sdk.capture_session(CONV, session_id=SESSION_ID)  # re-capture
+
+        turns = [e for e in EventLog(log_path).read_all()
+                 if (e.get("point") or {}).get("id") == pid]
+        assert turns, "the re-capture must journal the turn"
+        assert turns[-1]["point"]["status"] == "live", (
+            "the journal must carry the STORED status; a literal 'draft' "
+            "regresses the promoted turn on replay")
+
+        proj.rebuild(EventLog(log_path))
+        after = proj.g.query("MATCH (t:Point {id:$id}) RETURN t.status",
+                             params={"id": pid}).result_set[0][0]
+        assert after == "live", "replay must not downgrade a promoted turn"
+    finally:
+        sdk.close()
 
 
 def test_forged_payload_contains_session_cannot_create_a_link(tmp_path):

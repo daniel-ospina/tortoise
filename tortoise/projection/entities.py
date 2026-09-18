@@ -113,11 +113,14 @@ class _EntityHandlers:
         # — never a node property. The replay reads it from the RAW envelope
         # before `_norm` (`{**ev, **ev["point"]}`) can splice the payload over
         # it, so a point key of the same name cannot shadow (or forge) it; this
-        # entry is the writer-side backstop that keeps the key out of the
-        # open-set passthrough entirely. Deliberately NOT in `_POINT_DENY`:
-        # the deny list's drop-warning would then fire on every healthy turn
-        # replay (the envelope key is present by design) — the #2958 noise
-        # class.
+        # entry makes `_persist_extra_props` drop an IN-PAYLOAD forgery (its
+        # `skip` set is `_META_KEYS | handled_keys`), which is the only way the
+        # key can reach a node at all — the envelope half never enters the
+        # payload dict the extra-props walk reads. It sits here rather than in
+        # `_POINT_DENY` because that list is for payload keys the replay
+        # DELIBERATELY drops, and a forgery is not a policy-drop; the boundary
+        # rejects in `sdk._sanitize_props` / mcp `_SERVER_MANAGED_PROPS` are
+        # where a tenant is told no.
         "contains_session",
         # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
@@ -489,9 +492,9 @@ class _EntityHandlers:
         the point payload: it is a capture-write structural fact, not a
         Point property. The replay reads it from the **raw** envelope BEFORE
         `_norm` (`{**ev, **ev["point"]}`) can splice the payload over it, so
-        a point key of the same name cannot shadow it; `_POINT_DENY` and the
-        SDK/MCP boundary rejects are the backstops that keep the key out of
-        the node entirely.
+        a point key of the same name cannot shadow it; `_META_KEYS` is the
+        writer-side backstop that keeps the key out of the node, and the
+        SDK/MCP boundary rejects are the fail-closed backstop for tenants.
         """
         # Ontology v2.1: link Point → Source via extractedFrom edge.
         # #3263: many-to-many — one edge per source. _link_source fans a list
