@@ -33,15 +33,27 @@ result.
 ⚠️ **A KNOWN CROSS-LANE CONFLICT, RAISED NOT RESOLVED HERE.** The read-path
 contract's home issue is #3805 (*the read-path failure contract — unavailable
 must be distinguishable from empty*), which stays open: this module implements
-only its status-vocabulary sub-item. A second, older vocabulary already lives on
-an adjacent client surface: `157a3f8f3` (#3893 "D5") landed ``not_configured``
-(never set up) and ``tortoise_unavailable`` (configured but unreachable) in
-``tortoise/tortoise_client.py`` and ``client/tortoise_client/cli.py``. The four
-recorded terms collapse that pair into one ``unconfigured`` by the roadmap's own
-definition. This module deliberately does **not** rename or split to match D5 —
-the four terms are the recorded contract — so the reconciliation of the two
-vocabularies belongs to the client-boundary half of #3805 and is handed up, not
-silently settled here.
+only its status-vocabulary sub-item. Two other declarations of the SAME four
+words exist, and they do not agree:
+
+1. `157a3f8f3` (#3893 "D5") landed ``not_configured`` (never set up) and
+   ``tortoise_unavailable`` (configured but unreachable) in
+   ``tortoise/tortoise_client.py`` and ``client/tortoise_client/cli.py``.
+2. The unmerged ``tortoise/status_vocabulary.py`` (PR #4044) supersedes D5's
+   words with the same four terms but maps them differently: ``degraded`` = the
+   store is **configured but could not be reached** (off by outage), and
+   ``unconfigured`` = **no store / endpoint / key was declared** (off by
+   policy). Under that mapping the condition this module calls ``degraded`` — a
+   leg did not run (the #2573/#2898 class) — is a condition the four terms do
+   not name, and this module's ``unconfigured`` ("no store configured, **or**
+   unreachable") re-collapses the off-by-policy vs off-by-outage pair the four
+   terms exist to separate.
+
+**This module does not silently pick either reading and does not rename or
+split the terms** — the four terms are the recorded contract, and the mapping
+is a lane/owner call (it touches #3832/D5; #4044 raises the mirror-image of
+this note). It is handed up to the orchestrator, not settled locally. Whichever
+mapping wins, no fifth term is introduced here.
 
 **Additive and off by default.** The status is computed only when a caller
 passes ``read_status_out`` (the same caller-owned-mutable-sink pattern as the
