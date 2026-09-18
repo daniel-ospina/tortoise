@@ -6,7 +6,7 @@ point's OWN source raw chunks/turns into ONE package entry (point + ≤ one
 verbatim ref), dedups cross-item near-dupe statements restating the same
 fact to one slot, and orders the surviving packages value/verbatim-marked
 first with relevance order preserved within a tier. The docker-lane half
-(the eval arm markers on ``retrieve_for_question`` outcomes + the SDK ask
+(the eval arm markers on ``retrieve_for_question`` outcomes + the ask
 lane knob default) is exercised by the existing docker suites
 (test_retrieval.py / test_eval_* / test_ask_retrieval_levers.py) — this
 file runs the IDENTICAL pure logic offline (the single-source-of-truth

@@ -606,8 +606,8 @@ class LLMReader:
         passed through exactly as ``answer(context_hits=[])`` would: the
         user message becomes ``Memory context:\n\n\nQuestion: …``. The
         reader does NOT substitute ``NO_EVIDENCE_TEXT`` — per the constant's
-        contract that substitution is the SDK/ask-lane surface's
-        responsibility, and doing it here would break byte-identity.
+        contract that substitution is the ask lane's
+        (``ask_lane.run_ask_lane``) responsibility, and doing it here would break byte-identity.
         """
         user = build_reader_user_message(evidence, question)
         raw = self._model.complete(

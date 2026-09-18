@@ -165,7 +165,11 @@ def test_n2_registry_registration_has_no_ask_tool():
 def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     """The MCP PROTOCOL listing (real mounted HTTP app) serves no ask tool.
 
-    RED mutation: same registry restore as N2 → ``tools/list`` returns it."""
+    RED mutation: restoring the registry entry ALONE is not enough — the
+    module-bottom ``register_all`` skips an entry with no handler, so
+    ``tools/list`` only regains it when the ``mcp_server`` handler is
+    restored too (N2's direct ``register_all`` assertion catches the
+    registry-only restore)."""
     from tests.test_mcp_server_auth_modes import _mcp_post, _mounted_test_client
     from tortoise.mcp_server import create_http_app
 
