@@ -177,6 +177,18 @@ SOURCE_PATTERNS = {
                    # this file has a single matrix consumer, and the full matrix
                    # would buy nothing the E2E consumer is not already given.
                    "tests/_html_links.py",
+                   # #3950 review: two more inputs the guard DERIVES its scope from,
+                   # so each changes guard coverage without changing a page.
+                   # `website/_redirects` is what `_canonical_redirect_targets()`
+                   # reads to drop redirected pages from scope, and
+                   # `website/functions/blog/[[path]].ts` is the Function
+                   # `_function_serves()` resolves the blog link against. A
+                   # routing-only PR could therefore silently shrink or break the
+                   # guard while selecting NO surface (surfaces=[], full=False) —
+                   # the same #1349/#3332/#3616 silent-drop class, applied to the
+                   # derivation's own inputs rather than to its output.
+                   "website/_redirects",
+                   "website/functions/blog/[[path]].ts",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that

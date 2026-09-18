@@ -251,6 +251,13 @@ def _function_serves(path: str) -> bool:
     parts = [p for p in path.strip("/").split("/") if p]
     if not parts or ".." in parts:
         return False
+    if any(p.startswith("_") for p in parts):
+        # Cloudflare reserves `_`-prefixed files (`_middleware`, `_routes.json`, and
+        # by convention `_lib`/`_shared` helpers): they exist on disk but are never
+        # served. Without this, a link to `/_middleware` resolved as a real page and
+        # satisfied the dangling-link guard it should have failed (review finding,
+        # #3962).
+        return False
     targets = [FUNCTIONS.joinpath(*parts)]
     for depth in range(len(parts), 0, -1):
         targets.append(FUNCTIONS.joinpath(*parts[:depth], "index"))
@@ -358,8 +365,16 @@ def _is_noindex(html: str) -> bool:
     `_IN_SCOPE_AT_3950` pin turns either one into a loud failure (a pin edit with
     a reason) instead of a silent scope change.
     """
-    tag = re.search(r'<meta\s+name="robots"[^>]*>', html, re.I)
-    return bool(tag and "noindex" in tag.group(0).lower())
+    for tag in re.finditer(r"<meta\s[^>]*>", html, re.I):
+        raw = tag.group(0)
+        # Any attribute order or quoting: `<meta content="noindex" name="robots">` is
+        # as valid as the name-first form, and missing it silently left a noindexed
+        # page inside the guard's scope (review finding, #3962).
+        if "noindex" in raw.lower() and re.search(
+            r"""name\s*=\s*["']?robots["']?""", raw, re.I
+        ):
+            return True
+    return False
 
 
 def _in_scope_pages() -> list[Path]:
@@ -532,7 +547,7 @@ def test_no_in_scope_page_makes_the_extractors_declared_limits_live() -> None:
     offenders: list[str] = []
     for page in sorted(_in_scope_pages()):
         parser = _AnchorHrefParser()
-        parser.feed(page.read_text())
+        parser.feed(_read(page))
         parser.close()
         risky = sorted({tag for tag in parser.foreign_tags if tag in _DECLARED_FOREIGN_RISK})
         if risky:
@@ -605,6 +620,44 @@ def test_every_in_scope_page_is_selectable_by_ci() -> None:
         f"test_website_docs_consistency.py, so the guard cannot fail on the page "
         f"it was written for — the #1349/#3332 silent-drop class. Add them to "
         f"SOURCE_PATTERNS['onboarding'] in tools/ci_selection.py."
+    )
+
+
+def test_every_guard_input_is_selectable_by_ci() -> None:
+    """Close the same REVERSE ratchet one level up: the guard's OWN inputs.
+
+    `test_every_in_scope_page_is_selectable_by_ci` covers the pages in the derived
+    scope, but three inputs change that scope or the rule WITHOUT being a page: the
+    shared extractor `tests/_html_links.py` (the rule itself), `website/_redirects`
+    (which pages `_canonical_redirect_targets` drops from scope), and
+    `website/functions/blog/[[path]].ts` (what `_function_serves` resolves the blog
+    link against). A PR editing only one of those selects no surface, so this file
+    never runs and the guard silently stops covering what it was written for —
+    verified before listing: `select(["website/_redirects"], ...)` returned
+    `surfaces=[]` with this file absent from `test_files`.
+
+    `tests/test_ci_selection.py::test_every_source_pattern_is_selectable` cannot
+    catch this direction: it is derived FROM `SOURCE_PATTERNS`, so deleting an entry
+    deletes its own only case (review finding, #3962). These paths are therefore
+    pinned explicitly here.
+    """
+    manifest = load_manifest()
+    unselectable = [
+        path
+        for path in (
+            "tests/_html_links.py",
+            "website/_redirects",
+            "website/functions/blog/[[path]].ts",
+        )
+        if "test_website_docs_consistency.py"
+        not in select([path], "pull_request", manifest)["test_files"]
+    ]
+    assert not unselectable, (
+        f"guard input(s) whose PR does not run this file: {unselectable}. A PR "
+        f"touching only such an input never executes test_website_docs_consistency.py, "
+        f"so the guard silently stops covering the pages it was written for — the "
+        f"#1349/#3332 silent-drop class. Add them to SOURCE_PATTERNS['onboarding'] "
+        f"in tools/ci_selection.py."
     )
 
 
@@ -891,7 +944,7 @@ def test_product_hero_offers_the_blog() -> None:
         "assertion (e.g. to the secondary-link row) rather than trusting a "
         "possibly-truncated region."
     )
-    assert "/blog" in {_href_path(h) for h in _rendered_hrefs(hero.group(0))}, (
+    assert blog_entry_hrefs(hero.group(0)), (
         "the served homepage no longer offers the blog above the fold. #3950: the "
         "owner's report was 'cannot find the blog or how to reach it' — a footer "
         "link at the end of the scroll narrative is not a sufficient answer on the "

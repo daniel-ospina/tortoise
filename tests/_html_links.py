@@ -427,8 +427,15 @@ def is_blog_entry(href: str) -> bool:
     default port; ``mailto:``/``javascript:``/``data:`` and a host the site does
     not own are not ways in, nor is a path that resolves out of ``/blog``.
     """
+    # A browser skips EXTRA leading slashes and then parses the authority, so
+    # `///tortoise.premiselabs.co/blog` resolves to `https://tortoise.premiselabs.co/blog`
+    # while `urlsplit` sees no authority at all. Collapse 3+ opening slashes to `//`
+    # first: without this, a page whose only blog link used that form was a false
+    # NEGATIVE — and the comment this replaces asserted the opposite (review finding,
+    # #3962). `///blog` still fails the host check below, as it should.
+    probe = "//" + href.lstrip("/") if href.startswith("///") else href
     try:
-        parts = urlsplit(href)
+        parts = urlsplit(probe)
         host = parts.hostname
         port = parts.port
     except ValueError:
@@ -449,8 +456,14 @@ def is_blog_entry(href: str) -> bool:
         # resolves their host to `blog` — so they are not ways in either.)
         if host not in _BLOG_HOSTS:
             return False
-        if port is not None and port != (443 if scheme == "https" else 80):
-            return False
+        # A protocol-relative href inherits the PAGE's scheme, and every page this
+        # guard runs on is https — so `//host:80/blog` resolves to `https://host:80`,
+        # which fails TLS and is not a way in. Accepting it was a false PASS in
+        # exactly the direction the guard exists to prevent (review finding, #3962).
+        if port is not None:
+            expected_port = 443 if (scheme == "https" or not scheme) else 80
+            if port != expected_port:
+                return False
     path = _normalised_path(parts.path)
     return path == "/blog" or path.startswith("/blog/")
 

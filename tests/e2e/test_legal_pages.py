@@ -416,7 +416,16 @@ def _scan_instrumentation_markers() -> list[str]:
 
 
 def _goto(page: Page, url: str, status: int = 200) -> str:
+    """Fetch ``url`` and assert its status, retrying once on a mismatch.
+
+    This suite runs against LIVE production post-deploy, where a transient 5xx or a
+    stale edge response is not a defect — the external-crawl check below retries for
+    the same reason. Without this, the two unconditional production assertions added
+    for #3950 could redden the post-deploy job on a blip (review finding, #3962).
+    """
     resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    if resp is None or resp.status != status:
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     assert resp is not None, f"{url} produced no response"
     assert resp.status == status, f"{url} returned {resp.status} (expected {status})"
     return page.content()
