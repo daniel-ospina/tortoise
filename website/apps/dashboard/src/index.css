@@ -365,6 +365,14 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
   outline: 2px solid var(--accent, #06b6d4);
   outline-offset: 2px;
 }
+/* #3890 (WCAG 2.4.11 Focus Not Obscured): a deep-linked section heading is
+   brought into view by focus(), and must not land flush against the viewport
+   top. The dashboard header is not sticky today, so this is viewport-edge
+   clearance plus defensive padding for any future sticky chrome.
+   scroll-padding-top on the scroll port + scroll-margin-top on the target
+   both keep it clear. */
+html { scroll-padding-top: 24px; }
+#settings-memory-heading { scroll-margin-top: 24px; }
 /* #1148-ux review P4-2: switch knob visible against the off-track */
 .switch::after { border: 1px solid rgba(255,255,255,0.4); }
 /* #1148-ux review P4-1: busy state for the toggle */
@@ -765,6 +773,17 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .wizard-actions { display: flex; gap: 10px; margin-top: 1rem; flex-wrap: wrap; }
 .wizard-actions .btn-primary, .wizard-actions button.btn-primary { background: var(--accent, #38bdf8); color: #04121a; }
 .wizard-actions .ghost, .wizard-actions a.ghost { background: none; border: 1px solid rgba(255,255,255,0.12); color: var(--text, #e2e8f0); padding: 8px 14px; border-radius: 8px; text-decoration: none; font-size: 13px; }
+/* #3428/#2937 (lane B3): the done step's only real control is deliberately
+   demoted — nothing on that screen IS the next step (the next step happens in
+   the user's own terminal), so the dashboard exit is a quiet text link: no
+   fill, no border, and no arrow (an arrow means "advance"). Owner-approved
+   2026-09-14 on #3428. */
+/* review cycle 8 item 8: a form control (button) does not inherit the app
+   typeface — the UA default (Arial) applied here, and this is the one control
+   deliberately demoted to READ AS BODY TEXT, so the default was visible exactly
+   where it must not be. Precedent: `button.tier-badge` above (#1290). */
+.wizard-actions .done-link { background: none; border: none; padding: 0; margin: 0; color: inherit; opacity: 0.75; text-decoration: underline; font-size: 13px; font-weight: 400; cursor: pointer; font-family: inherit; }
+.wizard-actions .done-link:hover { opacity: 1; }
 .skill-row { display: flex; flex-direction: column; gap: 2px; padding: 0.6rem 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
 .skill-row:last-of-type { border-bottom: none; }
 .skill-row strong { font-size: 14px; }

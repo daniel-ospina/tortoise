@@ -448,7 +448,11 @@ class TestGracefulDegradation:
     def test_relative_db_path_is_config_error_not_crash(self):
         """Relative TORTOISE_DB_PATH raises ValueError at SDK construction
         (RELATIVE_PATH_ERROR) — the REAL trigger for the constructor-value
-        error class. Every contract degrades, never crashes."""
+        error class. Every contract degrades, never crashes.
+
+        #3832 (D5): this is the NEVER-CONFIGURED arm, so `write_claim` reports
+        the distinct `not_configured` value (it used to collapse into the down
+        daemon's `tortoise_unavailable`, which #343's crash fix introduced)."""
         self._clear_db_env()
         os.environ["TORTOISE_DB_PATH"] = "relative/tortoise.db"
         assert tortoise_client._get_sdk() is None
@@ -457,8 +461,31 @@ class TestGracefulDegradation:
         assert tortoise_client.query_existing_visions() == []
         assert tortoise_client.write_strategy_points([{"content": "x"}]) == []
         claim = tortoise_client.write_claim("x", kind="statement")
-        assert claim == {"error": "tortoise_unavailable", "id": "", "written": False}
+        assert claim == {"error": "not_configured", "id": "", "written": False}
         assert tortoise_client.status()["available"] is False
+        assert tortoise_client.status()["status"] == "not_configured"
+
+    def test_unconfigured_and_unreachable_report_distinct_values(self):
+        """#3832 (D5) BOTH-DIRECTIONS GUARD: the never-configured payload is
+        DISTINCT from a down daemon's, and a down daemon keeps
+        `tortoise_unavailable`. The value changes; the never-raise contract
+        does not (neither arm raises, neither tracebacks)."""
+        # Never configured: construction fails from the current config.
+        self._clear_db_env()
+        os.environ["TORTOISE_DB_PATH"] = "relative/tortoise.db"
+        assert tortoise_client.status()["status"] == "not_configured"
+        assert tortoise_client.write_claim("x", kind="statement") == {
+            "error": "not_configured", "id": "", "written": False}
+
+        # Down / unreachable: the SDK constructs, the first use fails — this
+        # arm is UNCHANGED and must never take the new value.
+        tortoise_client._close_cached_sdk()
+        self._clear_db_env()
+        os.environ["TORTOISE_DB_URI"] = "docker://localhost:1"
+        assert tortoise_client._get_sdk() is not None
+        assert tortoise_client.status()["status"] == "tortoise_unavailable"
+        assert tortoise_client.write_claim("x", kind="statement") == {
+            "error": "tortoise_unavailable", "id": "", "written": False}
 
     def test_unset_uri_logs_actionable_warning(self, capsys):
         """The degradation path must surface the actionable message
@@ -483,13 +510,19 @@ class TestGracefulDegradation:
         (["tortoise_client.py", "write-points", "--kind", "strategy",
           "--points-json", '[{"content": "x"}]'], "written", 0),
         (["tortoise_client.py", "write-claim", "--content", "x"],
-         "error", "tortoise_unavailable"),
+         "error", "not_configured"),
         (["tortoise_client.py", "status"], "available", False),
     ])
     def test_cli_subcommands_degrade(self, argv, out_key, out_value, capsys, monkeypatch):
         """Every CLI subcommand degrades to JSON output with NO SystemExit
-        (exit-0 contract) when the SDK is unavailable (#343). Real trigger:
-        relative TORTOISE_DB_PATH raises the constructor ValueError."""
+        when the SDK is unavailable (#343). Real trigger: relative
+        TORTOISE_DB_PATH raises the constructor ValueError.
+
+        #3832 (D5) SUPERSEDES the old "(exit-0 contract)" note here: `main()`
+        now RETURNS the process exit code instead of always leaving it at 0
+        (the real-process pin is test_cli_process_exits_not_configured). It
+        still never raises SystemExit on a degradation — the code is returned,
+        not raised, so in-process callers keep their old shape."""
         self._clear_db_env()
         os.environ["TORTOISE_DB_PATH"] = "relative/tortoise.db"
         monkeypatch.setattr(sys, "argv", argv)
@@ -497,12 +530,32 @@ class TestGracefulDegradation:
         payload = json.loads(capsys.readouterr().out)
         assert payload[out_key] == out_value
 
-    def test_cli_process_exits_zero(self):
-        """Real-process CLI contract: degradation → returncode 0, JSON
-        stdout, actionable stderr — no traceback. A relative
-        TORTOISE_DB_PATH forces the config error deterministically (no
-        default embedded-DB side effects); PYTHONPATH is pinned so the
-        `tortoise` package resolves regardless of ambient environment."""
+    def test_cli_exit_code_follows_the_command_not_a_second_probe(self, capsys, monkeypatch):
+        """#3832 (D5) regression pin: the exit code reflects the COMMAND's own
+        outcome. A command that succeeded must exit 0 even if a later status
+        probe WOULD report a degradation — the CLI reads the command's logged
+        degradation and does not re-probe. (Re-probing also emitted a SECOND
+        stderr warning for one command and could fail a command whose payload
+        already said the write succeeded.)"""
+        _fresh_sdk()
+        monkeypatch.setattr(sys, "argv", ["tortoise_client.py", "query-strategies"])
+        with patch.object(tortoise_client, "status",
+                          return_value={"available": False,
+                                        "status": "tortoise_unavailable"}):
+            assert tortoise_client.main() == 0
+        assert json.loads(capsys.readouterr().out)["count"] == 0
+
+    def test_cli_process_exits_not_configured(self):
+        """Real-process CLI contract (#3832 / D5): a never-configured client
+        exits **4**, with a JSON stdout payload, an actionable stderr warning
+        and no traceback. A relative TORTOISE_DB_PATH forces the config error
+        deterministically (no default embedded-DB side effects); PYTHONPATH is
+        pinned so the `tortoise` package resolves regardless of ambient
+        environment.
+
+        This pin MOVED off 0: #526's *exit 0 on degradation* clause is
+        superseded for the CLI probe only (the library still never raises), so
+        a degraded probe cannot look like success to an agent harness."""
         env = {k: v for k, v in os.environ.items()
                if k not in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "FLY_APP_NAME")}
         env["TORTOISE_DB_PATH"] = "relative/tortoise.db"
@@ -513,7 +566,7 @@ class TestGracefulDegradation:
             capture_output=True, text=True, timeout=120, env=env,
             cwd=str(Path(__file__).resolve().parents[1]),
         )
-        assert proc.returncode == 0, proc.stderr
+        assert proc.returncode == 4, proc.stderr  # not_configured (#3832)
         assert json.loads(proc.stdout)["count"] == 0
         assert "tortoise init" in proc.stderr
         # Trigger determinism (relative path raises the config ValueError,
@@ -833,7 +886,7 @@ class TestGracefulDegradation:
             [{"content": "x", "confidence": "high"}]) == []
         assert tortoise_client.write_claim(
             "x", kind="statement", confidence="high") == {
-            "error": "tortoise_unavailable", "id": "", "written": False}
+            "error": "not_configured", "id": "", "written": False}
 
     def test_non_locked_error_not_retried(self):
         """Only lock contention is retried: a non-locked error on the

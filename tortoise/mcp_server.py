@@ -712,8 +712,8 @@ ERR_INVALID = -32003
 # denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
-_SERVER_MANAGED_PROPS = frozenset({
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated"})
+_SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -1183,7 +1183,7 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     call) returning an ANSWER (not ranked hits), with the full ask response
     shape: {answer, abstained, question_type, question_date, evidence,
     context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
-    retrieval_degraded}.
+    retrieval_degraded, retrieved_session_ids}.
 
     COST PROFILE (group="ask" — #2013-gated exposure): unlike tortoise_search
     (LLM-free), tortoise_ask consumes LLM tokens against the org's
@@ -1896,19 +1896,50 @@ def tortoise_health() -> dict:
     Alias → overview(section='health') (epic #888 W3).
 
     #2202 (health-truthful): probes the SDK THIS server actually serves —
-    the request-scoped org SDK over HTTP (selfhost daemon: the org_selfhost
-    graph, the SAME namespace /health probes; hosted: the calling org's
-    graph on the SAME FalkorDB server /health deep-checks) and the base SDK
-    over stdio — so tool and /health can never disagree about DB reachability.
+    the request-scoped org SDK over HTTP and the base SDK over stdio — so the
+    report reflects the caller's own graph, never monitoring's module-global
+    handle.
+    #3143 correction: this tool and hosted /health do NOT probe the same
+    graph, so they can disagree about reachability. This tool probes the
+    CALLER'S ORG graph (``_get_org_sdk()``); hosted /health probes the
+    DEFAULT graph (``_make_sdk(namespace=None)`` through
+    ``hosted_api._probe_db()``). They share a FalkorDB SERVER, not a graph,
+    and the probe is not a bare reachability check: ``_probe_once`` runs
+    ``sdk._get_proj()`` (connect + version probe + ``_ensure_indexes()``),
+    whose cost scales with the PROBED graph. So an org graph can time out
+    while the default graph answers ok — #3143 is that case. Their budgets
+    differ by design too: this tool gives the reachability query a fresh
+    ``PROBE_TIMEOUT``, /health spends one shared budget across both phases
+    (its cached-verdict staleness window is #3062).
     The pre-#2202 code probed monitoring's module-global handle, which ONLY
     the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
     surfaces it stayed None and every call reported degraded/no_sdk_registered
     while /health (fresh SDK probe) said ok — the first call every onboarding
     script makes lied. graph_size likewise counts the SERVED graph, never an
-    empty unregistered handle."""
+    empty unregistered handle.
+
+    #3143 (health-truthful): the probe's 1.5s budget was written to bound the
+    sub-millisecond ``RETURN 1`` reachability query, but it also bounded the
+    projection cold-start (``_get_proj()``: connect + ``_ensure_indexes()`` —
+    ~28 round trips, and an index build over the whole graph when one is
+    missing). That cost scales with graph size, so a large, fully-reachable
+    org (9,019 entities) timed out during setup and reported
+    ``degraded``/``graph_size 0`` while ``tortoise_status`` worked. The tool
+    now passes the cold-start allowance it always pays for — it builds a
+    request-scoped SDK per call — while the platform liveness gate keeps the
+    tight fast-degrade bound. The allowance is resolved at CALL time
+    (``monitoring.probe_setup_timeout()``) so ``TORTOISE_PROBE_SETUP_TIMEOUT``
+    set in the repo-root ``.env`` — loaded after this module imports
+    ``tortoise.monitoring`` — is honoured instead of frozen at import."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
-    return _safe(lambda: monitoring.metrics(sdk=_get_org_sdk()))
+    # #3143: pass the cold-start allowance (call-time resolved) so a reachable
+    # graph whose cold-start exceeds /health's shared budget is reported ok
+    # with its real graph_size instead of degraded/0.
+    return _safe(lambda: monitoring.metrics(
+        sdk=_get_org_sdk(),
+        setup_timeout=monitoring.probe_setup_timeout(),
+    ))
 
 
 def tortoise_session_context() -> dict:

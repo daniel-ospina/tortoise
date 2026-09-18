@@ -4,7 +4,8 @@ The Graphs tab's render + management behavior (meter, per-graph key panel,
 one-time reveal, delete lifecycle, tier gate) is render/event logic in
 main.jsx that no unit test can reach (main.jsx has no component harness;
 graphs.js holds the pure derivations and IS node --test covered). This
-suite drives the real committed-dist dashboard (same two-server harness as
+suite drives the real built dashboard (`npm run build` first — dist/ is a
+build artifact since #3775; same two-server harness as
 test_keys_table_mixed.py):
 
   `wrangler@4 pages dev . --port 8788` from website/ (auth) +

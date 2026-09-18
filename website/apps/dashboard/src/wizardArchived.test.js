@@ -44,8 +44,8 @@ test('live wizard renders WIZARD_STEPS (the 4 human steps), not legacy labels', 
   // helper's `hasOrg` arm and the e2e's "never 'Create your Organization'" pin.
   const h1Open = src.indexOf('<h1 className="welcome-title">')
   const h1 = src.slice(h1Open, src.indexOf('</h1>', h1Open))
-  assert.ok(h1.includes('wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })'),
-    'the live wizard <h1> names the stage through wizardStageLabel (the org-holding and paused overrides are pinned by the unit tests)')
+  assert.ok(h1.includes('wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })'),
+    'the live wizard <h1> names the stage through wizardStageLabel (the org-holding, paused, #3428 not-connected and cycle-4 build-fork overrides are pinned by the unit tests)')
   assert.ok(!src.slice(src.indexOf('<div className="welcome-head">'), src.indexOf('LEGACY_WIZARD_ARCHIVED &&')).includes('className="wizard-title"'),
     'no in-card stage label may return in the LIVE wizard (the archived rollback block keeps its own)')
   // the archived block's title still reads wizardSteps (kept for rollback)

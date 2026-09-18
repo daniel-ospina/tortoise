@@ -14,7 +14,9 @@ aboutObjects: tortoise
 | Area | Path |
 | --- | --- |
 | Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
+| **MCP tool surface + public SDK methods** — the curated list: every tool and public method, what it does, what uses it, a recommendation and its rationale; the approved baseline (`config/surface-manifest.yml`) and the gate that blocks unapproved expansion (#3863) | `docs/product/mcp-sdk-surface.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
+| **Ship-test instrument** — the per-deploy clean-browser onboarding walk (signup → wizard → connected only when the server observed it) + the observation artifact (#3806) | `docs/runbook/3806-ship-test-instrument.md` |
 | Hosted platform **infra runbook** — provisioning, secrets rotation, rollback, health checks, machine topology + autostop policy (§6), and the out-of-band availability watchdog with self-healing + alert dedupe (§7) (#2850) | `docs/infra-runbook.md` |
 | Temporal measurement runbook + gate output (2×2 attribution + widening ablation, #2578) | `docs/runbook/2578-temporal-measurement.md` |
 | Temporal retrieval diagnosis + oracle ceiling (42/52 = 81%, #2976/#2978) — evidence | `docs/runbook/2578-oracle-ceiling.jsonl` · `docs/research/2026-09-11-subgraph-retrieval-research.md` |

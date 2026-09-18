@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 import threading
@@ -329,6 +330,27 @@ class TestHealthEndpoints:
         assert body["status"] == "ok"
         assert body["db"]["ok"] is True
         assert isinstance(body["db"]["latency_ms"], (int, float))
+
+    def test_health_probe_passes_no_setup_allowance(self, client, monkeypatch):
+        """#3143 review: the hosted liveness gate must keep the tight shared
+        budget. ``_probe_db()`` is the hosted leg of the platform `/health`
+        direct callers and is NOT covered by the selfhost pin; a regression
+        threading the MCP cold-start allowance into it would silently turn the
+        documented ~1.5s bound (#1384) into setup + 1.5s."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.monitoring as mon
+
+        seen = {}
+        real_probe_db = mon.probe_db
+
+        def _spy_probe_db(sdk, setup_timeout=None):
+            seen["setup_timeout"] = setup_timeout
+            return real_probe_db(sdk, setup_timeout=setup_timeout)
+
+        monkeypatch.setattr(mon, "probe_db", _spy_probe_db)
+        result = ha_mod._probe_db()
+        assert seen["setup_timeout"] is None, seen
+        assert "ok" in result
 
     def test_health_degraded_when_db_down(self, client, monkeypatch):
         """#1384: a stopped FalkorDB flips /health to degraded — 200, never
@@ -3795,6 +3817,36 @@ class TestSessionFloodGate:
         assert hits, "the turn-cap refusal must emit a structured record"
         assert str(MAX_SESSION_TURNS + 1) in hits[0], hits[0]
         assert str(MAX_SESSION_TURNS) in hits[0], hits[0]
+
+    def test_backfill_window_lands_below_the_handler_cap(self, client):
+        """#3575 P1-A: the backfill window must land at/below the HANDLER cap
+        (`MAX_SESSION_TURNS`), not the Pydantic `max_length` — a 1005-turn
+        session windowed to 1000 still 400s THIS route and writes NO receipt.
+
+        Posting the real windowed payload through the app (not merely
+        `SessionRequest(...)`) is the only assertion that bites: the Pydantic
+        boundary (1000) silently accepts a payload the handler then rejects.
+        """
+        from tortoise.quota import MAX_SESSION_TURNS
+        from tortoise.session_import import window_turns
+
+        conversation = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+            for i in range(1005)
+        ]
+        windowed, dropped = window_turns(conversation)
+        assert dropped == 1005 - len(windowed)
+        # Hit the REAL route first: the Pydantic boundary (max_length=1000)
+        # accepts `windowed`, so only the handler's own cap rejects it.
+        r = client.post("/v1/sessions", json={
+            "session_id": "backfill-window-over-cap",
+            "conversation": windowed,
+        })
+        assert r.status_code == 200, (
+            f"window kept {len(windowed)} turns; handler cap is "
+            f"{MAX_SESSION_TURNS} — the real route refused and the receipt "
+            f"is never written: {r.status_code} {r.text}"
+        )
 
     def test_capture_observation_line_hosted(self, client, caplog):
         """#2335 WI-1d: the hosted capture emits the observation line with
@@ -8739,3 +8791,353 @@ class TestE2E10ReadPathDisplaySupabase2600:
             assert rd.json()["actor_display"] is None, rd.json()
         finally:
             gen.close()
+
+
+class _StubProbe:
+    """Minimal ``HealthProbe`` stand-in.
+
+    Needs ``reset()`` because the autouse probe fixture resets the three real
+    coordinators at teardown (``_HEALTH_PROBE`` / ``_READY_PROBE`` /
+    ``_CONTROL_PLANE_PROBE``) and cannot tell that this one was swapped in.
+    """
+
+    def __init__(self, result=None, exc: Exception | None = None):
+        self.result = result if result is not None else {
+            "ok": True, "latency_ms": 1.0, "error": None}
+        self.exc = exc
+        self.calls = 0
+
+    async def run(self):
+        self.calls += 1
+        if self.exc is not None:
+            raise self.exc
+        return self.result
+
+    def reset(self) -> None:
+        pass
+
+
+class TestFirstContactPrewarm:
+    """#3284 Move A + the HTTP-level bound on the cold-start first request.
+
+    ``session_auth`` owns the JWKS cache and its hard fetch bound; this class
+    pins the two things ``hosted_api`` owes it: the warm-up is SCHEDULED (as a
+    background task, behind the listener) and the bounded failure reaches the
+    client as a real HTTP response — JSON body + ``Retry-After`` — never a
+    zero-byte hang.
+    """
+
+    def test_lifespan_schedules_the_prewarm_as_a_task(self, client):
+        """The task must exist on app.state (it is a task because uvicorn
+        binds only after the startup half returns — #2953)."""
+        import tortoise.hosted_api as ha_mod
+
+        task = getattr(ha_mod.app.state, "_first_contact_task", None)
+        assert task is not None, "lifespan did not schedule the first-contact pre-warm"
+
+    def test_prewarm_warms_jwks_and_the_control_plane_in_supabase_mode(
+            self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        calls = {"jwks": 0, "control": 0}
+
+        async def _fake_fetch() -> bytes:
+            calls["jwks"] += 1
+            return b'{"keys": [{"kid": "kid-1", "kty": "EC"}]}'
+
+        class _Probe(_StubProbe):
+            pass
+
+        probe = _Probe()
+        monkeypatch.setattr(sa, "_fetch_jwks", _fake_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", probe)
+
+        asyncio.run(ha_mod._first_contact_prewarm())
+
+        assert calls["jwks"] == 1
+        assert probe.calls == 1
+        assert sa._jwks._keys == {"kid-1": {"kid": "kid-1", "kty": "EC"}}
+
+    def test_prewarm_is_inert_in_registry_mode(self, monkeypatch):
+        """No Supabase session auth / no control plane → no network at boot.
+        The FalkorDB plane is already pre-paid by the health refresher."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        calls = {"jwks": 0}
+
+        async def _fake_fetch() -> bytes:
+            calls["jwks"] += 1
+            return b'{"keys": []}'
+
+        probe = _StubProbe(exc=AssertionError(
+            "control plane probed in registry mode"))
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _fake_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", probe)
+
+        asyncio.run(ha_mod._first_contact_prewarm())
+        assert calls["jwks"] == 0
+        assert probe.calls == 0
+        assert sa._jwks._keys is None
+
+    def test_prewarm_never_raises_when_the_probe_explodes(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise RuntimeError("jwks unreachable")
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE",
+                            _StubProbe(exc=RuntimeError("control plane unreachable")))
+
+        asyncio.run(ha_mod._first_contact_prewarm())  # must not raise
+
+    def test_empty_key_set_prewarm_log_is_not_a_transport_503(
+            self, monkeypatch, caplog):
+        """#2922: an empty 200 body must not be logged as a transport 503.
+
+        The reviewer's probe: a 200 with ``{"keys": []}`` was logged as
+        "pre-warm failed (None) — the first request will answer a bounded 503",
+        which is wrong twice over (the reason was None, and the request
+        actually answers 401 "Unknown signing key").
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _empty_fetch() -> bytes:
+            return b'{"keys": []}'
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _empty_fetch)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "EMPTY key set" in text, text
+        assert "NOT a transport outage" in text, text
+        assert "bounded 503" not in text, (
+            "an empty key body answers 401, not 503: " + text)
+        assert sa._jwks._last_failure_at is None
+
+    def test_stale_serve_prewarm_log_is_not_ready(self, monkeypatch, caplog):
+        """#2922: a warm-up that served last-good keys must not log "ready".
+
+        With last-good keys cached, a raising fetch makes ``get()`` log
+        "serving stale" and return the OLD set, so the pre-fix empty-check is
+        false and the boot log said "JWKS pre-warm ready … (N keys)" for a down
+        upstream. The log must say the warm-up did NOT refresh.
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise OSError("jwks unreachable")
+
+        cache = sa._JWKSCache()
+        cache._keys = {"kid-1": {"kid": "kid-1", "kty": "EC"}}
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "JWKS pre-warm ready" not in text, (
+            "a stale serve must not be logged as ready: " + text)
+        assert "did NOT refresh" in text, text
+        assert "last-good" in text, text
+        assert "jwks unreachable" in text, text
+
+    def test_empty_cache_transport_error_prewarm_log_is_not_an_empty_rotation(
+            self, monkeypatch, caplog):
+        """#2922/#3144: a RAISING fetch with an EMPTY cache is not a rotation.
+
+        ``_jwks`` is a module global that is NOT reset per lifespan, so a
+        previous empty 200 (or previous lifespan) leaves ``_keys == {}``. A
+        transport failure then takes the raise path — which returns the empty
+        set PLUS the real reason. Keyed off ``if not keys`` first, the report
+        said ``outcome="empty"`` and the boot log told the operator "NOT a
+        transport outage" during a real transport outage: the exact misreport
+        #2922 exists to prevent.
+        """
+        import logging as _logging
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        async def _boom() -> bytes:
+            raise OSError("network down")
+
+        cache = sa._JWKSCache()
+        cache._keys = {}  # NOT cold (None): what a prior empty 200 leaves behind
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "NOT a transport outage" not in text, text
+        assert "EMPTY key set" not in text, text
+        assert "network down" in text, text
+        # An EMPTY (not cold) cache answers 401, never 503: the log must not
+        # promise a 503-only outcome for a keyless set.
+        assert "401 'Unknown signing key' from an empty cached set" in text, text
+        assert cache._last_failure_at is None
+
+    @pytest.mark.parametrize(
+        "cached_keys", [None, {}], ids=["cold-cache", "empty-cache"])
+    def test_cooldown_blocked_prewarm_log_does_not_promise_a_fetch_attempt(
+            self, monkeypatch, caplog, cached_keys):
+        """#3284 P2: with a cooldown ALREADY armed, "the first request will
+        make its own bounded fetch attempt" is FALSE — the request path is
+        answered from the cooldown with ZERO fetches.
+
+        ``_jwks._last_failure_at`` is a module global that survives across
+        lifespans, so a boot warm-up can meet a cooldown armed by an EARLIER
+        lifespan (the warm-up's own ``arm_cooldown=False`` stops it ARMING the
+        cooldown, it does not stop it READING one). The boot log asserted a
+        request-path fetch that the cooldown short-circuits. The report's
+        ``error`` already carries the real reason verbatim; only the sentence
+        overpromised.
+        """
+        import logging as _logging
+        import time as _time
+
+        import tortoise.hosted_api as ha_mod
+        import tortoise.session_auth as sa
+        import tortoise.supabase_control as sc
+
+        fetches = {"n": 0}
+
+        async def _boom() -> bytes:
+            fetches["n"] += 1
+            raise OSError("network down")
+
+        cache = sa._JWKSCache()
+        cache._keys = cached_keys
+        # Armed by an EARLIER lifespan, before this boot warm-up runs.
+        cache._last_failure_at = _time.monotonic()
+        monkeypatch.setattr(sa, "_jwks", cache)
+        monkeypatch.setattr(sa, "_fetch_jwks", _boom)
+        monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+        monkeypatch.setattr(ha_mod, "_CONTROL_PLANE_PROBE", _StubProbe())
+
+        with caplog.at_level(_logging.WARNING):
+            asyncio.run(ha_mod._first_contact_prewarm())
+
+        text = caplog.text
+        assert "JWKS pre-warm failed" in text, text
+        assert "cooldown" in text, (
+            "the sentence must state the cooldown that blocks the attempt: "
+            + text)
+        # ``error`` is never ``None`` on the ``else`` (transport_error) branch:
+        # the cold case reports the bounded-503 HTTPException, the empty case
+        # the cooldown reason. Check the real reason is present, not a bare
+        # ``(None)``.
+        expected_reason = (
+            "HTTPException 503" if cached_keys is None
+            else "refetch not attempted")
+        assert expected_reason in text, text
+        assert "(None)" not in text, text
+        assert "will make its own bounded fetch attempt" not in text, (
+            "an armed cooldown short-circuits the request-path fetch, so this "
+            "claim is false: " + text)
+        assert fetches["n"] == 0, "the boot warm-up was blocked by the cooldown"
+
+        # Prove the claim was false ON THE FIRST REQUEST: the request path
+        # (kid miss -> the force path ``verify_session_jwt`` takes) is answered
+        # from the cooldown with no fetch at all. Cold cache -> bounded 503;
+        # empty cache -> the keyless 401 path.
+        from fastapi import HTTPException
+        if cached_keys is None:
+            with pytest.raises(HTTPException) as ei:
+                asyncio.run(cache.get(force=True, kid="kid-1"))
+            assert ei.value.status_code == 503, ei.value
+        else:
+            assert asyncio.run(cache.get(force=True, kid="kid-1")) == {}, (
+                "an empty cached set is served as-is")
+        assert fetches["n"] == 0, (
+            "the first request DID fetch — the cooldown short-circuit the log "
+            "omitted would not have happened")
+
+    def test_slow_dead_jwks_still_yields_a_bounded_503_with_retry_after(
+            self, unauth_client, monkeypatch):
+        """The #3284 regression on the REAL HTTP surface.
+
+        A session-authenticated request (``Bearer eyJ…`` → the session-auth
+        lane) against a JWKS endpoint that outlives its budget must come back
+        as a bounded 503 carrying a JSON body and ``Retry-After`` — the exact
+        contract the issue asks for, and the one a client with a 10s budget can
+        act on. Pre-fix the request waited the fetch out (unbounded).
+        """
+        import time as _time
+
+        import tortoise.session_auth as sa
+        from tests import _session_jwt_utils as _jwt
+
+        # raising=False: pre-fix the knob does not exist, so this test fails on
+        # the BEHAVIOUR (the request waits the fetch out, and the 503 carries
+        # no Retry-After) rather than on a missing attribute.
+        monkeypatch.setattr(sa, "_JWKS_FETCH_TOTAL_S", 0.25, raising=False)
+        monkeypatch.setattr(sa, "_jwks", sa._JWKSCache())
+
+        async def _slow_dead_fetch() -> bytes:
+            await asyncio.sleep(5.0)  # far past every budget
+            raise OSError("jwks unreachable")
+
+        monkeypatch.setattr(sa, "_fetch_jwks", _slow_dead_fetch)
+        priv, _pub = _jwt.make_ec_keypair()
+        token = _jwt.mint_es256_token(priv, "kid-1", {
+            "sub": "user-3144", "aud": "authenticated", "email": "u@example.com",
+            "exp": int(_time.time()) + 600, "iat": int(_time.time()),
+        })
+
+        t0 = _time.monotonic()
+        r = unauth_client.get(
+            "/v1/onboarding/state",
+            headers={
+                "Authorization": f"Bearer {token}",
+                # A browser origin: the dashboard must be able to READ the
+                # Retry-After header. It is not CORS-safelisted, so the
+                # response needs Access-Control-Expose-Headers (#3284 P2).
+                "Origin": "https://app.premiselabs.co",
+            })
+        elapsed = _time.monotonic() - t0
+
+        assert r.status_code == 503, r.text[:300]
+        assert elapsed < 1.0, f"cold request took {elapsed:.3f}s — not bounded"
+        assert r.content, "zero-byte response body"
+        assert r.json().get("detail"), r.text[:200]
+        assert int(r.headers["Retry-After"]) >= 1
+        assert r.headers["access-control-allow-origin"] == "https://app.premiselabs.co"
+        exposed = r.headers.get("access-control-expose-headers", "")
+        assert "Retry-After" in exposed, (
+            "a browser client cannot read Retry-After without "
+            f"Access-Control-Expose-Headers (got {exposed!r})")

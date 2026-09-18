@@ -9,9 +9,48 @@ ghost class #2490 eliminates).
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
+# #2795: cycle-free helper (tortoise/ids.py is stdlib-only). sdk.py imports
+# projection at module top, so the sdk-private `_content_hash` is NOT
+# importable here.
+from tortoise.ids import content_hash as _content_hash
 from tortoise.live import decay_clause  # #2490: rebuild folds decay terminal posteriors
+
+logger = logging.getLogger(__name__)
+
+# #2894: FalkorDB stores scalars and arbitrarily NESTED arrays of scalars (a
+# tuple is encoded as an array); a map/dict-valued property — including an
+# array that contains one at any depth — raises on `SET n += $extra`.
+# Verified empirically against the docker lane (#2958 review): `[[1, 2], [3, 4]]`,
+# `[[[['deep']]]]` and `(1, 2)` are accepted and stored, while `{'k': 1}`,
+# `[1, {'a': 1}]`, bytes and sets are rejected. Shared predicate used by every
+# `_persist_extra_props` layer (Subject/Object/Document/Event/Source) and by
+# the Point open-set writer (#2795).
+_PERSISTABLE_SCALAR_TYPES: tuple = (str, bool, int, float)
+# Depth cap for the recursive array check — a self-referential structure must
+# not recurse without bound (a JSON payload cannot contain one, but the props
+# passthrough accepts a plain Python object).
+_PERSISTABLE_MAX_DEPTH: int = 32
+
+
+def _is_persistable_prop_value(value, _depth: int = 0) -> bool:
+    """True for values FalkorDB accepts as node properties (#2894, #2795).
+
+    Scalars and arbitrarily nested arrays of scalars (lists AND tuples) are
+    stored. Maps/dicts — including any array that contains one, at any depth —
+    and bytes/sets are rejected by the engine, so they are filtered before
+    the SET rather than crashing it. `bool` is a subclass of `int`, so it is
+    covered by `_PERSISTABLE_SCALAR_TYPES`.
+    """
+    if isinstance(value, _PERSISTABLE_SCALAR_TYPES):
+        return True
+    if _depth >= _PERSISTABLE_MAX_DEPTH:
+        return False
+    if isinstance(value, (list, tuple)):
+        return all(_is_persistable_prop_value(x, _depth + 1) for x in value)
+    return False
 
 
 def _now_iso() -> str:
@@ -69,6 +108,20 @@ class _EntityHandlers:
         "aboutEvent",        # handled as aboutEvent edge
         "aboutPoint",        # handled as aboutPoint edge
         "aboutDocument",     # handled as aboutDocument edge
+        # #3947 review (security): the capture turn loop's session-container
+        # link. A structural EDGE carrier exactly like the `about*` keys above
+        # — never a node property. The replay reads it from the RAW envelope
+        # before `_norm` (`{**ev, **ev["point"]}`) can splice the payload over
+        # it, so a point key of the same name cannot shadow (or forge) it; this
+        # entry makes `_persist_extra_props` drop an IN-PAYLOAD forgery (its
+        # `skip` set is `_META_KEYS | handled_keys`), which is the only way the
+        # key can reach a node at all — the envelope half never enters the
+        # payload dict the extra-props walk reads. It sits here rather than in
+        # `_POINT_DENY` because that list is for payload keys the replay
+        # DELIBERATELY drops, and a forgery is not a policy-drop; the boundary
+        # rejects in `sdk._sanitize_props` / mcp `_SERVER_MANAGED_PROPS` are
+        # where a tenant is told no.
+        "contains_session",
         # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
         # on api._emit) + corrects — structural, never node properties. One
@@ -128,9 +181,74 @@ class _EntityHandlers:
         "source_path",
         "_searchText",
     })
+    # #2795 (D2): every key owned by the fixed SET clauses of
+    # `_upsert_point_props` (plus the MERGE key and the structural/edge-carried
+    # keys). The open-set passthrough skips these so the declared writers keep
+    # precedence — `updatedAt`/`embedding` must never be reloaded from a
+    # payload. `content_hash` is NOT here: it is recomputed (see _POINT_DENY).
+    _POINT_HANDLED: frozenset = frozenset({
+        "id",  # MERGE key (n:Point {id:$id}) — not a SET clause
+        "content", "is_operator", "op_type", "pointKind", "status",
+        "authoredBy", "confidence", "createdAt", "created_at",
+        "validFrom", "validTo", "updatedAt", "embedding",
+        # A10 operator-scoped replay extension
+        "direction", "label",
+        # structural / edge-carried — never node props via passthrough
+        "operator", "provenance", "about_entities", "aboutEntities",
+        "extractedFrom", "is_episodic", "_nid", "_graph_id",
+        # #2958 review: written by its own explicit clause in
+        # `_upsert_point_props` (`SET n.provenanceSource=$sid`), gated on
+        # provenance.source_id — the open passthrough must not supply it when
+        # that gate is closed.
+        "provenanceSource",
+        # Phase 2 #49: context was removed and is never written as a node
+        # prop — the old closed writer enforced this by omission; the open
+        # passthrough must keep it dropped.
+        "context", "new_context",
+    })
+    # #2795 (D2): recompute / non-persistable deny-list — the passthrough must
+    # never copy these from a payload. `embedding`/`content_hash`/`updatedAt`
+    # are recomputed by `_upsert_point_props`; `_nid`/`_graph_id` are replay
+    # bookkeeping. EP-owned props are denied because they are written only by
+    # ep.py/dream.py — an open-set passthrough would let a caller-supplied
+    # `posterior_alpha` overwrite EP state (D1 `payload_writable=False`).
+    # `reason` is deny-listed per D4. All of these were dropped by the old
+    # closed writer, so denying them preserves existing behaviour.
+    _POINT_DENY: frozenset = frozenset({
+        "embedding", "content_hash", "updatedAt", "_nid", "_graph_id",
+        "reason",
+        "c_cal", "posterior_alpha", "posterior_beta",
+        "ep_alpha", "ep_beta", "baseline_set", "baseline_source",
+        "inherited_at", "lastDreamedAt", "expiredAt", "outdated",
+    })
+    # #2795 (D2): D1's declared payload/capture props (contract.py has not
+    # landed yet) — known passthrough keys that must NOT trip the drift
+    # warning. NOTE (#2958 review): a LIST-valued entry here is INERT for that
+    # warning — the list policy in `_persist_extra_props` filters lists out
+    # BEFORE they can reach the extras dict the drift warning inspects, so such
+    # an entry is documentation-only until `_POINT_LIST_PROPS` is populated
+    # from D1's contract.py. `tags` is exactly that case: it is DENIED on
+    # replay (its raw-list half-restore is refused — #2897) and the drop is
+    # reported by the undeclared-list warning below, NOT suppressed here.
+    _POINT_DECLARED_PROPS: frozenset = frozenset({
+        "quote", "when", "search_keys", "speaker", "source_turn_id", "tags",
+    })
+    # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
+    # key is declared here. Arrays are not fulltext-indexed and the canonical
+    # form is the declared `flatten=list` STRING (`search_keys` -> space-joined
+    # by `_flatten_search_keys_prop`); `tags` is owned by its own `_sync_tags`
+    # path and its TAGGED-edge replay is out of scope (#2897), so a raw-list
+    # half-restore is refused. NOTE the live/rebuild boundary this creates:
+    # `sdk.create_point` still writes raw lists directly (`SET n += $props`),
+    # so a live `n.tags` exists while replay drops it — the pre-existing #2897
+    # gap (the drop is now REPORTED, not silent). Empty pre-D1: no list prop
+    # passes through the generic Point filter today. Replaced by contract.py's
+    # declared set in D1.
+    _POINT_LIST_PROPS: frozenset = frozenset()
 
     def _persist_extra_props(self, match_clause: str, match_params: dict,
-                              ev: dict, handled_keys: frozenset) -> None:
+                              ev: dict, handled_keys: frozenset,
+                              list_props: frozenset | None = None) -> dict:
         """Persist arbitrary caller-supplied props not explicitly handled.
 
         Computes the set difference between event dict keys and the union of
@@ -139,14 +257,37 @@ class _EntityHandlers:
 
         None values are excluded — Cypher null semantics in SET maps are
         unreliable (coalesce-based updates use explicit per-field clauses).
+        #2894: non-persistable values (maps/dicts at ANY depth, bytes, sets)
+        are filtered by `_is_persistable_prop_value` — the engine rejects them
+        on a SET, so dropping is the only non-crashing option. Nested scalar
+        ARRAYS (lists/tuples) ARE accepted by the engine and pass the filter
+        (#2958 review — the earlier flat-list-only rule silently dropped them).
+        #2795 (D2 mechanic 1): when `list_props` is supplied, a flat LIST is
+        # persisted only when its key is declared there; an undeclared list is
+        # denied, never written raw. `None` keeps the pre-existing permissive
+        # behaviour for the non-Point layers.
+
+        Returns the dict of props actually persisted (empty when none) so the
+        caller can report unrecognised keys (#2795 drift warning).
         """
         skip = self._META_KEYS | handled_keys
-        extra = {k: v for k, v in ev.items() if k not in skip and v is not None}
+        extra = {}
+        for k, v in ev.items():
+            if k in skip or v is None or not _is_persistable_prop_value(v):
+                continue
+            # #2958 review: a TUPLE is persisted by the engine as an array
+            # exactly like a list, so the list policy must cover both —
+            # otherwise a tuple-valued key bypasses the undeclared-list denial.
+            if isinstance(v, (list, tuple)) and list_props is not None \
+                    and k not in list_props:
+                continue
+            extra[k] = v
         if extra:
             self.g.query(
                 match_clause + " SET n += $extra",
                 params={**match_params, "extra": extra},
             )
+        return extra
 
     def _upsert_point_props(self, p: dict) -> None:
         """Write all Point node properties (no edges).
@@ -178,6 +319,26 @@ class _EntityHandlers:
             except Exception:
                 pass
 
+        # #2795 (D2): content_hash is DERIVED, not payload — recompute it from
+        # the content being written (mirrors create_point's `_content_hash`,
+        # #80). The old closed writer never wrote it, so every replayed node
+        # had content_hash=NULL and the indexed dedup MATCH degraded. Operators
+        # store no content (#548) — the writer synthesizes a fallback for them,
+        # so a hash would match nothing (noise): skip, mirroring the embedding
+        # carve-out above.
+        point_content_hash = None
+        if not op and p.get("content"):
+            try:
+                point_content_hash = _content_hash(p["content"])
+            except Exception:
+                # #2958 review: truthiness is not a type check — a truthy
+                # non-str content (int/list/dict) from a malformed or
+                # hand-edited JSONL line would raise inside
+                # sha256(text.encode). Rebuild is the RECOVERY path: leave the
+                # hash unset (the coalesce preserves any existing value)
+                # rather than crash the whole pass.
+                point_content_hash = None
+
         # Build SET clauses + params; context is optional (Phase 1 stop-writes, #49)
         set_clauses = [
             "n.content=$content",
@@ -187,6 +348,7 @@ class _EntityHandlers:
             "n.status=coalesce($st, n.status, 'live')",
             "n.authoredBy=coalesce($ab, n.authoredBy)",
             "n.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE n.embedding END",
+            "n.content_hash=coalesce($ch, n.content_hash)",
             "n.confidence=coalesce($cf, n.confidence)",
             "n.createdAt=coalesce($ca, n.createdAt, $now)",
             "n.validFrom=coalesce($vf, n.validFrom)",
@@ -200,6 +362,7 @@ class _EntityHandlers:
             "st": p.get("status"),
             "ab": p.get("authoredBy"),
             "embedding": embedding,
+            "ch": point_content_hash,
             "cf": p.get("confidence"),
             "ca": p.get("createdAt") or p.get("created_at"),
             "vf": p.get("validFrom"), "vt": p.get("validTo"),
@@ -221,6 +384,22 @@ class _EntityHandlers:
             if p.get("label") is not None:
                 set_clauses.append("n.label=$label")
                 params["label"] = p["label"]
+        # #3947: `is_episodic` is a SERVER-MANAGED node property — the
+        # points-quota discriminator (#1486, quota.py counts only
+        # `is_episodic IS NULL OR = false` Points). `create_point` writes it
+        # from its explicit kwarg on the LIVE path, but it sits in
+        # `_POINT_HANDLED`, so the open-set passthrough never carried it and
+        # every REPLAY silently dropped it: a rebuilt turn Point came back as
+        # a plain Point — counted against quota, invisible to the episodic
+        # reads. Live/replay parity gap, fixed here as an explicit clause
+        # gated on the payload's own value (the `provenanceSource` shape).
+        # The property stays unreachable from the generic passthrough, and
+        # the payload is a server-authored journal snapshot: a
+        # tenant-supplied `is_episodic` is rejected at the SDK
+        # (`_sanitize_props`) and MCP (`_SERVER_MANAGED_PROPS`) boundaries.
+        if p.get("is_episodic") is not None:
+            set_clauses.append("n.is_episodic=$episodic")
+            params["episodic"] = bool(p["is_episodic"])
         # Phase 2 #49: context removed — never written
         self.g.query(
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
@@ -246,13 +425,76 @@ class _EntityHandlers:
                 "MATCH (n:Point {id:$id}) SET n.provenanceSource=$sid",
                 params={"id": p["id"], "sid": prov["source_id"]},
             )
+        # #2795 (D2): open-set passthrough — parity with create_point's
+        # `SET n += $props` and with every other layer's _persist_extra_props.
+        # This is the shared live+replay writer, so door 3's live drop and
+        # rebuild's replay drop are fixed together. Handled + deny-listed keys
+        # are excluded (precedence: the fixed clauses above already wrote
+        # updatedAt/embedding/content_hash), and only persistable values
+        # survive the shared type filter (#2894).
+        extras = self._persist_extra_props(
+            "MATCH (n:Point {id:$id})", {"id": p["id"]}, p,
+            self._POINT_HANDLED | self._POINT_DENY,
+            list_props=self._POINT_LIST_PROPS,
+        )
+        for key in extras:
+            if key not in self._POINT_DECLARED_PROPS:
+                logger.warning(
+                    "Point prop %r is not declared — persisted via open-set "
+                    "passthrough (#2795); declare it in POINT_PROPS for parity",
+                    key)
+        # #2795 indicator 4 / D4: a prop that genuinely cannot be restored
+        # from the payload must be REPORTED, not dropped silently. The
+        # recompute keys (`embedding`/`updatedAt`/`_nid`/`_graph_id`) are
+        # fixed-clause/handled and excluded here to avoid noise; the genuinely
+        # payload-hostile set is `_POINT_DENY - _POINT_HANDLED`.
+        # #2958 review: warn ONCE per key per rebuild pass (the `_deny_drop_warned`
+        # set, reset by `rebuild_all`) — the #548 synthetic snapshot carries
+        # EP-owned state for every dreamed graph-only point, so a per-row
+        # warning emitted O(N) lines and buried genuine violations. On the live
+        # path the set persists for the process, which is the right cadence for
+        # a policy-level signal.
+        for key in self._POINT_DENY - self._POINT_HANDLED:
+            if p.get(key) is None:
+                continue
+            warned = getattr(self, "_deny_drop_warned", None)
+            if warned is None:
+                warned = self._deny_drop_warned = set()
+            if key in warned:
+                continue
+            warned.add(key)
+            logger.warning(
+                "Point prop %r dropped — deny-listed (recompute/EP-owned, "
+                "#2795); not restorable from the payload", key)
+        # (b) a policy-denied list is also reported: the live SDK writer
+        # still stores raw lists (e.g. `tags`), but replay refuses them, so the
+        # drop MUST be visible (#2795 indicator 4 / D7; `tags` -> #2897).
+        # #2958 review: tuples count as arrays here too (engine parity).
+        for key, val in p.items():
+            if not (isinstance(val, (list, tuple)) and val):
+                continue
+            if key in self._POINT_LIST_PROPS or key in self._POINT_HANDLED \
+                    or key in self._POINT_DENY or key in self._META_KEYS:
+                continue
+            logger.warning(
+                "Point list prop %r dropped — undeclared list props are never "
+                "written raw (#2795); not restorable from the payload", key)
 
-    def _upsert_point_edges(self, p: dict) -> None:
-        """Wire all Point edges (provenance + about + operator).
+    def _upsert_point_edges(self, p: dict, contains_session: str | None = None) -> None:
+        """Wire all Point edges (provenance + about + operator + session).
 
         Single source of truth for Point edge parity between apply() and
         rebuild_all() pass 2 (#330) — same role as _upsert_point_props for
         node properties.
+
+        ``contains_session`` (#3947) is the CONTAINS-container link of an
+        episodic turn Point, and arrives on the EVENT envelope rather than in
+        the point payload: it is a capture-write structural fact, not a
+        Point property. The replay reads it from the **raw** envelope BEFORE
+        `_norm` (`{**ev, **ev["point"]}`) can splice the payload over it, so
+        a point key of the same name cannot shadow it; `_META_KEYS` is the
+        writer-side backstop that keeps the key out of the node, and the
+        SDK/MCP boundary rejects are the fail-closed backstop for tenants.
         """
         # Ontology v2.1: link Point → Source via extractedFrom edge.
         # #3263: many-to-many — one edge per source. _link_source fans a list
@@ -260,6 +502,23 @@ class _EntityHandlers:
         source_ref = p.get("extractedFrom")
         if source_ref:
             self._link_source(p["id"], source_ref)
+        # #3947: the episodic turn stream is `(:Session)-[:CONTAINS]->(:Point)`
+        # (ONTOLOGY §4.5, the session container's one structural edge). NOT a
+        # member of the deferred generic direct-edge replay (#1048: caller-
+        # authored `create_direct_edge` descriptors stay unaligned on
+        # rebuild): it carries no caller attrs, and it is the capture TURN LOOP
+        # ALONE that journals the link, on the turn's own PointAdded (the only
+        # two `contains_session=` emission sites are the SDK and hosted turn
+        # loops). The extractor-minted points are wired into the Session by
+        # OTHER, raw CONTAINS writes scattered through the capture/extraction
+        # path — every one of them unjournaled — so a journal-only `rebuild()`
+        # still drops those edges; only `rebuild_all`'s `:Session` snapshot
+        # restores them. That gap is #3664/#3722's scope. Do NOT read this fold
+        # as covering it: the list of unjournaled writers is deliberately not
+        # enumerated here, because line-number inventories rot (an earlier
+        # draft of this comment cited three and missed two).
+        if isinstance(contains_session, str) and contains_session:
+            self._link_session(contains_session, p["id"])
         # aboutEntities → per-type about edges (Ontology v2.1 Phase 1)
         about = p.get("aboutEntities")
         if about and isinstance(about, list):
@@ -268,10 +527,52 @@ class _EntityHandlers:
         if p.get("operator"):
             self._create_edges(p)
 
-    def _upsert(self, p: dict) -> None:
+    def _link_session(self, session_id: str, point_id: str) -> None:
+        """Recreate the capture Session + its CONTAINS edge to one turn (#3947).
+
+        The `:Session` node is itself part of the unjournaled capture write
+        (the live loop MERGEs it raw, right before the turn loop), so a
+        replay has to recreate it here — carrying `is_episodic: true`, the
+        flag the ontology pins on the session container (ONTOLOGY §4.5: "The
+        capture graph's :Session node (session container, CONTAINS → turn
+        Points) also carries is_episodic: true").
+
+        Ordering mirrors the live loop: the node MERGE runs BEFORE the edge
+        MERGE — a full-path MERGE with a missing edge makes FalkorDB create
+        the whole path from scratch, duplicating the Point node (#490 review
+        P2-2).
+
+        KNOWN LIMIT (review F6): this recreates a MINIMAL Session — `id` +
+        `is_episodic` only. A journal-only `rebuild()` has no Session record to
+        replay (the live loop never journaled it), so `capture_ok`,
+        `turn_count` and `created_at` come back absent. For `rebuild_all` the
+        durable pre-wipe `:Session` snapshot restore loop runs BEFORE pass 2
+        (this method's only call site, reached via `_upsert_point_edges`), so
+        the full container is written FIRST and this
+        `MERGE ... SET s.is_episodic=true` is a no-op on properties — the
+        minimal stub is never written, hence never overwritten. For
+        `rebuild()` the props stay missing and a later capture may read
+        `capture_ok=None` as the legacy
+        "presumed captured" case (#2335) instead of retrying. So the durability
+        split is: `rebuild_all` carries the container (and its CONTAINS links)
+        via the pre-wipe sidecar; the JOURNAL carrier is the `SessionRecorded`
+        work already open as #3722/#2296; `rebuild()` alone still yields the
+        stub. See the residual note in the #3947 PR body.
+        """
+        self.g.query(
+            "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+            params={"sid": session_id},
+        )
+        self.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": session_id, "tid": point_id},
+        )
+
+    def _upsert(self, p: dict, contains_session: str | None = None) -> None:
         """Upsert a Point: node properties via _upsert_point_props, then edges."""
         self._upsert_point_props(p)
-        self._upsert_point_edges(p)
+        self._upsert_point_edges(p, contains_session=contains_session)
 
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})

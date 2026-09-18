@@ -13,23 +13,87 @@ Connection: TORTOISE_MCP_URL (default http://localhost:8000/mcp) and
 TORTOISE_API_KEY (optional; unset -> no auth).
 
 Graceful degradation: `status` never raises — a down server reports
-{"status": "tortoise_unavailable", ...} (exit 0), mirroring the driver.
+{"status": "tortoise_unavailable", ...}. The LIBRARY still reports the payload
+and never raises (script callers skip cleanly), but the CLI PROBE now carries
+a distinct process exit code (#3832 D5), superseding #526's exit-0 clause for
+this surface only:
+
+    0 = ok · 3 = can't reach it · 4 = not set up (no endpoint configured)
+    1 = a query/tool call that genuinely fails (kept)
+    2 = argparse usage errors (argparse owns it)
+
+Only the `status` PROBE emits 3 and 4. `list-tools` and `call` are operations
+against a known endpoint, so any failure there (including an unreachable
+daemon) keeps the generic code 1.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from tortoise.mcp_client import call_tool, list_tools, status
 
+# ── Exit codes (#3832 / D5) ─────────────────────────────
+# Supersedes #526's exit-0 clause FOR THE CLI PROBE ONLY. The library below is
+# unchanged (never raises, returns the status payload), so script callers keep
+# skipping cleanly; the exit code is the reporting concern of the surface a
+# human or an agent harness actually checks.
 _EXIT_OK = 0
-_EXIT_ERR = 1
+_EXIT_ERR = 1  # a query/tool call that genuinely fails (kept, never widened)
+_EXIT_UNAVAILABLE = 3  # configured, but we can't reach it
+_EXIT_NOT_CONFIGURED = 4  # never set up (no endpoint configured)
+
+_STATUS_EXIT_CODES = {
+    "ok": _EXIT_OK,
+    "tortoise_unavailable": _EXIT_UNAVAILABLE,
+    "not_configured": _EXIT_NOT_CONFIGURED,
+}
+
+
+def _probe_payload() -> dict:
+    """The probe payload, with the never-configured case split out (#3832).
+
+    The driver (`tortoise.mcp_client.status`) is deliberately UNCHANGED: it has
+    no notion of a missing endpoint (an unset TORTOISE_MCP_URL falls back to
+    the self-host default) and reports `tortoise_unavailable` for any failure
+    to answer. Splitting 'we were never pointed at a memory' from 'the memory
+    is down' is a presentation decision of this probe — the exact boundary the
+    D5 landing draws — so the driver keeps its contract and its callers keep
+    skipping cleanly, while the human/agent surface gets a distinct signal.
+
+    BOUNDARY, stated rather than implied: on THIS probe, 'TORTOISE_MCP_URL is
+    unset' IS the definition of not-configured. A self-hoster who runs the
+    default daemon without setting the variable and then loses that daemon
+    reads as `not_configured`, not `tortoise_unavailable` — the endpoint was
+    never declared, so the probe cannot tell 'intended the default' from 'never
+    set up' and does not pretend to. Set TORTOISE_MCP_URL (even to the default)
+    to move a down daemon into the can't-reach-it state.
+
+    The rewritten payload drops `url` (the driver filled in the UNCONFIGURED
+    default, so keeping it would advertise an endpoint the probe just said was
+    never configured) and adds `configured: false`.
+    """
+    payload = status()
+    if payload.get("status") == "tortoise_unavailable" and not os.environ.get("TORTOISE_MCP_URL"):
+        payload = {**payload, "status": "not_configured", "configured": False, "url": None}
+    return payload
+
+
+def _exit_code(word: str | None) -> int:
+    """Map the driver's machine-readable state to the CLI exit code (#3832).
+
+    An unrecognised word degrades to the unavailable code — fail loud, never
+    silently report success for a state we do not know.
+    """
+    return _STATUS_EXIT_CODES.get(word, _EXIT_UNAVAILABLE)
 
 
 def _cmd_status(_args: argparse.Namespace) -> int:
-    print(json.dumps(status(), indent=2))
-    return _EXIT_OK
+    payload = _probe_payload()
+    print(json.dumps(payload, indent=2))
+    return _exit_code(payload.get("status"))
 
 
 def _cmd_list_tools(_args: argparse.Namespace) -> int:

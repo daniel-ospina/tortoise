@@ -184,6 +184,20 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     "test_pack_state.py": {
         "legacy_graph": "read-only",  # variable — legacy-graph PackInstall assert
     },
+    # #3845 fork-slot wedge: the harness builds its OWN dedicated graphs — one
+    # per round (wedge / nofork / retry) — because the defect being reproduced
+    # is a GRAPH.COPY module fork, so the round must own the live destination
+    # the fork child was told to copy. The names are test-constructed, not
+    # production-shape: nothing outside the harness resolves them, and they
+    # must stay byte-for-byte because the reap is keyed to THIS daemon's socket
+    # prefix and each round's assertions read back the same graph it seeded.
+    # Renaming would not break a prod contract, it would silently turn a
+    # wedge round into a no-op against an empty graph.
+    "test_fork_slot_wedge_3845.py": {
+        '"org_wedge"': "test-constructed",    # round 1 — the graph the fork copies
+        '"org_nofork"': "test-constructed",   # rounds 2-3 — control + post-copy read
+        '"org_retry"': "test-constructed",    # round 4 — retry-after-reap target
+    },
     "test_navigation.py": {
         "name (MagicMock param)": "unit-mock",
     },
@@ -412,6 +426,9 @@ def test_no_redirect_stems_registry_exact():
         "test_backup_e2e",
         "test_config",
         "test_embedded_concurrency",
+        # #2879: embedded AOF durability drift pin (carve-out — the docker
+        # redirect hides the on-disk appendonlydir it measures).
+        "test_embedded_durability_claim",
         "test_embedded_lifecycle",
         "test_embedded_lifecycle_fast_close",
         "test_flip_gate",
