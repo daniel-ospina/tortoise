@@ -226,6 +226,39 @@ def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
         sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-09")
 
 
+def test_supersede_valid_from_same_day_instant_disagreement_refused(sdk):
+    """The contract is the same INSTANT, not the same calendar day.
+
+    Both literals carry an explicit time and offset, so nothing here depends on
+    the host timezone. Two properties, and the file needs BOTH:
+
+      * same day, different instant → REFUSED. Without this, a guard weakened
+        to date-granularity equality would accept it and stamp a predecessor
+        ``validTo`` inside the successor's window — the GAP/OVERLAP class the
+        guard exists to prevent.
+      * same instant, DIFFERENT non-zero offsets → ACCEPTED, and the value the
+        caller passed is what gets persisted (``str(valid_from)``, not the
+        stored form). This exercises ``_created_sort_key``'s offset arithmetic
+        through the guard; every other literal in this file is date-only, ``Z``
+        or ``+00:00``, which never reaches it.
+    """
+    # (a) same day, 12 hours apart → refused
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T12:00:00+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"],
+                            valid_from="2026-06-10T00:00:00+00:00")
+    op = _props(sdk, old["id"])
+    assert op.get("status") != "superseded"
+    assert "validTo" not in op
+
+    # (b) same instant, -04:00 encoding → accepted, caller's text persisted
+    sdk.supersede_point(old["id"], new["id"],
+                        valid_from="2026-06-10T08:00:00-04:00")
+    assert _props(sdk, old["id"])["validTo"] == "2026-06-10T08:00:00-04:00"
+
+
 def test_supersede_numeric_epoch_kwarg_refused(sdk):
     """The guard keys the value the write PERSISTS (``str(valid_from)``), not
     the caller's object.

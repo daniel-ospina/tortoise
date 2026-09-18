@@ -4903,7 +4903,8 @@ class TortoiseSDK:
         # `_covers`: with a kwarg present it refuses rather than allow an
         # unchecked window end against a start the read path treats as real
         # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
-        # predecessor end the kwarg writes). The no-kwarg falsey case keeps
+        # predecessor end the kwarg writes at or after epoch 0, and gaps
+        # before it). The no-kwarg falsey case keeps
         # the pre-existing truthiness fallback — its read/write divergence is
         # real and tracked in #3985, not silently redefined here.
         vf_rows = proj.g.query(
