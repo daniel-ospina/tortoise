@@ -158,6 +158,12 @@ SOURCE_PATTERNS = {
                    # mount path from its directory), so a change to the gate must
                    # run the guard too.
                    "website/functions/admin/[[path]].ts",
+                   # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
+                   # the Stripe ?session_id= return) are BUILT here, so a change to
+                   # the server-side return path must run the guard too — otherwise
+                   # public/_redirects goes stale against it and the guard stays
+                   # green: the same silent-drop class this entry exists to close.
+                   "tortoise/hosted_api.py",
                    # #3950: the blog-discoverability guard
                    # (test_website_docs_consistency.py
                    # ::test_every_in_scope_page_links_to_the_blog) covers all 12

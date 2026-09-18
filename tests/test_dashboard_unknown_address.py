@@ -51,6 +51,34 @@ def _rules() -> list[tuple[str, str, int]]:
     return rules
 
 
+def _first_wins() -> dict[str, tuple[str, int]]:
+    """First-match lookup over `_redirects`.
+
+    Cloudflare Pages applies the TOP-MOST matching rule, so a later duplicate
+    does NOT override an earlier one. A plain dict comprehension is LAST-wins
+    and therefore hides a shadowing duplicate (#4006 review): `/admin / 200`
+    placed ABOVE the real 301 restores the exact soft-404 this change removes,
+    while the last-wins view still reports the 301.
+    """
+    routed: dict[str, tuple[str, int]] = {}
+    for source, destination, code in _rules():
+        routed.setdefault(source, (destination, code))
+    return routed
+
+
+def test_no_duplicate_rule_sources() -> None:
+    """Pages is FIRST-match, so a duplicated source is ambiguous: the higher
+    line wins and the lower one is dead. That shadowing pair is how the bug
+    comes back while the file still looks like it routes correctly."""
+    sources = [source for source, _dest, _code in _rules()]
+    duplicates = sorted({s for s in sources if sources.count(s) > 1})
+    assert not duplicates, (
+        f"duplicate rule source(s) {duplicates!r} — Cloudflare Pages applies "
+        "the FIRST match, so the lower line is dead and a duplicate above a "
+        "real rule silently overrides it (#4006 review)"
+    )
+
+
 def test_top_level_404_html_exists() -> None:
     """Without a top-level 404.html, Pages reverts to SPA fallback: every
     unmatched path answers 200 with the root document. The file IS the fix."""
@@ -61,6 +89,22 @@ def test_top_level_404_html_exists() -> None:
     )
     body = NOT_FOUND.read_text()
     assert "noindex" in body, "the not-found page must not be indexed"
+    # It must not RE-REDIRECT the visitor home: a not-found page that bounces to
+    # `/` discards the requested address exactly as the soft-404 did — the
+    # symptom this change exists to remove, wearing a 404 status (#4006 review).
+    redirect_markers = (
+        'http-equiv="refresh"',
+        "http-equiv='refresh'",
+        "location.replace(",
+        "location.assign(",
+        "location.href",
+        "window.location =",
+    )
+    redirected = [m for m in redirect_markers if m in body]
+    assert not redirected, (
+        "404.html must state that the address was not found, not redirect the "
+        f"visitor away from it — found {redirected!r} (#4006 review)"
+    )
     # It is an honest not-found page, not a second copy of the app shell. Check
     # the DEPLOYED shell markers too, not just the vite dev entry: the built
     # document references /assets/index-<hash>.js, not /src/main.jsx, so a
@@ -104,7 +148,7 @@ def test_no_index_html_rewrite_destination() -> None:
 def test_admin_redirects_to_the_console() -> None:
     """/admin genuinely means the console (#3501/#3952) — it must send the
     visitor there, not render the dashboard overview."""
-    admin_rules = {source: (dest, code) for source, dest, code in _rules()
+    admin_rules = {source: rule for source, rule in _first_wins().items()
                    if source.startswith("/admin")}
     for source in ("/admin", "/admin/", "/admin/*"):
         assert source in admin_rules, f"no routing rule for {source}"
@@ -121,7 +165,7 @@ def test_valid_app_routes_still_serve_the_app() -> None:
     """The app's own pathnames must keep serving the app (200), with the URL
     intact — /welcome is what welcome mode keys on, and /team carries the
     Stripe ?session_id= handoff in the query string."""
-    routed = {source: (dest, code) for source, dest, code in _rules()}
+    routed = _first_wins()
     for source in ("/welcome", "/welcome/", *SERVER_BUILT_ROUTES):
         assert source in routed, f"valid app pathname {source} is not routed"
         dest, code = routed[source]
@@ -135,11 +179,23 @@ def test_valid_app_routes_still_serve_the_app() -> None:
 def test_every_pathname_the_app_branches_on_is_routed() -> None:
     """Anti-drift: the app decides behavior from location.pathname, and any
     such pathname is an app route. Adding a branch in ANY source module
-    without a routing rule would 404 the user who lands on it."""
+    without a routing rule would 404 the user who lands on it.
+
+    SCOPE, stated so this is not read as more than it is (#4006 review): the
+    matcher recognises the `pathname === '<literal>'` form ONLY. A branch
+    written with `startsWith`, `!==`, a `switch`, or a pathname built from a
+    constant is NOT detected — add its rule to `_redirects` by hand, and add
+    the pathname to SERVER_BUILT_ROUTES if the server builds it.
+    """
     branches: set[str] = set()
+    # Scope to the module extensions the app ships, and exclude every test
+    # flavour. `*.js*` also matched `.json` and missed `.test.tsx` (#4006
+    # review).
     sources = sorted(
-        p for p in SRC.rglob("*.js*")
-        if p.is_file() and not p.name.endswith(".test.js")
+        p for p in SRC.rglob("*")
+        if p.is_file()
+        and p.suffix in (".js", ".jsx", ".ts", ".tsx")
+        and ".test." not in p.name
     )
     for source in sources:
         branches |= set(re.findall(
@@ -147,7 +203,7 @@ def test_every_pathname_the_app_branches_on_is_routed() -> None:
         ))
     assert branches, "expected the app to branch on location.pathname"
     # `/` is served by the index.html asset, never by a rule — always routed.
-    routed = {source for source, _dest, _code in _rules()} | {"/", ""}
+    routed = {source for source in _first_wins()} | {"/", ""}
     missing = sorted(b for b in branches if b not in routed)
     assert not missing, (
         f"the app branches on {missing!r} but public/_redirects has no rule — "
