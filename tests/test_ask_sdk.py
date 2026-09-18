@@ -30,6 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tools.ask_spotcheck import merge_capture_session
 from tortoise.exceptions import (
     AskInFlightLimit,
     AskQuotaExceeded,
@@ -118,8 +119,12 @@ def _seed_event_graph(sdk: TortoiseSDK, turns: list[dict]) -> list[dict]:
     that a passed key is IGNORED, so re-adding the branch reds the build.
     """
     proj = sdk._get_proj()
-    proj.g.query("MERGE (s:Session {id:$sid})",
-                 params={"sid": SEEDED_EVENT_SESSION})
+    # The session node carries capture's own prop set — a bare-id Session is a
+    # node shape no product writer produces, and consumers reading
+    # `s.turn_count` / `s.is_episodic` would see None. This fixture models no
+    # TURN stream, so `turn_count` counts the claims seeded here: the prop SET
+    # is capture's, that one VALUE is the fixture's placeholder.
+    merge_capture_session(sdk, SEEDED_EVENT_SESSION, len(turns))
     for i, t in enumerate(turns):
         point = sdk.create_point("statement", t["content"])
         eid = t.get("eventId", f"ev-{i}")
@@ -170,6 +175,15 @@ def test_seed_event_graph_ignores_a_session_id_key():
         "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) RETURN p.id",
         params={"sid": SEEDED_EVENT_SESSION}).result_set
     assert [r[0] for r in edges] == [r[0] for r in points], edges
+    # The Session side is part of the shape too — capture writes all three.
+    sess = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.created_at, s.turn_count, "
+        "s.is_episodic", params={"sid": SEEDED_EVENT_SESSION}).result_set
+    assert len(sess) == 1, sess
+    created_at, turn_count, is_episodic = sess[0]
+    assert created_at, sess
+    assert turn_count == len(points), sess
+    assert is_episodic is True, sess
     # The wire identity comes from that edge — never from the forged key.
     assert all(h.get("sessionId") == SEEDED_EVENT_SESSION for h in hits), hits
     sdk.close()

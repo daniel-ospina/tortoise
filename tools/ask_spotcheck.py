@@ -97,6 +97,33 @@ def _to_iso_date(raw: str) -> str:
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else "2020-01-01"
 
 
+def merge_capture_session(sdk: TortoiseSDK, session_id: str, turn_count: int,
+                          now: str | None = None) -> str:
+    """MERGE a ``(:Session)`` node in the shape BOTH capture writers write.
+
+    The Session is never a bare ``{id}`` in production: both capture surfaces
+    SET ``created_at`` (coalesced, so an idempotent re-capture preserves the
+    ORIGINAL capture time), ``turn_count`` and ``is_episodic=true``
+    (``TortoiseSDK.capture_session`` / ``hosted_api._capture_session_impl``).
+    A bare-id Session is a node shape capture never produces, and a consumer
+    that reads those props (the hosted session listing reads ``s.turn_count``;
+    commit reads ``s.is_episodic``) sees ``None`` on any graph seeded without
+    them — so no fixture seeded that way can guard those surfaces.
+
+    Shared by every ask-lane seeder so the Session side cannot drift either.
+    Returns the ``now`` used, so a caller writing several sessions or turns
+    can hold ONE timestamp across them.
+    """
+    now = now or datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    sdk._get_proj().g.query(
+        "MERGE (s:Session {id:$sid}) "
+        "SET s.created_at=coalesce(s.created_at, $now), "
+        "    s.turn_count=$tc, s.is_episodic=true",
+        params={"sid": session_id, "now": now, "tc": turn_count},
+    )
+    return now
+
+
 def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
                             conversation: list[dict], *,
                             now: str | None = None) -> list[str]:
@@ -141,13 +168,7 @@ def seed_capture_turn_store(sdk: TortoiseSDK, session_id: str,
     if not transcript.strip():
         return []
     proj = sdk._get_proj()
-    now = now or datetime.now(timezone.utc).isoformat()  # noqa: UP017
-    proj.g.query(
-        "MERGE (s:Session {id:$sid}) "
-        "SET s.created_at=coalesce(s.created_at, $now), "
-        "    s.turn_count=$tc, s.is_episodic=true",
-        params={"sid": session_id, "now": now, "tc": len(windowed)},
-    )
+    now = merge_capture_session(sdk, session_id, len(windowed), now=now)
     turn_ids: list[str] = []
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))

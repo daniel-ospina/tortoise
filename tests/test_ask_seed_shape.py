@@ -59,7 +59,9 @@ def sdk(tmp_path):
 def _read_shape(sdk: TortoiseSDK) -> tuple[list, list, list]:
     """The RESOLVED shape read back from the store: Point rows (id, content,
     pointKind, is_episodic, is_operator, speaker, sessionId prop, eventId
-    prop, content_hash), Session ids, and the exact CONTAINS edge set."""
+    prop, content_hash), Session rows (id, created_at, turn_count,
+    is_episodic — capture writes all three, so a bare-id Session is a node
+    shape no product writer produces), and the exact CONTAINS edge set."""
     proj = sdk._get_proj()
     points = proj.g.query(
         "MATCH (p:Point) RETURN p.id, p.content, p.pointKind, p.is_episodic, "
@@ -67,7 +69,8 @@ def _read_shape(sdk: TortoiseSDK) -> tuple[list, list, list]:
         "       p.content_hash ORDER BY p.id",
     ).result_set
     sessions = proj.g.query(
-        "MATCH (s:Session) RETURN s.id ORDER BY s.id").result_set
+        "MATCH (s:Session) RETURN s.id, s.created_at, s.turn_count, "
+        "       s.is_episodic ORDER BY s.id").result_set
     edges = proj.g.query(
         "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN s.id, p.id "
         "ORDER BY s.id, p.id").result_set
@@ -128,6 +131,16 @@ def test_seed_capture_turn_store_is_capture_exact(sdk):
         assert chash, (pid, chash)
 
     assert [r[0] for r in sessions] == ["sess-x"]
+    # The SESSION side is part of capture's shape too: all three props, with
+    # turn_count over the window actually stored. A bare-id Session is a node
+    # capture never writes, and consumers that read these props (the hosted
+    # session listing reads s.turn_count; commit reads s.is_episodic) would
+    # see None on a graph seeded without them.
+    sid, created_at, turn_count, is_episodic = sessions[0]
+    assert sid == "sess-x"
+    assert created_at, sessions[0]
+    assert turn_count == len(ids), sessions[0]
+    assert is_episodic is True, sessions[0]
     assert [list(r) for r in edges] == [["sess-x", i] for i in ids]
 
     # Pre-mutation blank gate: nothing at all is written for a blank session.
@@ -168,6 +181,10 @@ def test_transcript_seeder_writes_the_capture_shape(sdk):
         assert chash, (pid, chash)
 
     assert [r[0] for r in sessions] == expected_sessions
+    for sid, created_at, turn_count, is_episodic in sessions:
+        assert created_at, (sid, created_at)
+        assert turn_count == 1, (sid, turn_count)
+        assert is_episodic is True, (sid, is_episodic)
     assert [list(r) for r in edges] == [
         [s, t] for s, t in zip(expected_sessions, expected_turns, strict=True)]
 
