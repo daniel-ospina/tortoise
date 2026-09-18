@@ -271,7 +271,7 @@ TOOL_CARVEOUTS = (
     "tools/embedder_probe.py",
     "tools/calibrate_thresholds.py",
     "tools/pair_label_runner.py",
-    # #2071: the product-lane QA spot-check tools (ask_spotcheck + the
+    # #2071: the eval-lane ask QA spot-check tools (ask_spotcheck + the
     # consistency/probe harnesses) use the eval judge and own the
     # test_ask_spotcheck_judge.py suite — a spot-check-only change must
     # select the sdk ask-lane surface, not drop to tier-1 smoke.

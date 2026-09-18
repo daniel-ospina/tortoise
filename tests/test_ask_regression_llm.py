@@ -1,5 +1,5 @@
-"""Product-lane ask LLM regression (#1987 Task 12) — the repeatable
-counterpart to the (b) product-lane known-answer smoke.
+"""Eval-only ask-lane LLM regression (#1987 Task 12) — the repeatable
+counterpart to the (b) eval-only ask-lane known-answer smoke.
 
 GATING (P2-9): SKIPPED unless ``TORTOISE_ASK_LLM_REGRESSION=1`` is set OR a
 live provider key env is present (DEEPSEEK_API_KEY / OPENROUTER_API_KEY /
@@ -231,7 +231,7 @@ def test_fixture_replay_user_message_byte_equal(monkeypatch) -> None:
 
 def test_live_key_mode_real_lane(monkeypatch) -> None:
     """LIVE-KEY mode: the REAL ``build_reader_model`` lane answers the
-    known-answer fixture (the (b) product-lane smoke — the RoutingModel
+    known-answer fixture (the (b) eval-only ask-lane smoke — the RoutingModel
     transport delta vs the eval's OpenAICompatModel)."""
     if _fixture_mode():
         pytest.skip("fixture mode set — live-key lane not exercised")

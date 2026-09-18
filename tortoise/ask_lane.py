@@ -104,7 +104,8 @@ class _LockedReader:
     ``complete()`` + usage capture under a per-instance ``threading.Lock`` —
     the mutable ``last_completion_tokens`` write at the end of the inner
     adapter's ``complete()`` is closed against cross-thread read-after-write
-    (contention bounded by the per-org in-flight cap 4). Forwards
+    (contention bounded while the product path's per-org in-flight cap 4
+    existed; the eval-only lane is unbudgeted). Forwards
     ``model``/``provider``/``route``/``last_route``/``last_prompt_tokens``/
     ``last_completion_tokens``/``last_finish_reason`` and ``close()``.
     """

@@ -274,7 +274,7 @@ def _record(question: dict, result: dict, judge) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="product-lane QA spot-check (issue #2071: full-semantic "
+        description="eval-lane ask QA spot-check (issue #2071: full-semantic "
                     "grading; fail-fast on missing judge key)")
     ap.add_argument(
         "--fixture", default=None,

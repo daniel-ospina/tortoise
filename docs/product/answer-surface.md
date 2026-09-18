@@ -158,7 +158,7 @@ measurement justifies a change.
   TANDEM with the assembly caps — raising only the assemble cap changes
   nothing. Measurement-gated: defaults stay OFF until the runbook
   baseline justifies a raise.
-- **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 product
+- **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 eval-lane
   cross-encoder rerank (eval R6 port, `tortoise/rerank.py` — the ONE
   implementation, re-exported by the eval lane). Truthy-only; needs the
   `embeddings` extra. Degrades to untouched on any scorer failure (never

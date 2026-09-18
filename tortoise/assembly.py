@@ -149,7 +149,7 @@ _RE_CURRENT = re.compile(
     r"^\s*(?:what|which|how)\b[^?]*?\bcurrent\s+(?:status|state)\s+of\s+"
     r"(?P<a>[^?]+?)\??\s*$",
     re.IGNORECASE | re.DOTALL)
-# current-state "is X still …" (product-lane state question)
+# current-state "is X still …" (ask-lane state question)
 _RE_CURRENT_STILL = re.compile(
     r"^\s*is\s+(?P<a>.+?)\s+still\s+(?:live|active|around|in\s+use|mine)"
     r"\??\s*$", re.IGNORECASE | re.DOTALL)

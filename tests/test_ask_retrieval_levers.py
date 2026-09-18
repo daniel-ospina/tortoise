@@ -18,7 +18,7 @@ Spec items 9/10 of docs/planning/2026-08-31-2070-scoping-package.md:
   ask knobs → identical query bytes and results.
 - retrieval_degraded honesty (A2): the ask lane still reports degraded
   when the vector leg is absent — never a silent success.
-- Product rerank degrade-path (A7): tortoise/rerank.py degrades to
+- Ask-lane (eval-only) rerank degrade-path (A7): tortoise/rerank.py degrades to
   untouched (applied False) on scorer failure, never raises.
 """
 from __future__ import annotations
@@ -303,10 +303,10 @@ def test_retrieval_degraded_honest_when_embedder_absent():
         sdk.close()
 
 
-# ── A7: product rerank degrade-path (ported eval contract) ─────────────────
+# ── A7: ask-lane (eval-only) rerank degrade-path (ported eval contract) ────
 
 def test_product_rerank_off_by_default():
-    """A7: the product rerank is fail-safe OFF (env truthy-only)."""
+    """A7: the ask-lane rerank is fail-safe OFF (env truthy-only)."""
     os.environ.pop("TORTOISE_ASK_RERANK", None)
     from tortoise.rerank import rerank_enabled
     assert rerank_enabled() is False
