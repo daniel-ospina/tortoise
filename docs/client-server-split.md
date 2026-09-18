@@ -58,6 +58,8 @@ client/
   LICENSE                  # Apache-2.0 text (governs the client dist)
   build_client.sh          # staging build — copies shared modules from the canonical
                            #   repo tree, overlays client shims, builds wheel+sdist
+  shared_modules.sh        # derives the wheel's shared-module set from
+                           #   build_client.sh (the CI path gate + allowlists read it)
   verify_client.sh         # acceptance gate (clean-venv import + dep checks)
   tortoise/__init__.py     # client-only `tortoise` namespace shim (lightweight —
                            #   NOT the engine's __init__, which imports redislite)
@@ -76,8 +78,15 @@ modules are never staged. The wheel ships exactly:
 - `tortoise/mcp_client.py` — the network driver (canonical copy)
 - `tortoise/config.py` — shared config (canonical copy)
 - `tortoise/exceptions.py` — shared error types (canonical copy)
+- `tortoise/status_vocabulary.py` — the one recorded status vocabulary
+  (`available` / `empty` / `degraded` / `unconfigured`, #3805; canonical copy)
 - `tortoise/__init__.py` — client namespace shim (`__version__` only)
 - `tortoise_client/` — re-export shim + CLI
+
+The canonical-copy list is not transcribed anywhere by hand: the `cp` lines
+in `client/build_client.sh` are the source, and `client/shared_modules.sh`
+derives the set from them for the CI `client` path gate and both wheel
+allowlists (PR #4044 review).
 
 **What stays server-side (unchanged):** everything else — sdk.py,
 projection, ep, FalkorDB deps, fastapi/uvicorn, mcp_server, mcp_auth/

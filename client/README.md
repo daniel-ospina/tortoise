@@ -13,7 +13,8 @@ your script / agent  ──MCP──►  tortoise-server (tortoise-graph)
    tortoise-client        (self-hosted daemon or hosted api.premiselabs.co)
 ```
 
-- **Thin:** ships only the MCP driver (`mcp_client`) + shared config/types.
+- **Thin:** ships only the MCP driver (`mcp_client`) + shared config/types
+  and the recorded status vocabulary (`status_vocabulary`).
   No engine, no FalkorDB, no numpy/scipy/fastapi.
 - **Permissive:** Apache-2.0 (engine stays BSL-1.1 — the license boundary
   sits at the network, so a client-only install never touches BSL code).
