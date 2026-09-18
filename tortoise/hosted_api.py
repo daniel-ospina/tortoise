@@ -8554,10 +8554,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # the same `speaker` property write (delta 5 — hosted previously wrote no
     # speaker tag). Hosted additionally adds quota/auth bounds + a pre-write
     # estimate. Keep the two in sync — and note the THIRD copy:
-    # tools/ask_spotcheck.py::_seed_memory mirrors this same per-turn store
-    # (id, `[role] ` framing, prop set, CONTAINS edge) to seed the QA
-    # spot-check fixture (#3910). #3551 tracks collapsing all three onto
-    # one shared primitive. The LLM extraction that follows the
+    # tools/ask_spotcheck.py::seed_capture_turn_store mirrors this same
+    # per-turn store (id, `[role] ` framing, prop set, CONTAINS edge) to seed
+    # the ask fixtures (#3910) — the ONE copy every ask seeder writes through
+    # since #3914. #3551 tracks collapsing all three onto one shared
+    # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))

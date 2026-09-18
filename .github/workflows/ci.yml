@@ -83,6 +83,13 @@ jobs:
               "dashboard": any_file(
                   startswith("website/apps/dashboard/"),
                   isfile("product/pricing.json"),
+                  # #3485: the dashboard's node suite loads the shared
+                  # website/assets/supabase-session.js bridge directly
+                  # (supabaseSessionBridge.test.js). Without this entry a PR
+                  # touching ONLY the bridge selects the `website` surface and
+                  # skips dashboard-js-tests, so the behavioural tests for the
+                  # very file under review would never run.
+                  isfile("website/assets/supabase-session.js"),
               ),
               # uv-lock-check
               "uv_lock": any_file(
