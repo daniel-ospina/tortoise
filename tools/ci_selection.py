@@ -228,7 +228,15 @@ SOURCE_PATTERNS = {
             # it mirrors, so a bench-only PR must select `sdk` rather than
             # drop to tier-1 smoke with that guard test never running.
             # Refs #2089, whose criterion 1 this entry satisfies.
-            "tools/ask_recall_bench.py"),
+            "tools/ask_recall_bench.py",
+            # #3914: gen_ask_transcripts.py OWNS the seeder whose shape the
+            # committed transcript goldens and tests/test_ask_seed_shape.py
+            # pin. Before this entry the flat "tools/" prefix swallowed the
+            # path, so a seeder-only PR selected NO surface (surfaces=[],
+            # tier-1 smoke only) and both guards ran nowhere — the same
+            # #1349/#3332/#3910 silent-drop class, on the file that
+            # manufactures the graph those guards read.
+            "tools/gen_ask_transcripts.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
@@ -340,6 +348,10 @@ TOOL_CARVEOUTS = (
     "tools/ask_spotcheck.py",
     "tools/ask_spotcheck_consistency.py",
     "tools/ask_spotcheck_probe.py",
+    # #3914: the transcript-golden generator's seeder is what
+    # tests/test_ask_seed_shape.py + tests/test_ask_regression_llm.py pin —
+    # same carve-out as the spot-check harnesses above.
+    "tools/gen_ask_transcripts.py",
     # #2159 review P2-3: the diff-gate selector itself must never classify
     # as docs-only (the two gated legs would skip AND the wiring pins in
     # tests/test_ci_selection.py would never run on the PR that owns them).
