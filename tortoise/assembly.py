@@ -515,7 +515,7 @@ def docker_resolver_port(sdk) -> ResolverPort:
 # state IS the answer) nor to Points). One batched typed walk (never
 # row-level N+1, never blind BFS): state slice
 # (Object status/supersededBy/supersededAt in ONE statement), dated spine
-# (aboutObject Points ∪ Event-aboutObject edges ∪ product-lane eventId
+# (aboutObject Points ∪ Event-aboutObject edges ∪ ask-lane eventId
 # join), evidence view (points with validity + EP). Per-lane date ladder
 # when → createdAt (sentinel-stripped) → eventId-joined startedAt (R2);
 # parse-fail FALLS THROUGH the ladder (never undated while a usable date

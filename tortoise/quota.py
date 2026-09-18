@@ -562,11 +562,13 @@ def enforce_org_limit(limits: dict | None, resource: str, sdk=None) -> None:
 
 # ── Ask lane: shared budget bucket + bounded runner (#1987 Tasks 6/7/8) ────
 #
-# ⛔ RETIRED-BUT-RETAINED (#3849): every caller of this cluster — the hosted
-# REST /v1/ask handler, the hosted MCP ask handler and the selfhost /ask
-# handler — was removed with the ask product surface, so NOTHING calls it
-# today (the eval-only lane, tortoise/ask_lane.py, is unbudgeted). The purge
-# is the #3849 §7 D5 follow-up; the comments below that name the removed
+# ⛔ RETIRED-BUT-RETAINED (#3849): every PRODUCT caller of this cluster — the
+# hosted REST /v1/ask handler, the hosted MCP ask handler and the selfhost
+# /ask handler — was removed with the ask product surface, so no product path
+# reaches it today (the eval-only lane, tortoise/ask_lane.py, is unbudgeted).
+# Its one remaining caller is a test: tests/test_quota.py pins
+# `run_ask_bounded`'s exec-floor guarantee, so the #3849 §7 D5 purge has to
+# move or drop that test with it. The comments below that name the removed
 # handlers are kept as the record of what the bounds were.
 #
 # The ONE shared per-org per-minute LLM budget for the ask lane, used by
@@ -656,14 +658,17 @@ def ask_budget_retry_after(org_id: str | None) -> float:
 
 class AskInFlightLimitError(Exception):
     """Per-org in-flight cap hit (4 concurrent) — mapped to 429
-    ``in_flight_limit`` by the ask handlers (removed in #3849 — no caller;
-    see the RETIRED note on this cluster)."""
+    ``in_flight_limit`` by the ask handlers (removed in #3849 — no handler
+    maps it any more, though the retained ``run_ask_bounded`` still raises
+    it; see the RETIRED note on this cluster)."""
 
 
 class AskBoundedTimeoutError(Exception):
     """The bounded ask section exceeded ``_ASK_TIMEOUT_S`` (semaphore queue
     OR the reader call) — mapped to 504 ``timeout`` by the ask handlers
-    (removed in #3849 — no caller; see the RETIRED note on this cluster)."""
+    (removed in #3849 — no handler maps it any more, though the retained
+    ``run_ask_bounded`` still raises it and tests/test_quota.py pins that;
+    see the RETIRED note on this cluster)."""
 
 
 #: Ask-lane bounds (#1987 Task 7): global semaphore, per-org in-flight cap,

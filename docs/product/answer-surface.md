@@ -210,7 +210,9 @@ measurement justifies a change.
   = 60` per team, per process, the per-team in-flight cap 4, and the global
   Semaphore(8) + 60s bound all lived on the hosted `/v1/ask` and MCP ask
   handlers, which no longer exist. `quota.run_ask_bounded` and the budget
-  helpers now have no caller, so no path can emit 429 `quota_exceeded` /
+  helpers now have no PRODUCT caller (the only caller left of
+  `run_ask_bounded` is `tests/test_quota.py`, which pins its exec-floor
+  guarantee), so no product path can emit 429 `quota_exceeded` /
   `in_flight_limit` or 504 `timeout`. The eval-only lane
   (`ask_lane.run_ask_lane`) is unbudgeted. The orphaned
   `quota.py`/`metering.py` ask cluster is retained pending the #3849 §7 D5

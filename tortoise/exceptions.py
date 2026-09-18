@@ -182,7 +182,9 @@ class AskQuotaExceeded(RuntimeError):
 
     RETIRED (#3849): no raiser. Its only producer was the removed SDK
     ``_post_ask`` status map; the ask budget itself is retained-but-uncalled
-    pending the #3849 §7 D5 purge. Kept as vocabulary, not as live surface."""
+    by any product path (tests/test_quota.py still pins `run_ask_bounded`'s
+    exec floor) pending the #3849 §7 D5 purge. Kept as vocabulary, not as
+    live surface."""
 
     code = CODE_QUOTA_EXCEEDED
 
@@ -197,8 +199,10 @@ class AskInFlightLimit(RuntimeError):
     """429 ``in_flight_limit`` — the per-org in-flight ask cap is full.
 
     RETIRED (#3849): no raiser. Its only producer was the removed SDK
-    ``_post_ask`` status map; the cap machinery is retained-but-uncalled
-    pending the #3849 §7 D5 purge. Kept as vocabulary, not as live surface."""
+    ``_post_ask`` status map; the cap machinery is retained-but-uncalled by
+    any product path (tests/test_quota.py still pins `run_ask_bounded`'s exec
+    floor) pending the #3849 §7 D5 purge. Kept as vocabulary, not as live
+    surface."""
 
     code = CODE_IN_FLIGHT_LIMIT
 
