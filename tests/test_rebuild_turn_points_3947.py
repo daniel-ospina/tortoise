@@ -733,43 +733,45 @@ def test_prewipe_writer_refuses_an_over_cap_payload_without_wiping(
         sdk.close()
 
 
-def test_session_only_sidecar_write_failure_does_not_abort(tmp_path):
-    """#3947 review F5: a session-only sidecar write failure must NOT abort.
+def test_session_only_sidecar_write_failure_aborts_before_the_wipe(captured):
+    """#3947 review G6: a session-only sidecar write failure MUST abort.
 
-    Post-#3947 every turn rides the journal and `_link_session` recreates the
-    container + CONTAINS edge on replay, so the sidecar's session sections only
-    preserve the RICH properties (`capture_ok` / `turn_count` / `created_at`)
-    across a crash — no turn is at risk. Making the log dir a REQUIRED write
-    target for every session-bearing store would abort (exit 1) a
-    fully-journalled rebuild on a read-only log dir where the same rebuild
-    previously succeeded. A non-session payload still aborts (see
-    `test_prewipe_snapshot_write_failure_aborts_before_wipe`).
+    The extractor-minted `(:Session)-[:CONTAINS]->(:Point)` edges are RAW,
+    UNJOURNALED writes (see ``_link_session`` in
+    ``tortoise/projection/entities.py``), so the durable pre-wipe sidecar is
+    their ONLY record. A normal capture IS the session-only shape
+    (``session_snapshot=1`` / ``session_point_links=4`` with
+    ``synthetic_events``/``batch_*`` empty — the journal carries the turn
+    Points, not the container or its links), so downgrading this failure to a
+    warning would wipe the graph with those edges living only in the
+    un-written sidecar: silent, permanent loss on an interrupted rebuild.
+    Pre-``3659d1fc8`` this failure RAISED; this test pins that, so the
+    warn-and-continue split cannot return.
     """
-    tmp = tmp_path / "events"
-    tmp.mkdir()
-    turn = SESSION_ID + "_t0"
-    (tmp / "sdk.jsonl").write_text(json.dumps({
-        "event_id": "e1", "ts": "2026-01-01T00:00:00Z", "type": "PointAdded",
-        "initiated_by": "sdk", "projection_version": 2,
-        "contains_session": SESSION_ID,
-        "point": {"id": turn, "content": "[user] hi", "pointKind": "event",
-                  "speaker": "user", "is_episodic": True, "status": "draft"},
-    }) + "\n", encoding="utf-8")
-    _pending_sidecar(
-        tmp, [],
-        session_snapshot=[{"id": SESSION_ID, "is_episodic": True,
-                           "capture_ok": True, "turn_count": 3}],
-        session_point_links=[(SESSION_ID, turn)])
+    sdk, log_path = captured
+    proj = sdk._get_proj()
+    # A sentinel that must survive the refused rebuild.
+    proj.g.query("CREATE (n:Sentinel {id:'sentinel-3947'})")
 
-    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
-    try:
-        proj = sdk._get_proj()
-        proj.g.query("MATCH (n) DETACH DELETE n")  # EMPTY live graph
-        with mock.patch("tortoise.projection._write_prewipe_snapshot",
-                        side_effect=OSError("read-only log dir")):
-            counts = proj.rebuild_all(str(tmp))    # must NOT raise
-        assert counts["nodes"] >= 1
-        assert _turn_ids(proj) == [turn]
-        assert set(_turn_ids(proj)) <= set(_contains(proj))
-    finally:
-        sdk.close()
+    with (
+        mock.patch("tortoise.projection._write_prewipe_snapshot",
+                   side_effect=OSError("read-only log dir")),
+        pytest.raises(RuntimeError) as ei,
+    ):
+        proj.rebuild_all(os.path.dirname(log_path))
+
+    msg = str(ei.value)
+    assert "aborted BEFORE the graph wipe" in msg
+    # The refusal enumerates the session-only population and NONE of the
+    # three #3010 populations — the exact shape the F5 split misjudged.
+    assert "0 graph-only Point event(s)" in msg
+    assert "0 :Batch marker(s)" in msg
+    assert "0 batch link(s)" in msg
+    assert ":Session container(s)" in msg and "session link(s)" in msg
+    # The wipe never ran: the sentinel, every turn Point and every CONTAINS
+    # edge are still here.
+    assert proj.g.query(
+        "MATCH (n:Sentinel {id:'sentinel-3947'}) RETURN count(n)"
+    ).result_set[0][0] == 1
+    assert _turn_ids(proj) == [f"{SESSION_ID}_t{i}" for i in range(3)]
+    assert set(_turn_ids(proj)) <= set(_contains(proj))

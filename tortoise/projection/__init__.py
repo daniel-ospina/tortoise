@@ -370,8 +370,9 @@ def _validate_link_entry(entry) -> str | None:
 
     Used by BOTH link sections — ``batch_point_links`` (#990) and
     ``session_point_links`` (#3947 × #3010, via ``_SNAPSHOT_ENTRY_CHECK``).
-    The restore loops unpack exactly two values, and write both into
-    properties — so a longer entry (or a non-string member) must not reach it.
+    The restore loops consume the two values as Cypher NODE IDS (MATCH keys)
+    and/or property values — so a longer entry (or a non-string member) must
+    not reach the driver.
     """
     if not isinstance(entry, (list, tuple)) or len(entry) != 2:
         return f"{entry!r} is not a 2-element list"
@@ -658,15 +659,18 @@ def _merge_entry(left: dict, fresh: dict, key: str) -> dict:
 def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
     """Order-stable, deduped union of a persisted snapshot with a fresh one.
 
-    Deduped on point id / batch id / container id / (point id, container id),
-    leftover order first so the synthetic prefix stays stable (the positional
-    seq space the fold sweeps index on is preserved by keeping every leftover
-    entry and appending only fresh-only ids). A colliding id in a NODE section
-    is merged FIELD-wise by ``_merge_entry`` — fresh truth where it exists,
-    leftover values where the fresh capture has none. The two LINK sections
-    are deduped WITHOUT a merge (``merge=False``), because an entry there is a
-    two-element pair, not a property map: the surviving occurrence is merely
-    kept.
+    Deduped on point id / batch container id / Session container id / link
+    pair, leftover order first so the synthetic prefix stays stable (the
+    positional seq space the fold sweeps index on is preserved by keeping
+    every leftover entry and appending only fresh-only ids). A colliding id in
+    a NODE section is merged FIELD-wise by ``_merge_entry`` — fresh truth
+    where it exists, leftover values where the fresh capture has none. The two
+    LINK sections are deduped WITHOUT a merge (``merge=False``), because an
+    entry there is a two-element pair, not a property map: the surviving
+    occurrence is merely kept. The pair order differs by section:
+    ``batch_point_links`` is ``(point id, batch id)`` (captured
+    ``RETURN p.id, p.batch_id``), while ``session_point_links`` is
+    ``(session id, point id)`` (captured ``RETURN s.id, p.id``).
     """
     leftover = leftover or {}
 
@@ -715,9 +719,11 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
     batches = _union(
         list(leftover.get("batch_snapshot") or [])
         + list(fresh["batch_snapshot"]), _container_id, "batch_snapshot")
-    # merge=False: a link entry is a (container_id, point_id) PAIR, so
-    # `_merge_entry`'s `dict(left)` would raise on it. The no-merge policy is
-    # passed EXPLICITLY — never inferred from another section's name.
+    # merge=False: a link entry is a two-element PAIR — `batch_point_links`
+    # is (point id, batch id), `session_point_links` is (session id, point
+    # id) — so `_merge_entry`'s `dict(left)` would raise on it. The no-merge
+    # policy is passed EXPLICITLY — never inferred from another section's
+    # name.
     links = [tuple(entry[:2]) for entry in _union(
         list(leftover.get("batch_point_links") or [])
         + list(fresh["batch_point_links"]), _link_key, "batch_point_links",
@@ -2600,25 +2606,18 @@ class FalkorProjection(
         # rebuild rather than proceeding into an unrecoverable wipe (never
         # silently trade durability for convenience).
         #
-        # #3947 review: the SESSION sections are a DIFFERENT class from
-        # #3010's payload. Post-#3947 every turn rides the journal and
-        # `_link_session` recreates the container + CONTAINS edge on replay,
-        # so the sidecar only preserves the RICH session properties
-        # (`capture_ok` / `turn_count` / `created_at`) across a crash — a
-        # session-only write failure loses no turn. Treating it as fatal would
-        # turn the event-log dir into a REQUIRED write target for every
-        # session-bearing store, aborting (exit 1) a fully-journalled rebuild
-        # on a read-only log dir where the same rebuild previously succeeded.
-        # So: warn-and-continue when ONLY the session sections are pending;
-        # hard-fail when ANY of the three unrecoverable sections (graph-only
-        # Points, :Batch markers, batch links) is non-empty — that population
-        # exists nowhere else.
+        # #3947: the SESSION sections are fatal for the same reason as the
+        # #3010 sections. The extractor-minted
+        # `(:Session)-[:CONTAINS]->(:Point)` edges are RAW, UNJOURNALED writes
+        # scattered through the capture/extraction path (`_link_session` in
+        # tortoise/projection/entities.py; #3664/#3722), so this sidecar is
+        # their ONLY durable record. A session-only write failure that
+        # continued into the wipe would silently and permanently destroy those
+        # edges — the exact loss class this change exists to stop. Refuse
+        # before the wipe, always.
         snapshot_pending = bool(
             synthetic_events or batch_snapshot or batch_point_links
             or session_snapshot or session_point_links)
-        unrecoverable_pending = bool(
-            synthetic_events or batch_snapshot or batch_point_links)
-        sidecar_written = False
         if snapshot_pending:
             try:
                 _write_prewipe_snapshot(snapshot_path, {
@@ -2632,32 +2631,19 @@ class FalkorProjection(
                     "session_point_links": [list(link) for link in
                                             session_point_links],
                 })
-                sidecar_written = True
             except (OSError, TypeError, ValueError) as e:
-                if unrecoverable_pending:
-                    raise RuntimeError(
-                        f"rebuild aborted BEFORE the graph wipe: could not persist "
-                        f"the pre-wipe snapshot to {snapshot_path} ({e}). Wiping "
-                        f"now would destroy {len(synthetic_events)} graph-only "
-                        f"Point event(s), {len(batch_snapshot)} :Batch marker(s) "
-                        f"and {len(batch_point_links)} batch link(s) with no "
-                        f"durable record (#2943). Fix the cause — write "
-                        f"permissions/space on the event-log directory, or a "
-                        f"non-serializable Point property — and re-run."
-                    ) from e
-                # Session-only payload (see the split above): no turn is at
-                # risk, so do not abort. `sidecar_written` stays False, so the
-                # post-replay retire is skipped unless a pre-existing
-                # `leftover` sidecar still needs retiring.
-                logger.warning(
-                    "rebuild: could not persist the %d :Session container(s) "
-                    "/ %d session link(s) to the pre-wipe snapshot at %s "
-                    "(%s) — continuing: every turn rides the journal, so the "
-                    "replay recreates the containers and links; only the rich "
-                    "session properties (capture_ok/turn_count/created_at) "
-                    "would be lost if this rebuild is interrupted (#3947)",
-                    len(session_snapshot), len(session_point_links),
-                    snapshot_path, e)
+                raise RuntimeError(
+                    f"rebuild aborted BEFORE the graph wipe: could not persist "
+                    f"the pre-wipe snapshot to {snapshot_path} ({e}). Wiping "
+                    f"now would destroy {len(synthetic_events)} graph-only "
+                    f"Point event(s), {len(batch_snapshot)} :Batch marker(s), "
+                    f"{len(batch_point_links)} batch link(s), "
+                    f"{len(session_snapshot)} :Session container(s) and "
+                    f"{len(session_point_links)} session link(s) with no "
+                    f"durable record (#2943, #3947). Fix the cause — write "
+                    f"permissions/space on the event-log directory, or a "
+                    f"non-serializable Point property — and re-run."
+                ) from e
         elif leftover is not None:
             # Nothing left to protect — do not leave a stale sidecar behind.
             _clear_prewipe_snapshot(snapshot_path)
@@ -3611,11 +3597,8 @@ class FalkorProjection(
         # sidecar recorded — drop it BEFORE the count queries (a timeout there
         # must not leave a sidecar that the next rebuild would re-merge). A
         # failure above leaves it in place deliberately: the graph may be
-        # partially wiped, and the sidecar is the rescue data. `leftover`
-        # covers the retire of a stale sidecar late in the replay; and a
-        # session-only write that FAILED (see `sidecar_written`) wrote nothing
-        # to retire — only attempt it when this run actually persisted one.
-        if sidecar_written or leftover is not None:
+        # partially wiped, and the sidecar is the rescue data.
+        if snapshot_pending:
             _clear_prewipe_snapshot(snapshot_path)
         node_count = self.g.query(
             "MATCH (n:Point) RETURN count(n)"

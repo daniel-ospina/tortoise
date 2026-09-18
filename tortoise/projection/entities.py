@@ -546,9 +546,13 @@ class _EntityHandlers:
         `is_episodic` only. A journal-only `rebuild()` has no Session record to
         replay (the live loop never journaled it), so `capture_ok`,
         `turn_count` and `created_at` come back absent. For `rebuild_all` the
-        durable pre-wipe `:Session` snapshot restores the full property set, so
-        this stub is overwritten; for `rebuild()` the props stay missing and a
-        later capture may read `capture_ok=None` as the legacy
+        durable pre-wipe `:Session` snapshot restore loop runs BEFORE pass 2
+        (this method's only call site, reached via `_upsert_point_edges`), so
+        the full container is written FIRST and this
+        `MERGE ... SET s.is_episodic=true` is a no-op on properties — the
+        minimal stub is never written, hence never overwritten. For
+        `rebuild()` the props stay missing and a later capture may read
+        `capture_ok=None` as the legacy
         "presumed captured" case (#2335) instead of retrying. So the durability
         split is: `rebuild_all` carries the container (and its CONTAINS links)
         via the pre-wipe sidecar; the JOURNAL carrier is the `SessionRecorded`
