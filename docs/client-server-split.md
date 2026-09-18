@@ -84,7 +84,9 @@ projection, ep, FalkorDB deps, fastapi/uvicorn, mcp_server, mcp_auth/
 session_auth, hosted/self-host APIs, billing, ingest/index CLIs,
 `tortoise/tortoise_client.py` (the S9 skill-wiring CLI — **not** a network
 driver, deliberately not the basis of the client; it remains an internal
-server-side wrapper).
+server-side wrapper. Only its machine-readable status WORDS moved, to the
+recorded vocabulary in `tortoise/status_vocabulary.py` — #3805; the split
+itself is unchanged).
 
 **No breakage:** `tortoise-graph` keeps shipping the full `tortoise.*`
 tree exactly as before — `from tortoise.mcp_client import ...` keeps working
@@ -193,5 +195,6 @@ client/verify_client.sh                         # clean-venv gate
   package.
 - **Internal consumers** (skills, graph-scripts, tests, bridge) migrate at
   leisure — the daemon is already their integration point (post-#338/#554).
-- `tortoise/tortoise_client.py` (S9 skill wiring) is untouched and stays
-  server-side.
+- `tortoise/tortoise_client.py` (S9 skill wiring) is not part of the split and
+  stays server-side; only its status words moved to the recorded vocabulary
+  (`tortoise/status_vocabulary.py`, #3805).

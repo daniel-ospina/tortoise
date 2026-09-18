@@ -31,10 +31,11 @@ if str(REPO_ROOT) not in sys.path:
 # path (the client dir carries its own `tortoise/` namespace), so the driver has
 # to be cached in sys.modules first — mirrors tests/test_client_cli_probe.py.
 import tortoise.mcp_client  # noqa: E402, F401
+import tortoise.status_vocabulary as vocabulary  # noqa: E402
 
 sys.path.insert(0, str(CLIENT_DIR))
 try:
-    from tortoise_client import cli, vocabulary
+    from tortoise_client import cli
 finally:
     sys.path.remove(str(CLIENT_DIR))
 

@@ -29,13 +29,15 @@ mkdir -p "$STAGE/tortoise" "$STAGE/tortoise_client"
 cp "$REPO_ROOT/tortoise/mcp_client.py" "$STAGE/tortoise/mcp_client.py"
 cp "$REPO_ROOT/tortoise/config.py"     "$STAGE/tortoise/config.py"
 cp "$REPO_ROOT/tortoise/exceptions.py" "$STAGE/tortoise/exceptions.py"
+# #3805: the recorded status vocabulary — the ONE declaration both client
+# surfaces import (the thin probe and the S9 skill-wiring client).
+cp "$REPO_ROOT/tortoise/status_vocabulary.py" "$STAGE/tortoise/status_vocabulary.py"
 
 # Client-only shim files (checked into client/ — NOT copies of the engine's
 # __init__, which imports redislite).
 cp "$SCRIPT_DIR/tortoise/__init__.py"          "$STAGE/tortoise/__init__.py"
 cp "$SCRIPT_DIR/tortoise_client/__init__.py"   "$STAGE/tortoise_client/__init__.py"
 cp "$SCRIPT_DIR/tortoise_client/cli.py"        "$STAGE/tortoise_client/cli.py"
-cp "$SCRIPT_DIR/tortoise_client/vocabulary.py" "$STAGE/tortoise_client/vocabulary.py"
 cp "$SCRIPT_DIR/tortoise_client/__main__.py"   "$STAGE/tortoise_client/__main__.py"
 
 cp "$SCRIPT_DIR/pyproject.toml" "$STAGE/pyproject.toml"

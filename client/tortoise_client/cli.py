@@ -25,12 +25,14 @@ this surface only:
     1 = a query/tool call that genuinely fails (kept)
     2 = argparse usage errors (argparse owns it)
 
-The four terms are `tortoise_client.vocabulary` — the published client-boundary
-term set. The driver (`tortoise/mcp_client.py`) is deliberately UNCHANGED: it
-has two outcomes and no notion of a missing endpoint, so this probe supplies the
-missing fact and maps the driver's word onto the recorded set. The pre-#3805
-words (`ok` / `tortoise_unavailable` / `not_configured`) are translated, never
-re-minted — see `vocabulary.LEGACY_WORDS`.
+The four terms are `tortoise.status_vocabulary` — the ONE recorded
+client-boundary term set, imported rather than redeclared (the client wheel
+stages that module as a shared file). The driver (`tortoise/mcp_client.py`) is
+deliberately UNCHANGED: it has two outcomes and no notion of a missing endpoint,
+so this probe supplies the missing fact and maps the driver's word onto the
+recorded set. The pre-#3805 words (`ok` / `tortoise_unavailable` /
+`not_configured`) are translated, never re-minted — see
+`status_vocabulary.LEGACY_WORDS`.
 
 Only the `status` PROBE emits 3 and 4. `list-tools` and `call` are operations
 against a known endpoint, so any failure there (including an unreachable
@@ -44,8 +46,8 @@ import json
 import os
 import sys
 
+from tortoise import status_vocabulary as vocab
 from tortoise.mcp_client import call_tool, list_tools, status
-from tortoise_client import vocabulary as vocab
 
 # ── Exit codes (#3832 / D5, vocabulary #3805) ───────────
 # Supersedes #526's exit-0 clause FOR THE CLI PROBE ONLY. The library below is

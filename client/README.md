@@ -85,8 +85,8 @@ keeps its never-raise contract.
 
 ### The client-boundary status vocabulary
 
-The published term set is `tortoise_client.vocabulary` — four terms, each naming
-exactly one condition, and no two of them collapsible into each other:
+The published term set is `tortoise.status_vocabulary` — four terms, each
+naming exactly one condition, and no two of them collapsible into each other:
 
 | term | condition it names | probe exit code |
 |---|---|---|
@@ -104,7 +104,13 @@ not look empty, and a set-up gap must not blame the service.
 The words `ok` / `tortoise_unavailable` / `not_configured` — the pre-#3805
 payload words — are **superseded by these four** (the exit codes are unchanged).
 A caller that has not migrated can read them through
-`vocabulary.LEGACY_WORDS`; the probe still translates, never re-mints.
+`status_vocabulary.LEGACY_WORDS`; the probe still translates, never re-mints.
+
+**Both client surfaces speak these four terms**, from that ONE declaration
+(imported, not copied): this thin probe, and the S9 skill-wiring client
+`tortoise/tortoise_client.py` — whose `status` payload and error values moved
+to `available` / `degraded` / `unconfigured` here, with its exit codes
+(`0`/`3`/`4`) unchanged.
 
 ⚠️ **One raised divergence in the read path.** The read-path half of this
 contract is an unmerged branch (`tortoise/read_status.py` on
@@ -115,7 +121,7 @@ takes `degraded` to mean the **configured-but-unreachable** (outage) condition.
 The same word would then name two conditions, and the distinction #3832 / D5
 exists to protect (*never configured* vs *configured but down*) is collapsed on
 the read path. Flagged for resolution — not silently aligned. See
-`vocabulary.py` for the full note.
+`tortoise/status_vocabulary.py` for the full note.
 
 Only the `status` probe emits `3`/`4`; `list-tools` and `call` are operations
 against a declared endpoint, so any failure there keeps the generic code `1`.
@@ -131,8 +137,8 @@ as `unconfigured` (exit `4`) when that daemon is down. Declare the endpoint
 | `tortoise/mcp_client.py` | The network driver — fastmcp Client + BearerAuth + StreamableHttpTransport (`status`/`available`/`list_tools`/`call_tool`), sync wrappers over fastmcp's async API |
 | `tortoise/config.py` | Shared config constants + env conventions (connection vars live in `mcp_client`: `TORTOISE_MCP_URL` / `TORTOISE_API_KEY`) |
 | `tortoise/exceptions.py` | Shared error taxonomy surfaced across the tool boundary |
+| `tortoise/status_vocabulary.py` | The **one recorded status vocabulary** (`available` / `empty` / `degraded` / `unconfigured`) — roadmap §7 item 9; the single declaration both client surfaces import |
 | `tortoise_client/` | Client-first shim package re-exporting the driver API + the `tortoise-client` CLI |
-| `tortoise_client/vocabulary.py` | The published client-boundary **status vocabulary** (`available` / `empty` / `degraded` / `unconfigured`) — roadmap §7 item 9 |
 
 **Not included (by design):** `tortoise.sdk`, `tortoise.projection`,
 `tortoise.ep`, the daemon, the MCP server, and every engine dependency.

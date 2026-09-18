@@ -1,4 +1,4 @@
-"""The client-boundary status vocabulary — roadmap §7 item 9 (ADOPTED 2026-09-17).
+"""The recorded status vocabulary — roadmap §7 item 9 (ADOPTED 2026-09-17).
 
 ONE vocabulary at the client boundary, published as a term set. Each term names
 exactly one condition, and no two of them may be collapsed into each other:
@@ -35,14 +35,26 @@ and neither failure is ever reported as a successful empty result. ``degraded``
 each other — a broken memory must not look empty, and a set-up gap must not
 blame the service.
 
-**Home — and one RAISED divergence, not a silent alignment.** This module is
-the CLIENT-BOUNDARY half of the contract. A read-path half exists as an
-UNMERGED branch (``tortoise/read_status.py`` on ``feat/3892-read-path-status`` /
-PR #4040), so nothing in this module imports it and nothing here assumes it has
-landed. That read-path half declares the same four terms but maps two of them
-differently:
+**Home — ONE declaration, imported by both client surfaces.** This module is the
+single home of the four terms, and it is deliberately in the ENGINE package so
+that both clients that speak the vocabulary can import it rather than each
+declaring their own copy:
 
-* **this boundary** — ``degraded`` = the store is configured but could not be
+* the thin network client — ``client/tortoise_client/cli.py`` (the
+  ``tortoise-client status`` probe);
+* the S9 skill-wiring client — ``tortoise/tortoise_client.py``.
+
+The client wheel stages this file as a SHARED module (``client/build_client.sh``
+copies it, like ``tortoise/mcp_client.py``), so ``import tortoise.status_vocabulary``
+works in a client-only install too.
+
+**One RAISED divergence, not a silent alignment.** The read-path half of the
+contract exists as an UNMERGED branch (``tortoise/read_status.py`` on
+``feat/3892-read-path-status`` / PR #4040), so nothing in this module imports it
+and nothing here assumes it has landed. That read-path half declares the same
+four terms but maps two of them differently:
+
+* **this vocabulary** — ``degraded`` = the store is configured but could not be
   reached (off by outage); ``unconfigured`` = no store / endpoint / key was ever
   declared (off by policy).
 * **the pending read path** — ``unconfigured`` = the read could not reach a
@@ -54,10 +66,9 @@ and the one condition the owner decision #3832 / D5 exists to separate —
 *never configured* vs *configured but down* — is collapsed again on the read
 path. **That is raised, not papered over**: it is a decision for the lanes and
 the owner decision it touches, so this module keeps the boundary's mapping and
-this note is the flag. It cannot be fixed by importing one declaration from the
-other, because the client wheel ships no engine code (``client/build_client.sh``
-whitelists the client subset), so agreement between the two has to be
-deliberate rather than structural.
+this note is the flag. When the read path lands it should consume this module's
+terms and resolve its own condition mapping explicitly, rather than redeclaring
+the words.
 """
 
 from __future__ import annotations

@@ -42,8 +42,8 @@ python3.12 -m venv "$VENV"
 "$VENV/bin/pip" install --quiet "$WHEEL"
 
 echo "== Gate 0: wheel content — whitelist (thin driver only) =="
-ALLOWED_TORTOISE="__init__.py mcp_client.py config.py exceptions.py"
-ALLOWED_TORTOISE_CLIENT="__init__.py __main__.py cli.py vocabulary.py"
+ALLOWED_TORTOISE="__init__.py mcp_client.py config.py exceptions.py status_vocabulary.py"
+ALLOWED_TORTOISE_CLIENT="__init__.py __main__.py cli.py"
 BAD_ENTRIES=()
 while IFS= read -r entry; do
     case "$entry" in
