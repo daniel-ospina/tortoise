@@ -14531,10 +14531,18 @@ class TortoiseSDK:
                         retry_after = None
             # The SAME finite/>=0 filter the 504 arm applies. Without it a
             # NON-finite value survives here while its 504 sibling sanitises it
-            # — and a caller honouring it (`time.sleep(exc.retry_after)`) dies
-            # with the very OverflowError/ValueError this arm just caught, or
-            # mirrors `Infinity`/`NaN` into a JSON tool result (non-standard).
-            # `0 <= ra` is False for nan; `< inf` rejects `float("9"*400")`.
+            # — so ``retry_after`` could be ``inf``/``nan``, which a caller
+            # cannot use (``time.sleep(inf)`` raises) and which the MCP lane
+            # would mirror into a JSON tool result as non-standard
+            # ``Infinity``/``NaN``. ``0 <= ra`` is False for nan; ``< inf``
+            # rejects ``float("9"*400)``.
+            #
+            # SCOPE — this is a well-formedness filter, NOT a magnitude bound:
+            # a finite-but-absurd hint (e.g. ``1e308``) is passed through
+            # unchanged, because it is the server's advertisement and clamping
+            # it here would misreport what the server said. Nothing in-repo
+            # sleeps on a 429's value (a 429 is never auto-retried); the 504
+            # path clamps its own sleep via the primitive's ``cap``.
             if retry_after is not None and not (
                     0 <= retry_after < _ASK_RETRY_AFTER_CEILING_S):
                 retry_after = None

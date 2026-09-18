@@ -852,7 +852,7 @@ independently confirmed by DISJOINT reviewers (#1+#3 on the stale comment; #2+#1
 | 3 | P2 (#2) | `retry.py` `delay_for` clamp | Same hole in the shared primitive, whose docstring promises "a malformed hint never escapes". | `OverflowError` added; a `10**400` row added to the malformed-hint test. |
 | 4 | P2 (#1) | `hosted_api.py` `_emit_ask_latency_off_path` | Both `except` branches called `_logger.warning(...)` **outside** any suppression — the only statements in a documented "NEVER RAISES" function not inside a swallowing guard, so a raising handler/stream would escape (turn the pinned 504 into a 500). The same PR suppresses exactly this hazard for the strip log. Two standards for one hazard in one file. | Both wrapped in `contextlib.suppress(Exception)`, matching the strip log. |
 | 5 | P2 (×2: #6, #7) | `schemas.ASK_BUSY_MESSAGE` | The message told the reader to retry "after the delay in the Retry-After header" — but it also ships as the **MCP tool error**, which has no HTTP response and therefore no header. On exactly the surface the measurement came from, the primary instruction named a field that cannot exist. | Reworded transport-neutrally (names the advertised value, then says where it lives per surface); still digit-free, so `ASK_BUSY_RETRY_AFTER_S` stays the single source. |
-| 6 | P2 (#7) | 1987 doc: 12 `SUPERSEDED` markers + AMENDMENT; scope doc ×2 | The docs claimed the refusal "carries `Retry-After` … on hosted REST, selfhost REST **and MCP**" — a header is structurally impossible on MCP. A future reader would test for something that cannot exist. | Corrected in all 15 places: header on the two REST surfaces, body-only on MCP. (Cycle 7 found this count was wrong and the AMENDMENT bullet had been missed — see the cycle-7 log.) |
+| 6 | P2 (#7) | 1987 doc: 12 `SUPERSEDED` markers + AMENDMENT; scope doc ×2 | The docs claimed the refusal "carries `Retry-After` … on hosted REST, selfhost REST **and MCP**" — a header is structurally impossible on MCP. A future reader would test for something that cannot exist. | Corrected in all **15 places cycle 6 searched** (12 `SUPERSEDED` markers + the AMENDMENT + scope-doc ×2). A **16th** site existed in production code (the `AskBoundedTimeoutError` docstring in `quota.py`), which cycle 6 did not search and cycle 8 did — see the cycle-7 and cycle-8 logs. |
 | 7 | **P1** (#3) | `quota.py` bound rationale | The comment said the max "sits **above** the 15s budget … converts an **opaque client-side timeout**" and then, two lines later, said the 15s is the **CONNECT** budget and "explicitly **not** an ask caller's per-call timeout" — a self-contradiction, and the scope record had marked the abandonment reading **Withdrawn**. | The owner's memo directs that this framing be preserved, so it is **kept** — but the following paragraph now scopes it explicitly (the 15s is the narrowest client's CONNECT budget; the max is *inside* every ask caller's per-call budget and was a **successful** slow ask; nothing claims a per-call abandonment). The claim no longer contradicts itself. See the decision note below. |
 | 8 | P2 (#7) | `tests/test_ask_api.py` | I had added a `set(props) <= _ALLOWED_ANALYTICS_PROPS` line next to the exact-set assertion. A subset check is a **tautology** after the allowlist filter has run — it cannot fail for the reason its comment claims. | Dropped; the exact-set assertion (which can fail) is kept. |
 
@@ -944,3 +944,39 @@ re-added or see-sawed); doc-affiliation clean on all 3 docs.
 10 s server bound; refusal staying 504 + `timeout`; retry through `call_with_predicate`; `duration_ms`
 persisted off the request path; `SLO_MS = 300` untouched; R5-3 filed as #4013 rather than folded; the
 two off-path emitters filed as #4023; the capped plan-review exit disclosed as capped.
+
+---
+
+## Cycle-8 code review (re-review of the cycle-7 fix commit) — findings, dispositions
+
+FRESH reviewers on the cycle-7 delta (`93b4165e7..4b4443f7b`). Security returned **NO ISSUES FOUND** — it
+verified the 429 filter against a hostile corpus (`inf`, `-inf`, `nan`, `"nan"`, `"Infinity"`,
+`"1e400"`, `10**400`, `"9"*400`, `-5`, `[]`, `{}`, `None`, HTTP-date, NUL — all → `None`), re-traced the
+value flow to every consumer, and confirmed the suppressed decrements cannot hide a real leak (the
+decrement logs *before* it can raise, and only on the branch where no decrement was owed).
+
+### Fixed in this cycle
+
+| # | Sev | Where | Finding | Fix |
+|---|---|---|---|---|
+| 1 | P2 (#1, #2) | `quota.py::AskBoundedTimeoutError` docstring | **Production code still carried the MCP-header over-claim** — "`Retry-After: ASK_BUSY_RETRY_AFTER_S` + a body `retry_after`/`message` on **all three surfaces (hosted REST, selfhost REST, MCP)**". This is the **16th** site, and it is not a doc: it is the exception's own contract, in the file this work already edits. Cycles 6 and 7 had corrected only the plan/doc copies of this claim and each declared completeness. | Rescoped to header on the two REST surfaces, body-only on MCP — the same split `ASK_BUSY_MESSAGE` documents. The cycle-6 row now records its 15-place scope and names the production site it missed. |
+| 2 | P1→P2 (#2) | `sdk.py` 429 comment | The filter's justification claimed it stops a caller's `time.sleep(exc.retry_after)` from dying with `OverflowError`. It is a **well-formedness** filter, not a magnitude bound: a finite-but-absurd hint (`1e308`) is admitted and `time.sleep(1e308)` does raise `OverflowError`. The protection was real but **partial**, and the comment (and the commit message) overstated it. | The comment now states the exact scope — non-finite/NaN/negative rejected; a finite hint is passed through unchanged as the server's advertisement, and nothing in-repo sleeps on a 429's value. Behaviour unchanged (clamping the value would misreport what the server said). |
+| 3 | P2 (#1) | `sdk.py` 429 comment | A code span read `float("9"*400")` — a stray quote, a `SyntaxError` if a reader pastes it, which defeats the point of quoting the exact expression. | Corrected to `float("9"*400)`. |
+| 4 | P2 (#1) | `quota.py` bound rationale | The cycle-7 replacement said the earlier revision stated the claim as fact and denied it "two paragraphs later" — false against **both** prior revisions (same paragraph in `fb787e641`, next paragraph in `93b4165e7`), i.e. a claim about the comment's own edit history that no artifact binds and that can only re-stale. | Replaced with the durable reason (the abandonment reading is **Withdrawn** in the scope record while the owner directed the framing be kept), which needs no history. |
+
+### Convergence note
+
+The MCP-header over-claim took **three cycles** to fully remove (14 claimed in cycle 6, 15 found in cycle 7,
+16 found in cycle 8) because each pass fixed the copies it searched and then asserted completeness over a
+set it had not enumerated. The lesson recorded here: **enumerate before claiming completeness** —
+`git grep` the claim across every tracked file, count the hits, fix them, and re-count, rather than
+asserting a total from the files in hand. The cycle-8 sweep did that (`git grep -n "Retry-After"` across
+all tracked `.py`/`.md`, filtered for MCP co-occurrence) and found exactly this one remaining production
+site plus one legitimate non-issue (`exceptions.py:83`, which is about `/v1/dream`'s own 429 and the MCP
+`ERR_QUOTA` code, and makes no header claim about MCP).
+
+### Not re-litigated
+
+All cycle-7 dispositions stand; the `header="inf", body=42 → None` case is pre-existing and consistent
+with the settled 504-arm ordering (no usable value is lost — the pre-delta code kept `inf` and never
+consulted the body either).

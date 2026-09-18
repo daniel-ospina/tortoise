@@ -655,8 +655,10 @@ class AskInFlightLimitError(Exception):
 class AskBoundedTimeoutError(Exception):
     """The bounded ask section exceeded ``_ASK_TIMEOUT_S`` (semaphore queue
     OR the reader call) — mapped to 504 ``timeout`` by the ask handlers, with
-    ``Retry-After: ASK_BUSY_RETRY_AFTER_S`` + a body ``retry_after``/
-    ``message`` on all three surfaces (hosted REST, selfhost REST, MCP)."""
+    ``Retry-After`` + a body ``retry_after``/``message`` on the two REST
+    surfaces (hosted, selfhost), and body ``retry_after``/``message`` only on
+    the MCP tool surface — a tool result has no HTTP response, so no header
+    can exist there (the same split ``ASK_BUSY_MESSAGE`` documents)."""
 
 
 #: Ask-lane bounds (#1987 Task 7 / #3834): global semaphore, per-org in-flight
@@ -674,10 +676,11 @@ class AskBoundedTimeoutError(Exception):
 #: Why a bound at all, given only a small tail exceeds it. The **owner's
 #: directive framing**, quoted because it is the product intent behind this
 #: number — NOT a measured claim (see the precision note below, which exists
-#: precisely because an earlier revision of this comment stated it as fact and
-#: then denied it two paragraphs later): "the 21.759s max sits above the 15s
-#: client budget, so a bound converts an opaque client-side timeout into a
-#: legible refusal while the server stops burning the work".
+#: because the abandonment reading of that sentence was **Withdrawn** in the
+#: scope record while the owner directed that the framing itself be kept):
+#: "the 21.759s max sits above the 15s client budget, so a bound converts an
+#: opaque client-side timeout into a legible refusal while the server stops
+#: burning the work".
 #:
 #: Precision on that framing, so the comment does not read as two claims that
 #: cancel (code-review cycles 6 and 7 both flagged the self-contradiction): the
