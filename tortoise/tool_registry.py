@@ -38,6 +38,8 @@ class ToolDefinition:
                                  # (deployment-gated — e.g. tortoise_pack_install;
                                  # self-host uses filesystem packs dir + CLI)
     writes: bool = False         # declared write permission — a caller needs graphs:write
+    retired_use_instead: Optional[str] = None  # noqa: UP045  # #3883: non-None ONLY
+                                 # on a retired entry — the call that replaces this name.
 
 
 # ── Shorthand constructors ────────────────────────────────────────
@@ -73,7 +75,12 @@ def _idem() -> ToolAnnotations:
 #    by design — that red IS the gate. Do not "fix" it by editing the baseline
 #    to match; see docs/product/mcp-sdk-surface.md for the curated list.
 
-TOOL_REGISTRY: list[ToolDefinition] = [
+# The FULL declaration, live and retired together. `TOOL_REGISTRY` (the live,
+# advertised surface) and `RETIRED_TOOL_REGISTRY` (the #3883 warning shims) are
+# both derived from this at the module bottom — which entries land where is
+# decided by `RETIRED_USE_INSTEAD` there, so an entry's retirement is legible in
+# one place rather than implied by which list literal it sits in.
+_ENTRY_DECLARATIONS: list[ToolDefinition] = [
     # ── Core CRUD ─────────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_create_point",
@@ -1447,15 +1454,65 @@ GROUP_BY_NAME: dict[str, str] = {
 }
 
 
-def _apply_groups() -> list[ToolDefinition]:
-    """Return the registry with curation groups assigned (frozen dataclass)."""
-    out = []
-    for t in TOOL_REGISTRY:
-        out.append(replace(t, group=GROUP_BY_NAME.get(t.name, "memory")))
-    return out
+# ── Retired names (#3883 / #3863) ─────────────────────────────────────────
+# A name in this mapping is RETIRED: it is not in TOOL_REGISTRY, so it is not
+# registered as an MCP tool and never appears in `tools/list`. It is NOT gone —
+# `_RetiredToolTransform` in mcp_server.py resolves it on `get_tool` and serves
+# a shim that answers exactly as the live tool did AND warns the caller, naming
+# the replacement. That is the #3836 (b) decision: a retired name keeps working
+# and tells us who still calls it.
+#
+# The handler FUNCTION (mcp_server.py) and the SDK METHOD (sdk.py) both stay: the
+# consolidating tool calls the function internally, so retiring the NAME loses no
+# capability.
+#
+# Retiring a name SHRINKS the agent-facing surface, so it is a surface change:
+# `tools/surface-guard.py` requires every name here to be recorded in the
+# approved baseline's `retired:` block, and re-cut by a human, exactly as an
+# addition requires approval.
+RETIRED_USE_INSTEAD: dict[str, str] = {
+    # Tier 1 — tortoise_get() already calls the handler; the name is redundant.
+    "tortoise_get_point": 'tortoise_get(id, type="point")',
+    "tortoise_get_entity": 'tortoise_get(id, type="entity")',
+    "tortoise_get_events": 'tortoise_get(None, type="events")',
+    "tortoise_get_operator": 'tortoise_get(id, type="operator")',
+    "tortoise_get_governance": 'tortoise_get(id, type="governance")',
+    # Tier 1 — tortoise_overview() already calls the handler; the name is redundant.
+    "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',
+    "tortoise_list_tags": 'tortoise_overview(section="tags")',
+    "tortoise_list_sources": 'tortoise_overview(section="sources")',
+    "tortoise_taxonomy": 'tortoise_overview(section="taxonomy")',
+    "tortoise_health": 'tortoise_overview(section="health")',
+    "tortoise_status": 'tortoise_overview(section="status")',
+    "tortoise_stale": 'tortoise_overview(section="stale")',
+    # Tier 2 — the entry's own description already named its replacement.
+    "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
+    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
+    "tortoise_index_sessions": "tortoise_index_files(directory)",
+    "tortoise_ingest_corpus": "tortoise_index_files(directory)",
+}
 
 
-TOOL_REGISTRY = _apply_groups()
+def _apply_groups(entries: list[ToolDefinition]) -> list[ToolDefinition]:
+    """Assign curation groups + the retirement pointer to a list of entries."""
+    return [
+        replace(
+            t,
+            group=GROUP_BY_NAME.get(t.name, "memory"),
+            retired_use_instead=RETIRED_USE_INSTEAD.get(t.name),
+        )
+        for t in entries
+    ]
+
+
+# The LIVE, advertised surface. Every entry here is registered on both surfaces.
+TOOL_REGISTRY = _apply_groups(
+    [t for t in _ENTRY_DECLARATIONS if t.name not in RETIRED_USE_INSTEAD]
+)
+# The RETIRED names: served ONLY through the warning shim, never advertised.
+RETIRED_TOOL_REGISTRY = _apply_groups(
+    [t for t in _ENTRY_DECLARATIONS if t.name in RETIRED_USE_INSTEAD]
+)
 
 
 def tools_by_group(group: str) -> list[ToolDefinition]:

@@ -75,11 +75,15 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """98 tools = the merged census (99 − the eval-only ask tool removed in
-        #3849). The census is bumped per add."""
-        from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 98, f"Expected 98, got {len(TOOL_REGISTRY)}"
+        """83 live tools = 99 − the 16 owner-approved retirements (#3863).
+        The census is bumped per add."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        assert len(TOOL_REGISTRY) == 83, f"Expected 83, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
+        # The 16 retired names are NOT live, and each one is declared retired.
+        retired = {t.name for t in RETIRED_TOOL_REGISTRY}
+        assert len(retired) == 16, f"Expected 16 retired, got {len(retired)}"
+        assert not (retired & names), f"Retired names still live: {retired & names}"
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
         assert "tortoise_graph_set_recording" in names, "Missing #2302 graph_set_recording tool"
@@ -104,8 +108,8 @@ class TestRegistryEquivalence:
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
         # #454-era surface tools covered by this PR's tests
-        for name in ("tortoise_list_tags", "tortoise_suggest_entry_points",
-                     "tortoise_get_events"):
+        for name in ("tortoise_query", "tortoise_suggest_entry_points",
+                     "tortoise_overview"):
             assert name in names, f"Missing tool: {name}"
         # Phase-4 mining/promotion/dedup/timeline surface (#787)
         phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
@@ -225,11 +229,17 @@ class TestDescriptionImprovements:
         assert "BFS" in ep and "tortoise_list_topics" in ep, ep
         assert "neighbor" in lt.lower() and "tortoise_entity_profile" in lt, lt
 
-    def test_query_aliases_marked_deprecated(self):
-        pq = self._desc("tortoise_paginated_query")
-        qt = self._desc("tortoise_query_points_by_tag")
-        assert "DEPRECATED" in pq and "tortoise_query" in pq, pq
-        assert "DEPRECATED" in qt and "tortoise_query" in qt, qt
+    def test_query_aliases_retired(self):
+        """The two query aliases are RETIRED (#3883), keeping their DEPRECATED
+        description and naming tortoise_query as the replacement."""
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+        pq = by_name["tortoise_paginated_query"]
+        qt = by_name["tortoise_query_points_by_tag"]
+        assert "DEPRECATED" in pq.description and "tortoise_query" in pq.description, pq.description
+        assert "DEPRECATED" in qt.description and "tortoise_query" in qt.description, qt.description
+        assert pq.retired_use_instead.startswith("tortoise_query")
+        assert qt.retired_use_instead.startswith("tortoise_query")
 
 
 class TestFastMCPAdapter:
@@ -331,6 +341,9 @@ class TestFastMCPAdapter:
             # Excluded tools should still be registered (HTTP filter handles hiding them)
             missing = excluded - registered
             assert not missing, f"excluded tools not registered: {missing}"
+            # The two legacy bulk writers are RETIRED (#3883): off the advertised
+            assert "tortoise_ingest_corpus" not in registered
+            assert "tortoise_index_sessions" not in registered
 
         asyncio.run(_check())
 

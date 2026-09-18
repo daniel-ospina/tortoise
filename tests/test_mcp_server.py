@@ -1090,7 +1090,10 @@ class TestStdioEntrypointToolRegistration:
             # Issue #993 target (1): tools/list >= 70 on this entrypoint.
             assert len(names) >= 70, f"expected >=70 tools, got {len(names)}"
             # Onboarding-critical tools must be present (Step 0 + the set).
-            assert "tortoise_health" in names
+            # #3883: tortoise_health is RETIRED — the consolidator is advertised
+            # and the retired name still answers, with a warning, off the list.
+            assert "tortoise_overview" in names
+            assert "tortoise_health" not in names
             onboarding = {
                 "tortoise_onboarding_demo_create",
                 "tortoise_onboarding_state",

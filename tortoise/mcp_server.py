@@ -3429,5 +3429,140 @@ _adapter.register_all(TOOL_REGISTRY, {
     if t.name in globals()
 })
 
+
+# ── Retired names (#3883): a removed name RESOLVES and WARNS ────────────────
+# #3836 (b): when a name is retired, a caller still gets an answer and is TOLD the
+# name is retired, naming the replacement. A silent "tool not found" is not
+# acceptable — which is why this exists BEFORE any name is retired (#3883 is a
+# hard prerequisite for executing the #3863 removals).
+#
+# A retired name is deliberately NOT a registered component, so it is absent from
+# `tools/list` and the advertised surface really does shrink. `_RetiredToolTransform`
+# resolves it on `get_tool`, so `tools/call` still works. The shim reuses the
+# ORIGINAL handler, so the answer is exactly what the live tool returned (same
+# structured content, same inferred output schema); the warning is ADDED, never
+# substituted. The warning rides BOTH the result content (so an agent sees it) and
+# the result `_meta` (so a client can read it).
+
+
+def _retired_warning(spec: Any) -> dict[str, Any]:
+    """The machine-readable warning carried on the result and on the tool itself."""
+    return {
+        "name": spec.name,
+        "retired": True,
+        "use_instead": spec.retired_use_instead,
+        "sdk_method": spec.sdk_method,
+        "message": (
+            f"RETIRED TOOL: `{spec.name}` has been retired from the Tortoise MCP "
+            f"surface. It still answers, but it is no longer advertised. Call "
+            f"`{spec.retired_use_instead}` instead (#3883)."
+        ),
+    }
+
+
+def _warn_retired_result(base: Any, spec: Any) -> Any:
+    """The result the live tool produced, plus a warning that the name is retired."""
+    from fastmcp.tools.base import ToolResult
+    from mcp.types import TextContent
+
+    if not isinstance(base, ToolResult):
+        return base
+
+    warning = _retired_warning(spec)
+    meta = dict(base.meta or {})
+    tortoise_meta = meta.get("tortoise")
+    meta["tortoise"] = {
+        **(tortoise_meta if isinstance(tortoise_meta, dict) else {}),
+        "retired": warning,
+    }
+    # The warning goes LAST, not first: the payload stays `content[0]` and
+    # `structured_content` is untouched, so a caller that reads the payload — the
+    # normal path — is byte-identical to the live tool. Only a caller of the
+    # RETIRED name sees the extra block, and seeing it is the point (#3883).
+    return ToolResult(
+        content=[*base.content, TextContent(type="text", text=warning["message"])],
+        structured_content=base.structured_content,
+        meta=meta,
+        is_error=base.is_error,
+    )
+
+
+def build_retired_tools(retired_registry: list[Any], handlers: dict[str, Any]) -> dict[str, Any]:
+    """Build the retired-name shims: same schema, same answer, plus a warning."""
+    import functools
+
+    from fastmcp.tools import FunctionTool
+
+    def _make_shim(original: Any, base: Any, spec: Any) -> Any:
+        # A factory, not a loop-local closure: a bare `def` inside the loop would
+        # capture the LOOP variable and every shim would call the last handler.
+        @functools.wraps(original)
+        def retired_fn(*args, **kwargs):
+            return _warn_retired_result(
+                base.convert_result(original(*args, **kwargs)), spec
+            )
+
+        return retired_fn
+
+    shims: dict[str, Any] = {}
+    for spec in retired_registry:
+        original = handlers.get(spec.name)
+        if original is None:
+            continue
+        # `base` is the tool this name WOULD have been, so `convert_result` yields
+        # byte-identical structured output (incl. the `x-fastmcp-wrap-result`
+        # envelope for list-returning handlers).
+        base = FunctionTool.from_function(
+            original, name=spec.name,
+            description=spec.description, annotations=spec.annotations,
+        )
+        retired_fn = _make_shim(original, base, spec)
+        retired_fn.__doc__ = (
+            f"RETIRED — use {spec.retired_use_instead}. {spec.description}"
+        )
+        shims[spec.name] = FunctionTool.from_function(
+            retired_fn, name=spec.name, description=retired_fn.__doc__,
+            annotations=spec.annotations,
+            meta={"tortoise": {"retired": _retired_warning(spec)}},
+        )
+    return shims
+
+
+from fastmcp.server.transforms import Transform  # noqa: E402
+
+
+class _RetiredToolTransform(Transform):
+    """Serve retired names on `get_tool` (with a warning) without advertising them.
+
+    `list_tools` strips them so the advertised surface shrinks; `get_tool` falls
+    back to the shim when no live tool owns the name. Registered unconditionally,
+    even with zero retired names, so the gate reads the transform set from the
+    source and a name can never be retired without the gate noticing.
+    """
+
+    def __init__(self, shims: dict[str, Any]) -> None:
+        self._shims = dict(shims)
+
+    async def list_tools(self, tools: Any) -> Any:
+        return [t for t in tools if getattr(t, "name", None) not in self._shims]
+
+    async def get_tool(self, name: str, call_next: Any, *, version: Any = None) -> Any:
+        tool = await call_next(name, version=version)
+        if tool is not None:
+            return tool
+        return self._shims.get(name)
+
+
+from tortoise.tool_registry import RETIRED_TOOL_REGISTRY  # noqa: E402
+
+_RETIRED_SHIMS = build_retired_tools(RETIRED_TOOL_REGISTRY, {
+    t.name: globals()[t.name]
+    for t in RETIRED_TOOL_REGISTRY
+    if t.name in globals()
+})
+if not getattr(mcp, "_retired_tool_transform_registered", False):
+    mcp.add_transform(_RetiredToolTransform(_RETIRED_SHIMS))
+    mcp._retired_tool_transform_registered = True
+
 if __name__ == "__main__":
     main()

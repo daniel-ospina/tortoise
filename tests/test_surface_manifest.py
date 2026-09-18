@@ -186,6 +186,34 @@ def test_the_rendered_list_agrees_with_the_manifest():
     if any(r.get("lifecycle") == "deprecated alias" for r in tools):
         assert "DEPRECATED" in text, "a deprecated alias renders with no marker"
 
+    # #3883: the retired block renders, names each replacement, and the legend must not
+    # still claim that nothing warns a caller — a stale generated file kept exactly that
+    # now-false sentence until an independent verifier regenerated it.
+    for r in doc.get("retired") or []:
+        assert f"`{r['name']}`" in text, f"{r['name']} missing from the retired section"
+        assert f"`{r['use_instead']}`" in text, f"{r['name']}'s replacement never renders"
+    assert "Nothing warns a caller today" not in text, (
+        "the legend claims nothing warns a caller, but retired names now warn (#3883)"
+    )
+    if doc.get("retired"):
+        assert "warn the caller with the" in text, "the retired legend is missing"
+
+
+def test_the_retired_table_does_not_assert_a_nonexistent_sdk_method():
+    """A retired alias may have declared an SDK method that never existed
+    (`tortoise_health` -> `health`). The retired table must mark it, not describe it
+    as public — the live table's `\u26a0 FALSE DECLARATION` distinction must survive."""
+    from tortoise.sdk import TortoiseSDK
+
+    text = RENDERED.read_text(encoding="utf-8")
+    for r in _manifest().get("retired") or []:
+        method = r.get("sdk_method")
+        if method and not hasattr(TortoiseSDK, method):
+            assert f"~~{method}~~" in text, (
+                f"{r['name']} renders `{method}` as if it were a public SDK method, "
+                "but TortoiseSDK has no such method"
+            )
+
 
 def test_split_clusters_carry_one_proposed_family_each():
     """AC13's cluster-family agreement, stated as a property over the declared set."""
@@ -274,6 +302,89 @@ def _load_guard():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _load_manifest_tool():
+    """Import tools/surface_manifest.py (hyphenated filename) as a module."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "surface_manifest", ROOT / "tools" / "surface_manifest.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_retired_block_matches_the_declaration():
+    """The baseline's `retired:` block is the approved retirement list."""
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+
+    doc = _manifest()
+    declared = {t.name: t.retired_use_instead for t in RETIRED_TOOL_REGISTRY}
+    baseline = {r["name"]: r.get("use_instead") for r in doc["retired"]}
+    assert declared == baseline
+    # And none of them is a live surface row.
+    live = {r["name"] for r in doc["rows"] if not str(r["name"]).startswith("sdk:")}
+    assert not (live & set(declared))
+
+
+def test_the_guard_reds_when_a_retired_name_stops_resolving(monkeypatch, capsys):
+    """#3883's core contract: a retired name that no longer resolves is a SILENT
+    removal — the exact failure the mechanism exists to prevent."""
+    from tortoise import mcp_server
+
+    guard = _load_guard()
+    transform = next(
+        t for t in mcp_server.mcp._transforms
+        if isinstance(t, mcp_server._RetiredToolTransform)
+    )
+    victim = next(iter(transform._shims))
+    saved = transform._shims.pop(victim)
+    try:
+        assert guard.main([]) == 1, "an unresolvable retired name did not red the gate"
+    finally:
+        transform._shims[victim] = saved
+    out = capsys.readouterr().out
+    assert "does NOT resolve" in out and victim in out
+
+
+def test_the_guard_reds_when_a_retirement_is_in_the_baseline_only(tmp_path):
+    """A retirement that is not in the declaration but IS approved is a change;
+    the gate must not pass by ignoring the difference."""
+    doc = _manifest()
+    doc["retired"] = [
+        *doc["retired"],
+        {"name": "tortoise_not_real", "use_instead": "tortoise_query()", "sdk_method": None},
+    ]
+    path = tmp_path / "extra-retired.yml"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    result = _run("tools/surface-guard.py", "--manifest", str(path))
+    assert result.returncode == 1, "a baseline-only retirement did not red the gate"
+    assert "tortoise_not_real" in result.stdout
+
+
+def test_the_guard_reds_when_a_new_retirement_is_not_approved(tmp_path):
+    """Retiring a name shrinks the surface; it needs the same approval an add does."""
+    doc = _manifest()
+    doc["retired"] = doc["retired"][:-1]
+    path = tmp_path / "missing-retired.yml"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    result = _run("tools/surface-guard.py", "--manifest", str(path))
+    assert result.returncode == 1, "an unapproved retirement did not red the gate"
+    assert "NEW RETIRED TOOL" in result.stdout
+
+
+def test_the_order_lint_reds_on_a_retired_mismatch(tmp_path, monkeypatch):
+    """`check` owns the same contract on the generated artifact."""
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    doc["retired"] = doc["retired"][:-1]
+    path = tmp_path / "manifest.yml"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    monkeypatch.setattr(sm, "MANIFEST_FILE", path)
+    rc = sm.cmd_check(__import__("argparse").Namespace())
+    assert rc == 1, "the order lint passed a manifest whose retired block was incomplete"
 
 
 def test_the_guard_reds_on_a_duplicate_registry_entry():
@@ -542,11 +653,13 @@ def test_the_transform_check_reads_the_source_not_only_the_runtime_list():
 
 
     guard = _load_guard()
-    # The runtime list is lifecycle-dependent: at guard time in CI (`create_http_app`
-    # never called) it is EMPTY, so a runtime-only check cannot fire there at all. The
-    # source scan is what CI actually relies on.
-    assert guard._source_transforms() == {"_HTTPToolFilter"}, (
-        "the source scan must see the transform the declaration registers"
+    # The runtime list is lifecycle-dependent: `_HTTPToolFilter` is registered only when
+    # the HTTP app is built (`create_http_app` never called at guard time in CI), so a
+    # runtime-only check cannot see it there at all — the source scan is what CI relies
+    # on. `_RetiredToolTransform` IS registered at import (#3883), which is why the
+    # source scan must still list BOTH: the allowed set is the union the guard uses.
+    assert guard._source_transforms() == {"_HTTPToolFilter", "_RetiredToolTransform"}, (
+        "the source scan must see every transform the declaration registers"
     )
 
     sample = pathlib.Path(tempfile.mkdtemp()) / "sample.py"
@@ -637,7 +750,12 @@ def test_the_usage_markers_are_not_inverted_and_every_row_is_well_formed_markdow
     true_in_use = {r["name"] for r in tools} - true_never
     assert true_never and true_in_use, "the fixture is degenerate — no usage signal at all"
 
-    rows = [ln for ln in text.split("\n") if ln.startswith("| `tortoise_")]
+    # Scope to the MCP-tool tables. The RETIRED names render in their own 4-column
+    # table below (#3883); it is not a tool row and must not be counted or checked
+    # as one here.
+    region = text.split("## The MCP tools", 1)[-1]
+    region = region.split("## Retired names", 1)[0].split("## The SDK methods", 1)[0]
+    rows = [ln for ln in region.split("\n") if ln.startswith("| `tortoise_")]
     assert len(rows) == len(tools), f"rendered {len(rows)} tool rows for {len(tools)} tools"
 
     malformed = [ln for ln in rows if ln.count("|") != 7]
