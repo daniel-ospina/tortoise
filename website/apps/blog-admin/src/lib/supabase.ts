@@ -1,20 +1,30 @@
 /**
  * Supabase client for the Tortoise blog admin SPA.
  *
- * Session contract: the site (tortoise.premiselabs.co) writes a parent-domain
- * PKCE session cookie named `sb-tortoise-auth-token` (JSON, same shape
- * supabase-js persists: { access_token, refresh_token, ... }). The admin gate
- * Function (website/functions/admin/[[path]].ts) verifies that cookie
- * server-side; this SPA reads the SAME session with the USER's own token via
- * a storage adapter keyed on `sb-tortoise-auth-token`.
+ * Session contract (#3485): the parent-domain cookie `sb-tortoise-auth-token`
+ * (JSON, same shape supabase-js persists: { access_token, refresh_token, ... })
+ * is the ONLY source of truth. The admin gate Function
+ * (website/functions/admin/[[path]].ts) verifies that cookie server-side, so
+ * client-visible must imply server-visible: a session this SPA can see but the
+ * gate cannot is not a session — with `autoRefreshToken` it would refresh
+ * itself and RE-MINT the cookie a sign-out just cleared, resurrecting exactly
+ * the signed-out state #3485 removes.
  *
- * Storage adapter (localStorage + parent-domain cookie):
- *  - getItem: localStorage first, then the cookie (session written by the
- *    site's auth flow on another subdomain — localStorage is per-origin so
- *    the cookie is the cross-subdomain bridge).
- *  - setItem: localStorage + best-effort cookie write scoped to the parent
- *    domain (keeps the site and admin in sync after refresh flows).
- *  - removeItem: clears both (sign-out).
+ * Storage adapter (parent-domain cookie; localStorage only as a dev fallback):
+ *  - getItem: the COOKIE first. localStorage is read only when no cookie exists
+ *    AND `import.meta.env.DEV` — in a production bundle that branch is
+ *    statically dead, so an origin-scoped stale session can neither outrank the
+ *    cookie nor survive the cookie's removal.
+ *  - setItem: writes the cookie, and keeps the localStorage copy only when the
+ *    cookie verifiably took the value (a refused/oversized write drops the
+ *    local copy rather than leaving a session the gate cannot see).
+ *  - removeItem: clears both (sign-out), and the cookie is really gone — see
+ *    clearCookie for why the old attribute list kept it.
+ *
+ * Keys other than STORAGE_KEY never touch the cookie: supabase-js stores
+ * auxiliary values (e.g. a PKCE code verifier) under `<storageKey>-*`, and the
+ * cookie holds the SESSION — serving it for those keys handed a verifier read
+ * the session blob.
  *
  * RLS note: the SPA NEVER uses a service-role key. Reads/writes ride the
  * user's session; blog_posts RLS grants SELECT/ALL to is_admin() members
@@ -54,9 +64,14 @@ function readCookie(): string | null {
   return null;
 }
 
-/** Cookie scope — parent-domain (.premiselabs.co) on real hosts, omitted in dev. */
-function cookieAttributes(): string[] {
-  const parts = ['path=/', 'samesite=lax', 'max-age=31536000'];
+/**
+ * Cookie scope — parent-domain (.premiselabs.co) on real hosts, omitted in dev.
+ * Deliberately carries NO expiry: the caller owns the lifetime, because one
+ * attribute list reused for both write and clear is how the clear became a
+ * no-op.
+ */
+function cookieScope(): string[] {
+  const parts = ['path=/', 'samesite=lax'];
   if (typeof window !== 'undefined') {
     const host = window.location.hostname;
     if (host !== 'localhost' && host !== '127.0.0.1' && host.endsWith('premiselabs.co')) {
@@ -68,38 +83,75 @@ function cookieAttributes(): string[] {
 }
 
 function writeCookie(value: string): void {
-  document.cookie = `${STORAGE_KEY}=${encodeURIComponent(value)}; ${cookieAttributes().join('; ')}`;
+  const attrs = ['max-age=31536000', ...cookieScope()];
+  document.cookie = `${STORAGE_KEY}=${encodeURIComponent(value)}; ${attrs.join('; ')}`;
 }
 
+/**
+ * Clearing must not repeat the year-long max-age: a duplicated attribute is
+ * resolved in favour of the LAST one, so the old string
+ * (`max-age=0; …; max-age=31536000`) left the cookie ON the document with an
+ * empty value instead of removing it. Expiry is the ONLY max-age here, which is
+ * why the scope list above excludes it.
+ */
 function clearCookie(): void {
-  document.cookie = `${STORAGE_KEY}=; path=/; max-age=0; ${cookieAttributes().join('; ')}`;
+  const attrs = ['max-age=0', ...cookieScope()];
+  document.cookie = `${STORAGE_KEY}=; ${attrs.join('; ')}`;
 }
 
-const authStorage: SupportedStorage = {
+function readLocal(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null; // localStorage unavailable (private mode / disabled)
+  }
+}
+
+function writeLocal(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore — the cookie already holds the session
+  }
+}
+
+function removeLocal(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+}
+
+/** Exported for tests (supabase-auth-storage.test.ts). */
+export const authStorage: SupportedStorage = {
   getItem: (key: string) => {
-    try {
-      const ls = localStorage.getItem(key);
-      if (ls) return ls;
-    } catch {
-      // localStorage unavailable (private mode / disabled) — cookie fallback below
+    if (key === STORAGE_KEY) {
+      const cookie = readCookie();
+      if (cookie) return cookie;
+      // No cookie → the gate sees no session. Only dev may fall back to
+      // localStorage (#3485): honouring it in production is what let a stale
+      // origin-scoped session be refreshed and re-mint the cleared cookie.
+      if (!import.meta.env.DEV) return null;
     }
-    return readCookie();
+    return readLocal(key);
   },
   setItem: (key: string, value: string) => {
-    try {
-      localStorage.setItem(key, value);
-    } catch {
-      // ignore — cookie write below still keeps the session readable
+    if (key !== STORAGE_KEY) {
+      writeLocal(key, value); // auxiliary value — never the session cookie
+      return;
     }
     writeCookie(value);
+    // Keep the local copy ONLY when the cookie verifiably holds the value.
+    // Otherwise the session would be visible to this SPA and invisible to the
+    // gate — and autoRefreshToken would later re-mint it from the refresh
+    // token, resurrecting a sign-out the server already performed.
+    if (readCookie() === value) writeLocal(key, value);
+    else removeLocal(key);
   },
   removeItem: (key: string) => {
-    try {
-      localStorage.removeItem(key);
-    } catch {
-      // ignore
-    }
-    clearCookie();
+    removeLocal(key);
+    if (key === STORAGE_KEY) clearCookie();
   },
 };
 
