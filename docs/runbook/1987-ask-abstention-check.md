@@ -13,6 +13,15 @@ ownedBy: epistemic-team
 > BLOCKED until all four sub-gates (a)–(d) pass with NON-SKIPPED verdicts on
 > file (verified by `scripts/check-ask-premerge.cjs` in the commit-workflow
 > pre-merge step).
+>
+> **⛔ Naming (#3849).** The dated measurement records below call the ask lane
+> the **"product lane"** — that was its name when those runs were performed
+> and they are left verbatim as the record they are. The lane is now the
+> **EVAL-ONLY** lane (`tortoise/ask_lane.py`, entry point `run_ask_lane`): no
+> MCP tool, no SDK method, no REST route (the surface table below carries the
+> per-row current state). Where a record names a removed SYMBOL
+> (`sdk.ask`, `TortoiseSDK.ask()`, `tortoise_ask`, `/v1/ask`), that symbol no
+> longer resolves — the lane's entry point is `ask_lane.run_ask_lane`.
 
 ---
 
@@ -363,7 +372,7 @@ only, no graph writes).
 
 FULL `_abs` set (30 questions) through the **unified product reader**
 (`LLMReader(build_reader_model())` — the RoutingModel transport, the same
-`build_reader_model` `sdk.ask` uses) with the **strict MockJudge** (the
+`build_reader_model` `ask_lane.run_ask_lane` uses) with the **strict MockJudge** (the
 judge-marker path — `_ABSTRACTION_MARKERS`, the deterministic judge; the
 preliminary sample used the same).
 
@@ -414,7 +423,7 @@ preliminary sample used the same).
 ### (b) Product-lane known-answer smoke — **PASS** (re-run this session)
 
 Gold-verbatim fixture (`what is the office hours policy?`) through the REAL
-`build_reader_model()` lane (`sdk.ask` — deepseek-direct primary):
+`build_reader_model()` lane (`ask_lane.run_ask_lane` — deepseek-direct primary):
 
 ```
 answer: The office hours policy is 9am to 5pm.
@@ -453,7 +462,7 @@ failure below is consistent with this under-engagement: `detected=None`
 ### (d) QA spot-check — **FAIL: aggregate 0.43 (9/21) < 0.8 (REQUIRED gate)**
 
 FULL spot-check via `TORTOISE_TEST_CARVE_OUT=1 uv run python
-tools/ask_spotcheck.py` — the REAL product lane (`sdk.ask` →
+tools/ask_spotcheck.py` — the REAL eval-only ask lane (`ask_lane.run_ask_lane` →
 `build_reader_model`), containment judge, 21-question composition (the
 plan's mix: 4 temporal / 3 preference / 4 KU / 4 MSR / 3 SSA / 3 `_abs`,
 deterministic seed 1987):
