@@ -465,3 +465,104 @@ def test_dashboard_public_copy_is_byte_identical() -> None:
     assert public_copy.exists(), "missing dashboard public/ copy"
     assert public_copy.read_text(encoding="utf-8") == shared, \
         "dashboard public/ copy drifted from the shared file"
+
+
+# ── #3485: readValidSession trusts ONLY the cookie ──────────────────────────
+
+
+def _read_valid_session_body() -> str:
+    """Extract the readValidSession function body by brace counting."""
+    text = _read(SHARED)
+    start = text.index("var readValidSession = function () {")
+    i = text.index("{", start)
+    depth, j = 0, i
+    while j < len(text):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i : j + 1]
+        j += 1
+    raise AssertionError("unbalanced braces in readValidSession")
+
+
+def test_read_valid_session_never_returns_a_localstorage_only_session() -> None:
+    """#3485: the auth loop was `readValidSession()` reporting a session that
+    lived ONLY in origin-scoped localStorage — invisible to app.premiselabs.co
+    and the server /admin gate, which bounced straight back to /auth, forever
+    (393 document loads / 8s reproduced with Playwright).
+
+    A localStorage fallback here IS the loop, so the read must be cookie-only:
+    when the cookie is absent, migrate the hardcoded LEGACY_KEYS synchronously
+    into it, then return null if it still is not there (the visitor signs in
+    again rather than being told they are signed in somewhere they are not)."""
+    body = _read_valid_session_body()
+    assert "migrateLegacyKeysToCookie()" in body, (
+        "readValidSession must migrate legacy keys synchronously before deciding"
+    )
+    assert "window.localStorage.getItem" not in body, (
+        "readValidSession must never read a session straight out of localStorage "
+        "— that session is invisible to the other subdomain and the server gate (#3485)"
+    )
+
+
+def test_sync_legacy_migration_is_present_and_confirm_before_clear() -> None:
+    """The gate-time migration must exist and never destroy the only copy: EVERY
+    cookie write is confirmed (readCookie equality) BEFORE the legacy key is
+    removed — the size guard can strip provider tokens, in which case the write
+    does not round-trip and the localStorage copy must survive. A legacy value
+    that is not a session must never be written to the shared cookie, and a
+    present-but-unusable cookie must never outrank a valid legacy session."""
+    text = _read(SHARED)
+    assert "var migrateLegacyKeysToCookie = function" in text, (
+        "missing the #3485 synchronous legacy→cookie migration"
+    )
+    body = text[text.index("var migrateLegacyKeysToCookie = function") :]
+    body = body[: body.index("\n  };\n")]
+    assert "supabaseStorage.setItem(COOKIE_NAME, legacy)" in body
+    # BOTH write branches (cookie absent, and both-present-newer) must confirm
+    # the round-trip before the legacy copy is dropped (#3485 review P2).
+    assert body.count("if (readCookie(COOKIE_NAME) !== legacy) continue;") == 2, (
+        "every legacy→cookie write must confirm the write before clearing the legacy key"
+    )
+    assert body.count("supabaseStorage.setItem(COOKIE_NAME, legacy)") == 2, (
+        "both the copy and the both-present-newer branches must write the cookie"
+    )
+    assert "typeof lo.access_token === 'string'" in body, (
+        "a legacy value that is not a session must never overwrite the cookie (#3485 review P3)"
+    )
+    assert "if (!legacyOk) {" in body, (
+        "the cookie-absent branch must refuse to share a non-session with the parent "
+        "domain — poison there would outrank the second legacy key (#3485 review P3)"
+    )
+    assert "typeof co.access_token === 'string'" in body, (
+        "a present-but-unusable cookie must not outrank a valid legacy session (#3485 review P3)"
+    )
+    # The sibling writer for the SAME keys (createTortoiseSupabaseClient path —
+    # reached when the head gate is skipped, e.g. the ?error early return) must
+    # not be a second, unguarded way to write a non-session into the cookie.
+    mig = text[text.index("var migrateLegacySession = function") :]
+    mig = mig[: mig.index("\n  };\n")]
+    assert "if (readCookie(COOKIE_NAME) !== legacy) return;" in mig, (
+        "migrateLegacySession must confirm its write before dropping the legacy key (#3485 review)"
+    )
+    assert "typeof lo.access_token === 'string'" in mig and "!legacyOk" in mig, (
+        "migrateLegacySession must refuse to share a non-session (#3485 review)"
+    )
+    # #3485 review: storeSession verifies the cookie it just wrote — re-entering
+    # the now-migrating readValidSession could let a legacy session win.
+    store = text[text.index("var storeSession = function") :]
+    store = store[: store.index("\n  };\n")]
+    assert "return readValidSession()" not in store, (
+        "storeSession must not re-enter the migrating accessor to verify its write (#3485 review)"
+    )
+    assert "readCookie(COOKIE_NAME)" in store, (
+        "storeSession must verify the cookie it just wrote (#3485 review)"
+    )
+    read_body = _read_valid_session_body()
+    assert "migrateLegacyKeysToCookie();" in read_body, (
+        "readValidSession must migrate unconditionally — a present-but-unparseable "
+        "cookie must not skip the migration and lose the legacy copy (#3485 review P2)"
+    )
+    assert "LEGACY_KEYS" in body, "migration must iterate the hardcoded LEGACY_KEYS"

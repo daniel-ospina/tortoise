@@ -133,6 +133,22 @@
       try { legacy = window.localStorage.getItem(legacyKey); } catch (e) { return; }
       if (!legacy) return;
       var alreadyShared = readCookie(COOKIE_NAME);
+      // #3485 review: the shared cookie may only ever receive a real session,
+      // and every write is confirmed (readCookie equality) before the legacy
+      // key is dropped — the same discipline as migrateLegacyKeysToCookie.
+      var legacyOk = false, legacyExp = 0, cookieOk = false, cookieExp = 0;
+      try {
+        var lo = JSON.parse(legacy);
+        legacyOk = !!lo && typeof lo === 'object' &&
+          typeof lo.access_token === 'string' && lo.access_token.length > 0;
+        legacyExp = (lo && lo.expires_at) || 0;
+      } catch (e) { /* not JSON — not a session */ }
+      if (!legacyOk) {
+        // Not a session and therefore never a credential — never share it with
+        // the parent domain; drop the junk.
+        try { window.localStorage.removeItem(legacyKey); } catch (e) { /* ignore */ }
+        return;
+      }
       if (!alreadyShared) {
         // Copy + confirm write before clearing (never destroy the only copy).
         // readCookie returns the DECODED value; equality holds unless the size
@@ -144,12 +160,15 @@
         // hold a NEWER legacy session than the cookie — compare expires_at and
         // keep the newer one before clearing the legacy key.
         try {
-          var legacyExp = JSON.parse(legacy).expires_at || 0;
-          var cookieExp = JSON.parse(alreadyShared).expires_at || 0;
-          if (legacyExp > cookieExp) {
-            supabaseStorage.setItem(COOKIE_NAME, legacy);
-          }
-        } catch (e) { /* malformed JSON — keep cookie, drop legacy below */ }
+          var co = JSON.parse(alreadyShared);
+          cookieOk = !!co && typeof co === 'object' &&
+            typeof co.access_token === 'string' && co.access_token.length > 0;
+          cookieExp = (co && co.expires_at) || 0;
+        } catch (e) { /* unusable cookie */ }
+        if (!cookieOk || legacyExp > cookieExp) {
+          supabaseStorage.setItem(COOKIE_NAME, legacy);
+          if (readCookie(COOKIE_NAME) !== legacy) return;
+        }
       }
       // Stale-secret hygiene: the new client never reads the legacy key; drop
       // it whether or not a cookie was already present.
@@ -205,14 +224,82 @@
     'sb-127-auth-token',                  // local CLI host (e2e seeds both)
   ];
 
-  var readValidSession = function () {
-    try {
-      var raw = readCookie(COOKIE_NAME);
-      if (!raw) {
-        for (var i = 0; i < LEGACY_KEYS.length && !raw; i++) {
-          try { raw = window.localStorage.getItem(LEGACY_KEYS[i]); } catch (e) {}
+  // #3485: SYNCHRONOUS legacy→cookie migration for the hardcoded LEGACY_KEYS.
+  // The head gate (signup.html) calls readValidSession() BEFORE the body runs
+  // createTortoiseSupabaseClient(), so migrateLegacySession() (which needs a
+  // supabaseUrl to derive the key) has not run yet. A visitor whose only
+  // session lives in origin-scoped localStorage therefore looked signed in to
+  // THIS origin while app.premiselabs.co and the server /admin gate saw no
+  // cookie — tortoise → app → tortoise, forever (#3485, 393 loads/8s).
+  // LEGACY_KEYS are hardcoded, so the migration needs no supabaseUrl and can
+  // run at gate time. Never throws: storage may be blocked or the value corrupt.
+  var migrateLegacyKeysToCookie = function () {
+    for (var i = 0; i < LEGACY_KEYS.length; i++) {
+      var legacy = null;
+      try { legacy = window.localStorage.getItem(LEGACY_KEYS[i]); } catch (e) { continue; }
+      if (!legacy) continue;
+      var existing = readCookie(COOKIE_NAME);
+      // #3485 review P3: parse the legacy value ONCE and require a real session
+      // shape (non-empty access_token) in BOTH branches. Object-ness alone is
+      // not a session: a {"expires_at":N} blob written to the shared cookie
+      // would outrank — and cause the deletion of — a valid session under the
+      // second legacy key.
+      var legacyExp = 0, legacyOk = false;
+      try {
+        var lo = JSON.parse(legacy);
+        legacyOk = !!lo && typeof lo === 'object' &&
+          typeof lo.access_token === 'string' && lo.access_token.length > 0;
+        legacyExp = (lo && lo.expires_at) || 0;
+      } catch (e) { /* not JSON — not a session */ }
+      if (!existing) {
+        if (!legacyOk) {
+          // Not a session, so never a credential — never share it with the
+          // parent domain; drop the junk.
+          try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) { /* ignore */ }
+          continue;
+        }
+        // Copy + confirm the write BEFORE clearing the only copy. readCookie
+        // returns the DECODED value; equality fails when the size guard
+        // stripped provider tokens — then keep the legacy copy.
+        supabaseStorage.setItem(COOKIE_NAME, legacy);
+        if (readCookie(COOKIE_NAME) !== legacy) continue;
+      } else {
+        // Both present (review P3-3): a stale cached tab may hold a NEWER
+        // legacy session — compare expires_at and keep the newer one before
+        // clearing the legacy key. #3485 review P2: the write is CONFIRMED
+        // (readCookie equality) before the legacy copy is dropped, and a
+        // legacy value that is not a session never overwrites the cookie.
+        var cookieExp = 0, cookieOk = false;
+        try {
+          var co = JSON.parse(existing);
+          cookieOk = !!co && typeof co === 'object' &&
+            typeof co.access_token === 'string' && co.access_token.length > 0;
+          cookieExp = (co && co.expires_at) || 0;
+        } catch (e) { /* unusable cookie */ }
+        if (legacyOk && (!cookieOk || legacyExp > cookieExp)) {
+          supabaseStorage.setItem(COOKIE_NAME, legacy);
+          if (readCookie(COOKIE_NAME) !== legacy) continue;
         }
       }
+      // The new client never reads the legacy key — drop it once it is shared.
+      try { window.localStorage.removeItem(LEGACY_KEYS[i]); } catch (e) { /* ignore */ }
+    }
+  };
+
+  // #3485: trust ONLY the parent-domain cookie — the credential both
+  // subdomains and the server can actually see. A localStorage-only session
+  // is migrated synchronously first; if it still cannot be shared, return null
+  // and let the visitor sign in again rather than report a session the
+  // destination cannot see (that report IS the redirect loop).
+  var readValidSession = function () {
+    try {
+      // #3485 review P2: ALWAYS migrate — migration is idempotent, and calling
+      // it only when the cookie is ABSENT skipped the case where the cookie is
+      // present but unparseable: readValidSession returned null, then the
+      // body's migrateLegacySession() deleted the only valid copy from
+      // localStorage. Migrating first repairs the cookie, closing that path.
+      migrateLegacyKeysToCookie();
+      var raw = readCookie(COOKIE_NAME);
       if (!raw) return null;
       var s = JSON.parse(raw);
       if (!s || !s.access_token) return null;
@@ -298,7 +385,13 @@
     if (!session || !session.access_token || !session.refresh_token) return false;
     try {
       supabaseStorage.setItem(COOKIE_NAME, JSON.stringify(session));
-      return readValidSession() !== null;
+      // Verify the cookie just written DIRECTLY — not via readValidSession(),
+      // which also migrates legacy keys and could prefer a NEWER legacy session
+      // over the one we just stored (#3485 review).
+      var raw = readCookie(COOKIE_NAME);
+      if (!raw) return false;
+      var stored = JSON.parse(raw);
+      return !!(stored && stored.access_token);
     } catch (e) { return false; }
   };
 
