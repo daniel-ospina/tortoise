@@ -7,17 +7,23 @@ Guards the contract the form exists to honour — at the repo level, no network:
      CODE CONSTANT in the Pages Function, never a request field — that is what
      keeps the form from being an open relay. A future edit that made the
      recipient configurable, or drifted it to another address, fails here.
-  2. FAIL LOUDLY WHEN UNCONFIGURED. With `RESEND_API_KEY` absent the endpoint
-     must answer 503 `not_configured` with a human-actionable message — never a
-     200. This is the #3616 lesson applied to a second surface: a requirement
-     that can only be read cannot fail. (The live proof is the curl probe in
-     website/README.md; this pins the source that produces it.)
-  3. THE SECRET IS READ FROM ENV AND NEVER LOGGED/ECHOED. `env.RESEND_API_KEY`
-     is the only read site; the key goes out as an Authorization header, never
-     in a URL, and never reaches a log line or a response body.
+  2. FAIL LOUDLY WHEN UNCONFIGURED. With the transport's credential absent the
+     endpoint must answer 503 `not_configured` with a human-actionable message —
+     never a 200. This is the #3616 lesson applied to a second surface: a
+     requirement that can only be read cannot fail. (The live proof is the curl
+     probe in website/README.md; this pins the source that produces it.)
+  3. THE SECRET IS READ FROM ENV AND NEVER LOGGED/ECHOED. The transport seam
+     reads it; the key goes out as an Authorization header, never in a URL, and
+     never reaches a log line or a response body.
   4. THE FORM IS SURFACED. `/contact` is a real page, linked from the company
      landing page, the product footer, the FAQ footer and the docs next-steps,
      and the trailing-slash / .html variants redirect to it.
+  5. THE TRANSPORT IS A SINGLE, PROVIDER-NEUTRAL SEAM — AND IT IS UNRESOLVED.
+     Every provider-specific detail (endpoint, credential variable, wire format)
+     lives in `functions/_shared/contact-transport.ts`, behind `deliver()`; no
+     other source file names a provider. The owner has NOT settled the
+     transport, so the pending decision must stay recorded in the code and in
+     website/README.md for the next reader.
 
 Run:  python -m pytest tests/test_contact_form.py -v
 """
@@ -30,6 +36,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WEBSITE_DIR = REPO_ROOT / "website"
 
 FUNCTION_TS = WEBSITE_DIR / "functions" / "api" / "contact.ts"
+TRANSPORT_TS = WEBSITE_DIR / "functions" / "_shared" / "contact-transport.ts"
 CONTACT_HTML = WEBSITE_DIR / "contact.html"
 REDIRECTS = WEBSITE_DIR / "_redirects"
 README = WEBSITE_DIR / "README.md"
@@ -59,62 +66,124 @@ def test_recipient_is_not_taken_from_the_request() -> None:
     is validated.
     """
     src = _src(FUNCTION_TS)
-    assert "to: [CONTACT_TO]" in src, "the To: field must be the CONTACT_TO constant"
+    assert "to: CONTACT_TO" in src, "the To: address must be the CONTACT_TO constant"
     # No request field may be used as the delivery target.
     assert not re.search(r"to:\s*\[\s*(body|data)\.", src)
-    assert "reply_to: email" in src, "the submitter's address belongs in Reply-To"
+    # The submitter's address is the Reply-To at the seam, sourced from the
+    # VALIDATED local — never from the raw body.
+    tsrc = _src(TRANSPORT_TS)
+    assert "reply_to: msg.replyTo" in tsrc, "the submitter's address belongs in Reply-To"
+    assert "to: [msg.to]" in tsrc, "the transport delivers only to the caller's decided address"
 
 
 # ── 2. Fail-loud when unconfigured ────────────────────────────────────────
 
 
 def test_missing_key_returns_503_not_configured() -> None:
+    """The seam's `not_configured` outcome maps to a visible 503.
+
+    The credential gate is transport-specific, so it lives in the seam; the
+    HTTP status lives in the function. Both halves of the unconfigured path are
+    pinned: a 503 only because the outcome is mapped, and the outcome only
+    because the gate precedes the send call.
+    """
     src = _src(FUNCTION_TS)
-    # The credential gate exists and returns 503 with the named error code.
-    assert "env.RESEND_API_KEY" in src
-    assert re.search(r"if\s*\(\s*apiKey\s*===\s*\"\"\s*\)", src), "missing-key gate not found"
-    # …and it returns BEFORE any send is attempted, so a silent success is
-    # structurally impossible on the unconfigured path.
-    gate_pos = src.index("apiKey === \"\"")
-    send_pos = src.index("await fetch(RESEND_URL")
-    assert gate_pos < send_pos, "the credential gate must precede the send"
-    # Pin the STATUS inside the gate itself — a 200 there would be the silent
+    assert re.search(r'if\s*\(\s*outcome\.status\s*===\s*"not_configured"\s*\)', src), (
+        "the function does not map the seam's not_configured outcome"
+    )
+    # Pin the STATUS inside the mapping — a 200 there would be the silent
     # success this whole contract exists to forbid.
-    gate = src[gate_pos:send_pos]
-    assert re.search(r"return\s+fail\(\s*503", gate), f"unconfigured path is not a 503: {gate[:200]!r}"
-    assert '"not_configured"' in gate
+    branch = src[src.index('outcome.status === "not_configured"') : src.index('outcome.status === "failed"')]
+    assert re.search(r"return\s+fail\(\s*503", branch), f"unconfigured path is not a 503: {branch[:200]!r}"
+    assert '"not_configured"' in branch
+    # …and the mapping precedes the final success return, so a silent success on
+    # the unconfigured path is structurally impossible. (rindex: the honeypot
+    # branch's generic success legitimately appears earlier.)
+    assert src.index('outcome.status === "not_configured"') < src.rindex("return json({ ok: true")
+
+    tsrc = _src(TRANSPORT_TS)
+    # The credential comes from env, and its gate precedes the send attempt.
+    assert 'const TRANSPORT_KEY_ENV = "RESEND_API_KEY"' in tsrc
+    assert "envString(env, TRANSPORT_KEY_ENV)" in tsrc
+    assert re.search(r'if\s*\(\s*apiKey\s*===\s*""\s*\)', tsrc), "missing-key gate not found"
+    gate_pos = tsrc.index('apiKey === ""')
+    send_pos = tsrc.index("await sendViaTransport(")
+    assert gate_pos < send_pos, "the credential gate must precede the send"
+    gate = tsrc[gate_pos:send_pos]
+    assert 'status: "not_configured"' in gate
 
 
 def test_unconfigured_message_gives_the_visitor_the_fallback() -> None:
     """A 503 the visitor cannot act on is a dead end, not a failure signal."""
     src = _src(FUNCTION_TS)
-    gate = src[src.index("apiKey === \"\"") : src.index("const from =")]
-    assert "hello@premiselabs.co" in gate
-    assert "not been sent" in gate or "not sent" in gate
+    branch = src[src.index('outcome.status === "not_configured"') : src.index('outcome.status === "failed"')]
+    assert "hello@premiselabs.co" in branch
+    assert "not been sent" in branch or "not sent" in branch
 
 
 # ── 3. Secret handling ───────────────────────────────────────────────────
 
 
 def test_secret_is_a_bearer_header_never_a_url_or_a_log() -> None:
-    src = _src(FUNCTION_TS)
-    assert "Authorization: `Bearer ${apiKey}`" in src
-    assert "Authorization: `Bearer ${RESEND_API_KEY}`" not in src
+    tsrc = _src(TRANSPORT_TS)
+    assert "Authorization: `Bearer ${apiKey}`" in tsrc
+    assert "Authorization: `Bearer ${RESEND_API_KEY}`" not in tsrc
     # `${apiKey}` must appear exactly once, in the Authorization header — never
     # in a URL (URLs are logged; a bearer token in one is a leaked token).
-    assert src.count("${apiKey}") == 1, f"${apiKey} used {src.count('${apiKey}')} times"
-    for line in src.splitlines():
+    assert tsrc.count("${apiKey}") == 1, f"${apiKey} used {tsrc.count('${apiKey}')} times"
+    for line in tsrc.splitlines():
         if "${apiKey}" in line:
             assert "Bearer" in line, f"key interpolated outside the auth header: {line.strip()}"
-    for m in re.finditer(r"console\.(?:log|error|warn)\(([^)]*)\)", src, flags=re.S):
+    for m in re.finditer(r"console\.(?:log|error|warn)\(([^)]*)\)", tsrc, flags=re.S):
         assert "apiKey" not in m.group(1), f"secret referenced in a log call: {m.group(0)[:80]}"
+    # Nothing outside the seam may touch the credential, either.
+    assert "RESEND" not in _src(FUNCTION_TS), "the provider leaks outside the transport seam"
 
 
 def test_secret_name_is_the_established_one() -> None:
-    """Same credential name the waitlist edge function and email_notify use, so
-    one key serves both surfaces and ops has one thing to bind."""
-    assert "RESEND_API_KEY" in _src(FUNCTION_TS)
-    assert "RESEND_FROM_EMAIL" in _src(FUNCTION_TS)
+    """Same credential name `tortoise/email_notify.py` uses (RESEND_API_KEY /
+    RESEND_FROM_EMAIL), so one key serves both surfaces and ops has one thing to
+    bind. The names live in the seam, not the function."""
+    tsrc = _src(TRANSPORT_TS)
+    assert 'const TRANSPORT_KEY_ENV = "RESEND_API_KEY"' in tsrc
+    assert 'const TRANSPORT_FROM_ENV = "RESEND_FROM_EMAIL"' in tsrc
+    # The product convention is defined by email_notify.py — do not invent a new
+    # name here without changing it there first.
+    notify = _src(REPO_ROOT / "tortoise" / "email_notify.py")
+    assert '"RESEND_API_KEY"' in notify and '"RESEND_FROM_EMAIL"' in notify
+
+
+# ── 5. The transport seam is singular, provider-neutral, and unresolved ───
+
+
+def test_the_send_is_isolated_behind_one_transport_seam() -> None:
+    """Swapping transport must be a change to ONE module. The function imports
+    the seam and never names a provider, endpoint or credential."""
+    src = _src(FUNCTION_TS)
+    assert re.search(
+        r'import\s*\{\s*deliver\s*\}\s*from\s*"\.\./_shared/contact-transport"', src
+    ), "the function must import the transport seam"
+    assert "resend" not in src.lower(), "the provider's name leaks into the function"
+    assert "https://api." not in src, "a provider endpoint leaks into the function"
+    assert "deliver({" in src, "the function must route delivery through the seam"
+
+
+def test_transport_is_marked_pending_the_owners_decision() -> None:
+    """The transport is deliberately unresolved … a reader must not mistake
+    today's placeholder implementation for the decision."""
+    tsrc = _src(TRANSPORT_TS)
+    assert "PENDING OWNER DECISION" in tsrc
+    assert "NOT SETTLED" in tsrc
+    assert "placeholder" in tsrc.lower()
+
+
+def test_pending_transport_decision_is_recorded_in_the_readme() -> None:
+    """Recorded for the next reader, not only in the PR report."""
+    readme = _src(README)
+    section = readme[readme.index("## Contact form (#2409)") :]
+    assert "hello@premiselabs.co" in section, "the decided recipient must be stated"
+    assert "PENDING" in section, "the undecided transport must be flagged as pending"
+    assert "contact-transport.ts" in section, "the seam's location must be named"
 
 
 # ── 4. Abuse protection and validation ───────────────────────────────────
@@ -179,7 +248,7 @@ def test_reply_to_is_validated() -> None:
     assert "\\u0020" in validator or "\\r" in validator, "no CR/LF guard in validEmail"
 
 
-# ── 5. The page and its surfacing ────────────────────────────────────────
+# ── 6. The page and its surfacing ────────────────────────────────────────
 
 
 def test_contact_page_posts_to_the_function() -> None:

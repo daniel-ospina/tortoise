@@ -53,14 +53,29 @@ aviso-privacidad). The recipient is a **code constant**, never a request
 field, which is what keeps the form from being an open relay.
 
 ```text
-contact.html ──POST JSON──▶ /api/contact ──▶ Resend ──▶ hello@premiselabs.co
+contact.html ──POST JSON──▶ /api/contact ──▶ deliver() ──▶ hello@premiselabs.co
    fields: name, email (Reply-To), message      honeypot (hp) + per-IP rate limit
+                                         └─ transport seam (PENDING) → functions/_shared/contact-transport.ts
 ```
 
-**Credential:** `RESEND_API_KEY` (Pages project env var). **Fail-loud contract:**
-with the key unset the endpoint returns `503 not_configured` and the page shows
-the visitor the direct-mailto fallback — it never returns a silent success.
-Never logged, never echoed, never placed in a URL.
+**Transport — ⚠️ PENDING the owner's decision; NOT SETTLED.** The owner has
+not chosen which mail provider the contact form delivers through, so nothing
+here is that choice. The actual send is isolated behind ONE seam —
+`functions/_shared/contact-transport.ts`, entry point `deliver()` — whose
+payload and result types are provider-neutral. That module currently
+implements Resend as the placeholder that keeps the endpoint exercisable, and
+it is the only source file that names a provider, endpoint, credential
+variable or wire format — so swapping transport is a change to that module
+alone. The recipient above **is** decided: a code constant in
+`functions/api/contact.ts`, never a request field.
+
+**Credential:** the seam reads `RESEND_API_KEY` (Pages project env var), plus
+`RESEND_FROM_EMAIL` (optional; in-code default `noreply@premiselabs.co`). These
+are the product's established names — the same ones `tortoise/email_notify.py`
+uses, so one key serves both surfaces. **Fail-loud contract:** with the key
+unset the endpoint returns `503 not_configured` and the page shows the visitor
+the direct-mailto fallback — it never returns a silent success. Never logged,
+never echoed, never placed in a URL.
 
 **Spam:** hidden `hp` honeypot field (a filled one is answered with a generic
 success so a bot learns nothing) plus a per-isolate rate limit (5 submissions /
@@ -84,9 +99,11 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8788/api/conta
    `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `TURNSTILE_SECRET_KEY`.
 2. **Pages env var for the contact form** — bind `RESEND_API_KEY` on the
    `premise-labs` Cloudflare Pages project (production). This is the ONE step
-   that makes `/contact` deliver; until it is bound the endpoint answers
-   `503 not_configured` exactly as designed. It is the
-   `RESEND_API_KEY` entry in `config/required-bindings.yml`.
+   that makes `/contact` deliver through the current placeholder transport;
+   until it is bound the endpoint answers `503 not_configured` exactly as
+   designed. It is the `RESEND_API_KEY` entry in
+   `config/required-bindings.yml`. (When the transport decision lands, this
+   binding moves with it — see the seam note above.)
 3. **Turnstile site key** → paste into the `TURNSTILE_SITE_KEY` constant in
    `index.html`.
 4. **Deploy** — see `supabase/README.md` (CI workflow does it on merge once

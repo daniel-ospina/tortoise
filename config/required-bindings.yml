@@ -110,10 +110,14 @@ bindings:
     type: env_vars
     envs: [production]
     note: >-
-      functions/api/contact.ts — the send credential for the website contact
-      form. Same Resend key the waitlist-subscribe edge function uses. The
-      companion sender is RESEND_FROM_EMAIL (in-code default
-      noreply@premiselabs.co, so it needs no binding).
+      functions/_shared/contact-transport.ts — the delivery credential for the
+      website contact form. The transport is PENDING the owner's decision
+      (#2409), so this binding names the CURRENT placeholder provider only;
+      when the transport is decided, this entry moves with the seam (which is
+      the sole source file that touches a provider). Same Resend key the
+      waitlist-subscribe edge function uses. The companion sender is
+      RESEND_FROM_EMAIL (in-code default noreply@premiselabs.co, so it needs no
+      binding).
 
   # Deliberately NOT required: blog/_shared/cloudflare-purge.ts is a best-effort
   # cache purge that returns boolean `false` and logs a warning when these are

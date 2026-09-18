@@ -9,31 +9,34 @@
  * recipient is a CODE CONSTANT, never a request field: that is what keeps this
  * form from being an open relay.
  *
- * FAIL LOUDLY WHEN UNCONFIGURED. Without `RESEND_API_KEY` there is no
- * send-capable credential (verified 2026-09: none on the machine, none in the
- * Pages project). The failure must be a visible 503 the visitor can act on —
- * never a 200 that drops the message on the floor. The contact page surfaces
- * the 503 message, which points at the direct mailto fallback.
+ * ⚠️  THE TRANSPORT IS NOT SETTLED (pending owner decision, #2409). This file
+ * therefore knows NOTHING about how delivery happens: no provider name, no
+ * credential variable, no endpoint, no wire format. The actual send lives
+ * behind ONE seam, `deliver()` in `../_shared/contact-transport.ts`, whose
+ * payload and result types are provider-neutral; swapping transport is a
+ * change to that module alone. This file's job is the transport-independent
+ * half: validation, honeypot, rate limit, cross-site refusal — and mapping the
+ * seam's outcome to HTTP.
  *
- * SECRET HANDLING: `RESEND_API_KEY` is read from `env` and used only as an
- * `Authorization` header. It is never logged, never echoed in a response, and
- * never placed in a URL — a bearer token in a URL lands in access logs.
+ * FAIL LOUDLY WHEN UNCONFIGURED. If the transport is unconfigured the seam
+ * reports `not_configured` and this function answers a visible 503 the visitor
+ * can act on — never a 200 that drops the message on the floor. The contact
+ * page surfaces the 503 message, which points at the direct mailto fallback.
  *
  * This response is built here, not by `_headers`: Cloudflare does NOT apply
  * `_headers` rules to Pages Function responses, so HSTS is stamped manually
  * (same contract as functions/_middleware.ts).
  */
 
+import { deliver } from "../_shared/contact-transport";
+
+/** The Pages `env`, handed to the transport seam untouched. */
 interface ContactEnv {
-  /** Resend send key. Absent → every submit is a visible 503. */
-  RESEND_API_KEY?: string;
-  /** Verified sender on premiselabs.co. Defaults to the project-wide one. */
-  RESEND_FROM_EMAIL?: string;
+  [key: string]: unknown;
 }
 
 /** Owner-decided destination for the outside-product surface. Not configurable. */
 const CONTACT_TO = "hello@premiselabs.co";
-const RESEND_URL = "https://api.resend.com/emails";
 const MAX_NAME = 100;
 const MAX_EMAIL = 254;
 const MAX_MESSAGE = 5000;
@@ -128,15 +131,6 @@ function json(body: Record<string, unknown>, status: number, extra: Record<strin
 
 function fail(status: number, error: string, message: string, extra: Record<string, string> = {}) {
   return json({ ok: false, error, message }, status, extra);
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 /** Strip control characters (incl. CR/LF) — the header-injection defence. */
@@ -253,13 +247,18 @@ async function handlePost(request: Request, env: ContactEnv): Promise<Response> 
     );
   }
 
-  // ── Credential gate ────────────────────────────────────────────────────
-  const apiKey = (env.RESEND_API_KEY || "").trim();
-  if (apiKey === "") {
-    // Visible, actionable, and honest about the cause. No secret involved:
-    // the absence of the variable is the condition, and naming it is what lets
-    // an operator fix it. The visitor gets the fallback, not the variable name.
-    console.error("contact: RESEND_API_KEY is unset — contact form cannot deliver");
+  // ── Delivery (the one transport seam) ───────────────────────────────────
+  // Everything provider-specific lives behind `deliver()`; this file only maps
+  // its provider-neutral outcome to HTTP. The gate that decides
+  // `not_configured` lives INSIDE the seam (it is transport-specific), and it
+  // precedes the send there, so a silent success on the unconfigured path is
+  // structurally impossible.
+  const outcome = await deliver({ to: CONTACT_TO, replyTo: email, name, message }, env);
+
+  if (outcome.status === "not_configured") {
+    // Visible and actionable, and honest about the cause. The visitor gets the
+    // fallback; the missing variable's name is operator-facing, logged by the
+    // seam, never shown here.
     return fail(
       503,
       "not_configured",
@@ -268,56 +267,11 @@ async function handlePost(request: Request, env: ContactEnv): Promise<Response> 
     );
   }
 
-  const from = (env.RESEND_FROM_EMAIL || "").trim() || "noreply@premiselabs.co";
-  const subject = `Website contact — ${name.slice(0, 60)}`;
-  const text =
-    `New message from the website contact form.\n\n` +
-    `Name:    ${name}\n` +
-    `Reply-to: ${email}\n\n` +
-    `Message:\n${message}\n`;
-  const html =
-    `<h2 style="font-family:system-ui,sans-serif;">New website contact message</h2>` +
-    `<p style="font-family:system-ui,sans-serif;"><strong>Name:</strong> ${escapeHtml(name)}<br>` +
-    `<strong>Reply-to:</strong> ${escapeHtml(email)}</p>` +
-    `<pre style="font-family:ui-monospace,monospace;white-space:pre-wrap;">${escapeHtml(message)}</pre>` +
-    `<p style="font-family:system-ui,sans-serif;color:#666;font-size:12px;">` +
-    `Sent from the contact form at premiselabs.co. Reply directly to this email to answer ${escapeHtml(name)}.</p>`;
-
-  let upstream: Response;
-  try {
-    upstream = await fetch(RESEND_URL, {
-      method: "POST",
-      headers: {
-        // The key travels as a header, never in the URL (URLs are logged).
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from,
-        to: [CONTACT_TO],
-        reply_to: email,
-        subject,
-        text,
-        html,
-      }),
-    });
-  } catch (err) {
-    console.error("contact: Resend request failed:", err instanceof Error ? err.message : "network error");
+  if (outcome.status === "failed") {
     return fail(
       502,
       "delivery_failed",
-      "We could not reach our email provider, so your message was not sent. Please try again, or email hello@premiselabs.co directly.",
-    );
-  }
-
-  if (!upstream.ok) {
-    // Log the provider's status + message (never the key, never the body).
-    const detail = await upstream.text().catch(() => "");
-    console.error(`contact: Resend rejected the send (${upstream.status}): ${detail.slice(0, 300)}`);
-    return fail(
-      502,
-      "delivery_failed",
-      "Our email provider rejected the message, so it was not sent. Please try again, or email hello@premiselabs.co directly.",
+      "We could not deliver your message, so it was not sent. Please try again, or email hello@premiselabs.co directly.",
     );
   }
 
