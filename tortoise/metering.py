@@ -301,26 +301,45 @@ def _current_period(org_id: str) -> MeteringPeriod:
     return MeteringPeriod(start=start, end=end)
 
 
-def _resolve_period_or_none(org_id: str, what: str) -> MeteringPeriod | None:
-    """Best-effort window resolution for the WRITE paths.
+def _require_period(org_id: str, what: str) -> MeteringPeriod:
+    """Window resolution for the WRITE paths — FAIL-CLOSED (#3825).
 
-    The increment paths are best-effort by long-standing contract (metering
-    failures never block a user write — #681/#923), so an unresolvable window
-    DROPS the increment with a loud ERROR. It is NEVER re-attributed to a
-    calendar month: a dropped increment leaves the ledger short, which the
-    reader at least sees as a smaller number, whereas a mis-attributed one
-    puts real spend on a row the window read cannot reach. Both are fail-open
-    on the cap; only the drop is greppable and cannot corrupt a key.
+    This was ``_resolve_period_or_none``: it DROPPED the increment and returned
+    None, on the long-standing best-effort contract (#681/#923). That was a
+    hole in the cohort cap. A dropped increment leaves the ledger SHORT, so the
+    cohort SUM undercounts and the cap fires LATE — spending real money past the
+    cap. The cap's read path (``_current_period``, reached via
+    ``metering_cohort_spend``) has always RAISED for the same org, so writer and
+    reader disagreed: the reader refused to answer while the writer forgot.
+
+    Now the write path fails exactly when the read path fails. An unresolvable
+    window RAISES :class:`~tortoise.quota.QuotaCheckError` — the increment is
+    neither dropped nor re-attributed to a calendar month.
+
+    WHICH WAY THIS FAILS, AND WHY: it fails CLOSED. A cap that fires LATE spends
+    real money; a cap that fires EARLY refuses a request that could have been
+    served. Refusing is recoverable — the operator fixes the anchor and the call
+    is retryable — whereas an uncounted increment is not recoverable, because
+    nothing on the graph records that it happened. The cost is real and is
+    accepted here: a window-resolution failure now REFUSES the user write
+    instead of silently skipping the meter. An unmeterable write is
+    indistinguishable from free spend, and free spend is what this cap exists
+    to stop.
+
+    Scope of the reversal — ONLY window resolution. A failure of the increment
+    RPC itself stays non-fatal (see each caller's ``try``/``except``): there the
+    window is known and the spend remains countable on retry, so it is not this
+    hole.
     """
     try:
         return _current_period(org_id)
     except Exception as e:
         _logger.error(
-            "%s DROPPED — the org's metering window is unresolvable "
+            "%s REFUSED — the org's metering window is unresolvable "
             "(fail-closed, no calendar-month fallback): team=%s error=%s",
             what, org_id, e,
         )
-        return None
+        raise
 
 
 def _display_period_label() -> str:
@@ -400,17 +419,19 @@ def record_write_ops(org_id: str, tier: str | None = None, n: int = 1,
 
     Returns:
         ``{write_ops, nodes_written, period, ops_allowance, overage_eligible}``
-        for threshold checking, or None if the registry is unreachable
-        (non-fatal — metering failures never block the write).
+        for threshold checking, or None if the increment RPC is unreachable
+        (non-fatal — an RPC failure leaves the window known and retryable).
 
     Raises:
-        Nothing — metering is best-effort. Failures are logged and swallowed.
+        QuotaCheckError: the org's metering window is unresolvable. This is
+            FAIL-CLOSED and REFUSES the write (#3825) — a write that cannot be
+            metered is indistinguishable from free spend, and a cap that fires
+            late spends real money. Only window resolution raises; a failure of
+            the increment RPC itself is still logged and swallowed.
     """
     if not org_id:
         return None
-    period = _resolve_period_or_none(org_id, "write-op metering increment")
-    if period is None:
-        return None
+    period = _require_period(org_id, "write-op metering increment")
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     try:
         if _supabase_mode():
@@ -608,7 +629,9 @@ def record_ask_usage(org_id: str | None, tier: str | None = None, *,
                      _selfhost_transport: bool = False) -> dict | None:
     """Record a per-query ask usage increment (#1987 Task 6).
 
-    Best-effort, non-fatal (metering failures never block the answer).
+    Window resolution is FAIL-CLOSED (#3825): an unresolvable window REFUSES
+    the answer rather than dropping the increment. The increment RPC itself
+    stays non-fatal — there the window is known and the spend stays countable.
     Extends the ``:MeteringRecord`` (registry) with additive fields
     ``ask_calls``/``ask_tokens_in``/``ask_tokens_out``/``ask_cost_usd`` via
     the MERGE+coalesce pattern (mirrors ``record_write_ops``); Supabase mode
@@ -624,9 +647,7 @@ def record_ask_usage(org_id: str | None, tier: str | None = None, *,
     """
     if not org_id or _selfhost_transport or _selfhost_transport_active():
         return None
-    period = _resolve_period_or_none(org_id, "ask metering increment")
-    if period is None:
-        return None
+    period = _require_period(org_id, "ask metering increment")
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     with _ask_meter_lock(org_id):
         return _record_ask_usage_locked(org_id, period, now_iso,
@@ -772,7 +793,9 @@ def record_capture_usage(org_id: str | None, *, calls: int = 1,
                          _selfhost_transport: bool = False) -> dict | None:
     """Record the MEASURED cost of one capture extraction attempt.
 
-    Best-effort, non-fatal (metering never blocks a committed capture).
+    Window resolution is FAIL-CLOSED (#3825): an unresolvable window REFUSES
+    the capture rather than dropping the increment. The increment RPC itself
+    stays non-fatal — there the window is known and the spend stays countable.
     Exemptions mirror ``record_ask_usage``: ``not org_id`` (stdio/None) or
     the selfhost-transport ContextVar (``_selfhost_transport``).
 
@@ -795,9 +818,7 @@ def record_capture_usage(org_id: str | None, *, calls: int = 1,
             org_id, cost_usd,
         )
         cost_usd = 0.0
-    period = _resolve_period_or_none(org_id, "capture metering increment")
-    if period is None:
-        return None
+    period = _require_period(org_id, "capture metering increment")
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     with _ask_meter_lock(org_id):
         return _record_capture_usage_locked(org_id, period, now_iso,

@@ -441,9 +441,11 @@ def test_cohort_spend_reads_a_boundary_range(supabase_mode, monkeypatch):
 
 
 def test_unresolvable_anchor_fails_closed(reg_org, monkeypatch):
-    """T10 → mutation: CATCH the anchor-read exception and return the
-    calendar-month key (the silent-fallback shape UF3 warns about). Assert a
-    RAISE (`QuotaCheckError`), never a month key.
+    """T10 → mutations: (i) CATCH the anchor-read exception and return the
+    calendar-month key (the silent-fallback shape UF3 warns about); (ii) return
+    None and DROP the increment — the write-path fail-open (#3825). Assert a
+    RAISE (`QuotaCheckError`) on BOTH the reader and the writer, never a month
+    key and never a silent drop.
 
     Three ways the anchor is unusable, all of which must refuse rather than
     silently meter on a calendar month:
@@ -451,6 +453,11 @@ def test_unresolvable_anchor_fails_closed(reg_org, monkeypatch):
       (b) the anchor READ fails (a control-plane/registry blip);
       (c) the CAP level must propagate it — a ceiling that substitutes a bucket
           reads a cohort as free, the false PASS this lane exists to prevent.
+
+    (a) and (b) each assert BOTH ends: `_current_period` (the cap's read) and
+    `record_write_ops` (the ledger's write). They must fail together — for an
+    org whose window is unresolvable, a reader that refuses while a writer
+    drops is exactly the undercount that makes the cap fire late.
     """
     import tortoise.cohort_cost as cc
     import tortoise.metering as m
@@ -463,8 +470,13 @@ def test_unresolvable_anchor_fails_closed(reg_org, monkeypatch):
     _anchor(reg, tid, None, None)
     with pytest.raises(QuotaCheckError, match="not a usable"):
         m._current_period(tid)
-    # ...and the WRITER drops the increment rather than re-attributing it
-    assert m.record_write_ops(tid) is None
+    # ...and the WRITER must REFUSE too. This assertion used to be
+    # `is None` — the fail-open half of a test NAMED fails_closed: the reader
+    # refused while the writer forgot, so the ledger ran short and the cohort
+    # cap fired LATE (real money past the cap). Mutation caught here: return
+    # None (drop) or a calendar-month key instead of refusing (#3825).
+    with pytest.raises(QuotaCheckError):
+        m.record_write_ops(tid)
 
     # (b) the read itself fails — "I could not find out" must never be spelled
     # the same way as "this org has no subscription"
@@ -476,7 +488,8 @@ def test_unresolvable_anchor_fails_closed(reg_org, monkeypatch):
     monkeypatch.setattr(m, "_reg_sdk", _boom)
     with pytest.raises(QuotaCheckError, match="anchor read failed"):
         m._current_period(tid)
-    assert m.record_write_ops(tid) is None
+    with pytest.raises(QuotaCheckError):
+        m.record_write_ops(tid)
 
     # (c) the cap propagates the refusal (it does NOT degrade to a month)
     monkeypatch.setattr(m, "_reg_sdk", original)

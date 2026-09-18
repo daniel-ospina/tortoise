@@ -21,6 +21,7 @@ from tortoise.metering import (
     get_current_usage,
     record_write_ops,
 )
+from tortoise.quota import QuotaCheckError
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +54,43 @@ def reg_sdk(monkeypatch, tmp_path):
     )
     yield sdk, tid
     sdk.close()
+
+
+def _break_increment_only(monkeypatch, sdk) -> None:
+    """Break the increment's OWN row write, leaving the anchor read working.
+
+    ``_reg_sdk`` is the dependency of BOTH halves of the meter: ``_metering_anchor``
+    reads the billing anchor through it, and the increment issues its
+    ``MERGE (m:MeteringRecord …)`` through it. A blanket ``_reg_sdk`` raise is
+    therefore no longer a statement about the increment at all — since #3825 it
+    makes the WINDOW unresolvable, and window resolution is FAIL-CLOSED (see
+    ``test_anchor_read_failure_refuses_the_write``, which pins that refusal).
+
+    Injecting the failure BY STATEMENT — everything delegates to the real
+    registry except the increment's MERGE — lets the window resolve and breaks
+    only the increment, which is exactly the claim ``test_non_fatal_on_db_error``
+    and ``test_non_fatal_on_registry_failure`` have always made.
+    """
+    import tortoise.metering as metering_mod
+
+    real_reg = sdk._get_registry()
+
+    class _IncrementBrokenRegistry:
+        """Delegate every statement to the REAL registry; fail the increment."""
+
+        def query(self, cypher, *args, **kwargs):
+            if "MERGE (m:MeteringRecord" in cypher:
+                raise RuntimeError("registry increment write failed")
+            return real_reg.query(cypher, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(real_reg, name)
+
+    class _StubSDK:
+        def _get_registry(self):
+            return _IncrementBrokenRegistry()
+
+    monkeypatch.setattr(metering_mod, "_reg_sdk", lambda: _StubSDK())
 
 
 # ── Increment tests ─────────────────────────────────────────────────────────
@@ -115,17 +153,45 @@ class TestRecordWriteOps:
         result = record_write_ops("", tier="pro")
         assert result is None
 
-    def test_non_fatal_on_db_error(self, reg_sdk, monkeypatch):
-        """Metering failures are logged, never raised."""
-        sdk, tid = reg_sdk  # noqa: RUF059
-        # Break ALL future registry SDK connections by patching _reg_sdk
+    def test_non_fatal_on_db_error(self, reg_sdk, monkeypatch, caplog):
+        """A failed INCREMENT row write is logged, never raised.
+
+        #3825: only the increment is broken here (``_break_increment_only``).
+        A blanket ``_reg_sdk`` failure would now make the window unresolvable,
+        and window resolution is FAIL-CLOSED by design — so the old shape could
+        not tell "I could not resolve the window" apart from "the row write
+        failed". The window resolves; the MERGE raises; the write is non-fatal.
+        """
+        sdk, tid = reg_sdk
+        _break_increment_only(monkeypatch, sdk)
+        with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
+            result = record_write_ops(tid, tier="pro")
+        assert result is None  # non-fatal: the window was known and retryable
+        assert any("increment failed" in r.message for r in caplog.records), (
+            [r.message for r in caplog.records]
+        )
+
+    def test_anchor_read_failure_refuses_the_write(self, reg_sdk, monkeypatch):
+        """The OTHER half of the pair (#3825): when the ANCHOR READ fails, the
+        org's window is unresolvable and window resolution is FAIL-CLOSED — the
+        write is REFUSED with ``QuotaCheckError``, never silently dropped.
+
+        ``test_non_fatal_on_db_error`` above pins the increment-RPC half (window
+        known → non-fatal). Together the two tests hold the paths APART: the
+        same monkeypatched seam, two different statements, two opposite
+        outcomes — which is what makes "a dropped increment undercounts the
+        cohort cap" a caught mutation rather than a silent one.
+        """
         import tortoise.metering as metering_mod
+
+        _sdk, tid = reg_sdk
+
         def _bad_reg():
             raise RuntimeError("db down")
+
         monkeypatch.setattr(metering_mod, "_reg_sdk", _bad_reg)
-        # Must not raise
-        result = record_write_ops(tid, tier="pro")
-        assert result is None
+        with pytest.raises(QuotaCheckError):
+            record_write_ops(tid, tier="pro")
 
 
 # ── Threshold events ────────────────────────────────────────────────────────
@@ -519,12 +585,21 @@ class TestAskMetering:
         assert get_ask_usage("selfhost")["ask_calls"] == 1
 
     def test_non_fatal_on_registry_failure(self, reg_sdk, monkeypatch, caplog):
-        sdk, tid = reg_sdk  # noqa: RUF059
+        """A failed ASK-increment row write is logged, never raised.
+
+        As in ``test_non_fatal_on_db_error`` (#3825), the failure is injected
+        into the increment's own ``MERGE (m:MeteringRecord …)`` so the anchor
+        read still resolves the window — only the increment is broken.
+        """
+        sdk, tid = reg_sdk
         from tortoise.metering import record_ask_usage
-        def _boom(*a, **k):
-            raise RuntimeError("registry down")
-        monkeypatch.setattr("tortoise.metering._reg_sdk", _boom)
-        assert record_ask_usage(tid, tokens_in=1) is None  # non-fatal
+
+        _break_increment_only(monkeypatch, sdk)
+        with caplog.at_level(logging.WARNING, logger="tortoise.metering"):
+            assert record_ask_usage(tid, tokens_in=1) is None  # non-fatal
+        assert any("increment failed" in r.message for r in caplog.records), (
+            [r.message for r in caplog.records]
+        )
 
     def test_concurrent_increments_sum(self, reg_sdk):
         """Two threads calling record_ask_usage concurrently → the final
