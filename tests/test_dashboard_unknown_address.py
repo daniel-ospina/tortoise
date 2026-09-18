@@ -37,6 +37,17 @@ CONSOLE = "https://tortoise.premiselabs.co/admin/"
 # they are stated here as the closed set the routing must preserve.
 SERVER_BUILT_ROUTES = ("/team", "/team/")
 
+# 404.html's ONLY script, pinned EXACTLY. It exists to name the requested
+# address, and it must stay read-only. The pin is what closes the family a
+# lexical check cannot: `window["loc"+"ation"]="/"`, `\u006cocation="/"` and
+# `eval(atob(…))` contain no `location` token to match, but they DO change the
+# script — so they fail this test instead of slipping past a substring scan
+# (#4006 review, cycle 4). Any edit here must be reviewed.
+REVIEWED_404_SCRIPT = (
+    'document.getElementById("requested").textContent='
+    'location.pathname+(location.search||"");'
+)
+
 
 def _rules() -> list[tuple[str, str, int]]:
     """Parse `[source] [destination] [code]` lines, ignoring comments."""
@@ -57,24 +68,37 @@ class _NotFoundDoc(HTMLParser):
 
     A substring list cannot enumerate the equivalent spellings of a redirect:
     HTML attribute names and the `refresh` keyword are ASCII case-insensitive,
-    attributes may be unquoted, and JS can assign through bracket notation. The
-    guard therefore constrains the SHAPE of what the page may do (#4006 review
-    cycle 3). HTMLParser lowercases attribute names for us, so
-    `<meta http-equiv=REFRESH>` is visible however it is spelled.
+    attributes may be unquoted, and JS can reach the same effect through bracket
+    notation, split strings, unicode escapes or `eval` (#4006 review, cycles
+    3-4). So the guard constrains the SHAPE of the page: NO element that can
+    navigate on its own (meta refresh, form submit, base rebase) and no inline
+    event handler — plus an exact pin on the page's single script, which is the
+    only scripting surface a not-found page needs.
     """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.meta_http_equiv: list[str] = []
+        self.bases: list[str] = []
+        self.forms: list[str] = []
+        self.event_handlers: list[str] = []
         self.scripts: list[str] = []
         self._buf: list[str] = []
         self._in_script = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, _value in attrs:
+            # HTMLParser lowercases attribute names, so `ONLOAD` is caught too.
+            if name.lower().startswith("on"):
+                self.event_handlers.append(f"<{tag} {name}>")
         if tag == "meta":
             for name, value in attrs:
                 if name.lower() == "http-equiv":
                     self.meta_http_equiv.append((value or "").strip().lower())
+        elif tag == "base":
+            self.bases.append(f"<base {attrs!r}>")
+        elif tag == "form":
+            self.forms.append(f"<form {attrs!r}>")
         elif tag == "script":
             self._in_script = True
             self._buf = []
@@ -127,15 +151,17 @@ def test_top_level_404_html_exists() -> None:
     )
     body = NOT_FOUND.read_text()
     assert "noindex" in body, "the not-found page must not be indexed"
-    # It must not RE-REDIRECT the visitor home: a not-found page that bounces to
-    # `/` discards the requested address exactly as the soft-404 did — the
-    # symptom this change exists to remove, wearing a 404 status (#4006 review).
-    # Structural, not lexical (#4006 review cycle 3). `<meta http-equiv=REFRESH>`
-    # (unquoted, different case), `location['href']='/'`,
-    # `window['location']='/'` and `window.open('/')` are all real redirects
-    # that defeated the previous marker list, so the guard now constrains the
-    # SHAPE of what a not-found page may do instead of listing forbidden
-    # spellings.
+    # The page must not RE-REDIRECT the visitor: a not-found page that bounces
+    # to `/` discards the requested address exactly as the soft-404 did — the
+    # symptom this change exists to remove, wearing a 404 status.
+    #
+    # Enumerating forbidden SPELLINGS does not work (#4006 review, cycles 3-4):
+    # `<meta http-equiv=REFRESH>` (unquoted, different case),
+    # `location['href']='/'`, `window['location']='/'`, `open('/','_self')`,
+    # `<body onload="location='/'">`, `<form>.submit()` and `<base href>` each
+    # defeat a substring list, and the split-string / `\u006cocation` /
+    # `eval(atob(…))` family contains no token to match at all. So the guard
+    # constrains the SHAPE of the page instead.
     doc = _NotFoundDoc()
     doc.feed(body)
     assert not doc.meta_http_equiv, (
@@ -143,25 +169,29 @@ def test_top_level_404_html_exists() -> None:
         "needs one in this deployment is a refresh/redirect, which discards the "
         f"requested address instead of reporting it (#4006 review): {doc.meta_http_equiv!r}"
     )
-    script = re.sub(r"\s+", "", "\n".join(doc.scripts)).lower()
-    assert "window.open" not in script, (
-        "404.html opens another document instead of reporting that the requested "
-        "address was not found (#4006 review)"
+    assert not doc.bases, (
+        "404.html carries a <base> — it re-points the page's own links (here, "
+        f"the only CTA) at another origin: {doc.bases!r} (#4006 review)"
     )
-    # ALLOWLIST: every `location` use must be a plain property READ. An
-    # assignment (`location='/…'`, `location.href='/…'`) or bracket access
-    # (`location['href']='/…'`) is rejected by construction, which is what makes
-    # this close the family rather than one spelling of it.
-    allowed_location_uses = {
-        ".pathname", ".search", ".hash", ".host", ".hostname", ".origin",
-        ".port", ".protocol",
-    }
-    uses = re.findall(r"location(\.\w+|\[[^\]]*\])?", script)
-    rejected = sorted({use for use in uses if use not in allowed_location_uses})
-    assert not rejected, (
-        "404.html uses location for something other than a property READ — an "
-        "assignment or bracket access is a redirect that discards the requested "
-        f"address: {rejected!r} (#4006 review)"
+    assert not doc.forms, (
+        "404.html carries a <form> — a submit navigates the top-level document "
+        f"and discards the requested address: {doc.forms!r} (#4006 review)"
+    )
+    assert not doc.event_handlers, (
+        "404.html carries an inline event handler, which can navigate and which "
+        f"no attribute-level scan can enumerate: {doc.event_handlers!r} (#4006 review)"
+    )
+    # The page's scripting surface is EXACTLY one reviewed, read-only snippet
+    # (it names the requested address so the visitor can see what was not
+    # found). Comments and whitespace are ignored; ANY other change fails, which
+    # is what closes the families that carry no `location` token to match.
+    joined = "\n".join(doc.scripts)
+    compact = re.sub(r"//[^\n]*", "", joined)
+    compact = re.sub(r"\s+", "", compact)
+    assert compact == REVIEWED_404_SCRIPT, (
+        "404.html's script is not the reviewed read-only snippet — a not-found "
+        "page needs no other script, and anything else it can do is navigate "
+        f"away from the address that was not found (#4006 review): {compact!r}"
     )
     # It is an honest not-found page, not a second copy of the app shell. Check
     # the DEPLOYED shell markers too, not just the vite dev entry: the built
