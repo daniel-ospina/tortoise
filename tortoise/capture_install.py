@@ -251,6 +251,7 @@ def _preflight_writable(dirs: list[Path]) -> str:
             return f"cannot create {d}: {e.__class__.__name__}: {e}"
         if not os.access(d, os.W_OK):
             return f"cannot install into {d}: directory is not writable"
+    return ""
 
 
 #: Tokens that RUN the token after them rather than being the command
