@@ -52,9 +52,20 @@ _CANONICAL_13 = {
 def _local_graph_lane(monkeypatch):
     """The ambient shell may carry ``TORTOISE_API_URL`` (fleet env); the
     eval lane is a LOCAL-graph lane and refuses when it is set. Isolation,
-    not a skip — the lane call below really executes."""
+    not a skip — the lane call below really executes.
+
+    The process-global ask-reader cache is ALSO reset around every test
+    (the sibling lane suites — test_ask_sdk / test_d3_session_identity /
+    test_w4_why_enrichment — do the same): ``run_ask_lane`` caches its
+    reader under a namespace key, and a leaked entry makes a later
+    ``monkeypatch.setattr(al, "_default_ask_reader_factory", ...)`` a
+    no-op — an order-dependent FALSE PASS rather than a failure."""
+    from tortoise.ask_lane import _reset_ask_reader_cache_for_tests
+
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    _reset_ask_reader_cache_for_tests()
     yield
+    _reset_ask_reader_cache_for_tests()
 
 
 class _CapturingReader:

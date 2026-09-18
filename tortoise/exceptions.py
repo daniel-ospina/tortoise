@@ -134,15 +134,16 @@ class Phase2Error(ValueError):
 
 
 # ── Ask-lane typed exceptions (#1987 Task 5) ──────────────────────────────
-# The eval-only ask lane (tortoise/ask_lane.py) maps reader/retrieval
-# failures to these;
+# The eval-only ask lane (tortoise/ask_lane.py) maps validation/reader/
+# retrieval failures to AskValidationError / AskReaderUnavailable /
+# AskRetrievalUnavailable;
 # each carries a ``code`` class attribute referencing the canonical vocabulary
-# constants BELOW (single home — ``tortoise/schemas.py`` re-exports them, so
-# the wire body and the SDK exception attributes share one source of truth;
-# a drift between the two surfaces is impossible by construction).
+# constants BELOW (single home — ``tortoise/schemas.py`` re-exports them).
+# The wire-body half of that contract is gone: the hosted /v1/ask route and
+# its path-scoped translation were removed in #3849.
 
-# Canonical error-code vocabulary (10 codes — one vocabulary, two surfaces:
-# the wire body + the SDK exception ``code`` attributes).
+# Canonical error-code vocabulary (10 codes; the first six are the lane's,
+# the last four are the retired wire vocabulary — retained, no raiser).
 CODE_UNAUTHORIZED = "unauthorized"
 CODE_QUOTA_EXCEEDED = "quota_exceeded"
 CODE_IN_FLIGHT_LIMIT = "in_flight_limit"
@@ -156,11 +157,10 @@ CODE_QUESTION_TOO_LONG = "question_too_long"
 
 
 class AskValidationError(ValueError):
-    """Client-input validation failure (local lane) OR a 400/401/403/422
-    response with a canonical/code-less body (hosted lane). Carries the
+    """Client-input validation failure on the eval-only ask lane. Carries the
     canonical ``code`` (``invalid_question``/``question_too_long``/
-    ``invalid_question_type``/``invalid_question_date``/``unauthorized``)
-    and, for hosted mappings, the HTTP status."""
+    ``invalid_question_type``/``invalid_question_date``). The hosted-lane
+    400/401/403/422 mappings were removed with the REST surface (#3849)."""
 
     code = CODE_INVALID_QUESTION
 
@@ -174,7 +174,11 @@ class AskValidationError(ValueError):
 
 class AskQuotaExceeded(RuntimeError):
     """429 ``quota_exceeded`` — the org's per-minute ask budget is spent.
-    Carries ``retry_after`` (seconds) when the server provided one."""
+    Carries ``retry_after`` (seconds) when the server provided one.
+
+    RETIRED (#3849): no raiser. Its only producer was the removed SDK
+    ``_post_ask`` status map; the ask budget itself is retained-but-uncalled
+    pending the #3849 §7 D5 purge. Kept as vocabulary, not as live surface."""
 
     code = CODE_QUOTA_EXCEEDED
 
@@ -186,7 +190,11 @@ class AskQuotaExceeded(RuntimeError):
 
 
 class AskInFlightLimit(RuntimeError):
-    """429 ``in_flight_limit`` — the per-org in-flight ask cap is full."""
+    """429 ``in_flight_limit`` — the per-org in-flight ask cap is full.
+
+    RETIRED (#3849): no raiser. Its only producer was the removed SDK
+    ``_post_ask`` status map; the cap machinery is retained-but-uncalled
+    pending the #3849 §7 D5 purge. Kept as vocabulary, not as live surface."""
 
     code = CODE_IN_FLIGHT_LIMIT
 
@@ -226,7 +234,12 @@ class AskRetrievalUnavailable(RuntimeError):
 class AskTimeout(RuntimeError):
     """504 ``timeout`` — the bounded ask section exceeded the server's
     ``_ASK_TIMEOUT_S`` (server-504-fired) OR the SDK client-side timeout
-    fired (wire connect/read timeout — ``source`` marks which)."""
+    fired (wire connect/read timeout — ``source`` marks which).
+
+    RETIRED (#3849): no raiser. The server-504 half went with the hosted
+    /v1/ask route and the client-side half with ``_post_ask`` /
+    ``ASK_SDK_TIMEOUT_S`` (both deleted in #3849). Kept as vocabulary, not as
+    live surface."""
 
     code = CODE_TIMEOUT
 

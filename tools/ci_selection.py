@@ -147,6 +147,14 @@ SOURCE_PATTERNS = {
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
             "tortoise/reader.py", "tortoise/retrieval.py",
+            # #3849: the ask PIPELINE now lives here (moved out of
+            # tortoise/sdk.py, which is a shared module -> FULL matrix). It
+            # is the only home of run_ask_lane/run_ask_assembled, so an
+            # ask_lane-only change must select sdk — otherwise the lane's
+            # own suites (test_ask_sdk / test_assembly_sdk /
+            # test_ask_regression_llm / test_d3_session_identity) silently
+            # stop running (fallback to core ran NO ask tests).
+            "tortoise/ask_lane.py",
             # ask-lane shared vocabulary/gating: a PR touching ONLY these
             # must select sdk so test_ask_sdk.py (+ ask reader/calibration
             # pins) run — the old fallback to core ran NO ask tests.

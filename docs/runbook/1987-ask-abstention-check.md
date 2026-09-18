@@ -656,7 +656,7 @@ PASS, (d) FAIL 0.43 < 0.8 — the merge remains BLOCKED on (d).
    `ASK_METER_RATES_STRONG = {3.00, 9.00}` (qwen $2/$6 × 1.5, the same
    over-cover convention); `select_ask_meter_rates(model.model)` picks by
    the SERVING wire id's family; BOTH `estimate_ask_cost_usd` call sites in
-   `sdk.ask` (the metering record + the response `cost_estimate_usd`) are
+   `ask_lane.run_ask_lane` (the metering record + the response `cost_estimate_usd`) are
    pinned to it — a strong-lane query never under-counts at 0.21/0.42
    (~10× under-count pre-fix).
 
@@ -714,7 +714,7 @@ target for the strong lane. Dollar blast radius at 60/min grows from
 > promise. Root-cause probe evidence: same evidence with headroom answers
 > correctly ($185 bike total; reunion synthesis; "10 days ago").
 
-### Fix (product lane, `tortoise/sdk.py` + `tortoise/reader.py`)
+### Fix (ask lane, `tortoise/ask_lane.py` + `tortoise/reader.py`)
 
 - `_ask_reader_complete` (bounded escalation, at most 2 calls): empty output
   + `finish_reason="length"` → ONE retry at an escalated budget

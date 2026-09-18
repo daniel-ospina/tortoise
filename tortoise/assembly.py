@@ -1,7 +1,7 @@
 """#2165 — pure pre-retrieval shape classifier + subject-term extraction (PRCA).
 
 Deterministic (zero-LLM, zero-retrieval) router that owns the fired decision
-for the connected-assembly branch in ``sdk.ask()``. High-precision ordered
+for the connected-assembly branch in ``ask_lane.run_ask_lane()``. High-precision ordered
 regexes over the question text; nothing else — no model, no graph.
 
 Shapes with MEASURED census support (tests/_assembly_census.json — the 133-Q
@@ -9,7 +9,7 @@ temporal taxonomy, see docs/plans/2026-09-08-2165-connected-assembly.md):
 
 * ``current-state`` — "what is the current status of X?" (fixture canary;
   the census's 2 current-state rows are duration-morphology and correctly do
-  NOT fire — the measured fireable subset is the fixture + product lane).
+  NOT fire — the measured fireable subset is the fixture + eval lane).
 * ``ordering`` — two-subject "Which X first, A or B?" / "Who ... first,
   A or B?" (the census's ordering/compare 34: the shape-typical rows fire;
   duration/count/N-ary rows that the SEMANTIC census filed under

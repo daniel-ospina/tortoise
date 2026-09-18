@@ -417,8 +417,8 @@ class TestLooksAbstained:
         clause to match — NOT abstained (pre-cycle-2 behavior; the
         cycle-2 clause filter must not crash on an empty clause list —
         this label gates NO_EVIDENCE_TEXT substitution upstream, so an
-        uncaught IndexError would escape sdk.ask()'s documented Raises
-        contract)."""
+        uncaught IndexError would escape ``ask_lane.run_ask_lane``'s
+        documented Raises contract)."""
         assert _looks_abstained("...") is False
         assert _looks_abstained(".") is False
         assert _looks_abstained("!?") is False
