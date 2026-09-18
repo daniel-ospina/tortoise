@@ -2923,10 +2923,18 @@ def _install_read_hook_impl(args) -> int:
         if dry:
             print(f"[dry-run] would merge into {target}:")
             print(out)
-        elif not target.exists() or target.read_text() != out:
+        elif not target.exists() or target.read_text(encoding="utf-8") != out:
             # #3808: a re-run is the upgrade path, so a byte-identical
             # document must not be rewritten — `tortoise install claude`
             # running twice is a no-op only if neither half churns the file.
+            #
+            # The explicit encoding is load-bearing, not style (#3808 R24):
+            # the default is locale.getencoding(), so on an ASCII host a
+            # UTF-8 document with one non-ASCII byte raised UnicodeDecodeError
+            # — a ValueError, which the `(OSError, RuntimeError)` boundary
+            # above does not catch — and the CLI died with a traceback.  The
+            # sibling read above (``existing = target.read_text(...)``) has
+            # always passed utf-8.
             target.write_text(out)
             if not ours:
                 print(f"Merged volunteer-turn.sh into {target}")

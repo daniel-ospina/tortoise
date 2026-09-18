@@ -317,6 +317,35 @@ def _symlink_escape(root: Path, target: Path, *, label: str) -> str:
     return ""
 
 
+def _preflight_probe(dirs: list[Path]) -> str:
+    """The WRITE-FREE half of the pre-flight: could ``dirs`` be installed to?
+
+    Every target must be creatable-or-usable as found: any existing component
+    at the target must already be a directory, an existing target must itself
+    be writable, and the nearest existing ancestor of a not-yet-existing
+    target must be writable (else the real run's ``mkdir`` fails).  Nothing is
+    created or modified, so ``--dry-run`` runs it too (#3808 R25): a dry run
+    over an impossible install (``.claude/hooks`` is a file) must refuse with
+    a non-zero exit exactly as the real run does, instead of printing
+    ``[dry-run] would install …`` and exiting 0.
+
+    Returns ``""`` on success, a refusal message otherwise.
+    """
+    for d in dirs:
+        anc = d
+        while not anc.exists() and not anc.is_symlink() and anc != anc.parent:
+            anc = anc.parent
+        if not anc.is_dir():
+            return (f"cannot install into {d}: {anc} is not a directory "
+                    f"(move it aside or pass an explicit install root)")
+        # A not-yet-existing target is created under ``anc``; a dangling
+        # symlink is left as the target itself (``mkdir`` would raise).
+        probe = d if (d.exists() or d.is_symlink()) else anc
+        if not os.access(probe, os.W_OK):
+            return f"cannot install into {d}: directory is not writable"
+    return ""
+
+
 def _preflight_writable(dirs: list[Path]) -> str:
     """Create ``dirs`` and prove each is writable *before* the first write.
 
@@ -324,14 +353,14 @@ def _preflight_writable(dirs: list[Path]) -> str:
     prevent: an unwritable hooks dir must abort the whole install before a
     script or a settings entry is written, not after.  Returns ``""`` on
     success, a refusal message otherwise.
+
+    ``_preflight_probe`` runs first so a refusal that needs no write (an
+    impossible path) is identical under ``--dry-run`` and a real run; the
+    ``mkdir`` below is the only write this function performs.
     """
-    for d in dirs:
-        anc = d
-        while not anc.exists() and anc != anc.parent:
-            anc = anc.parent
-        if not anc.is_dir():
-            return (f"cannot install into {d}: {anc} is not a directory "
-                    f"(move it aside or pass an explicit install root)")
+    refusal = _preflight_probe(dirs)
+    if refusal:
+        return refusal
     for d in dirs:
         try:
             d.mkdir(parents=True, exist_ok=True)
@@ -536,10 +565,14 @@ def _install_claude(root: Path, *, dry_run: bool) -> InstallResult:
 
     actions: list[str] = []
     changed = False
-    if not dry_run:
+    # The write-free probe runs on BOTH paths (#3808 R25), so `--dry-run`
+    # refuses an impossible install with the same non-zero exit as the real
+    # run; only the `mkdir` half is skipped when dry.
+    unwritable = _preflight_probe([hooks_dir, settings_path.parent])
+    if not unwritable and not dry_run:
         unwritable = _preflight_writable([hooks_dir, settings_path.parent])
-        if unwritable:
-            return InstallResult(harness, error=f"Refusing: {unwritable}")
+    if unwritable:
+        return InstallResult(harness, error=f"Refusing: {unwritable}")
 
     for name in CLAUDE_SCRIPTS:
         dst = hooks_dir / name
@@ -627,10 +660,13 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
 
     actions: list[str] = []
     changed = False
-    if not dry_run:
+    # Same split as ``_install_claude`` (#3808 R25): the write-free probe runs
+    # under ``--dry-run`` too, so the two halves agree on an impossible home.
+    unwritable = _preflight_probe([ext_dir])
+    if not unwritable and not dry_run:
         unwritable = _preflight_writable([ext_dir])
-        if unwritable:
-            return InstallResult(harness, error=f"Refusing: {unwritable}")
+    if unwritable:
+        return InstallResult(harness, error=f"Refusing: {unwritable}")
 
     # #3713: disable a pre-existing agent-infra extension first — Pi loads a
     # top-level tortoise-capture.ts AND tortoise-capture/index.ts as two

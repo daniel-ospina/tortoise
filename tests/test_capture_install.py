@@ -910,6 +910,30 @@ def test_cli_install_pi_dry_run_does_not_claim_installed(cli):
         "a dry run wrote the extension")
 
 
+def test_cli_install_pi_dry_run_refuses_an_impossible_extensions_dir(cli):
+    """`--dry-run` over an impossible install must refuse with a non-zero
+    exit exactly as the real run does (#3808 R25).
+
+    The write-free pre-flight probe (`_preflight_probe`) is what makes the two
+    agree; only the `mkdir` is skipped when dry.  A file at
+    ``~/.pi/agent/extensions`` is un-installable, so the dry run must not
+    print ``[dry-run] would install …`` and exit 0 while the real run exits 1.
+
+    Mutation: gate the pi probe behind ``if not dry_run`` — the dry run exits
+    0 with the would-install line and this REDs on returncode."""
+    run, _root, home = cli
+    (home / ".pi" / "agent").mkdir(parents=True)
+    blocker = home / ".pi" / "agent" / "extensions"
+    blocker.write_text("")
+
+    r = run("install", "pi", "--dry-run")
+
+    assert r.returncode != 0, (r.returncode, r.stdout, r.stderr)
+    assert "Capture install FAILED" in r.stderr, r.stderr
+    assert "would install" not in r.stdout, r.stdout
+    assert blocker.read_text() == "", "the dry run touched the blocker"
+
+
 def test_cli_install_claude_dry_run_writes_nothing(cli):
     """`install claude --dry-run` must report what WOULD happen and write
     nothing — neither the hook scripts nor the merged ``settings.json``.
@@ -933,6 +957,38 @@ def test_cli_install_claude_dry_run_writes_nothing(cli):
     assert "would install" in r.stdout, r.stdout
     assert "would merge SessionStart + SessionEnd capture hooks" in r.stdout, (
         r.stdout)
+
+
+def test_cli_install_claude_dry_run_refuses_an_impossible_hooks_dir(cli):
+    """`--dry-run` over an impossible install must refuse with a non-zero exit
+    exactly as the real run does — never print ``[dry-run] would install …``
+    and exit 0 while the real run refuses (#3808 R25).
+
+    ``_preflight_probe`` is the write-free half of the pre-flight (the `mkdir`
+    is the other half and stays behind ``not dry_run``); running it on both
+    paths is what makes the halves agree.  The read half's own probe
+    (``_read_hook_refusal``) has always run its real checks, so a dry run that
+    skipped the capture check contradicted it.
+
+    Mutation: gate the claude probe behind ``if not dry_run`` — the dry run
+    exits 0 with the would-install line and this REDs on returncode."""
+    run, root, _home = cli
+    hooks = root / ".claude" / "hooks"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("not a directory\n")
+
+    dry = run("install", "claude", "--dir", str(root), "--dry-run")
+
+    assert dry.returncode != 0, (dry.returncode, dry.stdout, dry.stderr)
+    assert "Capture install FAILED" in dry.stderr, dry.stderr
+    assert "would install" not in dry.stdout, dry.stdout
+
+    # ...and the REAL run refuses for the same reason: the halves agree.
+    real = run("install", "claude", "--dir", str(root))
+    assert real.returncode != 0, (real.returncode, real.stdout, real.stderr)
+
+    assert hooks.read_text() == "not a directory\n"
+    assert not (root / ".claude" / "settings.json").exists()
 
 
 def test_cli_install_claude_read_half_refusal_writes_nothing(cli):
@@ -993,6 +1049,61 @@ def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):
     assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
     assert "Traceback" not in r.stderr, r.stderr
     assert "Install failed" in r.stderr, r.stderr
+
+
+def test_cli_install_codex_non_ascii_registration_under_ascii_locale(tmp_path):
+    """A UTF-8 registration file with one non-ASCII byte must not crash the
+    install on a host whose ``locale.getencoding()`` is ASCII (#3808 R24).
+
+    The byte-identical no-op guard re-read the target with NO explicit
+    encoding, so the locale default applied and the UTF-8 bytes raised
+    ``UnicodeDecodeError`` — a ``ValueError``, which the read half's
+    ``(OSError, RuntimeError)`` boundary does not catch — so the CLI died
+    with a traceback and exit 1.
+
+    Mutation: drop ``encoding="utf-8"`` from that read (the default encoding
+    decodes the file as ASCII and the run ends in ``Traceback``)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    root = tmp_path / "proj"
+    (root / ".codex").mkdir(parents=True)
+    target = root / ".codex" / "hooks.json"
+    target.write_bytes('{"hooks": {},"note": "caf\u00e9"}'.encode("utf-8"))
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+        # The canonical ASCII-locale recipe: coercion OFF, UTF-8 mode OFF.
+        "LC_ALL": "C",
+        "LANG": "C",
+        "PYTHONUTF8": "0",
+        "PYTHONCOERCECLOCALE": "0",
+    }
+    # The bug EXISTS only where the default text encoding is ASCII, so prove
+    # the child really is in that state — a superset codec (latin-1) would
+    # decode the bytes and false-PASS this test without exercising R24.
+    enc = subprocess.run(
+        [sys.executable, "-c", "import locale; print(locale.getencoding())"],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert enc.stdout.strip().lower() in ("ascii", "us-ascii",
+                                          "ansi_x3.4-1968"), (
+        f"child locale encoding is {enc.stdout.strip()!r}, not ASCII — this "
+        "test cannot exercise the R24 decode")
+
+    r = _run(("install", "codex", "--dir", str(root)), env, root)
+
+    assert "Traceback" not in r.stderr, r.stderr
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    # The merge really happened (the non-ASCII sibling key survives escaped).
+    merged = json.loads(target.read_text(encoding="utf-8"))
+    assert merged["note"] == "caf\u00e9"
+    assert any(
+        "volunteer-turn.sh" in e.get("hooks", [{}])[0].get("command", "")
+        for e in merged["hooks"]["UserPromptSubmit"]
+        if isinstance(e, dict) and e.get("hooks")
+    )
 
 
 def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
