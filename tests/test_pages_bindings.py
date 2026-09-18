@@ -7,8 +7,11 @@ a checker that always returns [] would have let #3616 ship again.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,8 +22,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
 
 import check_pages_bindings as cpb  # noqa: E402
+import check_pages_upload_root as cpur  # noqa: E402
 
 MANIFEST_PATH = REPO / "config" / "required-bindings.yml"
+UPLOAD_CLASSIFICATION_PATH = REPO / "config" / "pages-upload-classification.txt"
 
 
 def _manifest() -> dict:
@@ -269,6 +274,12 @@ WF_PATH = REPO / ".github" / "workflows" / "deploy-pages.yml"
 PREFLIGHT = "Preflight — required Pages bindings exist"
 PROBE = "Post-deploy — sign-in is actually reachable"
 DEPLOY = "Deploy to Cloudflare Pages (premise-labs project)"
+#: #3620 — the pre-upload gate that every tracked top-level entry under
+#: `website/` is classified before anything is staged/uploaded.
+UPLOAD_PREFLIGHT = "Preflight — every website/ top-level entry is classified (#3620)"
+#: #3620 — the post-deploy assertion that the staged upload root excluded the
+#: internal paths that `wrangler pages deploy .` used to serve.
+LEAK_PROBE = "Post-deploy — internal paths are not publicly served (#3620)"
 
 #: Strip `#`-comments from a shell run block. Quote-aware: a `#` inside single
 #: or double quotes, inside a `${VAR#...}` expansion, or escaped with `\#` is NOT
@@ -428,6 +439,8 @@ def test_the_gate_files_select_a_surface_so_their_test_runs() -> None:
     for path in (
         "tools/check_pages_bindings.py",
         "config/required-bindings.yml",
+        "tools/check_pages_upload_root.py",
+        "config/pages-upload-classification.txt",
     ):
         result = cs.select([path], "pull_request", manifest)
         assert result.get("surfaces"), (
@@ -720,10 +733,14 @@ EXPECTED_CLASSIFICATION = {
     "SUPABASE_ANON_KEY": ("required", ["production"]),
     "SUPABASE_SERVICE_ROLE_KEY": ("required", ["production"]),
     "OPENROUTER_API_KEY": ("required", ["production"]),
-    # recommended: correct in-source default, or no caller yet
+    # recommended: correct in-source default
     "APP_ORIGIN": ("recommended", ["production"]),
     "AUTH_CALLBACK_URL": ("recommended", ["production"]),
-    "API_ORIGIN": ("recommended", ["production"]),
+    # required: SET in production+preview, and website/functions/api/v1/[[path]].ts
+    # answers `503 proxy_not_configured` without it (verified live: after it was
+    # set, /api/v1/teams returns 401 not_signed_in instead). The old
+    # `recommended` note said "the moment a client calls it" — that is now.
+    "API_ORIGIN": ("required", ["production"]),
     # recommended: cloudflare-purge.ts is best-effort and fail-open by design
     "CF_API_TOKEN": ("recommended", ["production"]),
     "CF_ZONE_ID": ("recommended", ["production"]),
@@ -822,8 +839,10 @@ def test_the_probe_harness_exercises_the_sleep_GUARD_not_just_the_string() -> No
     to `-lt 3`, the guard would be unreachable and pinned only by a source
     string — the same weakness this PR has already been caught on twice.
     """
-    step = next(s for s in _deploy_steps() if s.get("name") == PROBE)
-    run = step["run"]
+    # Read the COMMENT-STRIPPED block, not the raw `run`: this test exists to
+    # prove the guard is in the CODE, and a comment-only guard would otherwise
+    # satisfy it (the defect class already fixed at the LEAK_PROBE bound test).
+    run = _step_code(PROBE)
     assert "[ \"$attempt\" -lt 10 ] && sleep 15" in run, (
         "the shipped guard changed shape — update _probe_script and this test"
     )
@@ -989,20 +1008,848 @@ def test_the_probe_does_not_sleep_after_its_last_attempt() -> None:
 
 
 def test_the_manifest_is_not_inside_the_pages_upload_root() -> None:
-    """`wrangler pages deploy .` uploads ALL of `website/`.
+    """The manifest must not live under `website/`.
 
     `.wranglerignore` is NOT honoured by `wrangler pages deploy` (verified four
     ways in cycle 4, including a live 200 on
-    https://tortoise.premiselabs.co/.wranglerignore). So any file left under
-    `website/` is published — which is why the manifest lives in `config/`.
-    A future move back under `website/` would silently publish the binding
-    inventory and the D1 id.
+    https://tortoise.premiselabs.co/.wranglerignore) — which is why #3620
+    replaced `pages deploy .` with a staged upload root. That staging is a
+    DENYLIST: a NEW top-level file added under `website/` IS uploaded unless it
+    is explicitly excluded. Keeping the binding inventory class of file in
+    `config/` is what makes it immune to that residual risk.
     """
     assert MANIFEST_PATH.exists(), f"manifest missing: {MANIFEST_PATH}"
     assert MANIFEST_PATH.parent.name == "config", (
-        f"the manifest is at {MANIFEST_PATH} — anything under website/ is served "
-        "publicly by wrangler pages deploy"
+        f"the manifest is at {MANIFEST_PATH} — a file under website/ is staged for "
+        "public upload unless the deploy step explicitly excludes it"
     )
     assert "required-bindings" not in [
         p.name for p in (REPO / "website").glob("required-bindings*")
     ]
+
+
+# ---------------------------------------------------------------------------
+# #3620: the Pages upload root is STAGED, not `website/` wholesale.
+#
+# `wrangler pages deploy .` published EVERY file under `website/`, and
+# `website/.wranglerignore` had no effect at all (the Pages upload path uses a
+# hardcoded IGNORE_LIST and reads no ignore file; `wranglerignore` appears in 0
+# files across every installed bundle). Verified live: `/.wranglerignore`,
+# `/README.md`, `/website_architecture.md`, `/migrations/0001_auth_sessions.sql`
+# and `/apps/dashboard/src/main.jsx` all answered 200.
+#
+# The deploy step now stages an explicit upload set and the new leak probe
+# asserts each of those paths 404s.
+#
+# Every test below EXECUTES the shipped shell against a synthetic `website/`
+# tree with stubbed `npx`/`curl`. A string assertion cannot distinguish a
+# staging step from a comment describing one — cycle 3 of #3616 proved that on
+# this exact file, and #3620 is the second-order consequence.
+# ---------------------------------------------------------------------------
+
+#: The entries under `website/` at the time of #3620 — the public surface, the
+#: internal paths that were leaking, the generated `admin/` (produced into the
+#: upload root by the blog-admin build step above the deploy), and a committed
+#: `node_modules` tree (as `website/apps/dashboard/node_modules` really is).
+_WEBSITE_FIXTURE = (
+    "_redirects",
+    "_headers",
+    "index.html",
+    "404.html",
+    "product.html",
+    "privacy.html",
+    "tos.html",
+    "welcome.html",
+    "robots.txt",
+    "logo.png",
+    "consent.js",
+    "assets/app.css",
+    "blog/blog.js",
+    "blog/og-image.png",
+    "functions/_middleware.ts",
+    "functions/auth/start.ts",
+    "functions/api/session.ts",
+    "admin/index.html",
+    "admin/assets/index-abc.js",
+    "apps/dashboard/src/main.jsx",
+    "apps/dashboard/deploy.sh",
+    "apps/dashboard/package.json",
+    "apps/dashboard/node_modules/react/index.js",
+    "apps/blog-admin/src/App.tsx",
+    "apps/blog-admin/package.json",
+    # A top-level `website/node_modules` (a local `npm install` in website/).
+    # `/apps/` already prunes the dashboard's copy; this entry is what makes the
+    # separate `--exclude='node_modules/'` load-bearing rather than decorative.
+    "node_modules/some-pkg/index.js",
+    "migrations/0001_auth_sessions.sql",
+    ".wranglerignore",
+    "README.md",
+    "website_architecture.md",
+    "2479-re-auth-implementation-plan.md",
+)
+
+def _expected_public(rels) -> set[str]:
+    """The public set the REVIEWED classification implies for `rels`.
+
+    `rels` are paths RELATIVE to `website/` — the synthetic `_WEBSITE_FIXTURE`
+    tuple and `git ls-files website` differ only by that prefix. A path is public
+    iff its top-level entry is classified `public` and it is not caught by a
+    non-top-level rule the deploy step applies (`*.md` and `node_modules/` at any
+    depth).
+
+    This is derived from the tree + the reviewed table, NOT a hand-written sample
+    of "load-bearing" entries. The previous 14-of-26 sample (`_STAGED_MUST_EXIST`)
+    is exactly why `--exclude='consent.js'` (M22) and `--exclude='*.xml'` (M23)
+    could drop a public file with the whole suite green.
+    """
+    expected: set[str] = set()
+    for rel in rels:
+        if _WEBSITE_TOP_LEVEL_STAGED.get(rel.split("/", 1)[0]) is not True:
+            continue
+        if rel.endswith(".md") or "node_modules" in rel.split("/"):
+            continue
+        expected.add(rel)
+    return expected
+
+
+def _assert_stage_matches(actual: set[str], expected: set[str], out: str) -> None:
+    """Assert the stage is EXACTLY the classified public set, both directions.
+
+    `admin/` is generated into the upload root by the blog-admin build step and is
+    not tracked, so it is absent from the classified tree; its PRESENCE is
+    required and it is never counted as an extra.
+    """
+    assert any(a == "admin" or a.startswith("admin/") for a in actual), (
+        "the generated admin/ tree is missing from the stage"
+    )
+    actual_tracked = {a for a in actual if not a.startswith("admin/")}
+    missing = sorted(expected - actual_tracked)
+    added = sorted(actual_tracked - expected)
+    assert not missing, (
+        "PUBLIC files were dropped by the denylist staging — the leak probe "
+        f"asserts 404s only, so it can never notice this (#3620): {missing}\n{out}"
+    )
+    assert not added, (
+        f"internal files were staged for public upload (#3620): {added}\n{out}"
+    )
+
+#: Entries that MUST NOT be staged — the live-verified #3620 leak.
+_STAGED_MUST_NOT_EXIST = (
+    ".wranglerignore",
+    "README.md",
+    "website_architecture.md",
+    "2479-re-auth-implementation-plan.md",
+    "migrations/0001_auth_sessions.sql",
+    "apps/dashboard/src/main.jsx",
+    "apps/dashboard/deploy.sh",
+    "apps/dashboard/package.json",
+    "apps/dashboard/node_modules/react/index.js",
+    "apps/blog-admin/src/App.tsx",
+    "apps/blog-admin/package.json",
+    "node_modules/some-pkg/index.js",
+)
+
+#: The paths the leak probe asserts on. Deliberately the SAME set issue #3620
+#: enumerated from production, because a probe that drifts from the evidence
+#: stops being evidence.
+LEAK_PATHS = (
+    "/.wranglerignore",
+    "/README.md",
+    "/website_architecture.md",
+    "/2479-re-auth-implementation-plan.md",
+    "/migrations/0001_auth_sessions.sql",
+    "/apps/dashboard/src/main.jsx",
+    "/apps/blog-admin/src/App.tsx",
+    "/apps/dashboard/package.json",
+    "/apps/blog-admin/package.json",
+)
+
+#: Stub `npx`. Records its argv AND its working directory, so the harness can
+#: prove what the shipped command was pointed at — and that wrangler's cwd (which
+#: is where it resolves `functions/`) IS the upload root — plus that it never ran
+#: when a survival guard failed.
+STUB_NPX = r"""#!/bin/bash
+printf '%s\n' "$@" > "$STUB_DIR/npx_args"
+pwd -P > "$STUB_DIR/npx_pwd"
+exit 0
+"""
+
+#: Stub `curl` for the leak probe. STUB_SERVED lists paths that still answer 200;
+#: STUB_ERROR lists paths that answer 500; STUB_TRANSPORT_FAIL fails the
+#: connection; STUB_SERVED_CALLS limits serving to the first N probes (the "Pages
+#: is still serving the previous, leaking deployment" shape). Every requested path
+#: is recorded so the harness can prove the loop probed ALL of them, on the right
+#: number of attempts, and is reachable under `bash -e`.
+STUB_LEAK_CURL = r"""#!/bin/bash
+out=; fmt=; url=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2;;
+    -w) fmt=$2; shift 2;;
+    -m) shift 2;;
+    -s|-S|-sS|-f|--fail) shift;;
+    *) url=$1; shift;;
+  esac
+done
+path="/${url#*//*/}"
+echo "$path" >> "$STUB_DIR/probed"
+if [ "$STUB_TRANSPORT_FAIL" = "1" ]; then
+  echo "curl: (7) Failed to connect to host" >&2
+  printf '000'
+  exit 7
+fi
+code=404
+n=$(wc -l < "$STUB_DIR/probed")
+if [ -z "$STUB_SERVED_CALLS" ] || [ "$n" -le "$STUB_SERVED_CALLS" ]; then
+  for s in $STUB_SERVED; do [ "$s" = "$path" ] && code=200; done
+  for s in $STUB_ERROR; do [ "$s" = "$path" ] && code=500; done
+fi
+[ -n "$out" ] && : > "$out"
+case "$fmt" in *http_code*) printf '%s' "$code";; esac
+exit 0
+"""
+
+
+def _write_website_fixture(root: Path, omit: str | None = None) -> Path:
+    """Build a synthetic `website/` tree; `omit` drops one entry (or dir)."""
+    site = root / "website"
+    for rel in _WEBSITE_FIXTURE:
+        if omit and (rel == omit or rel.startswith(f"{omit}/")):
+            continue
+        f = site / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x\n", encoding="utf-8")
+    return site
+
+
+def _stub_bin(root: Path, name: str, body: str) -> Path:
+    bin_dir = root / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / name
+    stub.write_text(body, encoding="utf-8")
+    stub.chmod(0o755)
+    return bin_dir
+
+
+def _run_deploy(
+    tmp_path: Path, omit: str | None = None, set_runner_temp: bool = True
+) -> tuple[int, str, Path, Path]:
+    """Execute the shipped Deploy step with the shell exactly as CI runs it.
+
+    `bash -e` mirrors GitHub Actions' default Linux shell. The run block is the
+    comment-stripped shipped text — comments are inert, so executing without them
+    proves the CODE carries the behaviour, not the prose.
+    """
+    bin_dir = _stub_bin(tmp_path, "npx", STUB_NPX)
+    site = _write_website_fixture(tmp_path, omit)
+    script = tmp_path / "deploy.sh"
+    script.write_text(_step_code(DEPLOY), encoding="utf-8")
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+    }
+    if set_runner_temp:
+        env["RUNNER_TEMP"] = str(tmp_path)
+    else:
+        env.pop("RUNNER_TEMP", None)
+
+    r = subprocess.run(
+        ["bash", "-e", str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+    )
+    return r.returncode, r.stdout + r.stderr, tmp_path / "pages-upload", site
+
+
+def test_the_deploy_stages_a_controlled_upload_set(tmp_path) -> None:
+    """The whole point of #3620: WHAT gets uploaded is decided by the repo."""
+    rc, out, stage, site = _run_deploy(tmp_path)
+    assert rc == 0, f"the shipped deploy step failed:\n{out}"
+
+    actual = {p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file()}
+    _assert_stage_matches(actual, _expected_public(_WEBSITE_FIXTURE), out)
+
+    # Non-vacuity: the source tree really did contain each internal path, so the
+    # exclusion (not a missing fixture file) is what kept it out of the stage.
+    for rel in _STAGED_MUST_NOT_EXIST:
+        assert (site / rel).exists(), f"fixture is missing {rel} — assertion vacuous"
+    leaked = [rel for rel in _STAGED_MUST_NOT_EXIST if (stage / rel).exists()]
+    assert not leaked, f"internal paths were staged for public upload: {leaked}\n{out}"
+
+
+def test_the_deploy_clears_a_stale_stage_directory(tmp_path) -> None:
+    """`rm -rf "$STAGE"` is load-bearing: a stale file in `$RUNNER_TEMP/pages-upload`
+    would otherwise survive `mkdir -p` + rsync and be uploaded.
+
+    `$RUNNER_TEMP` is fresh on a hosted runner, but the step must not depend on
+    that — a local rerun and a self-hosted runner both reuse it. Before this test
+    the `rm -rf` was pinned by nothing.
+    """
+    stale = tmp_path / "pages-upload" / "stale-internal.txt"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("stale\n", encoding="utf-8")
+    rc, out, stage, _site = _run_deploy(tmp_path)
+    assert rc == 0, out
+    assert not (stage / "stale-internal.txt").exists(), (
+        'a stale file survived into the upload root — `rm -rf "$STAGE"` is gone'
+    )
+
+
+def _tracked_website_files() -> list[str]:
+    """Every tracked path under `website/`, RELATIVE to `website/`."""
+    out = subprocess.run(
+        ["git", "ls-files", "website"], cwd=REPO, capture_output=True, text=True, check=True
+    ).stdout.split()
+    return [p[len("website/") :] for p in out if p.startswith("website/")]
+
+
+def _copy_tracked_website(root: Path) -> None:
+    """Reproduce the CI checkout for the staging step: every TRACKED file under
+    `website/` (copying the `git ls-files` list, so untracked local artifacts stay
+    out of the comparison) plus the generated `admin/` tree the blog-admin build
+    step creates just before the deploy."""
+    for rel in _tracked_website_files():
+        src = REPO / "website" / rel
+        dst = root / "website" / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    admin = root / "website" / "admin"
+    (admin / "assets").mkdir(parents=True, exist_ok=True)
+    (admin / "index.html").write_text("x\n", encoding="utf-8")
+    (admin / "assets" / "index-abc.js").write_text("x\n", encoding="utf-8")
+
+
+def test_the_staged_upload_root_equals_the_classified_public_tree(tmp_path) -> None:
+    """COMPLETENESS over the REAL tree, not a sample: run the shipped staging step
+    and assert the stage is EXACTLY `tracked(website) − classified_excluded`.
+
+    Both directions must hold:
+      * a PUBLIC file missing from the stage is a silent 404 the leak probe can
+        never see (it asserts 404s only). A 14-of-26 sampled hand-list let
+        `--exclude='consent.js'` (M22) drop the consent banner + PostHog init,
+        and `--exclude='*.xml'` (M23) drop both public sitemaps — with the whole
+        suite green;
+      * an INTERNAL file present in the stage is the #3620 leak itself.
+
+    The expected set is derived from `git ls-files website` and the reviewed
+    classification, so it grows and shrinks with the real tree rather than needing
+    a hand-list edit.
+    """
+    _copy_tracked_website(tmp_path)
+    bin_dir = _stub_bin(tmp_path, "npx", STUB_NPX)
+    script = tmp_path / "deploy.sh"
+    script.write_text(_step_code(DEPLOY), encoding="utf-8")
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "RUNNER_TEMP": str(tmp_path),
+    }
+    r = subprocess.run(
+        ["bash", "-e", str(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+    )
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, f"the shipped deploy step failed on the real tree:\n{out}"
+
+    stage = tmp_path / "pages-upload"
+    actual = {p.relative_to(stage).as_posix() for p in stage.rglob("*") if p.is_file()}
+    _assert_stage_matches(actual, _expected_public(_tracked_website_files()), out)
+
+
+def test_the_deploy_uploads_the_staged_directory_not_website(tmp_path) -> None:
+    """BOTH halves of the upload root must be the staged directory.
+
+    Assets: the directory argument. Functions: `wrangler pages deploy` resolves
+    them from the **process cwd** (`path.join(process.cwd(), "functions")` —
+    there is no `--functions-directory` flag on `pages deploy`, only the global
+    `--cwd`), and its IGNORE_LIST never uploads `functions/` as an asset.
+
+    Running from the repo root therefore deploys a site with NO Functions —
+    every /auth/*, /api/*, /blog/* and /admin/* route 404s — while
+    `test -d "$STAGE/functions"` still passes, because the ASSET tree has it.
+    That is exactly the silent-dead-auth failure this change exists to avoid
+    (the old `cd website` + `deploy .` got it right by accident), so the cwd is
+    pinned here by execution, not by reading the workflow.
+    """
+    rc, out, stage, _site = _run_deploy(tmp_path)
+    assert rc == 0, out
+    args = (tmp_path / "npx_args").read_text(encoding="utf-8").splitlines()
+    assert args[:4] == ["--yes", "wrangler@4", "pages", "deploy"], args
+    target = args[4]
+    assert target == str(stage), (
+        f"the deploy was pointed at {target!r}, not the staged upload root {stage}"
+    )
+    assert target not in (".", "./", "website", "website/"), (
+        "the deploy still uploads website/ wholesale — every file under it is served"
+    )
+    assert args[5:] == ["--project-name=premise-labs", "--branch=main"], args
+    # The cwd is where wrangler looks for `functions/`. If it is not the stage,
+    # the deploy has no Functions — a green deploy with dead auth.
+    ran_in = (tmp_path / "npx_pwd").read_text(encoding="utf-8").strip()
+    assert ran_in == os.path.realpath(str(stage)), (
+        f"wrangler ran with cwd={ran_in!r}, not the upload root — it would resolve "
+        "`<cwd>/functions`, find none, and deploy NO Functions"
+    )
+
+
+@pytest.mark.parametrize(
+    ("omitted", "needle"),
+    [
+        # Each needle is unique to ITS OWN guard's diagnostic. `functions/` would
+        # also match the `_middleware.ts` guard's message, so deleting the
+        # directory guard would still look "caught".
+        ("functions", "compiles Functions from the cwd"),
+        ("functions/_middleware.ts", "host routing and the admin gate"),
+        ("_redirects", "the redirect contract is gone"),
+        ("_headers", "the security-header contract is gone"),
+        ("admin", "did not stage it"),
+    ],
+)
+def test_the_deploy_refuses_to_upload_when_a_load_bearing_entry_is_missing(
+    tmp_path, omitted: str, needle: str
+) -> None:
+    """The denylist is only safe because these guards fail LOUD, and BEFORE the
+    upload.
+
+    A denylist was chosen over an allowlist precisely because these five are easy
+    to forget. If a guard is removed — or moved after the `npx` call — the
+    failure returns to its silent form: a green deploy with dead auth.
+    """
+    rc, out, _stage, _site = _run_deploy(tmp_path, omit=omitted)
+    assert rc != 0, f"staging {omitted} away did not fail the step:\n{out}"
+    assert needle in out, f"no diagnostic naming {needle}:\n{out}"
+    assert not (tmp_path / "npx_args").exists(), (
+        "the deploy ran anyway — a survival guard must abort BEFORE the upload"
+    )
+
+
+def test_the_stage_path_refuses_an_empty_RUNNER_TEMP(tmp_path) -> None:
+    """`STAGE="$RUNNER_TEMP/pages-upload"` with RUNNER_TEMP unset is
+    `/pages-upload` — and the very next command is `rm -rf "$STAGE"`.
+
+    Runners always set the variable; a local invocation does not, and the failure
+    mode is deleting a path derived from an empty value. `${VAR:?}` fails fast.
+    """
+    rc, out, _stage, _site = _run_deploy(tmp_path, set_runner_temp=False)
+    assert rc != 0, f"an unset RUNNER_TEMP must fail the step:\n{out}"
+    assert "RUNNER_TEMP" in out, out
+    assert not (tmp_path / "npx_args").exists(), out
+
+
+def test_the_workflow_asserts_the_upload_root_in_the_deploy_job() -> None:
+    """Wiring: the leak probe must exist, and run in the SAME job as the deploy.
+
+    A step defined in another job would be here to satisfy a reader, not the
+    deploy — `verify-legal` runs only after the `deploy` job succeeds.
+    """
+    names = [s.get("name", "") for s in _deploy_steps()]
+    assert LEAK_PROBE in names, "the post-deploy leak assertion is gone"
+    assert names.index(DEPLOY) < names.index(LEAK_PROBE), (
+        "the leak assertion must run AFTER the upload"
+    )
+
+
+def test_the_leak_assertion_cannot_be_masked_by_the_sign_in_probe() -> None:
+    """A red sign-in probe must not skip the leak check.
+
+    The two assertions are independent, and a publicly served internal file
+    cannot be un-published by retrying the other one — so the leak step carries
+    `if: always()`.
+    """
+    step = next(s for s in _deploy_steps() if s.get("name") == LEAK_PROBE)
+    assert step.get("if") == "always()", (
+        "the leak assertion is skippable when the sign-in probe fails"
+    )
+
+
+def _leak_script(tmp_path: Path) -> Path:
+    """The shipped leak probe with ONLY these benign rewrites:
+      - 10 attempts -> 3, sleep 15 -> sleep 0 (so retry cases are fast)
+    The control flow under test — the `|| curl_rc=$?` guard, the exact-404 case
+    arms, the per-attempt accumulation, the retry bound and the final `exit 1` —
+    is untouched. The BOUND is rewritten too, so the retry is genuinely exercised
+    rather than pinned by a source string (the weakness this file was caught on
+    twice already).
+    """
+    rewritten = (
+        _step_code(LEAK_PROBE)
+        .replace("MAX_ATTEMPTS=10", "MAX_ATTEMPTS=3")
+        .replace("sleep 15", "sleep 0")
+    )
+    assert "MAX_ATTEMPTS=3" in rewritten, "the retry bound was not rewritten"
+    assert "MAX_ATTEMPTS=10" not in rewritten, "a second bound was left at 10"
+    p = tmp_path / "leak.sh"
+    p.write_text(rewritten, encoding="utf-8")
+    return p
+
+
+def _run_leak_probe(
+    tmp_path: Path,
+    served: str = "",
+    error: str = "",
+    transport_fail: bool = False,
+    served_calls: int | None = None,
+) -> tuple[int, str, list[str]]:
+    bin_dir = _stub_bin(tmp_path, "curl", STUB_LEAK_CURL)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "STUB_SERVED": served,
+        "STUB_ERROR": error,
+        "STUB_TRANSPORT_FAIL": "1" if transport_fail else "0",
+        "STUB_SERVED_CALLS": "" if served_calls is None else str(served_calls),
+    }
+    r = subprocess.run(
+        ["bash", "-e", str(_leak_script(tmp_path))],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    probed_file = tmp_path / "probed"
+    probed = probed_file.read_text(encoding="utf-8").split() if probed_file.exists() else []
+    return r.returncode, r.stdout + r.stderr, probed
+
+
+def test_the_leak_probe_passes_when_every_internal_path_is_404(tmp_path) -> None:
+    rc, out, probed = _run_leak_probe(tmp_path)
+    assert rc == 0, out
+    # Non-vacuity: the loop must have ACTUALLY probed every declared path. A
+    # probe that requests nothing passes every other assertion here.
+    assert probed == list(LEAK_PATHS), probed
+    assert "::error::" not in out, out
+
+
+@pytest.mark.parametrize("path", LEAK_PATHS)
+def test_the_leak_probe_fails_for_each_path_that_is_still_served(tmp_path, path: str) -> None:
+    """Every path #3620 enumerated must independently red the deploy."""
+    rc, out, _probed = _run_leak_probe(tmp_path, served=path)
+    assert rc == 1, f"{path} still served but the probe exited {rc}:\n{out}"
+    assert "::error::" in out, out
+    assert f"{path}(HTTP 200)" in out, out
+    assert "publicly served" in out, out
+    assert "#3620" in out, out
+
+
+def test_the_leak_probe_reports_every_leak_in_one_run(tmp_path) -> None:
+    """The loop must CONTINUE after a leak, and the failure must name every path.
+
+    Exiting on the first hit would report one path per re-run, so the operator
+    never sees the whole exposed set — and the loop must stay reachable under
+    `bash -e` to report anything at all.
+    """
+    rc, out, probed = _run_leak_probe(tmp_path, served=" ".join(LEAK_PATHS))
+    assert rc == 1
+    for path in LEAK_PATHS:
+        assert f"{path}(HTTP 200)" in out, out
+    # Every path on every attempt: the loop never short-circuits, and the retry
+    # really ran to its bound.
+    assert probed == list(LEAK_PATHS) * 3, probed
+
+
+def test_the_leak_probe_retries_because_pages_can_serve_the_previous_deploy(tmp_path) -> None:
+    """Why the probe polls rather than probing once.
+
+    Pages can briefly serve the PREVIOUS deployment after upload (the sign-in
+    probe above documents the same lag). That cuts both ways: on the deploy that
+    INTRODUCES this fix the previous deployment is the leaking one (a single-shot
+    probe reds the fix), and on a deploy that re-introduces a leak the previous
+    deployment is the clean one (a single-shot probe PASSES the regression —
+    fail-open). Here the leak is visible for exactly one attempt.
+    """
+    rc, out, probed = _run_leak_probe(
+        tmp_path, served=LEAK_PATHS[1], served_calls=len(LEAK_PATHS)
+    )
+    assert rc == 0, f"a leak that clears on the next attempt must not fail:\n{out}"
+    assert probed == list(LEAK_PATHS) * 2, probed
+    assert "::warning::" in out, "the transient was not reported at all"
+
+
+def test_the_leak_probe_refuses_a_non_404_answer(tmp_path) -> None:
+    """`curl -sf` — the obvious spelling — treats a 5xx as a PASS.
+
+    A 5xx means the file could not be read back, not that it is absent, so the
+    probe asserts 404 EXACTLY. This is the assertion that separates the gate from
+    a one-line `curl -sf` check.
+    """
+    rc, out, _probed = _run_leak_probe(tmp_path, error=LEAK_PATHS[1])
+    assert rc == 1, f"a 500 must not pass the leak check:\n{out}"
+    assert "did not return 404 (HTTP 500)" in out, out
+    assert f"{LEAK_PATHS[1]}(HTTP 500)" in out, out
+    assert "publicly served" not in out, out
+
+
+def test_the_leak_probe_fails_closed_on_a_transport_failure(tmp_path) -> None:
+    """Not knowing is not the same as knowing it is fine — the same contract as
+    `check_pages_bindings.main()`'s exit 2."""
+    rc, out, probed = _run_leak_probe(tmp_path, transport_fail=True)
+    assert rc == 1, f"a leak check that could not run must not pass:\n{out}"
+    assert "could not verify" in out, out
+    assert "(unverifiable)" in out, out
+    # `bash -e` must not abort the substitution: every path on every attempt.
+    assert probed == list(LEAK_PATHS) * 3, probed
+
+
+def test_the_leak_probe_harness_exercises_the_retry_bound() -> None:
+    """The harness must rewrite the bound, not merely the sleep.
+
+    If it left `MAX_ATTEMPTS=10`, the retry cases below would take 10 rounds and
+    the bound would be pinned only by a source string — the failure mode this
+    file has already been caught on twice.
+    """
+    import inspect
+
+    assert "MAX_ATTEMPTS=10" in _step_code(LEAK_PROBE), (
+        "the shipped retry bound changed shape — update _leak_script and this test"
+    )
+    src = inspect.getsource(_leak_script)
+    assert "MAX_ATTEMPTS=10" in src and "MAX_ATTEMPTS=3" in src
+    assert "sleep 15" in src and "sleep 0" in src
+
+
+#: Every top-level entry under `website/` and whether the Pages upload STAGES it.
+#: Single-sourced from `config/pages-upload-classification.txt` — the SAME table
+#: the deploy job's pre-upload preflight reads (`tools/check_pages_upload_root.py`)
+#: — so the test's expectations and the deploy gate cannot drift.
+#:
+#: `admin/` is deliberately absent: it is generated into `website/` by the
+#: blog-admin build step and is not tracked, so it never appears in
+#: `git ls-files website`; its presence in the stage is asserted by
+#: `_assert_stage_matches`.
+_WEBSITE_TOP_LEVEL_STAGED = cpur.load_classification(UPLOAD_CLASSIFICATION_PATH)
+
+
+def _rsync_exclude_patterns(code: str) -> list[str]:
+    """Every `--exclude='…'` value in a shipped shell run block."""
+    return re.findall(r"--exclude='([^']*)'", code)
+
+
+def _rsync_pattern_matches(pattern: str, name: str, is_dir: bool) -> bool:
+    """rsync exclude semantics for a TOP-LEVEL entry.
+
+    The rules that matter for this step's patterns:
+      * a trailing `/` matches directories only;
+      * a leading `/` anchors the pattern to the transfer root, so `/apps/` does
+        NOT match a nested `x/apps/`;
+      * a pattern with NO internal `/` matches the BASENAME at any depth, so
+        `*.md` and `node_modules/` match top-level entries too.
+
+    Matching the anchored literal only — the old probe — misses an unanchored
+    `--exclude='consent.js'`, which rsync DOES apply and which drops the consent
+    banner + PostHog init (M22), and `--exclude='*.xml'`, which drops both public
+    sitemaps (M23).
+    """
+    dir_only = pattern.endswith("/")
+    pat = pattern.rstrip("/")
+    if dir_only and not is_dir:
+        return False
+    if pat.startswith("/"):
+        # Anchored at the transfer root: only a root-level entry can match, and a
+        # remaining `/` would be a sub-path this helper does not model.
+        return "/" not in pat[1:] and fnmatch.fnmatchcase(name, pat[1:])
+    return fnmatch.fnmatchcase(name, pat)
+
+
+def test_every_top_level_entry_under_website_is_classified() -> None:
+    """The enumeration acceptance criterion, made executable.
+
+    #3620 required the publicly served set to be *decided*, not inherited. The
+    deploy step decides it with a DENYLIST, so a new top-level entry is uploaded
+    unless it is excluded. This test makes the decision forced instead of silent:
+    adding `website/internal/` fails here until it is classified. The table is
+    single-sourced from `config/pages-upload-classification.txt` — the same file
+    the deploy preflight reads.
+    """
+    unclassified, stale = cpur.compare(
+        cpur.tracked_top_level(), _WEBSITE_TOP_LEVEL_STAGED
+    )
+    assert not unclassified, (
+        "a top-level entry under website/ is not classified — an unclassified "
+        "entry is staged for public upload unless the deploy step excludes it "
+        f"(#3620): {unclassified}"
+    )
+    assert not stale, (
+        f"a classification row names a path that no longer exists (#3620): {stale}"
+    )
+
+    # Non-vacuity: the table must carry both answers, or it pins nothing.
+    assert any(_WEBSITE_TOP_LEVEL_STAGED.values()), "no entry is classified public"
+    assert not all(_WEBSITE_TOP_LEVEL_STAGED.values()), "no entry is classified excluded"
+
+    # Every entry classified NOT staged must actually be matched by a shipped
+    # `--exclude`, and every public entry must NOT be — otherwise this table is a
+    # claim, not a pin. Patterns are evaluated with rsync semantics (basename
+    # match when unanchored), not an anchored-substring probe: an unanchored
+    # `--exclude='consent.js'` or `--exclude='*.xml'` really does drop the file.
+    patterns = _rsync_exclude_patterns(_step_code(DEPLOY))
+    for name, staged in _WEBSITE_TOP_LEVEL_STAGED.items():
+        is_dir = (REPO / "website" / name).is_dir()
+        excluded = any(_rsync_pattern_matches(p, name, is_dir) for p in patterns)
+        assert excluded != staged, (
+            f"{name} is classified {'public' if staged else 'excluded'} but the "
+            f"deploy step {'excludes' if excluded else 'does not exclude'} it "
+            f"(patterns: {patterns})"
+        )
+
+
+def test_the_upload_root_preflight_runs_before_the_deploy() -> None:
+    """The deploy job must RUN the classification check before it stages/upload.
+
+    Without this step the ratchet is only a post-merge detector: a push adding an
+    unclassified top-level entry would publish it and only red afterwards (#3620).
+    """
+    steps = _deploy_steps()
+    names = [s.get("name", "") for s in steps]
+    check = next(
+        (s for s in steps if "check_pages_upload_root.py" in (s.get("run") or "")), None
+    )
+    assert check is not None, (
+        "the deploy job does not run tools/check_pages_upload_root.py — an "
+        "unclassified top-level entry would be uploaded on a green deploy (#3620)"
+    )
+    assert names.index(check["name"]) < names.index(DEPLOY), (
+        "the classification check must run BEFORE the upload"
+    )
+
+
+def _upload_preflight_script(tmp_path: Path) -> Path:
+    """The shipped upload-root preflight run block with ONLY the checker path
+    rewritten to a stub on `PATH` — exactly as `_preflight_script` does for the
+    sibling binding preflight. The `bash -e` semantics are left as shipped, so
+    the checker's exit code is what aborts the step."""
+    step = next(s for s in _deploy_steps() if s.get("name") == UPLOAD_PREFLIGHT)
+    rewritten = _strip_bash_comments(step["run"]).replace(
+        "python3 tools/check_pages_upload_root.py", "check_upload_stub"
+    )
+    assert "check_upload_stub" in rewritten, (
+        "the upload-root checker invocation was not substituted"
+    )
+    p = tmp_path / "upload_preflight.sh"
+    p.write_text(rewritten, encoding="utf-8")
+    return p
+
+
+def _run_upload_preflight(tmp_path: Path, exits: str) -> tuple[int, str, int]:
+    """Run the shipped upload-root preflight under `bash -e` with the checker
+    replaced by the recording stub (reuses `STUB_CHECKER`)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stem = tmp_path / "check_upload_stub_impl"
+    stem.write_text(STUB_CHECKER, encoding="utf-8")
+    stem.chmod(0o755)
+    stub = bin_dir / "check_upload_stub"
+    stub.write_text(f'#!/bin/bash\nexec "{stem}"\n', encoding="utf-8")
+    stub.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_DIR": str(tmp_path),
+        "STUB_EXITS": exits,
+    }
+    r = subprocess.run(
+        ["bash", "-e", str(_upload_preflight_script(tmp_path))],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    calls_file = tmp_path / "checker_calls"
+    calls = int(calls_file.read_text()) if calls_file.exists() else 0
+    return r.returncode, r.stdout + r.stderr, calls
+
+
+@pytest.mark.parametrize(("exits", "want_rc"), [("0", 0), ("1", 1), ("2", 2)])
+def test_the_upload_root_preflight_actually_invokes_the_checker(
+    tmp_path, exits: str, want_rc: int
+) -> None:
+    """The anti-neutering assertion for the deploy gate.
+
+    `test_the_upload_root_preflight_runs_before_the_deploy` only compares a
+    substring + step index; it never EXECUTES the step. So the whole deploy-time
+    classification gate could be turned into a no-op with the suite green:
+
+        run: python3 tools/check_pages_upload_root.py || true
+        run: echo 'python3 tools/check_pages_upload_root.py'
+        run: python3 tools/check_pages_upload_root.py || exit 0
+
+    Each leaves the substring in place. This test runs the shipped block and
+    proves (a) the checker was ACTUALLY invoked and (b) its non-zero exits
+    (1 = unclassified/stale, 2 = could-not-determine) abort the step. It is the
+    execution-based counterpart of `test_the_preflight_actually_invokes_the_checker`,
+    for the one gate this PR adds.
+    """
+    rc, out, calls = _run_upload_preflight(tmp_path, exits)
+    assert calls == 1, (
+        "the upload-root preflight never invoked the checker — replacing the "
+        "invocation with `echo` leaves every source-level string in place (#3620)"
+    )
+    assert "STUB_CHECKER_INVOKED:1" in out
+    assert rc == want_rc, f"checker exit {exits} must propagate, rc={rc} want={want_rc}\n{out}"
+
+
+def test_the_deploy_gate_and_the_tests_read_the_same_classification() -> None:
+    """One source of truth for the reviewed table.
+
+    The deploy step invokes `check_pages_upload_root.py` with NO arguments, so
+    the tool's `DEFAULT_CLASSIFICATION` IS the deploy gate's table, while the
+    ratchet above validates `UPLOAD_CLASSIFICATION_PATH`. Repointing either
+    constant at a rival table (e.g. one with `consent.js` flipped to `excluded`)
+    left the whole suite green while the deploy gate checked an UNREVIEWED set —
+    so the two must be the same file, and the step must not override it (#3620).
+    """
+    assert cpur.DEFAULT_CLASSIFICATION == UPLOAD_CLASSIFICATION_PATH, (
+        "tools/check_pages_upload_root.py's DEFAULT_CLASSIFICATION and the "
+        "ratchet's UPLOAD_CLASSIFICATION_PATH are different files — the deploy "
+        "gate would validate a table the tests never reviewed"
+    )
+    code = _step_code(UPLOAD_PREFLIGHT)
+    assert "--classification" not in code, (
+        "the deploy step overrides the classification table, so the tool's "
+        "DEFAULT_CLASSIFICATION (the file the ratchet pins) would no longer "
+        "govern what the deploy gate checks"
+    )
+
+
+def test_the_upload_root_preflight_reports_an_unclassified_entry() -> None:
+    """The deploy gate must red on a new entry, and not on a known one."""
+    table = cpur.load_classification(UPLOAD_CLASSIFICATION_PATH)
+    tracked = cpur.tracked_top_level()
+    unclassified, stale = cpur.compare(tracked | {"brand-new-internal"}, table)
+    assert unclassified == ["brand-new-internal"]
+    assert stale == []
+    # A row whose path no longer exists on disk is stale and must fail too.
+    _unclassified, stale = cpur.compare(tracked - {"consent.js"}, table)
+    assert stale == ["consent.js"]
+
+
+def test_the_upload_root_preflight_fails_closed_on_a_malformed_table(tmp_path) -> None:
+    """A malformed row is a configuration error, not an unclassified path — it
+    must raise rather than be silently skipped into a vacuous comparison."""
+    bad = tmp_path / "bad.txt"
+    bad.write_text("maybe thing\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="expected"):
+        cpur.load_classification(bad)
+
+
+def test_the_inert_wranglerignore_is_gone() -> None:
+    """`website/.wranglerignore` excluded nothing.
+
+    Wrangler's Pages upload path uses a hardcoded IGNORE_LIST and reads no ignore
+    file (verified four ways in #3620, including a live 200 on the file itself).
+    A config file that appears to enforce a security property but does not is
+    worse than no config file — it stops people from checking. The enforced
+    mechanism is now the staged upload (deploy step) plus the 404 assertions
+    (leak probe), both executed above.
+    """
+    assert not (REPO / "website" / ".wranglerignore").exists(), (
+        "website/.wranglerignore is back — wrangler never reads it, so it claims "
+        "a protection that does not exist (#3620)"
+    )

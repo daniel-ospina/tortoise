@@ -724,6 +724,11 @@ surfaces:
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
   - test_signup_form_safety.py
+  # #3485: dual-registered with `api` (cross-surface registration is deliberate,
+  # #2913). This is the website-guard home for the shared session-bridge asset:
+  # a `website/assets/supabase-session.js` change selects this surface via
+  # SOURCE_PATTERNS, so the guard runs on the PR that edits the file it guards.
+  - test_cross_subdomain_cookie_sync.py
   # #3616: the deploy-binding gate. A pure unit test of the (env, type, name)
   # comparison in tools/check_pages_bindings.py plus an execution harness for the
   # workflow's probe shell — no network, no Cloudflare credentials, no wrangler.
@@ -771,6 +776,7 @@ surfaces:
   - test_ask_regression_llm.py
   - test_ask_retrieval_levers.py
   - test_ask_sdk.py
+  - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
   - test_ask_spotcheck_judge.py
   - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge
   - test_client_surface.py
@@ -1054,16 +1060,20 @@ durations:
   test_delivery_tenancy.py: 11.4
   test_ep_selector.py: 11.4
   test_longmem_reader_prompting.py: 10.2
-  # #3616: 33 test functions / 49 collected cases over the binding-manifest
-  # comparison and the deploy workflow's probe shell.
+  # #3616: the deploy-binding gate, plus #3620's staged-upload-root gate (the
+  # deploy step's staging + survival guards and the post-deploy 404 assertions,
+  # both EXECUTED against stubbed `npx`/`curl`, not string-matched).
   #
   # DURATION IS HIGH-VARIANCE — do not trust a single sample. Observed across
-  # runs: ~1.7-2.1s warm, 6.3-14.4s standalone, and 86s on a cold conftest
+  # runs: ~30-45s warm (65 test functions / 98 collected cases; three warm samples
+  # on one machine were 42.7s / 34.8s / 29.7s), and up to ~86s on a cold conftest
   # import (the repo's heavy tests/conftest.py graph dominates; the tests
-  # themselves are millisecond-scale). A first draft recorded 85.0 from the cold
-  # run, which is ~40x the warm cost and would over-weight the LPT packing. 10.0
-  # is a deliberately loose middle. Re-measure rather than trusting it.
-  test_pages_bindings.py: 10.0
+  # themselves are millisecond-scale). 40.0 is inside the measured warm range.
+  # (#3620 review: this value was 10.0 while the comment called it "a deliberately
+  # loose middle" — it was below the ENTIRE measured range, so split_fast_gate's
+  # LPT packing under-weighted this file ~4x. Comment and value now agree.)
+  # Re-measure rather than trusting it.
+  test_pages_bindings.py: 40.0
   test_abuse_integration.py: 9.5
   test_github_index_lifecycle.py: 9.4
   test_main_guards.py: 9.2

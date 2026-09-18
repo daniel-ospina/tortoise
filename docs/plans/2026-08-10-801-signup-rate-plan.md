@@ -674,7 +674,8 @@ python -m pytest tests/test_waitlist_form.py -q                           # welc
 
 ## Deploy Steps (website change)
 
-- `website/signup.html` ships via the existing `deploy-pages.yml` (push to main, `paths: website/**` → `wrangler pages deploy . --project-name=premise-labs` → live at premiselabs.co/signup). No manual Pages step; no DNS change.
+- `website/signup.html` ships via the existing `deploy-pages.yml` (push to main, `paths: website/**` → staged upload → live at premiselabs.co/signup). No manual Pages step; no DNS change.
+  > **CORRECTED by #3620 (2026-09-16):** the workflow no longer runs `wrangler pages deploy .` (it published every file under `website/`). It stages an explicit upload set with `rsync` and uploads that; the push-to-main / `paths: website/**` trigger is unchanged.
 - `verify-legal` (same workflow, after deploy) will run the signup-safety suite against prod — this is the post-deploy gate for the lockout code.
 - `supabase/config.toml` is local-only (no deploy; prod auth config unchanged — confirmations stay ON).
 - Pre-deploy CI runs test the PR's page code via wrangler dev (legal-e2e) and the old-but-sufficient live page for the smoke (confirmation state shipped pre-#832) — no deploy-order flakiness.
