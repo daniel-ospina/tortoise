@@ -465,8 +465,11 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     else:
         # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a
         # positive assertion rather than a silent skip: it may only mean the
-        # documented HTTP->TCP migration, so the replacement must be present, and
-        # deleting the whole checks block still reds here.
+        # documented HTTP->TCP migration, so the SERVICES replacement
+        # ([[services.tcp_checks]]) must be present — deleting THAT block reds
+        # immediately below. (The separate top-level [checks] block has its own
+        # fail-closed absence assertion at the end of this branch; this paragraph
+        # covers the services check only, not `[checks]`.)
         #
         # 2026-09-17 (#3447): the top-level `[checks.loop_liveness]` entry the
         # old guard failed closed on has LANDED. A flat `"checks" not in _cfg`
@@ -546,6 +549,23 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
                 "[checks.loop_liveness] timeout must not BE the readiness policy "
                 "ceiling (READY_WORST_CASE_BUDGET_S) — the policy constant is "
                 "independent of this check, not borrowed from it"
+            )
+        else:
+            # Failure #3447 exists to catch, stated as the branch's own contract:
+            # an ABSENT top-level [checks] block is not the unmodelled case above
+            # and must not skip the model. In the #2850 state this block is the
+            # only application-level probe in the file — every remaining check is
+            # kernel-served (services.tcp_checks) and therefore blind to a
+            # stalled-but-running event loop. Deleting it is exactly the mistake
+            # that needs a mandatory post-merge `flyctl checks list`, so the
+            # tripwire has to red here rather than delegate that to the operator.
+            raise AssertionError(
+                "fly.toml has NO top-level [checks] block: got "
+                f"{checks!r}. Absence is NOT modelled — in the #2850 state "
+                "[checks.loop_liveness] is the only check that can see a STALLED "
+                "event loop (services.tcp_checks is kernel-served and cannot). "
+                "Restore [checks.loop_liveness] or record its removal AND its "
+                "replacement here deliberately."
             )
 
 
