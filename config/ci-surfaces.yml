@@ -6,6 +6,9 @@ surfaces:
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
   - test_analytics_write_path_resolution.py
+  # #3820: the analytics sink's OUTCOME contract + degraded-sink incident. Load-bearing
+  # here: the file it guards most (tortoise/hosted_api.py) selects the `api` surface.
+  - test_analytics_fallback_alert.py
   - test_battery_parity_executors.py
   - test_battery_parity_hash.py
   - test_battery_parity_mabench.py
@@ -295,6 +298,10 @@ surfaces:
   # this `core` entry is the fallback arm (core is only added when nothing else matched),
   # so it is belt-and-braces rather than the load-bearing registration.
   - test_analytics_write_path_resolution.py
+  # #3820: dual-registered with `api` for the same reason as the #3677 file above —
+  # this is the fallback arm, and it also covers a tortoise/monitoring.py-only change
+  # (the outcome counter lives in `core`, which has no SOURCE_PATTERN).
+  - test_analytics_fallback_alert.py
   - test_lifecycle_guards.py        # #2498: shared lifecycle guard — also runs on a tortoise/live.py-only change (terminal vocabulary pin)
   - test_about_edges.py
   - test_about_event_untangle.py
@@ -747,6 +754,7 @@ surfaces:
   - test_2952_degraded_read.py  # #2952: embeddings.py selects the eval surface — dual-registered so the (B) warm-up is covered there too
   - test_capture_cost_measurement.py  # #3359: the report reprices from the eval-owned PRICING_MAP (tools/longmem_eval/costing.py), so a pricing-map change must run it — dual-registered with `api`/`core`
   - test_analytics_write_path_resolution.py  # #3677: tools/capture_cost_report.py is an eval-surfaced source (the eval half of the cost measurement), so a read-path change there must run the guard that pins its resolved destination — dual-registered with `api`/`core`
+  - test_analytics_fallback_alert.py  # #3820: triple-registered with `api`/`core` for the same reason as the #3677 file above — the outcome counter it pins lives in `tortoise/monitoring.py`, which the eval lane's cost measurement also reads
   - eval/retrieval/test_1348.py
   - eval/retrieval/test_bootstrap.py
   - eval/retrieval/test_gate_1349.py

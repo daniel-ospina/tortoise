@@ -68,6 +68,7 @@ from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
     heartbeat_record,
     loop_heartbeat_info,
     loop_heartbeat_task,
+    record_analytics_outcome,  # #3820 analytics-sink outcome counter
     run_on_daemon_worker,
     start_health_listener,
     start_stall_watchdog,
@@ -19622,6 +19623,66 @@ _ALLOWED_ANALYTICS_PROPS = {
 
 _ANALYTICS_FALLBACK_PATH = None
 
+# #3820: the CLOSED outcome vocabulary of an analytics write. Every exit of
+# `_track_analytics_event` returns exactly one member, so its caller — and the
+# outcome counter — can tell "delivered" from "degraded" from "no sink
+# configured by design" from "lost entirely". Before this, every one of the
+# four exits returned bare `None`: a Supabase outage, a revoked key and an
+# unwritable JSONL were indistinguishable from success, which is why #3677 was
+# discoverable only by a human reading a filesystem on the production machine
+# (2,464 events / 568,889 bytes on an ephemeral Fly rootfs).
+_ANALYTICS_OUTCOMES = ("supabase", "fallback", "unconfigured", "dropped")
+
+# #3820: the incident kind for a degraded sink. Subject-less, platform-level —
+# like DRIVER_DOWN / R2_DOWN — because the analytics sink is shared by every
+# org: a per-org subject would fan one degradation out into one issue per
+# tenant.
+_ANALYTICS_INCIDENT_KIND = "ANALYTICS_SINK_DEGRADED"
+
+# #3820 (D2/P2-1): a single 5s POST timeout must not open a GitHub issue,
+# but a persistent outage must be visible within seconds. The trigger is a
+# STREAK, not a transition: `_ANALYTICS_DEGRADED_STREAK` counts consecutive
+# degraded writes since the last delivered one, and `fallback` alerts when the
+# streak reaches `_ANALYTICS_FALLBACK_ALERT_AFTER`. The review's P2-1 finding
+# was that the earlier "first fallback after a success" arm opened an incident
+# on ONE event, contradicting this decision's own rationale; a saturated
+# stream still reaches the threshold within ~15s. `dropped` — the event is
+# unrecoverable — alerts at once. `_ANALYTICS_INCIDENT_OPEN` is the in-process
+# latch that keeps it to ONE incident per episode; the AlertStore's own dedup
+# cannot substitute, because a per-event call costs an R2 conditional PUT + a
+# GitHub search + Telegram on EVERY event of an outage (seconds each, once
+# per event).
+#
+# #3820 (D5b — the ABSENCE half is DEFERRED, and recorded here rather than
+# dropped): D5b also asks for a sink that silently STOPS emitting to be caught
+# by a last-success timestamp against a wide cadence-derived threshold. That is
+# not implementable at this seam: analytics writes are user-driven with no
+# fixed cadence, so "no writes for N minutes" is indistinguishable from a
+# healthy idle process, and a real absence check needs a heartbeat the sink
+# does not emit — a new signal plus a timer, i.e. a separate change. The
+# transition INTO degradation (the next write) is covered by the streak below.
+# TRACKED: #3944 — the deferral must not evaporate with the #3820 branch.
+_ANALYTICS_FALLBACK_ALERT_AFTER = 3
+_ANALYTICS_INCIDENT_OPEN = False
+_ANALYTICS_DEGRADED_STREAK = 0
+# #3820 (cycle-4 P1-1): the recovery resolve cannot rely on the latch alone.
+# `_ANALYTICS_INCIDENT_OPEN` is PROCESS-LOCAL, but the incident is durable (the
+# AlertStore's dedup object outlives the process). After a restart — every `fly
+# deploy` — the latch is `False` while the issue is still open, so a
+# latch-only resolve never fires and every later degradation is absorbed into
+# the stale issue: the silent-loss class, reintroduced through the alert
+# channel. `_ANALYTICS_RESOLVE_PROBED` makes the DETECTION durable instead: the
+# first delivered write of each process probes the store once (one R2 read per
+# STARTUP, not per event), so a recovered sink resolves even across a restart.
+_ANALYTICS_RESOLVE_PROBED = False
+# #3820 (cycle-4 P2-2): DERIVED from the declared vocabulary — never re-typed.
+# A hand-written dict here (or a hand-written key list in
+# `_analytics_incident_detail`) means adding a fifth outcome raises `KeyError`
+# on the increment, outside every guard, straight into the GitHub OAuth
+# callback the never-raise contract exists to protect.
+_ANALYTICS_COUNTS = {o: 0 for o in _ANALYTICS_OUTCOMES}
+_ANALYTICS_ALERT_LOCK = threading.Lock()
+
 # #3677: bounded POST timeout. It is asserted (not merely tuned): a timeout
 # short enough to expire in production makes EVERY write fall through to the
 # ephemeral JSONL — #3677's symptom reached by a different route.
@@ -19629,7 +19690,7 @@ _ANALYTICS_POST_TIMEOUT_S = 5
 
 
 def _track_analytics_event(org_id: str, event_name: str,
-                           properties: dict | None = None) -> None:
+                           properties: dict | None = None) -> str:
     """Record a funnel event. PII-free; graceful when Supabase is unconfigured.
 
     Writes to Supabase analytics_events when SUPABASE_URL + a service key are
@@ -19643,6 +19704,46 @@ def _track_analytics_event(org_id: str, event_name: str,
     an ephemeral VM, and the whole analytics stream was silently discarded
     (2,464 events were found in that file on the production machine, and none
     of them in ``analytics_events``).
+
+    #3820: RETURN CONTRACT — the terminal outcome, exactly one member of
+    ``_ANALYTICS_OUTCOMES`` (the vocabulary is closed; callers may branch on
+    it, and no branch invents a value):
+
+    * ``"supabase"``     — delivered to the real store (2xx).
+    * ``"fallback"``     — Supabase was configured but the write degraded
+                           (transport error, or a non-2xx that ``post`` does
+                           not raise on); the event is on local disk instead.
+                           A HALF-configured env — ``SUPABASE_URL`` without a
+                           service key, or a key without a URL — is this arm
+                           too, with reason ``supabase_env_incomplete``. That
+                           is #3677's own failure shape (the URL was set and
+                           the key resolved to ``""``), and classifying it as
+                           ``unconfigured`` would make this signal BLIND to
+                           the very incident that created it.
+    * ``"unconfigured"`` — no URL/key at all (selfhost/dev). NOT a
+                           degradation: the JSONL is the intended sink, so no
+                           incident is ever filed for it (an alert here would
+                           fire on every such process and drown the real one).
+    * ``"dropped"``      — the event reached NO sink (no writable fallback
+                           directory, or the JSONL append itself failed). This
+                           is #3677's loss class, and it is unrecoverable.
+
+    ``fallback``/``dropped`` additionally increment
+    ``monitoring.ANALYTICS_OUTCOME_COUNT`` and, at most once per degradation
+    episode, file ``ANALYTICS_SINK_DEGRADED``. That alert leg is best-effort —
+    it cannot escape (the never-raise contract above is unchanged) and it is
+    NOT conditioned on the alert channel existing: counting happens either way.
+
+    #3820 (D5a): the alert leg is also NOT conditioned on the backup sweep
+    being enabled. ``_backup_config_safe()`` returns ``None`` whenever
+    ``BACKUP_SWEEP_ENABLED`` is false (the default), and a channel built on it
+    would therefore never file on such a deployment — re-creating #3677's loss
+    class through the alert channel, which is exactly what D5a forbade. The
+    channel's own credentials are read ungated (``backup_config.load_alert_
+    config``); the residual is its CONSTRUCTION — no ``DR_ISSUES_PAT`` (no
+    filer) or an unusable object store (``R2_*`` missing/typoed; the
+    ``AlertStore``'s dedup needs ``_backup_storage()``, and ``R2Storage``
+    raises without all four) — leaving the counter + WARNING.
     """
     if not isinstance(properties, dict):
         # The contract is never-raise; a non-dict would raise AttributeError
@@ -19663,7 +19764,27 @@ def _track_analytics_event(org_id: str, event_name: str,
     # name the hosted deployment never sets. Older sibling sites still
     # hand-roll the same pair — see #3677's sibling audit.
     key = _service_key()
-    if url and key:
+    # #3820 (D1): remember whether a sink was ATTEMPTED at all. This one
+    # boolean is what separates `fallback` (configured, but degraded — alert)
+    # from `unconfigured` (no sink by design — never alert).
+    configured = bool(url and key)
+    # #3820 (P1-2): a HALF-configured env is the FIFTH silent path. The
+    # docstring of `unconfigured` is "no URL/key AT ALL", but `configured`
+    # implements "both present" — so `SUPABASE_URL` set with the key missing
+    # (or renamed/#3677's `""`) fell through to `unconfigured`, `should_alert
+    # = False`, and the stream silently diverted to the ephemeral JSONL with no
+    # incident. That is #3677 itself, and it made this signal blind to the very
+    # failure that created the issue: with exactly one of the pair set, a sink
+    # was clearly INTENDED, so the write is a degradation.
+    misconfigured = bool(url) != bool(key)
+    if configured:
+        # #3820 (cycle-4 P2-1): the guard covers the NETWORK CALL only. The
+        # delivered branch used to sit inside it, so a raise in the success leg
+        # (`return _analytics_note_success()` — the counter, the lock, the store
+        # build, the resolve) was swallowed and fell through to the JSONL: a
+        # DELIVERED event was duplicated to disk and misreported as `fallback`,
+        # which can file an incident for a healthy sink.
+        delivered = False
         try:
             import httpx
             with httpx.Client(timeout=_ANALYTICS_POST_TIMEOUT_S) as client:
@@ -19679,10 +19800,18 @@ def _track_analytics_event(org_id: str, event_name: str,
             # discarded — the #3677 loss class, reachable whenever the key is
             # revoked or INSERT-denied (a 401 returns no exception). Fall
             # through to the local JSONL instead of dropping it.
-            if 200 <= resp.status_code < 300:
-                return
+            delivered = 200 <= resp.status_code < 300
         except Exception:
-            pass  # fall through to JSONL
+            delivered = False  # fall through to JSONL
+        if delivered:
+            # A raise here must NOT re-route a delivered event to the JSONL.
+            # The event reached the sink, so the outcome is known regardless;
+            # the never-raise contract still covers this leg.
+            try:
+                return _analytics_note_success()
+            except Exception as e:  # bookkeeping is best-effort
+                _logger.warning("analytics success bookkeeping failed: %s", e)
+                return "supabase"
     # JSONL fallback (~/.tortoise/analytics_fallback.jsonl)
     global _ANALYTICS_FALLBACK_PATH
     if _ANALYTICS_FALLBACK_PATH is None:
@@ -19695,13 +19824,223 @@ def _track_analytics_event(org_id: str, event_name: str,
             _ANALYTICS_FALLBACK_PATH = os.path.join(
                 fallback_dir, "analytics_fallback.jsonl")
         except Exception:
-            return  # no fallback disk available — still never raises
+            # #3820: the FOURTH silent path — the issue's table names three.
+            # Pre-#3820 this was a bare `return`: the event was dropped with no
+            # fallback line, no counter and no log — the same loss class as the
+            # append failure below, and the reason this exit now routes through
+            # the shared `_analytics_sink_dropped` helper.
+            return _analytics_sink_dropped("fallback_dir_unavailable")
     try:
         import json as _json
         with open(_ANALYTICS_FALLBACK_PATH, "a") as f:
             f.write(_json.dumps(event) + "\n")
     except Exception:
-        pass
+        # #3677 swallowed this; #3820 swallows it AND counts it — the event
+        # reached no sink at all.
+        return _analytics_sink_dropped("fallback_append_failed")
+    if misconfigured:
+        # #3820 (P1-2): a sink was clearly INTENDED, so this is a degradation
+        # with its own reason code — never `unconfigured`.
+        return _analytics_note_degradation("fallback", "supabase_env_incomplete")
+    return _analytics_note_degradation(
+        "fallback" if configured else "unconfigured")
+
+
+def _analytics_note_success() -> str:
+    """Record a delivered write; resolve an open sink incident. Never raises.
+
+    #3820 (D4): the resolve is what makes the NEXT loss a NEW incident. The
+    AlertStore resolves by delete, so leaving an incident open means every
+    later degradation is absorbed into a stale issue — the silent-loss class,
+    reintroduced through the alert channel. ``AlertStore.resolve_incident``
+    begins with an R2 download, so this is NOT called per event: it runs when
+    the in-process ``_ANALYTICS_INCIDENT_OPEN`` latch says an incident is open,
+    OR once per process (``_ANALYTICS_RESOLVE_PROBED``) — the latch alone
+    cannot survive a restart, and a latch-only resolve left an incident opened
+    by a PREVIOUS process permanently open (cycle-4 P1-1).
+    """
+    global _ANALYTICS_INCIDENT_OPEN, _ANALYTICS_DEGRADED_STREAK
+    global _ANALYTICS_RESOLVE_PROBED
+    with _ANALYTICS_ALERT_LOCK:
+        _ANALYTICS_COUNTS["supabase"] += 1
+        _ANALYTICS_DEGRADED_STREAK = 0
+        # Resolve when this process KNOWS an incident is open, OR once per
+        # process to catch an incident opened before a restart (P1-1): the
+        # latch is process-local, the incident is not.
+        resolve = _ANALYTICS_INCIDENT_OPEN or not _ANALYTICS_RESOLVE_PROBED
+        _ANALYTICS_RESOLVE_PROBED = True
+        if resolve:
+            _ANALYTICS_INCIDENT_OPEN = False
+    _analytics_count_outcome("supabase")
+    if resolve:
+        try:
+            store = _analytics_alert_store()
+            if store is not None:
+                store.resolve_incident(_ANALYTICS_INCIDENT_KIND, "")
+                _logger.info("analytics sink recovered — %s resolved",
+                             _ANALYTICS_INCIDENT_KIND)
+        except Exception as e:  # best-effort, never raises
+            _logger.warning("analytics sink resolve failed: %s", e)
+    return "supabase"
+
+
+def _analytics_sink_dropped(reason: str) -> str:
+    """Count + alert a write that reached NO sink; returns ``"dropped"``.
+
+    #3820: used by both unrecoverable exits (no fallback directory, failed
+    JSONL append) so the reason code, the count and the alert live in one
+    place — the two sites cannot drift apart.
+    """
+    return _analytics_note_degradation("dropped", reason)
+
+
+def _analytics_count_outcome(outcome: str) -> None:
+    """Increment the outcome counter; never raises (#3820 P2-3).
+
+    The counter leg used to sit OUTSIDE every guard in the two note helpers,
+    so a raise from the metrics library would have escaped a function whose
+    stated contract — the reason it exists — is never to raise into the GitHub
+    OAuth callback.
+    """
+    try:
+        record_analytics_outcome(outcome)
+    except Exception as e:
+        _logger.warning("analytics outcome counter failed (%s): %s", outcome, e)
+
+
+def _analytics_note_degradation(outcome: str, reason: str = "") -> str:
+    """Count a degraded analytics write and alert if warranted.
+
+    Returns ``outcome`` unchanged so the write path can
+    ``return _analytics_note_degradation(...)``. Never raises.
+
+    #3820 (D2/P2-1): ``fallback`` needs a STREAK of
+    ``_ANALYTICS_FALLBACK_ALERT_AFTER`` consecutive degraded writes; ``dropped``
+    is unrecoverable and alerts on the first one. ``unconfigured`` never alerts.
+    #3820 (P2-2): the episode latch is set only when the dispatch actually
+    SUCCEEDED — it used to be set before the dispatch, so a raising
+    ``open_incident`` (or an unavailable channel) silenced the whole episode and
+    the store's own retry never got a second call.
+    """
+    global _ANALYTICS_INCIDENT_OPEN, _ANALYTICS_DEGRADED_STREAK
+    with _ANALYTICS_ALERT_LOCK:
+        _ANALYTICS_COUNTS[outcome] += 1
+        if outcome == "unconfigured":
+            # The local JSONL IS the intended sink — never an alert.
+            should_alert = False
+        else:
+            _ANALYTICS_DEGRADED_STREAK += 1
+            if outcome == "dropped":
+                # Unrecoverable: the event is gone. Alert at once, but still
+                # only once per episode.
+                should_alert = not _ANALYTICS_INCIDENT_OPEN
+            else:  # "fallback" — the event is safe on disk; wait for a streak
+                should_alert = (
+                    not _ANALYTICS_INCIDENT_OPEN
+                    and _ANALYTICS_DEGRADED_STREAK
+                    >= _ANALYTICS_FALLBACK_ALERT_AFTER)
+    _analytics_count_outcome(outcome)
+    if should_alert and _analytics_open_incident(outcome, reason):
+        with _ANALYTICS_ALERT_LOCK:
+            _ANALYTICS_INCIDENT_OPEN = True
+    return outcome
+
+
+def _analytics_open_incident(outcome: str, reason: str) -> bool:
+    """Best-effort ``ANALYTICS_SINK_DEGRADED`` incident. Never raises (#3820).
+
+    Returns ``True`` only when the dispatch completed without raising — the
+    caller uses that to latch the episode (P2-2), so a failure leaves the next
+    event free to retry rather than silencing the episode.
+
+    The alert does NOT ride the failing sink (an analytics event filed through
+    ``_track_analytics_event`` would land in the same ephemeral file #3677's
+    2,464 events were found in) — it goes to the AlertStore, which has the
+    properties the signal needs: create-if-not-exists dedup per (kind,
+    subject), ``ops/suppression.json`` to pause a kind, delete-to-resolve, a
+    pending-push retry when Telegram fails, and a GitHub issue the fleet's
+    triage agents can read.
+    """
+    try:
+        # P2-3: inside the guard — building the detail takes the alert lock and
+        # used to run BEFORE the try, outside every guard.
+        detail = _analytics_incident_detail(outcome, reason)
+        store = _analytics_alert_store()
+        if store is None:
+            _logger.warning(
+                "analytics sink degraded (%s%s) — no alert store available "
+                "(no alert credentials, or the object store is unusable); the "
+                "counter tortoise_analytics_events_total is the only signal: "
+                "%s",
+                outcome, f"/{reason}" if reason else "", detail)
+            return False
+        store.open_incident(_ANALYTICS_INCIDENT_KIND, "", detail)
+        _logger.warning("analytics sink degraded (%s%s) — filed %s: %s",
+                        outcome, f"/{reason}" if reason else "",
+                        _ANALYTICS_INCIDENT_KIND, detail)
+        return True
+    except Exception as e:  # the write path must never raise
+        _logger.warning("analytics sink alert failed (%s): %s", outcome, e)
+        return False
+
+
+def _analytics_incident_detail(outcome: str, reason: str) -> dict:
+    """Counts and reason codes ONLY — never event content (#3820 D5).
+
+    The incident body is ``json.dumps(detail)`` rendered into a GitHub issue
+    that fleet agents read (``alert_store._body``). ``_ALLOWED_ANALYTICS_PROPS``
+    contains user-derived keys (``answer``, ``questions``, ``error_type``), so
+    passing the event's properties through would publish user content into an
+    issue and open a prompt-injection channel into the triage agent. Never the
+    URL, the key, the event name, or the properties.
+    """
+    with _ANALYTICS_ALERT_LOCK:
+        # #3820 (cycle-4 P2-2): derived from the declared vocabulary, so the
+        # detail can never drift from `_ANALYTICS_OUTCOMES` (a hand-written key
+        # list raised `KeyError` when the vocabulary grew).
+        return {
+            "outcome": outcome,
+            "reason": reason,
+            **{o: _ANALYTICS_COUNTS[o] for o in _ANALYTICS_OUTCOMES},
+        }
+
+
+def _analytics_alert_store():
+    """The AlertStore for sink incidents, or ``None`` when unavailable.
+
+    #3820: the indirection seam — tests monkeypatch THIS, never
+    ``_alert_store_from``.
+
+    #3820 (D5a): the channel is built from the ALERT credentials, NEVER from
+    the backup-sweep gate. ``_backup_config_safe()`` is ``None`` whenever
+    ``BACKUP_SWEEP_ENABLED`` is false — the default — and building this on it
+    meant an incident was never filed on such a deployment, leaving only an
+    unscraped counter and a log on an ephemeral Fly rootfs: #3677's loss class,
+    re-created through the alert channel. When the sweep is enabled its config
+    is used as-is (same env contract); otherwise, and when it is invalid,
+    ``load_alert_config()`` reads the alert credentials ungated. What remains
+    is the CHANNEL's own construction, not a feature switch: no
+    ``DR_ISSUES_PAT`` means no filer, and an unusable object store (missing or
+    typoed ``R2_*`` — ``_alert_store_from`` builds ``R2Storage``, whose
+    ``__init__`` raises unless all four R2 vars are set) means no dedup seam,
+    so the store cannot be built and the counter + WARNING are the residual.
+    The D6 residue is therefore "no PAT **or** no usable object store" — a real
+    physical limit, not "no PAT" alone.
+
+    Counting must never be conditioned on this returning a store.
+    """
+    try:
+        cfg = _backup_config_safe()
+        if cfg is None:
+            from tortoise.backup_config import load_alert_config
+
+            cfg = load_alert_config()
+        if cfg is None:
+            return None
+        return _alert_store_from(cfg)
+    except Exception as e:  # absence of a channel is not a loss
+        _logger.warning("analytics alert store unavailable: %s", e)
+        return None
 
 
 def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
