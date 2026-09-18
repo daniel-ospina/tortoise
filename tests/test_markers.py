@@ -62,6 +62,10 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
     "test_billing.py": {"registry": "prod-coupled"},
     "test_cli_serve.py": {"registry": "prod-coupled"},
+    # #3825 (base #3665): `_provision` seeds the org's ``:Team``/``created_at``
+    # into the registry store — the column the cohort reader derives the
+    # cohort from. Same prod-coupled registry-resolve class as test_metering.
+    "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_commit_endpoint.py": {"registry": "prod-coupled"},
     "test_dr_endpoints.py": {"registry": "prod-coupled"},
     "test_export_delete.py": {"registry": "prod-coupled"},
@@ -87,6 +91,10 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_mcp_server_auth_modes.py": {"registry": "prod-coupled",
                                      "selfhost": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern; #2657 TestAskConnectedAssemblyExposure auth_mode="none" resolves the canonical selfhost namespace (graph team_selfhost on the env URI)
     "test_metering.py": {"registry": "prod-coupled"},
+    # #3825: the metering-WINDOW tests put a real billing anchor on an org's
+    # ``:Team`` node and drive the ledger through the production writer; the
+    # registry store IS the coupling under test (same class as test_metering).
+    "test_metering_period_window.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},

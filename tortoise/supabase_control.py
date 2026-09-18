@@ -2909,14 +2909,21 @@ def update_org_billing(cp, org_id: str, updates: dict) -> None:
     """PATCH billing state on the orgs row (webhook SET twin).
 
     ``updates`` is a subset of {tier, stripe_customer_id, subscription_id,
-    subscription_status, customer_email, grace_until, current_period_end}
-    — only columns that exist on orgs (0006 + 0012) are written. Raises on
-    failure (fail-closed): a dropped billing write must surface, not
-    silently lose an upgrade/downgrade/cancel.
+    subscription_status, customer_email, grace_until, current_period_end,
+    current_period_start} — only columns that exist on orgs (0006 + 0012 +
+    20260918000001) are written. Raises on failure (fail-closed): a dropped
+    billing write must surface, not silently lose an upgrade/downgrade/cancel.
+
+    ``current_period_start`` (#3825) is the METER WINDOW ANCHOR, and its
+    omission here is SILENT: the ``if k in allowed`` filter below drops the key
+    and the PATCH still succeeds, leaving the column NULL — which the meter
+    resolver then treats as an unresolvable anchor for a subscription org. Any
+    webhook write of a new billing period column MUST be added to ``allowed``
+    in the same change.
     """
     allowed = {"tier", "stripe_customer_id", "subscription_id",
                "subscription_status", "customer_email", "grace_until",
-               "current_period_end",
+               "current_period_end", "current_period_start",
                # quota columns (0006) — apply_limits' Supabase branch writes
                # them; dropping them here would silently keep upgrades at
                # free-tier caps (re-review P1, PR #878)
@@ -2976,31 +2983,79 @@ def org_tier(cp, org_id: str) -> str | None:
 # Metering previously stored MeteringRecord nodes in the registry graph —
 # post-flip that RECREATES the deleted registry on every /v1/team call and
 # every write-op increment. Supabase mode stores rows in metering_records
-# (0014): PK (org_id, period), service-role RLS.
+# (0014): PK (org_id, period_start), service-role RLS.
+#
+# #3825: the row's identity is the START of a half-open metering window
+# ``[period_start, period_end)`` — the subscription's billing period (D10),
+# or the calendar month in UTC when the org has no subscription (D13). The
+# month string ``period`` is still written but is a DERIVED label; filtering
+# on it would be the month-granularity defect this issue removes.
 
 
-def metering_get(cp, org_id: str, period: str) -> int:
-    """Write-ops used by an org in a billing period (0 when absent)."""
+def org_metering_anchor(cp, org_id: str) -> dict:
+    """The org's billing anchor (#3825 / D10): ``subscription_id`` plus the
+    subscription's period start/end.
+
+    Returns ``{}`` when the org row does not exist — an unknown org has no
+    subscription, so metering falls back to the D13 calendar month in UTC.
+    A row that EXISTS but has not been populated by the webhook returns
+    ``None`` values; ``metering._current_period`` distinguishes the two and
+    refuses (raises) for a subscription org whose period is unusable, because
+    the alternative is silently metering a paying org on a month bucket.
+
+    ``current_period_start`` ships in migration 20260918000001. On a lane
+    where the migration has NOT been applied this read 400s and metering fails
+    closed — loudly, and with the cap's own arming already documented as
+    migration-before-config.
+    """
+    rows = cp.query(
+        "organizations",
+        select=["subscription_id", "current_period_start",
+                "current_period_end"],
+        filters=[("id", "eq", org_id)],
+    )
+    if not rows:
+        return {}
+    row = rows[0]
+    return {
+        "subscription_id": row.get("subscription_id"),
+        "current_period_start": row.get("current_period_start"),
+        "current_period_end": row.get("current_period_end"),
+    }
+
+
+def metering_get(cp, org_id: str, period_start: str) -> int:
+    """Write-ops used by an org in the window STARTING at *period_start*
+    (0 when absent).
+
+    #3825: the ledger key is ``(org_id, period_start)`` — the window start,
+    not a month label. Equality on the start is exact: one org has at most one
+    row per start, and a renewal mints a new start, so the prior row is never
+    overwritten. Filtering on ``period`` (the derived label) is NOT equivalent
+    — two billing periods of one org can share a month label.
+    """
     rows = cp.query(
         "metering_records",
         select=["write_ops"],
-        filters=[("org_id", "eq", org_id), ("period", "eq", period)],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
     )
     return int(rows[0]["write_ops"]) if rows else 0
 
 
-def metering_increment(cp, org_id: str, period: str, n: int = 1,
-                      nodes_written: int = 0) -> int:
-    """Increment the org's write-op counter for the period; returns the new
-    count. ATOMIC (review P2, PR #911): delegates to the metering_increment
-    SQL RPC (0014/0017) — write_ops = write_ops + n under Postgres row locking —
-    so concurrent increments can never undercount (a GET-then-PATCH would
-    lose updates). Best-effort by contract (metering failures never block a
-    write): the caller swallows exceptions.
+def metering_increment(cp, org_id: str, period_start: str, period_end: str,
+                      n: int = 1, nodes_written: int = 0) -> int:
+    """Increment the org's write-op counter for the window
+    ``[period_start, period_end)``; returns the new count. ATOMIC (review P2,
+    PR #911): delegates to the ``metering_increment`` SQL RPC — write_ops =
+    write_ops + n under Postgres row locking — so concurrent increments can
+    never undercount (a GET-then-PATCH would lose updates). Best-effort by
+    contract (metering failures never block a write): the caller swallows
+    exceptions.
 
-    nodes_written: net-new non-episodic nodes for the period (the value-first
-    commit cost driver, epic #909 §4.4/W-4 — 0 on hold commits). The 0017
-    RPC increments both columns atomically under the same row lock.
+    nodes_written: net-new non-episodic nodes for the window (the value-first
+    commit cost driver, epic #909 §4.4/W-4 — 0 on hold commits). The RPC
+    increments both columns atomically under the same row lock.
 
     #925: the read-back is the only best-effort step. The RPC call itself
     still raises when it fails — though if the response is lost the write
@@ -3014,35 +3069,41 @@ def metering_increment(cp, org_id: str, period: str, n: int = 1,
     """
     cp.rpc(
         "metering_increment",
-        {"p_org_id": org_id, "p_period": period, "p_n": n,
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_n": n,
          "p_nodes_written": nodes_written},
     )
     # PostgREST does not echo SECURITY DEFINER RPC results with
     # return=minimal — read back the atomic new value. The RPC above already
     # committed; if this read-back fails, fall back to the known delta (#925).
     try:
-        return metering_get(cp, org_id, period)
+        return metering_get(cp, org_id, period_start)
     except Exception:
         _logger.warning(
             "metering read-back failed after committed increment "
-            "(non-fatal): team=%s period=%s n=%s", org_id, period, n,
+            "(non-fatal): team=%s period_start=%s n=%s",
+            org_id, period_start, n,
         )
         return n
 
 
-def metering_get_usage(cp, org_id: str, period: str) -> dict:
-    """Ask usage for an org/period from the metering_records row (#1987 Task
+def metering_get_usage(cp, org_id: str, period_start: str) -> dict:
+    """Ask usage for an org's window STARTING at *period_start* (#1987 Task
     6) — the supabase-mode READ path for ``get_ask_usage``. Returns the
     ask_* columns as a dict (all ZEROS when the row is absent — the MERGE
     only creates the record on the first write). Deliberately SEPARATE from
     ``metering_get`` (which stays int-returning write_ops — its int
     consumers: metering.py arithmetic, the metering_increment read-back, and
-    test_supabase_control.py == 0/3 must not break)."""
+    test_supabase_control.py == 0/3 must not break).
+
+    #3825: keyed on ``period_start``, not the derived month label.
+    """
     rows = cp.query(
         "metering_records",
         select=["ask_calls", "ask_tokens_in", "ask_tokens_out",
                 "ask_cost_usd"],
-        filters=[("org_id", "eq", org_id), ("period", "eq", period)],
+        filters=[("org_id", "eq", org_id),
+                 ("period_start", "eq", period_start)],
     )
     if not rows:
         return {"ask_calls": 0, "ask_tokens_in": 0, "ask_tokens_out": 0,
@@ -3056,55 +3117,80 @@ def metering_get_usage(cp, org_id: str, period: str) -> dict:
     }
 
 
-def metering_increment_ask(cp, org_id: str, period: str, *, calls: int = 1,
+def metering_increment_ask(cp, org_id: str, period_start: str,
+                           period_end: str, *, calls: int = 1,
                            tokens_in: int = 0, tokens_out: int = 0,
                            cost_usd: float = 0.0) -> None:
-    """Increment the org's ask-usage counters for the period (#1987 Task 6)
-    via the ``metering_increment_ask`` SQL RPC (20260829000001) — the
+    """Increment the org's ask-usage counters for the window
+    ``[period_start, period_end)`` (#1987 Task 6) via the
+    ``metering_increment_ask`` SQL RPC (20260918000001 re-issues it) — the
     ask-side mirror of ``metering_increment`` (atomic under Postgres row
-    locking; best-effort by contract — the caller swallows exceptions)."""
+    locking; best-effort by contract — the caller swallows exceptions).
+
+    #3825: the window, not a month label, is the row key.
+    """
     cp.rpc(
         "metering_increment_ask",
-        {"p_org_id": org_id, "p_period": period, "p_calls": calls,
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_calls": calls,
          "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
          "p_cost_usd": cost_usd},
     )
 
 
-def metering_increment_capture_cost(cp, org_id: str, period: str, *,
+def metering_increment_capture_cost(cp, org_id: str, period_start: str,
+                                    period_end: str, *,
                                     calls: int = 0,
                                     cost_usd: float = 0.0) -> None:
-    """Increment the org's MEASURED capture-extraction cost for the period
-    (#3665) via the ``metering_increment_capture_cost`` SQL RPC
-    (20260917000001) — the capture-side mirror of ``metering_increment_ask``
-    (atomic under Postgres row locking; best-effort by contract — the caller
-    swallows exceptions)."""
+    """Increment the org's MEASURED capture-extraction cost for the window
+    ``[period_start, period_end)`` (#3665) via the
+    ``metering_increment_capture_cost`` SQL RPC (20260918000001 re-issues it)
+    — the capture-side mirror of ``metering_increment_ask`` (atomic under
+    Postgres row locking; best-effort by contract — the caller swallows
+    exceptions).
+
+    #3825: the window, not a month label, is the row key. NOTE the RPC is
+    DROPPED and recreated by 20260918000001 rather than replaced in place:
+    a new argument list would otherwise be an OVERLOAD, leaving the old
+    month-keyed function callable — the silent second path #3825 removes.
+    """
     cp.rpc(
         "metering_increment_capture_cost",
-        {"p_org_id": org_id, "p_period": period, "p_calls": calls,
+        {"p_org_id": org_id, "p_period_start": period_start,
+         "p_period_end": period_end, "p_calls": calls,
          "p_cost_usd": cost_usd},
     )
 
 
-def metering_cohort_spend(cp, org_ids: list[str], period: str) -> float:
-    """Measured LLM spend for a COHORT over one billing period (#3665).
+def metering_cohort_spend(cp, org_ids: list[str], period_start: str,
+                          period_end: str) -> float:
+    """Measured LLM spend for a COHORT over one metering WINDOW
+    (#3665/#3825).
 
     Aggregates ``SUM(ask_cost_usd + capture_cost_usd)`` over the cohort's
-    ``metering_records`` rows for the period **server-side**, in the
-    ``metering_cohort_spend`` SQL function (20260917000001).
+    ``metering_records`` rows for the window **server-side**, in the
+    ``metering_cohort_spend`` SQL function (20260918000001).
 
     WHY AN RPC RATHER THAN A FILTERED ROW READ (code-review cycle 1, P1):
     PostgREST silently caps a row LIST at the project's ``db-max-rows``, and a
     silently short read UNDERSTATES spend — a fail-open on a spend ceiling.
     The row count cannot detect it (a short read returns FEWER rows; the
-    (org_id, period) PK makes an over-return impossible, so the earlier
-    "more rows than the cohort has orgs" guard was unreachable dead code).
-    The function returns ONE scalar, so no row cap can apply.
+    ``(org_id, period_start)`` PK makes an over-return impossible, so the
+    earlier "more rows than the cohort has orgs" guard was unreachable dead
+    code). The function returns ONE scalar, so no row cap can apply.
 
-    One row per ORG, never one per capture: the aggregate is bounded by the
-    cohort size, not by capture volume — which is why the cap can afford this
-    read on every admission (#3665 trade-off 2, decided: no cache, no
-    weakened bound).
+    WHY A WINDOW RATHER THAN ``period = p_period`` (#3825): the month-equality
+    read #3780 shipped filters on the DERIVED label, so two billing periods of
+    one org that share a month label collapse into one bucket and a period
+    that starts mid-month is matched by a label rather than by its bounds. The
+    SQL applies an OVERLAP test (``period_start < end AND period_end > start``)
+    so a straddling row is counted; the alternative (rows whose start falls
+    inside the window) UNDER-reads and is therefore fail-OPEN on a ceiling.
+
+    One row per ORG per window, never one per capture: the aggregate is
+    bounded by the cohort size, not by capture volume — which is why the cap
+    can afford this read on every admission (#3665 trade-off 2, decided: no
+    cache, no weakened bound).
 
     FAIL-CLOSED: a failure raises (``RuntimeError`` from ``rpc``), never a
     partial or zero sum. A non-finite aggregate raises too — a poisoned SUM
@@ -3114,7 +3200,9 @@ def metering_cohort_spend(cp, org_ids: list[str], period: str) -> float:
     if not wanted:
         return 0.0
     value = cp.rpc_value("metering_cohort_spend",
-                         {"p_org_ids": wanted, "p_period": period})
+                         {"p_org_ids": wanted,
+                          "p_period_start": period_start,
+                          "p_period_end": period_end})
     total = float(value or 0.0)
     if not math.isfinite(total):
         raise RuntimeError(

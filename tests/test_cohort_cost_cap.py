@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests._http_fixtures import patched_tortoise_sdk
+from tests.fake_control_plane import _as_dt
 from tortoise import cohort_cost as _cc
 from tortoise import hosted_api as _ha
 from tortoise.alert_store import AlertStore
@@ -31,6 +32,12 @@ from tortoise.hosted_api import app, get_current_org
 from tortoise.hosted_backup import MemoryStorage
 
 CAP_USD = 5.0
+#: #3825: the metering WINDOW the seam-level tests below supply explicitly. The
+#: cohort fixture's orgs carry no ``subscription_id``, so the real resolver
+#: returns the calendar month in UTC (D13) — the behavioural tests further down
+#: use that real path (``metering._current_period``); these stub-plane tests
+#: pass the window in, because what they exercise is the SQL contract.
+WINDOW = ("2026-09-01T00:00:00+00:00", "2026-10-01T00:00:00+00:00")
 # A ONE-SECOND cohort window. The suite may share a FalkorDB server across
 # runs, so the cohort must be resolvable to exactly the orgs this test
 # provisions: a wide window would pull in every other org that carries a
@@ -378,17 +385,21 @@ def test_capture_ledger_write_is_what_the_cohort_spend_reader_reads(
     GREEN legitimate form: a real 200 capture through the cost-reporting
     extractor stub, then the real reader over the real ledger row."""
     from tortoise import sdk as sdk_mod
-    from tortoise.metering import get_cohort_spend_usd
+    from tortoise.metering import _current_period, get_cohort_spend_usd
 
     monkeypatch.setattr(sdk_mod, "_V2SessionMock", _CostModel)
 
-    before = get_cohort_spend_usd([COHORT_ORG])
+    # #3825: the window is the org's own (no subscription → D13 calendar month
+    # in UTC). Resolved once and reused, so the before/after pair reads the
+    # same window the capture lane writes to.
+    window = _current_period(COHORT_ORG)
+    before = get_cohort_spend_usd([COHORT_ORG], window)
     r = capture_env.client.post(
         "/v1/sessions",
         json={"conversation": _CONV, "harness": "claude",
               "session_id": "sess-3665-ledger"})
     assert r.status_code == 200, r.text
-    after = get_cohort_spend_usd([COHORT_ORG])
+    after = get_cohort_spend_usd([COHORT_ORG], window)
 
     assert after > before, (
         f"a real capture must grow the cohort's ledger spend ({before} → {after})")
@@ -446,13 +457,24 @@ class _StubPlane:
         self.rpcs.append((fn, dict(body or {})))
         p = body or {}
         if fn == "metering_cohort_spend":
+            # #3825: the SQL is a HALF-OPEN OVERLAP test over the window, not a
+            # ``period = p_period`` month equality. Mirror it exactly, or a
+            # boundary regression would pass against this double.
             wanted = {str(i) for i in (p.get("p_org_ids") or [])}
-            return sum(
-                float(r.get("ask_cost_usd") or 0.0)
-                + float(r.get("capture_cost_usd") or 0.0)
-                for r in self.ledger
-                if str(r.get("org_id")) in wanted
-                and r.get("period") == p.get("p_period"))
+            start = _as_dt(p.get("p_period_start"))
+            end = _as_dt(p.get("p_period_end"))
+            total = 0.0
+            for r in self.ledger:
+                if str(r.get("org_id")) not in wanted:
+                    continue
+                r_start = _as_dt(r.get("period_start"))
+                r_end = _as_dt(r.get("period_end"))
+                if r_start is None or r_end is None:
+                    continue
+                if r_start < end and r_end > start:
+                    total += float(r.get("ask_cost_usd") or 0.0)
+                    total += float(r.get("capture_cost_usd") or 0.0)
+            return total
         if fn == "cohort_org_ids_since":
             since = str(p.get("p_since") or "")
             limit = int(p.get("p_limit") or 0)
@@ -477,17 +499,20 @@ def test_supabase_cohort_reader_sums_both_lanes_over_the_cohort_via_rpc():
     from tortoise.supabase_control import metering_cohort_spend
 
     plane = _StubPlane(ledger=[
-        {"org_id": "cohort-a", "period": "2026-09", "ask_cost_usd": 0.10,
+        {"org_id": "cohort-a", "period_start": WINDOW[0],
+         "period_end": WINDOW[1], "ask_cost_usd": 0.10,
          "capture_cost_usd": 0.15},
-        {"org_id": "not-in-cohort", "period": "2026-09",
-         "ask_cost_usd": 0.50, "capture_cost_usd": 0.50},
+        {"org_id": "not-in-cohort", "period_start": WINDOW[0],
+         "period_end": WINDOW[1], "ask_cost_usd": 0.50,
+         "capture_cost_usd": 0.50},
     ])
 
-    total = metering_cohort_spend(plane, ["cohort-a"], "2026-09")
+    total = metering_cohort_spend(plane, ["cohort-a"], *WINDOW)
 
     assert total == pytest.approx(0.25), total
     assert plane.rpcs == [("metering_cohort_spend", {
-        "p_org_ids": ["cohort-a"], "p_period": "2026-09"})], plane.rpcs
+        "p_org_ids": ["cohort-a"], "p_period_start": WINDOW[0],
+        "p_period_end": WINDOW[1]})], plane.rpcs
     assert plane.queries == [], (
         "a filtered row read can be silently truncated by db-max-rows and "
         "read as a cheaper cohort — the total must come from the aggregate")
@@ -510,7 +535,7 @@ def test_supabase_cohort_reader_fails_closed_when_the_aggregate_is_unreachable()
             raise RuntimeError("Supabase unreachable (simulated)")
 
     with pytest.raises(RuntimeError, match="unreachable"):
-        metering_cohort_spend(_Broken(), ["cohort-a"], "2026-09")
+        metering_cohort_spend(_Broken(), ["cohort-a"], *WINDOW)
 
 
 def test_supabase_cohort_reader_rejects_a_non_finite_aggregate():
@@ -528,7 +553,7 @@ def test_supabase_cohort_reader_rejects_a_non_finite_aggregate():
             return float("inf")
 
     with pytest.raises(RuntimeError, match="not finite"):
-        metering_cohort_spend(_Poisoned(), ["cohort-a"], "2026-09")
+        metering_cohort_spend(_Poisoned(), ["cohort-a"], *WINDOW)
 
 
 def test_supabase_capture_increment_calls_the_atomic_rpc_with_the_measurement():
@@ -542,11 +567,12 @@ def test_supabase_capture_increment_calls_the_atomic_rpc_with_the_measurement():
     from tortoise.supabase_control import metering_increment_capture_cost
 
     plane = _StubPlane()
-    metering_increment_capture_cost(plane, "cohort-a", "2026-09",
+    metering_increment_capture_cost(plane, "cohort-a", *WINDOW,
                                     calls=1, cost_usd=0.004321)
 
     assert plane.rpcs == [("metering_increment_capture_cost", {
-        "p_org_id": "cohort-a", "p_period": "2026-09", "p_calls": 1,
+        "p_org_id": "cohort-a", "p_period_start": WINDOW[0],
+        "p_period_end": WINDOW[1], "p_calls": 1,
         "p_cost_usd": 0.004321})], plane.rpcs
     assert plane.queries == [], (
         "the ledger write must be the atomic RPC, never a read-modify-write")
@@ -651,6 +677,7 @@ def test_selfhost_transport_exemption_survives_the_to_thread_dispatch(
 
     GREEN legitimate form: the transport ContextVar set in the caller."""
     import asyncio
+    from datetime import datetime
 
     import tortoise.metering as _metering
     from tortoise.cohort_cost import enforce_cohort_cost_cap
@@ -659,6 +686,15 @@ def test_selfhost_transport_exemption_survives_the_to_thread_dispatch(
     monkeypatch.setattr(_cc, "cohort_org_ids", lambda since: ["in-cohort"])
     monkeypatch.setattr(_metering, "get_cohort_spend_usd",
                         lambda ids, period: 999.0)
+    # #3825: the gate resolves the REQUESTING org's metering window before it
+    # reads the ledger (a registry read in the embedded lane). Stub it — this
+    # test is about the ContextVar surviving the ``to_thread`` dispatch, not
+    # about anchor resolution.
+    monkeypatch.setattr(
+        _metering, "_current_period",
+        lambda org_id: _metering.MeteringPeriod(
+            start=datetime.fromisoformat("2026-09-01T00:00:00+00:00"),
+            end=datetime.fromisoformat("2026-10-01T00:00:00+00:00")))
 
     async def _run():
         tok = _selfhost_transport.set(True)
@@ -694,11 +730,15 @@ def test_non_finite_capture_cost_never_poisons_the_cohort_sum(
     (the non-finite charge would be written through to the ledger row).
 
     GREEN legitimate form: a finite charge is recorded verbatim."""
-    from tortoise.metering import get_cohort_spend_usd, record_capture_usage
+    from tortoise.metering import _current_period, get_cohort_spend_usd, record_capture_usage
 
     with patched_tortoise_sdk(str(tmp_path / "nonfinite.db")):
         assert record_capture_usage("org-3665-finite", cost_usd=float("nan"))
         assert record_capture_usage("org-3665-finite", cost_usd=float("inf"))
         assert record_capture_usage("org-3665-finite", cost_usd=2.5)
 
-        assert get_cohort_spend_usd(["org-3665-finite"]) == pytest.approx(2.5)
+        # #3825: the reader takes a WINDOW. The org has no subscription (an
+        # unknown registry org → D13 calendar month in UTC).
+        window = _current_period("org-3665-finite")
+        assert get_cohort_spend_usd(["org-3665-finite"], window) == \
+            pytest.approx(2.5)

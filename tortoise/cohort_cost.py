@@ -48,12 +48,23 @@ idiom the existing signup rate limiter uses
 
 WHAT IT READS — AND WHAT IT HONESTLY DOES NOT BOUND
 ---------------------------------------------------
-The ledger is ``metering_records`` (PK ``(org_id, period)``): the ask lane's
-``ask_cost_usd`` (#1987) plus the capture lane's ``capture_cost_usd``
-(measured by #3359, put on the ledger by migration 20260917000001). The
-aggregate is one row per org per month, not one per capture — which is why
-this read can run on every admission without a cache (a cache would weaken
-the bound by its TTL; #3665 trade-off 2, decided explicitly).
+The ledger is ``metering_records`` (PK ``(org_id, period_start)``): the ask
+lane's ``ask_cost_usd`` (#1987) plus the capture lane's ``capture_cost_usd``
+(measured by #3359, put on the ledger by migration 20260917000001, re-keyed to
+the period window by 20260918000001). The aggregate is one row per org per
+metered window, not one per capture — which is why this read can run on every
+admission without a cache (a cache would weaken the bound by its TTL; #3665
+trade-off 2, decided explicitly).
+
+**The window is the REQUESTING org's metering window** (#3825 / D10): the
+subscription's own billing period, or — for an org with no subscription — the
+calendar month in UTC (D13). A cohort is a set of orgs whose subscriptions may
+carry DIFFERENT anchors, so "the cohort's spend this window" is only
+well-defined per ledger row; the reader therefore applies an OVERLAP test and
+an overlapping row is counted in full. Over-reading can only fire the ceiling
+EARLIER; the alternative (rows that START inside the window) under-reads every
+org whose period began earlier, and on a spend ceiling an under-read is
+fail-OPEN.
 
 **This bounds REQUESTS, not dollars.** A pre-spend check reads spend *already
 recorded*; captures already in flight can still spend after they passed the
@@ -90,7 +101,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime
 
 from tortoise.quota import QuotaCheckError, QuotaExceededError
 
@@ -215,19 +226,20 @@ def _normalise_since(raw: str) -> str:
     return parsed.astimezone(UTC).isoformat()
 
 
-def current_period() -> str:
-    """The billing period as ``"YYYY-MM"`` (UTC) — the ledger's row key."""
-    now = datetime.now(timezone.utc)  # noqa: UP017
-    return f"{now.year}-{now.month:02d}"
-
-
-def next_period_start_iso() -> str:
-    """First instant of the next period — the cap's reset instant, surfaced in
-    the refusal message so the refusal is actionable."""
-    now = datetime.now(timezone.utc)  # noqa: UP017
-    first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    nxt = (first + timedelta(days=32)).replace(day=1)
-    return nxt.isoformat()
+# ``current_period()`` USED TO LIVE HERE — a SECOND, independent calendar-month
+# implementation, duplicating ``metering._current_period``. It was the THIRD
+# month producer in the codebase (after ``metering``'s own resolver and #3780's
+# capture lane), and #3825/D14 requires it to carry the window migration rather
+# than survive it. It is now DELETED, not re-pointed: two producers of the
+# ledger's row key can disagree, and when they do the cap sums a window nobody
+# wrote to and reads the cohort as FREE — the false PASS this lane exists to
+# prevent. The ONE producer is ``metering._current_period(org_id)``, which
+# resolves the subscription anchor (D10) and falls back to the calendar month
+# in UTC only when there is no subscription at all (D13).
+#
+# ``next_period_start_iso()`` was deleted with it: the reset instant is the
+# resolved window's OWN ``end`` — a month boundary is not where a subscription
+# period ends.
 
 
 def cohort_org_ids(since: str) -> list[str]:
@@ -351,8 +363,13 @@ def enforce_cohort_cost_cap(org: dict | None, *,
     if str(org_id) not in ids:
         return  # not in the cohort — the cap never reaches outside it
 
-    from tortoise.metering import get_cohort_spend_usd
-    period = current_period()
+    from tortoise.metering import _current_period, get_cohort_spend_usd
+    # The window is the REQUESTING org's metering window (D10: the
+    # subscription's own billing period; D13: the calendar month in UTC when it
+    # has no subscription). ``_current_period`` RAISES QuotaCheckError for a
+    # subscription org whose anchor is unusable — fail-closed, never a silent
+    # calendar month (a month-keyed row is a row the window read never sees).
+    period = _current_period(org_id)
     spent = get_cohort_spend_usd(ids, period)
     if spent >= resolved.cap_usd:
         # The client-visible message carries NO cohort-wide figure
@@ -366,15 +383,17 @@ def enforce_cohort_cost_cap(org: dict | None, *,
         raise CohortCostCapExceeded(
             f"Cohort LLM spend cap reached for this billing period. This "
             f"request started no extraction and wrote no capture data — "
-            f"re-POST the same session after {next_period_start_iso()} "
-            f"(period {period}) and it will extract normally. Contact us if "
+            f"re-POST the same session after {period.end_iso} "
+            f"and it will extract normally. Contact us if "
             f"you need the cap raised.",
             detail={
                 "cohort_since": resolved.since,
                 "cohort_size": len(ids),
                 "cap_usd": resolved.cap_usd,
                 "spent_usd": round(spent, 6),
-                "period": period,
+                "period": period.label,
+                "period_start": period.start_iso,
+                "period_end": period.end_iso,
                 "org_id": str(org_id),
             },
         )
