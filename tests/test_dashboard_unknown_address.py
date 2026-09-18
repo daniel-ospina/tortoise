@@ -66,6 +66,14 @@ URL_ATTRS = frozenset({
     "xlink:href",
 })
 
+# The URL standard strips LEADING/TRAILING C0 control or space (and tab, LF and
+# CR anywhere) before a URL's scheme is read, so `\x01javascript:…` IS
+# `javascript:…`. Python's str.strip() removes only a subset — `\x01`–`\x08`
+# survived the first version of this check and Chromium executed the payload on
+# a click (#4006 review, cycle 7).
+_URL_SPLIT_CHARS = re.compile(r"[\t\n\r]")
+_URL_EDGE_STRIP = "".join(chr(code) for code in range(0x21)) + "\x7f"
+
 
 def _rules() -> list[tuple[str, str, int]]:
     """Parse `[source] [destination] [code]` lines, ignoring comments."""
@@ -202,9 +210,11 @@ def test_top_level_404_html_exists() -> None:
     doc = _NotFoundDoc()
     doc.feed(body)
     assert not doc.meta_http_equiv, (
-        "404.html carries a meta http-equiv — the only reason a not-found page "
-        "needs one in this deployment is a refresh/redirect, which discards the "
-        f"requested address instead of reporting it (#4006 review): {doc.meta_http_equiv!r}"
+        "404.html carries a meta http-equiv. A not-found page has no use for one "
+        "here — security headers are set at the edge (public/_headers) — and the "
+        "one http-equiv that DOES belong to a page like this is a refresh, which "
+        "redirects and discards the address that was not found "
+        f"(#4006 review): {doc.meta_http_equiv!r}"
     )
     assert not doc.bases, (
         "404.html carries a <base> — it re-points the page's own links (here, "
@@ -231,9 +241,11 @@ def test_top_level_404_html_exists() -> None:
     unsafe_urls = [
         (tag, attr, value)
         for tag, attr, value in doc.url_attrs
-        # Normalize as the URL parser does BEFORE reading the scheme: tab,
-        # newline and CR are stripped, so `java\tscript:…` is `javascript:…`.
-        if re.sub(r"[\t\n\r\x00]", "", value).strip().lower().startswith(
+        # Normalize exactly as the URL parser does before reading the scheme:
+        # tab/LF/CR are removed anywhere and C0-control/space/DEL are stripped
+        # from the ends, so `java\tscript:…` and `\x01javascript:…` both resolve
+        # to the scripting scheme (#4006 review, cycles 6-7).
+        if _URL_SPLIT_CHARS.sub("", value).strip(_URL_EDGE_STRIP).lower().startswith(
             ("javascript:", "vbscript:")
         )
     ]
@@ -264,12 +276,24 @@ def test_top_level_404_html_exists() -> None:
         "element open in the browser past the point this parser closes it "
         f"(#4006 review): {joined.strip()!r}"
     )
+    # ASCII ONLY in the code (see below).
     # The page's scripting surface is EXACTLY one reviewed, read-only snippet
     # (it names the requested address so the visitor can see what was not
     # found). Comments and whitespace are ignored; ANY other change fails, which
     # is what closes the families that carry no `location` token to match.
-    compact = re.sub(r"//[^\n]*", "", joined)
+    # Comment stripping ends at EVERY JS line terminator, not just `\n`.
+    compact = re.sub(r"//[^\n\u2028\u2029]*", "", joined)
     compact = re.sub(r"\s+", "", compact)
+    # The CODE (comments excluded — they may carry typographic punctuation, as
+    # this page's own comment does) must be pure ASCII. That removes the whole
+    # lexer-vs-browser disagreement family by construction: U+2028/U+2029 end a
+    # `//` comment in the browser but not in a regex, so logic hidden after one
+    # used to ride the pin (#4006 review, cycle 7).
+    assert compact.isascii(), (
+        "404.html's script CODE contains non-ASCII characters, which the JS "
+        "lexer and this guard can disagree about (U+2028/U+2029 end a `//` "
+        f"comment): {compact!r} (#4006 review)"
+    )
     assert compact == REVIEWED_404_SCRIPT, (
         "404.html's script is not the reviewed read-only snippet — a not-found "
         "page needs no other script, and anything else it can do is navigate "
