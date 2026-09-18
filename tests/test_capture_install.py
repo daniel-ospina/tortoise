@@ -515,17 +515,27 @@ def test_claude_install_fails_loudly_when_a_shipped_hook_is_missing(tmp_path, mo
 
 def test_claude_install_turns_a_write_time_oserror_into_a_populated_error(
         tmp_path, monkeypatch):
-    """A write that fails at ``os.replace`` (an immutable target —
-    ``chflags uchg``, ``EROFS``/``ENOSPC``/``EDQUOT``) must come back as a
-    populated error, not a traceback — the pre-flight only proves the
-    DIRECTORY is writable, never that the file can be replaced.
+    """The DANGEROUS ordering: the hook scripts land, then the
+    ``settings.json`` write fails at ``os.replace`` (an immutable target —
+    ``chflags uchg``, ``EROFS``/``ENOSPC``/``EDQUOT``).  The script half is on
+    disk by then, so a swallowed error would leave the project HALF-INSTALLED
+    with no registration and no signal; the call must instead come back as a
+    populated error naming the half-install.
 
-    Mutation: remove the ``except OSError`` boundary in
-    ``capture_install.install_capture`` — the ``PermissionError`` escapes
-    ``_atomic_bytes``, the CLI prints a traceback, and the caller sees NO
-    ``InstallResult.error`` even though the hook scripts were half-installed."""
+    Mutation: wrap the settings write in a bare ``except OSError: pass`` (or
+    return the success ``InstallResult``) — the call returns ``ok=True`` and
+    the half-install is silent, so ``not res.ok`` / ``NOT fully installed``
+    RED while the script half is already on disk."""
+    settings_path = tmp_path / ".claude" / "settings.json"
+    real_replace = capture_install.os.replace
+
     def boom(src, dst, *args, **kwargs):
-        raise PermissionError(1, "Operation not permitted", str(dst))
+        # Fail ONLY the settings write — the scripts must land first, so the
+        # test exercises the half-install ordering rather than a first-write
+        # failure that never reaches the dangerous state.
+        if Path(dst) == settings_path:
+            raise PermissionError(1, "Operation not permitted", str(dst))
+        return real_replace(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(capture_install.os, "replace", boom)
 
@@ -535,9 +545,15 @@ def test_claude_install_turns_a_write_time_oserror_into_a_populated_error(
     assert "write failed" in res.error, res.error
     assert "PermissionError" in res.error, res.error
     assert "NOT fully installed" in res.error, res.error
-    # No registration is written through a failed script write — the user is
-    # told to fix the path rather than left with a hook-less settings entry.
-    assert not (tmp_path / ".claude" / "settings.json").exists()
+    # The dangerous half is REAL: both scripts were written and chmodded
+    # before the settings write failed — the error is the ONLY thing telling
+    # the user the seam is incomplete.
+    for name in ("session-start.sh", "session-end.sh"):
+        script = tmp_path / ".claude" / "hooks" / name
+        assert script.is_file(), f"{name} was not written before the failure"
+        assert script.stat().st_mode & 0o111, f"{name} is not executable"
+    # The registration write failed, so no settings.json was left behind.
+    assert not settings_path.exists()
 
 
 def test_claude_write_failure_is_loud_at_the_cli_seam(tmp_path, monkeypatch, capsys):
@@ -787,6 +803,31 @@ def test_cli_install_pi_dry_run_does_not_claim_installed(cli):
         "a dry run wrote the extension")
 
 
+def test_cli_install_claude_dry_run_writes_nothing(cli):
+    """`install claude --dry-run` must report what WOULD happen and write
+    nothing — neither the hook scripts nor the merged ``settings.json``.
+
+    Mutation: make ``_install_claude`` ignore ``dry_run`` (it writes the two
+    scripts and the settings merge before printing) — the on-disk assertions
+    below turn RED."""
+    run, root, _home = cli
+
+    r = run("install", "claude", "--dir", str(root), "--dry-run")
+
+    assert r.returncode == 0, r.stderr
+    # Nothing was written — not even the hooks directory. This is the primary
+    # signal: a dry run that touched disk is the false-success shape.
+    assert not (root / ".claude").exists(), "a dry run created .claude/"
+    assert not (root / ".claude" / "hooks" / "session-start.sh").exists()
+    assert not (root / ".claude" / "hooks" / "session-end.sh").exists()
+    assert not (root / ".claude" / "settings.json").exists()
+    # ...and it must still SAY what it would do, in dry-run voice.
+    assert "[dry-run]" in r.stdout
+    assert "would install" in r.stdout, r.stdout
+    assert "would merge SessionStart + SessionEnd capture hooks" in r.stdout, (
+        r.stdout)
+
+
 def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
     """`pi` has no read hook — `--uninstall` must not fall through to the
     cline target and rewrite `.cline/hooks/UserPromptSubmit`.
@@ -861,56 +902,55 @@ def test_classifier_parity_with_hook_install(tmp_path):
             f"capture_install={ours}, hook_install={theirs}")
 
 
-def test_entry_command_shape_parity_with_hook_install(tmp_path):
-    """``capture_install._our_command_dicts`` and
-    ``hook_install._entry_command_dicts`` return the SAME dicts for every
-    entry SHAPE — the installer delegates, so the shape gate cannot diverge
-    either.
+def test_entry_shape_gate_reads_only_nested_typed_command_handlers(tmp_path):
+    """The installer's entry reader accepts ONLY the shape Claude Code
+    actually executes — a matcher entry whose ``hooks`` ARRAY holds typed
+    ``{"type": "command", "command": …}`` dicts.
 
-    Mutation: reintroduce the hand-mirrored copy in ``capture_install`` — the
-    flat-event-level and missing-``type`` cases below then disagree with
-    ``hook_install`` (and the installer "repairs" a hook Claude Code never
-    runs).
-    """
+    Everything the harness silently IGNORES (a flat ``{type, command}`` at the
+    event level, a handler missing its ``type``, a non-string command, a
+    non-array ``hooks``) must NOT be read as an existing registration — the
+    installer would otherwise "repair" an entry Claude Code never runs and
+    leave the project capturing nothing while reporting success (#3866).
+
+    Mutation: make ``hook_install._entry_command_dicts`` (which
+    ``capture_install._our_command_dicts`` delegates to) return a flat
+    event-level entry as ours — ``return [entry]`` instead of ``[]`` — and the
+    flat case REDs; make ``_ok`` stop checking ``item.get("type")`` and the
+    untyped case REDs."""
+    hooks_dir = ".claude/hooks"
     ours = {"type": "command", "command": ".claude/hooks/session-end.sh",
             "timeout": 60}
-    foreign = {"type": "command", "command": "vendor/.claude/hooks/session-end.sh"}
-    entries = [
-        None,
-        "session-end.sh",
-        [],
-        {"matcher": "", "hooks": [dict(ours)]},
-        {"matcher": "", "hooks": [dict(ours), dict(ours)]},
-        {"matcher": "", "hooks": [dict(foreign), dict(ours)]},
-        # A flat ``{type, command}`` at the EVENT level: ignored by Claude Code.
-        {"type": "command", "command": ".claude/hooks/session-end.sh"},
-        # A handler missing its ``type``.
-        {"matcher": "", "hooks": [{"command": ".claude/hooks/session-end.sh"}]},
-        # A non-string command.
-        {"matcher": "", "hooks": [{"type": "command", "command": 5}]},
-        # ``hooks`` is not an array.
-        {"hooks": {"type": "command", "command": ".claude/hooks/session-end.sh"}},
-        # A foreign path at the same basename.
-        {"matcher": "", "hooks": [dict(foreign)]},
-    ]
-    for entry in entries:
-        got = capture_install._our_command_dicts(
-            entry, "session-end.sh", ".claude/hooks", tmp_path)
-        want = hook_install._entry_command_dicts(
-            entry, "session-end.sh", ".claude/hooks", tmp_path)
-        assert got == want, (
-            f"entry-shape divergence on {entry!r}: "
-            f"capture_install={got}, hook_install={want}")
+    foreign = {"type": "command",
+               "command": "vendor/.claude/hooks/session-end.sh"}
 
-    # The installer must never read a flat event-level entry as a registration
-    # (the harness ignores it) — pinned here independently of hook_install.
-    flat = {"type": "command", "command": ".claude/hooks/session-end.sh"}
-    assert capture_install._our_command_dicts(
-        flat, "session-end.sh", ".claude/hooks", tmp_path) == []
-    untyped = {"matcher": "", "hooks": [
-        {"command": ".claude/hooks/session-end.sh"}]}
-    assert capture_install._our_command_dicts(
-        untyped, "session-end.sh", ".claude/hooks", tmp_path) == []
+    def read(entry):
+        return capture_install._our_command_dicts(
+            entry, "session-end.sh", hooks_dir, tmp_path)
+
+    # Not entries at all.
+    assert read(None) == []
+    assert read("session-end.sh") == []
+    # A flat ``{type, command}`` at the EVENT level: ignored by Claude Code.
+    assert read({"type": "command",
+                 "command": ".claude/hooks/session-end.sh"}) == []
+    # A handler missing its ``type``.
+    assert read({"matcher": "", "hooks": [
+        {"command": ".claude/hooks/session-end.sh"}]}) == []
+    # A non-string command.
+    assert read({"matcher": "", "hooks": [
+        {"type": "command", "command": 5}]}) == []
+    # ``hooks`` is not an array.
+    assert read({"hooks": {"type": "command",
+                           "command": ".claude/hooks/session-end.sh"}}) == []
+    # A foreign path at the same basename is somebody else's hook.
+    assert read({"matcher": "", "hooks": [dict(foreign)]}) == []
+    # Positive control: a properly nested typed entry IS read — and EVERY
+    # child is inspected, not just the first (ours may sit behind a foreign
+    # hook, and one left untimed is cancelled at the 1.5 s default).
+    assert read({"matcher": "", "hooks": [dict(foreign), dict(ours)]}) == [ours]
+    assert read({"matcher": "", "hooks": [dict(ours), dict(ours)]}) == [
+        ours, ours]
 
 
 def test_install_then_status_is_clean_and_upgrade_is_a_no_op(tmp_path):
