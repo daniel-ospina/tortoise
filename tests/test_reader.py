@@ -14,8 +14,7 @@ Task 2 — deterministic type detection + the best-effort abstained label:
   * _looks_abstained phrase list + blank/whitespace → True,
   * LLMReader.answer + _looks_abstained over empty/whitespace/refusal
     outputs → blank → abstained=True (the canonical NO_EVIDENCE_TEXT
-    substitution happens at the SDK surface — pinned in
-    tests/test_ask_api.py, not inside the reader).
+    substitution happens at the ask-lane surface, not inside the reader).
 
 Fully offline: stub models only, no API keys, no DB.
 """
@@ -436,8 +435,8 @@ class TestLooksAbstained:
         ordinary text ("not enough chairs", "does not contain the
         document") IS labeled abstained — the label is a clause-scoped
         substring heuristic, NEVER a gate (the two-phase prompt is
-        authoritative; the SDK substitutes NO_EVIDENCE_TEXT on this
-        label, per tests/test_ask_api.py). Since the clause-scoped
+        authoritative; the ask lane substitutes NO_EVIDENCE_TEXT on this
+        label). Since the clause-scoped
         tightening (P2), the FIRST-clause occurrence labels abstained; a
         TRAILING qualifier does not (pinned in
         ``test_trailing_qualifier_not_abstained`` below) — except a
@@ -490,8 +489,8 @@ class TestLooksAbstained:
     def test_blank_output_labels_abstained(self) -> None:
         """Blank model output → the reader returns the raw blank and
         ``_looks_abstained`` labels it abstained (the deterministic case).
-        The canonical ``NO_EVIDENCE_TEXT`` substitution happens at the SDK
-        surface (pinned in tests/test_ask_api.py), not inside the reader —
+        The canonical ``NO_EVIDENCE_TEXT`` substitution happens at the
+        ask-lane surface, not inside the reader —
         this test pins the reader-side label only."""
         model = _StubModel(reply="")
         reader = LLMReader(model, model_id="stub")

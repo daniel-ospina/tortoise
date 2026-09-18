@@ -167,7 +167,7 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
                           if ln.startswith("data: ")), r.text)
         names = [t["name"] for t in
                  json.loads(data_line).get("result", {}).get("tools", [])]
-    assert len(names) > 30, "the listing must be the real full surface"
+    assert len(names) >= 75, f"default surface shrank to {len(names)}"
     assert _ASK_TOOL not in names
 
 
@@ -281,3 +281,30 @@ def test_n6_lane_call_sends_the_shipped_system_prompt(monkeypatch):
     finally:
         sdk.close()
         al._reset_ask_reader_cache_for_tests()
+
+
+# ── N7: the lane's hosted-mode refusal (the one semantic change in the move) ─
+
+def test_n7_lane_refuses_a_hosted_client(monkeypatch):
+    """RED mutation: restore the removed ``_post_ask`` delegation (``return
+    sdk._post_ask(...)``) in ``run_ask_lane`` → no raise here.
+
+    The hosted branch is the ONE semantic change in the pipeline move: the old
+    ``TortoiseSDK.ask`` delegated to ``_post_ask`` when ``TORTOISE_API_URL``
+    was set; the eval-only lane refuses instead, because the hosted ``/v1/ask``
+    route it delegated to no longer exists. ``run_ask_assembled``'s refusal is
+    pinned in ``tests/test_assembly_sdk.py::test_hosted_delegated_client_raises``;
+    this pins the ``run_ask_lane`` half (the autouse fixture deletes the var, so
+    without this test nothing reaches the branch)."""
+    import tortoise.ask_lane as al
+    from tests.test_ask_sdk import _new_sdk
+    from tortoise.exceptions import AskRetrievalUnavailable
+
+    sdk = _new_sdk()
+    try:
+        monkeypatch.setenv("TORTOISE_API_URL", "https://example.test")
+        with pytest.raises(AskRetrievalUnavailable):
+            al.run_ask_lane(sdk, "what is the gym schedule?")
+    finally:
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+        sdk.close()

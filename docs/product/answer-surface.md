@@ -172,8 +172,10 @@ measurement justifies a change.
 ## Cost & budget
 
 - **Per-query cost ≤ $0.01 target is structural:** 8000-token context cap +
-  40-item cap + 500-token output cap + the 60/min/team budget. Worst case
-  ~$0.0014–0.0023/query at the over-covered rate (5–7× under target).
+  40-item cap + 500-token output cap (the 60/min/team LLM budget was
+  retired with the product surface in #3849 — see *Cost & budget* above).
+  Worst case ~$0.0014–0.0023/query at the over-covered rate (5–7× under
+  target).
 - **Rates:** `ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m":
   0.42}` — verified deepseek-direct $0.14/$0.28 × a documented ×1.5 safety
   factor (covers the OpenRouter fallback markup). The meter over-covers.
@@ -196,11 +198,15 @@ measurement justifies a change.
   cap, exploit OpenRouter's $0.25/M cache-read, or re-baseline the target
   for the strong lane. The 60/min dollar blast radius grows from ~$0.14 to
   ~$1.28/min/team worst case.
-- **Budget:** `MAX_ASK_LLM_PER_MIN = 60` per team, per process (a
-  multi-worker uvicorn deployment scales the bound ×workers). Past budget →
-  **429 `quota_exceeded` + Retry-After** (the window self-heals). Per-team
-  in-flight cap 4 → 429 `in_flight_limit`. Global Semaphore(8) + 60s total
-  per-request bound → 504 `timeout` (queueing counts against the clock).
+- **Budget (RETIRED with the product surface, #3849):** `MAX_ASK_LLM_PER_MIN
+  = 60` per team, per process, the per-team in-flight cap 4, and the global
+  Semaphore(8) + 60s bound all lived on the hosted `/v1/ask` and MCP ask
+  handlers, which no longer exist. `quota.run_ask_bounded` and the budget
+  helpers now have no caller, so no path can emit 429 `quota_exceeded` /
+  `in_flight_limit` or 504 `timeout`. The eval-only lane
+  (`ask_lane.run_ask_lane`) is unbudgeted. The orphaned
+  `quota.py`/`metering.py` ask cluster is retained pending the #3849 §7 D5
+  purge follow-up.
 - **Metering:** per-query record via `record_ask_usage` (best-effort,
   non-fatal — metering failures never block the answer). Recorded when the
   SDK call completes successfully (the single call site: the SDK local lane
@@ -212,23 +218,25 @@ measurement justifies a change.
 
 ## Error vocabulary
 
-The canonical codes below are the ask lane's vocabulary — the typed
-exceptions raised by `tortoise/ask_lane.py` carry them as `.code`, defined in
-`tortoise/exceptions.py`. No HTTP body ships them any more: the `/v1/ask`
-route and its path-scoped 400/429/502/504 translation were removed in #3849.
+The canonical codes below are the ask vocabulary, defined in
+`tortoise/exceptions.py`. Only the rows marked *(lane)* can be raised by the
+eval-only lane (`tortoise/ask_lane.py`) and carried as `.code`; the rows
+marked *(RETIRED)* belonged to the removed product surfaces and have no
+raiser left. No HTTP body ships any of them any more: the `/v1/ask` route
+and its path-scoped 400/429/502/504 translation were removed in #3849.
 
 | Status | Code | Meaning |
 |---|---|---|
-| 400 | `invalid_question` | empty/whitespace/missing/wrong-type/control-char/malformed-JSON question |
-| 400 | `question_too_long` | > 2000 chars |
-| 400 | `invalid_question_type` | unknown question_type (valid list included) |
-| 400 | `invalid_question_date` | malformed/calendar-impossible date |
-| 401 | `unauthorized` | missing/invalid/expired key or session |
-| 429 | `quota_exceeded` | per-minute ask budget spent (Retry-After present) |
-| 429 | `in_flight_limit` | per-team in-flight cap (4) full (Retry-After omitted) |
-| 502 | `reader_unavailable` | LLM reader failed with no surviving lane |
-| 502 | `retrieval_unavailable` | retrieval/annotation/context assembly failed wholesale |
-| 504 | `timeout` | bounded section exceeded 60s (queue or reader) |
+| 400 | `invalid_question` | *(lane)* empty/whitespace/missing/wrong-type/control-char/malformed-JSON question |
+| 400 | `question_too_long` | *(lane)* > 2000 chars |
+| 400 | `invalid_question_type` | *(lane)* unknown question_type (valid list included) |
+| 400 | `invalid_question_date` | *(lane)* malformed/calendar-impossible date |
+| 401 | `unauthorized` | *(RETIRED)* removed HTTP auth path — no raiser |
+| 429 | `quota_exceeded` | *(RETIRED)* retired ask budget — no raiser |
+| 429 | `in_flight_limit` | *(RETIRED)* retired per-team in-flight cap — no raiser |
+| 502 | `reader_unavailable` | *(lane)* LLM reader failed with no surviving lane |
+| 502 | `retrieval_unavailable` | *(lane)* retrieval/annotation/context assembly failed wholesale |
+| 504 | `timeout` | *(RETIRED)* retired bounded section — no raiser |
 
 ## Hosted delegation (removed)
 

@@ -1002,12 +1002,15 @@ def synthesize_hits(
 
 # ══════════════════════════════════════════════════════════════════════════
 # #2165 Task 6 — _assemble_connected (R5/R6/R11/R14/R17): the product seam.
-# One single-source fired path shared by ask()'s pre-retrieval branch and
-# the public sdk.ask_assembled(). R14 drift pin: this function is imported
-# ONLY by sdk.ask()'s branch and sdk.ask_assembled (a source-text test
-# enforces it). The fired envelope wraps ONLY the content stages
+# One single-source fired path shared by run_ask_lane()'s pre-retrieval
+# branch and the public run_ask_assembled(). R14 drift pin: this function
+# is imported ONLY by the two eval-lane entry points (tortoise/ask_lane.py)
+# — enforced by a BEHAVIOURAL guard (both entry points fire; a poisoned
+# synthesize raises from both), not a source-text grep (replaced in #3849).
+# The fired envelope wraps ONLY the content stages
 # (classify->resolve->walk->render->decorate->enrich->assemble); the ONE
-# reader call stays under the shared ask()/ask_assembled reader envelope.
+# reader call stays under the shared run_ask_lane()/run_ask_assembled()
+# reader envelope.
 # ══════════════════════════════════════════════════════════════════════════
 
 # Object recall-excluded statuses (the successor-EXISTENCE probe treats an
@@ -1021,8 +1024,8 @@ _RECALL_OBJECT_EXCLUDED_STATUSES = frozenset(
 @dataclass(frozen=True)
 class _AssembledBlock:
     """Internal fired block (content stages only — NO reader, NO answer).
-    Ask() and ask_assembled() both consume this and add their own envelope
-    (shared reader machinery, metering, response shape)."""
+    run_ask_lane() and run_ask_assembled() both consume this and add their
+    own envelope (shared reader machinery, metering, response shape)."""
     fired: bool
     shape: str | None
     subjects: tuple
@@ -1037,7 +1040,7 @@ class _AssembledBlock:
 
 @dataclass
 class AssemblyAnswer:
-    """Public ask_assembled() return shape (pinned — Task 7's eval arm reads
+    """Public run_ask_assembled() return shape (pinned — Task 7's eval arm reads
     post_cap_lines for gold-id admission and answer for conversion; field
     names are the arm's contract)."""
     fired: bool

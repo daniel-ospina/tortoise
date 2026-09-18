@@ -974,7 +974,6 @@ durations:
   test_ingest_v2_consolidation.py: 16.5
   test_metering.py: 16.5
   eval/harness/test_harness_benchmark.py: 16.1
-  test_ask_api.py: 15.1
   test_epic903_scheduler.py: 14.0
   test_hosted_volunteer_context.py: 14.0
   test_tripwire.py: 14.0
@@ -1042,7 +1041,6 @@ durations:
   test_write_consolidation.py: 4.7
   test_value_extractor.py: 4.6
   test_pack_state.py: 4.5
-  test_ask_gating.py: 4.4
   test_skip_guard.py: 4.4
   test_admin_return_to.py: 4.3
   test_longmem_usage_e2e.py: 4.3

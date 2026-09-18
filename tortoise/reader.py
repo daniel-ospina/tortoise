@@ -34,8 +34,8 @@ Key contracts:
     authoritative). ``LLMReader.answer`` returns the raw stripped
     completion and labels abstained via ``_looks_abstained`` only —
     blank/whitespace output is NOT substituted inside the reader; the
-    canonical ``NO_EVIDENCE_TEXT`` substitution is the SDK/ask-lane
-    surface's responsibility (pinned in tests/test_ask_api.py).
+    canonical ``NO_EVIDENCE_TEXT`` substitution is the ask-lane
+    surface's responsibility (tested on the lane, not inside the reader).
   * ``PROBE_SYSTEM`` is the preflight ping prompt (moved from the eval's
     ``tools/longmem_eval/preflight.py``).
 """
@@ -287,7 +287,7 @@ _TYPE_FRAGMENTS: dict[str, str] = {
 #: pinned to the A1 abstention phrasing). NOT substituted by the reader —
 #: ``LLMReader.answer`` returns the raw stripped completion and labels
 #: abstained via ``_looks_abstained``; the substitution is the
-#: SDK/ask-lane surface's responsibility (pinned in tests/test_ask_api.py).
+#: ask-lane surface's responsibility (tested on the lane).
 #: The ``abstained`` label is best-effort heuristic sugar — the two-phase
 #: prompt is authoritative.
 NO_EVIDENCE_TEXT = (
@@ -298,9 +298,10 @@ NO_EVIDENCE_TEXT = (
 
 def build_reader_user_message(evidence: str, question: str) -> str:
     """The reader's user-message template (#1987 Task 5) — single-sourced
-    so the SDK local lane and ``LLMReader.answer`` share ONE copy (no
+    so the eval-only ask lane (``ask_lane.run_ask_lane``) and
+    ``LLMReader.answer`` share ONE copy (no
     parallel template drift: the eval measures ``LLMReader.answer``, the
-    product ships ``sdk.ask``)."""
+    product lane ships it)."""
     return f"Memory context:\n{evidence}\n\nQuestion: {question}\n\nAnswer:"
 
 #: Official gen.py default generation length for non-CoT runs (the reader's
@@ -475,7 +476,8 @@ def _looks_abstained(answer: str | None) -> bool:
     if not clauses:
         # separator-only output (".", "...", "!?", "—"): no clause to
         # match — NOT abstained (preserves pre-cycle-2 behavior; a crash
-        # here would escape sdk.ask()'s documented Raises contract).
+        # here would escape ``ask_lane.run_ask_lane``'s documented Raises
+        # contract).
         return False
     if any(p in clauses[0] for p in _ABSTAINED_PHRASES):
         return True
@@ -612,7 +614,8 @@ class LLMReader:
             system=system_prompt_for(question_type), user=user)
         # None-guard: a provider response with empty content (refusal / empty
         # generation) must surface as the empty string, not crash the caller
-        # (the product ask() guards with ``(raw or "").strip()`` — mirror it
+        # (``ask_lane.run_ask_lane`` guards with ``(raw or "").strip()`` —
+        # mirror it
         # here so the eval's direct LLMReader path never AttributeErrors on
         # ``None.strip()``; observed live 2026-09-02 on qwen via OpenRouter).
         return (raw or "").strip()

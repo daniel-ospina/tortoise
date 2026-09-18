@@ -2922,8 +2922,8 @@ SKIP_AUTH = {"/health", "/health/ready", "/v1/version", "/docs", "/openapi.json"
 
 async def _invoke_override(override, request: Request) -> dict:
     """Invoke a dependency override the way FastAPI DI would. Overrides
-    declared with a ``request`` parameter (e.g. test_ask_api's
-    _suspended(request: Request)) get the Request injected; zero-arg
+    declared with a ``request`` parameter (a real ``request: Request``
+    dependency override) get the Request injected; zero-arg
     lambdas (the common auth-bypass override) are called bare. Mirrors
     FastAPI's behavior so DIRECT calls from the C2 gated/session deps
     behave identically to Depends()-resolved overrides."""
@@ -2932,8 +2932,8 @@ async def _invoke_override(override, request: Request) -> dict:
         params = list(sig.parameters.values())
         first = params[0] if params else None
         # Pass the Request ONLY when the first param is REQUIRED and
-        # position-callable (a real ``request: Request`` override like
-        # test_ask_api's _suspended). Optional-keyword lambdas
+        # position-callable (a real ``request: Request`` override).
+        # Optional-keyword lambdas
         # (``lambda tid=tid: ...`` — the common auth-bypass override) must
         # be called bare: binding the Request to their first optional
         # param would silently corrupt the org dict (test_onboarding
