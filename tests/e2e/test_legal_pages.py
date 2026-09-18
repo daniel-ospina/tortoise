@@ -91,7 +91,7 @@ if (BASE_URL.startswith("https://") or TORTISE_HOST.startswith("https://")) and 
 # executable statement"), so bare collection must reach them before anything that
 # could fail to import. The helper is pure stdlib today, but the contract is what
 # keeps collection error-free in every lane, so it does not depend on that.
-from tests._html_links import extract_anchor_hrefs  # noqa: E402
+from tests._html_links import blog_entry_hrefs  # noqa: E402
 
 # ── Signup-flow mode discrimination (#1190) ────────────────────────────────
 # The deployed form is SERVER-FIRST on the hosted site (#801) but runs the
@@ -436,21 +436,24 @@ def _footer_links_present(content: str) -> None:
 def _has_blog_entry(content: str) -> bool:
     """True when the served HTML carries an ANCHOR into the blog (#3950).
 
-    Uses the SAME extractor the static guard uses (`extract_anchor_hrefs`, in
-    `tests/_html_links.py`), so the two layers cannot disagree about what a way
-    in is. That is not a stylistic preference: an earlier revision of this helper
+    Uses the SAME rule the static guard uses — `blog_entry_hrefs`, which is
+    `extract_anchor_hrefs` plus `is_blog_entry`, both in `tests/_html_links.py`.
+    That is not a stylistic preference: an earlier revision of this helper
     scanned the raw document, so a commented-out or `<script>`-only anchor
     satisfied the production check while the static guard correctly reported the
     link as lost — and no test could catch the divergence, because importing this
-    module runs its module-level `pytest.skip`.
+    module runs its module-level `pytest.skip`. The PREDICATE is shared for the
+    same reason: while each layer owned a copy, the two could disagree about
+    which hrefs count, with the same undetectability.
 
     `href="/blog"` (the index) and `/blog/<slug>` (a post — its own nav links
-    back) both count. Any host is accepted, so `premiselabs.co/blog` (which 301s
-    to the tortoise host) is as valid as the absolute tortoise form; and because
-    the extractor reads anchors, a `<link rel="prefetch">` is not a way in.
+    back) both count. A root-relative href is accepted as written; an absolute
+    one must name a host the site owns, so `premiselabs.co/blog` (which 301s to
+    the tortoise host) counts while a typo'd or third-party host does not. And
+    because the extractor reads anchors, a `<link rel="prefetch">` is not a way
+    in.
     """
-    paths = [urlsplit(h).path.rstrip("/") for h in extract_anchor_hrefs(content)]
-    return any(p == "/blog" or p.startswith("/blog/") for p in paths)
+    return bool(blog_entry_hrefs(content))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -40,7 +40,12 @@ if str(REPO_ROOT) not in sys.path:  # tools/ is not an installed package
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.ci_selection import load_manifest, select  # noqa: E402, I001
-from tests._html_links import extract_anchor_hrefs  # noqa: E402
+from tests._html_links import (  # noqa: E402
+    _AnchorHrefParser,
+    blog_entry_hrefs,
+    extract_anchor_hrefs,
+    is_blog_entry,
+)
 
 WEBSITE = REPO_ROOT / "website"
 FUNCTIONS = WEBSITE / "functions"
@@ -405,6 +410,11 @@ def _rendered_hrefs(html: str) -> list[str]:
 
 
 def _href_path(href: str) -> str:
+    """Path-only normalisation, for the hero REGION check below.
+
+    Not the blog predicate — that is `is_blog_entry` in the shared module, so the
+    two layers cannot answer "is this a way in" differently.
+    """
     return (urlparse(href).path or "/").rstrip("/") or "/"
 
 
@@ -414,14 +424,16 @@ def _offers_blog_entry(page: Path) -> bool:
     `/blog` (the index) and `/blog/<slug>` (an article — its own nav links back
     to the index) both count as a way in, so a page is not faulted for linking a
     post instead of the index. What does NOT count: a URL sitting in a comment,
-    a `<script>` or a `<style>` (`_rendered_hrefs` strips those first).
+    a `<script>` or a `<style>` (`_rendered_hrefs` strips those first) — and an
+    absolute href naming a host the site does not own, which would render a
+    DNS error rather than the blog. Both rules live in `is_blog_entry`, shared
+    with the E2E layer.
 
     Presence, not visibility — an anchor hidden with `display:none` would still
     satisfy this. The placement that actually matters is pinned separately by
     `test_product_hero_offers_the_blog`.
     """
-    return any(_href_path(h) == "/blog" or _href_path(h).startswith("/blog/")
-               for h in _rendered_hrefs(_read(page)))
+    return bool(blog_entry_hrefs(_read(page)))
 
 
 # The served+indexable page set as of #3950 (2026-09-17). This pins the
@@ -475,6 +487,88 @@ def test_blog_guard_covers_every_served_indexable_page() -> None:
     )
 
 
+# Constructs that would make the extractor's DECLARED limits live (the "Not
+# modelled, deliberately" note in `tests/_html_links.py`, tracked in #3970): tag
+# names, checked against the tags the parser actually saw INSIDE foreign content.
+#
+# Asking the parser rather than re-scanning the raw text is deliberate. A regex
+# over the source has to re-implement the parsing it is checking, and it was wrong
+# in both directions: it matched on a trailing space, so a bare `<mi>` — item 4 of
+# #3970's table — slipped through, and its `.*?</svg>` region ended at a `</svg>`
+# written inside a COMMENT, hiding a live integration point after it (review
+# finding, #3962).
+_DECLARED_FOREIGN_RISK = frozenset({
+    "foreignobject", "desc", "title", "template", "annotation-xml",
+    "mi", "mo", "mn", "ms", "mtext",
+})
+
+
+def test_no_in_scope_page_makes_the_extractors_declared_limits_live() -> None:
+    """Keep the extractor's declared limits honest (#3962 review, #3970).
+
+    `_AnchorHrefParser` deliberately does not model the HTML integration points
+    (`<svg><foreignObject>`, `<svg><desc>`, `<svg><title>`, MathML's text
+    integration points) or cross-namespace end-tag resolution: closing them means
+    reimplementing the HTML tree-construction algorithm, and #3970 carries the
+    reproductions. That declaration is only safe while no COVERED page reaches
+    those constructs.
+
+    Nothing else would notice a page growing one. The guard would go on reporting
+    the link — in the false-pass direction, since an unmodelled integration point
+    makes a `<template>` render here that a browser leaves inert — and the reason
+    the limit was acceptable would be quietly false. Three of these pages already
+    carry `<svg>` (index, product, signup) as `<path>`-only icons, so the
+    distance is one edit, not a hypothetical.
+
+    The same scan catches the constructs the extractor DETECTS and refuses to read
+    (`<frameset>`, the script-data escaped state): a wedge on a covered page is
+    not an acceptable state either — it means the guard would report the page as
+    offering no way in — so it fails here, where the fix is to look at the page.
+
+    This is a floor, not a proof: it fails closed on the constructs that make the
+    limit live, so widening the extractor or the page chrome is a decision taken
+    with #3970 in hand rather than a silent change of meaning.
+    """
+    offenders: list[str] = []
+    for page in sorted(_in_scope_pages()):
+        parser = _AnchorHrefParser()
+        parser.feed(page.read_text())
+        parser.close()
+        risky = sorted({tag for tag in parser.foreign_tags if tag in _DECLARED_FOREIGN_RISK})
+        if risky:
+            offenders.append(f"website/{page.name} reaches {risky} in foreign content")
+        if parser.foreign_root_mismatch:
+            # The precise cross-namespace trigger (item 5 of #3970): a foreign-ROOT end
+            # tag that matches no open root, e.g. `</math>` under `<svg>`. A browser
+            # ignores it and stays foreign; a bare counter left foreign content, so
+            # this is where the model is known to be wrong in a way that matters.
+            offenders.append(
+                f"website/{page.name} has a foreign-root end tag matching no open root "
+                f"{sorted(set(parser.foreign_root_mismatch))}"
+            )
+        if parser.foreign_unmatched_endtags:
+            # Wider RATCHET, kept deliberately: any other end tag inside foreign
+            # content. Those are handled correctly today, but the covered pages use
+            # only self-closing SVG children, so a page that starts closing SVG
+            # elements by name is one edit from the case above (review finding,
+            # #3962). The message says which of the two fired.
+            offenders.append(
+                f"website/{page.name} closes element(s) inside foreign content "
+                f"{sorted(set(parser.foreign_unmatched_endtags))}"
+            )
+        if parser.wedged_reason:
+            offenders.append(
+                f"website/{page.name} stops being readable ({parser.wedged_reason})"
+            )
+    assert not offenders, (
+        f"in-scope page(s) now reach a construct the extractor does not model: "
+        f"{offenders}. `tests/_html_links.py` declares those limits out of scope "
+        f"because no covered page used them; that is no longer true. Either model "
+        f"the construct (see #3970) or change the page, and update the declaration "
+        f"and this test in the same PR."
+    )
+
+
 def test_every_in_scope_page_is_selectable_by_ci() -> None:
     """Close the REVERSE direction of the CI-selection ratchet (#1349/#3332).
 
@@ -486,6 +580,12 @@ def test_every_in_scope_page_is_selectable_by_ci() -> None:
     absent from the `onboarding` entry, so `--changed-files website/tos.html`
     selected `surfaces=[]`.
 
+    The predicate is the GUARD'S OWN reachability, not "some surface ran": a page
+    that selects a different surface keeps `surfaces` non-empty while this file
+    never runs, so asserting on `surfaces` alone would report the silent drop as
+    covered (review finding, #3962). The assertion is therefore on `test_files`,
+    which is the set that actually gets executed.
+
     `tests/test_ci_selection.py::test_every_source_pattern_is_selectable` checks
     the OPPOSITE direction (entry -> runs) and states in its own docstring that it
     does not check this one, so nothing covered it. This drives the real
@@ -496,12 +596,14 @@ def test_every_in_scope_page_is_selectable_by_ci() -> None:
     unselectable = [
         f"website/{page.name}"
         for page in sorted(_in_scope_pages())
-        if not select([f"website/{page.name}"], "pull_request", manifest)["surfaces"]
+        if "test_website_docs_consistency.py"
+        not in select([f"website/{page.name}"], "pull_request", manifest)["test_files"]
     ]
     assert not unselectable, (
-        f"page(s) held to the blog guard that select NO test surface: {unselectable}. "
-        f"A PR touching only such a page runs nothing, so this guard cannot fail — "
-        f"the #1349/#3332 silent-drop class. Add them to "
+        f"page(s) held to the blog guard whose PR does not run this file: "
+        f"{unselectable}. A PR touching only such a page never executes "
+        f"test_website_docs_consistency.py, so the guard cannot fail on the page "
+        f"it was written for — the #1349/#3332 silent-drop class. Add them to "
         f"SOURCE_PATTERNS['onboarding'] in tools/ci_selection.py."
     )
 
@@ -544,6 +646,92 @@ def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     # anchor after it is swallowed, not rendered (review finding, #3962).
     assert _rendered_hrefs('<template/><a href="/blog">x</a>') == []
     assert _rendered_hrefs('<script/><a href="/blog">x</a>') == []
+    # ...including the rest of HTML's raw-text family, whose self-closing spelling
+    # reaches `handle_startendtag`, where the stdlib does NOT switch to CDATA mode
+    # — so these reached the extractor as markup and reported a link the browser
+    # reads as text (review finding, #3962, Chromium-verified).
+    assert _rendered_hrefs('<xmp/><a href="/blog">x</a>') == []
+    assert _rendered_hrefs('<iframe/><a href="/blog">x</a>') == []
+    assert _rendered_hrefs('<noembed/><a href="/blog">x</a>') == []
+    assert _rendered_hrefs('<noframes/><a href="/blog">x</a>') == []
+    assert _rendered_hrefs('<plaintext/><a href="/blog">x</a>') == []
+    # ...and such an element must ENTER raw-text tokenising on the self-closing
+    # path, because the stdlib does it only from `parse_starttag`. Without that, a
+    # nested raw-text start tag pushes a SECOND `_suppress` entry the single end
+    # tag cannot unwind: suppression sticks and every later anchor on the page is
+    # dropped — a false NEGATIVE in the direction that hides a real link
+    # (review finding, #3962, Chromium-verified).
+    assert _rendered_hrefs('<xmp/><xmp></xmp><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<title/><title></title><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<textarea/><textarea></textarea><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<iframe/><iframe></iframe><a href="/blog">x</a>') == ["/blog"]
+    # `<noscript>` is raw text only with scripting ENABLED — the browser default,
+    # and the only mode this guard's question is asked in — so a nested raw-text
+    # tag inside it is text, not a second suppression frame.
+    assert _rendered_hrefs('<noscript><noembed></noscript><a href="/blog">x</a>') == ["/blog"]
+    # Constructs that would otherwise fail OPEN are treated as UNREADABLE instead,
+    # because `HTMLParser`'s CDATA mode cannot express them: the script-data escaped
+    # states (spec 13.2.5), where `</script` no longer closes the element, and
+    # `<frameset>`, whose insertion mode ignores every other start tag. In both the
+    # browser puts nothing in the tree, so counting their anchors is a false pass —
+    # the direction this guard exists to prevent (review finding, #3962, both
+    # Chromium-verified). Stops collecting rather than guessing: a page carrying one
+    # fails the guard loudly instead of passing silently.
+    assert _rendered_hrefs('<script><!--<script></script><a href="/blog">x</a></script>') == []
+    assert _rendered_hrefs('<frameset><a href="/blog">x</a></frameset>') == []
+    assert _rendered_hrefs('<frameset><frame><a href="/blog">x</a>') == []
+    # ...but the token is IGNORED where the browser never enters frameset mode, so
+    # the net must not fire there or a page that DOES offer the blog is reported as
+    # offering nothing (a false FAIL; review finding, Chromium-verified). A `<body>`
+    # sets the spec's frameset-ok flag, and a `<body>` inside an inert `<template>` is
+    # template content rather than the document body (review finding,
+    # Chromium-verified).
+    assert _rendered_hrefs('<body><frameset><a href="/blog">x</a></frameset>') == ["/blog"]
+    assert _rendered_hrefs('<template><frameset></template><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<template><body></template><frameset><a href="/blog">x</a></frameset>') == []
+    # An honored `<frameset>` REPLACES the body, so anchors collected BEFORE it are
+    # gone too — keeping them reports a link no visitor can click.
+    assert _rendered_hrefs('<a href="/blog"/><frameset>') == []
+    # The spec's frameset-ok flag is NOT emulated: it decides whether the token above
+    # is honored, and the tokens that clear it (a non-whitespace character,
+    # `<br>`/`<img>`/`<button>`/`<li>`/…, a non-`hidden` `<input>`, `<template>`, …)
+    # are not tracked. This extractor wedges whenever the token appears with no body
+    # and no open suppression frame, so after any of those it reports no link where a
+    # browser keeps one — a false FAIL, the loud direction, on an obsolete element
+    # that no covered page uses. #3970 records it; emulating the flag cost a
+    # regression per review round for corners that cannot reach this guard.
+    assert _rendered_hrefs('<a href="/blog">x</a><table><frameset>') == []
+    assert _rendered_hrefs('<a href="/blog"/><input type="hidden"><frameset>') == []
+    # A foreign-ROOT end tag that matches no open root is ignored by a browser, which
+    # therefore STAYS in foreign content — `</math>` under `<svg>`. The bare-counter
+    # model left foreign content there and then treated the `<template>` as the inert
+    # HTML element, reporting no way in for a page that has one (review finding,
+    # #3962, Chromium-verified).
+    assert _rendered_hrefs('<svg></math><template><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<math></svg><template><a href="/blog">x</a>') == ["/blog"]
+    # `<![CDATA[` is a CDATA section only in FOREIGN content; in HTML content a
+    # browser makes it a BOGUS COMMENT ending at the first `>`. `HTMLParser` reads
+    # it as CDATA everywhere, so with no `]]>` the rest of the document was
+    # swallowed and real links were missed (review finding, #3962,
+    # Chromium-verified).
+    assert _rendered_hrefs('<div><![CDATA[</div><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<svg><![CDATA[<a href="/blog">x</a>]]></svg>') == []
+    # The abrupt close of an EMPTY comment (13.2.5.43): `<!-->` and `<!--->` end the
+    # comment at once, but the stdlib looks for a later `-->` first and only falls
+    # back to the abrupt close when there is none — so an element opened after the
+    # abrupt close went unregistered here and its suppression was lost, counting a
+    # link no browser renders (review finding, #3962, Chromium-verified).
+    assert _rendered_hrefs('<!--><a href="/blog">x</a>-->') == ["/blog"]
+    assert _rendered_hrefs('<!---><a href="/blog">x</a>-->') == ["/blog"]
+    assert _rendered_hrefs('<!--><template>--><a href="/blog">x</a>') == []
+    assert _rendered_hrefs('<!---><template>--><a href="/blog">x</a>') == []
+    assert _rendered_hrefs('<!--><script>--><a href="/blog">x</a>') == []
+    assert _rendered_hrefs('<!-- ordinary --><a href="/blog">x</a>') == ["/blog"]
+    # ...and the ordinary `document.write('<script …>')` idiom has no `<!--`, so it
+    # is NOT caught by that net — the trigger needs both markers.
+    assert _rendered_hrefs(
+        '<script>document.write(\'<script src=x></script>\');</script><a href="/blog">x</a>'
+    ) == ["/blog"]
     # ...but only in the HTML namespace: inside foreign content `<template>`
     # renders normally, so its anchor IS a way in (regression guard, #3962).
     assert _rendered_hrefs('<svg><template><a href="/blog">x</a></template></svg>') == ["/blog"]
@@ -561,6 +749,115 @@ def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     assert _href_path("/blog") == "/blog"
     assert _href_path("https://tortoise.premiselabs.co/blog") == "/blog"
     assert _href_path("https://tortoise.premiselabs.co/blog/") == "/blog"
+    # `<title>` is RCDATA, like `<textarea>` above, so an anchor inside it is text
+    # and not a link. On the supported interpreter the stdlib already covers both,
+    # so these two outcome pins cannot detect the `_RAW` entries being removed —
+    # the RULE is pinned directly at the end of this test (review finding).
+    assert _rendered_hrefs('<title><a href="/blog">x</a></title>') == []
+    # Foreign-content BREAKOUT (spec 13.2.6.5): a breakout start tag ends the
+    # foreign context, where `<template>` is inert again. Without the rule the
+    # parser stays "foreign", `<template>` renders, and a link no browser renders
+    # is counted — the false pass this whole guard exists to prevent (review
+    # finding, #3962, Chromium-verified).
+    assert _rendered_hrefs('<svg><p><template><a href="/blog">x</a></template>') == []
+    assert _rendered_hrefs('<svg><br><template><a href="/blog">x</a></template>') == []
+    assert _rendered_hrefs('<math><div><template><a href="/blog">x</a></template>') == []
+    assert _rendered_hrefs('<svg><font color=red><template><a href="/blog">x</a></template>') == []
+    # ...but `<font>` WITHOUT one of its presentational attributes is not a
+    # breakout tag, so the foreign context survives it and the template renders.
+    assert _rendered_hrefs('<svg><font><template><a href="/blog">x</a></template>') == ["/blog"]
+    # `</br>`/`</p>` pop foreign content too (13.2.6.5); any OTHER unmatched end
+    # tag leaves it alone. Popping on every unmatched end tag inverted this.
+    assert _rendered_hrefs('<svg></p><template><a href="/blog">x</a></template>') == []
+    assert _rendered_hrefs('<svg></br><template><a href="/blog">x</a></template>') == []
+    assert _rendered_hrefs('<svg></div><template><a href="/blog">x</a></template>') == ["/blog"]
+    assert _rendered_hrefs('<svg></span><template><a href="/blog">x</a></template>') == ["/blog"]
+    # A self-closing FOREIGN root is honored (empty element, closes immediately),
+    # so it must not leave foreign depth behind and disable `<template>`
+    # suppression for the rest of the document — a false pass (review finding).
+    assert _rendered_hrefs('<svg/><template><a href="/blog">x</a></template>') == []
+    assert _rendered_hrefs('<math/><template><a href="/blog">x</a></template>') == []
+    # A NON-breakout element keeps foreign content foreign, so `<template>` there
+    # still renders — the rule is the breakout list, not "any tag ends foreign".
+    assert _rendered_hrefs('<svg><g><template><a href="/blog">x</a></template></svg>') == ["/blog"]
+    assert _rendered_hrefs('<svg><template></template><template><a href="/blog">x</a></template>') == ["/blog"]
+    # A raw-text ELEMENT in HTML is not a raw-text element in FOREIGN content:
+    # `<script>` inside `<svg>` is a foreign element whose content is markup again,
+    # so an anchor inside it IS a real link. HTMLParser's CDATA switch is an
+    # HTML-rules behaviour, so it must not run there (review finding, #3962,
+    # Chromium-verified).
+    assert _rendered_hrefs('<svg><script><a href="/blog">x</a></script></svg>') == ["/blog"]
+    assert _rendered_hrefs('<svg><style><a href="/blog">x</a></style></svg>') == ["/blog"]
+    assert _rendered_hrefs('<svg><xmp><a href="/blog">x</a></xmp></svg>') == ["/blog"]
+    assert _rendered_hrefs('<svg><title><a href="/blog">x</a></title></svg>') == ["/blog"]
+    assert _rendered_hrefs('<svg><iframe><a href="/blog">x</a></iframe></svg>') == ["/blog"]
+    assert _rendered_hrefs('<script><a href="/blog">x</a></script>') == []
+    # Suppression must unwind correctly for nested opens.
+    assert _rendered_hrefs('<template><script></script><a href="/blog">x</a></template><a href="/docs">d</a>') == ["/docs"]
+    # A suppressed container stays CLOSABLE once ordinary or void elements sit
+    # above it: the end tag that NAMES it unwinds it (Chromium-verified).
+    assert _rendered_hrefs('<template><div></template><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<template><br></template><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<template><p></template><a href="/blog">x</a>') == ["/blog"]
+    assert _rendered_hrefs('<noscript><img></noscript><a href="/blog">x</a>') == ["/blog"]
+    # ...and an end tag that does NOT name the open container closes nothing, so
+    # the anchor after it is still inside the template and is not a link — the
+    # mirror of the three cases above (Chromium-verified).
+    assert _rendered_hrefs('<div><template></div><a href="/blog">x</a>') == []
+    # DELIBERATELY NOT pinned as browser-equal, and tracked in #3970: the HTML
+    # INTEGRATION POINTS (`<svg><foreignObject>`, `<svg><desc>`, MathML's text
+    # integration points) and cross-namespace end-tag resolution. A `<template>`
+    # inside an integration point is inert in a browser but renders here, and
+    # `<template><svg><template></template>` closes the outer template rather than
+    # the inner one. Both require the full HTML tree-construction algorithm, and no
+    # page this guard covers contains foreign content at all — the guard's
+    # adversary is a link LOST from a hand-edited marketing page, not an author
+    # hiding one inside SVG. See the class docstring's "Not modelled" note.
+    #
+    # What counts as a way INTO the blog, asked through the ONE rule both layers
+    # share. A root-relative href is accepted as written; an absolute one must
+    # name a host the site owns, and a path that resolves out of `/blog` is not a
+    # way in (review finding, #3962).
+    assert is_blog_entry("/blog")
+    assert is_blog_entry("/blog/")
+    assert is_blog_entry("/blog/some-post")
+    assert is_blog_entry("https://premiselabs.co/blog")
+    assert is_blog_entry("https://tortoise.premiselabs.co/blog")
+    assert is_blog_entry("https://tortoise.premiselabs.co/blog/some-post")
+    assert is_blog_entry("/blog//../docs")  # resolves to /blog/docs, still a way in
+    assert not is_blog_entry("https://tortoise.premiselab.co/blog")
+    assert not is_blog_entry("https://example.com/blog")
+    assert not is_blog_entry("//evil.example/blog")
+    assert not is_blog_entry("/docs")
+    assert not is_blog_entry("blog/x")  # document-relative, not root-relative
+    # Resolved, not raw-prefix: these only LOOK like the blog.
+    assert not is_blog_entry("/blog/../docs")
+    assert not is_blog_entry("/blog/%2e%2e/docs")
+    assert not is_blog_entry("/blog/%2E%2E/docs")
+    # A different origin is not the site's blog.
+    assert not is_blog_entry("https://tortoise.premiselabs.co:8443/blog")
+    assert not is_blog_entry("https://tortoise.premiselabs.co:80/blog")
+    assert not is_blog_entry("http://tortoise.premiselabs.co:443/blog")
+    # A scheme a browser cannot follow to the blog is not a way in.
+    assert not is_blog_entry("mailto:/blog")
+    assert not is_blog_entry("javascript:/blog")
+    assert not is_blog_entry("data:/blog")
+    assert not is_blog_entry("file:///blog")
+    assert not is_blog_entry("ftp://premiselabs.co/blog")
+    # No authority at all: a browser resolves the host to `blog`.
+    assert not is_blog_entry("///blog")
+    assert not is_blog_entry("https:///blog")
+    # `urlsplit` does not split on a backslash, a browser does (review finding).
+    assert not is_blog_entry("https://evil.example\\@tortoise.premiselabs.co/blog")
+    # Malformed hrefs are not a way in, and must not raise while the guard runs.
+    assert not is_blog_entry("http://[::1/blog")
+    # The `_RAW` RULE itself, because the pinned OUTCOMES above cannot all see it:
+    # on the pinned interpreter the stdlib already handles `<textarea>`/`<title>`,
+    # and it handles the rest except through `handle_startendtag` (review finding,
+    # #3962).
+    assert {
+        "textarea", "title", "xmp", "iframe", "noembed", "noframes", "plaintext",
+    } <= _AnchorHrefParser._RAW
 
 
 def test_product_hero_offers_the_blog() -> None:
