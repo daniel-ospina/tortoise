@@ -9,7 +9,11 @@ extraction that made provider calls has real spend), into
 
     ``_capture_cost_props`` -> ``_track_analytics_event``).
 
-Replay / M2 captures carry no extractor telemetry and emit nothing.
+Replay captures carry no extractor telemetry and emit nothing. M2 captures
+(#3824) DO make real provider calls — they simply discard the usage block —
+so they emit a row carrying ``unattributed`` with every measured field
+zeroed; the report counts those calls into ``unmetered_attempts`` instead of
+reading the session as an unmeasured or $0 one.
 
     row.properties = {
         session_id, calls, retries, prompt_tokens, completion_tokens,
@@ -17,6 +21,7 @@ Replay / M2 captures carry no extractor telemetry and emit nothing.
         calls_without_cost,   # calls the provider served without a charge
         calls_without_usage,  # calls that carried no usage block at all
         deadline_aborts,      # billed upstream, unpriceable here
+        unattributed,         # #3824: calls made, no roll-up survived
         by_stage: {stage: {provider: {model: {calls, prompt_tokens,
                     completion_tokens, cost_usd, usage_present,
                     calls_without_cost, calls_without_usage}}}},
@@ -241,6 +246,8 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
         add(f"  excluded, no calls at all         : {dist['excluded_no_calls']}")
         add(f"  excluded, calls but unmetered     : {dist['excluded_unmeasured']}")
         add(f"  deadline-killed (billed, no toks) : {dist['deadline_aborts']}")
+        add(f"  calls with no surviving roll-up   : {dist['unattributed_calls']}")
+        add(f"  captures behind those calls       : {dist['unattributed_captures']}")
         add("  (check that captures are actually running extraction, that the")
         add("   hosted emit path is deployed, and that the serving model ids")
         add("   have a row in the versioned PRICING_MAP)")
@@ -274,6 +281,9 @@ def render(rows: list[dict], *, top: int, since_label: str) -> str:
     add(f"  excluded, no calls at all      : {dist['excluded_no_calls']}")
     add(f"  excluded, calls but unmetered  : {dist['excluded_unmeasured']}")
     add(f"  deadline-killed (billed, no toks): {dist['deadline_aborts']}")
+    add(f"  calls with no surviving roll-up   : {dist['unattributed_calls']} "
+        f"(across {dist['unattributed_captures']} capture(s)) — counted in "
+        "the attempts line below, not additional to it")
     add(f"  calls served without a charge  : {dist['calls_without_cost']}")
     add(f"  attempts with no meterable reply: {dist['unmetered_attempts']}")
     add(f"  sessions tokens we could not price: {dist['unpriced_sessions']}")

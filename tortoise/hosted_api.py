@@ -8916,8 +8916,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #3359: one capture_cost row per capture ATTEMPT that ran an
         # extraction (successful or errored — a failed extraction that made
         # provider calls has real spend, and the deadline/deadline_aborts
-        # disclosure depends on that row existing). Replay/M2 captures carry
-        # no extractor telemetry and emit nothing. Idempotent for free: this
+        # disclosure depends on that row existing). Replays — and only
+        # replays — carry no extractor telemetry and emit nothing; an M2
+        # capture DOES make provider calls, so since #3824 it emits a row
+        # carrying its call count as ``unattributed`` rather than vanishing
+        # into the same silence as a zero-call replay. Idempotent for free: this
         # sits behind the SAME replay guard the write-op meter uses, so a
         # zero-node re-POST writes no second row; a genuine retry (#2335
         # WI-2b) does write a second row, which is why the report aggregates
@@ -19619,6 +19622,11 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "deadline_aborts", "by_stage",
+    # #3824: provider calls the capture made that NO roll-up accounted for.
+    # Without this key in the allowlist the counter is stripped here — the
+    # documented #3359 loss mode — and F2 stays invisible even though the
+    # row was written.
+    "unattributed",
 }
 
 _ANALYTICS_FALLBACK_PATH = None
@@ -20043,6 +20051,22 @@ def _analytics_alert_store():
         return None
 
 
+def _as_call_count(value) -> int:
+    """Coerce a #3824 call-evidence value to a non-negative int (0 on junk).
+
+    A producer is free to hand over ``None``/missing/negative/a float; none
+    of those may become a phantom nonzero disclosure, and none may raise
+    inside the capture handler's best-effort emit.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return n if n > 0 else 0
+
+
 def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     """#3359: the per-session cost driver as an analytics ``properties`` dict.
 
@@ -20052,14 +20076,44 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     ``calls_without_cost`` disclosure counter, and the per-stage/
     per-route ``by_stage`` envelope (repricable at report time).
 
-    Returns ``None`` when the extractor produced no LLM roll-up (a
-    replayed / M2 capture: ``meta["stats"]`` is ``{}``) — no measurement
-    exists, so no row is written. A capture whose extraction ERRORED does
-    carry a roll-up (and therefore a row): the provider calls were made and
-    their spend is real.
+    #3824 — TWO FACTS, NEVER ONE. A ``stats`` with no ``llm`` used to
+    collapse two distinct captures into the same ``None``:
+
+    * **F1 — zero provider calls.** A replay (#1727) or the
+      empty-transcript gate: nothing was sent, so no row is written and
+      the window stays clean. ``return None`` is correct here.
+    * **F2 — calls were made and the roll-up did not survive.** The M2
+      session lane (#3747) issues real provider calls and discards their
+      usage; any future lane that builds its own ``meta`` does the same.
+      Absence made F2 indistinguishable from F1 *and* from "$0.00 spent",
+      so an all-M2 deployment read as "NO capture_cost ROWS IN THIS
+      WINDOW" — a missing measurement wearing the shape of a cheap one,
+      and #3780's cohort-cap denominator was set from that undercount.
+
+    The discriminator is the call evidence the producer keeps OUTSIDE the
+    roll-up (``meta["stats"]["unattributed"]``, written by
+    ``sdk._extract_session_llm``) — it survives exactly the case the
+    roll-up does not, because it is recorded at the CALL site rather than
+    reconstructed from the response. When it is present with no roll-up the
+    row is written anyway, every measured field zeroed and ``unattributed``
+    carrying the call count, so the spend is DISCLOSED rather than erased.
+    When a roll-up does survive, ``unattributed`` rides alongside it (0 on a
+    fully-metered capture) — the sibling-counter precedent
+    (``calls_without_cost`` / ``calls_without_usage`` /
+    ``deadline_aborts``) rather than a second, drifting total.
+
+    A capture whose extraction ERRORED does carry a roll-up (and therefore
+    a row): the provider calls were made and their spend is real.
     """
-    llm = ((meta.get("stats") or {}).get("llm") or {})
-    if not llm:
+    stats = meta.get("stats") or {}
+    llm = stats.get("llm") or {}
+    # #3824: calls made that no roll-up accounted for. Must live OUTSIDE
+    # ``llm`` — nested there it could not exist in the very case it
+    # describes (an empty roll-up).
+    unattributed = _as_call_count(stats.get("unattributed"))
+    if not llm and not unattributed:
+        # F1: zero provider calls. No measurement exists, so no row — a
+        # fabricated $0 row here is the phantom the reader must never see.
         return None
     return {
         "session_id": session_id,
@@ -20079,6 +20133,10 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # session as a clean $0 (#1787 P2-L is the counter's origin).
         "deadline_aborts": int(llm.get("deadline_aborts", 0) or 0),
         "by_stage": llm.get("by_stage") or {},
+        # #3824: provider calls with no surviving roll-up. Rides the row so
+        # the reader can count them into the denominator and refuse to read
+        # the capture as a measured $0.
+        "unattributed": unattributed,
     }
 
 
