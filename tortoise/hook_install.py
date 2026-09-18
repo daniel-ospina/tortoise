@@ -460,6 +460,59 @@ _BOOLEAN_LONG: dict[str, frozenset[str]] = {
     }),
 }
 
+#: SHORT options that are PROVED BOOLEAN — they consume no separate argument
+#: AND leave the token that follows them in executable position.  THE ARITY
+#: DEFAULT FOR SHORT OPTIONS IS "CONSUMES": a short option (or one letter of a
+#: combined cluster) that is not in this table is assumed to take the next
+#: token as its VALUE.
+#:
+#: This is the same design as :data:`_BOOLEAN_LONG`, and for the same reason.
+#: Enumerating the ARGUMENT-TAKING short options cannot be complete — ``ksh``'s
+#: ``-R file`` / ``-T mask`` and bash-as-``sh``'s ``-O`` were missing from the
+#: old per-launcher table — and every gap was a FAIL-OPEN: the hook path was
+#: read as the option's value, bash ran nothing, and the install still reported
+#: current (the entry kept a stamped ``timeout`` and no real registration was
+#: appended).  A false NEGATIVE reports "missing", which only appends a
+#: DUPLICATE registration, so the unknown case MUST consume.
+#:
+#: Only options PROVEN boolean belong here: verified against the tool's own
+#: documentation AND, where the tool is installed on the development box,
+#: against real bash ground truth (``<launcher> -X <hook>`` actually executes
+#: the hook).  An option that is boolean but still does not run the following
+#: token — ``bash -s`` (stdin), ``bash -t``/``-D`` (no execution), ``sudo -V``
+#: (prints version and exits) — is deliberately ABSENT: treating it as boolean
+#: would put the hook back into command position and re-open the class.
+#: Under-listing is safe (a duplicate at worst); over-listing is not.
+_BOOLEAN_SHORT: dict[str, frozenset[str]] = {
+    "bash": frozenset({"-a", "-b", "-e", "-f", "-h", "-i", "-k", "-l",
+                       "-m", "-p", "-r", "-u", "-v", "-x", "-B", "-C",
+                       "-E", "-H", "-P", "-T"}),
+    "sh": frozenset({"-a", "-b", "-C", "-e", "-f", "-i", "-k", "-l",
+                     "-m", "-u", "-v", "-x"}),
+    "dash": frozenset({"-a", "-b", "-C", "-e", "-f", "-i", "-l", "-m",
+                       "-u", "-v", "-x"}),
+    "zsh": frozenset({"-a", "-b", "-C", "-D", "-e", "-E", "-f", "-g",
+                      "-G", "-h", "-H", "-i", "-I", "-k", "-l", "-L",
+                      "-m", "-N", "-p", "-P", "-Q", "-r", "-R", "-T",
+                      "-U", "-v", "-w", "-W", "-x", "-X", "-y", "-Y",
+                      "-Z"}),
+    "ksh": frozenset({"-a", "-b", "-e", "-f", "-h", "-i", "-k", "-l",
+                      "-m", "-p", "-r", "-u", "-v", "-x", "-B", "-C",
+                      "-E", "-G", "-H"}),
+    "env": frozenset({"-i"}),
+    "sudo": frozenset({"-A", "-b", "-B", "-E", "-H", "-n", "-P", "-S",
+                       "-s"}),
+    "timeout": frozenset({"-v"}),
+    "time": frozenset({"-a", "-p"}),
+    "nice": frozenset(),
+    "ionice": frozenset({"-t"}),
+    "exec": frozenset({"-c", "-l"}),
+    "xargs": frozenset(),
+    "setsid": frozenset({"-c", "-f", "-w"}),
+    "nohup": frozenset(),
+    "firejail": frozenset(),
+}
+
 #: Launchers that are shell syntax, not programs, and so cannot have options.
 _OPTION_LESS_LAUNCHERS = frozenset({
     "eval", "!", ".", "source", "if", "while", "until", "then", "do",
@@ -782,13 +835,21 @@ def _invokes_script(command: str, script_name: str,
         if launcher is not None:
             launcher_word = launcher
             continue
-        if not quoted and tok.startswith("-"):
+        if (not quoted and launcher_word is not None
+                and tok.startswith("-")):
+            # A launcher governs this operand position, so an option-looking
+            # token here is an OPTION of that launcher.  With NO launcher
+            # (``launcher_word is None``) an option-looking token is the
+            # command NAME itself — bash reports ``-x: command not found`` —
+            # so nothing after it executes: this block is skipped and the
+            # token is judged as a command below (which ends the run).
             if launcher_word in _SHELLS and (
                     tok == "--noexec"
                     or (not tok.startswith("--") and "n" in tok[1:])):
                 return False  # ``bash -n`` / ``sh -n``: syntax check only
-            options = _OPTIONS_WITH_ARG.get(launcher_word or "", frozenset())
-            booleans = _BOOLEAN_LONG.get(launcher_word or "", frozenset())
+            options = _OPTIONS_WITH_ARG.get(launcher_word, frozenset())
+            long_booleans = _BOOLEAN_LONG.get(launcher_word, frozenset())
+            short_booleans = _BOOLEAN_SHORT.get(launcher_word, frozenset())
             if launcher_word in _SHELLS and tok in _SHELL_COMMAND_FLAGS:
                 # A shell's ``-c`` argument is a command STRING to re-parse.
                 recurse_next = True
@@ -796,8 +857,6 @@ def _invokes_script(command: str, script_name: str,
                 pass  # end of options: the NEXT token is the command
             elif "=" in tok:
                 pass  # attached value (``--signal=KILL``) consumes no token
-            elif tok in options:
-                skip_next = True
             elif tok.startswith("--"):
                 if any(o.startswith("--") and o.startswith(tok)
                        for o in options):
@@ -805,7 +864,7 @@ def _invokes_script(command: str, script_name: str,
                     # option (``timeout --sig`` == ``--signal``).
                     skip_next = True
                 elif any(b.startswith("--") and b.startswith(tok)
-                         for b in booleans):
+                         for b in long_booleans):
                     pass  # a boolean long option (or its abbreviation)
                 else:
                     # UNKNOWN long option: assume it consumes the next token.
@@ -815,9 +874,21 @@ def _invokes_script(command: str, script_name: str,
                     # (the hook is read as the option's value and bash runs
                     # nothing), so the default is the safe direction.
                     skip_next = True
-            elif (len(tok) > 2
-                    and any(("-" + ch) in options for ch in tok[1:])):
-                # combined short flags hide a separate value (``-euxo pipefail``)
+            elif (len(tok) > 1
+                    and all(("-" + ch) in short_booleans
+                            for ch in tok[1:])):
+                pass  # every clustered short option is PROVED boolean
+            else:
+                # THE SHORT-OPTION ARITY DEFAULT IS "CONSUMES".  A short
+                # option (or one letter of a combined cluster) that the
+                # launcher's ``_BOOLEAN_SHORT`` table does not PROVE boolean is
+                # assumed to take the next token as its VALUE.  Enumerating
+                # the argument-taking short options cannot be complete
+                # (``ksh -R``/``-T``, bash-as-``sh``'s ``-O``) and every gap
+                # was a FAIL-OPEN: the hook was read as the option's value,
+                # bash ran nothing, and the install still reported current.
+                # A false "missing" only appends a DUPLICATE registration, so
+                # the unknown case MUST consume.
                 skip_next = True
             continue
         if _ASSIGNMENT_RE.match(tok):

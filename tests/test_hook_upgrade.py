@@ -23,6 +23,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import shutil
+import string
 import subprocess
 import sys
 from pathlib import Path
@@ -1564,6 +1567,10 @@ class TestDeclaredThreatSurface:
         #   timeout --sig <hook> -> GNU getopt_long ABBREVIATION of --signal
         #   sudo --login-class <hook> -> BSD sudo's canonical --login-class
         #   <unknown --long> <hook> -> arity unknown: the SAFE default consumes
+        #   ksh -R <hook>      -> the path is read as a CROSS-REFERENCE FILE
+        #   ksh -T <hook>      -> the path is read as a TEST MASK
+        #   sh -O <hook>       -> the path is read as a SHOPT OPTION NAME
+        #   bash -O <hook>     -> the path is read as a SHOPT OPTION NAME
         "sudo -u {abs}",
         "sudo -g {abs}",
         "sudo -c {abs}",
@@ -1573,6 +1580,10 @@ class TestDeclaredThreatSurface:
         "timeout --sig {abs}",
         "timeout --zzz {abs}",
         "bash -o {abs}",
+        "bash -O {abs}",
+        "ksh -R {abs}",
+        "ksh -T {abs}",
+        "sh -O {abs}",
         "env -u {abs}",
         "env -a {abs}",
         "env --uns {abs}",
@@ -1605,7 +1616,10 @@ class TestDeclaredThreatSurface:
         added → RED.  The alias/abbreviation cases additionally RED if the
         ``-a``/``--process-slot-var`` entries or the long-option prefix branch
         are removed; the ``--login-class``/unknown-long cases RED if the
-        unknown-long "assume it consumes" default is changed back to boolean.
+        unknown-long "assume it consumes" default is changed back to boolean;
+        and the ``ksh -R``/``-T``/``sh -O``/``bash -O`` cases RED if the
+        unknown-SHORT "assume it consumes" default is changed back to boolean
+        (the enumerated ``_OPTIONS_WITH_ARG`` table never listed them).
         """
         root = tmp_path / "project"
         abs_hook = root / ".claude" / "hooks" / "session-end.sh"
@@ -1679,16 +1693,112 @@ class TestDeclaredThreatSurface:
         arity by launcher, so a launcher with NO key silently defaults to
         "no option takes an argument" — exactly how ``time -o <hook>`` and
         ``xargs -J <hook>`` stayed fail-open.  Every program launcher must
-        declare a table (possibly empty); only shell syntax may be declared
-        option-less.
+        declare a table (possibly empty) in EACH arity table — the
+        argument-taking table AND both proved-boolean tables; only shell
+        syntax may be declared option-less.
 
         MUTATION: drop the ``"time"`` key (or ``"setsid"``/``"nohup"``, or
         add a new launcher to ``_LAUNCHERS`` without a table) → the launcher
-        is in neither declared set → RED.
+        is in neither declared set → RED.  Dropping a ``_BOOLEAN_SHORT`` /
+        ``_BOOLEAN_LONG`` key REDs the same way (an absent boolean table is
+        ``frozenset()``, which is safe but silently stops declaring arity).
         """
         declared = set(hook_install._OPTIONS_WITH_ARG) | set(
             hook_install._OPTION_LESS_LAUNCHERS)
         assert set(hook_install._LAUNCHERS) == declared
+        assert set(hook_install._BOOLEAN_SHORT) == set(
+            hook_install._OPTIONS_WITH_ARG)
+        assert set(hook_install._BOOLEAN_LONG) == set(
+            hook_install._OPTIONS_WITH_ARG)
+
+    def test_unproved_option_arity_defaults_to_consuming(self, tmp_path):
+        """STRUCTURAL guard for the class-1 mechanism — asserts the PROPERTY,
+        not an instance: for EVERY registered launcher, an option its
+        proved-boolean tables do NOT list must leave the matcher with NO match
+        when our hook follows it.
+
+        This is what ``test_every_launcher_declares_its_option_arity`` could
+        not see: that test only asserted each launcher had a KEY, so an
+        incomplete argument-taking table (``ksh -R``/``-T``, ``sh -O``) stayed
+        green while fail-open.  Iterating the SHORT-option space proves the
+        inversion holds for options no table mentions — the case an
+        enumeration can never cover.
+
+        MUTATION: replace the short ``else: skip_next = True`` with the old
+        ``any(("-" + ch) in options for ch in tok[1:])`` enumeration, or make
+        the unknown short option boolean (``pass``) → every unlisted short
+        option leaves the hook in command position → RED.
+        """
+        root = tmp_path / "project"
+        abs_hook = root / ".claude" / "hooks" / "session-end.sh"
+        root = _old_install(tmp_path, root=root)
+        offenders = []
+        for launcher in sorted(hook_install._OPTIONS_WITH_ARG):
+            for ch in string.ascii_letters + string.digits:
+                opt = "-" + ch
+                if opt in hook_install._BOOLEAN_SHORT[launcher]:
+                    continue
+                if (launcher in hook_install._SHELLS
+                        and opt in hook_install._SHELL_COMMAND_FLAGS):
+                    continue  # a command STRING: really executed, by design
+                cmd = f"{launcher} {opt} {abs_hook}"
+                if hook_install._invokes_script(
+                        cmd, "session-end.sh", ".claude/hooks", root):
+                    offenders.append(cmd)
+            for opt in ("--frobnicate-xyz", "--sig", "--login-class",
+                        "--output", "--zzz"):
+                if any(b.startswith(opt)
+                       for b in hook_install._BOOLEAN_LONG[launcher]):
+                    continue  # an abbreviation of a proved boolean: matches
+                cmd = f"{launcher} {opt} {abs_hook}"
+                if hook_install._invokes_script(
+                        cmd, "session-end.sh", ".claude/hooks", root):
+                    offenders.append(cmd)
+        assert offenders == [], (
+            "option not proved boolean left the hook in command position "
+            f"(FAIL-OPEN): {offenders}")
+
+    @pytest.mark.parametrize("launcher,option", [
+        ("ksh", "-R"),   # ksh: ``-R file`` — cross-reference database FILE
+        ("ksh", "-T"),   # ksh: ``-T mask`` — implementation test MASK
+        ("sh", "-O"),    # bash-as-sh: ``-O`` takes a shopt OPTION NAME
+    ])
+    def test_short_option_arity_matches_bash_ground_truth(
+            self, tmp_path, launcher, option):
+        """The reproduced instance, checked against REAL bash execution.
+
+        ``ksh -R <hook>`` (also ``-T``, and bash-as-``sh``'s ``-O``) consumed
+        the path as the option's VALUE: bash ran NOTHING, yet the matcher
+        returned True — ``detect_install`` judged the dead entry ours and
+        ``upgrade_install`` stamped ``timeout`` onto it instead of appending a
+        real registration (silent no-capture).  This runs the command through
+        bash, asserts the hook did NOT execute, then asserts the matcher
+        agrees — grounding the static table in observable behaviour rather
+        than another enumeration we could get wrong.
+
+        MUTATION: make the unknown short option default boolean (``pass``
+        instead of ``skip_next = True``) → the matcher claims the hook ran →
+        RED.
+        """
+        if shutil.which(launcher) is None:
+            pytest.skip(
+                f"{launcher!r} is not installed on this box — the reproduced "
+                f"instance cannot be ground-truthed here")
+        root = tmp_path / "project"
+        hook = root / ".claude" / "hooks" / "session-end.sh"
+        hook.parent.mkdir(parents=True)
+        marker = root / "MARKER"
+        hook.write_text(f"#!/bin/bash\ntouch {marker}\n")
+        hook.chmod(0o755)
+        command = f"{launcher} {option} {shlex.quote(str(hook))}"
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True,
+            timeout=30, cwd=str(root))
+        assert not marker.exists(), (
+            f"ground truth changed: {command!r} executed the hook "
+            f"(stdout={completed.stdout!r} stderr={completed.stderr!r})")
+        assert hook_install._invokes_script(
+            command, "session-end.sh", ".claude/hooks", root) is False
 
     @pytest.mark.parametrize("command", [
         "/bin/bash {abs}",
