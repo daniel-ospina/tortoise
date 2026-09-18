@@ -146,10 +146,13 @@ def test_supersede_disagreeing_valid_from_refused(sdk):
 
     Trusting the kwarg verbatim let it pick the predecessor's window end,
     which broke chain contiguity silently in BOTH directions:
-      * EARLIER kwarg → GAP: neither window covers [kwarg, stored), so
-        ``restore_point_at`` reports honest absence for a covered period;
-      * LATER kwarg → OVERLAP: both windows cover [stored, kwarg], so every
-        instant inside it reads ``ambiguous``.
+      * EARLIER kwarg → GAP: neither window covers the instants strictly
+        between them — the predecessor's end is the kwarg instant (inclusive)
+        and the successor's start is the stored one — so the uncovered region
+        is ``(kwarg, stored)`` and ``restore_point_at`` reports honest absence
+        for instants that fall in it;
+      * LATER kwarg → OVERLAP: both windows cover ``[stored, kwarg]`` (both
+        ends inclusive), so every instant inside it reads ``ambiguous``.
 
     Fail-closed: the refusal is raised in the resolution block (after the
     lifecycle guards, before the PointSuperseded emit and every write), so
@@ -157,7 +160,7 @@ def test_supersede_disagreeing_valid_from_refused(sdk):
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     new = _make_point(sdk, content="claim v2", validFrom="2026-06-10")
 
-    # (a) kwarg EARLIER than the stored value → would GAP [06-05, 06-10)
+    # (a) kwarg EARLIER than the stored value → would GAP (06-05, 06-10)
     with pytest.raises(ValueError, match="disagrees"):
         sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-05")
     # (b) kwarg LATER than the stored value → would OVERLAP [06-10, 06-20]
@@ -170,6 +173,12 @@ def test_supersede_disagreeing_valid_from_refused(sdk):
     assert not op.get("outdated")
     assert "validTo" not in op
     assert "expiredAt" not in op
+    # ...and fail-closed across the EVENT JOURNAL too: `_emit_event` runs
+    # append-before-mutation, so if the guard ever moved after the
+    # PointSuperseded emit a refusal would journal a phantom supersession that
+    # mutated nothing. The graph-state assertions above cannot see that.
+    from tortoise.event_store import read_after
+    assert read_after(sdk._get_proj(), 0, types=["PointSuperseded"]) == []
     assert sdk._get_proj().g.query(
         "MATCH (a:Point {id:$n})-[:CORRECTS]->(b:Point {id:$o}) RETURN a.id",
         params={"n": new["id"], "o": old["id"]}).result_set == []
@@ -423,9 +432,12 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
 
       * successor ``validFrom = 0`` — the parseable epoch-0 instant ⇒ its
         window is ``[epoch-0, ∞)``. An instant inside the predecessor's window
-        is covered by BOTH ⇒ ``ambiguous``. This is the overlap the guard
-        prevents, and it is why a falsey-but-present stored value cannot be
-        skipped as "undated".
+        is covered by BOTH ⇒ ``ambiguous``. This half pins that a
+        falsey-but-present start is a real WINDOW BOUND (so the guard is
+        necessary for this form), and that trusting the kwarg here produces a
+        visible overlap — it does NOT discriminate presence from truthiness
+        (a truthiness predicate would drop the start, leave the window
+        ``(-∞, ∞)``, and still return ``ambiguous``); part (b) does.
       * successor ``validFrom = ""`` — unparseable to ``_created_sort_key``
         (``(1, "")``) and never ordered below a parseable key ⇒ the successor
         covers NOTHING. That distinguishes presence from truthiness: under a
