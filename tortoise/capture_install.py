@@ -48,7 +48,12 @@ stderr + non-zero exit at the CLI): a missing shipped artifact, a symlinked
 target that escapes the install root, an unparsable/invalid ``settings.json``
 (never clobbered), an unwritable directory, a destination that is not a
 regular file.  Writes are atomic (temp file + ``os.replace``) so a failed
-write cannot leave a half-written ``settings.json`` behind.
+write cannot leave a half-written ``settings.json`` behind.  A **write-time**
+``OSError`` (an immutable target, ``EROFS``/``ENOSPC``/``EDQUOT``, a directory
+that lost its mode) is caught at the :func:`install_capture` boundary and
+returned as a populated ``error`` — never raised out of the module into a CLI
+traceback — because a write that fails silently at the seam is exactly the
+half-install (scripts on disk, no registration) this module exists to prevent.
 
 Relationship to ``tortoise/hook_install.py`` (PR #3866)
 -------------------------------------------------------
@@ -82,7 +87,13 @@ One intentional difference: #3866 refuses *any* symlink below the install root,
 while :func:`_symlink_escape` refuses only those that leave it — a symlink whose
 target is inside the project is replaced by a real file rather than refused.
 That is never a silent loss (the hook still runs), and #3866's ``status`` reads
-the resulting regular file as current.
+the resulting regular file as current.  The carve-out is for the **leaf** (the
+script / settings file itself), which ``_atomic_bytes`` swaps for a regular
+file.  A symlinked intermediate **directory** (``.claude`` / ``.claude/hooks``
+→ an in-root dir) is refused instead: it cannot be replaced by a regular file,
+and #3866's ``status`` reports any symlink below the install root as
+``symlinked-install`` while ``upgrade`` refuses it — so accepting one would
+print "installed" for a state the repair path will not touch.
 """
 from __future__ import annotations
 
@@ -214,6 +225,16 @@ def _symlink_escape(root: Path, target: Path, *, label: str) -> str:
     are compared on both sides, so a root reached via a symlinked alias
     (macOS ``/tmp`` → ``/private/tmp``, a git worktree) is not a false
     positive.  Returns ``""`` when the path is safe.
+
+    The in-root carve-out applies to the **leaf** only.  A symlinked
+    intermediate directory (``.claude/hooks`` → an in-root directory) is
+    refused even though it stays inside the root: the install would write
+    through it and report success, while #3866's ``detect_install`` reports
+    ``symlinked-install`` and ``upgrade_install`` refuses the same tree — an
+    install the repair path cannot maintain is not an install.  A leaf
+    symlink (``.claude/hooks/session-end.sh`` → an in-root file) IS accepted:
+    ``_atomic_bytes`` replaces the link with a regular file, so the resulting
+    state is one ``status`` reads as current.
     """
     root_r = root.resolve()
     try:
@@ -221,16 +242,25 @@ def _symlink_escape(root: Path, target: Path, *, label: str) -> str:
     except ValueError:
         rel_parts = target.parts  # target outside root — fall back to leaf
     cur = root
-    for part in rel_parts:
+    for index, part in enumerate(rel_parts):
         cur = cur / part
-        if cur.is_symlink():
-            resolved = cur.resolve()
-            if resolved != root_r and root_r not in resolved.parents:
-                return (
-                    f"{cur} resolves to {resolved} — outside the {label} "
-                    f"{root_r}. Symlinked configs are not touched (unlink the "
-                    "symlink first)."
-                )
+        if not cur.is_symlink():
+            continue
+        resolved = cur.resolve()
+        if resolved != root_r and root_r not in resolved.parents:
+            return (
+                f"{cur} resolves to {resolved} — outside the {label} "
+                f"{root_r}. Symlinked configs are not touched (unlink the "
+                "symlink first)."
+            )
+        if index != len(rel_parts) - 1:
+            return (
+                f"{cur} is a symlink to {resolved}, inside the {label} "
+                f"{root_r} — a symlinked hooks directory is not an install "
+                "`tortoise hooks status` reads as current (and `tortoise "
+                "hooks upgrade` refuses it), so nothing is written through "
+                "it. Replace the symlink with a real directory and re-run."
+            )
     return ""
 
 
@@ -286,32 +316,21 @@ def _our_command_dicts(entry: object, script_name: str, hooks_dir: str,
                        root: Path) -> list[dict]:
     """Every child command dict of ``entry`` that runs our ``script_name``.
 
-    Claude Code only executes handlers inside an entry's ``hooks`` ARRAY with a
-    ``{"type": "command", "command": …}`` shape; a flat ``{type, command}`` at
-    the EVENT level, a handler missing its ``type``, and a non-string command
-    are all silently IGNORED by the harness.  Counting any of them as our
-    registration would leave the project capturing nothing while reporting
-    success, so they are foreign and a fresh valid entry is appended instead
-    (#3866 makes the same distinction in ``_entry_command_dicts``).  ALL
-    children are inspected, never just the first: ours may sit behind a foreign
-    hook in the same array, and one left untimed is cancelled at Claude Code's
-    1.5 s default.
+    DELEGATES to :func:`tortoise.hook_install._entry_command_dicts` — the ONE
+    entry-shape reader the drift/repair path also uses.  This was a
+    hand-mirrored copy, and a copy is exactly the drift this module already
+    paid for on the tokenizer side: tightening the shape gate here (or there)
+    left the other surface reading a flat event-level ``{type, command}`` —
+    which Claude Code silently IGNORES — as a live registration, so the
+    install reported success while the project captured nothing.  One
+    function, two callers: the entry-shape contract (an entry needs a
+    ``hooks`` ARRAY of properly typed child commands) cannot diverge between
+    the installer and ``tortoise hooks status|upgrade``.  ALL children are
+    inspected, never just the first: ours may sit behind a foreign hook in the
+    same array, and one left untimed is cancelled at Claude Code's 1.5 s
+    default.
     """
-    if not isinstance(entry, dict):
-        return []
-    inner = entry.get("hooks")
-    if not isinstance(inner, list):
-        return []
-    found: list[dict] = []
-    for item in inner:
-        if not isinstance(item, dict) or item.get("type") != "command":
-            continue
-        command = item.get("command")
-        if not isinstance(command, str):
-            continue
-        if _is_our_script_command(command, script_name, hooks_dir, root):
-            found.append(item)
-    return found
+    return hook_install._entry_command_dicts(entry, script_name, hooks_dir, root)
 
 
 def merge_capture_hooks(data: dict, *, timeout: int = CLAUDE_TIMEOUT,
@@ -574,6 +593,26 @@ def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     return InstallResult(harness, changed=changed, actions=tuple(actions))
 
 
+def _write_failed(harness: str, e: OSError) -> InstallResult:
+    """The populated failure result for a write-time ``OSError``.
+
+    The pre-flight proves the DIRECTORY is writable; it cannot prove the
+    TARGET can be replaced — an immutable file (``chflags uchg``), a
+    filesystem that went read-only, ``ENOSPC``/``EDQUOT``, or a mode change
+    between the probe and the write all reach ``_atomic_bytes``/
+    ``chmod``/``unlink``/``rename`` and raise.  Returning this instead of
+    letting the exception escape keeps the module's stated contract: every
+    failure path populates :attr:`InstallResult.error`, and the CLI then prints
+    ``Capture install FAILED`` with a non-zero exit rather than a traceback.
+    """
+    where = getattr(e, "filename", None) or "the install target"
+    return InstallResult(harness, error=(
+        f"write failed at {where}: {e.__class__.__name__}: {e} — the capture "
+        "seam is NOT fully installed. Fix the path (permissions, immutable "
+        "flag, free space) and re-run; `tortoise hooks status` reports what "
+        "is on disk."))
+
+
 def install_capture(
     harness: str,
     *,
@@ -594,9 +633,15 @@ def install_capture(
         return InstallResult(harness, error=(
             f"no capture seam for harness {harness!r} (known: {known})"))
     if harness == "claude":
-        return _install_claude(Path(root), dry_run=dry_run)
-    return _install_pi(Path(home) if home is not None else Path.home(),
-                       dry_run=dry_run)
+        try:
+            return _install_claude(Path(root), dry_run=dry_run)
+        except OSError as e:
+            return _write_failed(harness, e)
+    try:
+        return _install_pi(Path(home) if home is not None else Path.home(),
+                           dry_run=dry_run)
+    except OSError as e:
+        return _write_failed(harness, e)
 
 
 __all__ = [

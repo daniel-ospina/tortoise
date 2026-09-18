@@ -513,6 +513,88 @@ def test_claude_install_fails_loudly_when_a_shipped_hook_is_missing(tmp_path, mo
     assert not (tmp_path / "proj" / ".claude").exists(), "half an install was left behind"
 
 
+def test_claude_install_turns_a_write_time_oserror_into_a_populated_error(
+        tmp_path, monkeypatch):
+    """A write that fails at ``os.replace`` (an immutable target —
+    ``chflags uchg``, ``EROFS``/``ENOSPC``/``EDQUOT``) must come back as a
+    populated error, not a traceback — the pre-flight only proves the
+    DIRECTORY is writable, never that the file can be replaced.
+
+    Mutation: remove the ``except OSError`` boundary in
+    ``capture_install.install_capture`` — the ``PermissionError`` escapes
+    ``_atomic_bytes``, the CLI prints a traceback, and the caller sees NO
+    ``InstallResult.error`` even though the hook scripts were half-installed."""
+    def boom(src, dst, *args, **kwargs):
+        raise PermissionError(1, "Operation not permitted", str(dst))
+
+    monkeypatch.setattr(capture_install.os, "replace", boom)
+
+    res = install_capture("claude", root=tmp_path)
+
+    assert not res.ok, "a failed write reported success"
+    assert "write failed" in res.error, res.error
+    assert "PermissionError" in res.error, res.error
+    assert "NOT fully installed" in res.error, res.error
+    # No registration is written through a failed script write — the user is
+    # told to fix the path rather than left with a hook-less settings entry.
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_claude_write_failure_is_loud_at_the_cli_seam(tmp_path, monkeypatch, capsys):
+    """The CLI layer reports the write failure as ``Capture install FAILED``
+    with a non-zero exit — never a traceback.
+
+    Mutation: let the ``OSError`` escape ``install_capture`` (the seam's
+    ``result.ok`` branch is bypassed and ``main`` has no handler, so this
+    returns an exception instead of exit 1)."""
+    from tortoise import __main__ as tortoise_main
+
+    def boom(src, dst, *args, **kwargs):
+        raise PermissionError(1, "Operation not permitted", str(dst))
+
+    monkeypatch.setattr(capture_install.os, "replace", boom)
+    args = type("Args", (), {"harness": "claude", "dir": str(tmp_path),
+                             "dry_run": False})()
+
+    rc = tortoise_main._install_capture_seam(args, install_capture)
+
+    captured = capsys.readouterr()
+    assert rc == 1, f"a failed install exited {rc}"
+    assert "Capture install FAILED" in captured.err, captured.err
+    assert "write failed" in captured.err, captured.err
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_claude_install_refuses_an_in_root_symlinked_hooks_directory(tmp_path):
+    """A hooks DIRECTORY symlinked to an in-root directory is refused — the
+    stated carve-out is for the leaf only.
+
+    Mutation: allow any in-root symlink (``_symlink_escape`` returns "" for an
+    intermediate component) — the install writes through the symlink and exits
+    0, while ``hook_install.detect_install`` reports ``symlinked-install`` and
+    ``upgrade_install`` refuses the very tree the installer just claimed to
+    have installed.  This pins the two surfaces together."""
+    root = tmp_path / "proj"
+    real = root / "real-hooks"
+    real.mkdir(parents=True)
+    (root / ".claude").mkdir()
+    (root / ".claude" / "hooks").symlink_to(real, target_is_directory=True)
+
+    res = install_capture("claude", root=root)
+
+    assert not res.ok, "a symlinked hooks dir was reported as installed"
+    assert "Refusing" in res.error
+    assert "symlink" in res.error
+    # Nothing was written THROUGH the symlink — no half-install in the target.
+    assert list(real.iterdir()) == [], "hooks were written through the symlink"
+    assert not (root / ".claude" / "settings.json").exists()
+    # ...and the drift detector agrees this is not an install (upgrade refuses
+    # symlinked installs), so refusing cannot mask a state status calls clean.
+    findings = hook_install.detect_install(root, "claude")
+    assert any(f.kind == "symlinked-install" for f in findings), findings
+    assert hook_install.upgrade_install(root, "claude").refused is not None
+
+
 def test_unknown_harness_is_refused(tmp_path):
     """Mutation: return an empty successful result for an unknown harness."""
     res = install_capture("cursor", root=tmp_path)
@@ -779,6 +861,58 @@ def test_classifier_parity_with_hook_install(tmp_path):
             f"capture_install={ours}, hook_install={theirs}")
 
 
+def test_entry_command_shape_parity_with_hook_install(tmp_path):
+    """``capture_install._our_command_dicts`` and
+    ``hook_install._entry_command_dicts`` return the SAME dicts for every
+    entry SHAPE — the installer delegates, so the shape gate cannot diverge
+    either.
+
+    Mutation: reintroduce the hand-mirrored copy in ``capture_install`` — the
+    flat-event-level and missing-``type`` cases below then disagree with
+    ``hook_install`` (and the installer "repairs" a hook Claude Code never
+    runs).
+    """
+    ours = {"type": "command", "command": ".claude/hooks/session-end.sh",
+            "timeout": 60}
+    foreign = {"type": "command", "command": "vendor/.claude/hooks/session-end.sh"}
+    entries = [
+        None,
+        "session-end.sh",
+        [],
+        {"matcher": "", "hooks": [dict(ours)]},
+        {"matcher": "", "hooks": [dict(ours), dict(ours)]},
+        {"matcher": "", "hooks": [dict(foreign), dict(ours)]},
+        # A flat ``{type, command}`` at the EVENT level: ignored by Claude Code.
+        {"type": "command", "command": ".claude/hooks/session-end.sh"},
+        # A handler missing its ``type``.
+        {"matcher": "", "hooks": [{"command": ".claude/hooks/session-end.sh"}]},
+        # A non-string command.
+        {"matcher": "", "hooks": [{"type": "command", "command": 5}]},
+        # ``hooks`` is not an array.
+        {"hooks": {"type": "command", "command": ".claude/hooks/session-end.sh"}},
+        # A foreign path at the same basename.
+        {"matcher": "", "hooks": [dict(foreign)]},
+    ]
+    for entry in entries:
+        got = capture_install._our_command_dicts(
+            entry, "session-end.sh", ".claude/hooks", tmp_path)
+        want = hook_install._entry_command_dicts(
+            entry, "session-end.sh", ".claude/hooks", tmp_path)
+        assert got == want, (
+            f"entry-shape divergence on {entry!r}: "
+            f"capture_install={got}, hook_install={want}")
+
+    # The installer must never read a flat event-level entry as a registration
+    # (the harness ignores it) — pinned here independently of hook_install.
+    flat = {"type": "command", "command": ".claude/hooks/session-end.sh"}
+    assert capture_install._our_command_dicts(
+        flat, "session-end.sh", ".claude/hooks", tmp_path) == []
+    untyped = {"matcher": "", "hooks": [
+        {"command": ".claude/hooks/session-end.sh"}]}
+    assert capture_install._our_command_dicts(
+        untyped, "session-end.sh", ".claude/hooks", tmp_path) == []
+
+
 def test_install_then_status_is_clean_and_upgrade_is_a_no_op(tmp_path):
     """An install this module produces is one `tortoise hooks status` reads as
     current, and `tortoise hooks upgrade` changes nothing.
@@ -959,3 +1093,19 @@ def test_every_capture_artifact_ships_in_the_wheel():
         assert covered(rel), (
             f"{harness}: {artifact} is not matched by any package-data pattern "
             f"{patterns} — a wheel install would not ship it")
+
+    # ``CAPTURE_SEAM["claude"]`` names only ``session-end.sh``, but the
+    # installer resolves EVERY ``CLAUDE_SCRIPTS`` entry — a glob narrowed to
+    # the one artifact in the seam map leaves a wheel whose
+    # ``session-start.sh`` is missing (the install then fails on the user's
+    # machine, not in CI).
+    claude_artifacts = [f"tortoise/claude-hooks/{name}"
+                        for name in capture_install.CLAUDE_SCRIPTS]
+    assert len(claude_artifacts) >= 2, (
+        "CLAUDE_SCRIPTS declares fewer scripts than the installer needs:"
+        f" {capture_install.CLAUDE_SCRIPTS}")
+    for artifact in claude_artifacts:
+        rel = str(Path(artifact).relative_to("tortoise"))
+        assert covered(rel), (
+            f"{artifact} is not matched by any package-data pattern "
+            f"{patterns} — a wheel install would fail resolving it")
