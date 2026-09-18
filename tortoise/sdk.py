@@ -4790,11 +4790,15 @@ class TortoiseSDK:
         change for callers that don't pass the kwarg.
 
         The kwarg is a CLAIM about the successor's window start, so when the
-        successor carries a stored ``validFrom`` the two must name the SAME
-        instant (compared by instant, not string form). A disagreement raises
-        ``ValueError`` BEFORE any mutation: a predecessor ``validTo`` that
-        disagrees either leaves a GAP (a query instant covered by neither
-        window) or an OVERLAP (two covering candidates ⇒ ``ambiguous``).
+        successor carries a stored ``validFrom`` the two must be parseable
+        timestamps naming the SAME instant (compared by instant via
+        ``_created_sort_key`` — the measure ``restore_point_at``'s ``_covers``
+        uses). A disagreement raises ``ValueError`` BEFORE any mutation: a
+        predecessor ``validTo`` that disagrees either leaves a GAP (a query
+        instant covered by neither window) or an OVERLAP (two covering
+        candidates ⇒ ``ambiguous``). The kwarg remains the SOLE source when
+        the successor carries no stored ``validFrom`` (an undated successor),
+        unchanged. See docs/ONTOLOGY.md §4.7 (``validTo``).
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx
@@ -4852,21 +4856,45 @@ class TortoiseSDK:
         # The resolution ORDER below is the documented one and is unchanged
         # (ONTOLOGY.md §4.1/§4.7 `validTo` row: `valid_from` kwarg →
         # successor validFrom → successor createdAt → now). What IS new is a
-        # PRECONDITION on the kwarg: trusting it verbatim broke chain
-        # contiguity silently in BOTH directions — an EARLIER kwarg left a
-        # GAP (a query instant covered by neither window, so
-        # `restore_point_at` reports honest absence for a period that was in
-        # fact covered) and a LATER kwarg left an OVERLAP (two covering
-        # candidates ⇒ every instant inside it reads `ambiguous`). The
-        # successor's STORED validFrom is the value every read path computes
-        # its window start from (`restore_point_at` → `_covers`), so a
-        # disagreeing kwarg can only ever make the chain wrong. Refuse it
+        # PRECONDITION on the kwarg, now stated in that row too: trusting it
+        # verbatim broke chain contiguity silently in BOTH directions — an
+        # EARLIER kwarg left a GAP (a query instant covered by neither
+        # window, so `restore_point_at` reports honest absence for a period
+        # that was in fact covered) and a LATER kwarg left an OVERLAP (two
+        # covering candidates ⇒ every instant inside it reads `ambiguous`).
+        # The successor's STORED validFrom is the value every read path
+        # computes its window start from (`restore_point_at` → `_covers`), so
+        # a disagreeing kwarg can only ever make the chain wrong. Refuse it
         # BEFORE any mutation rather than pick a winner: picking the store
         # would invert the documented order, picking the kwarg re-creates the
-        # defect. Instant-level comparison via ``_created_sort_key`` — the
-        # SAME mixed-format primitive ``_covers`` uses — so a cosmetic format
-        # difference ("2026-06-10" vs "2026-06-10T00:00:00+00:00") reads as
-        # agreement, never as a false refusal.
+        # defect.
+        #
+        # The comparison keys on ``str(valid_from)`` — the value the stamp
+        # block PERSISTS — not the caller's object, and requires BOTH sides to
+        # be parseable to the same instant. Both halves are load-bearing:
+        #   * keying the caller's object blesses a value the write
+        #     metamorphoses. A numeric-epoch kwarg parses as an instant, but
+        #     the ``str()`` that lands in ``validTo`` is UNPARSEABLE to
+        #     ``_created_sort_key`` (its ISO branch needs a ``-`` or ``T``),
+        #     i.e. an unbounded predecessor window — the exact OVERLAP this
+        #     guard exists to prevent.
+        #   * an unparseable side cannot be shown to name the same instant,
+        #     and ``_covers`` cannot order it either, so agreeing to write it
+        #     would be the silent wrong answer the read path refuses.
+        # ``_created_sort_key`` is the SAME measure ``_covers`` uses, so the
+        # guard's agreement boundary IS the read path's contiguity boundary.
+        # It normalizes a purely cosmetic encoding difference
+        # ("…T00:00:00Z" vs "…T00:00:00+00:00") and that is therefore
+        # accepted. It parses a DATE-ONLY value as LOCAL midnight (issue
+        # #3982), so a date-only-vs-offset-aware pair is a real instant
+        # difference off UTC — refused there, accepted on a UTC host. That is
+        # deliberate: `_covers` has the same host-dependence, so a
+        # host-independent verdict here would disagree with the read path.
+        # #3982 owns the decision on date-only semantics.
+        #
+        # A FALSEY stored validFrom ("") is treated as ABSENT — inherited
+        # from the resolution branch below and from `_covers`, never a new
+        # predicate; the guard's coverage claim is exactly that branch's.
         vf_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
             params={"id": new_id},
@@ -4874,27 +4902,17 @@ class TortoiseSDK:
         stored_vf = vf_rows[0][0] if vf_rows else None
         if valid_from is not None and stored_vf:
             from .search_engine import _created_sort_key
+            k_kwarg = _created_sort_key(str(valid_from))
             k_stored = _created_sort_key(stored_vf)
-            k_kwarg = _created_sort_key(valid_from)
-            if k_stored[0] == 0 and k_kwarg[0] == 0:  # both parseable
-                # Compare by INSTANT — the same mixed-format measure
-                # ``_covers`` uses. A merely cosmetic difference
-                # ("…T00:00:00Z" vs "…T00:00:00+00:00", or epoch vs ISO)
-                # is agreement, never a false refusal.
-                agrees = k_stored[1] == k_kwarg[1]
-            else:
-                # An unparseable side cannot be shown to name the same
-                # instant, and the two would not compare alike in
-                # ``_covers`` either — accept only a byte-identical value.
-                agrees = (k_stored[0] == k_kwarg[0]
-                          and str(stored_vf) == str(valid_from))
-            if not agrees:
+            if not (k_kwarg[0] == 0 and k_stored[0] == 0
+                    and k_kwarg[1] == k_stored[1]):
                 raise ValueError(
                     f"supersede_point: valid_from {valid_from!r} disagrees "
                     f"with successor {new_id}'s stored validFrom "
-                    f"{stored_vf!r} — the two must name the same instant, "
-                    f"else the predecessor's validTo gaps or overlaps the "
-                    f"chain (read paths use the stored window start)"
+                    f"{stored_vf!r} — both must be parseable timestamps "
+                    f"naming the same instant, else the predecessor's "
+                    f"validTo gaps or overlaps the chain (read paths use "
+                    f"the stored window start)"
                 )
         if valid_from is not None:
             succ_vf = str(valid_from)

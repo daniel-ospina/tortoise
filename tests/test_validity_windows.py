@@ -47,8 +47,13 @@ def _props(sdk: TortoiseSDK, pid: str) -> dict:
 
 # ── T1: supersede_point stamps the window (contiguity + fallback matrix) ──
 
-def test_supersede_explicit_valid_from_wins(sdk):
-    """The valid_from kwarg is the window-end source (contiguity)."""
+def test_supersede_valid_from_is_the_sole_source_when_successor_is_undated(sdk):
+    """The ``valid_from`` kwarg is the window-end source (contiguity) — and
+    the SOLE source, because this successor carries no stored ``validFrom``.
+
+    Name pinned to that condition: the kwarg is refused when it DISAGREES with
+    a stored ``validFrom`` (see the disagreement tests below), so "explicit
+    valid_from wins" is no longer an unconditional claim (ONTOLOGY.md §4.7)."""
     old = _make_point(sdk, content="gym at 6pm")
     new = _make_point(sdk, content="gym at 5pm")
     result = sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
@@ -196,6 +201,38 @@ def test_supersede_valid_from_cross_format_disagreement_refused(sdk):
                       validFrom="2026-06-10T00:00:00+00:00")
     with pytest.raises(ValueError, match="disagrees"):
         sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-09")
+
+
+def test_supersede_numeric_epoch_kwarg_refused(sdk):
+    """The guard keys the value the write PERSISTS (``str(valid_from)``), not
+    the caller's object.
+
+    A numeric-epoch kwarg names the same instant as the stored value, but the
+    ``str()`` that lands in ``validTo`` is UNPARSEABLE to ``_created_sort_key``
+    (its ISO branch needs a ``-`` or ``T``) — so ``_covers`` cannot order the
+    predecessor's window end and it silently becomes unbounded, i.e. the exact
+    OVERLAP this guard exists to prevent. Keying the caller's object instead
+    would accept it and corrupt the chain.
+    """
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T00:00:00+00:00")
+    # 2026-06-10T00:00:00Z as an epoch — the same instant, unserializable form
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from=1781049600.0)
+    # fail-closed: nothing written
+    assert "validTo" not in _props(sdk, old["id"])
+
+
+def test_supersede_unparseable_valid_from_refused(sdk):
+    """An unparseable kwarg cannot be shown to name the stored instant, and
+    ``_covers`` cannot order it — refused rather than written."""
+    old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
+    new = _make_point(sdk, content="claim v2",
+                      validFrom="2026-06-10T00:00:00+00:00")
+    with pytest.raises(ValueError, match="disagrees"):
+        sdk.supersede_point(old["id"], new["id"], valid_from="not-a-date")
+    assert "validTo" not in _props(sdk, old["id"])
 
 
 def test_invalidate_point_stamps_withdrawal(sdk):
