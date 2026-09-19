@@ -24,10 +24,20 @@ comes from ``tortoise.capture_receipts``, the same definition the server uses.
 HERMETICITY.  The probe transcript and the event payload are synthesized; the
 seam execution is real.  This module never writes the user's install.  The one
 write is the probe SESSION, which is unmistakably named
-``verify-<harness>-<timestamp>`` and deleted whenever the seam was FIRED — keyed
-on the capture attempt, never on whether the read observed it, and run from a
-``finally`` so a failed API read cannot skip it.  The deletion is reported, and
-a failed deletion is surfaced (exit non-zero), never swallowed.
+``verify-<harness>-<timestamp>`` and deleted whenever a fire was ATTEMPTED —
+keyed on the capture attempt, never on whether the fire *reported* success (a
+timed-out fire has still launched the seam) and never on whether the read
+observed it.  The fire and the observation share ONE ``try``/``finally``, so
+cleanup runs on every path and there is no second site that could drift.  The
+deletion is reported, and a failed deletion is surfaced (exit non-zero), never
+swallowed.
+
+DETACHING SEAMS.  Codex's (and Cursor's) seam hands its capture to a worker
+that OUTLIVES the hook (``nohup … & disown``), so the capture can land after
+this command has returned.  For those harnesses a ``DELETE 404`` is NOT proof
+that nothing was left behind — it only proves nothing had landed yet — and the
+report says the capture was still in flight rather than claiming a clean
+delete the code cannot honour.
 
 HONEST DISCLOSURE.  A harness whose seam cannot be fired headlessly is NOT
 faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
@@ -99,6 +109,18 @@ HEADLESS_FIRABLE: dict[str, bool] = {
     "cursor": False,
     "pi": False,
 }
+
+#: Harnesses whose capture seam DETACHES a background worker that outlives the
+#: hook — Codex's ``session-end.sh`` and Cursor's hand the slow capture to
+#: ``nohup … & disown`` because the harness kills the hook before a network
+#: POST could finish.  For a detaching harness the capture can land AFTER
+#: ``verify`` has returned, so a cleanup ``DELETE 404`` is not a guarantee: it
+#: proves only that nothing had landed *yet*.  The cleanup report must say the
+#: capture is still in flight, never the false "nothing was left behind".
+#: A per-harness fact table beside ``HEADLESS_FIRABLE``/``_CAPTURE_EVENT`` —
+#: the detach is a property of the shipped hook script, which this module
+#: deliberately never greps (behavioural verification, not a source scan).
+DETACHING_HARNESSES: frozenset[str] = frozenset({"codex", "cursor"})
 
 #: Why a non-firable harness's links are UNVERIFIABLE.  Named per harness so
 #: the report says exactly what is missing, never a generic shrug.
@@ -470,28 +492,37 @@ def verify_session_capture(harness: str,
         report["exit_code"] = _exit_code(report)
         return report
 
-    fired = _fire(root, command, payload, _fire_env(env), timeout)
-    report["fire"] = fired
-    if not fired["ok"]:
-        report["links"]["installed"] = _link(STATUS_FAIL, fired["detail"])
-        report["links"]["captured"] = _link(
-            STATUS_FAIL, "not fired — the installed seam did not run")
-        report["links"]["memory"] = _link(
-            STATUS_FAIL, "not fired — the installed seam did not run")
-        report["exit_code"] = _exit_code(report)
-        return report
-    report["links"]["installed"] = _link(
-        STATUS_PROVEN,
-        f"present, registered, and fired: {fired['detail']}")
-    # The seam was EXECUTED: the harness may have written a capture even when
-    # the read below never observes it.  Cleanup is keyed on THIS fact, never
-    # on the observation — a GET that 500s must not skip the delete, and a GET
-    # that persistently 404s must not report "nothing to delete" while a named
-    # probe session sits in the graph.
+    # ── the fire and the observation share ONE try/finally ───────────────
+    # The capture ATTEMPT is recorded BEFORE ``_fire`` is invoked: a fire that
+    # times out (or is killed) has still LAUNCHED the registered command, and
+    # the seam may have POSTed before it died — so cleanup must run on that
+    # path too.  Keying the attempt on ``fired["ok"]`` left the probe orphaned
+    # on exactly that path (#3809 rr2, the same class as the read-keyed
+    # cleanup).  Fire + observation therefore live in this single ``try``, and
+    # the ``finally`` below is the ONE cleanup site — reached on every exit:
+    # fire failure, observation failure, ``_ApiError``, or an unexpected raise.
     report["capture_attempted"] = True
-
     detail: dict[str, Any] | None = None
     try:
+        fired = _fire(root, command, payload, _fire_env(env), timeout)
+        report["fire"] = fired
+        if not fired["ok"]:
+            report["links"]["installed"] = _link(
+                STATUS_FAIL, fired["detail"])
+            # The command WAS launched — only the observation is missing.  The
+            # message must not claim the seam "did not run" (false when it
+            # timed out after POSTing): say exactly what is known.
+            report["links"]["captured"] = _link(
+                STATUS_FAIL,
+                "not observed — the installed seam was launched but the fire "
+                "did not complete, so the capture is unknown")
+            report["links"]["memory"] = _link(
+                STATUS_FAIL, "not reachable — the fire did not complete")
+            return report
+        report["links"]["installed"] = _link(
+            STATUS_PROVEN,
+            f"present, registered, and fired: {fired['detail']}")
+
         # ── link 2: captured ─────────────────────────────────────────────
         deadline = time.monotonic() + max(1.0, timeout)
         while time.monotonic() < deadline:
@@ -585,11 +616,16 @@ def verify_session_capture(harness: str,
         report["links"]["memory"] = _link(
             STATUS_FAIL, "not reachable — the session read failed")
     finally:
-        # ── cleanup: delete the probe session (never leave it behind) ────
+        # ── cleanup: the ONE site, reached on EVERY path above ───────────
+        # The probe session is deleted whenever a fire was attempted, and the
+        # exit code is settled here too so the early fire-failure return gets
+        # it.  There is deliberately no other cleanup call to drift from this
+        # one.
         report["cleanup"] = _cleanup(
             api_url, api_key, probe_id, keep=keep,
-            capture_attempted=report["capture_attempted"])
-    report["exit_code"] = _exit_code(report)
+            capture_attempted=report["capture_attempted"],
+            detaching=harness in DETACHING_HARNESSES)
+        report["exit_code"] = _exit_code(report)
     return report
 
 
@@ -605,17 +641,25 @@ def _probe_id(harness: str) -> str:
 
 
 def _cleanup(api_url: str, api_key: str, probe_id: str, *,
-             keep: bool, capture_attempted: bool) -> dict[str, Any]:
+             keep: bool, capture_attempted: bool,
+             detaching: bool = False) -> dict[str, Any]:
     """Delete the probe session (and its local import receipt).
 
-    Deletion is keyed on whether the seam was FIRED (``capture_attempted``),
-    NOT on whether the GET observed a session: a failed read must never leave
-    a write behind, and the report must never claim "nothing to delete" when
-    the seam actually ran.  ``keep`` skips the deletion by operator request,
-    and the report then says so — an intentional keep is not a silent leak.
-    A failed deletion is REPORTED and turns the command non-zero (it left a
-    write in the graph); it is never swallowed.  A DELETE 404 means no probe
-    session exists, so nothing was left behind (not an error).
+    Deletion is keyed on whether a fire was ATTEMPTED (``capture_attempted``),
+    NOT on whether the fire reported success and NOT on whether the GET
+    observed a session: a failed read must never leave a write behind, and the
+    report must never claim "nothing to delete" when the seam actually ran.
+    ``keep`` skips the deletion by operator request, and the report then says
+    so — an intentional keep is not a silent leak.  A failed deletion is
+    REPORTED and turns the command non-zero (it left a write in the graph); it
+    is never swallowed.
+
+    A ``DELETE 404`` means the probe session does not exist *now*.  For a
+    non-detaching seam that is proof nothing was left behind.  For a
+    DETACHING seam (``detaching``) the capture may land after this command
+    returns, so the 404 is only "not yet": the report says the capture is in
+    flight and marks ``in_flight`` (which turns the command non-zero) instead
+    of claiming a clean delete it cannot honour.
     """
     result: dict[str, Any] = {"attempted": False, "deleted": False,
                               "session_id": probe_id, "kept": False}
@@ -632,6 +676,20 @@ def _cleanup(api_url: str, api_key: str, probe_id: str, *,
                     method="DELETE")
     except _ApiError as e:
         if e.status == 404:
+            if detaching:
+                # The seam hands off to a worker that OUTLIVES the hook, so a
+                # 404 proves only that nothing had landed YET.  An honest "in
+                # flight" beats a "nothing was left behind" the code cannot
+                # honour (#3809 rr2).
+                result["in_flight"] = True
+                result["detail"] = (
+                    f"the seam detaches a worker that outlives the hook; no "
+                    f"probe session {probe_id} had landed at cleanup time "
+                    "(DELETE 404) — the capture was still in flight when "
+                    "verify returned and the probe session may appear after it. "
+                    "A bounded grace cannot fix this: any finite wait is "
+                    "outlived by a slower worker.")
+                return result
             result["detail"] = (
                 f"no probe session {probe_id} to delete (DELETE 404) — "
                 "nothing was left behind")
@@ -670,11 +728,13 @@ def _exit_code(report: dict[str, Any]) -> int:
     if STATUS_FAIL in statuses:
         return EXIT_BROKEN
     # A leaked write is a BROKEN link, not an unverifiable one: exit 2 means
-    # "nothing provably broken", and a failed DELETE proves the opposite.  This
-    # is checked BEFORE the UNVERIFIABLE branch so an old API build (memory
-    # UNVERIFIABLE) plus a failed cleanup still exits 1.
+    # "nothing provably broken", and a failed DELETE proves the opposite.  An
+    # in-flight capture for a detaching seam is the same class — the probe may
+    # remain, so the caller must not read the run as clean.  Both are checked
+    # BEFORE the UNVERIFIABLE branch so an old API build (memory UNVERIFIABLE)
+    # plus a failed/uncertain cleanup still exits 1.
     cleanup = report.get("cleanup") or {}
-    if cleanup.get("error"):
+    if cleanup.get("error") or cleanup.get("in_flight"):
         return EXIT_BROKEN
     if STATUS_UNVERIFIABLE in statuses:
         return EXIT_UNVERIFIABLE

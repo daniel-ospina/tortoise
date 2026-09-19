@@ -27,6 +27,7 @@ import json
 import os
 import stat
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -61,6 +62,13 @@ class _Graph:
         self.no_receipt = False
         self.zero_extracted = False
         self.turn_override: dict[str, int] = {}
+        #: Delay (s) between STORING a captured session and answering the POST
+        #: — lets a test drive ``_fire`` past its timeout while the seam has
+        #: really captured (the orphan-on-timeout reproduction).
+        self.post_delay = 0.0
+        #: When set, a POST blocks here BEFORE storing (or counting) anything —
+        #: the "detached worker has not landed yet" reproduction.
+        self.post_gate: threading.Event | None = None
         self._clock = 0
 
     def tick(self) -> str:
@@ -95,6 +103,8 @@ def _make_handlers(graph: _Graph):
                 if graph.fail_post:
                     self._send(500, {"detail": "capture refused (test)"})
                     return
+                if graph.post_gate is not None:
+                    graph.post_gate.wait(timeout=30)
                 graph.posts.append(body)
                 sid = body.get("session_id") or "unnamed"
                 harness = body.get("harness")
@@ -122,6 +132,8 @@ def _make_handlers(graph: _Graph):
                 if graph.omit_source_field:
                     session.pop("source", None)
                 graph.sessions[sid] = session
+                if graph.post_delay:
+                    time.sleep(graph.post_delay)
                 self._send(200, {"session_id": sid, "turns": n,
                                  "extracted": 0 if graph.zero_extracted else 1,
                                  "extraction_mode": "llm:mock"})
@@ -150,6 +162,12 @@ def _make_handlers(graph: _Graph):
                 if graph.fail_delete:
                     self._send(500, {"detail": "delete refused (test)"})
                     return
+                if sid not in graph.sessions:
+                    # The real API 404s a DELETE for a session that does not
+                    # exist; the double must too, or the ``DELETE 404`` cleanup
+                    # path is unreachable from any test.
+                    self._send(404, {"detail": "Session not found"})
+                    return
                 graph.deletes.append(sid)
                 graph.sessions.pop(sid, None)
                 self._send(200, {"deleted": True, "cleaned_receipts": []})
@@ -163,6 +181,10 @@ def _make_handlers(graph: _Graph):
 def hosted():
     graph = _Graph()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handlers(graph))
+    # A handler that is mid-``post_delay`` when the test ends writes to a
+    # socket its client has abandoned; that is expected here, so do not let
+    # socketserver print a traceback for it.
+    server.handle_error = lambda *_a, **_k: None
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -596,6 +618,104 @@ def test_guard_cleanup_failure_beats_an_unverifiable_link(hosted, setup):
     assert report["links"]["memory"]["status"] == "UNVERIFIABLE-IN-CI"
     assert report["cleanup"]["error"] is True
     assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_fire_timeout_after_a_capture_still_deletes_the_probe(
+        hosted, setup):
+    """A fire that is LAUNCHED but reports failure must still delete the probe.
+
+    The seam stores the session and advances the receipt, THEN blocks past the
+    fire timeout — so ``_fire`` reports failure after a capture that really
+    happened.
+
+    Mutation: set ``report["capture_attempted"] = True`` only after
+    ``fired["ok"]`` (and return early before the shared ``try``) — the probe is
+    orphaned (``cleanup.attempted`` is False, ``graph.deletes == []``, the probe
+    session survives) and this REDs.  Reverting the captured message to the old
+    "not fired — the installed seam did not run" wording REDs the "was
+    launched" assertion.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.post_delay = 15.0
+    report = _verify(hosted, home, "claude", root, timeout=5.0)
+    assert len(graph.posts) == 1, "the seam really captured before the timeout"
+    assert report["links"]["installed"]["status"] == "FAIL", report
+    assert "did not return within" in report["links"]["installed"]["detail"]
+    assert report["cleanup"]["attempted"] is True, report["cleanup"]
+    assert report["cleanup"]["deleted"] is True, report["cleanup"]
+    assert report["session_id"] in graph.deletes
+    assert report["session_id"] not in graph.sessions
+    assert "did not run" not in report["links"]["captured"]["detail"]
+    assert "was launched" in report["links"]["captured"]["detail"]
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+# ── P2-1: a detaching seam is not a "nothing was left behind" ───────────
+
+
+def test_guard_detaching_seam_reports_in_flight_not_nothing_left_behind(
+        hosted, setup):
+    """Codex's detached worker can POST AFTER verify returns — say so.
+
+    The capture POST is held at the server until the test releases it, so at
+    cleanup time nothing has landed and DELETE 404s.  For a DETACHING seam
+    that 404 is "not yet", not "nothing was left behind": the report must say
+    the capture was still in flight and the command must exit non-zero.
+
+    Mutation: drop the ``detaching`` branch in ``_cleanup`` (or pass
+    ``detaching=False``) — the report claims "nothing was left behind", the
+    ``in_flight``/message assertions RED, and the late POST still lands
+    (``posts == 1``).  (The exit-code assertion holds either way in THIS
+    scenario only because the unobserved capture already FAILs `captured`;
+    ``test_guard_in_flight_cleanup_is_broken_not_a_clean_exit`` covers the
+    ``_exit_code`` branch that makes an in-flight cleanup non-zero on its own.)
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "codex")
+    graph, _url = hosted
+    gate = threading.Event()
+    graph.post_gate = gate
+    try:
+        report = _verify(hosted, home, "codex", root, timeout=2.0)
+        assert graph.posts == [], "the worker had not landed at cleanup time"
+        assert report["links"]["captured"]["status"] == "FAIL", report
+        assert report["cleanup"]["attempted"] is True, report["cleanup"]
+        assert report["cleanup"].get("in_flight") is True, report["cleanup"]
+        assert "nothing was left behind" not in report["cleanup"]["detail"]
+        assert "in flight" in report["cleanup"]["detail"]
+        assert report["exit_code"] == EXIT_BROKEN, report
+        # Release the detached worker: the late capture really does land.
+        gate.set()
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and not graph.posts:
+            time.sleep(0.1)
+        assert len(graph.posts) == 1, "the detached worker POSTed after verify"
+        assert report["session_id"] in graph.sessions
+    finally:
+        gate.set()
+
+
+def test_guard_in_flight_cleanup_is_broken_not_a_clean_exit():
+    """An in-flight cleanup must exit non-zero, even with every link PROVEN.
+
+    Mutation: drop ``or cleanup.get("in_flight")`` from the ``_exit_code``
+    cleanup branch — a report whose only defect is an in-flight capture returns
+    ``EXIT_OK`` and this REDs.
+    """
+    from tortoise.session_verify import EXIT_OK, _exit_code
+
+    report = {
+        "links": {
+            "installed": {"status": "PROVEN", "detail": "fired"},
+            "captured": {"status": "PROVEN", "detail": "observed"},
+            "memory": {"status": "PROVEN", "detail": "extracted"},
+        },
+        "cleanup": {"attempted": True, "deleted": False, "in_flight": True},
+    }
+    assert _exit_code(report) == EXIT_BROKEN
+    assert _exit_code(report) != EXIT_OK
 
 
 # ── P2-2: the CLI boundary (catch-all form + exit propagation) ────────────
