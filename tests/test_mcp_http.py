@@ -1203,7 +1203,7 @@ class TestAdvertisedToolsAllServed:
         the module-bottom register_all resolves a handler for every registry
         entry (its 'no handler — skipped' warning must never fire). Uses the
         RAW provider listing (bypasses the HTTP _HTTPToolFilter transform,
-        which intentionally hides HTTP-excluded/ask-gated tools)."""
+        which intentionally hides HTTP-excluded/curation-group-scoped tools)."""
         import asyncio
 
         from tortoise import mcp_server

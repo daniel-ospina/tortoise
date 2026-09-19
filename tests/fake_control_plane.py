@@ -6,7 +6,7 @@ the shared resolution logic (resolve_api_key, user_memberships, ...) runs
 verbatim in CI with zero network. Mirrors the backup-seam fake pattern
 (plan Task 5 / P1-3): an adapter exposing query() over in-memory rows.
 
-Filter ops: eq | neq | is (None → IS NULL) | gt | lt | lte (all ordered
+Filter ops: eq | neq | is (None → IS NULL) | gt | gte | lt | lte (all ordered
 ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
 rows; POST appends a row (return=representation semantics); DELETE
 removes matching rows (mirrors PostgREST service-role deletes, #302).
@@ -838,6 +838,9 @@ class FakeControlPlane:
                 # SQL semantics: NULL never matches an ordered comparison
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) > value]
+            elif op == "gte":
+                rows = [r for r in rows
+                        if r.get(col) is not None and r.get(col) >= value]
             elif op == "lt":
                 rows = [r for r in rows
                         if r.get(col) is not None and r.get(col) < value]
@@ -883,12 +886,14 @@ def _matches(row: dict, filters: list[tuple[str, str, object]]) -> bool:
             return False
         if op == "gt" and (row.get(col) is None or row.get(col) <= value):
             return False
+        if op == "gte" and (row.get(col) is None or row.get(col) < value):
+            return False
         if op == "lt" and (row.get(col) is None or row.get(col) >= value):
             return False
         if op == "lte" and (row.get(col) is None or row.get(col) > value):
             # ISO-8601 cutoff (mirrors the GET path — #302 purge).
             return False
-        if op not in ("eq", "neq", "is", "gt", "lt", "lte"):
+        if op not in ("eq", "neq", "is", "gt", "gte", "lt", "lte"):
             # #3665 review: an op this helper does not implement must RAISE,
             # not silently no-op. Silently ignoring an op makes PATCH/DELETE
             # match on the remaining filters — i.e. the fake mutates MORE rows

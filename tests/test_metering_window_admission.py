@@ -15,7 +15,7 @@ untouched and makes the drop **visible to the operator** at all SIX sites:
   3. ``hosted_api.create_object``           → lane=object_write_op
   4. ``hosted_api.create_subject``          → lane=subject_write_op
   5. ``mcp_server._quota_gated`` (inner)    → lane=mcp_write_op
-  6. ``sdk.ask`` step 7                     → lane=ask_ledger
+  6. ``ask_lane.run_ask_lane`` step 7        → lane=ask_ledger
 
 Sites 3 and 4 are the two the issue body missed. They are a *second-line*
 handler around the already-absorbing ``_record_write_op``: normal traffic
@@ -51,12 +51,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
+import tortoise.ask_lane as ask_lane_mod
 import tortoise.hosted_api as ha
 import tortoise.metering as metering
-import tortoise.sdk as sdk_mod
 import tortoise.supabase_control as sc
 from tortoise import mcp_auth
 from tortoise import mcp_server as mcp
+from tortoise.ask_lane import (
+    _reset_ask_reader_cache_for_tests,
+    run_ask_lane,
+)
 from tortoise.hosted_api import app
 from tortoise.sdk import TortoiseSDK
 
@@ -72,7 +76,7 @@ SITE_LANES: dict[str, str] = {
     "object_write_op": "tortoise/hosted_api.py",
     "subject_write_op": "tortoise/hosted_api.py",
     "mcp_write_op": "tortoise/mcp_server.py",
-    "ask_ledger": "tortoise/sdk.py",
+    "ask_ledger": "tortoise/ask_lane.py",
 }
 
 _SUPABASE_URL = "https://n3981.test.supabase.co"
@@ -113,7 +117,7 @@ def _clean_ask_state(monkeypatch):
     SDK's LOCAL ask lane (a dev shell may export ``TORTOISE_API_URL``, which
     would route ``sdk.ask`` at the hosted ``/v1/ask`` instead)."""
     from tortoise.quota import _reset_ask_budget_for_tests
-    from tortoise.sdk import _reset_ask_reader_cache_for_tests
+    from tortoise.ask_lane import _reset_ask_reader_cache_for_tests
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     _reset_ask_reader_cache_for_tests()
     _reset_ask_budget_for_tests()
@@ -346,12 +350,12 @@ def test_mcp_abuse_failure_is_not_reported_as_a_dropped_increment(caplog,
         [rec.getMessage() for rec in caplog.records])
 
 
-# ── Site 6: sdk.ask step 7 ─────────────────────────────────────────────────
+# ── Site 6: ask_lane.run_ask_lane step 7 ───────────────────────────────────
 
 
 def test_ask_ledger_drop_is_signalled(caplog, monkeypatch, tmp_path):
-    """``sdk.ask`` meters AFTER the answer exists. A window failure there can
-    refuse nothing, so it is absorbed and reported as lane=ask_ledger. The
+    """``run_ask_lane`` meters AFTER the answer exists. A window failure there
+    can refuse nothing, so it is absorbed and reported as lane=ask_ledger. The
     answer must still be returned.
 
     REDs on: reverting the handler to ``except Exception: pass``; or letting
@@ -377,11 +381,12 @@ def test_ask_ledger_drop_is_signalled(caplog, monkeypatch, tmp_path):
             pass
 
     monkeypatch.setattr(metering, "record_ask_usage", _forced_window_error())
-    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: _Reader())
+    monkeypatch.setattr(ask_lane_mod, "_default_ask_reader_factory",
+                        lambda: _Reader())
     sdk = TortoiseSDK(str(tmp_path / "ask3981.db"))
     try:
         with caplog.at_level(logging.ERROR, logger="tortoise.metering"):
-            result = sdk.ask("what is the plan?", org_id="org-3981")
+            result = run_ask_lane(sdk, "what is the plan?", org_id="org-3981")
     finally:
         sdk.close()
     assert result["answer"] == "served answer"

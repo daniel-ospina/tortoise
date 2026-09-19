@@ -22,6 +22,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 from prometheus_client import Counter, Histogram, generate_latest
 
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
+
 logger = logging.getLogger(__name__)
 
 # Auth functions imported lazily (in _Handler.do_GET) to avoid
@@ -359,6 +361,17 @@ REQUEST_COUNT = Counter("tortoise_requests_total", "Total HTTP requests", ["endp
 REQUEST_LATENCY = Histogram("tortoise_request_latency_seconds", "Request latency")
 ERROR_COUNT = Counter("tortoise_errors_total", "Total errors")
 TEAM_COST = Counter("tortoise_team_cost_cents", "Cost by team", ["team"])
+# #3820: the analytics write path's terminal outcome, one label child per
+# member of `hosted_api._ANALYTICS_OUTCOMES`. The single writer is
+# `record_analytics_outcome` — the write path never touches the counter
+# directly, so the label vocabulary stays in one place (#501/#3677 house shape
+# for a hot path: `Counter` labelled by outcome, as `REQUEST_COUNT`/
+# `ERROR_COUNT` are labelled by endpoint).
+ANALYTICS_OUTCOME_COUNT = Counter(
+    "tortoise_analytics_events_total",
+    "Analytics writes by terminal outcome (#3820)",
+    ["outcome"],
+)
 
 
 def register(sdk) -> None:
@@ -379,6 +392,35 @@ def record_error() -> None:
 def record_cost(team: str, cents: int) -> None:
     """Track LLM/tool cost for a team. cents is integer (avoids float drift)."""
     TEAM_COST.labels(team=team).inc(cents)
+
+
+def record_analytics_outcome(outcome: str) -> None:
+    """Count one analytics write by its terminal outcome (#3820).
+
+    ``outcome`` is a member of ``hosted_api._ANALYTICS_OUTCOMES``; the caller
+    owns that vocabulary and increments this AFTER the sink leg resolved, so a
+    write cannot be counted as delivered before it was.
+    """
+    ANALYTICS_OUTCOME_COUNT.labels(outcome=outcome).inc()
+
+
+def analytics_outcome_counts() -> dict[str, int]:
+    """In-process snapshot of ``ANALYTICS_OUTCOME_COUNT``, keyed by outcome.
+
+    ``/metrics`` carries the Prometheus text form of the same counter; this is
+    the readable form, for tests and for any operator-facing surface that has
+    no scrape (today nothing scrapes it in production — see #3820's audit:
+    ``serve_health`` is not a ``fly.toml`` process).
+    """
+    counts: dict[str, int] = {}
+    for family in ANALYTICS_OUTCOME_COUNT.collect():
+        for sample in family.samples:
+            if not sample.name.endswith("_total"):
+                continue
+            outcome = sample.labels.get("outcome")
+            if outcome is not None:
+                counts[outcome] = int(sample.value)
+    return counts
 
 
 def _is_transient_connect_error(exc: BaseException) -> bool:
@@ -1620,9 +1662,9 @@ def _healthz_required() -> bool:
 
     The previous exact ``== "1"`` match made ``true``/``yes``/``on`` silently
     do nothing — a deploy-time contract believed to be enforced and not.
+    #4097: resolved through the declared truthy contract.
     """
-    return (os.environ.get("TORTOISE_HEALTHZ_REQUIRED", "").strip().lower()
-            in ("1", "true", "yes", "on"))
+    return is_truthy(os.environ.get("TORTOISE_HEALTHZ_REQUIRED"))
 
 
 def resolve_healthz_target(port: int | None = None, bind: str | None = None,

@@ -22,238 +22,24 @@ from time import monotonic as _monotonic
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
-from .assembly import AssemblyAnswer
 from .cross_lens import DEFAULT_THRESHOLD
+from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import ulid
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
-from .retrieval import (DEFAULT_POOL_SIZE, _distinct_session_ids,
-                        _safe_session_tag, resolve_pool_size)
+from .retrieval import (DEFAULT_POOL_SIZE, _safe_session_tag,
+                        resolve_pool_size)
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
+from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 import threading
-import collections
 from datetime import UTC
-
-# ── Ask-lane reader-model cache (#1987 Task 5) ─────────────────────────────
-# Per-namespace cache (keyed by org/namespace — NEVER a module-global
-# model): LRU bound (≤ N entries), in-flight entries NEVER evicted (an LRU
-# eviction can never race an in-flight ask), closed clients on eviction,
-# failed builds never cached, per-key build single-flight. The cache holds
-# the LOCKED WRAPPER — the per-instance lock lives INSIDE the cached object
-# (complete() + usage capture under it), so the shared cached wrapper IS the
-# locked object (P2-6).
-
-ASK_SDK_TIMEOUT_S = 75  # > the server's _ASK_TIMEOUT_S (60) — its 504 is always receivable
-_ASK_READER_CACHE_MAX = 64
-_ASK_READER_CACHE_LOCK = threading.Lock()
-_ask_reader_cache_store: collections.OrderedDict = None  # type: ignore[assignment]
-_ask_build_locks: dict[str, threading.Lock] = {}
-
-
-def _ask_reader_cache() -> collections.OrderedDict:
-    import collections
-    global _ask_reader_cache_store
-    if _ask_reader_cache_store is None:
-        _ask_reader_cache_store = collections.OrderedDict()
-    return _ask_reader_cache_store
-
-
-def _ask_build_lock(key: str) -> threading.Lock:
-    with _ASK_READER_CACHE_LOCK:
-        return _ask_build_locks.setdefault(key, threading.Lock())
-
-
-def _prune_ask_reader_cache(cache) -> None:
-    """LRU bound: evict IDLE entries only (never in-flight), closing their
-    clients (no leaked sockets). In-flight entries are never evicted (P1-6)."""
-    while len(cache) > _ASK_READER_CACHE_MAX:
-        for key, entry in list(cache.items()):
-            if entry.inflight() == 0:
-                cache.pop(key, None)
-                # Drop the single-flight build lock alongside the idle entry
-                # (P2 — the build-lock dict must not grow unbounded). Safe:
-                # an idle entry can never have an in-flight build (a build
-                # either returns the idle entry or the entry is absent).
-                _ask_build_locks.pop(key, None)
-                entry.close()
-                break
-        else:
-            break  # all entries in-flight — stop evicting
-
-
-def _default_ask_reader_factory():
-    """The production ask-lane reader factory — monkeypatched in tests to
-    inject fake readers/transports."""
-    from tortoise.model_adapters import build_reader_model
-    return build_reader_model()
-
-
-def _reset_ask_reader_cache_for_tests() -> None:
-    """Test seam — drop the cache + build locks (closes cached clients)."""
-    global _ask_reader_cache_store, _ask_build_locks
-    with _ASK_READER_CACHE_LOCK:
-        cache = _ask_reader_cache()
-        for entry in cache.values():
-            entry.close()
-        _ask_reader_cache_store = None
-        _ask_build_locks = {}
-
-
-class _LockedReader:
-    """The CACHED ask-lane reader wrapper (P2-6): serializes the inner
-    ``complete()`` + usage capture under a per-instance ``threading.Lock`` —
-    the mutable ``last_completion_tokens`` write at the end of the inner
-    adapter's ``complete()`` is closed against cross-thread read-after-write
-    (contention bounded by the per-org in-flight cap 4). Forwards
-    ``model``/``provider``/``route``/``last_route``/``last_prompt_tokens``/
-    ``last_completion_tokens``/``last_finish_reason`` and ``close()``.
-    """
-
-    def __init__(self, model):
-        self._model = model
-        self._lock = threading.Lock()
-        self._inflight = 0
-
-    def complete(self, *, system: str, user: str,
-                 max_tokens: int | None = None) -> str:
-        with self._lock:
-            self._inflight += 1
-            try:
-                # #2280: forward a per-call max_tokens override (RoutingModel
-                # / adapters already support it) — the ask lane uses it for
-                # bounded budget ESCALATION when the first call collapses
-                # empty (reasoning-budget collapse on reasoning models).
-                if max_tokens is None:
-                    out = self._model.complete(system=system, user=user)
-                else:
-                    out = self._model.complete(system=system, user=user,
-                                               max_tokens=max_tokens)
-                # same-frame capture — atomic with the call under the lock
-                self.last_prompt_tokens = getattr(
-                    self._model, "last_prompt_tokens", 0)
-                self.last_completion_tokens = getattr(
-                    self._model, "last_completion_tokens", 0)
-                self.last_finish_reason = getattr(
-                    self._model, "last_finish_reason", None)
-                return out
-            finally:
-                self._inflight -= 1
-
-    def close(self) -> None:
-        close = getattr(self._model, "close", None)
-        if close is not None:
-            try:  # noqa: SIM105
-                close()
-            except Exception:
-                pass
-
-    def failed(self) -> bool:
-        return False
-
-    def incr_inflight(self) -> None:
-        self._inflight += 1
-
-    def decr_inflight(self) -> None:
-        if self._inflight > 0:
-            self._inflight -= 1
-
-    def inflight(self) -> int:
-        return self._inflight
-
-    @property
-    def model(self):
-        return getattr(self._model, "model", None)
-
-    @property
-    def provider(self):
-        return getattr(self._model, "provider", None)
-
-    @property
-    def route(self):
-        return getattr(self._model, "route", None)
-
-    @property
-    def last_route(self):
-        return getattr(self._model, "last_route", None)
-
-
-def _ask_reader_complete(model, *, system: str, user: str) -> tuple[str, int]:
-    """ONE ask-lane reader call with bounded output-budget escalation
-    (#2280).
-
-    Reasoning-capable models (e.g. qwen3.8-max via OpenRouter) can spend
-    the whole reader output budget (``DEFAULT_READER_MAX_TOKENS``=500)
-    THINKING on hard questions and emit NOTHING — ``content`` empty/None
-    with ``finish_reason="length"`` (the reasoning-budget collapse class;
-    the DeepSeekDirect variant is fixed by disabling thinking, #1790, but
-    qwen refuses that knob). An empty model output is NEVER a legitimate
-    abstention — the two-phase prompt abstains in WRITING — so the product
-    must not read a collapsed call as "no evidence" (the pre-#2280 behavior
-    silently fabricated abstentions on answerable questions).
-
-    Policy (bounded, cost-controlled; at most TWO calls):
-      * non-empty output → returned (exactly one call, the common path);
-      * empty + ``finish_reason == "length"`` (budget exhausted before any
-        content) → ONE retry at an escalated budget
-        (``TORTOISE_ASK_ESCALATION_TOKENS``, default
-        ``DEFAULT_READER_ESCALATION_MAX_TOKENS``);
-      * empty + any other finish reason → ONE retry at the SAME budget
-        (transient empty/provider variance);
-      * still empty after the retry → ``AskReaderUnavailable``
-        (fail-loud) — NEVER abstained/``NO_EVIDENCE_TEXT``.
-
-    Returns ``(raw, completion_tokens_total)`` — the total is the SUM of
-    billed completion tokens across the (≤2) calls, so the collapsed first
-    call's tokens are never dropped from metering/cost estimates (the
-    per-call ``last_completion_tokens`` capture on ``_LockedReader`` only
-    reflects the LAST call).
-    """
-    from tortoise.exceptions import AskReaderUnavailable
-    from tortoise.reader import DEFAULT_READER_ESCALATION_MAX_TOKENS
-    from tortoise.retrieval import ask_env_int
-
-    def _billed() -> int:
-        return int(getattr(model, "last_completion_tokens", 0) or 0)
-
-    total = 0
-    raw = model.complete(system=system, user=user)
-    total += _billed()
-    if raw is not None and str(raw).strip():
-        return raw, total
-    finish_reason = getattr(model, "last_finish_reason", None)
-    if finish_reason == "length":
-        # Budget exhausted before any content — escalate ONCE.
-        esc = ask_env_int(
-            "TORTOISE_ASK_ESCALATION_TOKENS",
-            DEFAULT_READER_ESCALATION_MAX_TOKENS, lo=512, hi=8192)
-        raw = model.complete(system=system, user=user, max_tokens=esc)
-        total += _billed()
-        if raw is not None and str(raw).strip():
-            _logger.warning(
-                "ask reader: empty output at budget cap, escalated to "
-                "max_tokens=%s and answered (finish_reason=%r)", esc,
-                finish_reason)
-            return raw, total
-        raise AskReaderUnavailable(
-            "reader returned empty output after budget escalation "
-            f"(finish_reason={finish_reason!r}) — not an abstention")
-    # Non-length empty output — retry ONCE at the same budget (transient),
-    # then fail loud. Never a silent abstention.
-    raw = model.complete(system=system, user=user)
-    total += _billed()
-    if raw is not None and str(raw).strip():
-        return raw, total
-    raise AskReaderUnavailable(
-        "reader returned empty output "
-        f"(finish_reason={finish_reason!r}) — not an abstention")
-
 
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
@@ -371,10 +157,26 @@ _SESSION_LLM_DEFAULT_MODELS = {
     "gemini": "gemini-2.0-flash",
 }
 
+#: #3892 (owner ruling 2026-09-18): the additive warning a KEYLESS capture
+#: carries — the session's turns were stored (and are therefore searchable),
+#: but no memory points were extracted. One canonical string so the receipt
+#: and its tests cannot drift, and so a keyless capture is NEVER silent.
+_CAPTURE_NO_PROVIDER_WARNING = (
+    "no LLM provider key configured (set e.g. OPENROUTER_API_KEY or "
+    "DEEPSEEK_API_KEY) — the session's turns were STORED and remain "
+    "searchable, but LLM extraction into memory points was skipped"
+)
+
+#: #3892: the truthful ``extraction_mode`` for the keyless capture. Named so
+#: a consumer can tell "no provider configured" apart from the other
+#: zero-extraction states ("empty", "error", "replayed").
+_CAPTURE_NO_PROVIDER_MODE = "no-provider"
+
 
 def _session_llm_provider() -> str | None:
     """First configured session-extraction provider, or None when no provider
-    key is set (fail-closed). Mirrors ingest._PROVIDERS exactly — the same key
+    key is set (the no-extraction case, #3892 — the capture itself still
+    stores its turns). Mirrors ingest._PROVIDERS exactly — the same key
     set hosted_api._llm_provider_available() reports (#722 parity)."""
     from tortoise.ingest import _PROVIDERS
 
@@ -396,22 +198,91 @@ def _session_llm_mock_enabled() -> bool:
         "TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
 
 
+class _SessionLLMCallCounter:
+    """#3824: a transparent pass-through that counts model completions.
+
+    The M2 session lane discards its usage block wholesale, so by the time
+    its capture reaches the cost emitter there is no in-hand evidence that a
+    provider call happened — "made billed calls" and "made none" are the
+    same shape (an empty ``stats``). The emitter cannot recover that fact
+    from the roll-up, because the roll-up is exactly what is missing; it has
+    to come from the CALL site. This wrapper is that call site:
+    ``complete()`` is invoked once per provider request by ``_PointStage`` /
+    ``_RelationStage`` / ``_DocumentPointStage``, and the count survives
+    whatever the lane then does with the response.
+
+    Deliberately NOT a second cost/usage accumulator: it holds no tokens, no
+    charge and no per-stage envelope, so it cannot drift from a real
+    roll-up. It answers one question the roll-up cannot answer about
+    itself — "did this capture reach the provider at all?". Every other
+    PUBLIC attribute round-trips to the wrapped model — reads delegate, and
+    so do writes (``id``, ``provider``, ``usage_sink``), so
+    ``LLMExtractor.version`` and the #2185 usage seam are unaffected.
+    """
+
+    def __init__(self, model):
+        self._model = model
+        self.count = 0
+
+    def __getattr__(self, name):
+        # A leading underscore is resolved on THIS object only, so a missing
+        # ``_model`` raises instead of re-entering __getattr__ forever.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._model, name)
+
+    def __setattr__(self, name, value):
+        # Public attribute WRITES must reach the wrapped model too, or the
+        # wrapper silently swallows them: the #2185 usage seam is attached by
+        # assignment (``model.usage_sink = sink``), and a read-only
+        # ``__getattr__`` would leave the UNDERLYING model's sink unset —
+        # dropping every usage block the wrapper exists to keep visible.
+        # ``_model`` and the wrapper-local ``count`` are NOT forwarded.
+        if name.startswith("_") or name == "count":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._model, name, value)
+
+    def complete(self, *args, **kwargs):
+        self.count += 1
+        return self._model.complete(*args, **kwargs)
+
+
+def _session_llm_extractor(point_model, relation_model):
+    """Build the M2 ``LLMExtractor`` with #3824 call-evidence counters.
+
+    The counters ride on the extractor (``_call_counters``) because that is
+    the object ``_extract_session_llm`` holds; a fresh pair is built per
+    call to this helper, so a capture's count can never leak into the next
+    one (the extractor is built inside ``_extract_session_llm``, once per
+    capture).
+    """
+    from tortoise.extractor import LLMExtractor
+
+    counters = [_SessionLLMCallCounter(point_model),
+                _SessionLLMCallCounter(relation_model)]
+    extractor = LLMExtractor(counters[0], counters[1])
+    extractor._call_counters = counters
+    return extractor
+
+
 def _build_session_llm_extractor():
     """Build the M2 LLMExtractor for session capture from the configured
-    provider (or None when no provider key is set — the no-key case fails
-    closed). TORTOISE_SESSION_LLM_MOCK=1 is a test seam (precedent:
+    provider (or None when no provider key is set — the no-key case STORES
+    the session's turns and skips ONLY the extraction, #3892; it no longer
+    refuses). TORTOISE_SESSION_LLM_MOCK=1 is a test seam (precedent:
     TORTOISE_BACKUP_STORAGE=memory / RATE_LIMIT_DISABLED) that swaps in the
     deterministic MockModel so the E2E/unit suites exercise the real LLM
     pipeline shape with zero network."""
     if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
-        from tortoise.extractor import LLMExtractor, MockModel
+        from tortoise.extractor import MockModel
 
-        return LLMExtractor(MockModel("mock-point"), MockModel("mock-relation"))
+        return _session_llm_extractor(
+            MockModel("mock-point"), MockModel("mock-relation"))
     provider = _session_llm_provider()
     if provider is None:
         return None
-    from tortoise.ingest import _PROVIDERS  # noqa: I001
-    from tortoise.extractor import LLMExtractor
+    from tortoise.ingest import _PROVIDERS
     from tortoise.models import OpenAICompatModel
 
     base_url, key_env = _PROVIDERS[provider]
@@ -436,7 +307,7 @@ def _build_session_llm_extractor():
             if not m:
                 raise ValueError(f"bad model spec {spec!r}; expected <model> or <provider>:<model>")
             model_id = m
-    return LLMExtractor(
+    return _session_llm_extractor(
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
     )
@@ -899,6 +770,16 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             raise ValueError(
                 f"{key!r} is a server-managed field and cannot be set via props."
             )
+    # #3947 review (security): `contains_session` is an ENVELOPE-level capture
+    # directive (it drives the `(:Session)-[:CONTAINS]->(:Point)` rebuild fold),
+    # never a Point property. Reject it here as the fail-closed boundary: a
+    # tenant-supplied prop of this name must not be able to reach a writer that
+    # could turn it into a structural graph fact on replay.
+    if "contains_session" in props:
+        raise ValueError(
+            "'contains_session' is a server-managed capture field and cannot "
+            "be set via props."
+        )
     # #1486 (code-review P1): is_episodic is the points-quota discriminator
     # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
     # setting it true via props would exclude their points from the quota —
@@ -997,6 +878,40 @@ _CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 def _is_ulid(s: str) -> bool:
     """Return True if *s* matches a valid ULID format (canonical or Crockford)."""
     return bool(_ULID_RE.match(s) or _CROCKFORD_ULID_RE.match(s))
+
+
+# #4106: a recorded session time is only a DATE when it leads with a calendar
+# date in either the ingest producer's real format (``YYYY/MM/DD``, e.g.
+# ``2023/05/20 (Sat) 03:29`` — measured on the frozen dataset: 23,867/23,867
+# values are slash-form, zero are ISO) or ISO 8601 (``YYYY-MM-DD``). Both
+# normalise to ``YYYY-MM-DD``; anything else is ABSENT. Mirrors the canonical
+# ``subgraph_render._parse_date`` rule (its module imports ``tools.*``, which
+# the SDK core must not), and mirrors ``assembly``'s sentinel constant for the
+# same reason.
+_ISO_DATE10_RE = re.compile(r"^(\d{4})[-/](\d{2})[-/](\d{2})")
+#: The v2-lane undated sentinel (``tools/longmem_eval/ingest.UNDATED_SENTINEL``)
+#: — a POSITIVE date value that means "no date". Rendering it would put a
+#: fabricated date in front of a temporal question.
+_UNDATED_SENTINEL = "1970-01-01T00:00:00Z"
+
+
+def _iso_date10(value: object) -> str:
+    """``value``'s ``YYYY-MM-DD`` calendar date, else ``""`` (unknown).
+
+    Accepts ``YYYY/MM/DD…`` and ``YYYY-MM-DD…`` (normalised to the dashed
+    form), and treats the undated sentinel — in every ISO spelling of its
+    ``1970-01-01`` date — as absent. Never returns a truncated non-date: a
+    wrong date is worse than no date (#4106).
+    """
+    s = str(value).strip() if value else ""
+    if not s or s == _UNDATED_SENTINEL:
+        return ""
+    m = _ISO_DATE10_RE.match(s)
+    if not m:
+        return ""
+    date = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    # the sentinel's date itself (any offset spelling) is "no date"
+    return "" if date == _UNDATED_SENTINEL[:10] else date
 
 
 # #1516: entity ids minted by _entity_name_id / create_entity are PREFIXED
@@ -1126,7 +1041,7 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     double-residual vs the effective escalation ceiling) is DIAGNOSABLE from
     the logs when the self-surfacing failure fires. Emitted at the shared
     resp/effective-mode assembly. NOTE the mode COVERAGE is v2/m2/replayed/
-    error — an "empty" line can never fire here: the empty/blank conversation
+    error/no-provider — an "empty" line can never fire here: the empty/blank conversation
     gate RETURNS before the Session MERGE + shared emit point on both lanes
     (no Session is written, so there is no capture to observe; the empty
     population is not a GO candidate). Same for the 402/turn-cap raise paths
@@ -1138,8 +1053,11 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     out-token (recovered-case max semantics per the #2408 Task-4 handoff:
     max(sX_out_tokens, truncation_completion_tokens_sX) — base in the
     truncation key, escalated final list in the out-token key) / error_census.
-    ``meta["stats"]`` is {} on replayed/M2 (no extractor_v2 telemetry) — the
-    line still fires with the mode + turns (a replay/no-op is observable).
+    ``meta["stats"]`` carries no ``llm`` roll-up on replayed/M2 (no
+    extractor_v2 telemetry) — ``{}`` on a replay and on a zero-call M2
+    capture, ``{"unattributed": N}`` on an M2 capture that issued N
+    completions (#3824). The line still fires with the mode + turns (a
+    replay/no-op is observable).
     """
     st = meta.get("stats") or {}
     rec = st.get("recovery") or {}
@@ -1483,10 +1401,11 @@ def _ep_require_calibration_default() -> bool:
     since the #344 flip landed via PR #1212; set "0" to opt out). Draft
     points are excluded from the gate (#780/#1212), so draft-heavy test
     graphs stay passable under the fail-closed default.
+
+    #4097: resolved through the declared truthy contract; `default "1"` is the
+    default VALUE, so garbage still reads OFF.
     """
-    import os
-    raw = os.environ.get("TORTOISE_EP_REQUIRE_CALIBRATION", "1").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return is_truthy(os.environ.get("TORTOISE_EP_REQUIRE_CALIBRATION", "1"))
 
 
 # Per-corpus in-process run locks: the embedded FalkorDBLite's cross-connection
@@ -1776,6 +1695,47 @@ def _is_digest_noise(content) -> bool:
     if _DIGEST_GENUINE_LABEL_RE.match(t):
         return False
     return bool(_DIGEST_LABEL_RE.match(t))
+
+
+def _resolve_vector_min_similarity() -> float | None:
+    """#4028 — the OPT-IN vector-leg relevance floor (cosine) for the surface.
+
+    **Default: None (no floor — the pre-#4028 behaviour).** An absolute
+    cosine floor cannot be default-on: the query->document relevant and
+    unrelated bands OVERLAP for bge-small (see
+    ``embeddings.VECTOR_RELEVANCE_FLOOR``), so any floor high enough to drop
+    the #4028 residue also drops real answers and fails
+    ``tests/test_longmem_runner.py::test_vector_strategy_verified_in_eval_path``.
+    #4028's store defect is DATA (test residue), fixed by
+    ``tools/purge_test_residue.py``.
+
+    ``TORTOISE_VECTOR_MIN_SIMILARITY`` enables it (a value in (0, 1];
+    ``embeddings.VECTOR_RELEVANCE_FLOOR`` is the calibrated starting point).
+    Unset, 0, unparseable or out of range → None (off).
+
+    The knob changes the behaviour of the existing ``tortoise_search`` read
+    surface; it adds NO surface (#3863 surface freeze).
+    """
+    raw = os.environ.get("TORTOISE_VECTOR_MIN_SIMILARITY")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        # A typo must never silently ENABLE a floor that drops real answers.
+        return None
+    if not (0.0 < value <= 1.0):
+        return None
+    return value
+
+
+def _index_no_network_enabled() -> bool:
+    """`TORTOISE_INDEX_NO_NETWORK` — test-only: `extract_metadata=False` without network.
+
+    #4097: the single resolution point for that knob (``TortoiseSDK._index_no_network``
+    delegates here), so the declared truthy contract has one place to assert.
+    """
+    return env_flag("TORTOISE_INDEX_NO_NETWORK", False)
 
 
 class TortoiseSDK:
@@ -3136,7 +3096,8 @@ class TortoiseSDK:
         eventId is stamped onto the extracted Points as their provenance
         surface (#1417 — provenance is eventId, NOT the aboutEvent content
         edge). The deterministic regex loop is removed as a product
-        path — LLM extraction is the default and no-key fails closed.
+        path — LLM extraction is the default, and a missing key SKIPS the
+        extraction while still STORING the turns (#3892).
 
         Supersession records are REAL-BACKEND-ONLY, by construction: the v2
         extractor forms conversation-driven supersessions only when its S3
@@ -3166,22 +3127,31 @@ class TortoiseSDK:
         the hosted #1727 replay skip; a replay is a no-op on the first
         capture's Event + Source).
 
-        Requires an LLM provider key (OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY)
-        or the TORTOISE_SESSION_LLM_MOCK=1 test seam — raises ValueError
-        otherwise (fail-closed, mirroring the hosted 503; the no-extractor
-        check precedes the empty gate).
+        #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL. A missing
+        LLM provider key does NOT refuse the capture — the Session is merged
+        and the mechanical turn Points are written exactly as they are on the
+        keyed path (the same loop, unchanged); ONLY the LLM extraction into
+        memory points is skipped, and the receipt says so truthfully
+        (``extraction_mode`` "no-provider" + the additive
+        ``_CAPTURE_NO_PROVIDER_WARNING``). The key gates extraction, not
+        storage: the stored turns are searchable with no key at all (FTS is
+        DB-side; the dense leg is a local sentence-transformers model).
+        With a provider key present, behaviour is UNCHANGED. This is a
+        DELIBERATE divergence from the hosted lane — ``hosted_api.
+        _capture_session_impl`` keeps its 503-first refusal, because a hosted
+        deploy must never store a session its org did not ask to pay to
+        extract. A keyless capture records ``capture_ok=False`` +
+        ``capture_extractor="none"`` (no extraction lane ran), so a LATER
+        capture of the same session WITH a key re-attempts extraction through
+        the existing #2335 TRUE-retry path instead of silently replaying.
         """
         import uuid
         from datetime import datetime, timezone
 
-        if _build_session_llm_extractor() is None:
-            raise ValueError(
-                "capture_session requires an LLM provider key (set e.g. "
-                "OPENROUTER_API_KEY or DEEPSEEK_API_KEY) — the regex "
-                "extraction loop was removed as a product path (#822). "
-                "Set TORTOISE_SESSION_LLM_MOCK=1 in tests for the offline "
-                "MockModel extractor."
-            )
+        # #3892: resolve the extractor ONCE, up front, but NEVER refuse the
+        # capture for a missing key — the key gates EXTRACTION, not storage.
+        extractor = _build_session_llm_extractor()
+        no_provider = extractor is None
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -3209,8 +3179,9 @@ class TortoiseSDK:
         # exact input the extractors receive), the SAME signal the extractors
         # use, so the gate and the extractors cannot disagree, and
         # pre-mutation (no Session stub). turns reports the COMMITTED state (0)
-        # — nothing lands. (The no-extractor ValueError above precedes this
-        # gate — hosted 503-first precedent, #1529 OQ14.)
+        # — nothing lands. (#3892 deleted the no-extractor ValueError that
+        # used to precede this gate; the turn-cap refusal above still comes
+        # first, and this gate still precedes every write.)
         transcript, _est = _session_llm_transcript(windowed)
         if not transcript.strip():
             return {
@@ -3315,9 +3286,29 @@ class TortoiseSDK:
         # runs v2 (env != m2) — otherwise replay (safe no-op).
         prior_capture_ok = session_row[1]
         prior_capture_extractor = session_row[2]
+        # #3892: a keyless capture records lane "none" (no lane ran), and a
+        # FAILED prior attempt is re-attempted (#2335 TRUE retry) — that is
+        # how a session captured without a key gets its memory points once a
+        # key appears. "none" is retry-eligible for the same reason "v2" is
+        # (it minted no claims of its own, and its turn ids are deterministic,
+        # so the re-attempt converges).
+        # The m2 exclusion is UNCHANGED and deliberate: M2 dedups per-capture
+        # only, so re-running it can mint duplicate claims (the #1727/#2473
+        # hole). An earlier revision of this change admitted a "none" prior
+        # under M2 on the argument "a none prior minted nothing" — review
+        # cycles 4 and 5 showed that argument cannot be VERIFIED after the
+        # fact: a claim minted by a crashed or concurrent M2/V2 attempt is
+        # not yet :CONTAINS-wired (wiring happens only after the extractor
+        # returns), so no post-hoc graph read can distinguish a claim-free
+        # session from one with live unwired claims. Safety therefore wins
+        # over the M2-only upgrade capability: the retry stays refused under
+        # M2, and the refusal is DISCLOSED on the receipt (see the replay
+        # branch's warning) rather than silently reported as a plain replay.
+        # Residual (filed): a graph-local capture-attempt sentinel would make
+        # a claim-free M2 retry provable; see issue #3996.
         retry_failed_capture = (
             session_existed and prior_capture_ok is False
-            and prior_capture_extractor == "v2"
+            and prior_capture_extractor in ("v2", "none")
             and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
         proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
@@ -3332,7 +3323,16 @@ class TortoiseSDK:
         # non-strings -> str()), same `speaker` property write (delta 5).
         # Hosted additionally adds quota/auth bounds; the extraction that
         # follows the loop is shared via _extract_session_llm/_extract_session_v2
-        # (#822). Keep the two in sync when touching either.
+        # (#822). Keep the two in sync when touching either — and note the
+        # THIRD copy: tools/ask_spotcheck.py::seed_capture_turn_store
+        # mirrors this same per-turn store (id, `[role] ` framing, prop set,
+        # CONTAINS edge) to seed the ask fixtures — the ONE copy every ask
+        # seeder writes through since #3914 (#3910 had it in `_seed_memory`,
+        # which is now a delegating caller). It deliberately omits
+        # embeddings/Source/extraction, but the turn write itself must stay
+        # identical, or the fixtures teach a shape capture no longer
+        # produces (#3910). #3551 tracks collapsing all three onto one
+        # shared primitive.
         for i, turn in enumerate(windowed):
             # #721: _normalize_turn_role is the isinstance-first pattern — an
             # `or "unknown"` fallback only fixes falsy roles, but TRUTHY
@@ -3358,23 +3358,82 @@ class TortoiseSDK:
             # [:cap] here is the idempotent no-op keeping the store loop's own
             # window definition explicit (#1532 D1).
             turn_text = f"[{role}] {content[:5000]}"
-            proj.g.query(
+            _turn_rows = proj.g.query(
                 "MERGE (t:Point {id:$id}) "
                 "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
                 "    t.speaker=$speaker, "
                 "    t.is_episodic=true, "
                 "    t.status=coalesce(t.status, $s), "
                 "    t.createdAt=coalesce(t.createdAt, $now), "
-                "    t.updatedAt=$now, t.content_hash=$ch",
+                "    t.updatedAt=$now, t.content_hash=$ch "
+                "RETURN t.createdAt AS createdAt, t.status AS status",
                 params={"id": turn_id, "c": turn_text, "k": "event",
                         "speaker": role, "s": "draft", "now": now,
                         "ch": _content_hash(turn_text)},
-            )
+            ).result_set
+            # #3947 review (F4 + parity): the write's COALESCE decides what the
+            # graph holds — a RE-capture keeps the ORIGINAL createdAt AND the
+            # stored status (`coalesce(t.status, 'draft')`). Journal exactly
+            # what was stored: emitting the literal `now`/`draft` regresses a
+            # promoted turn back to draft on replay, and drifts createdAt on
+            # every re-capture. Read both back in the same statement.
+            turn_created_at = (
+                _turn_rows[0][0]
+                if _turn_rows and _turn_rows[0] and _turn_rows[0][0] is not None
+                else now)
+            turn_status = (
+                _turn_rows[0][1]
+                if _turn_rows and _turn_rows[0] and _turn_rows[0][1] is not None
+                else "draft")
             proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": session_id, "tid": turn_id},
             )
+            # #3947: journal the turn write so a rebuild can recreate it.
+            # The two Cypher writes above stay raw and un-reordered: their
+            # MERGE ordering + the deterministic `{session_id}_t{i}` id ARE
+            # the idempotency contract (#490 review P2-2), and the raw form
+            # keeps the live node shape unchanged.
+            #
+            # #3947 review (cycle 2, #3086): emit ONLY when a journal exists.
+            # On a lane with no `event_log_path` (`_make_sdk`/`_data_sdk` in
+            # hosted_api.py) the JSONL half is a no-op, and the `:GraphEvent`
+            # half is not a rebuild source — `rebuild()` wipes it with the rest
+            # of the graph. Paying `ensure_event_schema` + `next_seq` +
+            # `append_event` per turn there buys no durability on the very lane
+            # #3086 measures as already blocking the event loop (~4.75 s per
+            # 500-turn capture). Where a journal IS configured the record is
+            # what makes the rebuild possible, so it is emitted unconditionally.
+            #
+            # `contains_session` rides the EVENT ENVELOPE, not the point
+            # payload: the CONTAINS link is a capture-write structural fact
+            # (ONTOLOGY §4.5), so it is restored by the projection's edge fold
+            # without inventing a node property the live write never set —
+            # and without becoming a caller-forgeable prop.
+            if self._get_event_log() is not None:
+                self._emit_event(
+                    # Parity with `create_point`'s emission (#3947 review F5):
+                    # the PAYLOAD carries `content_hash`. It belongs here and
+                    # NOT in the `point` snapshot, which `_emit_event` strips
+                    # it from (`content_hash` is derived, and the replay
+                    # recomputes it in `_upsert_point_props`) — an earlier
+                    # draft put it in the snapshot, where nothing would ever
+                    # read it.
+                    "PointAdded",
+                    {"id": turn_id, "kind": "event",
+                     "content_hash": _content_hash(turn_text)},
+                    point={
+                        "id": turn_id,
+                        "content": turn_text,
+                        "pointKind": "event",
+                        "speaker": role,
+                        "is_episodic": True,
+                        "status": turn_status,
+                        "createdAt": turn_created_at,
+                    },
+                    contains_session=session_id,
+                )
 
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
@@ -3389,18 +3448,55 @@ class TortoiseSDK:
         # existing session_id is a NO-OP replay (extraction_mode "replayed",
         # 0 new non-episodic nodes), byte-parity with hosted_api's replay
         # branch (meta mode "replayed" + the additive warning).
-        if session_existed and not retry_failed_capture:
+        if no_provider:
+            # #3892 (owner ruling): no provider key — the capture is still a
+            # capture. The Session MERGE + the mechanical turn loop above
+            # already ran UNCHANGED, so the turns are STORED and searchable;
+            # only the LLM extraction into memory points is skipped, with the
+            # truthful mode + additive warning the assembly below reports.
+            # Placed BEFORE the #1727 replay branch ON PURPOSE: a keyless call
+            # must ALWAYS be reported as keyless, never as a silent "replayed"
+            # that hides the missing provider (the pre-#3892 code raised here
+            # instead, so there is no prior keyless behaviour — for keyless
+            # calls this branch defines it, and it never says "replayed").
+            # This branch is UNREACHABLE for a keyed call (no_provider False),
+            # so keyed behaviour is byte-identical.
+            extracted = []
+            meta = {
+                "provider": None, "route": None, "failover_used": False,
+                "errors": [], "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+                "mode": _CAPTURE_NO_PROVIDER_MODE,
+                # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+                # (additive meta contract), empty here (not fabricated).
+                "stats": {},
+            }
+        elif session_existed and not retry_failed_capture:
             # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
             # (capture_ok True) OR the session predates the capture_ok
             # property (legacy None — presumed captured, backward compat).
             # A prior FAILED capture (capture_ok False) falls through to the
             # extraction branches below — retry is TRUE.
             extracted = []
+            _replay_warnings = [
+                "session already captured (same session_id) — no new "
+                "extraction"]
+            if prior_capture_ok is False and prior_capture_extractor == "none":
+                # #3892: this session's turns were STORED without a provider
+                # key and extraction has NEVER run for it — the re-attempt was
+                # refused only because this process is configured to the
+                # NON-convergent M2 lane (see the retry gate above). Said OUT
+                # LOUD: "already captured" would be a false statement of this
+                # state, and the user's remedy is one env var away.
+                _replay_warnings.append(
+                    "this session's turns were stored WITHOUT a provider key "
+                    "and no extraction has ever run for it; extraction was "
+                    "NOT re-attempted because TORTOISE_SESSION_EXTRACTOR=m2 "
+                    "selects a non-convergent lane (re-running it could mint "
+                    "duplicate claims) — unset it and re-capture, or capture "
+                    "the session under a convergent lane, to extract")
             meta = {
                 "provider": None, "route": None, "failover_used": False,
-                "errors": [], "warnings": [
-                    "session already captured (same session_id) — no new "
-                    "extraction"], "mode": "replayed",
+                "errors": [], "warnings": _replay_warnings, "mode": "replayed",
                 # #2335 WI-1a: replayed has no extractor_v2 telemetry —
                 # stats is ALWAYS present (additive meta contract), empty
                 # on the replay branch (empty-on-replay semantics).
@@ -3450,7 +3546,13 @@ class TortoiseSDK:
         # retry is the real capture). The duplicate journal line is benign —
         # rebuild upserts by eventId (idempotent-convergent), the same
         # property the concurrent-fresh race relies on.
-        if not session_existed or retry_failed_capture:
+        # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
+        # materialization — a keyless retry extracts nothing, so there is
+        # nothing to stamp, while re-minting re-journals EventRecorded and
+        # refreshes startedAt on every call (review cycle 2, P3). The #2335
+        # re-mint rationale is about a FAILED extraction attempt, not a
+        # deliberately-skipped one. A later KEYED retry still mints.
+        if not session_existed or (retry_failed_capture and not no_provider):
             # #2335 WI-2b: a RETRY re-runs the mint/provenance — the Event id
             # is DETERMINISTIC (_server_id = _session_capture_event_id), so
             # re-minting on a retry MERGEs onto the SAME Event node (no
@@ -3630,7 +3732,31 @@ class TortoiseSDK:
         # Hosted computes _capture_ok AFTER its enrichment and downgrades to
         # partial (retryable) when points are skipped. Both internally
         # consistent; not forced-aligned (no skipped/verb concept here).
-        if not session_existed or retry_failed_capture:
+        # #3892: what THIS attempt RECORDS on the Session. A keyed attempt
+        # records its real outcome + lane, exactly as before. A KEYLESS
+        # attempt records capture_ok=False + lane "none": no extraction lane
+        # ran, and recording ok=True / lane "v2" instead would make a LATER
+        # capture WITH a key take the #1727 replay branch — silently
+        # extracting nothing and leaving the stored session permanently
+        # points-less. False + "none" is what the #2335 TRUE-retry gate
+        # consumes (see the gate above), so the later keyed capture
+        # re-attempts and the deterministic turn ids converge.
+        # A keyless attempt records this ONLY when it CREATES the session. A
+        # keyless RE-capture must NOT rewrite the prior attempt's record: a
+        # prior FAILED v2 attempt's lane is the evidence the #2473 M2
+        # exclusion reads, and overwriting it with "none" would re-admit the
+        # non-convergent M2 re-run over that attempt's live claims (review
+        # cycle 3, P2). A successful prior is never downgraded either — the
+        # block below is skipped entirely for it.
+        _capture_ok_record = False if no_provider else ok
+        _capture_extractor_record = (
+            "none" if no_provider
+            else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
+                  else "v2"))
+        _record_session_state = (
+            (not session_existed) if no_provider
+            else (not session_existed or retry_failed_capture))
+        if _record_session_state:
             # #2335 WI-2b: the attempt outcome is recorded ONLY on a genuine
             # attempt (fresh OR retry) — a replay performs NO Session write
             # (zero-write no-op; the stored value — True or legacy None —
@@ -3651,10 +3777,8 @@ class TortoiseSDK:
                     "MATCH (s:Session {id:$sid}) "
                     "SET s.capture_ok=$ok, "
                     "    s.capture_extractor=$extractor",
-                    params={"sid": session_id, "ok": ok,
-                            "extractor": "m2" if os.environ.get(
-                                "TORTOISE_SESSION_EXTRACTOR") == "m2"
-                            else "v2"})
+                    params={"sid": session_id, "ok": _capture_ok_record,
+                            "extractor": _capture_extractor_record})
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
@@ -3662,6 +3786,11 @@ class TortoiseSDK:
             effective_mode = "empty"
         elif not ok:
             effective_mode = "error"
+        elif meta.get("mode") == _CAPTURE_NO_PROVIDER_MODE:
+            # #3892: the keyless capture — turns stored, extraction skipped.
+            # Reported under its OWN name, never folded into "llm" (which
+            # would claim an extraction that did not happen) nor "replayed".
+            effective_mode = _CAPTURE_NO_PROVIDER_MODE
         elif meta.get("mode") == "replayed":
             # W5 Phase F (#2104): SDK mirror replay parity — a re-capture of
             # an existing session_id reports extraction_mode "replayed"
@@ -3689,7 +3818,9 @@ class TortoiseSDK:
             # sink decision) — present ONLY when the capture errored.
             **({"report_url": REPORT_HOOK_URL} if extraction_errors else {}),
             # #2335 WI-1a: the receipt carries the extractor telemetry
-            # (meta stats — real on v2, {} on replayed/M2). Additive.
+            # (meta stats — real on v2; {} on a replay or a zero-call M2
+            # capture, {"unattributed": N} on an M2 capture that reached the
+            # provider, #3824). Additive.
             "stats": meta.get("stats") or {},
         }
         # #1530 D8: extraction_provider reports the configured provider when a
@@ -3788,7 +3919,8 @@ class TortoiseSDK:
 
         Shared by the hosted copy so the two capture_session loops stay in
         sync — the regex decision/claim loop is removed as a product path
-        and no-key fails closed (the caller gates on _build_session_llm_extractor).
+        and no-key SKIPS EXTRACTION (the caller short-circuits with
+        extraction_mode "no-provider" before reaching here, #3892).
         """
         extractor = _build_session_llm_extractor()
         if extractor is None:
@@ -3912,13 +4044,26 @@ class TortoiseSDK:
             # P1 #1529 (D6): completed-but-empty output is an additive
             # warning (nothing extractable ≠ failure), never a silent 0.
             warnings.append("LLM extraction produced no points")
+        # #3824: the call-level evidence — how many model completions this
+        # capture actually issued. Carried OUTSIDE the (empty on this lane)
+        # roll-up so the cost emitter can tell "billed calls, no roll-up"
+        # (F2) from "no calls at all" (F1) instead of collapsing both to
+        # None. Counted at the model boundary above, so it holds even when
+        # ``extractor.run`` raised after the first request.
+        calls_made = sum(
+            int(getattr(c, "count", 0) or 0)
+            for c in getattr(extractor, "_call_counters", ()) or ())
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": errors, "warnings": warnings,
             "mode": "error" if errors else "llm",
-            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats —
-            # stats is ALWAYS present, empty on the M2 branch.
-            "stats": {},
+            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats — the
+            # key is ALWAYS present, but its value is not always empty.
+            # #3824: the ONE extractor fact this lane can state without a
+            # roll-up is that it reached the provider, so ``stats`` is
+            # {"unattributed": N} when N completions were issued and {} when
+            # none were — a genuine zero-call path stays a clean no-row.
+            "stats": ({"unattributed": calls_made} if calls_made else {}),
         }
         return extracted, meta
 
@@ -4789,6 +4934,17 @@ class TortoiseSDK:
         back to now — monotone, never a gap). Additive-only: no behavior
         change for callers that don't pass the kwarg.
 
+        The kwarg is a CLAIM about the successor's window start, so when the
+        successor carries a stored ``validFrom`` the two must be parseable
+        timestamps naming the SAME instant (compared by instant via
+        ``_created_sort_key`` — the measure ``restore_point_at``'s ``_covers``
+        uses). A disagreement raises ``ValueError`` BEFORE any mutation: a
+        predecessor ``validTo`` that disagrees either leaves a GAP (a query
+        instant covered by neither window) or an OVERLAP (two covering
+        candidates ⇒ ``ambiguous``). The kwarg remains the SOLE source when
+        the successor carries no stored ``validFrom`` (an undated successor),
+        unchanged. See docs/ONTOLOGY.md §4.7 (``validTo``).
+
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx
           - Plain structural edges (aboutSubject, aboutObject, aboutAction,
@@ -4841,19 +4997,92 @@ class TortoiseSDK:
         # E6 (#1538) D2: resolve the successor's validFrom (window contiguity
         # source) BEFORE the emit so the event payload carries the same
         # values the stamp block writes (read-only — no ordering impact).
+        #
+        # The resolution ORDER below is the documented one and is unchanged
+        # (ONTOLOGY.md §4.1/§4.7 `validTo` row: `valid_from` kwarg →
+        # successor validFrom → successor createdAt → now). What IS new is a
+        # PRECONDITION on the kwarg, now stated in that row too: trusting it
+        # verbatim broke chain contiguity silently in BOTH directions — an
+        # EARLIER kwarg left a GAP (a query instant covered by neither
+        # window, so `restore_point_at` reports honest absence for a period
+        # that was in fact covered) and a LATER kwarg left an OVERLAP (two
+        # covering candidates ⇒ every instant inside it reads `ambiguous`).
+        # The successor's STORED validFrom is the value every read path
+        # computes its window start from (`restore_point_at` → `_covers`), so
+        # a disagreeing kwarg can only ever make the chain wrong. Refuse it
+        # BEFORE any mutation rather than pick a winner: picking the store
+        # would invert the documented order, picking the kwarg re-creates the
+        # defect.
+        #
+        # The comparison keys on ``str(valid_from)`` — the value the stamp
+        # block PERSISTS — not the caller's object, and requires BOTH sides to
+        # be parseable to the same instant. Both halves are load-bearing:
+        #   * keying the caller's object blesses a value the write
+        #     metamorphoses. A numeric-epoch kwarg parses as an instant, but
+        #     the ``str()`` that lands in ``validTo`` is UNPARSEABLE to
+        #     ``_created_sort_key`` (its ISO branch needs a ``-`` or ``T``),
+        #     i.e. an unbounded predecessor window — the exact OVERLAP this
+        #     guard exists to prevent.
+        #   * an unparseable side cannot be shown to name the same instant,
+        #     and ``_covers`` cannot order it either, so agreeing to write it
+        #     would be the silent wrong answer the read path refuses.
+        # ``_created_sort_key`` is the SAME measure ``_covers`` uses, so the
+        # guard's agreement boundary IS the read path's contiguity boundary.
+        # It normalizes a purely cosmetic encoding difference
+        # ("…T00:00:00Z" vs "…T00:00:00+00:00") and that is therefore
+        # accepted. It parses a DATE-ONLY value as LOCAL midnight (issue
+        # #3982), so a date-only-vs-offset-aware pair is a real instant
+        # difference off UTC — refused there, accepted on a UTC host. That is
+        # deliberate: `_covers` has the same host-dependence, so a
+        # host-independent verdict here would disagree with the read path.
+        # #3982 owns the decision on date-only semantics.
+        #
+        # The guard's PRESENCE predicate is the read path's, not the
+        # resolution branch's. `_covers` gates on `vf is not None`, so a
+        # falsey-but-PRESENT stored value is a REAL window start there: `0`
+        # keys as the parseable epoch-0 instant, and `""` keys as an
+        # unparseable start that covers no PARSEABLE instant
+        # (`_created_sort_key("")` = `(1, "")`, and `(1, x) > (0, y)` is
+        # always True) — an unparseable QUERY instant also keys as
+        # `(1, <text>)` and IS covered by it, so `""` only hides the successor
+        # from parseable queries, which land in the predecessor's window end
+        # instead. The resolution
+        # branch below gates on TRUTHINESS instead (`elif stored_vf:`), so for
+        # those two values it falls through to `createdAt`. The guard follows
+        # `_covers`: with a kwarg present it refuses rather than allow an
+        # unchecked window end against a start the read path treats as real
+        # (a `validFrom=0` successor's `[epoch0, ∞)` window overlaps any
+        # predecessor end the kwarg writes at or after epoch 0, and gaps
+        # before it). The no-kwarg falsey case keeps
+        # the pre-existing truthiness fallback — its read/write divergence is
+        # real and tracked in #3985, not silently redefined here.
+        vf_rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
+            params={"id": new_id},
+        ).result_set
+        stored_vf = vf_rows[0][0] if vf_rows else None
+        if valid_from is not None and stored_vf is not None:
+            from .search_engine import _created_sort_key
+            k_kwarg = _created_sort_key(str(valid_from))
+            k_stored = _created_sort_key(stored_vf)
+            if not (k_kwarg[0] == 0 and k_stored[0] == 0
+                    and k_kwarg[1] == k_stored[1]):
+                raise ValueError(
+                    f"supersede_point: valid_from {valid_from!r} disagrees "
+                    f"with successor {new_id}'s stored validFrom "
+                    f"{stored_vf!r} — both must be parseable timestamps "
+                    f"naming the same instant, else the predecessor's "
+                    f"validTo gaps or overlaps the chain (read paths use "
+                    f"the stored window start)"
+                )
         if valid_from is not None:
             succ_vf = str(valid_from)
+        elif stored_vf:
+            succ_vf = stored_vf
+        elif vf_rows and vf_rows[0][1]:
+            succ_vf = vf_rows[0][1]
         else:
-            vf_rows = proj.g.query(
-                "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
-                params={"id": new_id},
-            ).result_set
-            if vf_rows and vf_rows[0][0]:
-                succ_vf = vf_rows[0][0]
-            elif vf_rows and vf_rows[0][1]:
-                succ_vf = vf_rows[0][1]
-            else:
-                succ_vf = now  # monotone fallback — never a gap
+            succ_vf = now  # monotone fallback — never a gap
         # #2423 (rebuild-parity fix): kwargs-style emission (id + extra keys)
         # so the FULL payload rides the JSONL line — the previous dict-style
         # emission only reached the :GraphEvent store (payload) while the
@@ -6162,10 +6391,19 @@ class TortoiseSDK:
             if not 0 <= val <= 1:
                 raise ValueError(f"{name} must be 0-1, got {val}")
         # #432 Task 3: durable OperatorAnnotated event (append-before-mutation).
+        # #3689: the positional payload is the :GraphEvent contract
+        # (docs/event-catalog.md — id/bias/precision/consistency/directness),
+        # so it is kept verbatim. `id=` + the annotator_* extras are REQUIRED
+        # for the JSONL branch: without them `_emit_event`'s
+        # `point is None and id is None` early-return dropped the record from
+        # the rebuild journal entirely, so rebuild_all erased the annotation
+        # silently (the #3299 class). Same payload+id shape as PointRetracted.
         self._emit_event("OperatorAnnotated", {
             "id": id, "bias": bias, "precision": precision,
             "consistency": consistency, "directness": directness,
-        })
+        }, id=id,
+            annotator_bias=bias, annotator_precision=precision,
+            annotator_consistency=consistency, annotator_directness=directness)
         return self.update_point(id,
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
@@ -12526,29 +12764,63 @@ class TortoiseSDK:
         temporal/KU fragments function on the ask path (#1987 Task 4).
 
         One BATCH Cypher over the returned hits' ids (never N+1): a join to
-        the ``:Event`` node (``eventId``) for ``startedAt`` and to the source
-        turn ``:Point`` (``source_turn_id``) for ``speaker``. Produces ADDITIVE
-        keys only — undated hits render byte-identical:
+        the point's OWN ``:Event`` node (``eventId`` → ``startedAt``), a join
+        to the session that CONTAINS the point for the session's RECORDED
+        time, and a join to the source turn ``:Point`` (``source_turn_id``)
+        for ``speaker``. Produces ADDITIVE keys only — undated hits render
+        byte-identical:
 
-          * ``session_date`` — ``startedAt[:10]`` from the Event join;
+          * ``session_date`` (#4106) — the point's own capture Event
+            (``startedAt[:10]``) when the ``eventId`` join yields one, ELSE
+            the CONTAINS session's recorded ``created_at[:10]``. When several
+            sessions CONTAIN the point the EARLIEST recorded time is taken —
+            a deterministic pick that never depends on the engine's
+            unspecified row order, and one of the point's own recorded
+            session times rather than an inference. A value that is not a
+            well-formed ``YYYY-MM-DD`` prefix is treated as ABSENT. NO other
+            source is consulted: a date that is not recorded renders as NO
+            date, never as a default (a wrong date is worse than none).
+            Episodic turn Points carry no ``eventId`` — the capture turn
+            store stamps provenance on EXTRACTED points only (see the retry
+            branch below) — so before #4106 the ``eventId`` join was the sole
+            source and every captured turn rendered undated, leaving the
+            reader's temporal/KU fragments to compute elapsed time from
+            nothing. The ``CONTAINS`` edge is the SAME provenance mechanism
+            the point fetch already resolves session IDENTITY from.
           * ``speaker`` — the hit's own ``speaker`` prop, else the source
             turn's ``speaker``, else "" (the ``_render_block`` role-bracket
             guard suppresses double-attribution);
-          * ``session_id`` — the Event's ``sessionId`` when the join yields
-            one (hits lacking ``sessionId`` but sharing an Event join group
-            together for the per-session dedup — P2-20), else the hit's own
-            value unchanged.
+          * ``session_id`` — the Event's ``sessionId`` when the ``eventId``
+            join yields one (hits lacking ``sessionId`` but sharing an Event
+            join group together for the per-session dedup — P2-20), else the
+            hit's own value unchanged. ⛔ The ``created_at`` leg added by
+            #4106 attaches NO ``session_id`` — it is read for the DATE only.
 
-        ⛔ POOL SAFETY (D3 #1540): this method must NOT introduce a NEW
+        ⛔ POOL SAFETY (D3 #1540, #4106): this method must NOT introduce a NEW
         session source. Every ``session_id`` it attaches becomes the ask
-        lane's ``dedup_pool`` bucket key, so widening the join (e.g. adding
-        the ``:Session`` ``CONTAINS`` edge — the eval ingest writes those
-        with INTERNAL ``lme:{qid}:s{si}`` ids) re-buckets the pool and
-        changes which hits fit the 8k/32KiB reader window. D3's session
-        identity is derived downstream by ``retrieval.hit_session_id`` from
-        the hit's own ``sessionId`` (populated by the point fetch from the
-        Point prop / ``:Session`` edge) / ``session_id``. That derivation does
-        NOT re-bucket the pool — but it does widen rendered blocks, so it
+        lane's ``dedup_pool`` bucket key, so widening the identity join (e.g.
+        taking the ``:Session`` ``CONTAINS`` edge id as a ``session_id`` — the
+        eval ingest writes those with INTERNAL ``lme:{qid}:s{si}`` ids)
+        re-buckets the pool and changes which hits fit the 8k/32KiB reader
+        window. #4106 adds ONE source, the session's own recorded
+        ``created_at``, and it is read for ``session_date`` ONLY — the
+        attached ``session_id`` set is byte-identical with and without it
+        (pinned by ``tests/test_ask_sdk.py``).
+
+        The ``session_date`` field is ITSELF a bucket-key fallback (the ask
+        lane's ``session_id or session_date or idx:`` chain and
+        ``retrieval._pkg_session``), so its effect on bucketing is measured,
+        not assumed (``tests/test_ask_sdk.py`` seeds ``session-transcript``
+        raw chunks across two sessions): the key such a hit used to get was
+        ``idx:-1`` — deliberately, because the point fetch emits neither the
+        snake ``session_id`` nor ``lme_session_index``, so EVERY such hit
+        shared one global bucket. Populating the date can therefore never
+        drop a hit the ``idx:-1`` collapse kept, and on sessions with
+        distinct dates it restores hits that collapse was discarding. D3's
+        session identity is derived downstream by ``retrieval.hit_session_id``
+        from the hit's own ``sessionId`` (populated by the point fetch from
+        the Point prop / ``:Session`` edge) / ``session_id``. That derivation
+        does NOT re-bucket the pool — but it does widen rendered blocks, so it
         changes 32 KiB byte-cap admission (see the ``retrieved_session_ids``
         row in ``docs/product/answer-surface.md``), unlike widening THIS join,
         which is what re-buckets the pool.
@@ -12567,12 +12839,17 @@ class TortoiseSDK:
         if not ids:
             return hits
         try:
+            # #4106: the ``CONTAINS`` session leg + ``collect(DISTINCT
+            # s.created_at)`` collapse a point contained by several sessions
+            # into ONE row per id (a scalar ``s.created_at`` return would
+            # multiply rows, and the engine's row order is unspecified).
             rows = proj.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
                 "OPTIONAL MATCH (ev:Event) WHERE ev.eventId = n.eventId "
+                "OPTIONAL MATCH (n)<-[:CONTAINS]-(s:Session) "
                 "OPTIONAL MATCH (t:Point) WHERE t.id = n.source_turn_id "
                 "RETURN n.id, ev.startedAt, n.speaker, t.speaker, "
-                "ev.sessionId, n.sessionId",
+                "ev.sessionId, n.sessionId, collect(DISTINCT s.created_at)",
                 params={"ids": ids},
             ).result_set
         except Exception:
@@ -12588,10 +12865,27 @@ class TortoiseSDK:
             turn_speaker = (row[3] or "") if len(row) > 3 else ""
             ev_session = (row[4] or "") if len(row) > 4 else ""
             n_session = (row[5] or "") if len(row) > 5 else ""
+            # #4106: session's RECORDED time, earliest first (deterministic —
+            # never plan order). Empty list = no recorded date ⇒ unknown.
+            session_times = [
+                str(v) for v in ((row[6] if len(row) > 6 else None) or [])
+                if v]
+            # #4106: only a well-formed YYYY-MM-DD prefix is a date. A
+            # malformed/sentinel recorded time renders as UNKNOWN — never as
+            # a truncated garbage "date". Earliest wins on a multi-session
+            # point (deterministic, never plan order).
+            ev_date = _iso_date10(ev_started)
+            recorded = sorted({d for d in map(_iso_date10, session_times) if d})
+            if ev_date:
+                sdate = ev_date
+            elif recorded:
+                sdate = recorded[0]
+            else:
+                sdate = ""
             joined[pid] = {
-                "session_date": (str(ev_started)[:10]
-                                 if ev_started else ""),
+                "session_date": sdate,
                 "speaker": own_speaker or turn_speaker or "",
+                # UNCHANGED by #4106 — the date leg attaches no session_id.
                 "session_id": ev_session or n_session,
             }
         out = []
@@ -12864,6 +13158,15 @@ class TortoiseSDK:
         # points — a top-level filter would drop the raw-chunk leg). Legacy
         # callers keep kind → structural kind + post-filter exactly as today.
         struct_kind = structural_kind if structural_kind is not None else kind
+        # #4028: the read surface's OPT-IN vector-leg relevance floor. Off by
+        # default (None) — see _resolve_vector_min_similarity. The shipped
+        # default's real failure was 17 test-residue Points holding the only
+        # stored embeddings: the hybrid surface answered every query with
+        # them. That is a DATA defect (tools/purge_test_residue.py); this
+        # lever additionally lets an operator who has measured their corpus
+        # drop sub-relevance near neighbours.
+        _vector_floor = _resolve_vector_min_similarity()
+        _floored_legs: set[str] = set()
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -12877,9 +13180,23 @@ class TortoiseSDK:
             # A1 (#2070): the ask-lane numeric-token policy threads into the
             # sparse leg's OR-union (default False = search lane unchanged).
             keep_numeric=keep_numeric,
+            min_vector_similarity=_vector_floor,
+            # Only request the floored-leg report when a floor is active, so a
+            # floor-off call keeps `trace_active` False (pre-#4028 shape).
+            floored_legs=(_floored_legs if _vector_floor is not None else None),
         )
 
         if not raw_results:
+            # #4028: the vector leg RAN and the relevance floor removed every
+            # near neighbour. That is an ANSWER (nothing relevant), not a leg
+            # failure — so the in-memory TF-IDF fallback, which returns a hit
+            # for almost any query, must NOT fire here.
+            if "vector" in _floored_legs:
+                if leg_trace is not None:
+                    leg_trace.append(_trace_entry(
+                        "fallback", ran=False, degraded=False,
+                        reason="relevance_floor_empty", count=0))
+                return []
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
                 # #1375: serve from the cached lean corpus snapshot when
@@ -13727,826 +14044,6 @@ class TortoiseSDK:
         merged = list(expanded)
         merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
         return merged
-
-    # ── Ask lane (#1987 Task 5): the SDK answer surface ─────────────────────
-
-    def _ask_validate(self, question: str, question_type: str | None,
-                      question_date: str | None) -> None:
-        """Local-lane validation — the FIRST pipeline stage (P2-8: invalid
-        inputs never reach retrieval — zero model calls AND zero retrieval
-        calls). Raises ``AskValidationError`` with the pinned canonical
-        instance codes (matching the wire codes — P2-14)."""
-        from tortoise.schemas import (  # noqa: I001
-            MAX_ASK_QUESTION_CHARS,
-            ASK_QUESTION_TYPES,
-            VALIDATION_CODE_BAD_DATE,
-            VALIDATION_CODE_BAD_TYPE,
-            VALIDATION_CODE_EMPTY,
-            VALIDATION_CODE_OVERSIZE,
-            ask_question_has_control_chars,
-            ask_question_is_punctuation_only,
-            validate_ask_question_date,
-        )
-        from tortoise.exceptions import AskValidationError
-        if not isinstance(question, str):
-            raise AskValidationError(
-                "question must be a non-empty string",
-                code=VALIDATION_CODE_EMPTY)
-        if question is None or not str(question).strip():
-            raise AskValidationError(
-                "question must be a non-empty string",
-                code=VALIDATION_CODE_EMPTY)
-        q = str(question)
-        if ask_question_has_control_chars(q):
-            raise AskValidationError(
-                "question contains control/zero-width characters",
-                code=VALIDATION_CODE_EMPTY)
-        if ask_question_is_punctuation_only(q):
-            raise AskValidationError(
-                "question is punctuation-only",
-                code=VALIDATION_CODE_EMPTY)
-        if len(q) > MAX_ASK_QUESTION_CHARS:
-            raise AskValidationError(
-                f"question exceeds {MAX_ASK_QUESTION_CHARS} chars",
-                code=VALIDATION_CODE_OVERSIZE)
-        if question_type is not None and question_type not in ASK_QUESTION_TYPES:
-            raise AskValidationError(
-                f"unknown question_type {question_type!r}; valid: "
-                f"temporal-reasoning|knowledge-update|multi-session|"
-                f"single-session-preference",
-                code=VALIDATION_CODE_BAD_TYPE)
-        if question_date is not None and not validate_ask_question_date(str(question_date)):
-            raise AskValidationError(
-                f"invalid question_date {question_date!r} (expected "
-                f"YYYY-MM-DD, real calendar date)",
-                code=VALIDATION_CODE_BAD_DATE)
-
-    def ask(self, question: str, *, question_type: str | None = None,
-            question_date: str | None = None, org_id: str | None = None,
-            _reader_factory=None, _selfhost_transport: bool = False) -> dict:
-        """Answer a question about captured memory (#1987 Task 5) — ONE
-        bounded RAG pass locally (or a POST to hosted ``/v1/ask`` when
-        ``TORTOISE_API_URL`` is set).
-
-        ⛔ GATED / EXPERIMENTAL (#2013 product decision): the ask surface is
-        NOT served to hosted customers — ``/v1/ask`` and the MCP
-        ``tortoise_ask`` tool are OFF by default (``TORTOISE_ENABLE_ASK=1``
-        unlocks them for tests/dev only). This method stays shipped as the
-        EVAL's reader path (the LongMemEval benchmark runs through the
-        product reader) — do not build production features on it until the
-        reader-model decision is made (the benchmark will use a strong
-        reader model).
-
-        Local lane pipeline: validation FIRST (``AskValidationError``, zero
-        model calls) → ``tortoise_fts_query`` (``include_terminal=True`` —
-        the D8 supersession markers reach the reader; cost-bounded by the
-        same 8k/40 caps) → ask-path annotation (session-date join + speaker)
-        → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
-        → A5 evidence-mark boost (default ON — reorders the deduped pool by
-        stored ``has_answer`` marks; zero marks = no-op) → A7 rerank
-        (env-gated OFF by default) → ``assemble_context`` (8000-token
-        estimate cap AND 32 KiB byte cap, whole-hit drop) →
-        ``detect_question_type`` (or caller override) →
-        ONE reader call via ``build_reader_model()`` (never an
-        LLM-skip pre-gate — exactly one model call incl. empty context;
-        #2280: an EMPTY model output escalates ONCE to a larger output
-        budget when the first call collapsed thinking-only
-        (``finish_reason="length"``), then fails loud as
-        ``AskReaderUnavailable`` — an empty output is never read as
-        an abstention) →
-        ``_looks_abstained`` (abstained is ALWAYS the model's written
-        decision; the blank→``NO_EVIDENCE_TEXT`` substitution is a
-        retired defensive invariant) → best-effort
-        ``record_ask_usage`` (ONLY with an explicit ``org_id``; default
-        None → no-op).
-
-        #2070 retrieval knobs (ask-lane only — the search lane is
-        untouched, both-not-either preserved):
-
-          * A1 numeric tokens — ``TORTOISE_ASK_NUMERIC_TOKENS`` (default ON):
-            all-digit money/quantity tokens survive the sparse tokenizer
-            (same-value dollar questions retrieve their turns).
-          * A2 vector leg — the ``embeddings`` extra is a DOCUMENTED runtime
-            requirement for ask quality (NEVER enforced): when the embedder
-            is absent the vector strategy is never submitted and
-            ``retrieval_degraded`` stays honest (no silent success).
-          * A3 fusion — ``TORTOISE_ASK_FUSION_WEIGHTS`` (JSON; default None
-            = the shared global 1.5) + ``TORTOISE_ASK_FUSION_K`` (default 60).
-          * A4 search_keys PRF — ``TORTOISE_ASK_SEARCH_KEYS_PRF`` (default
-            ON): additive expansion terms from the retrieved pool's
-            top-5 hits' ``search_keys`` (original tokens always keep their
-            OR-cap slots).
-          * A5 evidence boost — ``TORTOISE_ASK_EVIDENCE_BOOST`` (default
-            ON) + ``TORTOISE_ASK_EVIDENCE_BOOST_ANSWER_STRING/VERBATIM/SOURCE``.
-          * A6 caps — ``TORTOISE_ASK_RETRIEVAL_LIMIT`` /
-            ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` /
-            ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` (default OFF = 40/40/8000;
-            the retrieval-window limit is threaded IN TANDEM with the
-            assembly caps — raising only the assemble cap changes nothing).
-          * A7 rerank — ``TORTOISE_ASK_RERANK`` (default OFF, phase 2):
-            cross-encoder + MMR port (tortoise/rerank.py), degrade-to-
-            current contract + a context/token budget guard (#2976): a
-            reranked set over the 8000-token / 32 KiB caps is refused whole
-            (unreranked order), never silently truncated.
-          * A8 evidence-package assembly (Slice A #2683, epic #2080) —
-            ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF, fail-safe):
-            collapses a distilled point's own source raw chunks/turns into
-            ONE reader entry + dedups cross-item near-duplicate facts, so
-            the 40-item reader window admits distinct facts instead of
-            flooding on duplicates. PURE function (package_evidence_pool)
-            — recall surface unchanged, hermetic no-dupe tests prove the
-            ON path is byte-identical on duplicate-free pools.
-
-        Returns the 13-field response shape: ``{answer, abstained,
-        question_type, question_date, evidence, context_tokens, model,
-        provider, route, cost_estimate_usd, duration_ms,
-        retrieval_degraded, retrieved_session_ids}``. ``question_date`` is
-        ALWAYS the RESOLVED value
-        (server-now-UTC ``YYYY-MM-DD`` default when omitted; the caller
-        override when provided). No retrieval time-travel v1 — the pool stays
-        the live graph. ``retrieved_session_ids`` (D3 session identity) lists
-        the DISTINCT session ids of the assembled evidence in the order the
-        evidence presents them — the structured counterpart of the DERIVED
-        ``[session <id>]`` tags; empty when no hit's identity could be derived
-        (never fabricated). It is the
-        honest set of identities the retrieved hits carry, NOT a mirror of the
-        tags: a hit on the eval lane (``lme_session_index``) keeps its
-        historical tag whatever id it carries — a rendering index may name no
-        id, or render the index while still naming its id, and a
-        non-rendering index still renders ``[session ?]``. The derived tag is
-        also part of the BYTE accounting, so a pool already at the 32 KiB byte
-        ceiling can admit slightly fewer hits than pre-change (the 8K token
-        cap is unaffected — the tag adds bytes, not whitespace words). See
-        ``docs/product/answer-surface.md``.
-
-        Raises: ``AskValidationError`` (input), ``AskRetrievalUnavailable``
-        (retrieval/annotation/assembly raise), ``AskReaderUnavailable``
-        (the reader failed with no surviving lane).
-        """
-        import time as _time  # noqa: I001
-        from datetime import datetime as _dt2
-        from tortoise.retrieval import (
-            DEFAULT_MAX_CHUNKS_PER_SESSION,
-            apply_evidence_boost,
-            ask_env_bool,
-            assemble_context,
-            dedup_pool,
-            estimate_tokens_ask,
-            package_evidence_pool,
-            render_context,
-            resolve_ask_boost_multipliers,
-            resolve_ask_retrieval_caps,
-        )
-        from tortoise.metering import estimate_ask_cost_usd, select_ask_meter_rates
-        from tortoise.reader import (
-            NO_EVIDENCE_TEXT,
-            _looks_abstained,
-            build_reader_user_message,
-            detect_question_type,
-            system_prompt_for,
-        )
-        from tortoise.exceptions import (
-            AskReaderUnavailable,
-            AskRetrievalUnavailable,
-        )
-        # W4 (#2101): additive why-layer enrichment flag (shared resolver).
-        from .why import w4_enrichment_enabled
-
-        if os.environ.get("TORTOISE_API_URL"):
-            return self._post_ask(question, question_type=question_type,
-                                  question_date=question_date)
-
-        t0 = _time.monotonic()
-        # 1. Validation FIRST (P2-8): zero model calls AND zero retrieval
-        #    calls for invalid inputs.
-        self._ask_validate(question, question_type, question_date)
-        if question_date is None:
-            question_date = _dt2.now(UTC).strftime("%Y-%m-%d")
-
-        # 2. Connected-assembly branch (#2165 Task 6) — env-gated OFF by
-        #    default (flag OFF / unrouted / unresolved → legacy byte-identical
-        #    by construction: the branch precedes retrieval). Slots AFTER the
-        #    _post_ask delegation AND after _ask_validate (validation always
-        #    precedes the branch: invalid inputs raise AskValidationError on
-        #    fired shapes too). Whole-branch envelope: any assembler-stage
-        #    raise (classify/walk/render/decorate/enrich/date-parse) maps to
-        #    AskRetrievalUnavailable — never an untyped exception. The fired
-        #    block's evidence is rendered by the SHARED reader tail below
-        #    (ONE reader call, legacy AskReaderUnavailable envelope — no
-        #    double metering). R14: _assemble_connected is referenced only
-        #    here and in ask_assembled (source-text drift test).
-        caps = resolve_ask_retrieval_caps()
-        fired_block = None
-        if ask_env_bool("TORTOISE_ASK_CONNECTED_ASSEMBLY", False):
-            try:
-                from tortoise.assembly import _assemble_connected
-                fired_block = _assemble_connected(
-                    self, question, question_date=question_date, caps=caps)
-            except AskRetrievalUnavailable:
-                raise
-            except Exception as e:  # noqa: BLE001, RUF100 — fired envelope
-                raise AskRetrievalUnavailable(
-                    f"connected assembly unavailable: {type(e).__name__}"
-                ) from e
-        if fired_block is not None and fired_block.fired:
-            # fired: assembled = the assembled post-cap lines; the retrieval
-            # knobs/dedup/boost/rerank never run. hits=[] + leg_trace=[] make
-            # the shared degradation gate below pass [] to the D8 check (R11:
-            # a fired render NEVER reports retrieval_degraded).
-            assembled = fired_block.post_cap_lines
-            hits: list[dict] = []
-            leg_trace: list[dict] = []
-        else:
-            # Legacy lane: retrieval (whole-retrieval raises →
-            # AskRetrievalUnavailable). A1/A3/A4/A6 (#2070): the ask-lane
-            # retrieval knobs resolve ONCE here (env-gated; defaults =
-            # historical behavior) and thread into the one bounded RAG pass.
-            # A6's retrieval-window limit and the assembly caps resolve IN
-            # TANDEM (``resolve_ask_retrieval_caps``) — the gold is cut at
-            # ``result_ids[:limit]`` inside the retrieval call BEFORE
-            # dedup/assemble, so a cap raise that does not also raise the
-            # window changes nothing.
-            keep_numeric = ask_env_bool(
-                "TORTOISE_ASK_NUMERIC_TOKENS", True)  # A1, default ON
-            search_keys_prf = ask_env_bool(
-                "TORTOISE_ASK_SEARCH_KEYS_PRF", True)      # A4, default ON
-            evidence_boost = ask_env_bool(
-                "TORTOISE_ASK_EVIDENCE_BOOST", True)       # A5, default ON
-            # A8 (Slice A #2683): the evidence-package assembly arm —
-            # ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF — fail-safe,
-            # the #1745 default decision; hermetic no-dupe tests prove the
-            # ON path is byte-identical to OFF when no near-duplicates
-            # exist). mark_for=None = the stored-``has_answer`` fallback
-            # (source-session class only) — product graphs carry zero value
-            # marks, so the package is pure collapse+ordering-by-rank on
-            # real graphs (never a silent mark-driven reorder).
-            evidence_assembly = ask_env_bool(
-                "TORTOISE_ASK_EVIDENCE_ASSEMBLY", False)
-            from tortoise.retrieval import (  # noqa: I001
-                ASK_FUSION_WEIGHTS_ENV, ASK_FUSION_K_ENV, ask_env_int,
-                ask_env_weights,
-            )
-            fusion_weights = ask_env_weights(ASK_FUSION_WEIGHTS_ENV, None)  # A3
-            fusion_k = ask_env_int(ASK_FUSION_K_ENV, 60)                    # A3
-            leg_trace: list[dict] = []
-            try:
-                hits = self.tortoise_fts_query(
-                    question, limit=caps["limit"],
-                    pool_size=DEFAULT_POOL_SIZE, include_terminal=True,
-                    leg_trace=leg_trace,
-                    keep_numeric=keep_numeric,
-                    search_keys_prf=search_keys_prf,
-                    fusion_weights=fusion_weights,
-                    fusion_k=fusion_k)
-            except AskRetrievalUnavailable:
-                raise
-            except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
-                raise AskRetrievalUnavailable(
-                    f"retrieval unavailable: {type(e).__name__}") from e
-
-            # 3. Annotation (batch raise → AskRetrievalUnavailable).
-            try:
-                annotated = self.annotate_ask_hits(hits)
-            except AskRetrievalUnavailable:
-                raise
-            except Exception as e:  # noqa: BLE001, RUF100
-                raise AskRetrievalUnavailable(
-                    f"annotation unavailable: {type(e).__name__}") from e
-
-            # 4. Dedup (annotated session key — P2-20) → A5 evidence boost → A7
-            #    rerank → assembly (8k/40/32KiB caps from ``caps``).
-            try:
-                def _ask_session_key(h: dict) -> str:
-                    return (h.get("session_id")
-                            or h.get("session_date")
-                            or f"idx:{h.get('lme_session_index', -1)}")
-
-                deduped = dedup_pool(
-                    annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
-                    session_key=_ask_session_key)
-                # A5 (#2070): evidence-mark boost before assembly (mark_for=None =
-                # the stored-``has_answer`` fallback — source-session class,
-                # conservative). Zero marks → byte-identical order (all factors
-                # 1.0); the boost is a rank reorder, never a filter. Real product
-                # graphs carry zero marks until the extractor writes them
-                # (documented — the value is measured on seeded fixtures).
-                if evidence_boost:
-                    boost_mult = resolve_ask_boost_multipliers()
-                    deduped, _boost_stats = apply_evidence_boost(
-                        deduped,
-                        boost_answer_string=boost_mult["answer_string"],
-                        boost_verbatim=boost_mult["verbatim"],
-                        boost_source=boost_mult["source"],
-                    )
-                # A7 (#2070): cross-encoder + MMR rerank (env-gated, default
-                # OFF — phase 2). Degrade-to-current: any failure keeps the
-                # deduped pool untouched; the rerank never raises. Budget
-                # guard (#2976): the measured lever costs ~6.6x context, so a
-                # reranked set that overruns the SAME 8000-token / 32 KiB caps
-                # ``assemble_context`` enforces is refused WHOLE — degrade to
-                # the unreranked order (declared in the stats), never a silent
-                # truncation of the reranked set.
-                from tortoise.rerank import ask_lane_rerank
-                deduped, _rerank_stats = ask_lane_rerank(
-                    question, deduped, proj=self._get_proj(),
-                    top_k=caps["context_item_cap"],
-                    max_context_tokens=caps["context_token_cap"],
-                    max_context_bytes=32768,
-                    question_date=question_date)
-                # A8 (Slice A #2683): package the evidence pool BEFORE the
-                # reader window fill — a distilled point's own source raw
-                # chunks/turns collapse to one package entry, cross-item
-                # near-dupe points restate one fact in one slot, so the
-                # capped reader window admits distinct facts instead of
-                # flooding on duplicates. Recall surface unchanged; the
-                # package shapes only what ``assemble_context`` hands the
-                # reader. Env-gated OFF by default (fail-safe); hermetic
-                # tests in tests/test_evidence_assembly.py prove the ON
-                # path is byte-identical when the pool has no
-                # near-duplicates.
-                if evidence_assembly:
-                    deduped, _asm_stats = package_evidence_pool(
-                        deduped, mark_for=None)
-                assembled = assemble_context(
-                    deduped, top_k=caps["context_item_cap"],
-                    max_context_tokens=caps["context_token_cap"],
-                    question_date=question_date,
-                    context_item_cap=caps["context_item_cap"],
-                    byte_cap=32768)
-            except Exception as e:  # noqa: BLE001, RUF100
-                raise AskRetrievalUnavailable(
-                    f"context assembly unavailable: {type(e).__name__}") from e
-
-        # 5. Question type (deterministic detector or caller override).
-        qtype = question_type if question_type is not None \
-            else detect_question_type(question)
-
-        # 6. ONE reader call via the per-namespace cached model.
-        try:
-            evidence = render_context(assembled, question_date=question_date)
-            context_tokens = estimate_tokens_ask(evidence)
-        except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
-            raise AskRetrievalUnavailable(
-                f"context rendering unavailable: {type(e).__name__}") from e
-        try:
-            model = self._ask_reader_model(_reader_factory)
-        except Exception as e:  # noqa: BLE001, RUF100 — a build failure is a reader failure
-            raise AskReaderUnavailable(
-                f"reader unavailable (build): {type(e).__name__}") from e
-        try:
-            raw, reader_out_tokens = _ask_reader_complete(
-                model,
-                system=system_prompt_for(qtype),
-                user=build_reader_user_message(evidence, question))
-        except AskReaderUnavailable:
-            raise  # #2280: empty-output failure — never an abstention
-        except Exception as e:  # noqa: BLE001, RUF100
-            raise AskReaderUnavailable(
-                f"reader unavailable: {type(e).__name__}") from e
-        finally:
-            decr = getattr(model, "decr_inflight", None)
-            if decr is not None:
-                decr()
-        answer = (raw or "").strip()
-        abstained = _looks_abstained(answer)
-        # #2280: an empty output can no longer reach here — the escalation
-        # helper either returns non-empty text or raises AskReaderUnavailable.
-        # ``abstained`` is therefore ALWAYS the model's written abstention
-        # decision, never a blank-output substitution. (The substitution is
-        # retained as a defensive invariant for a future caller that skips
-        # the helper — it must never fire on the product path.)
-        if abstained and not answer:
-            answer = NO_EVIDENCE_TEXT
-
-        # 7. Metering (best-effort; ONLY with an explicit org_id).
-        # #2069: the record's cost_usd is metered at the SERVING lane's
-        # family rates (``select_ask_meter_rates`` on ``_LockedReader.model``
-        # — the strong lane never under-counts at the deepseek envelope).
-        # #3981: metering never blocks the answer — but a dropped increment is
-        # never silent. ``record_ask_usage`` raises on an unresolvable metering
-        # window; that raise is a SIGNAL, not a refusal (the answer is already
-        # produced by this point), so it is absorbed here and reported to the
-        # operator as lane=ask_ledger.
-        if org_id:
-            try:
-                from tortoise.metering import record_ask_usage
-                input_tokens = (estimate_tokens_ask(system_prompt_for(qtype))
-                                + estimate_tokens_ask(evidence))
-                out_tokens = reader_out_tokens or 500
-                record_ask_usage(
-                    org_id,
-                    tokens_in=input_tokens, tokens_out=out_tokens,
-                    cost_usd=estimate_ask_cost_usd(
-                        input_tokens, out_tokens,
-                        rates=select_ask_meter_rates(
-                            getattr(model, "model", None) or "")),
-                    _selfhost_transport=_selfhost_transport)
-            except Exception as e:  # noqa: BLE001, RUF100 — never blocks
-                # #3981: the alert import is itself guarded — the metering
-                # module may be the thing that failed, and an unguarded import
-                # inside this handler would lose the already-produced answer.
-                try:
-                    from tortoise.metering import report_unmetered_increment
-                except Exception:  # noqa: BLE001, RUF100 — never blocks
-                    logging.getLogger("tortoise.metering").error(
-                        "UNMETERED INCREMENT (#3981): lane=ask_ledger "
-                        "team=%s error=%s: %s (metering module unavailable)",
-                        org_id or "<none>", type(e).__name__, e)
-                else:
-                    report_unmetered_increment(lane="ask_ledger",
-                                               org_id=org_id, error=e)
-
-        # 8. Degradation signal (leg_trace + D8-decoration-unavailable).
-        degraded = any(bool(leg.get("degraded")) for leg in leg_trace)
-        if not degraded:
-            try:
-                degraded = self._ask_d8_decoration_unavailable(hits)
-            except Exception:  # noqa: BLE001, RUF100 — degrade to False
-                degraded = False
-
-        # W4 (#2101): additive why-layer entries for the evidence pool the
-        # reader saw (flag-gated — the ``why`` key is ABSENT with the flag
-        # OFF, keeping the response byte-identical for the flag-only key). The hits
-        # already carry the search-path enrichment; projection is a pure
-        # dict op (zero extra graph reads). Fail-open: any error → ``[]``.
-        why_entries: list[dict] = []
-        if w4_enrichment_enabled():
-            try:
-                from .why import item_to_why_entry
-                for _hit in assembled:
-                    _entry = item_to_why_entry(_hit)
-                    if _entry and _entry.get("point_id"):
-                        why_entries.append(_entry)
-            except Exception as e:  # noqa: BLE001, RUF100 — fail-open
-                _logger.warning("W4 why-layer enrichment failed (ask): %s", e)
-                why_entries = []
-        serving = getattr(model, "last_route", None) or \
-            getattr(model, "route", None)
-        # D3 session identity: the DISTINCT derived session ids of the
-        # assembled evidence, in the order the evidence presents them (this
-        # lane's post-dedup ranking order — post-boost, and when enabled
-        # post-rerank (A7) / post-package (A8) — NOT raw RRF once
-        # ``apply_evidence_boost`` has reordered the pool). Derived from the
-        # SAME hits the reader window contains, in the same order, so the field
-        # and the evidence cover exactly the same hits; the TAG each hit
-        # shows can still differ when the hit carries ``lme_session_index``
-        # (that lane's index tag wins — see ``_render_block``). Hits whose
-        # identity cannot be derived contribute nothing (never fabricated).
-        retrieved_session_ids = _distinct_session_ids(assembled)
-        duration_ms = int((_time.monotonic() - t0) * 1000)
-        try:
-            # #2069: the response's cost_estimate_usd uses the SERVING lane's
-            # family rates (STRONG for qwen//upstage//anthropic// specs — a
-            # strong-lane ask metered at the deepseek envelope would
-            # under-count ~10×).
-            cost_estimate = estimate_ask_cost_usd(
-                estimate_tokens_ask(system_prompt_for(qtype))
-                + estimate_tokens_ask(evidence),
-                reader_out_tokens or 500,
-                rates=select_ask_meter_rates(
-                    getattr(model, "model", None) or ""))
-        except Exception:  # noqa: BLE001, RUF100
-            cost_estimate = 0.0
-        resp = {
-            "answer": answer,
-            "abstained": abstained,
-            "question_type": qtype,
-            "question_date": question_date,
-            "evidence": evidence,
-            "context_tokens": context_tokens,
-            "model": getattr(model, "model", None),
-            "provider": serving,
-            "route": serving,
-            "cost_estimate_usd": cost_estimate,
-            "duration_ms": duration_ms,
-            "retrieval_degraded": degraded,
-            "retrieved_session_ids": retrieved_session_ids,
-        }
-        # W4 (#2101): additive why-layer entries — emitted ONLY with the W4
-        # flag ON (absent otherwise — every non-`why` field, including the
-        # D3 `retrieved_session_ids`, stays byte-identical).
-        if w4_enrichment_enabled():
-            resp["why"] = why_entries
-        return resp
-
-    @staticmethod
-    def _ask_d8_decoration_unavailable(hits: list[dict]) -> bool:
-        """D8-decoration-unavailable detection (P1-13/P1-5): terminal-status
-        hits returned WITHOUT supersession keys when ``include_terminal=True``
-        — the decoration silently failed to attach the markers, so the
-        evidence would render superseded content as current. 200 +
-        ``retrieval_degraded=True`` (never a silent success)."""
-        from tortoise.search_engine import TERMINAL_EXCLUDED_STATUSES
-        for h in hits:
-            if ((h.get("status") or "") in TERMINAL_EXCLUDED_STATUSES
-                    and not (h.get("superseded_by") or h.get("supersedes")
-                             or h.get("valid_from") or h.get("valid_to")
-                             or h.get("expired_at"))):
-                return True
-        return False
-
-    def ask_assembled(self, question: str, *, question_date: str | None = None,
-                      question_type: str | None = None,
-                      caps: dict | None = None,
-                      _reader_factory=None) -> AssemblyAnswer:
-        """#2165 Task 6 — connected-assembly ask (the eval arm's reader path).
-
-        One fired pipeline (classify → resolve → walk → render → decorate →
-        enrich → assemble) with a PURE-ASSEMBLY default: when no reader is
-        supplied the assembly fields populate and ``answer=None`` — the arm
-        measures gold-id admission (``post_cap_lines``) independently of any
-        reader. With a reader via ``_reader_factory`` the ONE reader call
-        fills ``answer`` (the shared reader machinery + legacy
-        AskReaderUnavailable envelope). Fires regardless of the caller's
-        ``question_type``, but the RESPONSE reports the caller/detector value
-        unchanged. ``fired=False`` returns the empty shape (no block, no
-        raise). In hosted-delegated client mode (``TORTOISE_API_URL`` set, no
-        local graph) raises ``AskRetrievalUnavailable`` — the hosted answer
-        surface is #2013-gated and does not expose this branch.
-        """
-        import os as _os
-
-        from tortoise.exceptions import (
-            AskReaderUnavailable,
-            AskRetrievalUnavailable,
-        )
-        if _os.environ.get("TORTOISE_API_URL"):
-            raise AskRetrievalUnavailable(
-                "ask_assembled requires a local graph (TORTOISE_API_URL is "
-                "set — the hosted /v1/ask surface does not expose the "
-                "connected-assembly branch)")
-        from tortoise.assembly import AssemblyAnswer as _AssemblyAnswer
-        from tortoise.assembly import _assemble_connected
-        from tortoise.reader import (
-            NO_EVIDENCE_TEXT,
-            _looks_abstained,
-            build_reader_user_message,
-            detect_question_type,
-            system_prompt_for,
-        )
-        from tortoise.retrieval import (
-            estimate_tokens_ask,
-            render_context,
-            resolve_ask_retrieval_caps,
-        )
-        # validation FIRST (same canonical codes as ask()); date resolved to
-        # server-now-UTC when omitted (identical default semantics)
-        self._ask_validate(question, question_type, question_date)
-        if question_date is None:
-            from datetime import UTC as _UTC2
-            from datetime import datetime as _dt3
-            question_date = _dt3.now(_UTC2).strftime("%Y-%m-%d")
-        if caps is None:
-            caps = resolve_ask_retrieval_caps()
-        try:
-            block = _assemble_connected(
-                self, question, question_date=question_date, caps=caps)
-        except AskRetrievalUnavailable:
-            raise
-        except Exception as e:  # noqa: BLE001, RUF100 — fired envelope
-            raise AskRetrievalUnavailable(
-                f"connected assembly unavailable: {type(e).__name__}") from e
-        qtype = question_type if question_type is not None \
-            else detect_question_type(question)
-        if not block.fired:
-            return _AssemblyAnswer(
-                fired=False, shape=None, question_type=qtype, subjects=[],
-                slices={}, post_cap_lines=[], admission={}, evidence="",
-                context_tokens=0, answer=None, retrieval_degraded=False)
-        evidence = render_context(block.post_cap_lines,
-                                  question_date=question_date)
-        context_tokens = estimate_tokens_ask(evidence)
-        answer: str | None = None
-        if _reader_factory is not None:
-            # the ONE reader call (pure-assembly mode when no reader — the
-            # eval arm decides whether conversion is measured)
-            try:
-                model = self._ask_reader_model(_reader_factory)
-            except Exception as e:  # noqa: BLE001, RUF100
-                raise AskReaderUnavailable(
-                    f"reader unavailable (build): {type(e).__name__}") from e
-            try:
-                raw, _out_tokens = _ask_reader_complete(
-                    model,
-                    system=system_prompt_for(qtype),
-                    user=build_reader_user_message(evidence, question))
-            except AskReaderUnavailable:
-                raise
-            except Exception as e:  # noqa: BLE001, RUF100
-                raise AskReaderUnavailable(
-                    f"reader unavailable: {type(e).__name__}") from e
-            finally:
-                decr = getattr(model, "decr_inflight", None)
-                if decr is not None:
-                    decr()
-            answer = (raw or "").strip()
-            if _looks_abstained(answer) and not answer:
-                answer = NO_EVIDENCE_TEXT
-        return _AssemblyAnswer(
-            fired=True, shape=block.shape, question_type=qtype,
-            subjects=list(block.subjects), slices=block.slices,
-            post_cap_lines=block.post_cap_lines,
-            admission=dict(block.admission), evidence=evidence,
-            context_tokens=context_tokens, answer=answer,
-            retrieval_degraded=False)
-
-    # ── Per-namespace reader-model cache (#1987 Task 5) ────────────────────
-
-    def _ask_reader_model(self, factory=None):
-        """Resolve the ask-lane reader model for THIS SDK's namespace from the
-        per-namespace cache (never module-global): LRU bound, in-flight
-        entries never evicted, failed builds never cached, per-key build
-        single-flight, closed clients on eviction."""
-        namespace = getattr(self, "_namespace", None) or "default"
-        key = f"ask:{namespace}"
-        cache = _ask_reader_cache()
-        with _ASK_READER_CACHE_LOCK:
-            entry = cache.get(key)
-            if entry is not None and not entry.failed():
-                cache.move_to_end(key)
-                entry.incr_inflight()
-                return entry
-        # Build path — per-key single-flight (P2-16): two simultaneous FIRST
-        # asks for the same namespace produce ONE build.
-        build_lock = _ask_build_lock(key)
-        with build_lock:
-            with _ASK_READER_CACHE_LOCK:
-                entry = cache.get(key)
-                if entry is not None and not entry.failed():
-                    cache.move_to_end(key)
-                    entry.incr_inflight()
-                    return entry
-            try:
-                builder = factory if factory is not None \
-                    else _default_ask_reader_factory()
-                model = builder() if callable(builder) else builder
-                locked = _LockedReader(model)
-            except Exception:
-                # Failed builds are NEVER cached (P2-21) — the key stays
-                # absent so a subsequent ask rebuilds and succeeds. Also
-                # drop the per-key single-flight lock (P2): a failed build
-                # leaves NO cache entry to evict alongside it, so without
-                # this the lock would linger in the module dict forever —
-                # unbounded growth under sustained build failure across
-                # namespaces. Safe: the failed build leaves no cached state
-                # and this thread still holds the lock while unwinding.
-                with _ASK_READER_CACHE_LOCK:
-                    _ask_build_locks.pop(key, None)
-                raise
-            with _ASK_READER_CACHE_LOCK:
-                entry = cache.get(key)
-                if entry is not None and not entry.failed():
-                    # A sibling thread's build landed while this one ran —
-                    # possible ONLY after a failed build popped the per-key
-                    # single-flight lock (P2-16): the lock is per-build, so
-                    # the sibling built on a FRESH lock concurrently. The
-                    # EXISTING entry wins — never overwrite it without
-                    # close() (the clobbered _LockedReader's model client
-                    # socket would leak and its in-flight count orphan).
-                    cache.move_to_end(key)
-                    entry.incr_inflight()
-                    locked.close()
-                    return entry
-                cache[key] = locked
-                cache.move_to_end(key)
-                locked.incr_inflight()
-                _prune_ask_reader_cache(cache)
-            return locked
-
-    def _post_ask(self, question: str, *, question_type: str | None = None,
-                  question_date: str | None = None) -> dict:
-        """Hosted-mode POST to ``TORTOISE_API_URL`` ``/v1/ask`` (Task 5) —
-        mirrors ``_post_commit``'s pattern (auth header, NO auto-retry v1).
-        The SDK-side timeout (75s) is STRICTLY GREATER than the server's
-        ``_ASK_TIMEOUT_S`` (60s) so the server's 504 is always receivable and
-        mapped to ``AskTimeout`` reliably. Maps statuses/body codes to the
-        typed SDK exceptions (exceptions.py) per the pinned vocabulary.
-        """
-        from tortoise.schemas import (  # noqa: I001
-            CODE_IN_FLIGHT_LIMIT,
-            CODE_INVALID_QUESTION,
-            CODE_INVALID_QUESTION_DATE,
-            CODE_INVALID_QUESTION_TYPE,
-            CODE_QUESTION_TOO_LONG,
-            CODE_RETRIEVAL_UNAVAILABLE,
-            CODE_UNAUTHORIZED,
-        )
-        from tortoise.exceptions import (
-            AskInFlightLimit,
-            AskQuotaExceeded,
-            AskReaderUnavailable,
-            AskRetrievalUnavailable,
-            AskTimeout,
-            AskValidationError,
-        )
-        import requests as _requests
-        base = os.environ.get("TORTOISE_API_URL", "http://localhost:8000")
-        key = os.environ.get("TORTOISE_API_KEY", "")
-        payload = {"question": question}
-        if question_type is not None:
-            payload["question_type"] = question_type
-        if question_date is not None:
-            payload["question_date"] = question_date
-        try:
-            r = _requests.post(
-                f"{base.rstrip('/')}/v1/ask",
-                headers={"Authorization": f"Bearer {key}"},
-                json=payload, timeout=ASK_SDK_TIMEOUT_S)
-        except _requests.exceptions.Timeout:
-            raise AskTimeout("client-side timeout awaiting /v1/ask",
-                             source="client") from None
-        except _requests.exceptions.ConnectionError:
-            raise AskReaderUnavailable(
-                "cannot reach the hosted ask server (connection refused)",
-                status_code=None) from None
-        body: dict = {}
-        try:
-            body = r.json()
-        except ValueError:
-            body = {}
-        err = body.get("error") or {}
-        code = err.get("code") if isinstance(err, dict) else None
-        status = r.status_code
-
-        def _val_err(default_code: str, message: str) -> AskValidationError:
-            return AskValidationError(message, code=code or default_code,
-                                      status_code=status)
-
-        if status == 429:
-            if code == CODE_IN_FLIGHT_LIMIT:
-                raise AskInFlightLimit("in-flight ask limit",
-                                       status_code=status)
-            # 429-is-quota: a code-less 429 → AskQuotaExceeded
-            # (retry_after=None — NEVER AskValidationError, P2-15).
-            # The hosted server emits Retry-After in the HTTP HEADER and
-            # ALSO ships the seconds in the 429 body (P1) — prefer the
-            # header, fall back to the body field. Parse the header FIRST;
-            # RFC 7231 allows an HTTP-date (float() raises → None) — only
-            # then fall back to the body.
-            retry_after = None
-            header_ra = r.headers.get("Retry-After")
-            if header_ra is not None:
-                try:
-                    retry_after = float(header_ra)
-                except (TypeError, ValueError):
-                    retry_after = None
-            if retry_after is None:
-                body_ra = err.get("retry_after") if isinstance(err, dict) else None
-                if body_ra is not None:
-                    try:
-                        retry_after = float(body_ra)
-                    except (TypeError, ValueError):
-                        retry_after = None
-            raise AskQuotaExceeded("ask quota exceeded",
-                                   retry_after=retry_after,
-                                   status_code=status)
-        if status == 502:
-            if code == CODE_RETRIEVAL_UNAVAILABLE:
-                raise AskRetrievalUnavailable("retrieval unavailable",
-                                              status_code=status)
-            raise AskReaderUnavailable("reader unavailable",
-                                       status_code=status)
-        if status == 504:
-            raise AskTimeout("server timeout", source="server",
-                             status_code=status)
-        if status == 402:
-            # a code-less 402 is a SERVER-side provider-billing condition —
-            # never mislabeled invalid_question (P2-3).
-            raise AskReaderUnavailable(
-                "provider billing 402 (status retained)",
-                status_code=status)
-        if status == 404:
-            # #2013: /v1/ask is NOT registered when the hosted ask exposure is
-            # gated off (TORTOISE_ENABLE_ASK unset) — a 404 is the EXPECTED
-            # gated state, not an invalid question (the default code-less 4xx
-            # map would mislabel it invalid_question).
-            raise AskReaderUnavailable(
-                "ask exposure is not enabled on this server",
-                status_code=status)
-        if 400 <= status < 500:
-            if code in (CODE_INVALID_QUESTION, CODE_QUESTION_TOO_LONG,
-                        CODE_INVALID_QUESTION_TYPE, CODE_INVALID_QUESTION_DATE,
-                        CODE_UNAUTHORIZED):
-                raise _val_err(code, f"ask rejected: {code}")
-            # code-less 4xx → the status-derived documented default
-            defaults = {400: CODE_INVALID_QUESTION, 401: CODE_UNAUTHORIZED,
-                        403: CODE_UNAUTHORIZED, 422: CODE_INVALID_QUESTION}
-            default_code = defaults.get(status, CODE_INVALID_QUESTION)
-            raise _val_err(default_code, f"ask rejected (HTTP {status})")
-        if status >= 500:
-            # Residual 5xx NOT covered above (500 handler failure, 503
-            # LB/deploy drain) — never escapes as an untyped
-            # requests.HTTPError on the ask surface: map to the typed
-            # unavailable exceptions with the status retained, mirroring
-            # the 502 branch (P2).
-            if code == CODE_RETRIEVAL_UNAVAILABLE:
-                raise AskRetrievalUnavailable("retrieval unavailable",
-                                              status_code=status)
-            raise AskReaderUnavailable("reader unavailable",
-                                       status_code=status)
-        r.raise_for_status()
-        return body
-
 
     def expand_relationships(self, point_id: str) -> list[dict]:
         """Full relationship payload for a single Point, incl. related_content (#1353 D14).
@@ -15898,6 +15395,13 @@ class TortoiseSDK:
             # #329 relief path: quota limits settable via the control plane so
             # an org at cap can be upgraded (no REST surface exists yet — the
             # fields are SDK/registry-level; get_current_org honors them).
+            # #4010: max_sessions is the EXCEPTION — no decision has asked to
+            # remove this writer, so the field stays in the allowed set. It is
+            # no longer a relief mechanism: every resolver returns an unlimited
+            # None and DELIBERATELY ignores a stored value, so a write here is
+            # accepted and has no quota effect. Even removing the method would
+            # not remove the graph property — the sweep stays the way a stored
+            # value is cleared.
             "max_points", "max_api_keys", "max_sessions",
         }
         invalid = set(fields.keys()) - allowed
@@ -17193,12 +16697,45 @@ class TortoiseSDK:
         # matched them via id/eventId but no caller relies on it.
         # Per-label indexed writes (id OR eventId — original predicate; no url).
         # UNION cannot carry SET, so run each branch sequentially (#327).
+        #
+        # #3689 P1 (#4094): the generic Point branch applied caller props with
+        # a live ``SET n += $p`` but emitted NO journal record — so
+        # ``update_entity(op, annotator_bias=0.77)`` wrote a live dim that
+        # ``rebuild_all`` silently erased (the operator came back from its
+        # ``OperatorAdded`` creation snapshot, dim-free). Journal the ANNOTATOR
+        # dims on the Point branch as a ``PointRevised`` record: the same shape
+        # ``update_point``/``annotate_operator`` emit and the same one
+        # ``_revise_point``/``_apply_one`` fold, so presence-conditional replay
+        # restores exactly what the live write set.
+        #
+        # SCOPE: only the annotator dims. Every other prop this generic surface
+        # writes live is still unfolded on replay — the pre-existing
+        # PointRevised-extras class tracked by #2946/#2795/#4094, deliberately
+        # NOT widened here: folding ``content`` would need the live
+        # content_hash/embedding recompute (#1904) or it would introduce a NEW
+        # live/replay divergence in the same breath.
+        annotator_updates = {
+            k: v for k, v in props.items() if k in _ANNOTATOR_PROP_NAMES}
         for label, prop in (("Point", "id"), ("Subject", "id"), ("Object", "id"),
                             ("Document", "id"), ("Source", "id"), ("Event", "eventId")):
-            proj.g.query(
-                f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p",
-                params={"id": id_val, "p": props},
-            )
+            if label == "Point":
+                res = proj.g.query(
+                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p "
+                    "RETURN count(n)",
+                    params={"id": id_val, "p": props},
+                )
+                # Post-apply, per matched label — the `_delete_entity`
+                # emitter's ordering contract (a failed/no-op write never
+                # leaves a phantom record).
+                if (annotator_updates and res.result_set
+                        and res.result_set[0][0]):
+                    self._emit_event("PointRevised", id=id_val,
+                                     **annotator_updates)
+            else:
+                proj.g.query(
+                    f"MATCH (n:{label} {{{prop}:$id}}) SET n += $p",
+                    params={"id": id_val, "p": props},
+                )
         return self._get_entity(id_val)
 
     def _delete_entity(self, id_val: str) -> bool:
@@ -18006,9 +17543,7 @@ class TortoiseSDK:
         return 24.0
 
     def _index_no_network(self) -> bool:
-        import os as _os
-        return _os.environ.get("TORTOISE_INDEX_NO_NETWORK", "").strip().lower() in (
-            "1", "true", "yes")
+        return _index_no_network_enabled()
 
     def _index_read_file(self, path, max_bytes: int):
         """Layer-2 BOUNDED BINARY read (§6.4 cycle-4 pin).

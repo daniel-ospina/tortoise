@@ -21,31 +21,14 @@ from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status,
                           _RESERVED_ACTOR_PROPS)
-from tortoise.schemas import (  # one vocabulary, no duplicated boundary literals (P2-14)
-    CODE_IN_FLIGHT_LIMIT,
-    CODE_QUOTA_EXCEEDED,
-    CODE_READER_UNAVAILABLE,
-    CODE_RETRIEVAL_UNAVAILABLE,
-    CODE_TIMEOUT,
-)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_org_id, _current_org_limits,
                                _current_scopes, _current_legacy_full_access,
                                _current_graph_id, _transport_mode, _tool_group,
                                _get_org_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
                                ERR_EXCLUDED, SELFHOST_ORG_ID)
-from tortoise.transport import ask_exposure_enabled
 
 _log = logging.getLogger(__name__)
-
-# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE (the MCP tortoise_ask
-# tool) is off by default. The READER ships (the eval's reader — the 500-Q
-# benchmark runs through it); only the customer-facing ask EXPOSURE is
-# gated until the reader-model decision is made. ``tortoise_ask`` lives in
-# its OWN curation group ("ask", see tool_registry.py GROUP_BY_NAME) so the
-# default (ungrouped) hosted /mcp surface can exclude it; an explicit
-# tool_group="ask" server (dev/eval) still serves it.
-_ASK_TOOL_GROUP = "ask"
 
 
 def _load_dotenv(path: str | None = None) -> None:
@@ -243,9 +226,14 @@ def _enforce_mcp_tool_scope(name: str) -> None:
 
     - legacy full-access keys (scopes None OR legacy_full_access) and OAuth/
       session resolutions (scopes None) pass — existing flows unchanged.
-    - a SCOPED key is enforced: tools in WRITE_TOOL_NAMES need
-      graphs:write; everything else (read tools) needs graphs:read (write
-      implies read — graphs:write satisfies reads).
+    - a SCOPED key is enforced: the tool's registry entry carries the declared
+      `writes` flag — a `writes=True` tool needs graphs:write, everything else
+      needs graphs:read (write implies read — graphs:write satisfies reads).
+      `WRITE_TOOL_NAMES` is the derived view of that flag (#4170).
+    - an UNRESOLVABLE name is DENIED (`AuthorizationError`), never served as a
+      read. The old else-branch treated any name missing from the parallel
+      write list as a read, so a writer absent from that list was reachable by
+      a graphs:read-only key (#4170).
     - deleg=0 children without a data scope never reach here (the
       middleware rejects them at resolution); deleg=0 children WITH a data
       scope are routed to their own graph by _get_org_sdk and enforced
@@ -259,7 +247,14 @@ def _enforce_mcp_tool_scope(name: str) -> None:
     if scopes is None or _current_legacy_full_access.get():
         return
     have = set(scopes)
-    if name in WRITE_TOOL_NAMES:
+    entry = get_tool_by_name().get(name)
+    if entry is None:
+        # #4170: an unresolvable name is DENIED, never served as a read. The
+        # default used to be "read", so a write missing from the parallel list
+        # was reachable from a graphs:read-only key.
+        raise AuthorizationError(
+            f"Unknown tool {name} — denied (not present in the registry).")
+    if entry.writes:
         if "graphs:write" not in have:
             raise AuthorizationError(
                 f"Key lacks graphs:write scope for tool {name}.")
@@ -431,44 +426,23 @@ _QUOTA_GATED: frozenset[str] = frozenset({
 })
 
 
-# #308 (R3, scoping delta 11): the explicit WRITE set for read-velocity
-# classification — tools/call for a tool NOT in this set counts as a read.
-# NOT derived as the complement of _QUOTA_GATED: tortoise_ingest is
-# _quota_gated-wrapped but absent from that frozenset, and the demo-create
-# tool writes Points via _enforce_quota without the wrapper. Membership is
-# asserted by an introspective test (plan Task 11) so a new write tool cannot
-# silently be counted as a read.
-WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
-    "tortoise_ingest",               # bulk write (wrapped, not in _QUOTA_GATED)
-    "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph,
-    "tortoise_mine_conversations", "tortoise_approve_merge",
-    "tortoise_promote_point",
-    # C5 #2114 (code-review P1): the destructive/mutating _rw() tools a
-    # graphs:read-only key must NEVER invoke — a read-only key deleting
-    # points/entities or mutating operators/sources is a write-scope
-    # bypass. Membership asserted by test_every_node_creating_tool_* +
-    # test_no_write_tool_counted_as_read (extended in C5).
-    "tortoise_delete_point", "tortoise_delete", "tortoise_delete_entity",
-    "tortoise_set_point_baseline", "tortoise_set_source_tier",
-    "tortoise_annotate_operator",
-    # tortoise_pack_install MERGEs :PackManifest/:PackInstall into the
-    # tenant graph (write) — re-review P2: it was missing (classified read).
-    "tortoise_pack_install",
-    # C5 #2114 (re-review 3): REST/MCP parity + write-cache tools — session
-    # capture writes episodic Points (REST twin requires graphs:write); the
-    # onboarding index/demo/toggle tools write DEFAULT-graph/org state;
-    # get_source_reliability write-through refreshes the Source cache.
-    "tortoise_session_capture",
-    "tortoise_graph_set_recording",  # #2302: per-graph recording override write (team:manage-gated in-function; a graphs:read-only key must never reach it) — REST PATCH /v1/graphs twin
-    "tortoise_onboarding_github_index",
-    "tortoise_onboarding_session_recording",
-    "tortoise_get_source_reliability",
-    "tortoise_onboarding_github_connect",  # stores credentials + org state
-    # main-side #2156 landed during the C5 rebase — onboarding_seed writes
-    # the two anchor Subjects into the DEFAULT graph (derived write-set test
-    # caught it at the rebased head).
-    "tortoise_onboarding_seed",
-})
+# #4170: the write permission lives on each ToolDefinition entry (`writes`),
+# so WRITE_TOOL_NAMES is DERIVED — a rename or a merge edits the entry and the
+# permission travels with it. It is no longer a hand-maintained parallel list
+# that a new writer could silently be missing from.
+#
+# #308 (R3, scoping delta 11): this is also the read-velocity classification
+# set — tools/call for a tool NOT in it counts as a read. It is NOT the
+# complement of _QUOTA_GATED: tortoise_ingest is _quota_gated-wrapped but
+# absent from that frozenset, and the demo-create tool writes Points via
+# _enforce_quota without the wrapper.
+#
+# The `# noqa: E402` is deliberate: the bottom `tool_registry` import exists
+# for the adapter, and importing the derived helpers here keeps this module's
+# import order unchanged (tool_registry does not import mcp_server — no cycle).
+from tortoise.tool_registry import get_tool_by_name, get_write_tool_names  # noqa: E402
+
+WRITE_TOOL_NAMES: frozenset[str] = get_write_tool_names()
 
 
 # #329: per-org per-minute LLM-call budget for tortoise_analyze (operator LLM
@@ -744,8 +718,8 @@ ERR_INVALID = -32003
 # denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
-_SERVER_MANAGED_PROPS = frozenset({
-    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated"})
+_SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a tenant prop)
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id", "outdated", "contains_session"})
 
 
 # #2600: client-supplied actor claims are STRIP-AND-IGNORE (never a 4xx —
@@ -784,17 +758,13 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 
 
 
-def _http_excluded_error(message: str | None = None) -> dict:
-    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
-
-    ``message`` overrides the default guidance (used by the #2013 ask gate,
-    where the hosted REST /v1/ask is ALSO gated off — the default text's
-    "hosted REST API" hint would be wrong for that caller)."""
+def _http_excluded_error() -> dict:
+    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4)."""
     return {
         "jsonrpc": "2.0",
         "error": {
             "code": ERR_EXCLUDED,
-            "message": message or (
+            "message": (
                 "This tool is not available over HTTP. "
                 "Use the hosted REST API or stdio MCP."),
         },
@@ -1207,93 +1177,6 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                  relationship_filter=relationship_filter,
                  traversal_path=traversal_path)
 
-
-async def tortoise_ask(question: str, question_type: str | None = None,
-                       question_date: str | None = None) -> dict:
-    """Answer a question about captured memory (#1987 Task 8) — ONE bounded
-    RAG pass (retrieval → annotation → context assembly → ONE LLM reader
-    call) returning an ANSWER (not ranked hits), with the full ask response
-    shape: {answer, abstained, question_type, question_date, evidence,
-    context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
-    retrieval_degraded, retrieved_session_ids}.
-
-    COST PROFILE (group="ask" — #2013-gated exposure): unlike tortoise_search
-    (LLM-free), tortoise_ask consumes LLM tokens against the org's
-    per-minute ask budget (60/min) — budget-exhausted calls return the
-    structured error {"error": {"code": "quota_exceeded", "retry_after": …}}
-    and are NEVER an unbounded call. Read-classified (never counted as a
-    write; NOT in _QUOTA_GATED/WRITE_TOOL_NAMES). Budget/in-flight/timeout
-    bounds are the SAME shared structures as the REST surface
-    (tortoise/quota.py run_ask_bounded — Semaphore(8) + 60s + per-org
-    in-flight cap 4); stdio/selfhost contexts are unbudgeted AND unmetered.
-    On the hosted path the MCP handler meters through the SAME single call
-    site as HTTP (``sdk.ask(org_id=_current_org_id.get())``); stdio
-    (org_id=None) and the selfhost transport (the ``_selfhost_transport``
-    flag) record nothing.
-
-    Invalid inputs (empty/oversize/bad type/bad date) surface as a
-    STRUCTURED tool error {"error": {"code": …}} with ZERO LLM calls.
-    """
-    # #2013 PRODUCT-GATING: call-time gate mirroring the listing filter —
-    # FastMCP dispatches tools/call by name without consulting the list
-    # Transform, so a listing-only gate would leak the ask exposure. Served
-    # only on (a) the default surface with TORTOISE_ENABLE_ASK=1 or (b) an
-    # explicit tool_group="ask" server (dev/eval opt-in).
-    if (_transport_mode.get() == "http"
-            and _tool_group.get() != _ASK_TOOL_GROUP
-            and not ask_exposure_enabled()):
-        return _http_excluded_error(
-            message="The ask tool is not served on this server: the hosted ask "
-                    "exposure is gated off (#2013). Use stdio MCP or an "
-                    "explicit tool_group=\"ask\" server.")
-    from tortoise.exceptions import (
-        AskQuotaExceeded,
-        AskReaderUnavailable,
-        AskRetrievalUnavailable,
-        AskValidationError,
-    )
-    from tortoise.quota import (
-        AskBoundedTimeoutError,
-        AskInFlightLimitError,
-        ask_budget_retry_after,
-        ask_in_flight_capacity,
-        ask_llm_budget_available,
-        run_ask_bounded,
-    )
-    org_id = _current_org_id.get()
-    sdk = _get_org_sdk()
-    # Local-lane validation FIRST (structured error, ZERO complete() calls)
-    # — BEFORE the budget gate, so invalid inputs never consume a budget slot
-    # (matching the HTTP path's validate-first semantics).
-    try:
-        sdk._ask_validate(question, question_type, question_date)
-    except AskValidationError as e:
-        return {"error": {"code": e.code}}
-    # Budget gate (the ONE shared bucket helper — stdio/selfhost exempt) —
-    # skip the charge when the in-flight cap is already full (a request that
-    # will 429 ``in_flight_limit`` must not burn a budget slot, P2).
-    if ask_in_flight_capacity(org_id) and not ask_llm_budget_available(org_id):
-        return {"error": {"code": CODE_QUOTA_EXCEEDED,
-                          "retry_after": ask_budget_retry_after(org_id)}}
-    try:
-        return await run_ask_bounded(
-            sdk.ask, org_id, question,
-            question_type=question_type, question_date=question_date,
-            _sdk_org_id=org_id,
-        )
-    except AskValidationError as e:
-        return {"error": {"code": e.code}}
-    except AskQuotaExceeded as e:
-        return {"error": {"code": CODE_QUOTA_EXCEEDED,
-                          "retry_after": e.retry_after}}
-    except AskInFlightLimitError:
-        return {"error": {"code": CODE_IN_FLIGHT_LIMIT}}
-    except AskBoundedTimeoutError:
-        return {"error": {"code": CODE_TIMEOUT}}
-    except AskReaderUnavailable:
-        return {"error": {"code": CODE_READER_UNAVAILABLE}}
-    except AskRetrievalUnavailable:
-        return {"error": {"code": CODE_RETRIEVAL_UNAVAILABLE}}
 
 
 def tortoise_expand_relationships(point_id: str) -> list[dict]:
@@ -3187,6 +3070,15 @@ def tortoise_session_capture(conversation: list[dict],
         org["legacy_full_access"] = bool(_current_legacy_full_access.get())
     if limits.get("max_points") is not None:
         org["max_points"] = int(limits["max_points"])
+    # #4010: carry the resolved sessions limit through the SAME bridge, but
+    # ONLY when it is actually present. `_check_org_limit(org, "sessions")`
+    # treats an EXPLICIT None as unlimited and a MISSING key as fail-closed
+    # (#310 GAP-B) — so a presence guard is required, not `.get()`: the bridge
+    # must not synthesize a key the resolver never produced (that would be the
+    # same silent leniency the `enforce_org_limit` fallback removal exists to
+    # kill, and it would make MCP capture succeed where REST 500s).
+    if "max_sessions" in limits:
+        org["max_sessions"] = limits["max_sessions"]
     try:
         body = SessionRequest(conversation=conversation, harness=harness,
                               session_id=session_id,
@@ -3455,19 +3347,13 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
     class _HTTPToolFilter(Transform):
         """Hide HTTP-excluded tools from tools/list (D4) + optional curation
-        group scoping (#523) + the #2013 gated ask group.
+        group scoping (#523).
 
         The excluded tools (org_create/backfill_v25/ingest_corpus) remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-
         scoped servers keep the agent's tool-selection surface under ~20.
-
-        #2013 PRODUCT-GATING: the ask tool (group="ask") is absent from the
-        DEFAULT (ungrouped) hosted surface unless TORTOISE_ENABLE_ASK=1 — the
-        reader ships (the eval's reader), the hosted ask EXPOSURE is gated
-        off. An EXPLICIT tool_group="ask" server (dev/eval) serves it
-        regardless — deliberate opt-in.
         """
         async def list_tools(self, tools):
             group = _tool_group.get()
@@ -3482,13 +3368,8 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                 if t.name not in HTTP_ALLOWED:
                     return False
                 tgroup = GROUP_BY_NAME.get(t.name)
-                if group:
-                    # explicit curation-group request — serve that group's tools
-                    if tgroup != group:
-                        return False
-                elif tgroup == _ASK_TOOL_GROUP and not ask_exposure_enabled():
-                    # default (ungrouped) hosted surface: the gated ask group
-                    # is excluded unless the exposure flag is on (#2013)
+                # explicit curation-group request — serve that group's tools
+                if group and tgroup != group:
                     return False
                 # Epic #888: onboarding tools retire from the steady-state
                 # surface once this org's onboarding is complete (fail-open

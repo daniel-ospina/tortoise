@@ -27,6 +27,13 @@ Supported stores:
     *.jsonl`` — the same store Claude Desktop and Claude Code share).
     Records are ``{"message": {"role": ..., "content": <str | parts>}}`` —
     the same shape session-end.sh converts, ported to a shared parser.
+  - ``cursor``: Cursor agent transcript JSONL
+    (``~/.cursor/projects/<mangled-workspace>/agent-transcripts/<id>/<id>.jsonl``
+    or the legacy ``agent-transcripts/<id>.jsonl``).  Records are
+    ``{"role": ..., "message": {"content": [{"type": "text", "text": …}]}}``
+    — the shape Cursor's ``Tgd``/``ECf`` emit (verified against the installed
+    bundle, Cursor 3.20.21).  The optional ``metadata`` header and the
+    ``turn_ended`` markers carry no ``role`` and are skipped.
 """
 from __future__ import annotations
 
@@ -149,6 +156,20 @@ def _role_content(rec: dict, role_key: str) -> tuple[str | None, object]:
             return None, None
         msg = rec.get("message") or {}
         return msg.get("role"), msg.get("content")
+    if role_key == "cursor":
+        # Cursor agent transcript (#3819): the ROLE is at the record level and
+        # the content parts live under `message`.  The write path emits
+        # exactly ``{"role": …, "message": {"content": [...]}}`` (bundle:
+        # ``Tgd``), plus a `metadata` header and `turn_ended` markers that
+        # carry no role.  Unlike the claude/pi branches the record has no
+        # ``type`` to key on, so the role itself is the discriminator.
+        role = rec.get("role")
+        if not isinstance(role, str) or role not in _KEEP_ROLES:
+            return None, None
+        msg = rec.get("message")
+        if not isinstance(msg, dict):
+            return None, None
+        return role, msg.get("content")
     # codex path
     rtype = rec.get("type") or ""
     if rtype == "response_item":
@@ -186,9 +207,21 @@ def parse_claude_desktop(path: str | Path) -> list[dict]:
     return _walk_codex_records(Path(path), role_key="message")
 
 
+def parse_cursor(path: str | Path) -> list[dict]:
+    """Parse a Cursor agent transcript JSONL into conversation turns.
+
+    #3819: Cursor's agent transcripts use their own shape
+    (``{"role": …, "message": {"content": [parts]}}``, with ``metadata`` and
+    ``turn_ended`` markers interleaved) — a DEDICATED branch, not the Claude
+    parser, whose ``message.role`` lookup returns nothing for Cursor records
+    and would silently file 0 turns for every session."""
+    return _walk_codex_records(Path(path), role_key="cursor")
+
+
 PARSERS: dict[str, Callable[[str | Path], list[dict]]] = {
     "codex": parse_codex,
     "claude-desktop": parse_claude_desktop,
+    "cursor": parse_cursor,
     "pi": parse_pi,
 }
 

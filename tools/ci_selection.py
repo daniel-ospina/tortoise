@@ -97,6 +97,15 @@ SHARED_MODULES = (
     # surfaces (test_divergence_conformance, test_epic903_modes,
     # test_ingest_*, test_calibration) — a change here runs the full matrix.
     "tortoise/exceptions.py",
+    # #4097: cross-cutting leaf — the declared env-truthiness contract. Consumed by
+    # `core` (why, rerank, monitoring, model_adapters, frontmatter_validator,
+    # extractor_v2, backup_config, embedded_lifecycle, cimd, projection), `api`
+    # (hosted_api), `sdk` (sdk, retrieval) and `eval` (embeddings) — the `ep` and
+    # `onboarding` surfaces list the guard for coverage reasons, not because they
+    # import the leaf. A change to `env_flag`'s blank/garbage handling changes
+    # consumer behaviour on every surface, so it runs the full matrix (same
+    # rationale as exceptions.py above).
+    "tortoise/env_truthy.py",
     "tortoise/tool_registry.py",
     "tortoise/mcp_server.py",
     "tortoise/projection/",
@@ -116,6 +125,16 @@ SOURCE_PATTERNS = {
                    "website/self-hosted.html", "website/product.html",
                    "website/index.html", "website/signup.html",
                    "website/signin.html", "website/privacy.html",
+                   # #3485: the shared cross-subdomain session bridge is a
+                   # website asset whose guard test
+                   # (test_cross_subdomain_cookie_sync.py) reads it directly.
+                   # Without this entry a bridge-only PR matched no pattern,
+                   # fell into NON_PYTHON_PREFIXES -> changed == [] -> tier-1
+                   # smoke, and the guard for the file under review never ran
+                   # (the #1349/#3332/#3616 silent-drop class). The file is
+                   # dual-registered: this surface owns the website guards,
+                   # `api` keeps its existing membership.
+                   "website/assets/supabase-session.js",
                    # #3332: the public pages that own a guard test in this surface.
                    # docs.html + faq.html -> test_website_docs_consistency.py;
                    # product.html + welcome.html -> test_website_static.py;
@@ -136,11 +155,96 @@ SOURCE_PATTERNS = {
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
                    "website/apps/blog-admin/dist/index.html",
+                   # #3523: the dashboard's unknown-address guard
+                   # (tests/test_dashboard_unknown_address.py) reads the Pages
+                   # routing inputs for app.premiselabs.co plus the app's
+                   # location.pathname branches. `website/` sits in
+                   # NON_PYTHON_PREFIXES and neither path is under a Python
+                   # package prefix, so without these entries a PR that deletes
+                   # 404.html, adds a `/* / 200` catch-all, or adds an unrouted
+                   # pathname branch selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the
+                   # #1349/#3332/#3616 silent-drop class, which registration
+                   # alone does not fix (registration only makes the file
+                   # CLASSIFIED; selection is what makes it RUN). `src/` is a
+                   # directory because the anti-drift check scans every non-test
+                   # source module for pathname branches, not just main.jsx.
+                   "website/apps/dashboard/public/_redirects",
+                   "website/apps/dashboard/public/404.html",
+                   "website/apps/dashboard/src/",
                    # The guard also reads the gate Function itself (it extracts
                    # returnToPath/gateDecision from it, and derives the console's
                    # mount path from its directory), so a change to the gate must
                    # run the guard too.
                    "website/functions/admin/[[path]].ts",
+                   # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
+                   # the Stripe ?session_id= return) are BUILT here, so a change to
+                   # the server-side return path must run the guard too — otherwise
+                   # public/_redirects goes stale against it and the guard stays
+                   # green: the same silent-drop class this entry exists to close.
+                   "tortoise/hosted_api.py",
+                   # #3950: the blog-discoverability guard
+                   # (test_website_docs_consistency.py
+                   # ::test_every_in_scope_page_links_to_the_blog) covers all 12
+                   # public+indexable+served pages, not just docs/faq. An unlisted
+                   # page means a PR touching ONLY that page selects no surface
+                   # (surfaces=[], full=False) and the guard never runs — verified
+                   # before listing: `--changed-files website/tos.html` yielded
+                   # surfaces=[] while website/product.html yielded ['onboarding'].
+                   # That is the #1349/#3332 silent-drop class one more time: the
+                   # guard silently stops covering the page it was written for.
+                   # The ratchet is now two-directional, so adding a guarded page
+                   # without listing it here FAILS a test instead of silently
+                   # shrinking coverage: `test_every_source_pattern_is_selectable`
+                   # (tests/test_ci_selection.py) checks entry -> runs, and
+                   # `test_every_in_scope_page_is_selectable_by_ci`
+                   # (tests/test_website_docs_consistency.py) checks the reverse —
+                   # that every page in the blog guard's derived set reaches a
+                   # surface through this tuple.
+                   "website/security.html", "website/tos.html",
+                   "website/license.html", "website/dpa.html",
+                   "website/aviso-privacidad.html",
+                   # #3436: the two remaining top-level pages, listed for the
+                   # same reason as every other page entry in this tuple — they
+                   # are covered by the site-wide element-id uniqueness guard
+                   # (tests/test_website_docs_consistency.py), whose scope is
+                   # DERIVED as `website/*.html`. Their absence was verified
+                   # before listing: `select(["website/invite-accept.html"])`
+                   # returned surfaces=[] with the guard absent from
+                   # test_files, so a duplicate id could land on the invite
+                   # landing page without the guard running on the PR that
+                   # added it. Both are `noindex` pages, which keeps them out of
+                   # the blog guard's scope, not out of this one: a noindex page
+                   # is still a served document, and duplicate ids are invalid in
+                   # it.
+                   "website/404.html", "website/invite-accept.html",
+                   # The shared href extractor both blog-guard layers call
+                   # (tests/test_website_docs_consistency.py here, and
+                   # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
+                   # job, which CI runs on every PR regardless of selection).
+                   # Without this entry, editing ONLY the extractor selects core
+                   # and does NOT run the static guard — so the file implementing
+                   # the guard's rule could be changed without running
+                   # `test_rendered_hrefs_ignores_non_rendered_markup`, the test
+                   # that pins that rule. Same #1349/#3332/#3616 class as the
+                   # pages above, one level up: the helper needs the same
+                   # reachability guarantee as the pages it serves.
+                   # Deliberately NARROW rather than promoted to SHARED_MODULES:
+                   # this file has a single matrix consumer, and the full matrix
+                   # would buy nothing the E2E consumer is not already given.
+                   "tests/_html_links.py",
+                   # #3950 review: two more inputs the guard DERIVES its scope from,
+                   # so each changes guard coverage without changing a page.
+                   # `website/_redirects` is what `_canonical_redirect_targets()`
+                   # reads to drop redirected pages from scope, and
+                   # `website/functions/blog/[[path]].ts` is the Function
+                   # `_function_serves()` resolves the blog link against. A
+                   # routing-only PR could therefore silently shrink or break the
+                   # guard while selecting NO surface (surfaces=[], full=False) —
+                   # the same #1349/#3332/#3616 silent-drop class, applied to the
+                   # derivation's own inputs rather than to its output.
+                   "website/_redirects",
+                   "website/functions/blog/[[path]].ts",
                    # #3616: the deploy-binding gate is a PAIR — the checker and
                    # the manifest it reads. Neither path is under a Python
                    # package prefix, so without these two entries a PR that
@@ -150,7 +254,23 @@ SOURCE_PATTERNS = {
                    # it. That is the #3616 pattern one level up: the thing that
                    # decides whether the gate works would not itself be gated.
                    "tools/check_pages_bindings.py",
-                   "config/required-bindings.yml"),
+                   "config/required-bindings.yml",
+                   # #3806: the ship-test instrument and its guard. The guard test
+                   # (tests/test_ship_test_onboarding.py) is registered in BOTH
+                   # `core` (its generic probe helpers) and `onboarding` (the
+                   # onboarding surface it measures). Without this entry a change
+                   # to the instrument alone selects NO surface (`tools/` is a
+                   # flat NON_PYTHON_PREFIXES entry, and the docs-only return
+                   # bypasses the `core` fallback) so its guard never runs on the
+                   # PR that edits it — the #3261/#3616/#3910 silent-drop class.
+                   "tools/ship_test_onboarding.py",
+                   # #3620: the Pages UPLOAD-ROOT gate is a pair too — the
+                   # preflight checker and the reviewed classification it reads.
+                   # A PR that adds a top-level entry under website/ (or edits
+                   # the checker) must select this surface, or the ratchet that
+                   # classifies the new entry never runs on the PR that owns it.
+                   "tools/check_pages_upload_root.py",
+                   "config/pages-upload-classification.txt"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
@@ -163,6 +283,14 @@ SOURCE_PATTERNS = {
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
             "tortoise/reader.py", "tortoise/retrieval.py",
+            # #3849: the ask PIPELINE now lives here (moved out of
+            # tortoise/sdk.py, which is a shared module -> FULL matrix). It
+            # is the only home of run_ask_lane/run_ask_assembled, so an
+            # ask_lane-only change must select sdk — otherwise the lane's
+            # own suites (test_ask_sdk / test_assembly_sdk /
+            # test_ask_regression_llm / test_d3_session_identity) silently
+            # stop running (fallback to core ran NO ask tests).
+            "tortoise/ask_lane.py",
             # ask-lane shared vocabulary/gating: a PR touching ONLY these
             # must select sdk so test_ask_sdk.py (+ ask reader/calibration
             # pins) run — the old fallback to core ran NO ask tests.
@@ -170,11 +298,33 @@ SOURCE_PATTERNS = {
             # transport.py is dual-wired with api: its only direct unit test
             # is test_metering.py::test_selfhost_transport_exemption.
             "tortoise/schemas.py", "tortoise/transport.py",
-            # #2071: the spot-check tools are the product ask-lane QA — a
+            # #2071: the spot-check tools are the eval-lane ask QA — a
             # spot-check-only PR selects the sdk surface (its tests live
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
-            "tools/ask_spotcheck_probe.py"),
+            "tools/ask_spotcheck_probe.py",
+            # #3910: the ask-lane recall bench is the same QA family —
+            # tests/test_ask_retrieval_levers.py pins the `_retrieve_pipeline`
+            # it mirrors, so a bench-only PR must select `sdk` rather than
+            # drop to tier-1 smoke with that guard test never running.
+            # Refs #2089, whose criterion 1 this entry satisfies.
+            "tools/ask_recall_bench.py",
+            # #3914: gen_ask_transcripts.py OWNS the seeder whose shape the
+            # committed transcript goldens and tests/test_ask_seed_shape.py
+            # pin. Before this entry the flat "tools/" prefix swallowed the
+            # path, so a seeder-only PR selected NO surface (surfaces=[],
+            # tier-1 smoke only) and both guards ran nowhere — the same
+            # #1349/#3332/#3910 silent-drop class, on the file that
+            # manufactures the graph those guards read.
+            "tools/gen_ask_transcripts.py",
+            # B6 objective 4: the answer-shape instrument is the ask-lane's
+            # shape measurement (it drives sdk.ask, build_reader_model and
+            # the shipping tortoise_search/tortoise_recall handlers to
+            # compute shape_rate). Same family and same silent-drop trap as
+            # the entries above: the flat "tools/" prefix would swallow a
+            # shape-rate-only PR into tier-1 smoke and the ask-lane tests
+            # would not run where the measurement changed.
+            "tools/ask_shape_rate.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/hosted_backup.py",
             "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             # #3154: hosted_api.py imports hosted_backup.py at module level (the
@@ -279,13 +429,21 @@ TOOL_CARVEOUTS = (
     "tools/embedder_probe.py",
     "tools/calibrate_thresholds.py",
     "tools/pair_label_runner.py",
-    # #2071: the product-lane QA spot-check tools (ask_spotcheck + the
+    # #2071: the eval-lane ask QA spot-check tools (ask_spotcheck + the
     # consistency/probe harnesses) use the eval judge and own the
     # test_ask_spotcheck_judge.py suite — a spot-check-only change must
     # select the sdk ask-lane surface, not drop to tier-1 smoke.
     "tools/ask_spotcheck.py",
     "tools/ask_spotcheck_consistency.py",
     "tools/ask_spotcheck_probe.py",
+    # #3914: the transcript-golden generator's seeder is what
+    # tests/test_ask_seed_shape.py + tests/test_ask_regression_llm.py pin —
+    # same carve-out as the spot-check harnesses above.
+    "tools/gen_ask_transcripts.py",
+    # B6 objective 4: the answer-shape instrument — same carve-out reason
+    # as gen_ask_transcripts.py above (without it the flat "tools/" prefix
+    # silently drops the path to tier-1 smoke).
+    "tools/ask_shape_rate.py",
     # #2159 review P2-3: the diff-gate selector itself must never classify
     # as docs-only (the two gated legs would skip AND the wiring pins in
     # tests/test_ci_selection.py would never run on the PR that owns them).
@@ -293,6 +451,13 @@ TOOL_CARVEOUTS = (
     # lands in the unknown-path fail-closed branch -> FULL matrix + both
     # legs — the heaviest but safest gate for the file that owns gating.
     "tools/ci_selection.py",
+    # #B7 (#3674): the activation-scorecard cohort roll-up. Its `roll_up`
+    # summing logic owns part of tests/test_activation_scorecard.py; without
+    # this carve-out a cohort-script-only change selects NO surface and the
+    # suite that pins it never runs. No SOURCE_PATTERN matches this path, so it
+    # lands in the unknown-path fail-closed branch -> FULL matrix + both legs,
+    # which is the safe outcome for a file that a metrics number depends on.
+    "tools/activation_cohort.py",
     # #3261: the pre-dispatch collision check (#3061) owns
     # tests/test_collision_preflight.py. Without this carve-out a
     # preflight-only change is swallowed by the flat "tools/" prefix,
@@ -307,6 +472,13 @@ TOOL_CARVEOUTS = (
     # A narrower core-only mapping is possible but not needed: a
     # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
+    # #2573: the CI embedder gate (tools/embedder_provision.py) owns
+    # tests/test_embedder_provision.py. Same silent-drop class as the
+    # preflight carve-out above: no SOURCE_PATTERNS entry matches it, so a
+    # change to the gate alone would classify as docs-only (surfaces=[] ->
+    # tier-1 smoke) and its own wiring/behaviour tests would never run on the
+    # PR that edits it.
+    "tools/embedder_provision.py",
 )
 
 
@@ -680,7 +852,7 @@ ENV_BROKEN_FILES = {"test_agent_signup.py"}
 
 
 def carve_out_files(manifest: dict) -> set[str]:
-    """Epic #1647 Task 9 (P3): the 17-file embedded carve-out set.
+    """Epic #1647 Task 9 (P3): the embedded carve-out set.
 
     The carve-out tests run embedded BY DESIGN (E2E-4) in the dedicated
     URI-unset job (TORTOISE_TEST_CARVE_OUT=1) — they are excluded from the
