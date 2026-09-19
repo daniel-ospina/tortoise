@@ -313,6 +313,14 @@ class TestApplyLimitsAndReconcile:
     def test_apply_limits_writes_tier_and_limits_atomically(self, monkeypatch, billing_sdk):
         sdk = billing_sdk
         team = sdk.org_create("limits-team")
+        # #4010: seed a stored cap FIRST so the assertion below distinguishes
+        # "apply_limits DELETES the property" from "the field was never set"
+        # (FalkorDB deletes a property written as NULL).
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.max_sessions = 1000",
+            params={"id": team["id"]},
+        )
+        assert sdk.org_get(team["id"])["max_sessions"] == 1000
         queries: list[str] = []
         orig_query = sdk._get_registry().query
 
@@ -327,7 +335,9 @@ class TestApplyLimitsAndReconcile:
         assert t["tier"] == "pro"
         assert t["max_points"] == 100000   # == max_graph_nodes (GAP-B mapping)
         assert t["max_api_keys"] == 10
-        assert t["max_sessions"] == 1000
+        # #4010: the stored 1000 is CLEARED by the tier write (NULL → the
+        # property is deleted), so a later reader cannot re-cap the org.
+        assert t.get("max_sessions") is None
         assert t["max_users"] == 2
         assert t.get("max_graphs") is None   # pro = unlimited (None not stored)
 
@@ -679,6 +689,41 @@ class TestWebhook:
         assert r.status_code == 200, r.text
         tier, status, cust, sub_id, _ = self._mirror(billing_client)
         assert (tier, status, cust, sub_id) == ("pro", "active", "cus_1", "sub_1")
+
+    def test_webhook_analytics_carries_plan_and_tier(
+            self, monkeypatch, tmp_path, billing_client):
+        """#3821 regression: the billing emit passes plan/tier to
+        `_track_analytics_event`; before #3821 neither was in
+        `_ALLOWED_ANALYTICS_PROPS`, so every billing row was written
+        STRIPPED — the live silent loss since c928b0316 (2026-08-09)."""
+        from tortoise import billing as bl
+        from tortoise import hosted_api as ha
+
+        org_id = billing_client["org_id"]
+        self._bind_customer(billing_client, "cus_3821")
+        fallback = tmp_path / "billing-analytics.jsonl"
+        monkeypatch.setattr(ha, "_ANALYTICS_FALLBACK_PATH", str(fallback))
+        for var in ("SUPABASE_URL", "SUPABASE_SERVICE_KEY",
+                    "SUPABASE_SERVICE_ROLE_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
+                            self._verify({
+            "type": "checkout.session.completed", "id": "evt_3821",
+            "data": {"object": {"client_reference_id": org_id,
+                                "customer": "cus_3821",
+                                "customer_details": {"email": "o@e.com"},
+                                "subscription": "sub_3821"}}}))
+        monkeypatch.setattr(bl.StripeClient, "get_subscription",
+                            lambda self, sid: FIXTURE_SUB)
+        r = self._post(billing_client["client"], {})
+        assert r.status_code == 200, r.text
+        rows = [json.loads(line) for line in
+                fallback.read_text().splitlines() if line.strip()]
+        assert rows, "the webhook must emit a billing analytics row"
+        props = rows[-1]["properties"]
+        assert props.get("plan") == "pro"
+        assert props.get("tier") == "pro"
+        assert props.get("status") == "checkout.session.completed"
 
     def test_webhook_replay_dedup_single_processing(self, monkeypatch, billing_client):
         from tortoise import billing as bl

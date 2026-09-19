@@ -50,6 +50,7 @@ import requests
 
 # #2185 seam: the canonical usage-sink fire helper (models.py is dependency-
 # free of model_adapters — this one-way import cannot cycle).
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.models import _emit_usage_sink
 
 
@@ -882,8 +883,13 @@ def _should_send_json_mode(system: str | None, user: str | None) -> bool:
 
     True only when TORTOISE_JSON_MODE is enabled (default "1", read per
     call — the toggle can flip mid-run) AND the prompt requests JSON
-    (delegated to ``_prompt_requests_json``)."""
-    return (os.environ.get("TORTOISE_JSON_MODE", "1") == "1"
+    (delegated to ``_prompt_requests_json``).
+
+    #4097: the env read goes through the declared truthy contract, so
+    ``TORTOISE_JSON_MODE=true``/``yes``/``on`` now enables it — previously the
+    exact ``== "1"`` match made those spellings silently DISABLE a default-ON
+    mode."""
+    return (is_truthy(os.environ.get("TORTOISE_JSON_MODE", "1"))
             and _prompt_requests_json(system, user))
 
 

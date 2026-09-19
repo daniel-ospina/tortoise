@@ -3,17 +3,23 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, preferredSurface } from './harnesses.js'
+import { CANONICAL_MCP_URL, HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_FAMILIES, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_OAUTH, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SELF_INSTALL, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, MCP_URL, SKILLS_INSTALL_URL, UNIVERSAL_COMMAND, WORKFLOWS_PROMPT, harnessDisplayName, harnessFamilyOf, knownHarnessName, preferredSurface } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
-import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js'
+import { captureStatusForHarness, captureClaimForHarness, lastErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
 // #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
 // memory digest, next action), zero toggles. Pure derivations, node --test
 // unit-tested (overview.test.js).
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
+// #3890: the D5 empty state's ONE primary action (a real link to the live
+// home of the four source toggles — Settings → Memory sources), the
+// hash→tab deep-link resolver, and the focus mover. Extracted so the suite
+// can RENDER the live action (react-dom/server) and execute the handler
+// instead of grepping source text.
+import { OverviewEmptyActions, resolveSectionHash, focusDeepLinkTarget } from './overviewEmptyAction.js'
 // #1997 (W1): the 4 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError, durableKeyName, wizardStageLabel } from './wizardFlow.js'
@@ -30,7 +36,11 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 // session mode; durableConnectKey + usableDurableRows resolve the connect
 // step's gate from the keys-table rows (Never-keys-only embed policy, #2426
 // decision 2).
-import { isManagedKey, durableConnectKey } from './sessionKey.js'
+import { isManagedKey, durableConnectKey, connectKeyGate, keyDisplayName } from './sessionKey.js'
+// #3874: the org's API-key allowance as the SERVER states it — the pre-cap
+// line + the at-cap notices derive from one server field so they cannot
+// desync, and no client-side number is ever fabricated.
+import { allowanceLine, upgradeNoticeFrom, rotateCapNoticeFrom } from './keyAllowance.js'
 import {
   canManageGraphKeys,
   deleteTypedMatches,
@@ -63,8 +73,25 @@ import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx'
 // opening trigger, restore focus to it on close (pure, node --test
 // unit-tested — dialogFocus.test.js).
 import { rememberFocusedTrigger, rememberRestoreTarget, restoreFocus } from './dialogFocus.js'
+// #3501/#4054: the BFF session gate — the ONE place a `/api/session` response is
+// interpreted, and the ONE place a redirect to /auth is authorized. Pure and
+// node --test unit-tested (sessionGate.test.js). This is the client half of the
+// #3485 remedy: 401 means signed out (may bounce), 503 means retryable
+// (render an error, NEVER a redirect).
+import { readSession, sessionGateAction } from './sessionGate.js'
 
-const API_BASE = 'https://api.premiselabs.co'
+// #3501: the dashboard talks to its OWN origin. `functions/api/v1/[[path]].ts`
+// resolves the `__Host-session` cookie server-side and attaches the Bearer to
+// the upstream `api.premiselabs.co` call; the browser never builds an
+// Authorization header and never holds a token.
+const API_BASE = '/api'
+// #3501: `sessionTokenRef` is a PRESENCE SENTINEL, not a credential. The browser
+// holds exactly one credential — an HttpOnly `__Host-session` cookie it cannot
+// read — and that cookie rides every same-origin request automatically. The
+// value is deliberately a stable constant (not a token) because several
+// in-flight response staleness guards compare `sessionTokenRef.current` against
+// a value captured before an await.
+const SESSION_PRESENT = 'session'
 // #2246 (ADR-010): KEY_STORAGE ('tortoise_api_key') is the legacy held-key
 // slot. Session mode never reads or writes it — at most it is PURGED (the
 // one-shot session-mount cleanup + logout wipe). Only removeItem remains in
@@ -106,6 +133,11 @@ const _MS_PER_DAY = 86400000
 // #2479 code-review fix P2: named constant for max re-auth attempts (spec: 1)
 const MAX_REAUTH_ATTEMPTS = 1
 const REAUTH_EXCEEDED_MESSAGE = 'Re-authentication failed — try again later or contact support.'
+// #3783 (review P2): how long the connect step waits on GET /v1/team/keys before
+// its wait state becomes actionable. A request that never settles produces no
+// rejection, so this bound is the only thing that turns a hang into a retry
+// instead of an infinite "Checking…" (the dead end the failed-read fix closes).
+const KEYS_LOAD_SLOW_MS = 12000
 
 // #2426: Custom date (YYYY-MM-DD) → whole days until that date, clamped to
 // 1..366. Null when missing/invalid/out-of-range — the + New key button stays
@@ -456,7 +488,10 @@ function SettingsTab(props) {
           session_recording). DE2E-2: reachable only via Settings → Memory
           sources. ── */}
       <section className="settings-home" aria-labelledby="settings-memory-heading">
-        <h3 id="settings-memory-heading">Memory sources</h3>
+        {/* #3890: tabIndex -1 makes the heading a programmatic focus target —
+            the deep link from the Overview empty state moves focus here
+            (WCAG 2.4.3 / 2.4.11) and scroll-margin-top keeps it clear. */}
+        <h3 id="settings-memory-heading" tabIndex={-1}>Memory sources</h3>
         <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph; session recording is on by default and can be turned off any time.</p>
         <MemorySources {...memorySourcesProps} />
       </section>
@@ -673,23 +708,13 @@ function clearClaimPendingMarker() {
     document.cookie = `${CLAIM_PENDING_COOKIE}=;${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Max-Age=0`
   } catch { /* best-effort */ }
 }
-const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY'
-
-// ── Parent-domain cookie storage (cross-subdomain session, D5 #572) ──
-// supabase-js v2 defaults to localStorage (origin-scoped) — a session created
-// on tortoise.premiselabs.co never reaches app.premiselabs.co. This adapter
-// persists the session token in a cookie scoped to .premiselabs.co so both
-// subdomains share it (plan §5.3 d2: PKCE + parent-domain cookie).
-const COOKIE_NAME = 'sb-tortoise-auth-token'
+// #3501/#4054: the legacy parent-domain session adapter is DELETED — the
+// JS-readable cross-subdomain session cookie, the supabase-js client it fed,
+// and the window-global bridge factory it mirrored. The browser holds exactly
+// one credential now (the HttpOnly `__Host-session` cookie) and every read and
+// action rides the same-origin BFF. The host-conditional attributes below
+// survive for the NON-SECRET claim-intent marker (`tt_claim_pending`).
 const COOKIE_DOMAIN = '.premiselabs.co'
-// #1835: encoded-bytes cap for the 4096-byte cookie limit. Google OAuth
-// sessions (provider_token ~1200 chars + full identity) encode to ~5012
-// bytes — an oversized cookie is SILENTLY rejected by the browser →
-// getSession() returns null → the mount gate bounces to /auth (the GitHub
-// loop was never hit because its provider token is shorter). Mirrors
-// website/assets/supabase-session.js SIZE_GUARD exactly.
-const SIZE_GUARD = 3800
 // #1857: host-conditional cookie attributes (RFC 6265). A hardcoded
 // `Domain=.premiselabs.co; Secure` is REJECTED by the browser on localhost,
 // 127.0.0.1, and *.pages.dev preview origins (non-matching Domain → cookie
@@ -714,61 +739,21 @@ const domainAttr = () => (isPremiselabsHost() && !isLocal() ? '; Domain=' + COOK
 // reject a Secure cookie.
 const secureAttr = () => (isLocal() ? '' : '; Secure')
 
-const supabaseStorage = {
-  getItem(key) {
-    try {
-      // #1860 (P3-3): escape the key — same as the shared bridge's
-      // readCookie (website/assets/supabase-session.js). Regex metacharacters
-      // in a cookie name (e.g. supabase's `sb-...-auth-token` pattern is
-      // benign today, but any `[.*+?^${}()|\]` in a key would silently
-      // misparse) must not be treated as regex. Keep in sync with
-      // supabase-session.js readCookie.
-      const m = document.cookie.match(new RegExp('(?:^|; )' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'))
-      return m ? decodeURIComponent(m[1]) : null
-    } catch { return null }
-  },
-  setItem(key, value) {
-    if (!value) { this.removeItem(key); return }
-    let encoded = encodeURIComponent(value)
-    // Size guard (#1835, mirrors supabase-session.js): an OAuth session with
-    // provider tokens AND user metadata can exceed the 4096-byte cookie limit. provider tokens
-    // are only needed by the initiating flow — strip them first; if still
-    // over the cap, attempt the write anyway with a warning.
-    if (encoded.length > SIZE_GUARD) {
-      try {
-        const obj = JSON.parse(value)
-        delete obj.provider_token
-        delete obj.provider_refresh_token
-        // Strip large metadata bloat — identities array and user_metadata fields
-        // are not needed for auth and can exceed the cookie size cap.
-        if (obj.user) {
-          delete obj.user.identities
-          if (obj.user.user_metadata) {
-            // Keep only what the dashboard reads (display_name, avatar_url)
-            var keep = {}
-            if (obj.user.user_metadata.display_name) keep.display_name = obj.user.user_metadata.display_name
-            if (obj.user.user_metadata.avatar_url) keep.avatar_url = obj.user.user_metadata.avatar_url
-            if (obj.user.user_metadata.full_name) keep.full_name = obj.user.user_metadata.full_name
-            if (obj.user.user_metadata.name) keep.name = obj.user.user_metadata.name
-            obj.user.user_metadata = keep
-          }
-        }
-        encoded = encodeURIComponent(JSON.stringify(obj))
-      } catch { /* not JSON — leave as-is */ }
-      if (encoded.length > SIZE_GUARD + 100) {
-        console.warn(`${COOKIE_NAME} session exceeds cookie size cap (${encoded.length} bytes) — session may not bridge subdomains`)
-      }
-    }
-    const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString()
-    document.cookie = `${key}=${encoded}${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
-  },
-  removeItem(key) {
-    // `=;` + domainAttr() yields `;;` when the Domain attribute is present
-    // (premiselabs hosts) — intentional, byte-matches supabase-session.js;
-    // the empty cookie-av is ignored per RFC 6265 §5.2.
-    document.cookie = `${key}=;${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Max-Age=0`
-  },
+// #4054: the session bridge used to inject a global origin-aware bounce (a hop
+// to tortoise.premiselabs.co/auth). The BFF moved auth onto THIS origin, so the
+// bounce is now a plain same-origin navigate — and the global dies with the
+// bridge.
+//
+// Back-proof by construction: `location.replace` overwrites the history entry
+// instead of pushing one, so Back cannot land on the signed-out page and
+// re-trigger the bounce. `search` carries the #1224 OAuth error banner; `hash`
+// carries the #1909 denied-provider fragment. A live token fragment must NEVER
+// be forwarded from here — under the BFF no fragment carries a credential, and
+// forwarding one would reintroduce the #1566 drop/loop.
+function bounceToAuth(search = "", hash = "") {
+  window.location.replace("/auth" + search + hash)
 }
+
 
 // #1909: supabase-js implicit flow returns OAuth error params in the URL
 // FRAGMENT (#error=…&error_code=…) — not just the search string (a denied
@@ -794,23 +779,11 @@ function oauthErrorHash() {
   return /[?&#](?:error|error_code|error_description)=/.test(landingHash) ? landingHash : ''
 }
 
-let supabaseClient = null
-try {
-  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth: {
-      flowType: 'implicit',  // #1566: cross-origin OAuth returns from /auth
-      // carry #access_token (a pkce verifier cannot cross subdomains); the
-      // claim flow's raw key still rides sessionStorage only (#1082).
-      storage: supabaseStorage,
-      storageKey: COOKIE_NAME,
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
-    },
-  })
-} catch (e) {
-  console.warn('Supabase client init failed:', e)
-}
+// #3501/#4054: there is NO client-side supabase-js client any more. The
+// browser cannot hold a session, so `window.supabase` is never consulted: every
+// session read is `/api/session` and every auth ACTION is a same-origin BFF
+// route (`/auth/*`). A CDN/vendor load failure can therefore no longer gate the
+// dashboard, and there is no client storage adapter to drift out of sync.
 
 // #1719 (Task 6): humanize an API error detail body. Server failures carry
 // dict details ({"error_code": ..., "message": ...}) — render the message,
@@ -1053,11 +1026,8 @@ function App() {
   // state — keep the ref (read by claimSignIn/claimEmailPassword) in lockstep
   // so the credential used matches what's on screen (no pre-fill mismatch).
   React.useEffect(() => { apiKeyRef.current = apiKey }, [apiKey])
-  // #1148-ux review: combined login/signup card
-  const [authIsSignup, setAuthIsSignup] = React.useState(false)
-  const [authEmail, setAuthEmail] = React.useState('')
-  const [authPassword, setAuthPassword] = React.useState('')
-  const [authBusy, setAuthBusy] = React.useState(false)
+  // #3501/#4054: the dead `authIsSignup`/`authEmail`/`authPassword`/`authBusy`
+  // login-card state was removed with its two unreachable handlers (below).
   
 // #1511 (code-review P1): claim-intent is IN-FLIGHT ONLY — either the
 // ?claim=1 route (the ANON funnel lands here before the key is pasted) or
@@ -1073,7 +1043,6 @@ function claimIntentInFlight() {
 }
 
   const [authed, setAuthed] = React.useState(false)
-  const [authUnavailable, setAuthUnavailable] = React.useState('')
   // #1559: a session-resolution / mount or team-load failure (e.g. 429 rate
   // limit, 5xx, suspension) must surface an actionable error — never the
   // silent "Redirecting to the sign-in page…" shell (which does NOT redirect
@@ -1081,6 +1050,47 @@ function claimIntentInFlight() {
   const [mountError, setMountError] = React.useState('')
   const [team, setTeam] = React.useState(null)
   const [keys, setKeys] = React.useState([])
+  // #3783 (review P2): `keys` initialises to [] — indistinguishable from a
+  // loaded-but-empty org. This flag marks whether the rows payload has actually
+  // ARRIVED, so the connect gate can render a wait state instead of a mint CTA
+  // in the window where a slow/failed GET /v1/team/keys would otherwise resolve
+  // 'mint' and can burn the plan's last key slot.
+  const [keysLoaded, setKeysLoaded] = React.useState(false)
+  // #3783 (review P2): `keysLoaded` flips on SUCCESS only, so it cannot tell
+  // "still in flight" from "the GET failed". The connect gate's 'loading' arm
+  // therefore had no failure exit — a failed or hanging keys read left the
+  // wizard on a dead wait (no mint, no action, reload-only). `keysLoadError`
+  // carries the failure so the gate resolves 'error' (a retryable state, still
+  // no mint); `keysLoadSlow` bounds a request that never settles at all (a hang
+  // never reaches loadAll's catch), degrading the wait to that same retry.
+  // `keysLoadNonce` re-arms the bound on every event that starts a fresh read:
+  // `keysLoaded` stays false across a retry AND across a team switch, so the
+  // flag alone would not restart the clock (see resetKeysLoadUnresolved below).
+  const [keysLoadError, setKeysLoadError] = React.useState('')
+  const [keysLoadSlow, setKeysLoadSlow] = React.useState(false)
+  const [keysLoadNonce, setKeysLoadNonce] = React.useState(0)
+  React.useEffect(() => {
+    if (keysLoaded) { setKeysLoadSlow(false); return undefined }
+    const t = setTimeout(() => setKeysLoadSlow(true), KEYS_LOAD_SLOW_MS)
+    return () => clearTimeout(t)
+  }, [keysLoaded, keysLoadNonce])
+  // #3783 (review P2, second pass): clear the unresolved keys-read state AND
+  // re-arm the wait bound, for EVERY event that starts a fresh read (logout, a
+  // team switch, the wizard's retry). `keysLoaded` is false both while a read is
+  // IN FLIGHT and after it FAILED (it flips on success only), so a caller
+  // cannot restart the effect's timer by touching that flag: the deps stay
+  // Object.is-equal, the effect does not re-run, and no timer is scheduled. The
+  // nonce is the re-arm trigger. Without it a team switch cleared `keysLoadSlow`
+  // while leaving the deps untouched — the new team's `loadAll('')` could then
+  // hang with the bound already spent and nothing left to fire, so the wait
+  // state had no action forever (the same dead wait this bound exists to
+  // prevent). Shared with the retry so the two cannot drift. The behaviour is
+  // EXECUTED by keysLoadRearmExec.test.js (the effect, these deps, this body).
+  function resetKeysLoadUnresolved() {
+    setKeysLoadError('')
+    setKeysLoadSlow(false)
+    setKeysLoadNonce((n) => n + 1)
+  }
   const [sessions, setSessions] = React.useState([])
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
@@ -1127,10 +1137,17 @@ function claimIntentInFlight() {
   // is (welcomeKey || apiKey): the first-timer's in-memory shown-once reveal,
   // or the anon/key-hold carve-out's apiKey state. Never a localStorage read.
   const snippetKey = welcomeKey || apiKey
-  const firstDataSnippet = `curl -X POST https://api.premiselabs.co/v1/points \
-  -H "Authorization: Bearer ${snippetKey}" \
-  -H "Content-Type: application/json" \
-  -d '{"content":"hello graph","kind":"statement"}'`
+  // #3501: rendered display text, not a request header. Built by concatenation
+  // so the template never interpolates a live credential into an
+  // `Authorization: Bearer <key>` shape — the browser constructs no
+  // Authorization header. (The rendered command is byte-identical to the
+  // pre-#3501 template: a `\`+newline in a template literal is a line
+  // CONTINUATION that renders as nothing, so the source previously collapsed
+  // these lines into one; the concatenation preserves that rendered output.)
+  const firstDataSnippet = 'curl -X POST https://api.premiselabs.co/v1/points '
+    + '  -H "Authorization: Bearer ' + snippetKey + '" '
+    + '  -H "Content-Type: application/json" '
+    + "  -d '{\"content\":\"hello graph\",\"kind\":\"statement\"}'"
   const [welcomeOrgName, setWelcomeOrgName] = React.useState('')
   const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
@@ -1225,6 +1242,15 @@ function claimIntentInFlight() {
   // blocks the scope hydration effect until the new team's state lands, so
   // the new team never seeds from (or persists over) the old team's scope.
   const onboardingStaleRef = React.useRef(false)
+  // #3428/#2937 (lane B3, review cycle 5 item 3): monotonic guard for
+  // refreshOnboarding. `Promise.race` abandons the 15 s refresh but does not
+  // CANCEL it, so a refresh started before a connection landed could resolve
+  // AFTER a newer refresh that observed it and apply the OLDER projection —
+  // flipping serverHarnessConnected true → false (the connected screen reverted
+  // to "Not connected yet", and the poll charged a failure although a refresh
+  // HAD applied). Every call takes a sequence number here; a response whose
+  // request was superseded by a NEWER issued request is dropped, never applied.
+  const onboardingRefreshSeqRef = React.useRef(0)
   // #1893 (scope-verify P1): PER-KEY pre-hydration touch tracking — a touch
   // on ONE key must never suppress seeding of the OTHER, and must never
   // persist the other key's un-seeded default over its stored server value.
@@ -1333,15 +1359,32 @@ function claimIntentInFlight() {
   // claim an agent is taking over.
   const [wizardPaused, setWizardPaused] = React.useState(false)
   const wizardCardRef = React.useRef(null)
-  // #2361 review-r4 (P2): connectedOnceRef is session-local — a re-opener
-  // whose org ALREADY connected (server checkpoint) must not see the paused
-  // 'not connected yet' copy when they skip. Read the projection the client
-  // already holds; refreshOnboarding at wizard-open + step-4 keeps it fresh.
-  // ⚠️ MUST be declared BEFORE effectivelyPaused (TDZ fix, #2621):
-  const connectedOnceRef = React.useRef(false)
+  // #3428/#2937 (lane B3, owner-approved charter comment 5703012625):
+  // `connectedOnceRef` — the session-local "the user told us it's connected"
+  // flag — is DELETED. It existed only so the connect step's Continue button
+  // could manufacture a connected state, which made the done step claim an
+  // agent was taking over on the strength of a click. That is precisely the
+  // false `harness-connected` claim this lane removes (#3428 keyed, #2937
+  // keyless — one handler, two leaves).
+  //
+  // `serverHarnessConnected` is now the ONLY source, read straight from the
+  // server projection (refreshOnboarding at wizard-open + the step-3 landing
+  // refresh keep it fresh).
   const serverHarnessConnected = Array.isArray(onboarding && onboarding.completed_steps) &&
     onboarding.completed_steps.includes('harness-connected')
-  const effectivelyPaused = wizardPaused && !connectedOnceRef.current && !serverHarnessConnected
+  // `wizardPaused` is set ONLY by the connect step's THREE live "Skip for now"
+  // escapes — the keyless/owner nav, the cap-remedy nav, and the main
+  // per-harness nav (`setWizardPaused(true)` has exactly three call sites) — so
+  // it now means exactly "the user skipped the connect step" — no session-local
+  // assertion can suppress it any more. (review cycle 1 P2-7: the count was
+  // stated as two, which made the invariant unauditable.)
+  const effectivelyPaused = wizardPaused && !serverHarnessConnected
+  // #3428 (lane B3, option (a)): the success screen's capture sentence is
+  // DERIVED, never asserted — 'present' | 'future' | 'install-pending' | 'none'
+  // (#3782 added the pending state: nothing observed is not a promise). Computed
+  // here so the derivation is a plain value (unit-testable without a React
+  // harness, which this repo does not have).
+  const harnessCaptureClaim = captureClaimForHarness(onboarding, wizardHarness)
   const wizardFocusInit = React.useRef(false)
   const lastWizardStepRef = React.useRef(-1)  // #2361 r4: focus only on step change
   const onboardingRefreshedAtDoneRef = React.useRef(false)
@@ -1355,10 +1398,179 @@ function claimIntentInFlight() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, welcomeMode, authed])
+  // #3428/#2937 (lane B3, review cycle 1 P1-4, cycle 2 P1-1): the
+  // not-connected body promises the connection "shows up here the moment it
+  // does" — so this refresh must live as long as that promise can still come
+  // true. It used to be a bounded poll (`maxTries = 5`, ~24 s), after which
+  // nothing on the page refetched onboarding: a user who read the promise,
+  // switched to their terminal, and filed a memory a minute later came back to
+  // a screen frozen on "not connected" FOREVER while the copy claimed the
+  // opposite. The effect's own guard is the only stop condition it needs — it
+  // ends when the connection lands (`serverHarnessConnected`), the user leaves
+  // step 3, or the wizard unmounts — so the try cap was the one thing making
+  // the sentence false. `refreshOnboarding` owns the team-identity guard, so
+  // every attempt is pinned to the org on screen.
+  // review cycle 3 (P2-8): that promise also cannot be kept by a failing
+  // refresh, and the old loop retried every 4 s forever with no counter, no
+  // backoff and no surface (the global error banner does not render in welcome
+  // mode). Consecutive failures now back off exponentially, and past a small
+  // threshold a quiet line states that we cannot check right now.
+  // review cycle 3 (P2-9): a HIDDEN tab throttles setInterval to ~1/min, so a
+  // user who tabs to their terminal and back can face a stale not-connected
+  // body even though the state already changed. Ticks are skipped while the
+  // document is hidden, and the document becoming visible again (or regaining
+  // focus) fires one immediate refresh.
+  const wizardConnectPollRef = React.useRef(null)
+  const wizardConnectPollFailsRef = React.useRef(0)
+  const wizardConnectPollSuccessesRef = React.useRef(0)
+  const wizardConnectPollNextAtRef = React.useRef(0)
+  const wizardConnectPollInFlightRef = React.useRef(false)
+  const [wizardConnectPollStalled, setWizardConnectPollStalled] = React.useState(false)
+  React.useEffect(() => {
+    if (!(welcomeMode && authed) || wizardStep !== 3 || serverHarnessConnected) return
+    // review cycle 4 (item 9): the failure/stall state was NEVER reset, so it
+    // out-lived the effect that produced it. Reachable false state: a user sees
+    // ≥3 failed checks, presses Back, re-enters step 3, and the connection
+    // lands via a NON-poll refresh (the step-3 landing refresh) — the effect
+    // tears down with nothing polling, yet the CONNECTED screen still printed
+    // "we'll keep trying". The stale `nextAt` also delayed the first re-entry
+    // check by up to 60 s. Reset every ref/flag on setup; the render also gates
+    // the notice on `!serverHarnessConnected` (belt and braces).
+    wizardConnectPollFailsRef.current = 0
+    wizardConnectPollSuccessesRef.current = 0
+    wizardConnectPollNextAtRef.current = 0
+    wizardConnectPollInFlightRef.current = false
+    setWizardConnectPollStalled(false)
+    // review cycle 5 (items 2 + 3): this effect's async work must be
+    // CANCELLABLE. `active` is flipped false in the cleanup and every callback
+    // returns on it; `connectTimeout` is the 15 s race timer, now CLEARED on
+    // teardown. Before this the timer always fired — after teardown it could
+    // clear a LATER generation's in-flight guard (starting a concurrent check,
+    // breaking single-flight) and render the stall notice on a healthy poll.
+    let active = true
+    let connectTimeout = null
+    const wizardConnectTick = (force = false) => {
+      // #3428/#2937 (lane B3, review cycle 7 item 2): the tick is a QUEUED
+      // interval callback — clearing the handle in the cleanup cannot recall an
+      // invocation the timer already queued. That stale tick used to set the
+      // SHARED in-flight ref, arm its own closure timer and fire a real request,
+      // then hit `if (!active) return` in its `.then` BEFORE releasing the ref —
+      // so the next generation's every tick returned at the in-flight guard and
+      // the poll died silently while the screen kept asserting a live update.
+      // The teardown guard is the tick's FIRST statement, before any ref write.
+      if (!active) return
+      if (document.hidden) return
+      // review cycle 5 (item 9): `force` — the visibility/focus handler —
+      // bypasses the schedule below, so a landing connection still surfaces
+      // immediately even while the not-connected success backoff is holding.
+      if (!force && Date.now() < wizardConnectPollNextAtRef.current) return
+      // review cycle 4 (item 10): with no in-flight guard every 4 s tick stacked
+      // another refresh behind a slow/hung response, and with no timeout a
+      // request that never settled left the failure counter untouched — so
+      // neither the backoff nor the stall notice ever ran while the screen kept
+      // promising the connection "shows up here the moment it does". One check
+      // at a time, and a 15 s ceiling that counts as a failed check.
+      if (wizardConnectPollInFlightRef.current) return
+      wizardConnectPollInFlightRef.current = true
+      // review cycle 6 (item 5): the PREVIOUS check's race timer may still be
+      // pending — a check that settled through `refreshOnboarding()` never
+      // cleared it, so the next tick overwrote the handle and the cleanup could
+      // only ever clear the newest one. Drop the stale handle BEFORE arming.
+      if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+      const wizardConnectCheck = Promise.race([
+        refreshOnboarding(),
+        new Promise((resolve) => { connectTimeout = setTimeout(() => resolve(false), 15000) }),
+      ]).catch(() => false)  // a rejection must clear the in-flight guard, not freeze the poll
+      wizardConnectCheck.then((outcome) => {
+        // review cycle 6 (item 5): clear THIS check's timer the moment it
+        // settles, whichever arm won — the cleanup alone only saw the last handle.
+        if (connectTimeout) { clearTimeout(connectTimeout); connectTimeout = null }
+        if (!active) return  // review cycle 5 (item 2): a torn-down generation must not mutate a later poll
+        wizardConnectPollInFlightRef.current = false
+        // review cycle 6 (item 4): a SUPERSEDED response is NEUTRAL — it did not
+        // land, so it must not bank a success, and it did not fail, so it must
+        // not charge a failure. Either charge makes the stall signal lie: a
+        // genuinely failing endpoint could have its notice suppressed by a
+        // concurrent refresh (a step-3 landing refresh, a job `onDone`, a
+        // toggle) that superseded the poll's own check.
+        if (outcome && outcome.superseded) return
+        const landed = !!(outcome && outcome.applied)
+        if (landed) {
+          wizardConnectPollFailsRef.current = 0
+          setWizardConnectPollStalled(false)
+          // review cycle 5 (item 9): `landed` means the projection was APPLIED
+          // — while this effect is still mounted it therefore observed NO
+          // connection. A flat 4 s cadence is ~900 GETs/hour for a user parked
+          // on the done step, so after a few consecutive not-connected
+          // successes ease off (capped like the failure arm). A forced tick
+          // (tab focus/visibility) still checks immediately.
+          // review cycle 6 (item 7): the success cap is 20 s, not 60 s. The body
+          // on this screen makes a STANDING promise ("it shows up here the
+          // moment it does") and the stall flag is false here, so the softened
+          // branch never renders; `force` fires only on focus/visibility, which
+          // does NOT fire for a user who keeps the dashboard visible on a second
+          // monitor and works in a terminal. A 60 s cap let the screen assert
+          // immediacy for a whole minute.
+          const successes = wizardConnectPollSuccessesRef.current + 1
+          wizardConnectPollSuccessesRef.current = successes
+          wizardConnectPollNextAtRef.current = successes >= 3
+            ? Date.now() + Math.min(4000 * 2 ** (successes - 2), 20000)
+            : 0
+          return
+        }
+        wizardConnectPollSuccessesRef.current = 0
+        const fails = wizardConnectPollFailsRef.current + 1
+        wizardConnectPollFailsRef.current = fails
+        wizardConnectPollNextAtRef.current = Date.now() + Math.min(4000 * 2 ** (fails - 1), 60000)
+        if (fails >= 3) setWizardConnectPollStalled(true)
+      })
+    }
+    wizardConnectPollRef.current = setInterval(wizardConnectTick, 4000)
+    const onWizardConnectVisible = () => { if (!active) return; if (!document.hidden) wizardConnectTick(true) }
+    document.addEventListener('visibilitychange', onWizardConnectVisible)
+    window.addEventListener('focus', onWizardConnectVisible)
+    return () => {
+      active = false
+      if (connectTimeout) clearTimeout(connectTimeout)
+      if (wizardConnectPollRef.current) {
+        clearInterval(wizardConnectPollRef.current)
+        wizardConnectPollRef.current = null
+      }
+      document.removeEventListener('visibilitychange', onWizardConnectVisible)
+      window.removeEventListener('focus', onWizardConnectVisible)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizardStep, welcomeMode, authed, serverHarnessConnected])
+  // #3428/#2937 (lane B3, review cycle 8 item 5): the stall flag was reset ONLY
+  // inside the poll effect's setup, which early-returns when `wizardStep !== 3`.
+  // Leaving step 3 after a stall therefore kept the flag set, and re-entering
+  // committed ONE paint frame with the live region already containing the
+  // message (not announced — the a11y reason the region is mounted up front)
+  // and the body rendering the softened clause the poll was about to retract.
+  // Clear it where the step is LEFT, so re-entry starts from the not-stalled
+  // state and the frame cannot render a withdrawn promise.
+  React.useEffect(() => {
+    if (wizardStep !== 3) setWizardConnectPollStalled(false)
+  }, [wizardStep])
   // #2361 review-r3 (P2-2): wizardPaused must not out-live a real connection —
   // connect → Back → Skip must still show 'connected', not 'paused'.
-  // (connectedOnceRef declaration moved up for TDZ fix, #2621)
+  // #3428/#2937: the declared-before-use ordering #2621's TDZ fix required is
+  // gone with connectedOnceRef — `effectivelyPaused` now reads the projection
+  // only, so there is no ref to hoist.
   const [wizardStepAnnounce, setWizardStepAnnounce] = React.useState('')
+
+  // #3428/#2937 (lane B3, review cycle 5 item 4): `wizardForkChosen` and the
+  // `wizardFork` / `isBuildFork` derivation are HOISTED above the step
+  // announcement effect so `isBuildFork` can be a DEP. It was previously read in
+  // the effect BODY only (a later-declared const cannot sit in a deps array
+  // without the #2426/#2621/#2709 TDZ white-screen), so when `onboarding.fork`
+  // flipped to 'build' while the user sat on step 3 the <h1> re-rendered to "No
+  // connection observed yet" while the sr-only announcement kept "Not connected
+  // yet" — none of the effect's other deps change on that flip. Both surfaces
+  // must share the one derivation; declaring the consts here makes the dep legal.
+  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
+  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
+  const isBuildFork = wizardFork === 'build'
 
   // #2361 review-r2 (a11y P1): announce + move focus on wizard step change.
   // Step 1 (org input) and step 3 (paste field / copy button) carry their own
@@ -1367,7 +1579,12 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (!(welcomeMode && authed)) return
     if (LEGACY_WIZARD_ARCHIVED) return  // A0 rollback owns its own steps (#2361 r3 P3-7)
-    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })
+    // review cycle 5 (item 4): `isBuildFork` is derived ABOVE this effect and
+    // IS a dep (see the dep list), so an `onboarding.fork` flip to 'build' while
+    // the user sits on step 3 re-runs the announcement with the SAME arm the
+    // <h1> just rendered. It used to be body-only (a later-declared const in a
+    // deps array is the #2426 TDZ white-screen), which let the two disagree.
+    const label = wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })
     setWizardStepAnnounce(`Step ${wizardStep + 1} of 4: ${label}`)
     if (!wizardFocusInit.current) { wizardFocusInit.current = true; return }
     // #2361 review-r4 (P3): focus ONLY on step changes — toggling the paste
@@ -1388,7 +1605,14 @@ function claimIntentInFlight() {
     // without it the announcement keeps saying "Setup paused…" while the <h1>
     // and body have already flipped to "You're all set", re-creating the
     // h1/announcement disagreement the shared helper exists to prevent.
-  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused])
+    // #3428/#2937 (lane B3): `serverHarnessConnected` must ALSO be a dep now.
+    // `effectivelyPaused` is `wizardPaused && !serverHarnessConnected`, so it
+    // only tracks the projection while `wizardPaused` is true — a user who did
+    // NOT skip can have the connection land (the step-3 landing refresh) with
+    // `effectivelyPaused` unchanged, which would leave the announcement saying
+    // "Not connected yet" beneath a <h1> that had already flipped to "You're
+    // all set": the same disagreement this dep list exists to prevent.
+  }, [wizardStep, welcomeMode, authed, wizardPaused, effectivelyPaused, serverHarnessConnected, isBuildFork])
   // ⛔ #2426 e2e catch (P0): welcomeHasOrg (~line 4890) and wizardShowPaste
   // (~1832) are declared LATER in this giant component — a hook dep array
   // evaluates eagerly DURING render, so listing either here threw "Cannot
@@ -1412,25 +1636,13 @@ function claimIntentInFlight() {
   const mountedRef = React.useRef(true)  // review: flash-timer guard — flipped false on unmount so late setState is skipped
   React.useEffect(() => () => { mountedRef.current = false; stopGithubPoll && stopGithubPoll(); stopBoundedPoll(indexPollRef); stopBoundedPoll(docsPollRef) }, [])  // unmount cleanup
 
-  // #1147: build the tier-cap notice. The server's 402 detail carries the
-  // real limit ('Team api_keys limit reached (N). Upgrade your plan to
-  // increase it.') — /v1/team does NOT return max_api_keys, so parse it
-  // instead of trusting a client-side hardcode.
-  function upgradeNoticeFrom(message, team_) {
-    const m = String(message || '').match(/limit reached \((\d+)\)/)
-    const limit = m ? m[1] : (team_?.max_api_keys ?? '2')
-    return `You've reached your plan's limit of ${limit} API keys. Upgrade to add more — or regenerate an existing key instead.`
-  }
-  // #2229: rotate-path cap notice. Rotate mints the REPLACEMENT before
-  // revoking the old key, so a team AT max_api_keys 402s on the mint leg —
-  // the generic notice's "regenerate instead" tail would loop here
-  // (regenerating needs the same free slot). Truthful escape: revoke an
-  // unused key first (non-held rows have trash) or upgrade.
-  function rotateCapNoticeFrom(message, team_) {
-    const m = String(message || '').match(/limit reached \((\d+)\)/)
-    const limit = m ? m[1] : (team_?.max_api_keys ?? '2')
-    return `You're at your plan's limit of ${limit} API keys. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more.`
-  }
+  // #1147/#3874: the tier-cap notices now live in keyAllowance.js — the
+  // number comes from the server's 402 detail, else from /v1/team's
+  // max_api_keys (exposed by #3874). The old local implementations fell back
+  // to a hardcoded '2', which could declare a limit the server never
+  // enforced. The pre-cap allowance line (allowanceLine) renders the same
+  // server field BEFORE the cap is reached, so the allowance is visible
+  // ahead of the refusal instead of only at it.
 
   // #1147: shared mint — POST /v1/team/keys and return the plaintext key.
   // `name` (optional) is the key label — sent only when non-empty.
@@ -1457,8 +1669,12 @@ function claimIntentInFlight() {
     if (expiresInDays != null && !Number.isNaN(expiresInDays)) payload.expires_in = expiresInDays
     const k = await api(`/v1/team/keys${q}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(sessionTokenRef.current ? {} : (activeKey ? { Authorization: `Bearer ${activeKey}` } : {})) },
-      useSession: true,  // #1148: management → session JWT when signed in
+      // #3501/#4054: session-only. The proxy resolves the `__Host-session`
+      // cookie server-side; the browser never builds an Authorization header
+      // (the pre-#3501 `Authorization: Bearer <key>` fallback is removed — the
+      // browser holds no key in every reachable state, ADR-010).
+      headers: { 'Content-Type': 'application/json' },
+      useSession: true,  // retained no-op — the proxy is the authenticator
       body: JSON.stringify(payload),
     })
     return k
@@ -1498,10 +1714,8 @@ function claimIntentInFlight() {
       }
       const res = await fetch(`${API_BASE}/v1/team/dashboard-login`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${sessionTokenRef.current}`,
-        },
+        // #3501: same-origin proxy; the session cookie is the credential.
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: next }),
       })
       if (res.ok) {
@@ -1535,9 +1749,22 @@ function claimIntentInFlight() {
       const candidate = h.slice(2)
       if (KNOWN_TABS.includes(candidate)) return candidate
     }
+    // #3890: a section deep-link (#settings-memory-heading) opens the tab that
+    // holds the section, so a middle-click / new-tab / shared URL lands on the
+    // source toggles rather than the Overview.
+    const section = resolveSectionHash(h)
+    if (section) return section.tab
     return 'overview'
   })()
   const [tab, setTab] = React.useState(initialTab)
+  // #3890: the section a deep link is waiting to focus, seeded from the
+  // landing hash so a new-tab deep link focuses too (the effect below runs
+  // once the section's tab has rendered).
+  const deepLinkRef = React.useRef(resolveSectionHash(landingHash))
+  // #3890: a re-run trigger for the focus effect. A hash change that targets
+  // the tab we are ALREADY on does not change `tab`, so state alone would
+  // never re-run the effect (address-bar paste / forward-nav onto the section).
+  const [deepLinkTick, setDeepLinkTick] = React.useState(0)
   // #2509: sync tab state → URL hash (pushState for tab switches,
   // useRef guard skips initial mount to avoid strict-mode double effect).
   const tabSyncRef = React.useRef(false)
@@ -1547,6 +1774,10 @@ function claimIntentInFlight() {
     if (!tabSyncRef.current) { tabSyncRef.current = true; return }
     const hash = '#/' + tab
     if (window.location.hash !== hash) {
+      // #3890: keep a section deep-link intact for the tab it targets —
+      // rewriting it to '#/<tab>' would drop the section the user landed on.
+      const section = resolveSectionHash(window.location.hash)
+      if (section && section.tab === tab) return
       programmaticTabChangeRef.current = true
       window.history.pushState({ tab }, '', hash)
     }
@@ -1561,13 +1792,32 @@ function claimIntentInFlight() {
       if (popProcessingRef.current) return
       popProcessingRef.current = true
       setTimeout(() => { popProcessingRef.current = false }, 0)
+      const h = window.location.hash
+      // #3890: a section deep-link (#settings-memory-heading) is NEVER
+      // self-produced — the tab-sync effect only ever writes '#/<tab>' — so it
+      // is always a real user navigation and must be resolved BEFORE the #2528
+      // self-trigger guard below. That guard's flag is set before every
+      // nav-button pushState, and pushState fires no event to clear it, so a
+      // stale flag would otherwise swallow the FIRST click of the deep link
+      // (the action would change the URL but never switch tab or focus).
+      const section = resolveSectionHash(h)
+      if (section) {
+        programmaticTabChangeRef.current = false
+        deepLinkRef.current = section
+        setTab(section.tab)
+        // #3890: a hash change to the tab we are already on is a state no-op —
+        // bump the tick so the focus effect still runs.
+        setDeepLinkTick((n) => n + 1)
+        setSelectedSessionId(null)
+        setSessionDetail(null)
+        return
+      }
       // #2528: Safari fires popstate on pushState — skip when the change
       // was self-triggered (tab sync effect sets this ref before pushState).
       if (programmaticTabChangeRef.current) {
         programmaticTabChangeRef.current = false
         return
       }
-      const h = window.location.hash
       if (h.startsWith('#/')) {
         const candidate = h.slice(2)
         if (KNOWN_TABS.includes(candidate)) {
@@ -1597,6 +1847,26 @@ function claimIntentInFlight() {
   }, [])
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
+  // #3890: move focus to the deep-linked section heading once its tab has
+  // rendered (WCAG 2.4.3 Focus Order / 2.4.11 Focus Not Obscured). The tab
+  // switch and this focus are ONE interaction — the link's href is the
+  // navigation, so middle-click, new-tab and link announcement all work.
+  //
+  // `checking` / `authed` / `welcomeMode` / `team` are deps, not just `tab`:
+  // on a COLD load (new tab / middle-click / shared URL) the app is still
+  // checking the session and fetching the team, so the Settings tab — and this
+  // heading — is not mounted yet on the first commit. The pending route must
+  // survive that miss and retry once the content mounts; focusDeepLinkTarget
+  // reports whether it landed, and the route is cleared ONLY on success (or
+  // abandoned when the user navigates to a different tab first). Declared
+  // below `checking` because a deps array is evaluated eagerly during render
+  // (the #2709 TDZ class — `tdzDepsTripwire.test.js` guards it).
+  React.useEffect(() => {
+    const route = deepLinkRef.current
+    if (!route) return
+    if (route.tab !== tab) { deepLinkRef.current = null; return }
+    if (focusDeepLinkTarget(document, route.sectionId)) deepLinkRef.current = null
+  }, [tab, team, checking, authed, welcomeMode, deepLinkTick])
   const sessionTokenRef = React.useRef(null)
   // #1680: the session user metadata is captured at mount for component-
   // scope reads (the seed-step prefill for returning users).
@@ -1797,7 +2067,10 @@ function claimIntentInFlight() {
   }
   const orgIdRef = React.useRef(null)
   const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
-  const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
+  // #3501: the supabase `onAuthStateChange` subscription ref was removed with
+  // the subscription itself — re-validation now rides the `focus` listener
+  // registered in the mount-gate effect (a 503 there does nothing; only a 401
+  // bounces, #3485).
   // #2789 review P2/P1: the set of orgs that existed BEFORE the new-org
   // purchase. The poll's prefix arm is a heuristic, so it must never consider
   // one of those. It cannot live in a ref: the checkout opens in a NEW TAB
@@ -1864,29 +2137,21 @@ function claimIntentInFlight() {
   }
 
   async function api(path, opts = {}) {
-    // #1148 review P1-2: management calls pass the SESSION JWT when signed
-    // in (the dashboard-login gate rejects key-auth on those when the flag
-    // is off — a session always passes). opts.useSession forces it.
-    // #2246 (ADR-010): the key-derived default authHeaders is DELETED — the
-    // browser never holds a key, so the only Authorization source is the
-    // session JWT override below (the anon claim flows use raw fetch).
-    let authHeaders = {}
-    if (opts.useSession && sessionTokenRef.current) {
-      authHeaders = { Authorization: `Bearer ${sessionTokenRef.current}` }
-    }
+    // #3501/#4054: the browser holds no credential. Every call goes to the
+    // SAME-ORIGIN BFF proxy (`/api/v1/...`), which resolves the
+    // `__Host-session` cookie server-side and attaches the Bearer itself. A
+    // client-built Authorization is stripped by the proxy anyway — building one
+    // would imply the browser holds a token it does not.
+    // `opts.useSession` is retained as a no-op for call-site stability.
     // #1835: json-body calls (onboarding-state PATCHes, etc.) must send
     // Content-Type: application/json or the server 422s on the body.
     const hasBody = typeof opts.body === 'string'
-    const hdrs = { ...authHeaders, ...(opts.headers || {}) }
-    // #2167 rule 1 (defense-in-depth): with a session JWT present a key
-    // Authorization merged from opts.headers must never override the session
-    // on a dual-auth endpoint (the old shape let a held key shadow the
-    // session). #2246 (ADR-010): the mount stored-key probe (the old rule-1
-    // exemption) is DELETED — a session-authed browser never holds a key, so
-    // api() is session-JWT-only in every reachable state. authMode 'apikey'
-    // is the sessionless claim-paste screen, which returns before the chrome
-    // and never calls api() (the claim flows use raw fetch).
-    if (sessionTokenRef.current) hdrs.Authorization = `Bearer ${sessionTokenRef.current}`
+    const hdrs = { ...(opts.headers || {}) }
+    // Belt-and-braces: no caller may smuggle a client-built Authorization past
+    // this seam. The proxy ignores it, and a browser-held token is the exact
+    // artifact #3501 removes.
+    delete hdrs.Authorization
+    delete hdrs.authorization
     if (hasBody && !hdrs['Content-Type'] && !hdrs['content-type']) hdrs['Content-Type'] = 'application/json'
     const res = await fetch(`${API_BASE}${path}`, { ...opts, headers: hdrs })
     if (!res.ok) {
@@ -1917,6 +2182,34 @@ function claimIntentInFlight() {
     return res.json()
   }
 
+  // #3501/#4054: the same-origin BFF auth ACTION call. `/auth/*` routes live at
+  // the SITE ROOT (not under the `/api` prefix `api()` targets), take the
+  // HttpOnly `__Host-session` cookie, and never carry a client-built credential.
+  // On failure the Error carries `status` so every caller keeps the #3485
+  // distinction: a 401 from these routes means the CREDENTIALS were rejected
+  // (never "your session ended"), and a 503 means a store/provider fault that
+  // must be SHOWN, never turned into a redirect to /auth.
+  async function authAction(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify(body || {}),
+    })
+    let data = null
+    try { data = await res.json() } catch { data = null }
+    if (!res.ok) {
+      const fallback = data && (data.message || data.detail || data.error)
+      const msg = apiErrorText(res.status, data)
+        || (typeof fallback === 'string' ? fallback.replace(/_/g, ' ') : '')
+        || `HTTP ${res.status}`
+      const err = new Error(msg)
+      err.status = res.status
+      throw err
+    }
+    return data || {}
+  }
+
   // ── #1765 identity surface: inventory fetch + link/unlink/resend handlers ──
   async function fetchIdentity() {
     if (authMode !== 'session' || !sessionTokenRef.current) return
@@ -1942,20 +2235,17 @@ function claimIntentInFlight() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider }),
       })
-      // intent-ref contract: vendored supabase-js linkIdentity (REDIRECT
-      // flow — flowId is null under implicit, so the app's ?link_flow=
-      // search param + sessionStorage marker carry the ref; the mount
-      // effect POSTs link-commit on return).
+      // intent-ref contract: the BFF mints the PKCE flow and makes the
+      // authenticated GoTrue link-identity call server-side (`GET /auth/link`),
+      // then 302s the browser. The app's ?link_flow= search param +
+      // sessionStorage marker carry the ref; the mount effect POSTs
+      // link-commit on return.
       try { sessionStorage.setItem('tt_link_flow', intent_ref) } catch { /* best-effort */ }
-      if (supabaseClient) {
-        const { error } = await supabaseClient.auth.linkIdentity({
-          provider,
-          options: {
-            redirectTo: `${window.location.origin}${window.location.pathname}?link_flow=${encodeURIComponent(intent_ref)}`,
-          },
-        })
-        if (error) throw new Error(error.message)
-      }
+      // Navigate — never fetch: the response is a cross-origin redirect and
+      // the link call needs the server-held token, which only the BFF has.
+      const linkNext = `${window.location.pathname}?link_flow=${encodeURIComponent(intent_ref)}`
+      window.location.assign(`/auth/link?provider=${encodeURIComponent(provider)}&next=${encodeURIComponent(linkNext)}`)
+      return
     } catch (e) {
       setProfileError(e.message || 'Could not start linking')
     } finally {
@@ -1965,14 +2255,14 @@ function claimIntentInFlight() {
 
   async function handleAddEmail(email, password) {
     setProfileError('')
-    if (!supabaseClient) { setProfileError('Auth is unavailable'); return }
     if (identityInv && identityInv.email_confirmed_at) {
-      // confirmed email → updateUser({password}) only (#2085: creates no
+      // confirmed email → password update only (#2085: creates no
       // email identity row — has_password is the tracked signal)
       setProfileBusy('email')
       try {
-        const { error } = await supabaseClient.auth.updateUser({ password })
-        if (error) throw new Error(error.message)
+        // #4054: `POST /auth/update-password` (server-side; the BFF holds the
+        // token and owns the F15 bulk session revocation).
+        await authAction('/auth/update-password', { password })
         await fetchIdentity()
       } catch (e) { setProfileError(e.message || 'Could not add email login') }
       finally { setProfileBusy('') }
@@ -1997,9 +2287,11 @@ function claimIntentInFlight() {
   }
 
   async function doChangeEmail(email, password) {
-    if (!supabaseClient) throw new Error('Auth is unavailable')
-    const { error } = await supabaseClient.auth.updateUser({ email, password })
-    if (error) throw new Error(error.message)
+    // #4054: server-side email change (`POST /auth/set-email`). Under
+    // `double_confirm_changes` a 200 means the request was ACCEPTED, not that
+    // the address changed — the route reports `{changed, pending}` for that and
+    // the UI must not assert more than it does.
+    await authAction('/auth/set-email', { email, password })
     await fetchIdentity()
   }
 
@@ -2055,11 +2347,14 @@ function claimIntentInFlight() {
   async function handleReauthPassword(password) {
     setReauthBusy(true); setReauthError('')
     try {
-      if (!supabaseClient) throw new Error('Auth is unavailable')
-      const { error } = await supabaseClient.auth.signInWithPassword({
+      // #4054: server-side password grant (`POST /auth/password`). It mints a
+      // NEW `__Host-session` cookie; the browser still holds nothing. A 401
+      // here is GoTrue rejecting the CREDENTIALS — it is NOT "your session
+      // ended", so it surfaces in the dialog and never bounces to /auth
+      // (#3485).
+      await authAction('/auth/password', {
         email: (identityInv && identityInv.email) || '', password,
       })
-      if (error) throw new Error(error.message)
       // #2479: success — reset attempt counter
       reauthAttemptRef.current = 0
       closeReauth()
@@ -2102,11 +2397,13 @@ function claimIntentInFlight() {
     // #1765 review P1: capture the pre-round-trip session uid — if the
     // provider sign-in switches accounts, abort the pending change-email
     try {
-      const { data: pre } = await supabaseClient.auth.getUser()
-      beforeUidRef.current = (pre && pre.user && pre.user.id) || null
+      // #3501/#4054: the pre-round-trip uid comes from the SAME BFF session
+      // read the mount gate uses (/api/session → `{ user: { id } }`); there is
+      // no client session to ask.
+      const pre = await readSession()
+      beforeUidRef.current = pre.kind === 'signed-in' ? pre.user.id : null
     } catch { beforeUidRef.current = null }
     try {
-      if (!supabaseClient) throw new Error('Auth is unavailable')
       // same-provider re-sign-in (a different provider with private email
       // would auto-link a NEW user → account split); resume the pending
       // action after the round-trip via the ?reauth=1 marker
@@ -2121,11 +2418,11 @@ function claimIntentInFlight() {
             unlinkIdentityId: pending.unlinkIdentityId }))
         } catch { /* best-effort */ }
       }
-      const { error } = await supabaseClient.auth.signInWithOAuth({
-        provider,
-        options: { redirectTo: `${window.location.origin}${window.location.pathname}?reauth=1` },
-      })
-      if (error) throw new Error(error.message)
+      // #4054: the BFF starts the provider flow (`GET /auth/start`) and returns
+      // the browser to `?reauth=1` via the persisted, re-validated `next`.
+      // Navigate — the response is a cross-origin redirect.
+      const reauthNext = `${window.location.pathname}?reauth=1`
+      window.location.assign(`/auth/start?provider=${encodeURIComponent(provider)}&next=${encodeURIComponent(reauthNext)}`)
       if (!pending) closeReauth()
     } catch (e) {
       setReauthError(e.message || 'Sign-in failed')
@@ -2203,8 +2500,10 @@ function claimIntentInFlight() {
           }
           await fetchIdentity()
           setTab('profile')
-          const { data: sess } = await supabaseClient.auth.getSession()
-          const returnedUid = sess && sess.session && sess.session.user && sess.session.user.id
+          // #3501/#4054: the returned identity comes from /api/session — the
+          // browser holds no client session to read.
+          const returned = await readSession()
+          const returnedUid = returned.kind === 'signed-in' ? returned.user.id : null
           if (pending && pending.uid && returnedUid && returnedUid !== pending.uid) {
             setProfileError("Signed in as a different account — sign out and retry.")
             return
@@ -2433,28 +2732,50 @@ function claimIntentInFlight() {
     // under team B, and must not clear the switch-stale flag for a stale
     // team). Mirrors the Round-10 _teamAtCall pattern in loadAll/loadGraphs.
     const _teamAtCall = orgIdRef.current
+    // #3428/#2937 (lane B3, review cycle 5 item 3): this call's monotonic
+    // sequence number — captured before the await so a response can be told
+    // apart from one issued LATER (see the apply guard below).
+    const _seq = ++onboardingRefreshSeqRef.current
+    // #3428/#2937 (lane B3, review cycle 8 item 1): `_superseded` is
+    // FUNCTION-scoped, declared before the try. Declared inside the try (cycle 7
+    // item 3) it was in the TDZ at the early no-session exit and completely
+    // UNBOUND in the `catch` (a try-scoped `const` is not in scope there), so
+    // EVERY error path threw `ReferenceError` instead of returning the
+    // discriminated outcome. It is assigned after each await, immediately before
+    // each use, so it always reflects the latest issued sequence.
+    let _superseded = false
     try {
       if (!sessionTokenRef.current) {
-        // Mount race (#1838): the onboarding-state GET rides the session JWT —
-        // the mount gate populates sessionTokenRef.current after getSession()
-        // resolves, but this mount effect fires first. Wait for the session to
-        // materialize (bounded) instead of firing an unauthenticated GET that
+        // Mount race (#1838): the onboarding-state GET rides the session —
+        // the mount gate sets `sessionTokenRef.current` once its `/api/session`
+        // read resolves, but this mount effect fires first. Wait for the session
+        // to materialize (bounded) instead of firing an unauthenticated GET that
         // 401s ("Missing session token"). A null result means the session is
         // genuinely absent (or the auth lib failed to load — the gate bounces
         // to /auth / renders the auth-unavailable card), so returning is
         // correct: the loading surface just stays in its idle state.
-        let session = null
-        if (supabaseClient) {
-          const { data } = await supabaseClient.auth.getSession()
-          session = (data && data.session) || null
-        }
-        // P2 (review): strict validity check — a non-expired JWT is required,
-        // otherwise fall through to the loading-off return below.
-        if (session && session.access_token && session.expires_at && session.expires_at * 1000 > Date.now()) {
-          sessionTokenRef.current = session.access_token
+        // #3501/#4054: the browser holds no client-side session to wait for.
+        // Ask the BFF instead (`/api/session`, same-origin — the HttpOnly
+        // `__Host-session` cookie authorizes it). A positive identity is the
+        // session being present; a 503 (store fault) and a 401 (signed out)
+        // BOTH land in the else — this read only decides whether to issue the
+        // GET below. It is NOT a sign-out path: the mount gate owns that
+        // decision and keeps 401 and 503 distinct (#3485).
+        const live = await api('/session').catch(() => null)
+        _superseded = _seq < onboardingRefreshSeqRef.current
+        if (live && live.user && live.user.id) {
+          // Presence sentinel, same value as the module-scope SESSION_PRESENT
+          // (named constants are out of reach of the extracted-function test
+          // harness in refreshOnboardingExec.test.js, which compiles this body
+          // with `new Function(...deps)`).
+          sessionTokenRef.current = 'session'
         } else {
-          setOnboardingLoading(false)
-          return
+          // #3428/#2937 (lane B3, review cycle 7 item 3): this exit and the two
+          // below return the SAME discriminated outcome as the success path —
+          // the poll consumes the shape, and a bare `false` also cleared the
+          // loading flag for a response a newer refresh already superseded.
+          if (!_superseded) setOnboardingLoading(false)
+          return { applied: false, superseded: _superseded }
         }
       }
       // #1893 (code-review P1): pin the SELECTED team so multi-membership
@@ -2471,15 +2792,47 @@ function claimIntentInFlight() {
       // effect's pinned refetch lands. The pinned refetch is authoritative;
       // the unpinned mount GET is discarded (harmless — the refetch corrects
       // onboarding, and the first-timer 403-swallow path is unaffected).
-      if (st && st.onboarding && _teamAtCall && orgIdRef.current === _teamAtCall) {
+      // review cycle 4 (item 11): `applied` — a refresh is 'landed' only when
+      // its projection was actually APPLIED below. The unconditional `return
+      // true` reported success for a DISCARDED response (the team-identity guard
+      // skipped `setOnboarding`, and a body without `st.onboarding` fell through
+      // both), so the poll reset its failure counter and cleared the stall
+      // notice while the projection never moved.
+      let applied = false
+      // #3428/#2937 (lane B3, review cycle 5 item 3): a SUPERSEDED response is
+      // never applied. If a newer request was issued while this one was in
+      // flight, this one is stale by definition and is dropped; `_superseded`
+      // is returned as a success below so the poll does not count it as a
+      // failed check.
+      _superseded = _seq < onboardingRefreshSeqRef.current
+      if (st && st.onboarding && _teamAtCall && orgIdRef.current === _teamAtCall && !_superseded) {
         // code-review P1: this response is for the CURRENT team (the team
         // did not move while the GET was in flight) — clear the switch-stale
         // flag so hydration can proceed.
         onboardingStaleRef.current = false
         setOnboarding(st.onboarding)
         if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
+        applied = true
       }
-      setOnboardingLoading(false)
+      // review cycle 6 (item 3): the loading flag belongs to THIS request. A
+      // superseded response must not flip it while the newer request is still in
+      // flight — it was the one mutation the monotonic apply guard did not cover.
+      if (!_superseded) setOnboardingLoading(false)
+      // #3428/#2937 (lane B3, review cycle 3 P2-8): the step-3 poll has to be
+      // able to tell a landed refresh from a failed one, and this function
+      // swallows its own errors (the swallow is deliberate — see the catch
+      // below), so it RETURNS the outcome instead. Callers that only fire and
+      // forget keep working unchanged; the poll counts the `false`s.
+      // review cycle 5 (item 3): a SUPERSEDED response is not a failure of THIS
+      // check, and a newer refresh owns the truth.
+      // review cycle 6 (item 4): it is not a SUCCESS either. The outcome is
+      // DISCRIMINATED — `{ applied, superseded }` — so the poll banks a success
+      // only on `applied` and treats `superseded` as neutral. The old
+      // `applied || _superseded` reported a DISCARDED response as landed
+      // (cycle 4 item 11's defect in a new form): it reset the failure counter,
+      // cleared the stall notice and advanced the success backoff for a
+      // projection that never moved.
+      return { applied, superseded: _superseded }
     } catch (e) {
       // #1847/#2323 (Option B): first-timer org-create race — the mount-time
       // refreshOnboarding() fires BEFORE the org exists (a teamless first-
@@ -2500,8 +2853,16 @@ function claimIntentInFlight() {
       // state leaves the panel in its initial state;
       // finishWelcomeLoads() re-fires this after org-create + provisioning
       // and is the authoritative load.
-      if (e && e.status === 403 && !e.suspended && !orgIdRef.current) return
-      setOnboardingLoading(false)  // best-effort — the surface renders its error state
+      // review cycle 8 item 1: re-read the sequence AFTER the rejection (the
+      // awaited call never resolved, so no post-await assignment ran) — reading
+      // an unbound identifier here was the ReferenceError the P0 fixes.
+      _superseded = _seq < onboardingRefreshSeqRef.current
+      if (e && e.status === 403 && !e.suspended && !orgIdRef.current) return { applied: false, superseded: _superseded }
+      // #3428/#2937 (lane B3, review cycle 7 item 3): a superseded REJECTION is
+      // superseded-aware too — the newer in-flight refresh owns the loading
+      // flag (cycle 6's side-effect-free claim covered only the response path).
+      if (!_superseded) setOnboardingLoading(false)  // best-effort — the surface renders its error state
+      return { applied: false, superseded: _superseded }
     }
   }
   React.useEffect(() => { refreshOnboarding() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
@@ -2524,9 +2885,14 @@ function claimIntentInFlight() {
   const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
-  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' — set once per org (#2407: 'unsure' never sets it; fork stays None so the card keeps asking)
-  // #1998 (W2): connect-consent state — the harness-connected checkpoint
-  // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
+  // `wizardForkChosen` is declared ABOVE the step-announcement effect (review
+  // cycle 5 item 4) so `isBuildFork` can be a DEP of it without a TDZ.
+  // #1998 (W2) / #3428 (lane B3): connect-step busy state. The advance no
+  // longer WRITES the harness-connected checkpoint — that click-writer was
+  // deleted, so this flag covers the refresh that sharpens the done step's read
+  // of the server projection. review cycle 4 (item 7): `wizardConnectError` is
+  // CLEARED by that advance (`setWizardConnectError('')`) and never given a
+  // message there; the only writer of a message is the copy-failure path.
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
   const [wizardConnectError, setWizardConnectError] = React.useState('')
   const [wizardKeyMode, setWizardKeyMode] = React.useState('included')
@@ -2551,6 +2917,11 @@ function claimIntentInFlight() {
 
   const [wizardDurableBusy, setWizardDurableBusy] = React.useState(false)
   const [wizardDurableError, setWizardDurableError] = React.useState('')
+  // #3428/#2937 (lane B3, review cycle 3 P2-7): the wizard's OWN mint 402. It
+  // is a different signal from `capNotice` (set only by the Keys-tab
+  // create/rotate 402s), so an owner who hits the cap inside the wizard needs
+  // this flag to stop the done step promising "running it creates a fresh key".
+  const [wizardDurableCapped, setWizardDurableCapped] = React.useState(false)
   // #1998 fold-in: optional paste-your-own-durable-key fallback (closes the
   // 402-cap loop — a user at max_api_keys regenerates in the API Keys tab and
   // pastes the shown-once replacement here instead of dead-ending).
@@ -2702,12 +3073,16 @@ function claimIntentInFlight() {
   // neither main nor master.
   async function loadBranches(repo) {
     if (Object.prototype.hasOwnProperty.call(branchLists, repo)) return  // already loaded
+    // #3687: declared at FUNCTION scope (mirrors loadRepos) so the `catch` below
+    // can read it. A try-scoped binding is not in scope in the catch, so every
+    // failed branch load threw ReferenceError instead of degrading to the
+    // best-effort empty list.
+    const _teamAtCall = orgIdRef.current
     try {
       const q = encodeURIComponent(repo)
       // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
       // The URL already carries ?repo= — join org_id with & (a second `?`
       // would corrupt the repo value and silently unpin the team).
-      const _teamAtCall = orgIdRef.current
       const res = await api(`/v1/onboarding/github/branches?repo=${q}${onboardingTeamQ('&')}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return  // stale switch response
       const branches = res && Array.isArray(res.branches) ? res.branches : []
@@ -3037,8 +3412,14 @@ function claimIntentInFlight() {
       refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
       // #1691: reflect the subject in the account username (display_name)
       // — best-effort; the graph Subject is the source of truth.
-      if (subj && subj.id && supabaseClient) {
-        supabaseClient.auth.updateUser({ data: { display_name: subjectName } }).catch(() => {})
+      if (subj && subj.id) {
+        // #4054: best-effort display-name mirror (`PATCH /api/profile`). The
+        // graph Subject is the source of truth, so a failure here is non-fatal.
+        fetch(`${API_BASE}/profile`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ displayName: subjectName }),
+        }).catch(() => {})
       }
       setWizardSeeding(false)
     } catch (e) {
@@ -3097,7 +3478,6 @@ function claimIntentInFlight() {
   async function wizardComplete() {
     setWizardDone(true)
     setWizardPaused(false)
-    connectedOnceRef.current = false
     // #2195/#2246 (durable connect key): the done step ends the connect flow —
     // the minted/pasted durable plaintext was shown once in the command; drop
     // it so a later re-entry re-gates (a revoked/regenerated key never
@@ -3106,6 +3486,10 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // review cycle 5 (item 8): the wizard's OWN mint-402 flag must not out-live
+    // the wizard — an owner who hit the cap, left, and re-entered without a
+    // fresh mint attempt permanently lost the fresh-key clause.
+    setWizardDurableCapped(false)
     setWizardShowPaste(false)    // #2361 review-r2: welcomeKey is the first-timer provisioned plaintext
     // #2710: the wizard never owns the shared key-create modal — clear any
     // queued flag on the way out so it cannot surface on the dashboard. The two
@@ -3138,125 +3522,95 @@ function claimIntentInFlight() {
   }
 
   // #1566: in-app first-time provisioning (ported from welcome.html).
-  // The tenant-provision edge function authorizes the app origin; the
-  // membership row + the key are created here. The raw tt_ key NEVER leaves
-  // the app origin (#1082) — it is revealed here exactly once (atomic
-  // reveal+null, A13) and shown in the welcome card.
+  // #3501/#4054: the call rides the same-origin BFF (`POST /api/provision`).
+  // The route resolves the `__Host-session` cookie, mints the access token
+  // SERVER-side, and attaches it to the `tenant-provision` Edge Function call —
+  // the browser never holds, reads, or sends a token. The Edge Function's 201
+  // body carries the fresh org + its one-time plaintext key, revealed here once
+  // and shown in the welcome card (#1082: the key never leaves the app origin).
   async function provisionInApp(session, orgName = '') {
     setWelcomeProvisioning(true)
     setWelcomeProvisionError('')
-    // #2323 (code-review P2): use the LIVE session — the org-create submit
-    // can happen long after mount (an onboarding tab left open past token
-    // expiry), so the mount-captured token may no longer authenticate.
-    // supabase-js getSession() returns a fresh token transparently.
-    try {
-      const { data: live } = await supabaseClient.auth.getSession()
-      if (live && live.session && live.session.access_token && live.session.user) {
-        session = live.session
-      }
-    } catch { /* keep the passed session when getSession fails */ }
     // #1082 double-provision guard (fail-closed, mirrors welcome.html's
-      // claimStatusGuard): a tt_claim_pending marker means a claimable anon
-      // team may exist — never mint a stray team over it.
-      if (/(?:^|; )tt_claim_pending=/.test(document.cookie)) {
-        // #1566 (code-review P2): the guard must NOT dead-end — offer the
-        // claim card (the welcome.html 'Go claim my team' pattern).
-        setWelcomeProvisionError(
-          'You have an anonymous organization waiting to be claimed — attach your ' +
-          'GitHub or Google identity to claim it (same key, same graph).')
-        return { routedAway: true }
-      }
-      const userId = (session.user && session.user.id) || ''
-      const meta = (session.user && session.user.user_metadata) || {}
-      const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-      const provisionUrl = isLocal
-        ? 'http://127.0.0.1:54321/functions/v1/tenant-provision'
-        : SUPABASE_URL + '/functions/v1/tenant-provision'
-      const callProvision = () => fetch(provisionUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + session.access_token,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          user_id: userId,
-          email: (session.user && session.user.email) || '',
-          ...(meta.display_name ? { display_name: meta.display_name } : {}),
-          // #2323 (Option B): name-first — the wizard-typed org name. The
-          // edge fn validates it (same regex as the server) and falls back to
-          // display-name derivation when absent (older callers).
-          ...(orgName ? { org_name: orgName } : {}),
-        }),
-      })
-      // Attempt 1 + exactly ONE retry (a second mint = a second team).
-      let response = null
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try { response = await callProvision() } catch { response = null }
-        if (response && response.ok) break
-        if (attempt === 0) await new Promise(r => setTimeout(r, 1000))
-      }
-      if (response && response.status === 401) {
-        // #1511 semantic, ported: a 401 from tenant-provision means the
-        // session is stale/invalid — welcome must never render for
-        // unauthenticated users. Clear the session and go to /auth.
-        if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-        // #1860 (P3-5): preserve the search params — /auth's OAuth-error
-        // banner reads ?error=... (the mount gate already passes
-        // window.location.search on its bounce; the bare call here dropped
-        // them, so an OAuth failure during provisioning silently lost the
-        // banner's cause). #1909: an error FRAGMENT rides along too.
-        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, oauthErrorHash())
-        // #1860 (P3-5, review P2-1): the degraded fallback must preserve the
-        // params too — mirror the mount gate's fallback exactly, or the
-        // OAuth-error banner's cause is lost precisely when the bridge is
-        // blocked/unavailable.
-        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search + oauthErrorHash())
-        return { routedAway: true }
-      }
-      if (response && response.ok) {
-        // The function wrote the membership row before answering — re-query
-        // and reveal through the canonical path (atomic reveal+null, A13).
-        try {
-          for (let attempt = 0; attempt < 3; attempt++) {
-            // #1566 (review P2): port the welcome.html poll shape — status
-            // filter + newest row, so placeholder (org_id='') and M:N rows
-            // can't error the poll (PGRST116).
-            const { data, error } = await supabaseClient
-              .from('org_memberships')
-              .select('org_id, org_name, graph_name, status')
-              .eq('user_id', userId)
-              .eq('status', 'active')
-              .order('created_at', { ascending: false })
-              .limit(1)
-              .maybeSingle()
-            if (!error && data && data.status === 'active' && data.org_id) {
-              const { data: key, error: rErr } = await supabaseClient
-                .rpc('reveal_api_key', { p_user_id: userId, p_org_id: data.org_id })
-              if (rErr) return null
-              if (!key || key === 'pending') {
-                // Already consumed (a prior reveal elsewhere) — no re-reveal.
-                return { api_key: '', org_name: data.org_name, graph_name: data.graph_name }
-              }
-              return { api_key: key, org_name: data.org_name, graph_name: data.graph_name }
-            }
-            await new Promise(r => setTimeout(r, 1000))
-          }
-        } catch {
-          // #1566 (code-review P2): a transport error must NOT leave the
-          // provisioning spinner forever — fall through to the error card.
-          return null
-        }
-        // The membership write may have failed despite 201 — the 201 body is
-        // the only other copy of the plaintext.
-        try {
-          const body = await response.json()
-          if (body && body.api_key && body.org_name) {
-            return { api_key: body.api_key, org_name: body.org_name, graph_name: body.graph_name || '' }
-          }
-        } catch { /* fall through */ }
-        return null
-      }
+    // claimStatusGuard): a tt_claim_pending marker means a claimable anon
+    // team may exist — never mint a stray team over it.
+    if (/(?:^|; )tt_claim_pending=/.test(document.cookie)) {
+      // #1566 (code-review P2): the guard must NOT dead-end — offer the
+      // claim card (the welcome.html 'Go claim my team' pattern).
+      setWelcomeProvisionError(
+        'You have an anonymous organization waiting to be claimed — attach your ' +
+        'GitHub or Google identity to claim it (same key, same graph).')
+      return { routedAway: true }
+    }
+    // #2323 (code-review P2): use the LIVE identity. The org-create submit can
+    // happen long after mount (an onboarding tab left open past expiry), so the
+    // mount-captured profile is re-read from the BFF before provisioning. A 503
+    // (unavailable) keeps the captured profile — retryable, never a sign-out —
+    // and the server still owns the identity match (#802).
+    let profile = (session && session.user) || null
+    const live = await readSession()
+    if (live.kind === 'signed-in') profile = live.user
+    const userId = (profile && profile.id) || ''
+    const email = (profile && profile.email) || ''
+    const displayName = (profile && profile.displayName) || ''
+    if (!userId) {
+      // No identity to provision for. Do NOT bounce: a missing profile is an
+      // error card, not evidence the session ended (the mount gate owns that
+      // decision, and a store fault must never redirect — #3485).
+      setWelcomeProvisionError('Could not read your session — reload to try again.')
       return null
+    }
+    // The BFF route forwards this body verbatim to `tenant-provision`, whose
+    // own validation (#802 identity match, #2323 org_name, #1111 type guard)
+    // stays the single authority on the payload.
+    const callProvision = () => fetch(`${API_BASE}/provision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        user_id: userId,
+        email,
+        ...(displayName ? { display_name: displayName } : {}),
+        // #2323 (Option B): name-first — the wizard-typed org name. The
+        // edge fn validates it (same regex as the server) and falls back to
+        // display-name derivation when absent (older callers).
+        ...(orgName ? { org_name: orgName } : {}),
+      }),
+    })
+    // Attempt 1 + exactly ONE retry (a second mint = a second team).
+    let response = null
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { response = await callProvision() } catch { response = null }
+      if (response && response.ok) break
+      if (attempt === 0) await new Promise(r => setTimeout(r, 1000))
+    }
+    if (response && response.status === 401) {
+      // #1511 semantic, ported: the BFF's OWN 401 means — and only ever means —
+      // "not signed in", so welcome must never render for unauthenticated
+      // users. Clear the session and go to /auth. (A store fault is 503 and is
+      // deliberately NOT handled here: it shows, it never redirects — #3485.)
+      if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+      // #1860 (P3-5): preserve the search params — /auth's OAuth-error
+      // banner reads ?error=... #1909: an error FRAGMENT rides along too.
+      bounceToAuth(window.location.search, oauthErrorHash())
+      return { routedAway: true }
+    }
+    if (response && response.ok) {
+      // The Edge Function committed the org + key before answering, and its 201
+      // body carries the one-time plaintext — `{org_id, org_name, api_key,
+      // graph_name}`. The server-held token never rides the response, so this is
+      // the reveal: shown once, in memory only (#1082/A13).
+      try {
+        const body = await response.json()
+        if (body && body.api_key && body.org_name) {
+          return { api_key: body.api_key, org_name: body.org_name, graph_name: body.graph_name || '' }
+        }
+      } catch { /* unreadable body — fall through to the error card */ }
+      return null
+    }
+    // Any other non-2xx (a genuine 4xx refusal or an upstream 5xx) falls to the
+    // caller's error card. A 503 is NEVER turned into a redirect (#3485).
+    return null
   }
 
   // #2167 (rule 1): the bootstrap-mint helper (mintSessionKey, four callers:
@@ -3283,12 +3637,15 @@ function claimIntentInFlight() {
         const stashedInvite = (() => {
           try { return sessionStorage.getItem(INVITE_TOKEN_STORAGE) || '' } catch { return '' }
         })()
-        const acceptStashedInvite = async (accessToken) => {
-          if (!stashedInvite || !accessToken) return
+        const acceptStashedInvite = async () => {
+          if (!stashedInvite) return
           try {
+            // #3501: same-origin proxy — the `__Host-session` cookie is the
+            // credential, so this call takes NO token argument and builds no
+            // Authorization header.
             const inviteRes = await fetch(`${API_BASE}/v1/invites/accept`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
+              headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ token: stashedInvite }),
             })
             if (inviteRes.ok) {
@@ -3314,35 +3671,42 @@ function claimIntentInFlight() {
           }
         }
 
-        if (!supabaseClient) {
-          // #1511 (code-review P2): the head gate may pass on a valid cookie
-          // while the auth library failed to load (blocked CDN/vendor script,
-          // offline) — the eternal "Redirecting to the sign-in page…" shell
-          // would never redirect. Surface an actionable error instead.
+        // #3501/#4054: no client sign-in library to fail loading — the session
+        // read below (`readSession`) is the only gate, and a transport failure
+        // there is an `unavailable` outcome that renders the retry card instead
+        // of the eternal "Redirecting…" shell (#3485).
+        // #3501/#4054: the ONE session read. `/api/session` is same-origin and
+        // the HttpOnly `__Host-session` cookie rides it — the browser holds no
+        // token. 401 means signed out AND ONLY THAT; 503 means the store is
+        // unreachable and is RETRYABLE. `sessionGateAction` owns that decision
+        // (pure, unit-tested in sessionGate.test.js): collapsing 401 and 503
+        // is exactly the #3485 login loop.
+        const gate = await readSession()
+        const action = sessionGateAction(gate, { claimIntent: claimIntentInFlight() })
+
+        if (action === 'error') {
+          // A store/provider fault (503) or a malformed 200. The session is
+          // NOT known to be gone, so the user must NOT be signed out and MUST
+          // NOT be bounced to /auth — render the retry card instead (#3485).
+          setMountError(UNAVAILABLE_COPY)
+          setAuthed(false)
           setChecking(false)
-          setAuthUnavailable('Could not load the sign-in library — check your connection and refresh.')
           return
         }
-        const { data: { session }, error } = await supabaseClient.auth.getSession()
-        if (error || !session || !session.expires_at || session.expires_at * 1000 <= Date.now()) {
-          // #1511: NO strictly-valid session (missing OR past expires_at =
-          // invalid — the presence-over-validity bug class) → the dashboard
-          // never shows auth UI. In-flight claim-intent (paste tt_ → OAuth →
-          // claim; D2) renders the claim-paste screen; everyone else goes to
-          // /auth via the origin-aware bounceToAuth (Back-proof). The
-          // storedKey exemption is gone — a stored key is a "Last used" hint
-          // on /auth, not a dashboard credential.
-          const claimIntent = claimIntentInFlight()
-          if (!claimIntent) {
-            // #1224/#1566: OAuth state-expiry errors land as ?error=… (or,
-            // #1909, as #error=… in the fragment) on the app origin now —
-            // preserve the SEARCH and any ERROR fragment so /auth renders the
-            // banner (never a live #access_token fragment: it must not be
-            // re-ingested by the destination).
-            if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, oauthErrorHash())
-            else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search + oauthErrorHash())
-            return
-          }
+
+        if (action === 'bounce') {
+          // #1511: no session, no claim intent → the dashboard never shows
+          // auth UI. The origin-aware bounceToAuth is Back-proof.
+          // #1224/#1566: OAuth state-expiry errors land as ?error=… (or,
+          // #1909, as #error=… in the fragment) on the app origin now —
+          // preserve the SEARCH and any ERROR fragment so /auth renders the
+          // banner (never a live #access_token fragment: it must not be
+          // re-ingested by the destination).
+          bounceToAuth(window.location.search, oauthErrorHash())
+          return
+        }
+
+        if (action === 'claim') {
           // Claim-intent: render the claim-paste screen (no session, no team).
           // #1909: a denied claim OAuth round-trip returns with
           // ?claim=1#error=… — surface the reason on the paste screen
@@ -3357,14 +3721,22 @@ function claimIntentInFlight() {
                 : 'Sign-in failed' + (desc ? `: ${desc}` : '. Please try again.'))
           }
           setAuthMode('apikey')
-          setChecking(false); return
+          setChecking(false)
+          return
         }
-        sessionTokenRef.current = session.access_token
+
+        // action === 'render': signed in. `gate.user` is the BFF profile shape
+        // `{ id, email, displayName }` (functions/api/session.ts).
+        const profile = gate.user
+        sessionTokenRef.current = SESSION_PRESENT
         setSessionBooted(true)
-        sessionMetaRef.current = (session && session.user) ? {
-          display_name: (session.user.user_metadata && session.user.user_metadata.display_name) || '',
-          email: session.user.email || '',
-        } : null
+        // #3501: `sessionMetaRef` is the seam every chrome consumer already
+        // reads — map the BFF profile onto its existing shape here so no
+        // downstream `session.user.*` access survives.
+        sessionMetaRef.current = {
+          display_name: profile.displayName || '',
+          email: profile.email || '',
+        }
         // #2246 (ADR-010): session-authed users never hold an API key. The
         // legacy localStorage slot is residue now — never read, never probed;
         // purge it ONCE per session mount (the issue: "at most inert residue
@@ -3381,29 +3753,11 @@ function claimIntentInFlight() {
         // replaces the chrome on failure.
         setAuthed(true)
         setChecking(false)
-        // Round-6 (P2): supabase-js auto-refreshes the access token (~1h) into
-        // the cookie — keep the ref in sync so JWT-scoped calls never die with
-        // a stale token while the dashboard still looks logged in.
-        const { data: authSub } = supabaseClient.auth.onAuthStateChange((_evt, s) => {
-          if (s?.access_token) {
-            sessionTokenRef.current = s.access_token
-            // #1177: signed-out invitee completed sign-in → accept the stashed invite.
-            if (_evt === 'SIGNED_IN') acceptStashedInvite(s.access_token)
-          } else if (_evt === 'SIGNED_OUT') {
-            // #2246 (ADR-010): the old key-auth fallback that kept a
-            // signed-out tab coherent is gone (the browser never holds a key) —
-            // a cross-tab/expired sign-out must not leave the stale-data
-            // zombie shell. Mirror logout(): null the ref FIRST (in-flight
-            // Round-9/12 guards key off it), flip authed, bounce to /auth.
-            sessionTokenRef.current = null
-            setTeams([])
-            setAuthed(false)
-            if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-            if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
-            else window.location.replace('https://tortoise.premiselabs.co/auth')
-          }
-        })
-        authSubRef.current = authSub?.subscription || null
+        // #3501/#4054: there is NO client-side session to observe —
+        // `onAuthStateChange` could never fire again. Cross-tab/re-validation
+        // now rides a `focus` listener (registered in its own effect below),
+        // which re-reads `/api/session` and mirrors this state on a 401 while
+        // explicitly doing NOTHING on a 503 (#3485).
 
         // #1082 (PR1): ?claim=1 claim-intent routing — the OAuth redirect
         // lands here with the pasted key in sessionStorage (same-tab PKCE).
@@ -3411,10 +3765,9 @@ function claimIntentInFlight() {
         // Phase-2 mint is never reached (redirectTo targets the dashboard
         // claim route, NOT welcome.html), so the claimable anon team is
         // never orphaned by a stray mint.
-        // #1177: signed-in invitee at mount → accept now (signed-out path is
-        // handled by onAuthStateChange SIGNED_IN above).
-        if (stashedInvite && session.access_token) {
-          await acceptStashedInvite(session.access_token)
+        // #1177: signed-in invitee at mount → accept now.
+        if (stashedInvite) {
+          await acceptStashedInvite()
         }
 
         const claimParam = new URLSearchParams(window.location.search).get('claim')
@@ -3423,9 +3776,9 @@ function claimIntentInFlight() {
           try { claimKeyStored = sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { /* best-effort */ }
           // sessionStorage is same-tab/same-origin — the OAuth redirect
           // returns to this dashboard origin, so the key is always here.
-          if (claimKeyStored.startsWith('tt_') && session.access_token) {
+          if (claimKeyStored.startsWith('tt_') && sessionTokenRef.current) {
             try {
-              const claimRes = await performClaim(session.access_token, claimKeyStored)
+              const claimRes = await performClaim(claimKeyStored)
               if (claimRes.ok) {
                 try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
                 clearClaimPendingMarker()
@@ -3476,9 +3829,7 @@ function claimIntentInFlight() {
         let teamsList = []
         let teamsSuspendDetail = null
         try {
-          const teamsRes = await fetch(`${API_BASE}/v1/organizations`, {
-            headers: { Authorization: `Bearer ${session.access_token}` },
-          })
+          const teamsRes = await fetch(`${API_BASE}/v1/organizations`)
           if (teamsRes.ok) {
             teamsList = await teamsRes.json()
           } else if (teamsRes.status === 403) {
@@ -3498,8 +3849,8 @@ function claimIntentInFlight() {
             }
           }
           if (teamsRes.ok && Array.isArray(teamsList)) {
-            // Round-12: SIGNED_OUT during this fetch must not resurrect teams
-            if (sessionTokenRef.current === session.access_token) setTeams(teamsList)
+            // Round-12: a sign-out during this fetch must not resurrect teams
+            if (sessionTokenRef.current === SESSION_PRESENT) setTeams(teamsList)
           } else {
             // #1566 (review P1): a 200 with a non-array body is NOT 'no
             // teams' — it must fail CLOSED, never flip an existing user
@@ -3512,7 +3863,7 @@ function claimIntentInFlight() {
               // session token (Round-12) — a SIGNED_OUT racing the 403 must
               // not land the blocking suspension card on an ended-session
               // tab; fall through to the tail's end-session handling instead.
-              if (sessionTokenRef.current !== session.access_token) {
+              if (sessionTokenRef.current !== SESSION_PRESENT) {
                 setAuthed(false)
                 setMountError('Your session ended — sign in again.')
                 setChecking(false)
@@ -3544,10 +3895,13 @@ function claimIntentInFlight() {
         // its submit calls tenant-provision with the typed name (deterministic
         // org_id), and the welcome key + demo seed land on that one org.
         if (!teamsList.length) {
-          if (sessionTokenRef.current === session.access_token) {
+          if (sessionTokenRef.current === SESSION_PRESENT) {
             // The welcome card must render: leave the checking state + mark
             // authed (the normal completeLogin path never runs for first-timers).
-            sessionRef.current = session
+            // #3501: `sessionRef` holds the BFF profile (no access token — the
+            // browser has none); the first-org provisioning call reads its own
+            // session server-side.
+            sessionRef.current = { user: profile, expiresAt: gate.expiresAt }
             setChecking(false)
             setAuthed(true)
             setWelcomeMode(true)
@@ -3555,10 +3909,8 @@ function claimIntentInFlight() {
             // #1660: prefill the archived seed step's Subject from the OAuth
             // identity now (no team exists to read); the Project resolves
             // once the org is created.
-            {
-              const m = (session.user && session.user.user_metadata) || {}
-              setWizardSubject(m.display_name || (session.user && session.user.email ? session.user.email.split('@')[0] : '') || 'me')
-            }
+            setWizardSubject(profile.displayName
+              || (profile.email ? profile.email.split('@')[0] : '') || 'me')
           }
           return
         }
@@ -3606,6 +3958,31 @@ function claimIntentInFlight() {
     })()
   }, [])
 
+  // #3501/#4054: replaced the supabase `onAuthStateChange` subscription. Under
+  // the BFF the browser cannot observe a client session — there is none — so
+  // the only remaining signal that the session may have changed underneath this
+  // tab (a sign-out in another tab, an expired/revoked session) is window
+  // focus. Re-read `/api/session` then, and mirror the outcome:
+  //   signed-in      → nothing to do (the cookie is the source of truth)
+  //   signed-out 401 → mirror logout() state and bounce to /auth
+  //   unavailable 503 → DO NOTHING. A store fault must never sign the user out
+  //                     (#3485) — the next focus/action retries.
+  React.useEffect(() => {
+    const onFocus = async () => {
+      if (!sessionTokenRef.current) return  // nothing established to re-validate
+      const outcome = await readSession()
+      if (sessionGateAction(outcome) !== 'bounce') return
+      // A 401 confirmed signed-out: mirror logout()'s local teardown and leave.
+      sessionTokenRef.current = null
+      setTeams([])
+      setAuthed(false)
+      if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+      bounceToAuth()
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [])
+
   async function refreshTeam(key, expectedOrgId, seq) {
     // P1 (code-review): extracted team refetch — the success-return poll loop
     // used an undefined `jl` (dead code); this is the real refetch.
@@ -3620,9 +3997,7 @@ function claimIntentInFlight() {
     // all call sites pass '' (kept for signature stability).
     const _teamAtCall = expectedOrgId || orgIdRef.current
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
-    const t = await api(`/v1/team${q}`, sessionTokenRef.current
-      ? { useSession: true }
-      : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
+    const t = await api(`/v1/team${q}`, { useSession: true })
     // Round-13/14 (P2): never land a team's data under a different team's
     // selection. Two guards:
     //  - expectedOrgId (checkout poll pin): null on Stripe-return loads
@@ -3644,12 +4019,10 @@ function claimIntentInFlight() {
   async function loadAlerts(tid) {
     // #308 (R7): session-authed alert history — reachable even while the
     // team is suspended (API-key routes 403 by design).
-    const tok = sessionTokenRef.current
-    if (!tok || !tid) return
+    if (!sessionTokenRef.current || !tid) return
     try {
-      const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      })
+      // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
+      const res = await fetch(`${API_BASE}/v1/team/alerts?org_id=${encodeURIComponent(tid)}`)
       if (res.ok) {
         const d = await res.json()
         setAlerts(d.alerts || [])
@@ -3683,9 +4056,7 @@ function claimIntentInFlight() {
       // api() useSession is the only auth leg — no key fallback exists in
       // session mode (the held-key/stored-key callers are deleted).
       const q = teamAtCompleteLogin ? `?org_id=${encodeURIComponent(teamAtCompleteLogin)}` : ''
-      const t = await api(`/v1/team${q}`, sessionTokenRef.current
-        ? { useSession: true }
-        : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
+      const t = await api(`/v1/team${q}`, { useSession: true })
       // #1567 (review P1): the chrome renders early, so a team switch can
       // land DURING this await — never land team A's data under team B's
       // selection (the refreshTeam response-identity guard, applied here).
@@ -3733,79 +4104,14 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1148-ux review: OAuth login OR signup (Supabase auto-creates the account
-  // on first sign-in — no need to discover which one you are).
-  async function authProvider(provider) {
-    if (!supabaseClient) { setError('Auth is not configured on this deployment.'); return }
-    setError('')
-    setAuthBusy(true)
-    try { window.setLastAuthMethod(provider); setLastAuthMethod(provider) } catch { /* best-effort */ }
-    try {
-      const { data, error } = await supabaseClient.auth.signInWithOAuth({
-        provider: provider,
-        options: { redirectTo: `${window.location.origin}${window.location.pathname}` },
-      })
-      if (error) { setError(error.message || 'Sign-in failed — try again.') ; return }
-      if (data?.url) { window.location.href = data.url }
-    } catch (err) {
-      setError((err && err.message) || 'Sign-in failed — try again.')
-    } finally {
-      setAuthBusy(false)
-    }
-  }
-
-  // #1148-ux review: email+password login or signup
-  async function authEmailPassword() {
-    if (!supabaseClient) { setError('Auth is not configured on this deployment.'); return }
-    setError('')
-    setAuthBusy(true)
-    try {
-      let result
-      if (authIsSignup) {
-        // #1148 review P2: signup goes through the SERVER /v1/signup/email
-        // (#801 admin-create, email_confirm=true — no SMTP bucket, no
-        // confirmation email required), THEN logs in with the credentials.
-        const sres = await fetch(`${API_BASE}/v1/signup/email`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: authEmail.trim(), password: authPassword }),
-        })
-        if (!sres.ok) {
-          let msg = `Signup failed (HTTP ${sres.status}).`
-          try {
-            const b = await sres.json()
-            msg = apiErrorText(sres.status, b) || msg
-          } catch { /* non-JSON */ }
-          setError(msg)
-          return
-        }
-        result = await supabaseClient.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword })
-      } else {
-        result = await supabaseClient.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword })
-      }
-      if (result.error) {
-        const m = result.error.message || ''
-        if (m.includes('already registered') || m.includes('already been registered')) {
-          setError('That email is already registered — log in instead, or continue with GitHub/Google.')
-        } else if (m.includes('Invalid login')) {
-          setError('Invalid email or password.')
-        } else {
-          setError(result.error.message || 'Something went wrong — try again.')
-        }
-        return
-      }
-      try { window.setLastAuthMethod('email'); setLastAuthMethod('email') } catch { /* best-effort */ }
-      // #1148 review P2: the mount effect bootstraps only on first load —
-      // reload so the mount re-resolves the fresh session and runs the
-      // session-only landing (loadTeams → completeLogin(''), no bootstrap-key
-      // mint at login).
-      window.location.reload()
-    } catch (err) {
-      setError((err && err.message) || 'Something went wrong — try again.')
-    } finally {
-      setAuthBusy(false)
-    }
-  }
+  // #3501/#4054 (dead-code removal): the client-side login/signup card
+  // (`authProvider`, `authEmailPassword`, and the `authIsSignup`/`authEmail`/
+  // `authPassword`/`authBusy` state) was UNREACHABLE — #1511 removed the
+  // login/key card and the only !authed surface is the claim-paste screen.
+  // Both functions called the supabase client's OAuth / password sign-in
+  // helpers, which cannot work under the BFF (the browser holds no client
+  // session), so the dead token-holding path is deleted rather than left in
+  // place. Sign-in lives on the /auth surface; the dashboard redirects there.
 
   // #1511: the key-paste `login()` handler was deleted — the dashboard never
   // shows a login/key-only screen (the claim-paste screen handles anon keys).
@@ -3825,10 +4131,6 @@ function claimIntentInFlight() {
       setClaimError('Paste your tt_ API key above, then connect a login to claim your organization.')
       return
     }
-    if (!supabaseClient) {
-      setClaimError('Auth is not configured on this deployment.')
-      return
-    }
     // Key survives the OAuth redirect via sessionStorage (same-tab PKCE
     // round-trip). NEVER in redirectTo — GoTrue puts it in the OAuth state
     // URL → leak. Raw key = sessionStorage only (P1-2). The non-secret
@@ -3839,23 +4141,13 @@ function claimIntentInFlight() {
     try { window.setLastAuthMethod(provider); setLastAuthMethod(provider) } catch { /* best-effort */ }
     setClaimBusy(true)
     try {
-      const redirectTo = `${window.location.origin}${window.location.pathname}?claim=1`
-      const { data, error } = await supabaseClient.auth.signInWithOAuth({
-        provider: provider, // github | google — provider-verified email invariant
-        options: { redirectTo },
-      })
-      if (error) {
-        setClaimError(error.message || 'Sign-in failed — try again.')
-        setClaimBusy(false)
-        return
-      }
-      if (data?.url) {
-        // Same-tab redirect (sessionStorage survives); the popup flow would
-        // lose the key — pinned in e2e.
-        window.location.href = data.url
-        return
-      }
-      setClaimBusy(false)
+      // #4054: the BFF starts the provider flow (`GET /auth/start`) and returns
+      // the browser to `?claim=1` via the persisted, re-validated `next`. A
+      // same-tab redirect keeps sessionStorage (the raw key) alive — a popup
+      // would lose it (pinned in e2e). Navigate, never fetch: the response is a
+      // cross-origin redirect.
+      const claimNext = `${window.location.pathname}?claim=1`
+      window.location.assign(`/auth/start?provider=${encodeURIComponent(provider)}&next=${encodeURIComponent(claimNext)}`)
     } catch (err) {
       setClaimError((err && err.message) || 'Sign-in failed — try again.')
       setClaimBusy(false)
@@ -3889,17 +4181,14 @@ function claimIntentInFlight() {
         setClaimKey('')
         // #1148 review P2: sign in with the just-created credentials so the
         // user lands in SESSION mode (not stuck on the claimed-team gate).
+        // #4054: server-side password grant (`POST /auth/password`) — it mints
+        // the `__Host-session` cookie. A failure (including a 401 credential
+        // rejection) is NOT a sign-out and never redirects; we still reload so
+        // the completed claim is reflected and the user can sign in from the
+        // auth card.
         try {
-          if (supabaseClient) {
-            const { error } = await supabaseClient.auth.signInWithPassword({
-              email: claimEmail.trim(), password: claimPassword,
-            })
-            if (!error) {
-              try { window.setLastAuthMethod('email'); setLastAuthMethod('email') } catch { /* best-effort */ }
-              window.location.reload()
-              return
-            }
-          }
+          await authAction('/auth/password', { email: claimEmail.trim(), password: claimPassword })
+          try { window.setLastAuthMethod('email'); setLastAuthMethod('email') } catch { /* best-effort */ }
         } catch { /* fall through to reload */ }
         // If sign-in failed for any reason, reload — the claim is done, the
         // user can log in from the auth card.
@@ -3919,15 +4208,14 @@ function claimIntentInFlight() {
     }
   }
 
-  async function performClaim(sessionToken, key) {
-    // POST /v1/claim — both credentials in ONE request: session JWT
-    // (Authorization) + pasted tt_ key (body).
+  async function performClaim(key) {
+    // POST /v1/claim — both credentials in ONE request: the session (the
+    // HttpOnly `__Host-session` cookie, attached to the same-origin proxy
+    // request) and the pasted tt_ key (body). #3501: NO token argument and no
+    // Authorization header — the browser holds neither.
     const res = await fetch(`${API_BASE}/v1/claim`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${sessionToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: key }),
     })
     return res
@@ -3935,6 +4223,42 @@ function claimIntentInFlight() {
 
   async function logout() {
     setAccountMenuOpen(false) // #1148-ux: close the blob dropdown on logout
+
+    // #3501/#4104: sign-out is a SERVER operation now — the GoTrue session lives
+    // behind the BFF, so only POST /api/session (which revokes the D1 handle
+    // and clears the HttpOnly cookie) can end it. The supabase client's
+    // sign-out is gone: the browser holds no client session for it to clear,
+    // and clearing only the legacy cookie would leave the user signed in on
+    // reload.
+    //
+    // CHECK THE RESPONSE, and tear nothing down until it succeeds. `/api/session`
+    // answers 503 WITHOUT clearing the cookie when the D1 revoke did not land
+    // ("never report a successful sign-out on a failed write"). A 503 RESOLVES
+    // NORMALLY — the old `try/catch` only covered transport faults — so the code
+    // navigated to /auth anyway, whose head probe GETs /api/session, sees the
+    // still-live session (200), and bounces the user straight back. Sign-out
+    // then appeared to work while the handle stayed usable for its full TTL. On
+    // failure: surface it, keep the user signed in visually, and DO NOT navigate.
+    let revoked = false
+    try {
+      // #4104 (cycle 2): the BFF's shared CSRF guard now covers this route, and
+      // its media-type layer requires `application/json` (a form cannot send
+      // it). Send it explicitly — otherwise the real sign-out 415s. The body is
+      // empty: the guard checks the header, not a payload.
+      const res = await fetch(`${API_BASE}/session`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+      })
+      revoked = !!res && res.ok
+    } catch {
+      revoked = false
+    }
+    if (!revoked) {
+      setError('Could not sign out \u2014 please try again.')
+      return
+    }
+
     localStorage.removeItem(KEY_STORAGE)
     setApiKey('')
     apiKeyRef.current = null
@@ -3942,6 +4266,12 @@ function claimIntentInFlight() {
     setTeam(null)
     setStaleFired(false) // #1858: null→null when logging out from the terminal '—' state — the reset effect won't fire, so clear the per-load latch directly; the next session's skeleton must get a fresh floor
     setKeys([])
+    setKeysLoaded(false)
+    // #3783 (review P2): the failed/stalled read's state is per-user — never
+    // let one session's keys-read error (or a fired wait bound) land on the next.
+    // The helper also RE-ARMS the bound: logout leaves `keysLoaded` false, so
+    // clearing the flags alone would let the next session's read hang unbounded.
+    resetKeysLoadUnresolved()
     setSessions([])
     setNewKey(null)
     setNewKeyExpiresAt(null) // #2426: expiry echo rides the show-once card
@@ -3961,6 +4291,10 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // #3428/#2937 (lane B3, review cycle 7 item 4): logout is the one connect
+    // exit that missed the mint-402 cap flag; a fresh session must not inherit
+    // it (the flag is session/team-scoped, like the key state beside it).
+    setWizardDurableCapped(false)
     setWizardShowPaste(false)
     // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
     // session-scoped; drop it with the other key state on logout.
@@ -4007,10 +4341,6 @@ function claimIntentInFlight() {
     setInviteRole('member')
     setNewGraphName('')
 
-    // Round-7: onAuthStateChange returns {data:{subscription}} with .unsubscribe() —
-    // client.auth.removeChannel doesn't exist on GoTrueClient (was a silent no-op).
-    if (authSubRef.current) { authSubRef.current.unsubscribe?.(); authSubRef.current = null }
-    try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
     // #1511: the key-only card is gone — after signOut the dashboard has NO
     // !authed UI. Always go to /auth (origin-aware; the app-origin gate emits
     // the absolute target) so the sign-out lands on the login page instead of
@@ -4018,8 +4348,7 @@ function claimIntentInFlight() {
     // already clears the cookie via the adapter; a blocked script is covered
     // by the mount-effect redirect on next load).
     if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-    if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
-    else window.location.replace('https://tortoise.premiselabs.co/auth')
+    bounceToAuth()
   }
 
   async function loadAll(key) {
@@ -4044,6 +4373,8 @@ function claimIntentInFlight() {
       ])
       if (orgIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
       setKeys(Array.isArray(k) ? k : k.keys || [])
+      setKeysLoaded(true)
+      setKeysLoadError('')
       // #2246 (ADR-010): the rule-5/7 held-key classification hook is DELETED
       // — no held key exists to classify in session mode (apiKey state is ''
       // and the KEY_STORAGE slot was purged at session resolution). keys[]
@@ -4053,7 +4384,16 @@ function claimIntentInFlight() {
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
-      if (orgIdRef.current === _teamAtCall) setError(e.message)
+      if (orgIdRef.current === _teamAtCall) {
+        setError(e.message)
+        // #3783 (review P2): Promise.all rejects both reads together, so a
+        // failure here means the keys payload never landed. Record it, so the
+        // connect gate resolves 'error' (retryable) instead of waiting on a
+        // read that has already failed — the 'loading' arm has no failure exit,
+        // which trapped the wizard until a full page reload.
+        setKeysLoadError(
+          (e && e.message) || 'Could not load your organization\u2019s API keys.')
+      }
     }
   }
 
@@ -4065,13 +4405,12 @@ function claimIntentInFlight() {
     const tok = sessionTokenRef.current
     if (!tok) return null
     try {
-      const res = await fetch(`${API_BASE}/v1/organizations`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      })
+      // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
+      const res = await fetch(`${API_BASE}/v1/organizations`)
       if (res.ok) {
         const list = await res.json()
-        // Round-12: a SIGNED_OUT (cross-tab broadcast) during this fetch must
-        // not resurrect the previous user's team list after logout's setTeams([]).
+        // Round-12: a sign-out during this fetch must not resurrect the
+        // previous user's team list after logout's setTeams([]).
         if (sessionTokenRef.current !== tok) return null
         setTeams(list)
         // Round-8: guard on orgIdRef (sync write, no render-closure race) —
@@ -4281,7 +4620,11 @@ function claimIntentInFlight() {
     setWizardOrgError('')
     try {
       const session = sessionRef.current
-      if (!session || !session.access_token) {
+      // #3501/#4054: `sessionRef` holds the BFF profile — there is no
+      // `access_token` on it (the browser holds none), and `provisionInApp`
+      // now posts to the same-origin BFF route (`POST /api/provision`), which
+      // attaches the server-held credential. The guard is PRESENCE-only.
+      if (!session) {
         setWizardOrgError('Your session ended — reload to sign in again.')
         return
       }
@@ -4389,36 +4732,47 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1998 (W2): connect-consent Continue — the harness-connected checkpoint
-  // (surface 5/6 contract; W1's plan table left it "W2 owns"). The agent-side
-  // tortoise-onboarding skill writes it after tortoise_health passes (CLI
-  // harnesses via REST); Claude Desktop/Web have NO REST/curl surface, so the
-  // human's Continue writes it (session dual-auth — the checkpoint endpoint
-  // accepts session OR tt_ key). FWW keyed-MERGE → replay is a 200 no-op, so
-  // the agent write + this write (and repeat clicks) can all fire safely.
-  // Mirror handleWizardFork's failure handling: busy/disable, stay on step on
-  // 503/error (a fire-and-forget would strand Desktop/Web's gate with no
-  // retry affordance), advance on 2xx only.
+  // #3428 + #2937 (lane B3, owner-approved design 2026-09-14): the connect
+  // step's advance NO LONGER WRITES the harness-connected checkpoint.
+  //
+  // The old handler POSTed `{step:'harness-connected'}` and then raised a
+  // session-local "connected" flag, so the done step's connected copy was
+  // produced by the CLICK and not by the graph. `harness-connected` therefore
+  // carried two incompatible meanings: a fact the server observed, and a
+  // user's assertion. The click could not distinguish "my agent is running and
+  // has filed something" from "I pasted a command and hoped" — nor, on a
+  // keyless leaf (#2937), from "I clicked with no key at all". Same defect
+  // class this lane exists to kill: a gate that reports success without
+  // running.
+  //
+  // There is now exactly ONE writer class — server-observed:
+  //   - the agent-side tortoise-onboarding skill checkpoints it after
+  //     tortoise_health passes (CLI harnesses, via REST), and
+  //   - `_maybe_onboarding_auto_complete()` flips it server-side on the
+  //     harness's first successful graph write — which is what covers Claude
+  //     Desktop/Web, the REST-less group the human writer used to stand in for.
+  //
+  // The advance still ADVANCES: the user can always reach the dashboard, and
+  // the done step now REPORTS what the server observed
+  // (`serverHarnessConnected`) instead of what the click asserted. A
+  // not-yet-connected user is therefore not trapped — they are told the truth,
+  // pointed at the Setup guide, and the state resolves by itself the moment
+  // their agent files its first memory.
+  //
+  // The refresh is what makes the honest branch report the freshest truth: a
+  // user whose agent already checkpointed during the connect step (the normal
+  // happy path) lands on the connected screen, because the refresh reads the
+  // checkpoint the AGENT wrote.
   async function wizardHarnessContinue() {
     setWizardConnectBusy(true)
     setWizardConnectError('')
-    try {
-      await api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ step: 'harness-connected' }),
-      })
-      setWizardPaused(false)
-      connectedOnceRef.current = true
-      setWizardStep(3)
-    } catch (e) {
-      if (e?.status === 503) {
-        setWizardConnectError('The graph is temporarily unavailable — try again in a moment.')
-      } else {
-        setWizardConnectError(e?.message || 'Could not save your progress — try again.')
-      }
-    } finally {
-      setWizardConnectBusy(false)
-    }
+    // Best-effort, matching every other refreshOnboarding call site: it only
+    // sharpens the done step's reading of the server projection, and the write
+    // that used to justify a blocking error is gone.
+    await refreshOnboarding().catch(() => {})
+    setWizardPaused(false)
+    setWizardStep(3)
+    setWizardConnectBusy(false)
   }
 
   // #1998 fold-in (PR #2161 finding): the connect step must source a DURABLE
@@ -4433,10 +4787,21 @@ function claimIntentInFlight() {
   // owner/admin, matching the server contract. The plaintext is shown ONCE —
   // the connect command embeds it (the reveal); afterwards the key is
   // managed/regenerable from the API Keys tab.
+  // #3783 (review P2): the connect step's in-wizard recovery for an unresolved
+  // keys read (a failed GET, or a wait that exceeded KEYS_LOAD_SLOW_MS). It
+  // re-issues the same load the mount used, so a transient failure no longer
+  // forces a page reload. Clearing the error flips the affordance back to the
+  // wait state (the retry's own feedback); the nonce re-arms the wait bound.
+  function wizardRetryKeysLoad() {
+    resetKeysLoadUnresolved()
+    loadAll('').catch(() => {})
+  }
+
   async function wizardMintDurableKey() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
     setWizardDurableError('')
+    setWizardDurableCapped(false)  // a retry re-reads the cap rather than trusting the last 402
     try {
       // Round-15 (P2) team pin (createKey pattern): resolve the ACTIVE team
       // explicitly so the mint lands on the onboarding org — a session JWT
@@ -4490,6 +4855,7 @@ function claimIntentInFlight() {
       // box, which for owner/admin sits behind the disclosure (#2325 review
       // P2) — open it so the error's "paste it below" lands on a visible field.
       if (e?.status === 402) {
+        setWizardDurableCapped(true)  // this session's mint is capped (P2-7)
         setWizardShowPaste(true)
         setWizardDurableError(isBuildFork
           // #3218: the remedy must name only affordances THIS branch renders —
@@ -4549,6 +4915,17 @@ function claimIntentInFlight() {
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
+    setKeysLoaded(false)
+    // #3783 (review P2): the previous team's keys-read failure (or a fired wait
+    // bound) must not render as the NEW team's state before its loadAll lands —
+    // and the bound must be RE-ARMED for that new read. `keysLoaded` is already
+    // false here, so clearing the flags alone leaves the effect's deps
+    // Object.is-equal: no re-run, no timer, and a hanging `loadAll('')` below
+    // would sit on the wait state with the action forever unavailable (reachable
+    // when the previous read already fired the bound, then the user switches
+    // without retrying). The helper bumps the nonce, which is what makes the
+    // effect below re-run and schedule a fresh timer.
+    resetKeysLoadUnresolved()
     setSessions([])
     clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
     setSessionDeletingId(null)
@@ -4570,6 +4947,7 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    setWizardDurableCapped(false)  // review cycle 5 (item 8): the mint-402 flag is team-scoped too
     setWizardShowPaste(false)
     // #2246 (review, P1): welcomeKey is TEAM-scoped shown-once plaintext — a
     // switch must not leak the previous team's plaintext into the new team's
@@ -4678,9 +5056,8 @@ function claimIntentInFlight() {
     const tok = sessionTokenRef.current
     if (!tok || !orgId) return
     try {
-      const res = await fetch(`${API_BASE}/v1/graphs?org_id=${orgId}`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      })
+      // #3501: same-origin proxy; the `__Host-session` cookie authenticates.
+      const res = await fetch(`${API_BASE}/v1/graphs?org_id=${orgId}`)
       // #1842 P2-1: terminal state on failure — a non-200 (or a transport
       // error below) must not leave graphsStatus 'loading' forever.
       if (!res.ok) {
@@ -4724,7 +5101,7 @@ function claimIntentInFlight() {
       if (!tok) throw new Error('No session')
       const res = await fetch(`${API_BASE}/v1/graphs`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ org_id: currentOrgId, name: newGraphName.trim() }),
       })
       const b = await res.json().catch(() => ({}))
@@ -4963,7 +5340,6 @@ function claimIntentInFlight() {
       const q = `?org_id=${encodeURIComponent(currentOrgId)}`
       const res = await fetch(`${API_BASE}/v1/graphs/${encodeURIComponent(graphId)}${q}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${tok}` },
       })
       if (!res.ok) {
         const b = await res.json().catch(() => ({}))
@@ -4993,9 +5369,7 @@ function claimIntentInFlight() {
     if (!tok || !orgId || !isOwnerAdmin) return
     setTrashStatus('loading')
     try {
-      const res = await fetch(`${API_BASE}/v1/graphs/trash?org_id=${orgId}`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      })
+      const res = await fetch(`${API_BASE}/v1/graphs/trash?org_id=${orgId}`)
       if (!res.ok) {
         if (orgIdRef.current === orgId) setTrashStatus('error')
         return
@@ -5023,7 +5397,6 @@ function claimIntentInFlight() {
       const q = `?org_id=${encodeURIComponent(currentOrgId)}`
       const res = await fetch(`${API_BASE}/v1/graphs/trash/${encodeURIComponent(graphId)}/restore${q}`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${tok}` },
       })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -5054,9 +5427,7 @@ function claimIntentInFlight() {
       const tok = sessionTokenRef.current
       if (!tok) throw new Error('No session')
       const q = `?org_id=${encodeURIComponent(currentOrgId)}`
-      const res = await fetch(`${API_BASE}/v1/graphs/trash/${encodeURIComponent(graphId)}/points${q}`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      })
+      const res = await fetch(`${API_BASE}/v1/graphs/trash/${encodeURIComponent(graphId)}/points${q}`)
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
         throw new Error(body.detail || `HTTP ${res.status}`)
@@ -5083,9 +5454,7 @@ function claimIntentInFlight() {
     const tok = sessionTokenRef.current
     if (!tok || !orgId) return
     try {
-      const res = await fetch(`${API_BASE}/v1/organizations/${orgId}/members`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      })
+      const res = await fetch(`${API_BASE}/v1/organizations/${orgId}/members`)
       // P3 (code-review): staleness guard — a newer team switch may have
       // landed while this request was in flight.
       if (orgIdRef.current !== orgId) return
@@ -5118,7 +5487,7 @@ function claimIntentInFlight() {
       if (!tok) throw new Error('No session')
       const res = await fetch(`${API_BASE}/v1/invites`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ org_id: currentOrgId, email: inviteEmail.trim(), role: inviteRole }),
       })
       if (!res.ok) {
@@ -5155,7 +5524,6 @@ function claimIntentInFlight() {
       if (!tok) throw new Error('No session')
       const res = await fetch(`${API_BASE}/v1/organizations/${currentOrgId}/members/${userId}`, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${tok}` },
       })
       if (!res.ok) {
         const b = await res.json().catch(() => ({}))
@@ -5183,7 +5551,7 @@ function claimIntentInFlight() {
       if (!tok) throw new Error('No session')
       const res = await fetch(`${API_BASE}/v1/organizations/${currentOrgId}/members/${userId}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ role }),
       })
       if (!res.ok) {
@@ -5214,9 +5582,7 @@ function claimIntentInFlight() {
     // #1842 P1-2: /backups is session-dual-auth (get_current_org_session_ungated).
     const q = _teamAtCall ? `?org_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
-      const b = await api(`/backups${q}`, sessionTokenRef.current
-        ? { useSession: true }
-        : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
+      const b = await api(`/backups${q}`, { useSession: true })
       if (orgIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       // #2784: retain the whole array — the Graphs tab derives a per-graph
@@ -5791,18 +6157,18 @@ function claimIntentInFlight() {
     const claimIntent = claimIntentInFlight()
     if (!claimIntent) {
       // #1559: a mount failure (429/5xx on session resolution or team
-      // load, auth lib blocked — #2246: no session-key mint runs in the
+      // load — #2246: no session-key mint runs in the
       // !authed mount window) renders a REAL error card with a retry —
       // never the silent "Redirecting…" shell (which only ever
       // accompanied an ACTUAL navigation).
-      if (authUnavailable || mountError) {
+      if (mountError) {
         return (
           <div className="auth-wrap">
             <div className="auth-card">
               <div className="logo">Tortoise</div>
               <h1>Dashboard</h1>
               <div role="alert">
-                <p className="error">{authUnavailable || mountError}</p>
+                <p className="error">{mountError}</p>
                 {suspended && suspended.appeal_url ? (
                   // #308: the appeal CTA must be reachable even when the
                   // team is suspended pre-render (the authed banner is not
@@ -5899,7 +6265,7 @@ function claimIntentInFlight() {
             )}
             {claimError && <p className="error" role="alert">{claimError}</p>}
             <p className="dim">
-              <a href="https://tortoise.premiselabs.co/auth">← Back to sign in</a>
+              <a href="/auth">← Back to sign in</a>
             </p>
           </div>
         </main>
@@ -5923,7 +6289,7 @@ function claimIntentInFlight() {
             (API keys remain valid for graph operations).
           </p>
           <p className="dim small">
-            <a href="https://tortoise.premiselabs.co/auth" target="_blank" rel="noreferrer">
+            <a href="/auth" target="_blank" rel="noreferrer">
               Sign in with GitHub or Google →
             </a>
           </p>
@@ -6026,6 +6392,15 @@ function claimIntentInFlight() {
   // create/rotate/paste ('rows-durable' when a usable durable exists, 'none'
   // when not).
   const durableConnect = durableConnectKey(welcomeKey, '', keys)
+  // #3783: the connect step's source-aware key gate. `durableConnect.source`
+  // already distinguishes 'rows-durable' (a usable row exists; its plaintext
+  // is not held) from 'none' (no key at all) — the wizard used to collapse
+  // both into the mint CTA, so an org whose key was provisioned at creation
+  // got a SECOND key minted here, spending the free tier's 2-key allowance on
+  // a key the user never chose to create, while the Overview (reading this
+  // same source) said an existing key was usable. Consumed by
+  // `wizardKeyAffordance` below.
+  const connectGate = connectKeyGate(welcomeKey, keys, keysLoaded, !!keysLoadError)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
   // #2323 (Option B): name-first first-run — an org exists once the wizard
   // provisioned it (welcomeTeamReady) or the account already held one
@@ -6048,9 +6423,74 @@ function claimIntentInFlight() {
   const wizardConnectHarness = wizardHarness
   // #1998 fork-aware connect: the fork choice determines what the connect step
   // shows — 'build' users see API key + SDK code; 'self' users see harness
-  // picker + setup command.
-  const wizardFork = wizardForkChosen || (onboarding && onboarding.fork) || ''
-  const isBuildFork = wizardFork === 'build'
+  // picker + setup command. `wizardFork` / `isBuildFork` are derived ONCE,
+  // above the step-announcement effect (review cycle 5 item 4), so the <h1>,
+  // the announcement and this render all share ONE derivation.
+  // #3428/#2937 (lane B3, review cycle 3 P1-A): the done step may name a
+  // harness — and print a per-harness capture sentence — ONLY when the connect
+  // step actually offered the chooser that sets `wizardHarness`. Two paths
+  // reach step 3 without one: the 'unsure' fork answer (handleWizardFork
+  // advances straight to step 3, so step 2's chooser never rendered) and the
+  // capped owner/admin re-entry (capNotice replaces the chooser with the
+  // mint-cap remedy). On both, `wizardHarness` still holds its untouched
+  // 'claude' default, so naming Claude there is the same defect class the build
+  // fork was fixed for: "names a harness the branch never offered". A pick is
+  // ESTABLISHED only when a self fork was chosen or persisted AND no cap remedy
+  // is standing in for the chooser.
+  const harnessPickEstablished = wizardFork === 'self' && !capNotice
+  // Both done-step claims key on that gate: the name falls back to the neutral
+  // 'your agent', and the capture claim falls to 'none' (silence) rather than
+  // asserting a harness-specific capability for a branch that never ran it.
+  const doneHarnessName = harnessPickEstablished
+    ? (knownHarnessName(wizardHarness) || 'your agent')
+    : 'your agent'
+  const doneCaptureClaim = harnessPickEstablished ? harnessCaptureClaim : 'none'
+  // #3428/#2937 (lane B3, review cycle 2 P2-4 / cycle 3 P1-D + P2-7): the
+  // not-connected body's remedy clause is DERIVED, the same way the capture
+  // claim is. "(running it creates a fresh key)" is true only where the user
+  // can actually mint a fresh key for a KEYED harness: false on the key-less
+  // OAuth leaves (no key is involved at all — the connector recipe has no
+  // command with a key) and false for any non-owner/admin (a member has no key
+  // and cannot mint one, so pointing them at the Setup guide's command is a
+  // dead end — the one action they have is asking an owner/admin).
+  // `wizardDurableCapped` is the wizard's OWN mint 402 (`capNotice` is set only
+  // by the Keys-tab create/rotate 402s), so an owner who hit the cap inside the
+  // wizard is not promised a fresh key either. Where the clause is false it is
+  // dropped rather than asserted.
+  // review cycle 4 (item 12): the remedy derives from the harness ONLY where a
+  // pick was established. `wizardHarness` keeps its untouched 'claude' default
+  // on the 'unsure' fork and the capped re-entry, so with no pick the arms below
+  // would tell a member to ask for an API key for a surface the branch never
+  // showed them, and promise an owner a fresh key for a recipe that may have no
+  // command at all. Without an established pick the neutral arm names the one
+  // surface every branch can reach.
+  const doneHarnessForRemedy = harnessPickEstablished ? wizardHarness : null
+  const doneKeylessLeaf = doneHarnessForRemedy !== null && HARNESS_OAUTH.includes(doneHarnessForRemedy)
+  const doneCanMintFresh = isOwnerAdmin && !capNotice && !wizardDurableCapped
+  // review cycle 9 (UX F1 + code F4): the Setup guide renders "Resume setup →"
+  // ONLY while it can render the active checklist — the card returns a skeleton
+  // while loading, an error card when the projection never landed, an
+  // "Unavailable" card when the server reports FLOW unavailable, and a
+  // collapsed card once complete; the button sits inside the active branch
+  // (SetupGuideCard: `onResume && g.status === 'active'`). Naming a control
+  // that is not on screen is the same defect class as naming a harness the
+  // branch never offered — and it is REACHABLE: a failed onboarding GET leaves
+  // `onboarding === null`, so this remedy's minting arm would point at a card
+  // that is concurrently rendering "Couldn't load setup status — refresh to
+  // retry." Derive the clause from the SAME predicate the card uses. The mint
+  // clause is true only when reopening would mint: a key already resolved
+  // (minted this session, or matching a durable row) is reused, not re-minted.
+  const guideCanResume = !!onboarding && !onboardingLoading && setupGuide(onboarding).status === 'active'
+  const doneReopenClause = guideCanResume
+    ? 'reopen it from Settings → Setup guide (Resume setup)'
+    : 'the steps are in Settings → Setup guide'
+  const doneSetupRemedy = (!harnessPickEstablished || doneKeylessLeaf)
+    ? 'the steps are in Settings → Setup guide'
+    : (!isOwnerAdmin
+        ? 'ask an owner or admin for an API key'
+        : (doneCanMintFresh && !harnessKey
+            ? `${doneReopenClause} — the connect step mints a fresh key`
+            : doneReopenClause))
 
   // #2710: the wizard's paste escape (shared verbatim with the member/capped
   // branch below — same markup, same validation, no copy or IA change). The
@@ -6120,7 +6560,9 @@ function claimIntentInFlight() {
   // no-key branch never offers a button that would 403.
   const wizardNoKeyAffordance = (
     <>
-      <p className="dim small">Create an API key to see the setup prompt.</p>
+      <p className="dim small">{isBuildFork
+        ? 'Create an API key to call the SDK from your application.'
+        : 'Create an API key to see the setup prompt.'}</p>
       <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
         <button type="button" className="btn-primary small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
           {wizardDurableBusy ? 'Creating…' : 'Create an API key'}
@@ -6143,6 +6585,105 @@ function claimIntentInFlight() {
       )}
     </>
   )
+
+  // #3783: the connect step's EXISTING-key affordance. `connectKeyGate` returns
+  // mode 'existing' when a usable durable row exists but its plaintext is not
+  // in this browser (keys are shown once). The step used to fall straight
+  // through to the mint CTA here, so an organization provisioned with a key at
+  // creation (created_via 'provisioned', name null) had a SECOND key minted at
+  // connect — burning the free tier's 2-key allowance on a key the user never
+  // chose to create — while the Overview banner read the same 'rows-durable'
+  // source and said an existing key was usable. Route to the existing key
+  // (rotating replaces it in place, without growing the count) and demote the
+  // fresh mint to an explicit choice whose cost is named. Owner/admin only
+  // (POST /v1/team/keys is _require_owner_admin); members keep the paste row.
+  const wizardExistingKeyAffordance = (
+    <>
+      <p className="dim small">
+        Your organization already has an API key
+        {connectGate.existing && connectGate.existing.key_prefix
+          ? <> (<code>{connectGate.existing.key_prefix}</code>, created {fmtTime(connectGate.existing.created_at)})</>
+          : null}{' '}
+        — its value can&apos;t be shown here: keys are displayed once, when they are created.
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        {/* Every connect-step exit clears the in-memory plaintext + cap state
+            (pinned by wizardConnectTripwire #3218/#3428) and lands on the tab
+            where the existing key can be rotated. */}
+        <button type="button" className="btn-primary small"
+          onClick={() => { setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardDurableCapped(false); setWizardShowPaste(false); setTab('keys') }}>
+          Use an existing key →
+        </button>
+        <button type="button" className="ghost small" aria-expanded={wizardShowPaste}
+          aria-controls={wizardShowPaste ? 'wizard-paste-row' : undefined}
+          onClick={() => setWizardShowPaste((v) => !v)}>
+          I already have a key — paste it instead
+        </button>
+        <button type="button" className="ghost small" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+          {wizardDurableBusy ? 'Creating…' : 'Create a new key instead'}
+        </button>
+      </div>
+      <p className="wizard-note">
+        Rotate the existing key in the API Keys tab to get a value you can use — rotating replaces it
+        without adding a key. Creating a new key here spends another of your plan&apos;s key slots.
+      </p>
+      {wizardShowPaste && wizardPasteRow}
+      {!wizardShowPaste && wizardDurableError && (
+        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
+      )}
+    </>
+  )
+
+  // #3783 (review P2): the 'loading' mode offers NEITHER the mint nor the
+  // paste row — the rows GET has not landed, so "no key" is not a resolved
+  // answer and a mint CTA could burn a slot while an unloaded row already
+  // exists. The gate re-renders the moment `keysLoaded` flips.
+  const wizardLoadingKeyAffordance = (
+    <p className="dim small" aria-live="polite">Checking your organization&apos;s API keys…</p>
+  )
+
+  // #3783 (review P2 — the dead end this closes): the wait state above had no
+  // exit. `keysLoaded` flips on SUCCESS only, so a FAILED (or hanging) keys read
+  // left the connect step waiting forever: the mint was correctly withheld, but
+  // nothing replaced it, and the only recovery was a full page reload. An
+  // unresolved read is still NOT "no key" (offering a mint there re-opens the
+  // slot burn #3783 fixed), so this state keeps the mint withheld and adds the
+  // one honest action — retry the read in place. A failed read is ACTIONABLE,
+  // never a terminal wait.
+  const wizardKeysUnavailableKeyAffordance = (
+    <>
+      <p className="dim small" role="status">
+        {keysLoadError
+          ? `We couldn’t check your organization’s API keys — ${keysLoadError}`
+          : 'We still can’t see your organization’s API keys.'}
+      </p>
+      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginTop: '0.5rem' }}>
+        <button type="button" className="btn-primary small" onClick={wizardRetryKeysLoad}>
+          Try again
+        </button>
+      </div>
+      <p className="wizard-note">
+        We don&apos;t create a key until we can read the keys your organization already has — creating
+        one now could spend a plan slot on a key you already hold.
+      </p>
+    </>
+  )
+
+  // #3783: ONE role- and source-aware derivation for every keyed leaf, so the
+  // source-aware branch cannot drift between the shared, Codex Desktop and
+  // build-fork arms. Minting is offered ONLY when `connectGate.mode === 'mint'`
+  // (no usable key exists at all); 'existing' routes to the reuse path above;
+  // an unresolved read ('error', or a 'loading' that has exceeded the wait
+  // bound) shows the retryable state and NO mint; a read still in flight shows
+  // the wait state, also with no action.
+  const wizardKeyAffordance = connectGate.mode === 'error'
+    || (connectGate.mode === 'loading' && keysLoadSlow)
+    ? wizardKeysUnavailableKeyAffordance
+    : connectGate.mode === 'loading'
+      ? wizardLoadingKeyAffordance
+      : isOwnerAdmin
+        ? (connectGate.mode === 'existing' ? wizardExistingKeyAffordance : wizardNoKeyAffordance)
+        : wizardPasteRow
 
   if (welcomeMode && authed) {
     // #2323 (Option B): name-first first-run — the welcome card renders the
@@ -6167,7 +6708,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
-            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); connectedOnceRef.current = false; if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '#/' + tab); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardDurableCapped(false); setWizardShowPaste(false); setWizardPaused(false); setKeyModalOpen(false); setKeyModalStage('form'); if (wizardStep >= 2) setWelcomeKey(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -6211,17 +6752,23 @@ function claimIntentInFlight() {
                     <p className="welcome-eyebrow">{shownOrgName}</p>
                   )}
                   <h1 className="welcome-title">
-                    {wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused })}
+                    {wizardStageLabel(wizardStep, { hasOrg: welcomeHasOrg, paused: effectivelyPaused, connected: serverHarnessConnected, buildFork: isBuildFork })}
                   </h1>
                   {(() => {
                     // Step 0 on an org-holding account is a read-only summary
                     // whose body already says "You're set up in <org>…" — a
-                    // second line here would repeat it. Same for the paused
-                    // reconnect: its <h1> already names the state, and the step-3
-                    // body carries the recovery (PR-gate UX: the old paused lede
-                    // restated both).
+                    // second line here would repeat it. Same for step 3 without
+                    // an observed connection: its <h1> already names the state
+                    // (wizardStageLabel's paused / not-connected arms) and
+                    // the body carries the recovery (PR-gate UX: the old paused
+                    // lede restated both). Review cycle 1 P1-1: keying this on
+                    // `effectivelyPaused` left the DIRECT Continue path
+                    // (`wizardPaused` false) rendering the lede "Your agent takes
+                    // over from here." beneath a "Not connected yet" <h1> — the
+                    // #2364/#2912 heading-vs-body contradiction, reassembled. It
+                    // is now keyed on the same derived flag the <h1> uses.
                     if (wizardStep === 0 && welcomeHasOrg) return null
-                    if (wizardStep === 3 && effectivelyPaused) return null
+                    if (wizardStep === 3 && !serverHarnessConnected) return null
                     // #2912 (review cycle 2): WIZARD_STEPS[2].sub is the harness
                     // pick's copy, but step 2 has THREE bodies — only the
                     // owner/self branch is a harness pick.
@@ -6453,20 +7000,7 @@ function claimIntentInFlight() {
                           </>
                         ) : (
                           <>
-                            {isOwnerAdmin ? (
-                              <>
-                                <p className="dim small" style={{ margin: '0 0 0.6rem' }}>
-                                  Create an API key to call the SDK from your application.
-                                </p>
-                                <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
-                                  {wizardDurableBusy ? 'Creating…' : `Create an API key for ${shownOrgName || 'your organization'}`}
-                                </button>
-                              </>
-                            ) : (
-                              <p className="dim" style={{ margin: 0 }}>
-                                Only owners and admins can create API keys. Ask an owner or admin to create one.
-                              </p>
-                            )}
+                            {wizardKeyAffordance}
                             <div style={{ marginTop: '0.6rem' }}>
                               {/* #3218: this arm is the NO-KEY branch (no
                                   plaintext is on screen here), so the clears
@@ -6475,8 +7009,13 @@ function claimIntentInFlight() {
                                   header escape — both of which also drop
                                   welcomeKey. This handler is kept in step with
                                   them so the `wizardDurable*` state can never
-                                  outlive the step on any path. */}
-                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setTab('keys'); finishWelcomeLoads('keys') }}>
+                                  outlive the step on any path. review cycle 6 (item 6): that contract includes
+                                  `wizardDurableCapped` — this was the one exit cycle 5
+                                  missed, so a capped build-fork owner who left via
+                                  this link and re-entered without a fresh mint
+                                  attempt kept the done screen's "(running it
+                                  creates a fresh key)" clause suppressed. */}
+                              <button type="button" className="ghost small" onClick={() => { window.history.replaceState({}, '', '#/keys'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); setWizardShowPaste(false); setWizardDurableCapped(false); setTab('keys'); finishWelcomeLoads('keys') }}>
                                 Manage API keys →
                               </button>
                             </div>
@@ -6487,17 +7026,17 @@ function claimIntentInFlight() {
                       {harnessKey && (
                         <WizardBlock step={2} title="Call the SDK">
                           <p className="dim" style={{ margin: 0, lineHeight: 1.6 }}>
-                            Run this to verify your API key and file your first memory — it creates your graph and connects your project.
+                            Run this to verify your API key and file your first memory — it creates your graph.
                           </p>
                           <pre className="snippet" style={{ margin: 0 }}>
 {`curl https://api.premiselabs.co/v1/points \\
-  -H "Authorization: Bearer ${harnessKey}" \\
+  -H "Authorization: Bearer ` + harnessKey + `" \\
   -H "Content-Type: application/json" \\
   -d '{\"content\":\"my first application is set up\"}'`}
                           </pre>
                           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                              {wizardConnectBusy ? 'Saving…' : "I've set it up — Continue →"}
+                              {wizardConnectBusy ? 'Checking…' : "I've set it up — Continue →"}
                             </button>
                             <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">
                               SDK documentation →
@@ -6506,9 +7045,6 @@ function claimIntentInFlight() {
                         </WizardBlock>
                       )}
 
-                      {wizardDurableError && (
-                        <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
-                      )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
                         <div className="wizard-nav-actions">
@@ -6718,7 +7254,7 @@ function claimIntentInFlight() {
                                   <p className="wizard-note">{KEY_VISIBILITY_NOTE}</p>
                                   {procedure}
                                 </>
-                              ) : wizardNoKeyAffordance}
+                              ) : wizardKeyAffordance}
                             </WizardBlock>
                           ) : (
                             <>
@@ -6763,8 +7299,12 @@ function claimIntentInFlight() {
                                      (POST /v1/team/keys is owner/admin-gated).
                                      A member on a keyed leaf keeps the paste
                                      escape they have today — never a mint CTA
-                                     that would 403. */
-                                  isOwnerAdmin ? wizardNoKeyAffordance : wizardPasteRow
+                                     that would 403. #3783: the same derivation
+                                     also routes an owner/admin who already has
+                                     a usable durable key to the existing-key
+                                     path instead of minting a second (which
+                                     spends the free tier's allowance). */
+                                  wizardKeyAffordance
                                 )}
                               </WizardBlock>
 
@@ -6795,7 +7335,7 @@ function claimIntentInFlight() {
                             <div className="wizard-nav-actions">
                               {wizardConnectError && <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>}
                               <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                                {wizardConnectBusy ? 'Saving…' : (wizardKeyless
+                                {wizardConnectBusy ? 'Checking…' : (wizardKeyless
                                   ? (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've connected it — Continue →")
                                   : (['pi','cursor'].includes(wizardHarness) ? 'Done — Continue to dashboard' : "I've set it up — Continue →"))}
                               </button>
@@ -6824,7 +7364,7 @@ function claimIntentInFlight() {
                         <div className="wizard-nav-actions">
                           {wizardDurableKey && (
                             <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
-                              {wizardConnectBusy ? 'Saving…' : 'Continue to dashboard'}
+                              {wizardConnectBusy ? 'Checking…' : 'Continue to dashboard'}
                             </button>
                           )}
                           <button type="button" className="ghost" onClick={() => { setWizardPaused(true); setWizardStep(3) }}>Skip for now</button>
@@ -6835,17 +7375,157 @@ function claimIntentInFlight() {
 
                   {wizardStep === 3 && (
                     <div className="done">
-                      {effectivelyPaused ? (
-                        <p className="dim">You're set up, but your agent isn't connected yet — nothing was installed on the connect step. Open Settings → Setup guide to follow what happens next — the setup command there creates a fresh key when you do.</p>
+                      {isBuildFork ? (
+                        // #3428/#2937 (lane B3, review cycle 2 P1-2): the build
+                        // fork never offers a harness — its step 2 is the SDK
+                        // call (`POST /v1/points`). That write files a point but
+                        // files NO onboarding step: no REST route reaches
+                        // `_maybe_onboarding_auto_complete()` (only the MCP tools
+                        // do — verified 2026-09-16, and reported to the lane
+                        // orchestrator as its own defect). The self-fork body is
+                        // therefore false twice here: "hasn't filed anything" is
+                        // false the moment the user runs the wizard's own curl,
+                        // and the harness name is the untouched 'claude' default
+                        // on a branch that never offered Claude. This body names
+                        // the SDK call the user actually has, asserts nothing
+                        // about filing, and ties the live update to the agent
+                        // tools that CAN file the step.
+                        serverHarnessConnected ? (
+                          <>
+                            <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
+                            <p style={{ fontWeight: 600, margin: '0 0 0.5rem' }}>Connected</p>
+                            <p className="dim" style={{ lineHeight: 1.6 }}>
+                              You can query your project's graph, use it to make decisions, and embed it in your workflows.
+                            </p>
+                            <p className="dim" style={{ fontWeight: 600, margin: '0.9rem 0 0' }}>
+                              Keep calling the SDK from your app.
+                            </p>
+                          </>
+                        ) : (
+                          // review cycle 6 (item 1): the stall notice below renders
+                          // on THIS screen too — it keys on the poll, not on the
+                          // fork — so the build arm's standing promise must soften
+                          // exactly as the self arm's does. Two sentences on one
+                          // screen cannot both be true (cycle 5 keyed only the
+                          // self arm).
+                          <p className="dim" style={{ lineHeight: 1.6 }}>
+                            Your project's graph is set up, but we can't tell it's connected yet — Tortoise
+                            marks a project connected when a write arrives through its agent tools, not
+                            through the <code>/v1/points</code> REST call. Connect an agent to Tortoise
+                            and {wizardConnectPollStalled
+                              ? "we'll show it as soon as we can check"
+                              : 'it shows up here on its own'}.
+                          </p>
+                        )
                       ) : (
-                        <p className="dim">Your agent is connected — it files your decisions and findings to this Organization's graph from here on. Open Settings → Setup guide to follow what happens next.</p>
+                        <>
+                          {serverHarnessConnected ? (
+                            // #3428/#2937 (lane B3, charter 5703012625): the
+                            // owner-approved success screen (2026-09-14). Reachable
+                            // ONLY on a server-observed `harness-connected` — the
+                            // deleted human writer can no longer produce it from a
+                            // click, and neither can a keyless one (#2937).
+                            <>
+                              <p aria-hidden="true" style={{ fontSize: 26, lineHeight: 1.2, margin: '0 0 0.15rem' }}>✓</p>
+                              <p style={{ fontWeight: 600, margin: '0 0 0.5rem' }}>Connected</p>
+                              <p className="dim" style={{ lineHeight: 1.6 }}>
+                                {/* Lane B3, option (a) / review cycle 3 P1-A,
+                                    corrected in cycle 4 (item 8), and #3782: the
+                                    sentence printed follows the server's
+                                    OBSERVATION, not the capability flag.
+                                    'present' prints only on an observed
+                                    per-harness RECEIPT; 'future' only once an
+                                    install PROBE was observed (the install is
+                                    confirmed server-side, capture has not fired);
+                                    'install-pending' — recording on, nothing
+                                    observed for this harness — prints the SAME
+                                    "not installed yet" string Settings renders
+                                    for the identical state, instead of promising
+                                    a capture the server never saw (#3782: live,
+                                    probe AND receipt were null while Settings
+                                    said "not installed yet"). The capability
+                                    flag still decides whether ANY sentence may
+                                    print ('none' for no install path, recording
+                                    off, or NO HARNESS PICKER offered). A true
+                                    flag with no installed seam (#3575, lane B1)
+                                    is still a separate defect this screen cannot
+                                    detect. */}
+                                {doneCaptureClaim === 'present' && "Tortoise is capturing your agent's sessions. "}
+                                {doneCaptureClaim === 'future' && "Tortoise will capture your agent's sessions. "}
+                                {doneCaptureClaim === 'install-pending' && `Session capture is ${HARNESS_CAPTURE_STATUS_LABEL['install-pending']}. `}
+                                You can ask your agent to query it, use it to make decisions, and embed it in your workflows.
+                              </p>
+                              {/* The redirect is PROSE, not a control: we cannot open
+                                  the user's terminal, so a "Go to your agent"
+                                  button would be a control that does nothing. */}
+                              <p className="dim" style={{ fontWeight: 600, margin: '0.9rem 0 0' }}>
+                                Head back to {doneHarnessName}.
+                              </p>
+                            </>
+                          ) : (
+                            // Not observed — either the user skipped the step, or
+                            // they finished it and their agent has not filed its
+                            // first memory yet. ONE body, true in BOTH cases: it
+                            // asserts nothing about the install and names the two
+                            // real next actions. Deliberately does not claim the
+                            // connection is absent forever, nor that it succeeded.
+                            // review cycle 2 (P2-4): the remedy is the derived
+                            // `doneSetupRemedy`, so this sentence never promises a
+                            // fresh key on a key-less leaf or to a non-minting role.
+                            // review cycle 3 (P1-A): the name is the derived
+                            // `doneHarnessName` (neutral when no picker was offered).
+                            // review cycle 5 (item 6): the body may only state what
+                            // was OBSERVED. "hasn't filed anything to this
+                            // Organization's graph yet" was false for a user whose
+                            // CAPTURED SESSION had already written Session nodes and
+                            // extracted points (that path files only the
+                            // `capture-disclosed` checkpoint, never
+                            // `harness-connected`), while Settings → Captured
+                            // sessions listed the session. State the missing
+                            // observation instead of the graph fact.
+                            // review cycle 5 (item 7): the live-update promise is
+                            // keyed on the stall flag — while the poll cannot check,
+                            // the body must not keep asserting the very promise the
+                            // stall notice below withdraws.
+                            <p className="dim" style={{ lineHeight: 1.6 }}>
+                              We haven't seen your agent's first write through its Tortoise tools yet — so we can't
+                              tell it's connected. If you haven't finished the setup, {doneSetupRemedy}. If you have,
+                              head back to {doneHarnessName} and ask it to file a memory; {wizardConnectPollStalled
+                                ? "we'll show it as soon as we can check"
+                                : 'it shows up here the moment it does'}.
+                            </p>
+                          )}
+                        </>
+                      )}
+                      {/* #3428/#2937 (lane B3, review cycle 3 P2-8): the poll
+                          backs off after consecutive failures; past its threshold
+                          the live-update promise can no longer be kept, so say so
+                          quietly instead of leaving the screen asserting it. */}
+                      {!serverHarnessConnected && (
+                        <p className="dim small" role="status" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                          {wizardConnectPollStalled
+                            ? "We haven't been able to check for your connection for a moment — we'll keep trying. If this persists, reload the page."
+                            : ''}
+                        </p>
                       )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                       </div>
                       <div className="wizard-actions">
-                        <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
-                        <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
+                        {/* #3428 (lane B3): the only real control is deliberately
+                            demoted — nothing on this screen IS the next step
+                            (the next step happens in another application), so
+                            the dashboard exit is a quiet text link: no fill, no
+                            border, and no arrow (an arrow means "advance", and
+                            this link is explicitly not the advance path).
+                            Owner-approved 2026-09-14. Lane B3 review cycle 1
+                            P2-2: the approved screen has exactly ONE control
+                            beneath the redirect (the design decision names this
+                            dashboard link as "the only real control"), so the
+                            docs link is dropped HERE to match it — it remains
+                            on the header/legacy surfaces. Spec fidelity, not a
+                            deletion. */}
+                        <button type="button" className="done-link" onClick={wizardComplete}>Go to dashboard</button>
                       </div>
                     </div>
                   )}
@@ -7242,6 +7922,9 @@ function claimIntentInFlight() {
             {keyModalStage === 'form' && (
               <>
                 <h2>Create new API key</h2>
+                {keysLoaded && allowanceLine(team, keys) && (
+                  <p className="dim small" data-key-allowance>{allowanceLine(team, keys)}</p>
+                )}
                 <div className="inline-form" style={{ marginTop: 8 }}>
                   <input
                     placeholder="Name (e.g. CI, staging)"
@@ -7633,7 +8316,7 @@ function claimIntentInFlight() {
                 wizard end): members can't create keys, and a fresh owner
                 create would 402 once the org's key allowance is used. */}
             <p className="dim">
-              {snippetKey || durableConnect.source === 'rows-durable'
+              {snippetKey || connectGate.mode === 'existing'
                 ? (isOwnerAdmin
                     ? "Your Organization's API key is live — finish the setup below to connect your agent (the setup step shows a fresh key, or you can use an existing one)."
                     : "You're in — finish the setup below to connect your agent (paste the key an owner or admin shared with you).")
@@ -7642,7 +8325,7 @@ function claimIntentInFlight() {
                     : "Your Organization is live — finish the setup below to connect your agent. You'll need an API key: ask an owner or admin to share one, then paste it on the connect step.")}
             </p>
             <div className="empty-actions">
-              <button className="btn-primary" onClick={() => { connectedOnceRef.current = false; setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
+              <button className="btn-primary" onClick={() => { setWizardPaused(false); onboardingRefreshedAtDoneRef.current = false; setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
               {!snippetKey && (
@@ -7692,7 +8375,7 @@ function claimIntentInFlight() {
               // one click away for owners (their only first-party surface).
               <p className="dim">
                 {isOwnerAdmin
-                  ? (durableConnect.source === 'rows-durable'
+                  ? (connectGate.mode === 'existing'
                       ? "Your Organization's API keys are live — connect your agent below (the setup step can mint up to your plan's key limit, or use an existing one)."
                       : 'Your Organization is live — connect your agent below (its key is created on the connect step, or in the API Keys tab).')
                   : "Your Organization is live — connect your agent below. You'll need an API key to paste: ask an owner or admin to share one."}
@@ -7709,16 +8392,25 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
+          // #3832 (D5): connected-and-genuinely-empty. The copy is the owner's
+          // APPROVED string, built verbatim from `d5-copy-v2.md` (③) — do not
+          // reword. #3890: the approved [Integrations] action is now SHIPPED as
+          // the state's ONE primary action — a real link to the live home of
+          // the four source toggles, Settings → Memory sources (where the
+          // agent-session recorder actually lives). The wizard has NO
+          // integrations step, so the old external 'welcome' destination was a
+          // dead end. [Tortoise Decide] still has no in-product destination (it
+          // is an agent/CLI skill) and so still ships no button — never a dead
+          // or disabled one. The CLI command stays as the demoted secondary.
           <section className="overview empty-state">
-            <h2>Welcome to your Tortoise graph</h2>
-            <p className="dim">Connect your agent so it remembers why, not just what — the decisions and findings it saves land here as memories.</p>
+            <h2>No memories yet</h2>
+            <p className="dim">
+              Your memory is connected — there's nothing in it yet. There are two ways to add
+              memory: <strong>Integrations</strong> (that's where the agent-session recorder
+              lives), or <strong>Tortoise Decide</strong>.
+            </p>
             <div className="empty-actions">
-              <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
-                Connect your agent →
-              </a>
-              {snippetKey && (
-                <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${snippetKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
-              )}
+              <OverviewEmptyActions snippetKey={snippetKey} />
             </div>
           </section>
         )}
@@ -7873,6 +8565,19 @@ function claimIntentInFlight() {
                 <button className="ghost" onClick={() => { setKeyModalOpen(true); setKeyModalStage('form'); setError(''); setNewKeyName(''); setNewKeyExpiryPreset('30'); setNewKeyExpiryDate('') }}>+ New key</button>
               )}
             </div>
+            {/* #3874: the allowance stated BEFORE the cap — the same
+                server field the create/rotate 402s derive their number from
+                (keyAllowance.js), rendered from the RAW keys payload so the
+                count matches the mint gate's predicate. Gated on keysLoaded:
+                the `keys` state starts [] and fills asynchronously, so
+                without the gate the line would read "0 in use" before the
+                read lands (a fabricated count). Nothing renders when the
+                server has not supplied a limit (never fabricate one). */}
+            {keysLoaded && allowanceLine(team, keys) && (
+              <p className="dim small" style={{ margin: '0 0 1rem' }} data-key-allowance>
+                {allowanceLine(team, keys)}
+              </p>
+            )}
             {!isOwnerAdmin && (
               <p className="dim small" style={{ margin: '0 0 1rem' }}>
                 Only owners and admins can create or rotate keys in this dashboard. Paste an existing key into the setup step to connect an agent.
@@ -7966,7 +8671,7 @@ function claimIntentInFlight() {
                         />
                       ) : (
                         <span className="key-name">
-                          {k.name ? k.name : <span className="dim">—</span>}
+                          {keyDisplayName(k) ? keyDisplayName(k) : <span className="dim">—</span>}
                           {!k.revoked_at && isOwnerAdmin && (
                             <button
                               className="ghost small key-rename"

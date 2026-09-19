@@ -3,7 +3,7 @@
 Epic #1647 P4 (Task 10) DEMOTION: this module is now DEV-MACHINE HYGIENE
 ONLY. CI runs the docker lane — the fast matrix provisions falkordb, and
 migrated files construct via the URI-aware redirect (never spawning a
-redislite server); the 17 carve-out files run embedded in the URI-unset
+redislite server); the carve-out files run embedded in the URI-unset
 carve-out job, whose conftest `_redislite_hygiene` session sweeps own their
 own orphan reclamation. Docker halves produce ~0 embedded orphans by
 construction (E2E-7). The reaper keeps its local-dev role: a dev box's
@@ -51,6 +51,7 @@ skipped, never killed.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import math
@@ -58,10 +59,12 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +110,18 @@ OWNERS_DIRNAME = ".tortoise-owners"
 # same-suffix foreign dir (another tool's temp naming, a planted decoy) is
 # never touched.
 REAPER_OWNED_MARKER = ".reaper-owned"
+# #4068: the marker filenames that identify a dir carrying a redislite
+# server. Declared once so discovery and classification share one contract.
+SOCKET_MARKER = "redis.socket"
+PIDFILE_MARKER = "redis.pid"
+# NOTE (#4068): deliberately a STRICTER predicate than EPHEMERAL_PREFIXES.
+# This one is a name-SHAPE allowlist consumed by the classifier in the
+# no-registry / old-format branches, where a `redislite_*`/`tmp*` dir
+# OUTSIDE the tempdir must still read as auto-generated — the containment
+# check (_is_ephemeral_dir) cannot reach such a dir. DISCOVERY must not use
+# it: discovery is depth-1 and uses EPHEMERAL_PREFIXES, which is exactly
+# the predicate every REMOVAL path requires there (kills are covered by the
+# pass-1 lemma — see _ephemeral_name).
 _AUTOGEN_DIRNAME = re.compile(r"^(redislite_|tmp)[a-zA-Z0-9_]+$")
 
 # Ephemeral tmp-tree prefixes (under the system tempdir) that test code
@@ -158,10 +173,21 @@ ZERO_CLIENT_STATE_MAX_AGE = 7 * 86400.0
 ZERO_CLIENT_STATE_PATH = os.path.join(
     os.path.expanduser("~"), ".tortoise", "reaper-zero-client.json")
 
-# #1642 FIX 2 (#1449): time budget for the C-speed `find` socket-dir walk.
-# The walk no longer depends on the tempdir's total entry count (pollution
-# disabled cleanup — chicken-and-egg); the budget is the backstop against a
-# pathological tree, never an entry-count gate.
+# #1642 FIX 2 (#1449): time budget for the socket-dir walk. The walk is a
+# backstop, never a gate on the tempdir's entry count (pollution disabled
+# cleanup — chicken-and-egg).
+# #4068: the walk is now an IN-PROCESS `os.scandir` depth-1 enumeration, so
+# this is a monotonic DEADLINE (like reap()/_run_sweep) rather than a
+# `find` subprocess timeout — and it is sampled every iteration, so expiry
+# is always a loud WARNING + a partial result, never a silent [].
+#
+# OVERRIDES: #1642 FIX 2's unconditional full-tempdir walk — pass-2
+# DISCOVERY is now name-scoped to the ephemeral namespace. Every REMOVAL
+# path already required that predicate at depth 1, and live servers are
+# enumerated name-independently by pass 1, so no removable/killable record
+# is lost; the recorded #1642 intent (never gate on the tempdir's entry
+# COUNT) still holds, as a name scope is a different class. Detection is
+# restored by `--full-scan`. See issue #4068.
 SOCKET_WALK_TIMEOUT = 20.0
 
 
@@ -1000,20 +1026,25 @@ def _socket_dir_from_cmdline(pid: int) -> str | None:
     return None
 
 
-def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:
+def discover(jobs: int = 1, max_tempdir_entries: int = 5000,
+             full_scan: bool = False) -> list[dict]:
     """Scan for redislite orphans; return classified records.
 
     Two passes (issue #1005 perf — the tempdir accumulates tens of thousands
     of stale dirs, making a full walk minutes-long under load):
       1. Live servers via pgrep + cmdline unixsocket extraction — O(servers).
-      2. Socket-bearing dirs via a time-budgeted `find` walk — O(socket
-         dirs) classification cost, independent of the tempdir's total
-         entry count (#1642 FIX 2: pollution no longer disables cleanup).
+      2. Socket-bearing dirs via a depth-1 `os.scandir` scoped to the
+         ephemeral namespace — independent of the tempdir's total entry
+         count (#1642 FIX 2: pollution no longer disables cleanup; #4068:
+         no `find` subprocess, no depth-2 lstat storm).
+
+    The returned list is a `_ScanAwareList` (still a `list`) whose
+    `.complete` flag is False when the bounded scan returned a partial set
+    — a truncated scan is never reported as a finished one.
 
     jobs>1 parallelizes per-dir classification. Fail-closed semantics are
     per-record and unchanged under parallelism.
     """
-    results = []  # noqa: F841
     tmpdir = _real_gettempdir()
 
     # Pass 1: live servers (authoritative pid comes from pgrep).
@@ -1024,23 +1055,27 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:
     global _PROC_INFO_CACHE
     _PROC_INFO_CACHE = _batch_process_info(live_pids)
     try:
-        return _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
-                                   max_tempdir_entries)
+        records, complete = _discover_from_live(
+            live_pids, jobs, tmpdir, seen_dirs, max_tempdir_entries,
+            full_scan=full_scan)
     finally:
         _PROC_INFO_CACHE = {}
+    out = _ScanAwareList(records)
+    out.complete = complete
+    return out
 
 
 def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
-                        max_tempdir_entries):
+                        max_tempdir_entries, full_scan: bool = False):
     """Classification half of discover() (separated so the proc-info cache
-    has a deterministic lifetime)."""
+    has a deterministic lifetime). Returns ``(records, scan_complete)``."""
     results = []
 
     def _classify_live(pid: int) -> dict | None:
         sock_dir = _socket_dir_from_cmdline(pid)
         if not sock_dir:
             return None
-        socket_path = os.path.join(sock_dir, "redis.socket")
+        socket_path = os.path.join(sock_dir, SOCKET_MARKER)
         # #1383: pass the pgrep pid as known_pid so a stale registry
         # pidfile can never misclassify a LIVE server as stale_socket.
         rec = _classify_dir(sock_dir, socket_path, known_pid=pid)
@@ -1064,16 +1099,22 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                 results.append(rec)
                 seen_dirs.add(os.path.dirname(rec["socket_path"]))
 
-    # Pass 2: tempdir stale-socket walk (stale sockets + synthetic dirs in
-    # tests). #1642 FIX 2 (#1449): the walk was previously SKIPPED wholesale
+    # Pass 2: tempdir stale-socket scan (stale sockets + synthetic dirs in
+    # tests). #1642 FIX 2 (#1449): the scan was previously SKIPPED wholesale
     # when the tempdir exceeded max_tempdir_entries (5000) — pollution
     # disabled the ONLY path that cleans killed-suite residue (chicken-and-
-    # egg). The walk now scans ONLY socket/pid-bearing dirs via a
-    # time-budgeted `find` subprocess (C-speed traversal; O(socket dirs)
-    # classification cost regardless of the total entry count), so a 32k-
-    # entry tempdir still converges. max_tempdir_entries is retained for API
-    # compatibility but no longer gates the walk.
-    socket_dirs = _find_socket_dirs(tmpdir)
+    # egg). #4068: it is now a depth-1 in-process `os.scandir` scoped to the
+    # ephemeral namespace (every REMOVAL path requires exactly that predicate
+    # at depth 1; kills are covered by the pass-1 lemma — see
+    # `_ephemeral_name`), so a 32k-entry tempdir converges without lstat'ing
+    # the whole tree. `full_scan=True` restores the pre-#4068 un-scoped
+    # enumeration for detection; it adds no reachability an earlier release
+    # lacked. max_tempdir_entries is retained for API compatibility but no
+    # longer gates the walk.
+    scan = _scan_socket_dirs(
+        tmpdir, full_scan=full_scan,
+        deadline=time.monotonic() + SOCKET_WALK_TIMEOUT)
+    socket_dirs = scan.dirs
     dirs = []
     for d in socket_dirs:
         # #1383 plan-review P1: reaper-owned quarantine dirs (*.reaper-
@@ -1083,7 +1124,7 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
         if STALE_QUARANTINE_SUFFIX in os.path.basename(d):
             continue
         try:
-            socket_path = os.path.join(d, "redis.socket")
+            socket_path = os.path.join(d, SOCKET_MARKER)
             if not os.path.exists(socket_path):
                 continue
             if os.path.realpath(d) in seen_dirs:
@@ -1115,38 +1156,134 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                 continue
             if rec is not None:
                 results.append(rec)
-    return results
+    return results, scan.complete
 
 
-def _find_socket_dirs(tmpdir: str) -> list[str]:
-    """Dirs directly under the tempdir that carry redis.socket/redis.pid.
+class _ScanResult(NamedTuple):
+    """A name-scoped scan's dirs plus whether it ran to completion."""
 
-    #1642 FIX 2 (#1449): a C-speed `find` subprocess (time-budgeted) scans
-    for the socket/pid marker files — the stale-socket walk is no longer
-    gated on the tempdir's total entry count, so a 32k-entry polluted
-    tempdir still converges (the ONLY path that cleans killed-suite
-    residue previously skipped itself). Returns deduped dir paths, [] on
-    failure (fail closed — per-record classification still isolates
-    errors). Symlinked marker entries resolve to their dir (the classifier
-    realpaths before containment checks).
+    dirs: list[str]
+    complete: bool
+
+
+class _ScanAwareList(list):
+    """A list of records carrying the discovery scan's `complete` flag.
+
+    #4068: a `list` SUBCLASS, not a new return type — existing callers
+    (`len()`, iteration, `== []`, `isinstance(x, list)`) keep working
+    unchanged, while the sweep summary can report that a bounded scan
+    returned a partial set. Defaults to `False` (fail-closed): a
+    construction path that forgets to set it must not read as finished.
     """
+
+    complete: bool = False
+
+
+def _always_match(name: str) -> bool:
+    """`--full-scan` predicate — restores the pre-#4068 un-scoped set."""
+    return True
+
+
+def _ephemeral_name(name: str) -> bool:
+    """The depth-1 discovery predicate: the name half of `_is_ephemeral_dir`.
+
+    For a depth-1 entry the two are equivalent, which is why scoping
+    discovery to this loses no record any REMOVAL path can act on.
+
+    Losslessness for KILLS rests on a second, independent fact — the pass-1
+    lemma: every LIVE server is enumerated by `_pgrep_redis_servers` +
+    `_socket_dir_from_cmdline` regardless of its dir name, so a live orphan
+    is discovered even when its dir name is outside this namespace. The
+    lemma is pinned by `test_live_candidate_is_found_by_pass1_regardless_of_dir_name`.
+    """
+    return name.startswith(EPHEMERAL_PREFIXES)
+
+
+def _iter_candidate_dirs(tmpdir: str, *, predicate, deadline=None,
+                         ) -> _ScanResult:
+    """Depth-1 enumeration of tempdir entries whose NAME matches predicate.
+
+    #4068 — replaces the depth-2 `find` subprocess. The NAME test runs
+    FIRST, before `is_symlink()` and before any stat: a foreign entry costs
+    one readdir entry, never a metadata call (the old `find` lstats'd ~224k
+    entries and held a core for the life of the call). Only name-matching
+    entries are then tested for symlink-ness, and a symlinked entry is
+    SKIPPED — parity with `find` without `-L`, which does not descend a
+    symlinked dir. `deadline` is an ABSOLUTE monotonic cutoff (the
+    reap()/_run_sweep convention) sampled every iteration, so an
+    already-expired budget always yields `complete=False` + a WARNING.
+    """
+    dirs: list[str] = []
+    complete = True
     try:
-        out = subprocess.run(
-            # marker files live one level BELOW the tempdir root
-            # (T/<tmpXXXX>/redis.socket) -> maxdepth 2
-            ["find", tmpdir, "-maxdepth", "2", "(",
-             "-name", "redis.socket", "-o", "-name", "redis.pid", ")"],
-            capture_output=True, text=True, timeout=SOCKET_WALK_TIMEOUT,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        logger.warning("socket-dir walk failed/timeout for %s", tmpdir)
-        return []
-    dirs: set[str] = set()
-    for line in out.stdout.splitlines():
-        p = os.path.dirname(line)
-        if p and p != tmpdir:
-            dirs.add(p)
-    return sorted(dirs)
+        with os.scandir(tmpdir) as it:
+            for entry in it:
+                if deadline is not None and time.monotonic() >= deadline:
+                    complete = False
+                    logger.warning(
+                        "tempdir scan budget expired — returning partial "
+                        "name-scoped set (%d dirs so far)", len(dirs))
+                    break
+                if not predicate(entry.name):
+                    continue
+                if entry.is_symlink():
+                    continue
+                dirs.append(entry.path)
+    except OSError as exc:
+        logger.warning("tempdir scan failed for %s: %s", tmpdir, exc)
+        complete = False
+    return _ScanResult(dirs, complete)
+
+
+def _as_scan_aware(records: list) -> _ScanAwareList:
+    """Wrap a discovery result so completeness is always read FAIL-CLOSED.
+
+    A plain `list` (a monkeypatched `discover` seam, or a future caller that
+    forgot to set the flag) must never read as a finished scan.
+    """
+    if isinstance(records, _ScanAwareList):
+        return records
+    out = _ScanAwareList(records)
+    out.complete = False
+    return out
+
+
+def _scan_socket_dirs(tmpdir: str, *, full_scan: bool = False,
+                      deadline: float | None = None) -> _ScanResult:
+    """Socket/pid-bearing dirs under ``tmpdir``, plus scan completeness.
+
+    #4068: scoped to the ephemeral namespace by default. That is provably
+    lossless for every REMOVAL path — each requires `_is_ephemeral_dir`, and
+    for a depth-1 dir that is exactly `basename.startswith(EPHEMERAL_PREFIXES)`.
+    Losslessness for KILLS rests on the pass-1 lemma (see `_ephemeral_name`):
+    a live server is enumerated by pgrep/cmdline regardless of its dir name,
+    so the scoped scan losing an out-of-namespace name costs no kill.
+
+    ``full_scan=True`` restores the pre-#4068 UN-SCOPED enumeration. It can
+    reach nothing an earlier release could not, and it cannot widen an
+    rmtree (containment is re-derived at every removal). It is NOT
+    "detect-only" in the strict sense — a live record that only the broad
+    scan surfaces is still subject to normal classification and the kill
+    path, exactly as before #4068.
+
+    The return value carries ``complete`` so a truncated scan is visible
+    rather than reported as a finished one. A ``None`` deadline means "use
+    the default budget" — never unbounded (#1642 FIX 2's always-bounded
+    intent is preserved for direct callers).
+    """
+    predicate = _always_match if full_scan else _ephemeral_name
+    if deadline is None:
+        deadline = time.monotonic() + SOCKET_WALK_TIMEOUT
+    res = _iter_candidate_dirs(tmpdir, predicate=predicate, deadline=deadline)
+    out: list[str] = []
+    for d in res.dirs:
+        try:
+            if os.path.exists(os.path.join(d, SOCKET_MARKER)) or \
+                    os.path.exists(os.path.join(d, PIDFILE_MARKER)):
+                out.append(d)
+        except OSError:
+            continue
+    return _ScanResult(sorted(out), res.complete)
 
 
 def _classify_dir(dbdir: str, socket_path: str,
@@ -1693,7 +1830,7 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # pid is a recycled number, provably not the recorded server, so the
     # socket re-probe below remains the real gate).
     pid = None
-    pidfile = os.path.join(dbdir_real, "redis.pid")
+    pidfile = os.path.join(dbdir_real, PIDFILE_MARKER)
     try:
         pid = int(Path(pidfile).read_text().strip())
     except (OSError, ValueError):
@@ -1742,13 +1879,52 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # the dir intact (retried next sweep); a stray marker on a later rename
     # failure is inert (redis ignores unknown files; the marker is simply
     # re-written on the next successful rename).
+    #
+    # #4098 (CWE-377 / SEI CERT FIO21-C): the candidate dir is discovered
+    # in a SHARED, world-writable tempdir (Linux `/tmp`, mode 1777), so the
+    # marker write must never follow a symlink the dir's owner planted
+    # there — a plain `open(path, "w")` turns "write a marker" into
+    # "truncate any file the reaper's uid can write". O_NOFOLLOW alone
+    # protects only the basename, so the dir is opened O_NOFOLLOW and the
+    # marker is addressed RELATIVE to that fd (the openat pattern;
+    # CVE-2018-6954 is the precedent for skipping it). The dir open needs
+    # READ permission, so a candidate dir that is write+execute but
+    # non-readable (0300) is abandoned rather than reaped — fail-closed, and
+    # unreachable for redislite/mkdtemp dirs (0700).
     try:
-        with open(os.path.join(dbdir_real, REAPER_OWNED_MARKER), "w") as fh:
-            fh.write("reaper-owned\n")
+        dir_fd = os.open(dbdir_real,
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        logger.warning("stale dir unopenable (%s), skipping: %s",
+                       exc, dbdir_real)
+        return None
+    try:
+        marker_fd = _open_marker_no_follow(dir_fd)
+        if marker_fd is None:
+            logger.warning("could not write reaper marker, aborting: %s",
+                           dbdir_real)
+            return None
+        try:
+            if os.write(marker_fd, b"reaper-owned\n") != len(
+                    b"reaper-owned\n"):
+                raise OSError("short marker write")
+        finally:
+            try:  # noqa: SIM105
+                os.close(marker_fd)
+            except OSError:
+                pass
     except OSError:
+        # Pre-#4098 semantics preserved: a marker write/close failure skips
+        # THIS record (the dir is retried next sweep) — it must never abort
+        # the whole sweep, whose remaining records include live orphans.
         logger.warning("could not write reaper marker, aborting: %s",
                        dbdir_real)
         return None
+    finally:
+        try:  # noqa: SIM105
+            os.close(dir_fd)
+        except OSError:
+            pass
     renamed = dbdir_real + STALE_QUARANTINE_SUFFIX + str(time.time_ns())
     try:
         os.rename(dbdir_real, renamed)
@@ -1756,7 +1932,7 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
         logger.warning("stale dir rename failed (%s), skipping: %s",
                        exc, dbdir_real)
         return None
-    renamed_sock = os.path.join(renamed, "redis.socket")
+    renamed_sock = os.path.join(renamed, SOCKET_MARKER)
     if not os.path.exists(renamed_sock):
         logger.warning("quarantined socket vanished, leaving dir: %s", renamed)
         return None  # leave quarantine (next sweep re-probes)
@@ -1766,7 +1942,7 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # Guard 8: pidfile written during the window (backlog-full ECONNREFUSED
     # hardening — a live server that refuses connects can still write its pid)
     try:
-        moved_pid = int(Path(os.path.join(renamed, "redis.pid")).read_text().strip())
+        moved_pid = int(Path(os.path.join(renamed, PIDFILE_MARKER)).read_text().strip())
     except (OSError, ValueError):
         moved_pid = None
     if moved_pid is not None and _pid_effectively_alive(moved_pid):
@@ -1782,6 +1958,73 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # existing acted assertions hold; the renamed/quarantined path rides in
     # `removed_dir` for --json correlation (plan-review cycle 2).
     return {**record, "removed_dir": renamed}
+
+
+def _open_marker_no_follow(dir_fd: int) -> int | None:
+    """Open REAPER_OWNED_MARKER inside ``dir_fd`` for writing, never
+    following a symlink and never truncating through a foreign link (#4098).
+
+    Returns a writable fd for a REGULAR, singly-linked file, or None (fail
+    closed). The open is `O_WRONLY|O_CREAT|O_NOFOLLOW|O_NONBLOCK` and
+    deliberately does NOT carry `O_TRUNC`: truncation happens only AFTER the
+    `fstat` gate, because the truncation itself is the primitive. A hardlink
+    planted at the marker name is a REGULAR file that would pass an
+    `O_TRUNC` open and truncate a file outside the candidate dir; the
+    `st_nlink == 1` gate refuses it (the attacker's link, and only that link,
+    is then removed with a `dir_fd`-anchored `unlink`). A stale marker left by
+    this module is singly-linked and is truncated in place via `ftruncate`.
+
+    A planted symlink is REFUSED (`ELOOP` — `O_NOFOLLOW` protects the
+    basename); a FIFO cannot block (`O_NONBLOCK`); a directory is `EISDIR`.
+    Anything the open lands on that fails the gate is removed with the
+    `dir_fd`-anchored `unlink` (which never follows a trailing symlink) and
+    retried once; a re-plant in that window, or an entry that cannot be
+    unlinked (a directory occupant, an unwritable dir), fails closed.
+
+    The `dir_fd` pins the parent, so the write cannot be redirected by a
+    swapped parent directory either — `O_NOFOLLOW` alone protects only the
+    basename (CVE-2018-6954 is the precedent for skipping `openat`).
+
+    NOTE: this is strictly TIGHTENING, not "no semantic change". A candidate dir
+    whose marker is ABSENT — or whose occupant must be `unlink`ed first — must be
+    writable, so a readable-but-not-writable or unreadable dir now abandons the
+    record instead of writing through it. A STALE REGULAR `nlink == 1` marker in
+    such a dir is still overwritten (`O_CREAT` on an existing owned file needs no
+    write permission on the directory). Fail-closed, and unreachable for
+    redislite/mkdtemp dirs.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    for _attempt in (0, 1):
+        try:
+            fd = os.open(REAPER_OWNED_MARKER, flags, 0o600, dir_fd=dir_fd)
+        except OSError:
+            fd = None
+        if fd is not None:
+            try:
+                st = os.fstat(fd)
+                usable = stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+            except OSError:
+                usable = False
+            if usable:
+                # Truncate only now, through the verified fd. A short write is
+                # impossible for a 14-byte payload on a regular file, but the
+                # return is checked rather than trusted.
+                try:
+                    os.ftruncate(fd, 0)
+                    os.lseek(fd, 0, os.SEEK_SET)
+                except OSError:
+                    os.close(fd)
+                    return None
+                return fd
+            os.close(fd)
+        # Occupied by something this must neither follow nor keep: a symlink
+        # (ELOOP), a FIFO (opened non-blocking above), a directory (EISDIR),
+        # or a HARDLINK (regular but nlink > 1).
+        try:
+            os.unlink(REAPER_OWNED_MARKER, dir_fd=dir_fd)
+        except OSError:
+            return None
+    return None
 
 
 def _kill(pid: int, sigterm_timeout: float) -> None:
@@ -1817,9 +2060,18 @@ _LOCK_PATH = os.path.join(
     # target is tempfile.gettempdir() (machine-global on Linux) — a per-HOME
     # lock means two sweepers with different $HOME (parallel agents/users/
     # containers on a shared box) each flock a DIFFERENT inode and both run
-    # overlapping sweeps, reaping each other's live sockets. Same convention
-    # as ACTIVE_SUITES_DIR above (both under <tempdir>/.tortoise/).
-    os.path.realpath(tempfile.gettempdir()), ".tortoise", ".reaper.lock")
+    # overlapping sweeps, reaping each other's live sockets. Same tempdir root
+    # as ACTIVE_SUITES_DIR above; see the #4098 note below for why the lock DIR
+    # diverges from that sibling's `<tempdir>/.tortoise`.
+    #
+    # #4098: the lock DIR is uid-scoped (`.tortoise-reaper-<euid>`). On a
+    # shared `/tmp` any local uid can pre-create a fixed name, and the
+    # ownership gate below then fails closed forever — a permanent,
+    # zero-privilege denial of the victim's reaper. Because the tmpdir is
+    # ours on macOS and the file is 0700, the pre-existing
+    # `<tempdir>/.tortoise` is left to ACTIVE_SUITES_DIR.
+    os.path.realpath(tempfile.gettempdir()),
+    f".tortoise-reaper-{os.geteuid()}", ".reaper.lock")
 TIMEOUT_DEFAULT = 120
 
 
@@ -1830,21 +2082,150 @@ class _ReaperLock:
         self.path = path
         self._fh = None
 
+    def _close_fh_quietly(self) -> None:
+        # #4098 review: `close()` can itself raise (EINTR/EIO, plausible
+        # right after a failed truncate/flush on a struggling filesystem).
+        # Unguarded, it would REPLACE the in-flight exception and escape
+        # `acquire()` — turning a fail-closed refusal into a startup crash.
+        if self._fh is not None:
+            try:  # noqa: SIM105
+                self._fh.close()
+            except OSError:
+                pass
+        self._fh = None
+
+    def _refuse(self, reason: str, foreign_owned: bool = False) -> bool:
+        # #4098 review: close FIRST — a refusal abandons an open fh (and, on
+        # the write-failure path, a successfully-taken flock), so leaving it
+        # to refcounting is a real fd-lifetime change. `_close_fh_quietly`
+        # is null-safe and idempotent, so the non-regular path's own call
+        # cannot double-close.
+        self._close_fh_quietly()
+        # #4098 review: EVERY refusal must be LOUD. A silent `return False`
+        # is indistinguishable from "another sweeper holds the lock", and on
+        # a shared `/tmp` this path is attacker-triggerable and PERMANENT: a
+        # foreign uid can pre-create our uid-scoped name as a directory, a
+        # symlink to one, or a plain file, and the 1777 sticky bit stops us
+        # removing it — so the reaper would stop sweeping until root
+        # intervenes. Say so, and do not prescribe an action this uid cannot
+        # perform.
+        logger.warning(
+            "reaper lock unavailable (%s) at %s — refusing to lock; %s",
+            reason, self.path,
+            # #4098 review: attribute ownership ONLY where it was established.
+            # "cannot wrap the lock fd" / "not a regular file" are reachable
+            # only AFTER `st_uid == geteuid` passed on a 0700 dir, so those
+            # artifacts can only be ours — blaming a foreign uid there would
+            # be a false diagnosis of our own stale FIFO or fd failure.
+            ("this path is owned by another uid and can only be removed by "
+             "its owner or root, so sweeps are skipped until then")
+            if foreign_owned else
+            ("this uid cannot clear the cause, so sweeps are skipped until "
+             "it is fixed"))
+        self._fh = None
+        return False
+
     def acquire(self) -> bool:
         import fcntl
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        self._fh = open(self.path, "a")  # noqa: SIM115
+        # #4098 (CWE-377): the lock lives in the SHARED tempdir
+        # (`<tempdir>/.tortoise`, 1777 on Linux), so its open is the same
+        # symlink sink as the marker write — a plain `open(path, "a")`
+        # TRUNCATED an attacker-chosen file the reaper's uid can write when
+        # the lock name was planted as a symlink (and a FIFO blocked startup
+        # before the SIGALRM watchdog was armed). Never follow a link and
+        # never open a non-regular file; the sibling `index_lock.py` #280
+        # fix is the pattern (dir 0700, O_NOFOLLOW, truncate through the fd).
+        lock_dir = os.path.dirname(self.path)
+        try:
+            os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+            dir_fd = os.open(lock_dir,
+                             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            return self._refuse("cannot open the lock directory")
+        try:
+            # #4098 review: a PRE-EXISTING dir may have been created by another
+            # local uid (any local uid can `mkdir /tmp/.tortoise-reaper-<uid>`),
+            # and `fchmod` tightens the mode without changing ownership — the
+            # owner can chmod back and unlink/recreate the lock file, which
+            # would break the singleton invariant (two reapers on two inodes).
+            # Require the dir to be OURS; otherwise fail closed LOUDLY — the
+            # uid-scoped name means this needs a deliberate, targeted
+            # pre-creation, not the ordinary shared-`/tmp` case.
+            #
+            # #4098 review: `acquire()`'s contract is "return False on every
+            # failure, never raise" — the invariant `_close_fh_quietly`
+            # exists to preserve. An unguarded `fstat` here was the one
+            # remaining violation (a filesystem-level EIO reaches it).
+            try:
+                dir_uid = os.fstat(dir_fd).st_uid
+            except OSError:
+                return self._refuse("cannot stat the lock directory")
+            if dir_uid != os.geteuid():
+                return self._refuse(
+                    "the lock directory is not owned by this uid",
+                    foreign_owned=True)
+            # Best-effort tighten of a PRE-EXISTING dir. Done through the fd:
+            # chmod(2) FOLLOWS a symlink and Linux has no lchmod, so a path
+            # chmod would run before the O_NOFOLLOW gate and let a planted
+            # `.tortoise` symlink redirect the mode change (#4098 review).
+            try:  # noqa: SIM105
+                os.fchmod(dir_fd, 0o700)
+            except OSError:
+                pass
+            try:
+                fd = os.open(os.path.basename(self.path),
+                             os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
+                             dir_fd=dir_fd)
+            except OSError:
+                return self._refuse("cannot open the lock file")
+            try:
+                self._fh = os.fdopen(fd, "r+")
+            except Exception:
+                # os.fdopen does not take ownership on failure — close the
+                # raw fd itself, or it leaks. Guard the BROAD case (not just
+                # OSError) so a non-OSError from fdopen cannot leak the fd.
+                try:  # noqa: SIM105
+                    os.close(fd)
+                except OSError:
+                    pass
+                return self._refuse("cannot wrap the lock fd")
+        finally:
+            try:  # noqa: SIM105
+                os.close(dir_fd)
+            except OSError:
+                pass
+        try:
+            is_regular = stat.S_ISREG(os.fstat(self._fh.fileno()).st_mode)
+        except OSError:
+            is_regular = False
+        if not is_regular:
+            # A FIFO opens fine O_RDWR without blocking — never treat it as
+            # the lock. Closed exactly once, here; an OSError from close must
+            # not turn a fail-closed refusal into an exception.
+            self._close_fh_quietly()
+            return self._refuse("the lock path is not a regular file")
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            # #4098 review: split CONTENTION from FAILURE. `EWOULDBLOCK` is
+            # the ordinary "another sweeper holds the lock" exit and must
+            # stay SILENT (a warning here would fire on every concurrent
+            # run). Every OTHER errno — EINTR/EIO from flock, or any failure
+            # later in this block — is a real fault that must be LOUD, or it
+            # is indistinguishable from contention.
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                self._close_fh_quietly()
+                return False
+            return self._refuse(f"cannot take the lock: {exc}")
+        try:
             self._fh.seek(0)
             self._fh.truncate()
             self._fh.write(str(os.getpid()))
             self._fh.flush()
-            return True
-        except OSError:
-            self._fh.close()
-            self._fh = None
-            return False
+        except OSError as exc:
+            # A full/read-only tempfs (ENOSPC/EDQUOT/EIO) reaches here.
+            return self._refuse(f"cannot write the lock file: {exc}")
+        return True
 
     def release(self) -> None:
         import fcntl
@@ -1853,8 +2234,11 @@ class _ReaperLock:
                 fcntl.flock(self._fh, fcntl.LOCK_UN)
             except OSError:
                 pass
-            self._fh.close()
-            self._fh = None
+            # #4098 review: guarded, like every other close. `close()` can
+            # raise (EINTR/EIO) and `release()` runs from `main()`'s finally
+            # while `_run_sweep`'s exception may be in flight — a bare close
+            # would replace it and escape main() as an uncaught traceback.
+            self._close_fh_quietly()
 
 
 def _parse_timeout(cli_value: str | None) -> int:
@@ -1954,22 +2338,21 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
     the probe is authoritative) and remove only dead ones. Same budget
     CONSTANT as reap()'s stale branch but a SEPARATE counter — one sweep
     can remove up to 2xSTALE_SWEEP_BUDGET (plan-review cycle 2). Scanned
-    via the C-speed `find` walk (#1642 FIX 2 — no longer gated on the
-    tempdir entry count); symlinked entries are skipped (mirror discover
-    pass 2).
+    via the shared depth-1 `os.scandir` primitive (#4068, same primitive as
+    discover pass 2 — the scan is NOT namespace-scoped because a quarantine
+    rename preserves the dir's ephemeral name anyway, but the scan itself
+    is detection-oriented and every removal below is re-verified by
+    `_is_ephemeral_dir`); symlinked entries are skipped (mirror discover
+    pass 2). A truncated scan logs a WARNING and this pass converges on the
+    next sweep.
     """
     tmpdir = _real_gettempdir()
-    try:
-        out = subprocess.run(
-            ["find", tmpdir, "-maxdepth", "1", "-name",
-             f"*{STALE_QUARANTINE_SUFFIX}*"],
-            capture_output=True, text=True, timeout=SOCKET_WALK_TIMEOUT,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        logger.warning("quarantine find walk failed/timeout for %s", tmpdir)
-        return []
+    scan = _iter_candidate_dirs(
+        tmpdir,
+        predicate=lambda name: STALE_QUARANTINE_SUFFIX in name,
+        deadline=time.monotonic() + SOCKET_WALK_TIMEOUT)
     removed = []
-    for q in out.stdout.splitlines():
+    for q in scan.dirs:
         if len(removed) >= budget:
             break
         if os.path.islink(q) or not os.path.isdir(q):
@@ -1983,13 +2366,13 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
         if not _is_ephemeral_dir(os.path.realpath(q),
                                  os.path.realpath(tempfile.gettempdir())):
             continue  # containment re-verify (defense in depth)
-        qsock = os.path.join(q, "redis.socket")
+        qsock = os.path.join(q, SOCKET_MARKER)
         # Guard-8 equivalent (cycle-3 P1): a LIVE backlog-full server
         # answers ECONNREFUSED ('dead') — the moved pidfile is the
         # discriminator. A guard-8-preserved quarantine left by reap() in
         # the SAME sweep must never be rmtree'd here.
         try:
-            qpid = int(Path(os.path.join(q, "redis.pid")).read_text().strip())
+            qpid = int(Path(os.path.join(q, PIDFILE_MARKER)).read_text().strip())
         except (OSError, ValueError):
             qpid = None
         if qpid is not None and _pid_effectively_alive(qpid):
@@ -2026,14 +2409,17 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
         _cleanup_tempdir(q)
         removed.append(q)
         logger.warning("removed quarantined dir %s", q)
-    return removed
+    out = _ScanAwareList(removed)
+    out.complete = scan.complete
+    return out
 
 
 def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                jobs: int = 8, kill_pacing: float = KILL_PACING_DEFAULT,
                sweep_pid_files: bool = True,
                sigterm_timeout: float = 10.0,
-               deadline: float | None = None) -> list[dict]:
+               deadline: float | None = None,
+               full_scan: bool = False) -> list[dict]:
     """Discover + classify + reap; return acted-upon records.
 
     deadline: optional monotonic-clock cutoff threaded into reap() — a
@@ -2054,8 +2440,15 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     NOTE: the reaper singleton lock is held by main() (CLI); direct callers
     (tests, conftest session hygiene) run unlocked — pre-existing contract,
     unchanged by #1383.
+
+    #4068: `full_scan` is forwarded unconditionally; completeness is read
+    # FAIL-CLOSED through `_as_scan_aware`, so an unknown discovery result
+    # (a monkeypatched seam returning a plain list) can never read as a
+    # finished scan. The returned list is a `_ScanAwareList` carrying
+    # `.complete` (False = at least one bounded scan returned a partial set).
     """
-    records = discover(jobs=jobs)
+    records = _as_scan_aware(discover(jobs=jobs, full_scan=full_scan))
+    discovery_complete = records.complete
     # #1383: reapable classes are candidate (live orphan -> kill) and
     # stale_socket (dead-pid leftover dir -> guarded rmtree). Phase 1
     # resolves stale-pid records before any action.
@@ -2075,9 +2468,14 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                  sigterm_timeout=sigterm_timeout, deadline=deadline)
     # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
     try:
-        for q in _sweep_quarantine_dirs(dry_run=dry_run):
+        quarantine = _sweep_quarantine_dirs(dry_run=dry_run)
+        for q in quarantine:
             acted.append({"pid": None, "quarantine_dir": q,
                           "classification": "stale_quarantine"})
+        # #4068: the quarantine scan is a SECOND bounded scan on the same
+        # sweep — its truncation must not be hidden behind pass 2's flag.
+        discovery_complete = discovery_complete and getattr(
+            quarantine, "complete", False)
     except Exception as exc:  # never fail the sweep over hygiene
         logger.warning("quarantine sweep failed: %s", exc)
     # #1231 T3: stale per-session index-lock pid files (crash leftovers).
@@ -2091,7 +2489,9 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                               "classification": "stale_pid_file"})
         except Exception as exc:  # never fail the sweep over pid hygiene
             logger.warning("index-pid sweep failed: %s", exc)
-    return acted
+    out = _ScanAwareList(acted)
+    out.complete = discovery_complete
+    return out
 
 
 def _zero_client_state_read() -> dict:
@@ -2416,12 +2816,22 @@ def main(argv: list[str] | None = None) -> int:
                              "scheduled-cron mode)")
     parser.add_argument("--json", action="store_true",
                         help="Machine-readable JSON output")
+    parser.add_argument("--full-scan", action="store_true",
+                        help="Restore the pre-#4068 UN-SCOPED tempdir "
+                             "enumeration (default is scoped to the "
+                             "ephemeral namespace). It can reach nothing an "
+                             "earlier release could not, and cannot widen "
+                             "an rmtree (containment is re-derived at every "
+                             "removal); the scheduled sweep stays scoped. "
+                             "[env TORTOISE_REAPER_FULL_SCAN]")
     parser.add_argument("--timeout", type=str, default=None,
                         help=f"Sweep timeout in seconds (default "
                              f"{TIMEOUT_DEFAULT}; env TORTOISE_REAPER_TIMEOUT)")
     args = parser.parse_args(argv)
 
     timeout = _parse_timeout(args.timeout)
+    full_scan = args.full_scan or _env_truthy(
+        os.environ.get("TORTOISE_REAPER_FULL_SCAN"))
 
     # Singleton lock: second concurrent instance exits 0 with message.
     lock = _ReaperLock()
@@ -2440,7 +2850,8 @@ def main(argv: list[str] | None = None) -> int:
         acted = _run_sweep(dry_run=not args.no_dry_run,
                            batch_size=args.batch_size,
                            only_safe=args.only_safe,
-                           jobs=args.jobs)
+                           jobs=args.jobs,
+                           full_scan=full_scan)
         signal.alarm(0)
     finally:
         lock.release()
@@ -2462,17 +2873,90 @@ def main(argv: list[str] | None = None) -> int:
         killed = sum(1 for r in acted if r.get("classification") == "candidate")
         stale = sum(1 for r in acted if r.get("classification") in (
             "stale_socket", "stale_quarantine", "stale_pid_file"))
+        # #4068: a bounded scan that returned a partial set must never read
+        # as a finished sweep (the silent-[] failure class this change
+        # removes).
+        truncated = ("" if getattr(acted, "complete", True)
+                     else " — SCAN TRUNCATED (partial discovery)")
         print(f"[reaper] sweep complete: {len(acted)} acted "
-              f"({killed} killed, {stale} stale cleaned)")
+              f"({killed} killed, {stale} stale cleaned){truncated}")
     return 0
 
 
+# Dependency-free mirror of `tortoise.env_truthy.TRUTHY` (#4097). This module has NO
+# intra-package module-level imports by design (see the module docstring), so it
+# cannot import the shared leaf without dragging in `tortoise/__init__.py` ->
+# redislite. A module-level delegate was measured to break the standalone import
+# purity pinned by
+# tests/test_env_truthy.py::test_reaper_standalone_import_stays_dependency_free;
+# the mirror is held in lockstep with the contract by
+# tests/test_env_truthy.py::test_reaper_mirror_matches_the_contract.
+_ENV_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_truthy(raw: str | None) -> bool:
+    """Truthy env value: {1,true,yes,on}, case-insensitive.
+
+    #4068: `None` (unset) is False. Mirrors `tortoise.env_truthy.is_truthy` (see
+    `_ENV_TRUTHY` above); the `--full-scan` flag takes precedence over the env var
+    (the `_parse_timeout` CLI > env > default shape).
+    """
+    return raw is not None and str(raw).strip().lower() in _ENV_TRUTHY
+
+
 def _lock_holder_pid() -> str:
+    # #4098: never read through a planted symlink at the lock path, and never
+    # BLOCK on one — this runs in main() BEFORE `signal.alarm(timeout)` is
+    # armed, so `open(FIFO, O_RDONLY)` without O_NONBLOCK would hang reaper
+    # startup forever with the watchdog disabled. A non-regular path is
+    # "unknown": it can never be the lock this module wrote.
+    #
+    # #4098 review: `O_NOFOLLOW` alone protects only the BASENAME, so a
+    # planted symlink at the lock DIR would still redirect the read (log
+    # spoofing) and could serve an arbitrarily large file before the
+    # watchdog is armed. Anchor on the dir fd and address the lock RELATIVE
+    # to it, exactly like `_ReaperLock.acquire` — and cap the read, and
+    # require the dir to be ours (a foreign-owned dir's contents are
+    # attacker-authored).
+    lock_dir = os.path.dirname(_LOCK_PATH)
     try:
-        with open(_LOCK_PATH) as fh:
-            return fh.read().strip() or "unknown"
+        dir_fd = os.open(lock_dir,
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return "unknown"
+    try:
+        try:
+            if os.fstat(dir_fd).st_uid != os.geteuid():
+                return "unknown"
+        except OSError:
+            return "unknown"
+        try:
+            fd = os.open(os.path.basename(_LOCK_PATH),
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600,
+                         dir_fd=dir_fd)
+        except OSError:
+            return "unknown"
+        try:
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return "unknown"
+            except OSError:
+                return "unknown"
+            try:
+                chunk = os.read(fd, 64)   # a pid, not a file
+            except OSError:
+                return "unknown"
+            return chunk.decode("utf-8", "replace").strip() or "unknown"
+        finally:
+            try:  # noqa: SIM105
+                os.close(fd)
+            except OSError:
+                pass
+    finally:
+        try:  # noqa: SIM105
+            os.close(dir_fd)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

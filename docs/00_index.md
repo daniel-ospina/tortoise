@@ -13,19 +13,23 @@ aboutObjects: tortoise
 
 | Area | Path |
 | --- | --- |
-| Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
+| Ask lane — **EVAL-ONLY** (`tortoise/ask_lane.py`, #1987/#3849: no REST route, no SDK method, no MCP tool) | `docs/product/answer-surface.md` |
+| **MCP tool surface + public SDK methods** — the curated list: every tool and public method, what it does, what uses it, a recommendation and its rationale; the approved baseline (`config/surface-manifest.yml`) and the gate that blocks unapproved expansion (#3863) | `docs/product/mcp-sdk-surface.md` |
+| **Canonical MCP tool list** — the owner-approved target surface (23 tools), read/write-separated, with the removals, the design decisions and the open items gating the cutover (#3863) | `docs/product/canonical-mcp-tools.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
+| **Ship-test instrument** — the per-deploy clean-browser onboarding walk (signup → wizard → connected only when the server observed it) + the observation artifact (#3806) | `docs/runbook/3806-ship-test-instrument.md` |
 | Hosted platform **infra runbook** — provisioning, secrets rotation, rollback, health checks, machine topology + autostop policy (§6), and the out-of-band availability watchdog with self-healing + alert dedupe (§7) (#2850) | `docs/infra-runbook.md` |
 | Temporal measurement runbook + gate output (2×2 attribution + widening ablation, #2578) | `docs/runbook/2578-temporal-measurement.md` |
 | Temporal retrieval diagnosis + oracle ceiling (42/52 = 81%, #2976/#2978) — evidence | `docs/runbook/2578-oracle-ceiling.jsonl` · `docs/research/2026-09-11-subgraph-retrieval-research.md` |
 | **A/B/C context-assembly pre-registration** — verbatim vs epistemic subgraph vs union (#2976/#2978/#2683) | `docs/experiments/2026-09-11-abc-context-assembly-experiment.md` |
 | Competitor analysis — 14 profiles incl. the four-epistemic-primitives matrix (Kumiho/Cognee/Mem0/HippoRAG/GraphRAG/Emergence/Letta) | `product/competition/_analysis.md` · `product/competition/_index.md` |
 | Decision evidence — #2952 (degraded retrieval) + #2976 (temporal retrieval) from competitors (Hindsight TEMPR temporal leg, Zep bi-temporal, supermemory "dreaming") | `docs/research/2026-09-11-decisions-2952-2976-competitor-evidence.md` |
-| Auth architecture — standard patterns vs Tortoise (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
+| Auth architecture — **current: server-side BFF + HttpOnly `__Host-session` on `app.premiselabs.co` (#4054)**; historical client-side head-gate design (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | CI audit — measured runner-cost/lane analysis, read-only (2026-09-02) | `docs/research/2026-09-02-ci-audit.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |
+| Activation scorecard runbook — beta-readiness lane B7: which sessions activate vs merely sign up, the measurable-vs-blocked legs, cohort roll-up, measured production baseline, deploy requirement | `docs/runbook/b7-activation-scorecard.md` |
 | Ontology | `docs/ONTOLOGY.md` |
 | Registry graph schema (incl. Graph entity + scoped APIKey + quota — epic #2083) | `docs/registry-graph-schema.md` |
 | Definitions — account layer vs in-graph Subjects ("organization account" vocab note, #2311) | `docs/registry-graph-schema.md` (§ Definitions) · `docs/ONTOLOGY.md` §5/§6 |
@@ -41,10 +45,12 @@ aboutObjects: tortoise
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
 | E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |
+| Read-path latency profile — phase-by-phase measurement of the ask lane, store round-trips, and the captured-turn embedding census (WAVE-R / M1, #4194) | `docs/research/2026-09-19-m1-read-path-latency-profile.md` |
 | Temporal reasoning in competitor agent-memory systems (2026-09-02) | `docs/research/2026-09-02-temporal-reasoning-competitors.md` |
 | Temporal retrieval admission trace — where #2578's temporal evidence is lost (#2976, 2026-09-11) | `docs/research/2026-09-11-2976-temporal-retrieval-trace.md` |
 | Kinds classification-later deep research (#1695) | `docs/research/2026-08-26-classification-later.md` |
 | Reaper race scoping/research (#1658) | `docs/scoping/2026-08-24-1658-reaper-race-scoping.md` |
+| Reaper destruction-path threat model on a shared `$TMPDIR` — demonstrated CWE-377 symlink-write + attacker-chosen kill/rmtree, and the escalated provenance-guard decision (#4098) | `docs/scoping/2026-09-18-4098-tmpdir-hardening-scoping.md` |
 | Test (b) lane 403/export-delete scoping (#2090) | `docs/scoping/2026-09-01-2090-test-b-lane-scoping.md` |
 | Test B-wave shared-fixture scoping (#2127) | `docs/scoping/2026-09-02-2127-b-waves-scoping.md` |
 | Ingest contract (`tortoise_ingest` / `sdk.ingest` bundle API) | `docs/INGEST_CONTRACT.md` |

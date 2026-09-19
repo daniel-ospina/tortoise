@@ -41,6 +41,67 @@ later), we need a clear license grant from every outside contributor. See the
 5. **CI must be green.** The project's checks (lint, tests, drift gates) run
    on every PR.
 
+## The MCP tool surface and public SDK methods cannot grow by accident
+
+Adding an entry to `TOOL_REGISTRY` in [`tortoise/tool_registry.py`](tortoise/tool_registry.py) does not
+just register a tool — it **expands what every agent can see**. That surface grew to 99 MCP tools and
+152 public SDK methods without anyone deciding it should, so it is now gated.
+
+The gate: **`tools/surface-guard.py`** (CI job `surface-guard`, part of the required `python-ci-gate`)
+compares the live declaration against the approved baseline in
+[`config/surface-manifest.yml`](config/surface-manifest.yml) and **fails closed** on any added tool,
+any added public SDK method, any removal, any **changed SDK binding** (which method a tool fronts), any
+change to how a tool is served (HTTP vs stdio-only), a registry whose entry count no longer matches the
+baseline (a duplicate name a name comparison cannot see), or an exemption that has become reachable. A
+missing, unreadable, or malformed baseline is also a failure, as is an unreadable served-surface
+declaration — the guard must never skip a check and still report success.
+
+**"Added tool" means the advertised surface, not just the registry.** A tool can reach agents without
+ever entering `TOOL_REGISTRY`, by three routes the guard checks separately, because each is invisible
+to the others:
+
+1. **Registered on the server** — a `@mcp.tool()`-decorated function in `tortoise/mcp_server.py`, or a
+   direct `mcp.add_tool(...)`. Caught by enumerating the served set through **both** the pre-transform
+   aggregate and the protocol `tools/list` path and reding on anything undeclared in **either**; each
+   view alone has a blind spot, since the pre-transform view misses transforms and the protocol view
+   applies auth/visibility filtering.
+2. **Injected by a server-level transform** (`mcp.add_transform`, whose `list_tools` appends a tool —
+   `mcp_server.py` already uses that API for `_HTTPToolFilter`). Caught by the **`allowed_transforms`**
+   check, which is derived from the `add_transform` call sites in `mcp_server.py` and reds on any
+   transform beyond the approved set.
+3. **Replacing an approved tool's implementation** — `mcp.add_tool(fn)` where `fn` reuses an approved
+   name silently REPLACES it while leaving the name set and the entry count identical. Caught by the
+   per-row **`served_from`** fingerprint, which records the **code object** behind each tool
+   (`co_filename:sha256` over the code object's bytecode, names and constants) — deliberately not
+   `__module__`/`__qualname__`, which are writable strings a shadow implementation can simply copy
+   from the tool it replaces. `co_firstlineno` is deliberately **not** part of the identity: a pure
+   code move is not a change to the served implementation.
+
+**Scope, stated plainly.** The gate constrains the *registration routes* — what `TOOL_REGISTRY`
+declares, what the server registers, and what the transforms do. It is **not** a security boundary
+against someone who edits `mcp_server.py` and `tools/surface-guard.py` together; a party who can edit
+the guard can defeat any gate, and the control for that class is required review, not this check. What
+the gate guarantees is that the surface cannot grow as a **side effect** — silently, in a diff nobody
+reads, through a route nobody chose.
+
+**To propose an addition**, in the same PR:
+
+1. Change the registry.
+2. `uv run python tools/surface_manifest.py cut` — folds the change into the baseline and marks
+   `approval_status: pending-owner-approval`.
+3. `uv run python tools/surface_manifest.py render` — regenerates
+   [`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md).
+4. Get the owner's approval and record it **per row** in `approval:` — a PR number and a principal,
+   never a bare `yes` or a date. This applies to **every** row, MCP tools and SDK methods alike; once
+   `approval_status: approved` is set, a row without a recorded approval is a red build. The
+   `exemption: true` flag is **not** an approval carve-out — it records a method deliberately outside
+   the reachable set, and the guard reds if such a method later becomes reachable.
+
+**A red `surface-guard` is the gate working, not a bug.** Do not resolve it by editing the baseline to
+match the registry — that is precisely the unapproved expansion the check exists to catch. The curated
+list, including what each tool does, what uses it, and the recommendation for it, lives in
+[`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md).
+
 ## Contribution license note
 
 This project follows the pattern used by MariaDB (the BSL originators) for

@@ -1,18 +1,48 @@
 ---
-title: "Tortoise — Canonical Ontology v3.12"
+title: "Tortoise — Canonical Ontology v3.13"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-15
+updated: 2026-09-18
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.12
+# Tortoise — Canonical Ontology v3.13
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.13 (2026-09-18, issue #3980 — the `valid_from` kwarg precondition):**
+> - §4.7/§4.1 (`validTo`): the resolution order is unchanged
+>   (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`),
+>   but the kwarg is now a **claim** rather than an unconditional input. When the
+>   successor carries a stored `validFrom` the two must be **parseable**
+>   timestamps naming the **same instant** (compared by instant via
+>   `_created_sort_key` — the measure `restore_point_at`'s `_covers` uses), else
+>   `supersede_point` raises `ValueError` **before any mutation**. The refusal
+>   exists because a disagreeing kwarg silently broke contiguity in either
+>   direction: an EARLIER kwarg left a **gap** (a query instant covered by
+>   neither window, so `restore_point_at` reports honest absence for a period
+>   that *was* covered) and a LATER kwarg left an **overlap** (two covering
+>   candidates ⇒ every instant inside it reads `ambiguous`). The kwarg remains
+>   the **sole** source when the successor carries no stored `validFrom` (an
+>   undated successor) — that half of D2 is unchanged. The comparison keys the
+>   value the write **persists**, `str(valid_from)`, because a numeric epoch
+>   parses as an instant but its `str()` does not — a distinction that decides
+>   whether the predecessor's `validTo` is orderable by `_covers` at all.
+>   A date-only value parses as **local** midnight, so the guard's verdict for a
+>   date-only-vs-offset-aware pair follows `_covers`'s own host-dependence
+>   (issue **#3982**, which owns the date-only semantics decision). The guard's
+>   **presence** predicate is also the read path's (`stored_vf is not None`), not
+>   the resolution branch's truthiness: a falsey-but-present stored `validFrom`
+>   is a real window start to `_covers` (`0` keys as the parseable epoch-0
+>   instant), so a kwarg against it is refused rather than written unchecked.
+>   The **no-kwarg** falsey case keeps the pre-existing truthiness fallback —
+>   that residual read/write divergence is tracked in **#3985**. Deliberate
+>   departure from the #1538 plan's unconditional "explicit `valid_from` kwarg
+>   wins" pin — recorded on #1538.
 >
 > **Changelog v3.12 (2026-09-15, issue #3642 — declared temporal model):**
 > - §4.7: rewritten as the canonical statement of the temporal model — two
@@ -179,6 +209,9 @@ doc_status: live
 >   jobToBeDone/valueProposition) → objectKinds.
 
 **Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case) — e.g. `doc_status`, `file_hash`, `is_episodic`, `c_cal`, `story_arc`, `passes_frequency_gate`, `provenance_spans` (v3.6, #909).
+
+---
+CRITICAL RULE: no modification to this file is allowed without explicit approval of the exact changes by Daniel Ospina.
 
 ---
 
@@ -433,7 +466,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` | ISO8601 | — | `prov:generatedAtTime` | ⚠️ | Valid-time **start** — populated by the date-carrying write paths (the hosted commit path sets it from the payload `when`; mining W-4 from the session date). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`) falls back to the **wall clock** when the session carries no date, so a clock-stamped start is possible though not the intent; **absent ⇒ open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp. §4.7 |
-| `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` stamps `now` (no successor ⇒ no contiguity). §4.7 |
+| `validTo` | ISO8601 | — | `prov:invalidatedAtTime` | ✅ | Valid-time **end** — `supersede_point` stamps the successor's `validFrom` **when it carries one**; an undated successor falls back to its `createdAt`, then to `now` (monotone — never a gap), so the windows are exactly contiguous **only for a dated successor**. `invalidate_point` stamps `now` (no successor ⇒ no contiguity). A `valid_from` **kwarg** is refused when it disagrees with a successor that **carries** a stored `validFrom` (same instant required, else `ValueError` before any write — §4.7). §4.7 |
 | `expiredAt` | ISO8601 | — | — | ✅ | Transaction-time expiry — **when our record stopped being current** (termination), not *why* it did. Written by both `supersede_point` (replaced by a successor) and `invalidate_point` (withdrawn) — **the timestamp alone cannot tell the two apart**. Supersession is a separate fact: Points carry it as `status='superseded'` (Point has no `supersededAt`); the `outdated` flag + `CORRECTS` edge are shared with `invalidate_point` and do **not** distinguish the two. See §4.7. |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
 | `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Indexed via the plain `:Point(lastDreamedAt)` index, created idempotently at init on ALL engines — `is_operator` is never indexed (#522 embedded stale bool type table; #3154 docker/server `GRAPH.COPY` drops the `false` postings of a copied boolean RANGE index, zeroing `is_operator = false` on copies whose index set carries it, and leaving the copy destination unable to rebuild it) |
@@ -549,7 +582,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
 | start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). The legacy mining W-4 post-pass (`ConversationMiner._temporal_wire`, mining.py) falls back to the **wall clock** (`_now()`) when the session carries no `date`/`startedAt`, so a clock-stamped start is a real, reachable write — though not the intent. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start, and an **absent** `validFrom` means an **open/unbounded start** (`restore_point_at`). The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
-| end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity) |
+| end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg stays the **sole** source for an undated successor. `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity) |
 
 > **Point's `when` is not a second valid-time slot.** `when` (§4.1) is the
 > **occurrence-date input** — the payload-level anchor the hosted commit path
@@ -1018,37 +1051,6 @@ subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
   `reliability_derived_at`) — the derivation is the truth, the cache is a
   performance artifact.
 
----
-
-## §11.5 Object Confidence — Compositional Projection (spec — proposed, not yet implemented)
-
-> **Status:** PROPOSED design — no code implements this projection yet (landed with the
-> #2238 problem-family manifests, which declare the composition-eligible relations).
-> Follow-up issue filed for the read-time projection. Do not treat as shipped behavior.
-
-Object confidence is derived at read time — a **derived value that may be cached but is
-never authoritative**, per the §11 v3.2 cache doctrine (the same doctrine Object.status
-follows: §2/§4.3 describe a write-through fold cache, NOT a query-time projection) — as
-the **compensating mean** of two evidence sets:
-
-1. the mean EP posterior of Points `aboutObject → O` (the §11 reputation/derivation
-   family — the epistemic base already computed for subjects extends naturally), and
-2. the derived confidence of O's parts via declared **composition channels** —
-   pack relations carrying `semantics: hasPart` (currently an intent annotation on
-   relations: `semantics` is NOT yet validated or read by any code), e.g.
-   `(O)-[:hasPart]->(C)` for dev's theme → epic decomposition:
-   `{ confidence(C) : (O)-[:hasPart]->(C) }`.
-
-Propagation flows **child → parent** (reverse traversal of the declared edge),
-recursive over the composition DAG with fixpoint iteration (reusing EP convergence).
-A drop in any child lowers the parent, but the mean is compensating — *"unless
-another child rises"*. v1: composition channels only; signed channels (e.g.
-`competesWith`) deferred — note `mechanism: NAND` remains an EPISTEMIC operator
-between Points (§3.1 operator table), not an object-relation sign.
-
-Objects remain nouns — no object-level operators. The projection only walks
-structural edges at read time; the epistemic layer (Points) is unchanged and is
-the bottom of the recursion (leaf confidence = mean EP of attached points).
 
 ---
 

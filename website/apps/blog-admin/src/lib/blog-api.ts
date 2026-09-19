@@ -315,8 +315,10 @@ export async function purgePostCache(slug: string): Promise<void> {
   if (existing) return existing;
   const run = (async () => {
     try {
-      // #3501: no token to attach — the HttpOnly session cookie rides along on
-      // same-origin requests. Attaching a bearer token here was the exposure.
+      // #3501/#4171: no token to attach — the HttpOnly `__Host-session` cookie
+      // rides along on this same-origin request, and the app-origin /blog/api
+      // proxy attaches the server-minted credential upstream. Attaching a bearer
+      // token here was the exposure.
       await fetch('/blog/api/purge', {
         method: 'POST',
         credentials: 'same-origin',
@@ -334,7 +336,8 @@ export async function purgePostCache(slug: string): Promise<void> {
 }
 
 // ── AI generation (#1861 generate-seo, #1863 generate-cover) ─────────────
-// Server-side only (admin-gated); the editor sends the user's access token.
+// Server-side only (admin-gated /blog/api/*, reached through the app-origin
+// same-origin proxy #4171 — the browser never holds the credential).
 // Fail-open for the caller: generation errors surface as thrown errors the
 // editor catches (toast) — generation never blocks save.
 

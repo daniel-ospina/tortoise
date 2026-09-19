@@ -192,12 +192,14 @@ def _fly_check_budget_proxy_s() -> float | None:
     # as a /health/ready budget proxy would be a different quantity entirely
     # (and smaller than the ready worst case, so it cannot serve as a ceiling).
     # There is consequently NO HTTP-check budget left to compare against here.
-    # The deferred top-level ``[checks.loop_liveness]`` does NOT restore one:
-    # it is a loop-liveness check (fly.toml documents its timeout as 5s, below
-    # the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
+    # The top-level ``[checks.loop_liveness]`` (shipped #3447) does NOT restore
+    # one: it is a loop-liveness check (fly.toml documents its timeout as 5s,
+    # below the ~11.6s sum), it is a TOP-LEVEL ``[checks]`` entry rather than a
     # ``services[0].http_checks`` one, and this reader does not consume it. The
     # cross-endpoint bound now lives in ``READY_WORST_CASE_BUDGET_S``, and the
-    # caller's else branch fails closed if any top-level ``[checks]`` appears.
+    # caller's else branch MODELS that one entry explicitly (identity, bounds,
+    # and that it does not feed the ceiling) while still failing closed on any
+    # OTHER top-level ``[checks]`` entry.
     if "http_checks" not in svc:
         return None
     try:
@@ -248,7 +250,9 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
     The bound now lives on each ``HealthProbe`` rather than in a per-handler
     ``wait_for``, so pin BOTH the single-source-of-truth equality (the signature
     default IS the shared module constant) AND the ordering property (it clears
-    the DB probes' statically-known total), plus each plane's fail-closed flag
+    the DB probes' loose outer-alignment bound — ``PROBE_DB_TOTAL_TIMEOUT`` is
+    deliberately an OVER-ESTIMATE of the probes' real total, NOT that total —
+    plus the nominal SDK-acquisition budget), plus each plane's fail-closed flag
     and the liveness refresher's alignment. ``_READY_PROBE_TIMEOUT_S`` is gone
     with the mechanism it bounded; a reintroduced per-handler literal would be
     an unreasoned second source of truth.
@@ -272,15 +276,17 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
         f"PROBE_HARD_TIMEOUT ({PROBE_HARD_TIMEOUT}s), not a hand-typed literal "
         f"(got {default}s)"
     )
-    # (2) ORDERING PROPERTY. The default must clear the DB probes'
-    # statically-known total (probe_db's two-attempt ceiling PLUS the nominal
-    # SDK-acquisition budget). Necessary but NOT sufficient: the embedded
-    # acquisition prefix is unbounded, so this is a best-effort alignment, not
-    # a proven invariant (see monitoring.PROBE_MAX_SUPERSEDES).
+    # (2) ORDERING PROPERTY. The default must clear the DB probes' loose
+    # outer-alignment bound (``PROBE_DB_TOTAL_TIMEOUT`` — deliberately an
+    # OVER-ESTIMATE of probe_db's real total, NOT the exact inner total — plus
+    # the nominal SDK-acquisition budget). Necessary but NOT sufficient: the
+    # embedded acquisition prefix is unbounded, so this is a best-effort
+    # alignment, not a proven invariant (see monitoring.PROBE_MAX_SUPERSEDES).
     inner_total = PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET
     assert default > inner_total, (
         f"HealthProbe's default wall bound ({default}s) does not clear the DB "
-        f"probes' statically-known total ({inner_total}s) — an omitted timeout "
+        f"probes' loose outer-alignment bound ({inner_total}s — an OVER-ESTIMATE, "
+        "not the exact total) — an omitted timeout "
         "strands a worker thread on every timeout (#2988)"
     )
     assert "_READY_PROBE_TIMEOUT_S" not in HOSTED_API.read_text(), (
@@ -307,11 +313,11 @@ def test_every_plane_probe_is_hard_bounded_and_fail_closed():
     )
     assert mod._HEALTH_PROBE._timeout > inner_total, (
         f"/health's refresher bound ({mod._HEALTH_PROBE._timeout}s) must clear "
-        f"_probe_db's statically-known total ({inner_total}s = probe_db's "
-        f"{PROBE_DB_TOTAL_TIMEOUT}s + the {PROBE_SDK_ACQUISITION_BUDGET}s "
-        "nominal SDK-acquisition budget), or it abandons a live worker on every "
-        "timeout (#2988). This is alignment, not proof: the embedded "
-        "acquisition prefix is unbounded."
+        f"_probe_db's loose outer-alignment bound ({inner_total}s = the "
+        f"over-estimate PROBE_DB_TOTAL_TIMEOUT {PROBE_DB_TOTAL_TIMEOUT}s + the "
+        f"{PROBE_SDK_ACQUISITION_BUDGET}s nominal SDK-acquisition budget), or it "
+        "abandons a live worker on every timeout (#2988). This is alignment, "
+        "not proof: the embedded acquisition prefix is unbounded."
     )
 
 
@@ -321,7 +327,8 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     Abandoning a probe does not stop its thread — ``wait_for`` cancels the
     awaitable, not the worker (CPython #87185), so the worker stays parked in
     its socket read. The defence is ordering: keep the outer bound ABOVE the
-    probe's statically-known inner bound, so the inner bound normally fires
+    probe's loose inner figure (``PROBE_DB_TOTAL_TIMEOUT`` — deliberately an
+    OVER-ESTIMATE, not the exact inner total), so the inner bound normally fires
     first and the thread returns by itself. This is a best-effort ALIGNMENT
     that reduces stranding, NOT a proven invariant — the inner worst case is
     unbounded (httpx's ``read`` is per-read; the embedded acquisition prefix
@@ -331,9 +338,9 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     and leaned on ``PROBE_MAX_SUPERSEDES`` instead. That rationale was
     overstated: the supersede counter RESETS on any live completion, so it caps
     a single wedge episode rather than the process lifetime. Both properties
-    are now asserted at once — each bound is above its own statically-known
-    inner total — AND the probe still runs on a dedicated coordinator rather
-    than the shared default pool.
+    are now asserted at once — each bound is above its own loose inner figure
+    (an OVER-ESTIMATE of the inner total, not the exact one) — AND the probe
+    still runs on a dedicated coordinator rather than the shared default pool.
 
     This test is THE canonical per-plane tripwire (the structural test above
     deliberately does not duplicate these predicates): raise a PHASE in
@@ -354,9 +361,12 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     the only external bound is the TCP replacement — whose 5s timeout is
     documented as headroom, not a latency budget, and cannot serve as a
     ceiling. When no http_check budget exists the test asserts instead that the
-    documented replacement (``[[services.tcp_checks]]``) IS present and that no
-    top-level ``[checks]`` table has appeared — so removing or altering the
-    checks block reds here rather than silently passing.
+    documented replacement (``[[services.tcp_checks]]``) IS present, that the
+    top-level ``[checks.loop_liveness]`` entry this repo now ships IS present
+    and carries its own documented bounds (and is NOT the readiness ceiling),
+    and that no OTHER top-level ``[checks]`` entry has appeared — so removing,
+    altering or shadowing the checks block reds here rather than silently
+    passing.
     """
     import httpx
 
@@ -364,16 +374,23 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     import tortoise.supabase_control as sc
     from tortoise.monitoring import PROBE_DB_TOTAL_TIMEOUT, PROBE_TIMEOUT
 
-    # Data plane: ``probe_db`` retries one TRANSIENT connect failure, so its
-    # real ceiling is PROBE_DB_TOTAL_TIMEOUT (2 x PROBE_TIMEOUT + the retry
-    # delay), NOT the bare PROBE_TIMEOUT. Bounding against the per-attempt
-    # figure looked correct (2.0 > 1.5) while actually sitting BELOW the true
-    # 3.1s inner bound — the exact inversion this test exists to prevent.
+    # Data plane: since #3143 probe_db's PLATFORM shape (no explicit
+    # allowance) has ONE caller deadline of PROBE_TIMEOUT — the #1565 retry
+    # rides the REMAINDER instead of taking a second bound — so its real total
+    # is ~PROBE_TIMEOUT. PROBE_DB_TOTAL_TIMEOUT (2 x PROBE_TIMEOUT + the retry
+    # delay) is now deliberately a LOOSE OVER-ESTIMATE kept as the
+    # outer-alignment figure a coordinator is sized ABOVE, NOT the exact inner
+    # total. The assertion still targets that loose figure on purpose: it is
+    # the STRICTER check (the readiness bound must clear the over-estimate
+    # too), so it cannot pass while the real ~1.5s total is unguarded. Bounding
+    # against the bare per-attempt figure instead is what produced the
+    # historical inversion (2.0 > 1.5 while the then-real total was ~3.1s,
+    # before #3143 made the retry ride the remainder).
     assert mod._READY_PROBE._timeout > PROBE_DB_TOTAL_TIMEOUT, (
         f"the FalkorDB readiness bound ({mod._READY_PROBE._timeout}s) must exceed "
-        f"probe_db's TOTAL bound ({PROBE_DB_TOTAL_TIMEOUT}s = 2 x {PROBE_TIMEOUT}s "
-        "+ the retry delay) or the outer bound wins the race and strands a worker "
-        "thread per timeout (#2988)"
+        f"probe_db's loose outer-alignment bound ({PROBE_DB_TOTAL_TIMEOUT}s = 2 x "
+        f"{PROBE_TIMEOUT}s + the retry delay) or the outer bound wins the race and "
+        "strands a worker thread per timeout (#2988)"
     )
 
     # Control plane: the probe request carries its OWN composed per-request
@@ -451,30 +468,108 @@ def test_each_plane_bound_sits_above_its_own_client_timeout(monkeypatch):
     else:
         # No HTTP-check budget in fly.toml (the #2850 state). Make that ABSENCE a
         # positive assertion rather than a silent skip: it may only mean the
-        # documented HTTP->TCP migration, so the replacement must be present, and
-        # deleting the whole checks block still reds here.
+        # documented HTTP->TCP migration, so the SERVICES replacement
+        # ([[services.tcp_checks]]) must be present — deleting THAT block reds
+        # immediately below. (The separate top-level [checks] block has its own
+        # fail-closed absence assertion at the end of this branch; this paragraph
+        # covers the services check only, not `[checks]`.)
         #
-        # FAIL CLOSED on a top-level [checks] table. The deferred
-        # [checks.loop_liveness] follow-up is NOT a readiness budget (fly.toml
-        # documents its timeout as 5s — below the sum — and it times loop
-        # liveness, not a request), so it can never restore this ceiling, and
-        # nothing here reads it. If it (or any other top-level check) lands, this
-        # reds so whoever adds it must wire a real deadline in deliberately
-        # instead of silently leaving the sum unbounded.
+        # 2026-09-17 (#3447): the top-level `[checks.loop_liveness]` entry the
+        # old guard failed closed on has LANDED. A flat `"checks" not in _cfg`
+        # would now forbid the shipped config outright; widening it to "any
+        # top-level table is fine" would delete the guard. Instead MODEL the
+        # known entry explicitly: assert its identity and its bounds, and assert
+        # it cannot feed the readiness ceiling — any OTHER top-level check still
+        # reds, so a future unmodelled `[checks]` entry cannot escape this
+        # analysis.
+        #
+        # It is NOT wired into READY_WORST_CASE_BUDGET_S (the message's other
+        # offered resolution) because it is a DIFFERENT quantity: 9090/healthz
+        # is a dedicated listener off the client's request path, and the check's
+        # 5s timeout times loop liveness, not a request — it would TIGHTEN the
+        # 11.6s readiness worst case to a value about a different surface, i.e.
+        # silently disarm the ceiling it is supposed to guard.
         _cfg = tomllib.loads((REPO / "fly.toml").read_text())
         assert _cfg["services"][0].get("tcp_checks"), (
             "fly.toml exposes NEITHER an http_check budget proxy NOR the "
             "tcp_checks that replaced it (#2850) — the services checks block "
             "was removed or altered without the documented migration"
         )
-        assert "checks" not in _cfg, (
-            "fly.toml now defines a top-level [checks] table. The deferred "
-            "[checks.loop_liveness] is a loop-liveness check, NOT a readiness "
-            "budget, so it does not restore the cross-endpoint ceiling and this "
-            "reader does not consume it. Wire its deadline into "
-            "READY_WORST_CASE_BUDGET_S (or assert it here) rather than letting "
-            f"the sum ({ready_worst_case}s) go unbounded."
-        )
+        checks = _cfg.get("checks")
+        if checks is not None:
+            assert isinstance(checks, dict) and set(checks) == {"loop_liveness"}, (
+                "fly.toml carries an unmodelled top-level [checks] entry: "
+                f"{sorted(checks) if isinstance(checks, dict) else checks!r}. Only "
+                "the loop-liveness check (#3447) is modelled here. A new top-level "
+                "check also gates flyctl's deploy wait and may bound the readiness "
+                "surface — add it to this model (identity + bounds + whether it "
+                "feeds READY_WORST_CASE_BUDGET_S) rather than letting it escape "
+                "the cross-endpoint analysis."
+            )
+            ll = checks["loop_liveness"]
+            assert isinstance(ll, dict), (
+                f"[checks.loop_liveness] is not a table ({ll!r}) — its bounds "
+                "cannot be evaluated"
+            )
+            assert ll.get("type") == "http" and ll.get("path") == "/healthz", (
+                "[checks.loop_liveness] must probe the app's dedicated HTTP "
+                f"/healthz listener; got type={ll.get('type')!r} "
+                f"path={ll.get('path')!r}"
+            )
+            assert ll.get("port") == 9090, (
+                "[checks.loop_liveness] must target the dedicated 9090 listener, "
+                "NOT the client-facing 8000 plane — its whole point is to be off "
+                f"the request path; got port={ll.get('port')!r}"
+            )
+            assert ll.get("method", "get") == "get", (
+                "[checks.loop_liveness] must be a GET — the handler 405s anything "
+                "else (monitoring.py _method_not_allowed), and flyctl's deploy "
+                "wait requires every reported check to pass, so a non-GET fails "
+                f"every deploy; got {ll.get('method')!r}"
+            )
+            # Its OWN documented bounds (fly.toml §6.4): pin them so a silent
+            # edit to the interval/timeout/grace cannot pass through the model.
+            interval, timeout, grace = "15s", "5s", "180s"
+            assert (ll.get("interval"), ll.get("timeout"), ll.get("grace_period")) \
+                == (interval, timeout, grace), (
+                    "[checks.loop_liveness] bounds drifted from the documented "
+                    f"{interval}/{timeout}/{grace}: got interval={ll.get('interval')!r} "
+                    f"timeout={ll.get('timeout')!r} grace_period={ll.get('grace_period')!r}"
+                )
+            # NOT a readiness budget. Its 5s timeout sits BELOW /health/ready's
+            # sequential worst case, so borrowing it as a ceiling would be a
+            # silent DISARM; and _fly_check_budget_proxy_s — the only reader —
+            # consumes services[0].http_checks, never a top-level check (which is
+            # exactly why it returned None and put this branch in force).
+            loop_timeout_s = float(timeout[:-1])
+            assert loop_timeout_s < ready_worst_case, (
+                "[checks.loop_liveness] timeout must stay BELOW /health/ready's "
+                f"sequential worst case ({ready_worst_case}s) — it bounds loop "
+                "liveness, not a readiness request, so it cannot serve as the "
+                "cross-endpoint ceiling"
+            )
+            assert loop_timeout_s != READY_WORST_CASE_BUDGET_S, (
+                "[checks.loop_liveness] timeout must not BE the readiness policy "
+                "ceiling (READY_WORST_CASE_BUDGET_S) — the policy constant is "
+                "independent of this check, not borrowed from it"
+            )
+        else:
+            # Failure #3447 exists to catch, stated as the branch's own contract:
+            # an ABSENT top-level [checks] block is not the unmodelled case above
+            # and must not skip the model. In the #2850 state this block is the
+            # only application-level probe in the file — every remaining check is
+            # kernel-served (services.tcp_checks) and therefore blind to a
+            # stalled-but-running event loop. Deleting it is exactly the mistake
+            # that needs a mandatory post-merge `flyctl checks list`, so the
+            # tripwire has to red here rather than delegate that to the operator.
+            raise AssertionError(
+                "fly.toml has NO top-level [checks] block: got "
+                f"{checks!r}. Absence is NOT modelled — in the #2850 state "
+                "[checks.loop_liveness] is the only check that can see a STALLED "
+                "event loop (services.tcp_checks is kernel-served and cannot). "
+                "Restore [checks.loop_liveness] or record its removal AND its "
+                "replacement here deliberately."
+            )
 
 
 def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
@@ -512,9 +607,10 @@ def test_db_probe_bound_covers_the_sdk_acquisition_prefix():
         "DB_PROBE_HARD_TIMEOUT must be the shared derived bound, not a second "
         "hand-typed literal"
     )
-    # STRICTLY above the statically-known total (probe_db's two-attempt total
-    # PLUS the nominal acquisition budget) — equality would still be a race.
-    # This does NOT cover the embedded acquisition prefix.
+    # STRICTLY above the LOOSE outer-alignment figure (``PROBE_DB_TOTAL_TIMEOUT``
+    # — deliberately an OVER-ESTIMATE of probe_db's real total, NOT the exact
+    # inner total — PLUS the nominal acquisition budget) — equality would still
+    # be a race. This does NOT cover the embedded acquisition prefix.
     assert mod.DB_PROBE_HARD_TIMEOUT > \
         PROBE_DB_TOTAL_TIMEOUT + PROBE_SDK_ACQUISITION_BUDGET, (
         "DB_PROBE_HARD_TIMEOUT must sit strictly above PROBE_DB_TOTAL_TIMEOUT + "
