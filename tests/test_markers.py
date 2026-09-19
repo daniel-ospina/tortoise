@@ -57,6 +57,12 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # literal (session/extraction tests) — routed so the markers gate passes
     # repo-wide.
     "test_capture_session.py": {"registry": "session-capture"},
+    # #3665: `_provision` seeds the org's REAL `created_at` into the registry
+    # graph (the column the cohort is derived from) and the cap's cohort
+    # resolution reads that same graph, so the literal IS the seed→resolution
+    # coupling — a test_* rename would seed a different graph than the code
+    # resolves. Same class as test_quota/test_commit_endpoint.
+    "test_cohort_cost_cap.py": {"registry": "prod-coupled"},
     "test_cross_tenant_read_isolation.py": {"registry": "prod-coupled"},  # #3663 — registry control-plane seeding for the cross-tenant read proof
     "test_index_docs_api.py": {"registry": "index-docs"},
     "test_session_extraction_modes.py": {"registry": "session-extraction"},
