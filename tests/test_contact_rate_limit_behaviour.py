@@ -66,10 +66,10 @@ stale anchor say so out loud rather than pass quietly.
 
 The one limiter statement with no mutation of its own is the refusal path's skipping of
 the cap block, which is inert by construction: that branch adds no key, so there is
-nothing for the cap to bound. Every other statement and branch the limiter executes has
-a case that reds when it changes. That is still not a completeness proof — it is the
+nothing for the cap to bound. That is still not a completeness proof — it is the
 behaviours that were demonstrably reachable, pinned where a mutation cannot reach them
-undetected.
+undetected, and two earlier versions of this paragraph made a broader claim that review
+then falsified.
 
 Node is required and the tests SKIP with a reason when it is absent, rather than
 passing silently.
@@ -207,6 +207,7 @@ const CLIENT_Y = "198.51.100.77";
 const CLIENT_V = "203.0.113.77";
 const CLIENT_R = "198.51.100.9";
 const CLIENT_K = "203.0.113.200";
+const CLIENT_Z = "198.51.100.30";
 
 // The loops must not scale with a bumped constant: a huge RATE_LIMIT or
 // MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
@@ -273,17 +274,19 @@ observations.otherAddressOk = !rateLimited(CLIENT_Y, T0 + limit);
 // MAX_RATE_KEYS. The flood's FIRST-INSERTED name is `ip{planned-1}` and the LAST is
 // `ip0`, and `ip0` sorts first lexicographically: an eviction that sorts keys by name
 // rather than taking the oldest evicts the address that just submitted, which the
-// `newestKept` assertion below catches. `size` on a store that lacks it is reported
-// as -1 so the assertion fails loudly instead of passing on `undefined`.
+// WHICH key was evicted, not just how many remain: an eviction that takes the NEWEST
+// key instead of the oldest leaves the count at the cap all the same. The oldest key is
+// the first-inserted name; the newest key's survival follows from that plus the count,
+// so it is deliberately not asserted — an implication is not a second guard.
+// `size` on a store that lacks it is reported as -1 so the assertion fails loudly
+// instead of passing on `undefined`.
 hits.clear();
 const planned = Math.min(MAX_RATE_KEYS, CAP_CEILING) + 1;
 for (let i = 0; i < planned; i++) rateLimited("ip" + (planned - 1 - i), T0);
 observations.attemptedKeys = planned;
 observations.mapSize = hits.size === undefined ? -1 : hits.size;
-// WHICH keys survive, not just how many: an eviction that takes the NEWEST key
-// instead of the oldest leaves the count at the cap all the same.
 observations.oldestEvicted = !hits.has("ip" + (planned - 1)); // inserted first
-observations.newestKept = hits.has("ip0"); // inserted last
+observations.oldestEvicted = !hits.has("ip" + (planned - 1)); // inserted first
 
 // 5. The expired sweep, when over the cap: an EXPIRED key must be dropped before a
 // LIVE one. Seeds are written directly (the limiter cannot travel back in time to
@@ -403,6 +406,15 @@ observations.negativeExcessOldestKept = hits.has("kept0");
 observations.negativeExcessLiveCount = keptLeft;
 observations.negativeExcessExpected = liveSeed + 1;
 
+// 12. A CLOCK STEP BACK: an address whose stored timestamps are all in the future of
+// this call — `Date.now()` stepping backwards is reachable under NTP — must still be
+// counted and refused. A predicate that also requires `t <= now` drops the whole
+// history on that call and lets the submission through.
+hits.clear();
+for (let i = 0; i < limit; i++) rateLimited(CLIENT_Z, T0 + 1000 + i);
+observations.clockStepBackRefuses = rateLimited(CLIENT_Z, T0);
+observations.clockStepBackStored = (hits.get(CLIENT_Z) || []).length;
+
 console.log(JSON.stringify(observations));
 """
 
@@ -493,6 +505,15 @@ def _check_window(observed: dict) -> None:
         "must expire, so the refusal comes once `limit` live entries are stored and "
         f"the next arrives, got {observed['mixed']!r}"
     )
+    assert observed["clockStepBackRefuses"] is True, (
+        "stored timestamps in the future of this call (a clock step back) must still "
+        "count: a predicate requiring `t <= now` drops the whole history on that call "
+        "and lets the submission through"
+    )
+    assert observed["clockStepBackStored"] == limit, (
+        "the future-dated history must be KEPT (and the refusal writes the pruned "
+        f"window back), got {observed['clockStepBackStored']}"
+    )
 
 
 def _check_isolation(observed: dict) -> None:
@@ -529,10 +550,6 @@ def _check_cap(observed: dict) -> None:
     assert observed["oldestEvicted"] is True, (
         "eviction must take the OLDEST key — the first address of the flood must be "
         "gone, or the cap is buying its bound by discarding recent history instead"
-    )
-    assert observed["newestKept"] is True, (
-        "the address that just submitted must not be the eviction victim: its "
-        "history would be lost immediately and the limit bypassable"
     )
 
 
@@ -746,6 +763,11 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "emptied history after the write-back",
         r"hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;",
         "\\g<0>\n  recent.length = 0;",
+    ),
+    (
+        "predicate drops future-dated entries",
+        r"\(\s*t\s*\)\s*=>\s*t\s*>\s*cutoff",
+        "(t) => t > cutoff && t <= now",
     ),
     ("predicate that never counts", r"\(\s*t\s*\)\s*=>\s*t\s*>\s*cutoff", "\\g<0> && false"),
     ("empty array written back", r"hits\.set\(\s*ip\s*,\s*recent\s*\)\s*;", "hits.set(ip, []);"),
