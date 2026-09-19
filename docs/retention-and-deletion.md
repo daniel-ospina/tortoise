@@ -38,7 +38,7 @@ The horizon is **path-dependent**, and the difference matters:
 | Path / copy | Deletion horizon | Where it lives in code |
 |-------------|------------------|------------------------|
 | **Graph** deletion — the undo window | **7 days** | `tortoise/backup_sweep.py` `_GRAPH_PURGE_GRACE_DAYS` → `retention.RESTORE_WINDOW_DAYS` |
-| **Graph** deletion — the graph's own backup pool | erased **wholesale at the 7-day purge** | `tortoise/backup_sweep.py` `_purge_graph_storage` |
+| **Graph** deletion — the graph's own backup pool | erased **at the 7-day purge, best-effort per artifact family** — a residual is **not retried** (see *Accepted gaps the promise carries*) | `tortoise/backup_sweep.py` `_purge_graph_storage` |
 | **Live**-data snapshots (a backup horizon, **not** an undo) | ≈ **28 days** (24 hourly + 7 daily + 4 weekly) | `tortoise/backup_config.py` `retention_hourly/daily/weekly` |
 | **Team-account** deletion — backup artifacts | **not yet erased** — see *Open gaps* below | `tortoise/hosted_api.py` `_purge_deleted_orgs` |
 | **Second-region mirror** (shipped; `BACKUP_MIRROR_ENABLED` default **off**) | deletion **not propagated** (append-only) | `docs/ops/registry-backup-dr.md` |
@@ -46,6 +46,28 @@ The horizon is **path-dependent**, and the difference matters:
 > **Restore window ≠ retention window.** R1 forbids retaining user **content**
 > for any length. The 7 days are an **undo** offer, never a claim that we keep
 > content. Do not conflate the two in copy or in code.
+
+### Accepted gaps the promise carries
+
+Two consequences of the code below the promise are **owner-accepted, not copy
+claims**: they are recorded here, and **must not be re-disclosed in customer
+copy** (see *The end-destination rule* below).
+
+- **The graph backup purge is best-effort and is not retried.** Deleting a graph
+  drops its namespace and purges its own backup pool, but `_purge_graph_storage`
+  works **per artifact family**, collects the failures, and never aborts the
+  purge — and the tombstone row is stamped **regardless**, so a residual artifact
+  (a failed `storage.delete`, or an unreadable legacy-flat index) is left behind
+  with no automatic follow-up (`tortoise/backup_sweep.py:1473-1510`, row stamped
+  at `:1620-1622`). The end destination is still erasure; the residual is what we
+  repair toward, not a promise we make differently.
+- **Per-graph vs per-entity.** Deletion is scoped to a **graph** (or an
+  account) — there is **no separate purge for an entity** (a single point)
+  removed inside a **live** graph. Such a removal is an ordinary live-graph
+  write; the only copies that still hold it are the live-data snapshots on the
+  24/7/4 cycle, which age out on the ≈28-day horizon. **That is why the
+  four-week horizon matters:** for an entity deleted inside a live graph, the
+  backup copy — not a per-entity purge — is what bounds the residual.
 
 ## The authoritative implementation constants
 
@@ -129,16 +151,23 @@ fails on any new retention/deletion claim that neither links here nor is a named
 constant; `test_surveyed_files_link_to_canonical_doc` guards the link set itself.
 The coverage is:
 
-**Linked here and checked by the scan** — `website/privacy.html` · `website/dpa.html` ·
-`website/apps/dashboard/src/{main.jsx,graphs.js}` · `docs/ops/registry-backup-dr.md` ·
-`docs/ops/multi-graph-migration-runbook.md` · `docs/infra-runbook.md` ·
-`docs/data-safety.md` · `docs/registry-graph-schema.md` ·
-`docs/scoping-2304-delete-semantics.md`.
+**Checked by the link gate** — exactly `LINKED_FILES` in
+`tests/test_retention_promise.py` — `docs/00_index.md` · `docs/data-safety.md` ·
+`docs/infra-runbook.md` · `docs/ops/registry-backup-dr.md` ·
+`docs/registry-graph-schema.md` · `docs/scoping-2304-delete-semantics.md` ·
+`docs/scoping-2313-per-graph-backups.md` · `tortoise/hosted_backup.py` ·
+`website/apps/dashboard/src/graphs.js` · `website/apps/dashboard/src/main.jsx`.
 
-**Named implementation constants** (exempt by design — the scan never counts them):
-`tortoise/{retention,backup_sweep,backup_config,hosted_api,sdk,supabase_control,hosted_backup}.py`.
-`website/apps/dashboard/src/graphs.test.js` is derived: it imports
-`TRASH_GRACE_DAYS` from `graphs.js` rather than restating the number.
+`website/privacy.html` and `website/dpa.html` link here as well, but are gated by
+the owner-gated privacy test rather than by `LINKED_FILES`; this is a link gate,
+not a whitelist — a file outside the set above may still link here.
+
+**Named implementation constants** (exempt by design): `tortoise/retention.py` and
+`tortoise/backup_config.py` are exempt whole-file (every line is the authority);
+`tortoise/{backup_sweep,hosted_api,sdk,supabase_control}.py` are exempt only on
+lines that name a canonical constant. `website/apps/dashboard/src/graphs.test.js`
+is derived: it imports `TRASH_GRACE_DAYS` from `graphs.js` rather than restating
+the number.
 
 **Point-in-time records — exempt, not gated** (they state the window as it was;
 this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md` ·
@@ -157,7 +186,7 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 > applied to `website/privacy.html` and its mirror
 > `docs/drafts/2026-08-08-657-privacy-draft.md`. The §"Deletion scope" and
 > `website/dpa.html` §11 sentences are aligned to the same one-number style and
-> are **pending the owner's confirmation** — the PR stays a draft until they are.
+> are **pending the owner's confirmation**.
 >
 > **Division of labour.** The policy copy states **one number** (four weeks)
 > plus the single graph exception. The 24-hour / 7-day / 4-weekly rotation, the
