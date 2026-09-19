@@ -65,27 +65,37 @@ README = WEBSITE_DIR / "README.md"
 #: decision, not a code change — it must be argued in the issue, not here.
 CONTACT_TO = "hello@premiselabs.co"
 
-#: Verbs that promise the visitor a follow-up. The confirmation and the client
-#: that displays it may use NONE of them, in any wording: intake is the receiving
-#: mechanism and a reply is the exception. A verb family, not a sentence list,
-#: because "pin the exact wording" was itself defeated by a promise phrased
-#: differently (cycles 2-3), and every literal is scanned — not just the ones
-#: anchored to `message:` — because a CONCATENATION hid its second half.
+#: The reply words those commitments land on.
+REPLY_WORD = (
+    r"(?:repl(?:y|ies|ying)|respond|response|answer|reaching out|reach out|"
+    r"write back|write to you|get back to you|be in touch|be in contact|"
+    r"get in touch|follow(?:ing)? up|hear from|be contacted|contact you)\b"
+)
+
+#: Reply promises, as a VOCABULARY of the shapes copy actually uses: a
+#: first-person/team/visitor subject within a short span of a reply word. A reply
+#: promise is a natural-language property and no regex decides it, so this is not
+#: a proof — it recognises the commitment shapes below and fails closed on them
+#: (a sentence that merely NEGATES a promise trips it too; the fix there is to
+#: phrase it without the commitment verb). A phrasing outside the shape is not
+#: caught; the durable answer is a product-level check or the behavioural harness
+#: filed as #4108. Coverage is asserted by TEST CASES at the bottom of this file,
+#: not by this prose.
 REPLY_PROMISE_VERBS = (
-    # A first-person COMMITMENT. Up to three intervening words are allowed, so
-    # "we'll be sure to respond" / "we'll always reply" / "we aim to respond" are
-    # caught too (cycle-5 review: the immediate-adjacency form missed them while
-    # this comment claimed any wording). Deliberately fail-closed: a sentence
-    # that merely NEGATES a promise ("we do not reply to every message") also
-    # trips it, and the fix there is to phrase it without the commitment verb.
-    r"\b(?:we|i)(?:'ll| will| shall| can)\s+(?:\w+\s+){0,3}?"
-    r"(?:reply|respond|reaching out|reach out|write back|write to you|get back to you|"
-    r"be in touch|be in contact|get in touch|follow up|answer|contact you)\b"
-    # …or the present-tense form: "we reply to every message", "we always answer".
-    r"|\bwe\s+(?:\w+\s+){0,2}?(?:reply|respond|answer|write back|follow up|get back to you)\b"
-    # …or a promise made TO the visitor: "you'll hear from us".
-    r"|\byou(?:'ll| will)\s+(?:\w+\s+){0,2}?(?:hear|get a reply|receive a reply|be contacted)\b"
-    r"|\bexpect a reply\b|\ba reply will\b"
+    # A subject that can make the promise, then a commitment marker, then a reply
+    # word: "our team will reply…", "we will send you a response", "we'll be sure
+    # to respond" (cycle-7 review: the earlier arms keyed on `we|i` only and
+    # missed `our team`, and on immediate adjacency so "send you a response"
+    # passed).
+    r"\b(?:we|i|our team|the team|support)\b[^.!?]{0,30}?"
+    r"(?:'ll| will| shall| going to| aim to| try to| be sure to| always| usually)"
+    r"[^.!?]{0,25}?" + REPLY_WORD
+    # …or the present-tense first person: "we reply to every message".
+    + r"|\bwe\b[^.!?]{0,20}?" + REPLY_WORD
+    # …or a promise made TO the visitor: "you will receive a response". `can` is
+    # deliberately NOT a commitment marker here, so an invitation to write to us
+    # ("you can also get in touch at that address") is not a promise.
+    + r"|\byou(?:'ll| will)\b[^.!?]{0,25}?" + REPLY_WORD
 )
 
 #: The confirmation the visitor sees on success, pinned as a VALUE. It states
@@ -337,27 +347,26 @@ def test_the_confirmation_promises_no_reply() -> None:
     """
     src = _src(FUNCTION_TS)
     html_src = _src(CONTACT_HTML)
-    # Pin the success literal by VALUE, with whitespace tolerance: a substring
-    # check accepted `"…received your message." + " We'll reach out shortly."`
-    # (cycle-2 review), and a single-line-only regex rejected a purely cosmetic
-    # reflow (cycle-3 review).
-    assert re.search(r'message:\s*"' + re.escape(CONFIRMATION_EXACT) + r'"', src), (
-        "the success return must carry the receipt-only confirmation verbatim"
-    )
-    # …and then scan EVERY string literal in the file, not just the ones anchored
-    # to `message:`. Three escapes made the anchored versions insufficient: a
-    # reworded promise in the success branch (cycle-2), a decoy `return json(…)`
-    # appended after the handler (cycle-3), and a CONCATENATED promise
-    # (`"…received your message." + " We'll reach out shortly."`), whose second
-    # half an anchored scan never reads (cycle-3). Comments are stripped first, so
-    # the file's extensive prose about email is not scanned — only what the code
-    # could show a visitor.
+    # Strip comments first, so the file's extensive prose about email is not
+    # scanned — only what the code could show a visitor — and then take EVERY
+    # string literal in the file, not just the ones anchored to `message:`. Three
+    # escapes made the anchored versions insufficient: a reworded promise in the
+    # success branch (cycle-2), a decoy `return json(…)` appended after the
+    # handler (cycle-3), and a CONCATENATED promise (`"…received your message." +
+    # " We'll reach out shortly."`), whose second half an anchored scan never reads
+    # (cycle-3).
     code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     code = re.sub(r"//[^\n]*", "", code)
     literals = re.findall(
         r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`', code, re.S
     )
     assert literals, "no string literals found — did the file shape change?"
+    # Pin the VALUE: the receipt-only confirmation must be present as a literal.
+    # Extracting it into a named constant is a legitimate, value-preserving edit,
+    # so the pin is membership, not adjacency (cycle-7 review).
+    assert f'"{CONFIRMATION_EXACT}"' in literals, (
+        "the receipt-only confirmation must appear as a string literal"
+    )
     for text in literals:
         assert not re.search(REPLY_PROMISE_VERBS, text, re.I), (
             f"contact.ts carries a reply promise the visitor could be shown: {text}"
@@ -366,14 +375,14 @@ def test_the_confirmation_promises_no_reply() -> None:
     # and the client that displays it. Cycle-3 review shipped a promise by editing
     # ONLY the client — `show(msg, "Thanks — we'll reply within two business
     # days.")` kept all 86 tests green — so the success branch must consume the
-    # server's message, and the client's own fallback is pinned by value.
+    # server's message, and its fallback is pinned BY VALUE among the scanned
+    # literals (a hoisted constant is a legitimate edit; cycle-7 review).
     script = html_src[html_src.index("<script>") :]
-    assert re.search(
-        r'show\(\s*msg\s*,\s*data\.message\s*\|\|\s*"Thanks — your message is on its way\."\s*\)',
-        script,
-    ), (
-        "the success branch must display the server's message (`data.message`) with its "
-        "own fallback pinned — the client cannot substitute its own confirmation"
+    assert re.search(r"show\(\s*msg\s*,\s*data\.message\s*\|\|", script), (
+        "the success branch must display the server's message (`data.message`)"
+    )
+    assert '"Thanks — your message is on its way."' in script, (
+        "the success branch's own fallback must stay the reviewed, promise-free text"
     )
     # The whole PAGE is visitor-facing, not just its script: the static copy, the
     # lede and the noscript fallback are what a JS-off reader sees, and appending
@@ -595,9 +604,22 @@ def test_rate_limit_map_is_bounded() -> None:
     # The GUARD is part of the cap: inverting it (`<` instead of `>`) disables
     # eviction entirely while the loop below still reads correctly, and the guard
     # sat outside the old slice (cycle-3 review).
-    guard = re.search(r"if \(hits\.size > MAX_RATE_KEYS\)", code)
-    assert guard is not None, "the cap guard must compare the map size to MAX_RATE_KEYS"
-    cap = code[guard.end() : code.index("return false;")]
+    loop_at = code.index("for (const k of hits.keys())", guard_at)
+    # The LOOP is inside the cap too: wrapping it in an always-false branch left
+    # all four loop assertions green while eviction never ran (cycle-7 review), so
+    # the guard's own nesting test is applied to it: it must be a direct statement
+    # of the guard's body.
+    guard_body = code[code.index("{", guard_at) + 1 : loop_at]
+    loop_depth = guard_body.count("{") - guard_body.count("}")
+    assert loop_depth == 0, (
+        f"the eviction loop is nested at depth {loop_depth} in the guard's body: an "
+        "enclosing branch can disable the cap while every token stays readable"
+    )
+    loop_stmt = re.split(r"[;{}]", guard_body)[-1]
+    assert not re.search(r"\b(?:if|while|for)\b", loop_stmt), (
+        f"the eviction loop must not be the braceless body of another branch: {loop_stmt.strip()[:80]!r}"
+    )
+    cap = code[guard_at:code.index("return false;")]
     # Bind the initializer to the cap AND make it the only assignment: `excess = 0;`
     # after a correct `let excess = …` breaks out immediately, leaving the map
     # unbounded under live keys, while every token still appears (cycle-3 review).
@@ -607,10 +629,51 @@ def test_rate_limit_map_is_bounded() -> None:
     assert re.search(r"let excess\s*=\s*hits\.size\s*-\s*MAX_RATE_KEYS", cap), (
         "excess must be derived from the cap, not a constant"
     )
-    loop = cap[cap.index("for (const k of hits.keys())") :]
+    loop = code[loop_at:]
     assert re.search(r"if \(excess <= 0\) break;", loop), "the loop must stop at the cap"
     assert re.search(r"hits\.delete\(k\);", loop), "no key eviction under the cap"
     assert re.search(r"excess--;|excess -= 1;", loop), "the loop must count down"
+
+
+# ── 6. The reply-promise vocabulary's coverage, as CASES ─────────────────
+
+#: Promises the family MUST catch. One per shape real copy uses — this table is
+#: what the constant's comment means by "coverage is asserted by test cases".
+REPLY_PROMISES = (
+    "We will reply within two business days.",
+    "We'll be sure to respond shortly.",
+    "We always reply to every message.",
+    "Our team will reply within two business days.",
+    "The team will respond as soon as possible.",
+    "You will receive a response within two business days.",
+    "We will send you a response shortly.",
+    "You'll hear from us within a few days.",
+    "Thanks — we'll follow up next week.",
+)
+
+#: Copy that must NOT be flagged: an invitation to write to us is not a promise,
+#: and the negation of a promise is not one either — the second is the family's
+#: declared fail-closed edge, kept here so a widening that starts catching
+#: invitations is visible.
+REPLY_NON_PROMISES = (
+    "Please email hello@premiselabs.co directly.",
+    "You can also get in touch at that address.",
+    "Thanks for reaching out.",
+    "We are sorry for the detour.",
+    "We could not accept your message, so it was not sent.",
+)
+
+
+def test_the_reply_promise_vocabulary_covers_the_shapes_copy_uses() -> None:
+    """Coverage as cases, so widening or narrowing the family is visible here."""
+    for promise in REPLY_PROMISES:
+        assert re.search(REPLY_PROMISE_VERBS, promise, re.I), (
+            f"a reply promise the scan must catch is not caught: {promise!r}"
+        )
+    for other in REPLY_NON_PROMISES:
+        assert not re.search(REPLY_PROMISE_VERBS, other, re.I), (
+            f"copy that only invites a message, or negates a promise, is flagged: {other!r}"
+        )
 
 
 def test_reply_to_is_validated() -> None:
