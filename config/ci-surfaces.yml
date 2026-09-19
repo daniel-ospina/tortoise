@@ -41,6 +41,13 @@ surfaces:
   - test_agent_signup_idempotency.py
   - test_api.py
   - test_action_endpoints_dual_auth.py
+  # #B7: the activation scorecard (GET /v1/activation/scorecard). Registered under
+  # `api` AND `core` deliberately, same rationale as the boot guards above: the
+  # endpoint lives in tortoise/hosted_api.py (selects `api`) while
+  # tortoise/activation_scorecard.py matches no named pattern and falls to the
+  # `core` fallback — a one-surface registration would skip the suite whenever
+  # the other half of the diff changed.
+  - test_activation_scorecard.py
   - test_audit.py
   # #2938: the eight battery members previously dual-registered here (arms,
   # cli, config, determinism, enums, run, runner, setup) were verified per
@@ -342,6 +349,7 @@ surfaces:
   - test_about_edges.py
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
+  - test_activation_scorecard.py   # #B7: activation scorecard (with the `api` half — see there)
   - test_agent_ops_pack.py
   - test_agent_ops_supersede.py
   - test_alert_store.py
