@@ -22,13 +22,19 @@ pipeline consumes (plan §5.1 component boundary; the #280/#330 ``_FM_RE`` /
     percent-encoding, corpus_name single-encode, realpath dedup and escape
     rejection (§4.1/§4.2). SHARED with #909 (the shared identity contract,
     §4.6 point 1).
-  - ``derive_session_source_url`` — the SESSION-scoped permalink for the
-    hosted commit path (#4005): the session id is the collision domain, so
-    two raw files sharing a basename on two machines derive DISTINCT urls.
-    Uses the SAME segment encoding as ``derive_source_url`` (one encoding
-    primitive, never a second url format).
+  - ``derive_session_source_url`` — the CANONICAL session-Source identity for
+    the hosted commit path (#4005): ``session:<session_id>``, the same url the
+    capture path materializes, the projection stub mints and
+    ``delete_session``/the orphan sweep delete — so capture, commit and delete
+    converge on ONE ``:Source``. Deliberately NOT under the ``corpus://``
+    authority, which stays reserved for ``derive_source_url`` (a session id
+    can never alias a corpus name).
+  - ``provenance_basename`` — the ONE basename primitive shared by Layer-1
+    (``commit_schema``) and the writers (``hosted_api``): splits on BOTH path
+    separators (``os.path.basename`` is POSIX-only) and returns ``""`` for a
+    basename-less path so Layer-1 can 422 it before any write (#4005).
   - ``derive_source_content_hash`` — the raw-integrity anchor (#4005): sha256
-    (``hash_text``) of the raw's normalized text, ``""`` when the raw is
+    (``hash_text``) of the raw's CRLF-normalized text, ``""`` when the raw is
     absent. NEVER a hash of the identity url.
   - ``derive_session_id`` / ``derive_meeting_event_id`` / ``derive_document_id``
     — event/document identity rules (§4.2), incl. the derived-id collision
@@ -241,57 +247,87 @@ def _corpus_permalink(corpus_name: str, rel: Path) -> str:
     return f"corpus://{name_enc}/{seg_enc}"
 
 
-def derive_session_source_url(session_id: str, provenance_path: str) -> str:
-    """Session-scoped Source identity for the hosted commit path (#4005).
+def provenance_basename(path: str | None) -> str:
+    """The ONE basename primitive shared by Layer-1 and the write paths (W-7).
 
-    ``corpus://<session-id>/<basename>`` — the session id is the collision
-    domain. Two raw files that share a basename on two different machines
-    (two different sessions) derive DISTINCT urls, where the previous
-    ``os.path.basename`` identity collapsed them onto ONE ``:Source`` MERGE
-    key. The basename is preserved (not the full local path) per W-7 — the
-    full path never leaves the machine; only the session id and the basename
-    are graph-visible. Uses ``_corpus_permalink`` so the encoding is the ONE
-    shared with ``derive_source_url`` (no second derivation).
+    ``os.path.basename`` splits on ``/`` only, so a Windows-style
+    ``provenance_refs[].path`` would leak the whole local path into the graph
+    identity; this splits on BOTH separators and strips trailing ones. Returns
+    ``""`` when the path carries no basename component (``""``/``"/"``/
+    ``"."``/``".."``/``"a/."``) — Layer-1 rejects that with a 422 (#4005)
+    rather than letting the writer mint a basename-less ``Source.url``.
 
-    Raises ``ValueError`` on an empty session id or provenance path — a
-    Source url is an identity and may never be empty.
+    Layer-1 (``commit_schema``) and the hosted writer (``hosted_api``) MUST
+    both derive the basename through THIS function — the two used to disagree
+    on ``"."``/``"a/."`` (``Path(...).name`` vs ``os.path.basename``), so a
+    Layer-1-accepted payload fell through the writer's map and minted a
+    bare-basename Source (#4005 review P2).
     """
-    sid = str(session_id or "").strip()
-    if not sid:
+    raw = str(path or "").replace("\\", "/")
+    while raw.endswith("/"):
+        raw = raw[:-1]
+    base = raw.rsplit("/", 1)[-1]
+    if base in ("", ".", ".."):
+        return ""
+    return base
+
+
+def derive_session_source_url(session_id: str) -> str:
+    """Canonical session-Source identity: ``session:<session_id>`` (#4005).
+
+    ONTOLOGY §4.6 registers ``session:<id>`` as THE session-Source url (with
+    ``sourceKind: agentSession``). It is the SAME identity the capture path
+    materializes (``sdk._materialize_session_source``), the replay/projection
+    stub mints (``projection.edges._mint_source_stub``) and ``delete_session``
+    / the capture orphan sweep delete — so capture, commit and delete converge
+    on ONE ``:Source``. The pre-fix ``os.path.basename(ref.path)`` identity
+    collided two machines' ``session.md`` onto one node and was orphaned on
+    delete.
+
+    Deliberately NOT under the ``corpus://`` authority that
+    ``derive_source_url`` owns: ``corpus://<name>/<rel-path>`` is keyed on a
+    corpus name, which a session id could otherwise alias
+    (``derive_source_url(root/notes/session.md, root/notes)`` ==
+    ``corpus://notes/session.md``), collapsing a session Source onto a
+    corpus-indexed one. ``session:`` can never be produced by
+    ``derive_source_url``, so the two derivations can never be equal.
+
+    The raw's W-7 basename is NOT part of the identity — it rides as a
+    property (``Source.sourcePath`` / ``Document.sourcePath``). Two different
+    session ids therefore derive DISTINCT urls even when their raw basenames
+    are identical. (Two machines that resolve the SAME session id — e.g. both
+    fall back to ``derive_session_id`` -> ``file_<stem>`` — still address one
+    Source; the session id is the client's stable handle, not the basename.)
+
+    Raises ``ValueError`` on a blank session id — a Source url is an identity
+    and may never be empty. Layer-1 rejects a blank ``session_id`` with a 422
+    BEFORE any write (#4005), so this is the fail-closed backstop.
+    """
+    sid = str(session_id or "")
+    if not sid.strip():
         raise ValueError(
-            "derive_session_source_url: session_id is required (the collision "
-            "domain for the Source identity)"
+            "derive_session_source_url: session_id is required (the session "
+            "Source identity is `session:<session_id>`)"
         )
-    raw = str(provenance_path or "").rstrip("/")
-    if not raw:
-        raise ValueError(
-            "derive_session_source_url: provenance_path is required "
-            "(the raw's basename is the Source's rel-path)"
-        )
-    # basename-only (W-7): a path that arrives with directories must not leak
-    # them into the graph identity.
-    base = os.path.basename(raw)
-    if not base:
-        raise ValueError(
-            f"derive_session_source_url: provenance_path {provenance_path!r} "
-            "has no basename component"
-        )
-    return _corpus_permalink(sid, Path(base))
+    return f"session:{sid}"
 
 
 def derive_source_content_hash(raw_text: str | None) -> str:
     """Integrity anchor of the RAW (not of the identity url) (#4005).
 
-    ``hash_text`` of the raw's normalized text — the same single-read
-    primitive the local index path hashes (``compute_file_hash`` /
-    ``hash_text``) — so a hosted session Source carries the SAME kind of
-    anchor as a corpus-indexed one. Returns ``""`` when the raw is absent or
-    empty: an absent anchor is honest, where ``content_hash(url)`` (the
-    pre-fix value) could not detect that the raw changed, exists, or is gone.
+    ``hash_text`` of the raw's CRLF-normalized text — the SAME anchor a
+    corpus-indexed Source carries (``compute_file_hash`` reads in universal-
+    newlines text mode, so it hashes the normalized buffer; this normalizes
+    the client's buffer the same way before hashing, or the two anchors would
+    diverge on a CRLF raw — the #330 non-convergence class). Returns ``""``
+    when the raw is absent or empty: an absent anchor is honest, where
+    ``content_hash(url)`` (the pre-fix value) could not detect that the raw
+    changed, exists, or is gone.
     """
     if not raw_text:
         return ""
-    return hash_text(raw_text)
+    normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+    return hash_text(normalized)
 
 
 # ── Event / Document identity (§4.2) ──────────────────────────────────────

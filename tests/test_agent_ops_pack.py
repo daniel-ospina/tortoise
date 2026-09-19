@@ -289,12 +289,13 @@ class TestRulesWithWhyExtraction:
             "RETURN e.eventKind, e.content", {}).result_set
         assert rows, "ruleRevised Event missing"
         # session linkage: extractedFrom → session Source + Session CONTAINS
-        # (#4005: the session Source identity is the canonical session-scoped
-        # permalink, not a bare basename)
+        # (#4005: the session Source identity is the canonical
+        # `session:<session_id>` ONTOLOGY §4.6 url — the SAME one the capture
+        # path materializes and delete_session deletes — not a bare basename)
         n = g.query(
             "MATCH (p:Point {content:$c})-[:extractedFrom]->"
             "(s:Source {url:$u}) RETURN count(s)",
-            params={"c": RATIONALE_TEXT, "u": f"corpus://{sid}/session.md"},
+            params={"c": RATIONALE_TEXT, "u": f"session:{sid}"},
         ).result_set[0][0]
         assert n >= 1
         n = g.query(

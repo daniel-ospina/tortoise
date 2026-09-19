@@ -155,7 +155,7 @@ def _session_source_rows():
 
     Queried by ``sourceKind`` rather than by a hard-coded url so a test can
     observe the identity the write path actually minted (#4005) — the
-    pre-fix basename url and the post-fix canonical permalink are both
+    pre-fix basename url and the post-fix canonical ``session:<id>`` are both
     visible here.
     """
     rows = _team_sdk()._get_proj().g.query(
@@ -163,6 +163,23 @@ def _session_source_rows():
         "RETURN s.url, s.contentHash",
     ).result_set
     return [(r[0], r[1]) for r in rows]
+
+
+def _session_source_meta(url: str):
+    """(contentHash, version, sourcePath) of one Source, or None."""
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (s:Source {url:$url}) "
+        "RETURN s.contentHash, s.version, s.sourcePath",
+        params={"url": url},
+    ).result_set
+    return rows[0] if rows else None
+
+
+def _all_source_urls():
+    rows = _team_sdk()._get_proj().g.query(
+        "MATCH (s:Source) RETURN s.url",
+    ).result_set
+    return sorted(r[0] for r in rows)
 
 
 # ── Payload factory (mirrors the slice-5a client serializer, W-3) ───────────
@@ -396,7 +413,7 @@ class TestFourNodeChain:
 
         # Source bridge (sourceKind agentSession, contentHash, provenance_spans)
         rows = g.query(
-            "MATCH (s:Source {url:'corpus://s1/session.md'}) RETURN s.sourceKind, "
+            "MATCH (s:Source {url:'session:s1'}) RETURN s.sourceKind, "
             "s.contentHash, s.provenance_spans, s.is_episodic",
         ).result_set
         assert rows and rows[0][0] == "agentSession"
@@ -404,7 +421,7 @@ class TestFourNodeChain:
 
         # (Document)<-[:references]-(Source)
         n = g.query(
-            "MATCH (s:Source {url:'corpus://s1/session.md'})-[:references]->(d:Document) "
+            "MATCH (s:Source {url:'session:s1'})-[:references]->(d:Document) "
             "WHERE d.sessionId='s1' RETURN count(d)",
         ).result_set[0][0]
         assert n >= 1
@@ -419,7 +436,7 @@ class TestFourNodeChain:
         assert rows[0][2] == "session.md"
         n = g.query(
             "MATCH (p:Point {id:'pt_0000000000000000000000000000000000000000000000000000000000000000'})"
-            "-[:extractedFrom]->(s:Source {url:'corpus://s1/session.md'}) RETURN count(s)",
+            "-[:extractedFrom]->(s:Source {url:'session:s1'}) RETURN count(s)",
         ).result_set[0][0]
         assert n >= 1
 
@@ -666,7 +683,7 @@ class TestExternalSources:
         assert rows[0][1] == "T1" and rows[0][2] == "sha123"
         # session Source references the external Source (DE2E-5 chain)
         n = g.query(
-            "MATCH (a:Source {url:'corpus://s1/session.md'})-[:references]->"
+            "MATCH (a:Source {url:'session:s1'})-[:references]->"
             "(b:Source {url:'https://example.com/pricing'}) RETURN count(b)",
         ).result_set[0][0]
         assert n >= 1
@@ -688,20 +705,39 @@ class TestSessionSourceIndexIdentity:
     and ``contentHash = content_hash(url)``: two raw files sharing a basename
     on two machines COLLIDED on the single ``MERGE (s:Source {url:$url})``
     key, and the stored hash could not detect that the raw had changed,
-    existed, or was absent. Each behaviour below was RED before the fix.
+    existed, or was absent. The identity is now the canonical
+    ``session:<session_id>`` (ONTOLOGY §4.6) — the SAME url the capture path
+    materializes and ``delete_session`` deletes — with the W-7 basename as a
+    property. Each behaviour below was RED before the fix.
     """
 
-    def test_same_basename_different_machines_distinct_source_urls(self, client):
-        """(i) two raw files sharing a basename on two machines get DISTINCT
-        Source urls (pre-fix both collapsed onto ``session.md``)."""
+    def test_distinct_sessions_sharing_a_basename_get_distinct_urls(self, client):
+        """(i) two sessions whose raw file shares the basename ``session.md``
+        get DISTINCT Source urls (pre-fix both collapsed onto ``session.md``).
+
+        This is the two-machines case as far as identity can distinguish it:
+        the collision domain is the session id. Two machines that resolve the
+        SAME session id still share one Source — the limitation is pinned by
+        the next test."""
         for sid in ("machine-a", "machine-b"):
             raw = _raw_payload(1, session_id=sid)
             raw["provenance_refs"] = [{"path": "session.md", "spans": []}]
             r = _commit(client, raw)
             assert r.status_code == 200, r.text
         urls = sorted(u for u, _ in _session_source_rows())
-        assert urls == ["corpus://machine-a/session.md",
-                        "corpus://machine-b/session.md"], urls
+        assert urls == ["session:machine-a", "session:machine-b"], urls
+
+    def test_same_session_id_is_one_identity_pinned_limitation(self, client):
+        """The limitation, pinned explicitly rather than implied-fixed: the
+        identity is the SESSION, not the basename. Two raws that resolve the
+        SAME session id (e.g. two machines both falling back to
+        ``derive_session_id`` -> ``file_<stem>``) address ONE Source."""
+        for summary in ("first raw", "different raw"):
+            raw = _raw_payload(1, summary=summary)
+            raw["provenance_refs"] = [{"path": "session.md", "spans": []}]
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+        assert [u for u, _ in _session_source_rows()] == ["session:s1"]
 
     def test_content_hash_is_of_raw_not_of_url(self, client):
         """(ii) ``contentHash`` is the RAW's anchor, never ``hash(url)``.
@@ -718,6 +754,7 @@ class TestSessionSourceIndexIdentity:
         rows = _session_source_rows()
         assert len(rows) == 1, rows
         url, stored = rows[0]
+        assert url == "session:s1", rows
         assert not stored, stored
         assert stored != content_hash(url), (
             "contentHash is a hash of the Source url, not of the raw"
@@ -735,52 +772,195 @@ class TestSessionSourceIndexIdentity:
         assert stored == hash_text(raw_text)
         assert stored != content_hash(url)
 
-    def test_content_hash_stable_for_same_raw_changes_for_new_raw(self, client):
-        """(iii) the anchor is stable for identical raw and changes when the
-        raw changes, on the SAME Source url."""
+    def test_anchor_stable_for_same_raw_changes_for_new_raw(self, client):
+        """(iii) the anchor is stable while the raw is unchanged and changes
+        when the raw changes, on the SAME Source url.
+
+        Every re-commit carries a DIFFERENT ``summary``, so it is a real write,
+        not an L1 replay — the pre-fix test used byte-identical payloads that
+        the server short-circuits with zero writes (a vacuous assertion,
+        #4005 review)."""
 
         def _commit_raw(summary: str, raw_text: str):
             raw = _raw_payload(1, summary=summary)
             raw["provenance_refs"] = [{"path": "session.md", "spans": [],
                                        "contentHash": hash_text(raw_text)}]
-            r = _commit(client, raw)
-            assert r.status_code == 200, r.text
+            resp = _commit(client, raw)
+            assert resp.status_code == 200, resp.text
+            assert resp.json().get("duplicate") is not True
             rows = _session_source_rows()
             assert len(rows) == 1, rows
             return rows[0]
 
-        url_a, stored_a = _commit_raw("summary A", "raw A: first capture")
+        url_a, stored_a = _commit_raw("summary A1", "raw A: first capture")
+        assert url_a == "session:s1"
         assert stored_a == hash_text("raw A: first capture")
-        # a duplicate re-commit of the same raw leaves the anchor STABLE
-        url_a2, stored_a2 = _commit_raw("summary A", "raw A: first capture")
+        v_a = _session_source_meta(url_a)[1]
+        # SAME raw, re-committed → SAME url, SAME anchor, NO version bump
+        url_a2, stored_a2 = _commit_raw("summary A2", "raw A: first capture")
         assert url_a2 == url_a and stored_a2 == stored_a
-        # the raw changed → SAME url, DIFFERENT anchor (the version-bump
+        assert _session_source_meta(url_a)[1] == v_a
+        # the raw changed → SAME url, DIFFERENT anchor, version bump (the
         # contract create_source relies on)
         url_b, stored_b = _commit_raw("summary B", "raw B: the raw changed")
         assert url_b == url_a, (url_a, url_b)
         assert stored_b == hash_text("raw B: the raw changed")
         assert stored_b != stored_a
+        assert _session_source_meta(url_a)[1] == v_a + 1
 
-    def test_derivation_is_the_shared_canonical_permalink(self):
-        """Derivation parity: one encoding primitive with
-        ``file_indexer.derive_source_url`` (no second url format), basename
-        only (W-7), and a hash that is empty iff the raw is absent."""
+    def test_anchorless_recommit_preserves_stored_anchor(self, client):
+        """#4005 review P1: an anchorless re-commit must NOT wipe the stored
+        anchor or bump version.
+
+        Pre-fix ``contentHash=ref.contentHash or ""`` turned the back-compat
+        NULL into ``""``, so ``_upsert_source``'s conditional write took the
+        OVERWRITE branch (the preserve branch fires only WHEN ``$hash IS
+        NULL``) — the anchor was wiped and the version bumped."""
+        anchor = hash_text("raw v1")
+        raw = _raw_payload(1, summary="first capture")
+        raw["provenance_refs"] = [{"path": "session.md", "spans": [],
+                                   "contentHash": anchor}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        url, stored = _session_source_rows()[0]
+        assert url == "session:s1" and stored == anchor
+        version = _session_source_meta(url)[1]
+
+        # back-compat client: no contentHash at all, different summary so this
+        # is a real write (not an L1 replay)
+        raw = _raw_payload(1, summary="second capture")
+        raw["provenance_refs"] = [{"path": "session.md", "spans": []}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        assert r.json().get("duplicate") is not True
+        url2, stored2 = _session_source_rows()[0]
+        assert url2 == url
+        assert stored2 == anchor, (
+            "an anchorless re-commit wiped the stored contentHash"
+        )
+        assert _session_source_meta(url2)[1] == version, (
+            "an anchorless re-commit bumped the version"
+        )
+
+    def test_capture_commit_delete_agree_on_one_session_source(self, client):
+        """#4005 review P1: capture, commit and delete all address the SAME
+        ``:Source``.
+
+        Pre-fix the capture path materialized ``session:s1`` while the commit
+        path minted a basename node (``session.md``) — a SECOND agentSession
+        Source that ``delete_session`` never deleted (orphan on delete). With
+        one canonical identity the whole lifecycle is ONE node."""
+        from tortoise.hosted_api import app, get_current_org_session_ungated
+        app.dependency_overrides[get_current_org_session_ungated] = \
+            lambda: dict(TEST_TEAM)
+        try:
+            # 1) capture path — the hosted capture endpoint calls this helper
+            sdk = _team_sdk()
+            sdk._materialize_session_source(
+                "s1", None, "2026-08-11T10:00:00+00:00",
+                [{"role": "user", "content": "the raw transcript"}])
+            assert [u for u, _ in _session_source_rows()] == ["session:s1"]
+
+            # 2) commit path — SAME identity, no second Source
+            raw = _raw_payload(1)
+            raw["provenance_refs"] = [{"path": "session.md", "spans": [],
+                                       "contentHash": hash_text("raw v1")}]
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+            rows = _session_source_rows()
+            assert [u for u, _ in rows] == ["session:s1"], rows
+
+            # 3) delete path — the canonical identity is what it removes
+            rd = client.delete("/v1/sessions/s1")
+            assert rd.status_code == 200, rd.text
+            assert _session_source_rows() == []
+        finally:
+            app.dependency_overrides.pop(get_current_org_session_ungated, None)
+
+    @pytest.mark.parametrize("path", [
+        "session.md",
+        "/Users/alice/notes/session.md",
+        "notes\\session.md",
+        "a/b/session.md",
+    ])
+    def test_layer1_accepted_source_ref_resolves_to_the_session_source(
+            self, client, path):
+        """Review P2: Layer-1 and the writer derive the basename through the
+        ONE shared primitive, so any path Layer-1 accepts produces an
+        ``extractedFrom`` that resolves to the session Source — never a
+        bare-basename Source minted by the fallback."""
+        raw = _raw_payload(1)
+        raw["provenance_refs"] = [{"path": path, "spans": []}]
+        raw["points"][0]["source_ref"] = "session.md"
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        n = g.query(
+            "MATCH (p:Point {id:$pid})-[:extractedFrom]->(s:Source {url:'session:s1'}) "
+            "RETURN count(s)",
+            params={"pid": raw["points"][0]["id"]},
+        ).result_set[0][0]
+        assert n >= 1
+        assert _all_source_urls() == ["session:s1"], _all_source_urls()
+
+    @pytest.mark.parametrize("path", [".", "..", "/", "a/.", "a/.."])
+    def test_basename_less_provenance_path_422s_before_any_write(
+            self, client, path):
+        """Review P1/P2: a basename-less path used to pass Layer-1 and then
+        either raise mid-write (a 500 after the Session/Document/Event landed)
+        or mint a bare-basename Source. It must 422 BEFORE any write."""
+        raw = _raw_payload(1)
+        raw["provenance_refs"] = [{"path": path, "spans": []}]
+        r = _commit(client, raw)
+        assert r.status_code == 422, r.text
+        assert _all_source_urls() == [], _all_source_urls()
+
+    def test_blank_session_id_422s_before_any_write(self, client):
+        """Review P1: ``session_id='   '`` passed ``min_length=1`` and then
+        raised inside the write AFTER the Session counters, Document and Event
+        were written — a redacted 500 with a non-converging retry."""
+        raw = _raw_payload(1)
+        raw["session_id"] = "   "
+        r = _commit(client, raw)
+        assert r.status_code == 422, r.text
+        assert _all_source_urls() == [], _all_source_urls()
+
+    def test_derivation_is_the_canonical_session_identity(self):
+        """Derivation: the identity is the canonical ``session:<id>`` — the
+        SAME url the capture path materializes and ``delete_session`` deletes —
+        and it can NEVER collide with ``derive_source_url``'s ``corpus://``
+        authority (review P1 #3)."""
         from tortoise.file_indexer import (
             derive_session_source_url,
             derive_source_content_hash,
+            derive_source_url,
+            provenance_basename,
         )
 
-        assert derive_session_source_url("my session", "a b#c.md") == \
-            "corpus://my%20session/a%20b%23c.md"
-        # the session id is the collision domain...
-        assert derive_session_source_url("m1", "session.md") != \
-            derive_session_source_url("m2", "session.md")
-        # ...and a directory component never leaks into the identity (W-7)
-        assert derive_session_source_url(
-            "m1", "/Users/alice/notes/session.md") == "corpus://m1/session.md"
+        assert derive_session_source_url("s1") == "session:s1"
+        # the session id is the collision domain ...
+        assert derive_session_source_url("m1") != derive_session_source_url("m2")
+        # ... and a session id can never alias a corpus name: even an id equal
+        # to the corpus name yields `session:`, never `corpus://<name>/...`
+        assert derive_session_source_url("notes") != \
+            derive_source_url("/root/notes/session.md", "/root/notes",
+                              corpus_name="notes")
+        # a blank session id is a hard error (Layer-1 422s first)
+        for bad in ("", "   ", None):
+            with pytest.raises(ValueError):
+                derive_session_source_url(bad)
+        # the ONE shared basename primitive (W-7 + Windows separators)
+        assert provenance_basename("/Users/alice/notes/session.md") == "session.md"
+        assert provenance_basename("notes\\session.md") == "session.md"
+        assert provenance_basename("a/b/session.md") == "session.md"
+        for basename_less in ("", "/", ".", "..", "a/.", "a/.."):
+            assert provenance_basename(basename_less) == "", basename_less
+        # the anchor is a hash of the raw's CRLF-normalized text, never the url
         assert derive_source_content_hash("") == ""
         assert derive_source_content_hash(None) == ""
         assert derive_source_content_hash("raw") == hash_text("raw")
+        assert derive_source_content_hash("a\r\nb") == \
+            derive_source_content_hash("a\nb")
 
 
 # ── DE2E-6 — NAND direction policy ─────────────────────────────────────────
@@ -945,7 +1125,7 @@ class TestReplayIdempotency:
         assert n >= 1
         # edge transfer: extractedFrom moved to the new point
         n = g.query(
-            "MATCH (new:Point {id:$new})-[:extractedFrom]->(s:Source {url:'corpus://s1/session.md'}) "
+            "MATCH (new:Point {id:$new})-[:extractedFrom]->(s:Source {url:'session:s1'}) "
             "RETURN count(s)",
             params={"new": new_id},
         ).result_set[0][0]
@@ -1541,7 +1721,7 @@ class TestPrivacy:
         ).result_set
         assert rows and rows[0][0] == "session.md"
         rows = g.query(
-            "MATCH (s:Source {url:'corpus://s1/session.md'}) RETURN count(s)",
+            "MATCH (s:Source {url:'session:s1'}) RETURN count(s)",
         ).result_set
         assert rows[0][0] >= 1
 
