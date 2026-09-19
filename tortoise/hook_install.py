@@ -916,8 +916,13 @@ def _token_is_our_script(tok: str, script_name: str, hooks_dir: str | None,
 
 def _invokes_script(command: str, script_name: str,
                     hooks_dir: str | None,
-                    root: str | os.PathLike[str] | None = None) -> bool:
+                    root: str | os.PathLike[str] | None = None,
+                    *, matched: list[str] | None = None) -> bool:
     """True when a command line EXECUTES our script under ``hooks_dir``.
+
+    ``matched``, when given, receives the raw token the classifier resolved as
+    our script (the first one, matching this predicate's first-hit semantics).
+    It is informational only and does not change the verdict.
 
     THE RULE: walk the token stream and ask, at each position, whether the token
     that BASH would resolve as an executed command names our hook.  A token is in
@@ -983,7 +988,8 @@ def _invokes_script(command: str, script_name: str,
             # Trailing tokens after a ``-c`` command string are the child
             # shell's positional args ($0, $1, …), not commands.
             expect_cmd = False
-            if _invokes_script(tok, script_name, hooks_dir, root):
+            if _invokes_script(tok, script_name, hooks_dir, root,
+                               matched=matched):
                 return True
             continue
         if skip_next:
@@ -1068,6 +1074,8 @@ def _invokes_script(command: str, script_name: str,
             continue
         expect_cmd = False
         if _token_is_our_script(tok, script_name, hooks_dir, root):
+            if matched is not None:
+                matched.append(tok)
             return True
     return False
 

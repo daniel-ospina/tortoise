@@ -334,26 +334,24 @@ def _hook_fork_seconds(home, root, harness, tmp_path):
 
 
 #: The hook's time-to-fork per SEAM, measured once at the CURRENT load and
-#: reused.  The prologue is a property of the registered command and the hook
-#: bytes — not of the harness — so keying on the harness alone let a guard
-#: that short-circuits the hook (``exit 3``) poison every later landing test's
-#: budget (#3809 rr6).  Fresh temp roots install the shipped hooks
-#: byte-identically, so the honest case still pays for one calibration run per
-#: harness.
+#: reused.  The key is the registered command plus the hook bytes, not the
+#: harness alone: keying on the harness alone let a guard that short-circuits
+#: the hook (``exit 3``) poison every later landing test's budget (#3809 rr6).
+#: Fresh temp roots install the shipped hooks byte-identically, so the honest
+#: case still pays for one calibration run per harness.
 _FORK_SECONDS: dict[tuple[str, str], float] = {}
 
 
 def _hook_byte_sources(harness: str, root: Path, command: str) -> list[Path]:
-    """Every on-disk hook file whose bytes define this seam.
+    """The on-disk hook files whose bytes feed this seam's fingerprint.
 
     The raw command path is taken literally (a guard may synthesise a bare
-    path), AND the file a REAL install's command executes is located through
-    the installer's OWN classifier — ``hook_install._invokes_script``, the
-    same predicate ``detect_install``/``registered_commands`` use — so a
-    quoted Codex/Cursor path, a ``/bin/sh <hook>`` prefix, or a ``$VAR`` form
-    resolves to the file that actually runs.  Prefix-joining the whole command
-    string onto ``root`` only ever worked for a bare relative path; for a
-    quoted or multi-token command it missed, and the bytes leg was dropped.
+    path), and the file a registered command names is resolved through the
+    installer's OWN classifier — ``hook_install._invokes_script``, the same
+    predicate ``detect_install``/``registered_commands`` use.  A token the
+    classifier matched by its ``$VAR`` suffix form is NOT resolvable here, so
+    it contributes no source: the fingerprint falls to its marker rather than
+    keying on a guessed path.
     """
     import tortoise.hook_install as hook_install
 
@@ -363,9 +361,15 @@ def _hook_byte_sources(harness: str, root: Path, command: str) -> list[Path]:
         sources.append(raw if raw.is_absolute() else Path(root) / raw)
     layout = hook_install.get_layout(harness)
     for spec in layout.scripts:
-        if hook_install._invokes_script(
-                command, spec.name, layout.hooks_dir, root):
-            sources.append(Path(root) / layout.hooks_dir / spec.name)
+        matched: list[str] = []
+        if not hook_install._invokes_script(
+                command, spec.name, layout.hooks_dir, root, matched=matched):
+            continue
+        token = matched[0]
+        if token.startswith("$"):
+            continue  # a ``$VAR`` value is unknowable — never guess a path
+        sources.append(
+            Path(token) if os.path.isabs(token) else Path(root) / token)
     seen: set[str] = set()
     unique: list[Path] = []
     for source in sources:
@@ -378,18 +382,15 @@ def _hook_byte_sources(harness: str, root: Path, command: str) -> list[Path]:
 def _seam_fingerprint(harness: str, root: Path) -> tuple[str, str]:
     """Identity of the seam this root fires: the command AND the hook bytes.
 
-    Two roots that installed the same shipped hook hash the same and share one
-    calibration; a locally edited hook, or a substituted command (``exit 7``),
-    hashes differently and gets its own — never a landing test's throttled
+    The key is this harness, the root-canonicalized command, and the bytes of
+    every located hook source — so a locally edited hook, or a substituted
+    command (``exit 7``), gets its own key, never a landing test's throttled
     value.
 
-    The bytes leg reads the file the command ACTUALLY executes
-    (``_hook_byte_sources``), so it is not silently skipped when the registered
-    command quotes the path (Codex/Cursor) or prefixes a launcher
-    (``/bin/sh <hook>``) — the forms under which a shipped and a tampered hook
-    shared one key.  When NO hook file can be read, a MARKER keyed on the
-    canonical command is hashed instead: an unresolvable form still keys
-    differently from a resolved one, never a silent drop.
+    The bytes leg hashes what ``_hook_byte_sources`` finds, so a command that
+    quotes the path (Codex/Cursor) or prefixes a launcher (``/bin/sh <hook>``)
+    does not drop it.  When no candidate can be read, a marker is mixed in
+    under its own tag, distinct from a bytes leg.
     """
     import tortoise.session_verify as sv
 
@@ -407,11 +408,13 @@ def _seam_fingerprint(harness: str, root: Path) -> tuple[str, str]:
             # A candidate that is not the invoked file (e.g. the raw quoted
             # token); ``hashed`` decides whether EVERY candidate missed.
             continue
-        digest.update(b"\0")
+        digest.update(b"\0bytes\0")
+        digest.update(len(blob).to_bytes(8, "big"))
         digest.update(blob)
         hashed = True
     if command and not hashed:
-        digest.update(b"\0unresolved\0")
+        digest.update(b"\0marker\0")
+        digest.update(len(canonical).to_bytes(8, "big"))
         digest.update(canonical.encode("utf-8"))
     return (harness, digest.hexdigest())
 
@@ -543,6 +546,86 @@ def test_guard_hook_bytes_are_hashed_for_quoted_and_multitoken_commands(
     assert this._seam_fingerprint("claude", project_b) == claude_shipped
     _tamper(project_a / ".claude" / "hooks" / "session-end.sh")
     assert this._seam_fingerprint("claude", project_a) != claude_shipped
+
+
+def test_guard_unresolvable_var_token_never_keys_on_a_guessed_path(
+        monkeypatch, tmp_path):
+    """A ``$VAR``-form command keys on its marker, never on a guessed path.
+
+    ``_invokes_script`` accepts a ``$VAR`` token via its suffix branch, but the
+    variable's value is unknowable to ``_hook_byte_sources``, so the token must
+    contribute NO source.  Mapping the hit to ``root/<hooks_dir>/<script>``
+    would hash a file bash may never run and stay blind to the file ``$VAR``
+    really names — the rr9-1 silent skip.  Tampering the guessed file must
+    therefore leave the ``$VAR`` key UNCHANGED, while a command that resolves
+    to that same file DOES key on its bytes.
+
+    Mutation: map every ``_invokes_script`` hit to
+    ``Path(root) / layout.hooks_dir / spec.name`` (the old guess) — tampering
+    the guessed file moves the ``$VAR`` key and this REDs.
+    """
+    this = sys.modules[__name__]
+    import tortoise.hook_install as hook_install
+    import tortoise.session_verify as sv
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    home = tmp_path / "home"
+    assert install_capture("codex", home=home).ok
+    root = hook_install.default_root(hook_install.get_layout("codex"), home)
+    hook = root / "hooks" / "tortoise-session-end.sh"
+    assert hook.is_file()
+
+    var_command = "$OTHER_DIR/hooks/tortoise-session-end.sh"
+    assert hook_install._invokes_script(
+        var_command, "tortoise-session-end.sh", "hooks", root) is True
+
+    monkeypatch.setattr(sv, "_registered_capture_command",
+                        lambda _h, _root: var_command)
+    var_key = this._seam_fingerprint("codex", root)
+    hook.write_bytes(hook.read_bytes() + b"\n# tampered\n")
+    assert this._seam_fingerprint("codex", root) == var_key
+
+    # A command that DOES resolve to that same file keys on its bytes.
+    monkeypatch.setattr(
+        sv, "_registered_capture_command",
+        lambda _h, r: str(Path(r) / "hooks" / "tortoise-session-end.sh"))
+    resolved = this._seam_fingerprint("codex", root)
+    hook.write_bytes(hook.read_bytes() + b"\n# again\n")
+    assert this._seam_fingerprint("codex", root) != resolved
+
+
+def test_guard_unresolved_marker_is_tagged_apart_from_hook_bytes(
+        monkeypatch, tmp_path):
+    """A missing hook and a hook imitating the marker never collide.
+
+    ``_seam_fingerprint`` mixes a marker when no candidate can be read and a
+    bytes leg when one can.  If the marker were a bare constant suffix, a hook
+    whose bytes are exactly that suffix plus the canonical command would hash
+    identically to the hook being ABSENT — two distinct install states sharing
+    one calibration key (rr9-2).  The two legs are tagged apart, so the states
+    are distinguishable.
+
+    Mutation: encode the bytes leg as ``b"\\0" + blob`` and the marker as
+    ``b"\\0unresolved\\0" + canonical`` (the old scheme) — the two fingerprints
+    below compare EQUAL and this REDs.
+    """
+    this = sys.modules[__name__]
+    import tortoise.session_verify as sv
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert install_capture("claude", root=tmp_path, home=tmp_path).ok
+    command = sv._registered_capture_command("claude", tmp_path)
+    assert command
+    canonical = command.replace(str(tmp_path), "<root>")
+    hook = tmp_path / ".claude" / "hooks" / "session-end.sh"
+    assert hook.is_file()
+
+    hook.write_bytes(b"unresolved\x00" + canonical.encode("utf-8"))
+    present = this._seam_fingerprint("claude", tmp_path)
+    hook.unlink()
+    absent = this._seam_fingerprint("claude", tmp_path)
+    assert present != absent
 
 
 def test_default_fire_timeout_is_derived_not_a_wall_clock(monkeypatch, tmp_path):
