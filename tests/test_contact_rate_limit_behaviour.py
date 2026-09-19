@@ -10,32 +10,38 @@ pin's defeat surface over a mutable implementation is unbounded. The pins are ke
 as a tripwire and for their messages, but they cannot certify behaviour.
 
 This file asserts BEHAVIOUR instead: it extracts the limiter from
-`website/functions/api/contact.ts`, runs it in Node, and checks what it DOES. Each
-assertion below is a behaviour no static pin could see:
+`website/functions/api/contact.ts`, runs it in Node, and checks what it DOES.
 
 * the (RATE_LIMIT + 1)-th submission from one address is refused;
 * the stored history ACCUMULATES across calls — the map holds the array by
   reference, so an emptied array is visible here and nowhere else;
-* a submission after the window has passed does not count expired history;
-* the map stays bounded at MAX_RATE_KEYS under a flood of distinct addresses;
+* the window's edges: one ms inside the window still refuses, at exactly
+  `now - RATE_WINDOW_MS` the oldest submission has expired, and in a mixed window
+  only the expired entries stop counting;
+* the map converges to exactly MAX_RATE_KEYS under a flood of distinct addresses;
 * one address tripping does not refuse another.
 
-SCOPE, HONESTLY. The extraction is deliberately narrow — the limiter and its
-constants, not the module — so this harness says nothing about the handler's
-routing or the response it builds. Two escape classes from the pin history are
-handler-level and are NOT caught here: a per-request key
-(`crypto.randomUUID()`) and a `hits.clear()` in the handler body. Those stay the
-STATIC pins' job (the call site pinned verbatim, every `hits` reference confined),
-which was verified to red on both. The two guards are complementary, and a mutation
-to this limiter that changes its behaviour has to pass BOTH:
+HOW THIS RELATES TO THE STATIC PINS. The pins red on every limiter-level mutation
+below as well — `RATE_LIMITED_BODY` is the limiter verbatim, so any body edit
+breaks it. Their role is to force a re-read of the reviewed text; the value they
+add is the message telling a human to re-read the limiter and update the pin. This
+harness is the check that survives that update: it asserts the behaviour the
+re-read is supposed to preserve. The two handler-level escapes from the pin
+history — a per-request key (`crypto.randomUUID()`) and a `hits.clear()` in the
+handler body — are NOT visible here; they stay the pins' job (the call site pinned
+verbatim, every `hits` reference confined), verified red on both.
 
-    static pins   -> the handler's shape: the call site, the key derivation, where
-                     `hits` may be touched
-    this harness  -> what the limiter DOES with the store, over a scripted history
+`MUTATIONS` below replays the eleven limiter-level escapes as an executable
+battery, so the detection claim is an artifact in the repo rather than a number in
+a message.
 
-The division is demonstrated, not asserted: of the thirteen mutations recovered
-from the pin history, the harness reds on eleven and the static pins red on the two
-handler-level ones.
+SCOPE, HONESTLY. The extraction is deliberately narrow — the limiter, its
+constants and its store, not the module — so this harness says nothing about the
+handler's routing, the 429 response, the honeypot, `isCrossSite`, or CR/LF
+rejection in the reply-to: those need a handler-level harness (#4108 remains open
+for them). The window's SEMANTICS are verified against the declared constant; the
+constant's magnitude is a product choice pinned only loosely in
+`test_contact_form.py`, so a shorter-but-sane window does not red here.
 
 Node is required and the tests SKIP with a reason when it is absent, rather than
 passing silently.
@@ -47,6 +53,7 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -111,27 +118,27 @@ def _brace_end(text: str, start: int) -> int:
     raise AssertionError(f"unbalanced braces after offset {start}")
 
 
-def _limiter_source() -> str:
-    """The limiter as runnable JavaScript: its constants, its map, its function.
+def _limiter_source(code: str) -> str:
+    """The limiter as runnable JavaScript: its constants, its store, its function.
 
     Asserted loudly rather than skipped: if the module's shape changes so this
     extraction stops finding the limiter, the harness must fail — a silent skip
     would be a behaviour test that tests nothing.
     """
-    code = _strip_comments(CONTACT_TS.read_text(encoding="utf-8"))
+    source = _strip_comments(code)
     constants = re.findall(
-        r"^const (?:RATE_LIMIT|RATE_WINDOW_MS|MAX_RATE_KEYS)\s*=\s*[^;]+;", code, re.M
+        r"^const (?:RATE_LIMIT|RATE_WINDOW_MS|MAX_RATE_KEYS)\s*=\s*[^;]+;", source, re.M
     )
     assert len(constants) == 3, f"expected the three limiter constants, found {constants!r}"
-    declaration = re.search(r"const hits\s*=\s*[^;]+;", code)
+    declaration = re.search(r"const hits\s*=\s*[^;]+;", source)
     assert declaration is not None, "the limiter's state map was not found"
     # The declaration is used VERBATIM (only its TypeScript type arguments removed),
     # not replaced by a `new Map()` of the harness's own: otherwise changing the
     # store — `new WeakMap()` has no `size`, so the cap silently never runs — would
     # be invisible to a behaviour test that builds its own store.
     store = re.sub(r"<[^>]*>", "", declaration.group(0))
-    start = code.index("function rateLimited")
-    body = code[start : _brace_end(code, start)]
+    start = source.index("function rateLimited")
+    body = source[start : _brace_end(source, start)]
     # The signature carries TypeScript annotations only; the body is plain JS. The
     # parameters are passed positionally by the harness, so a changed ORDER is a
     # behaviour change and the assertions below catch it.
@@ -141,27 +148,22 @@ def _limiter_source() -> str:
         body,
         count=1,
     )
-    return "\n".join(
-        [
-            *constants,
-            store,
-            body,
-            "",
-        ]
-    )
+    return "\n".join([*constants, store, body, ""])
 
 
 DRIVER = r"""
 const observations = {};
 const T0 = 1_000_000;
 
-// The loops below must not scale with a bumped threshold: a huge RATE_LIMIT would
-// make this harness HANG rather than fail. `RATE_LIMIT` is exercised up to
-// THRESHOLD_CEILING; the static pin in test_contact_form.py owns the value RANGE
-// (1..100), so a value beyond this ceiling is reported as an unexercised limit and
-// the assertion below fails on it rather than running for hours.
+// The loops must not scale with a bumped constant: a huge RATE_LIMIT or
+// MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
+// to a ceiling and a value beyond it is reported so the assertion can say so.
 const THRESHOLD_CEILING = 101;
+const CAP_CEILING = 10000;
 observations.rateLimit = RATE_LIMIT;
+observations.maxRateKeys = MAX_RATE_KEYS;
+observations.thresholdCeiling = THRESHOLD_CEILING;
+observations.capCeiling = CAP_CEILING;
 const limit = Math.min(RATE_LIMIT, THRESHOLD_CEILING);
 observations.limit = limit;
 
@@ -182,11 +184,28 @@ for (let i = 0; i < limit; i++) {
 }
 observations.growth = growth;
 
-// 2. Window expiry: history older than RATE_WINDOW_MS must not refuse a submission.
+// 2. The WINDOW, at its edges rather than somewhere past them. `limit` submissions
+// land at T0..T0+limit-1, so at `now = T0 + RATE_WINDOW_MS` the first of them is
+// exactly ON the cutoff and must have expired: the predicate is strict (`t > cutoff`)
+// and this is the one input that separates strict from non-strict. A filter that
+// stops expiring altogether, or that keeps the old entries, changes the mixed
+// sequence below.
 hits.clear();
 for (let i = 0; i < limit; i++) rateLimited("w", T0 + i);
-observations.expiredRefuses = rateLimited("w", T0 + RATE_WINDOW_MS + 1000);
+observations.expiredRefuses = rateLimited("w", T0 + RATE_WINDOW_MS + limit);
 observations.afterExpiryStored = (hits.get("w") || []).length;
+
+hits.clear();
+for (let i = 0; i < limit; i++) rateLimited("e", T0 + i);
+observations.edgeInsideRefuses = rateLimited("e", T0 + RATE_WINDOW_MS - 1);
+observations.edgeExactRefuses = rateLimited("e", T0 + RATE_WINDOW_MS);
+observations.edgeAfterStored = (hits.get("e") || []).length;
+
+hits.clear();
+for (let i = 0; i < 2; i++) rateLimited("m", T0 + i);
+const mixed = [];
+for (let i = 0; i < limit + 1; i++) mixed.push(rateLimited("m", T0 + RATE_WINDOW_MS + i));
+observations.mixed = mixed;
 
 // 3. Per-address isolation: one address tripping must not refuse another's.
 hits.clear();
@@ -194,34 +213,51 @@ for (let i = 0; i < limit; i++) rateLimited("x", T0 + i);
 observations.oneAddressTrips = rateLimited("x", T0 + limit);
 observations.otherAddressOk = !rateLimited("y", T0 + limit);
 
-// A cap beyond what this harness seeds is reported as unexercised (the static pin in
-// test_contact_form.py owns the value RANGE) rather than run — and the seed loop is
-// bounded so a huge value fails instead of hanging.
-const CAP_CEILING = 20000;
-observations.maxRateKeys = MAX_RATE_KEYS;
-const seedCount = Math.min(MAX_RATE_KEYS, CAP_CEILING) + 100;
-observations.capCeiling = CAP_CEILING;
-
-// 4. The map is bounded by KEY COUNT under a flood of distinct addresses. The keys
-// are seeded DIRECTLY so the run stays fast: one live entry each (nothing expired),
-// then one call to trigger the sweep. `size` on a store that lacks it is reported as
-// -1 so the assertion fails loudly instead of passing on `undefined`.
+// 4. The cap, under a REAL flood of distinct addresses through `rateLimited`. One
+// more key than the cap is attempted, so a correct eviction leaves exactly
+// MAX_RATE_KEYS. `size` on a store that lacks it is reported as -1 so the assertion
+// fails loudly instead of passing on `undefined`.
 hits.clear();
-for (let i = 0; i < seedCount; i++) hits.set("seed" + i, [T0]);
-rateLimited("fresh", T0);
+const planned = Math.min(MAX_RATE_KEYS, CAP_CEILING) + 1;
+for (let i = 0; i < planned; i++) rateLimited("ip" + i, T0);
+observations.attemptedKeys = planned;
 observations.mapSize = hits.size === undefined ? -1 : hits.size;
-observations.attemptedKeys = seedCount + 1;
+
+// 5. The expired sweep, when over the cap: an EXPIRED key must be dropped before a
+// LIVE one. Seeds are written directly (the limiter cannot travel back in time to
+// create an expired window) and the LIVE ones are inserted FIRST, so insertion order
+// and expiry order disagree: an eviction that ignores expiry removes the live keys
+// and leaves the dead ones behind, which the counts below show.
+hits.clear();
+const expiredAt = T0 - RATE_WINDOW_MS - 1;
+for (let i = 0; i < MAX_RATE_KEYS; i++) hits.set("live" + i, [T0]);
+for (let i = 0; i < 10; i++) hits.set("dead" + i, [expiredAt]);
+rateLimited("fresh", T0);
+let deadLeft = 0;
+let liveLeft = 0;
+for (const k of hits.keys()) {
+  if (k.startsWith("dead")) deadLeft++;
+  else liveLeft++;
+}
+observations.deadKeysLeft = deadLeft;
+observations.liveKeysLeft = liveLeft;
 
 console.log(JSON.stringify(observations));
 """
 
 
-@pytest.fixture(scope="module")
-def behaviour() -> dict:
-    """Run the limiter in Node once and return what it observed."""
-    script = _limiter_source() + DRIVER
+def _observe(code: str) -> dict:
+    """Run the limiter extracted from `code` in Node and return its observations.
+
+    A failure to run is an assertion failure, not a skip: a limiter the harness
+    cannot execute is a limiter this harness cannot certify.
+    """
     result = subprocess.run(
-        [NODE, "-e", script], capture_output=True, text=True, timeout=120, check=False
+        [NODE, "-e", _limiter_source(code) + DRIVER],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
     )
     assert result.returncode == 0, (
         f"the extracted limiter failed to run in node (exit {result.returncode}):\n"
@@ -235,74 +271,212 @@ def behaviour() -> dict:
         ) from err
 
 
-def test_the_limiter_refuses_past_its_threshold(behaviour: dict) -> None:
-    """The submission after the limit is refused — and one fewer is not.
-
-    A limit beyond what this harness exercises is a FAILURE here, not a skip: the
-    static pin in `test_contact_form.py` bounds the value to a sane range, so a
-    larger one means that pin was violated too.
-    """
-    assert behaviour["limit"] == behaviour["rateLimit"], (
-        f"RATE_LIMIT={behaviour['rateLimit']} is beyond what this harness exercises — "
-        "the static pin in test_contact_form.py bounds that value"
+def _check_threshold(observed: dict) -> None:
+    """The submission after the limit is refused — and one fewer is not."""
+    assert observed["limit"] == observed["rateLimit"], (
+        f"RATE_LIMIT={observed['rateLimit']} is larger than this harness exercises "
+        f"({observed['thresholdCeiling']}) — raise THRESHOLD_CEILING for that tuning"
     )
-    assert behaviour["firstTripIndex"] == behaviour["limit"], (
+    assert observed["firstTripIndex"] == observed["limit"], (
         "the boundary must be the (RATE_LIMIT+1)-th submission from one address, "
-        f"got the first refusal at index {behaviour['firstTripIndex']}"
+        f"got the first refusal at index {observed['firstTripIndex']}"
     )
 
 
-def test_the_stored_history_accumulates(behaviour: dict) -> None:
-    """The map holds the window BY REFERENCE, so an emptied array is a silent no-op.
-
-    `recent.length = 0;` anywhere, `hits.set(ip, [])`, `hits.clear()`, or a filter
-    that always drops everything each leaves the window empty: the stored length
-    stops growing and the limiter can never trip, while a static pin over the
-    statements sees nothing.
-    """
-    limit = behaviour["limit"]
-    assert behaviour["growth"] == list(range(1, limit + 1)), (
+def _check_accumulation(observed: dict) -> None:
+    """The map holds the window BY REFERENCE, so an emptied array is a silent no-op."""
+    limit = observed["limit"]
+    assert observed["growth"] == list(range(1, limit + 1)), (
         "the stored window must grow by one per submission, got "
-        f"{behaviour['growth']!r} — the history is being emptied"
+        f"{observed['growth']!r} — the history is being emptied"
     )
-    assert behaviour["storedAfterTrip"] == limit, (
+    assert observed["storedAfterTrip"] == limit, (
         f"after the refusal the stored window must hold {limit} entries, got "
-        f"{behaviour['storedAfterTrip']}"
+        f"{observed['storedAfterTrip']}"
     )
 
 
-def test_expired_history_does_not_refuse(behaviour: dict) -> None:
-    """Past the window the earlier submissions must not count."""
-    assert behaviour["expiredRefuses"] is False, (
-        "a submission after RATE_WINDOW_MS must be allowed — the window is filtering "
-        "against the wrong cutoff"
+def _check_window(observed: dict) -> None:
+    """The window expires at its edge — strictly, and only for expired entries."""
+    limit = observed["limit"]
+    assert observed["expiredRefuses"] is False, (
+        "a submission a full window after the history began must be allowed — the "
+        "window is filtering against the wrong cutoff"
     )
-    assert behaviour["afterExpiryStored"] == 1, (
-        "the expired history must be replaced, not kept: "
-        f"{behaviour['afterExpiryStored']} entries stored"
+    assert observed["afterExpiryStored"] == 1, (
+        "the fully expired history must be replaced, not kept: "
+        f"{observed['afterExpiryStored']} entries stored"
+    )
+    assert observed["edgeInsideRefuses"] is True, (
+        "one millisecond inside the window the earlier submissions must still count "
+        "— the window is expiring history too early"
+    )
+    assert observed["edgeExactRefuses"] is False, (
+        "at exactly `now - RATE_WINDOW_MS` the oldest submission has reached the "
+        "cutoff and must not count — the predicate must be strict (`t > cutoff`)"
+    )
+    assert observed["edgeAfterStored"] == limit, (
+        f"at the edge the window must hold {limit} live entries after the new one, "
+        f"got {observed['edgeAfterStored']}"
+    )
+    assert observed["mixed"] == [False] * limit + [True], (
+        "in a mixed window only the expired entries may stop counting: the oldest two "
+        f"must expire, so the refusal comes on the {limit}-th live submission — got "
+        f"{observed['mixed']!r}"
     )
 
 
-def test_one_address_does_not_refuse_another(behaviour: dict) -> None:
+def _check_isolation(observed: dict) -> None:
     """The limit is per address, not global."""
-    assert behaviour["oneAddressTrips"] is True, "the over-limit address must be refused"
-    assert behaviour["otherAddressOk"] is True, (
+    assert observed["otherAddressOk"] is True, (
         "a different address must not be refused by another address's history"
     )
 
 
-def test_the_map_is_bounded_under_a_flood(behaviour: dict) -> None:
-    """The cap bounds KEY COUNT, so memory cannot grow without bound.
+def _check_cap(observed: dict) -> None:
+    """The cap bounds KEY COUNT, and lands ON the cap rather than short of it.
 
-    A store without `size` (a `WeakMap`), a cap that is never reached, or eviction
-    that stops early all show up here as an unbounded map. A cap beyond what this
-    harness seeds is a FAILURE, not a skip — the static pin owns the value range.
+    A store without `size` (a `WeakMap`, reported as -1), a cap that is never
+    reached, and an over-eviction that drops live keys all show up here — the last
+    one matters most, because an evicted live key loses its history and the limit
+    becomes bypassable.
     """
-    assert behaviour["maxRateKeys"] <= behaviour["capCeiling"], (
-        f"MAX_RATE_KEYS={behaviour['maxRateKeys']} is beyond what this harness seeds — "
-        "the static pin in test_contact_form.py bounds that value"
+    assert observed["maxRateKeys"] <= observed["capCeiling"], (
+        f"MAX_RATE_KEYS={observed['maxRateKeys']} is larger than this harness floods "
+        f"({observed['capCeiling']}) — raise CAP_CEILING for that tuning"
     )
-    assert 100 <= behaviour["mapSize"] <= behaviour["attemptedKeys"] - 100, (
-        "the map must be capped: "
-        f"{behaviour['mapSize']} keys kept of {behaviour['attemptedKeys']} attempted"
+    assert observed["mapSize"] == observed["maxRateKeys"], (
+        f"the flood attempted {observed['attemptedKeys']} distinct addresses and the "
+        f"map must converge to exactly {observed['maxRateKeys']} keys, got "
+        f"{observed['mapSize']}"
     )
+
+
+def _check_sweep(observed: dict) -> None:
+    """Over the cap, expired keys go before live ones.
+
+    The live seeds are inserted FIRST and the expired ones last, so this cannot be
+    satisfied by plain oldest-first eviction: a sweep that stops expiring keeps the
+    dead keys and starts evicting live history instead.
+    """
+    assert observed["deadKeysLeft"] == 0, (
+        "an expired key must be dropped before any live one when the map is over the "
+        f"cap — {observed['deadKeysLeft']} expired keys survived"
+    )
+    assert observed["liveKeysLeft"] == observed["maxRateKeys"], (
+        f"the live keys (plus the new one) must fill the cap: expected "
+        f"{observed['maxRateKeys']}, got {observed['liveKeysLeft']}"
+    )
+
+
+INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
+    ("threshold", _check_threshold),
+    ("accumulation", _check_accumulation),
+    ("window", _check_window),
+    ("isolation", _check_isolation),
+    ("cap", _check_cap),
+    ("sweep", _check_sweep),
+)
+
+
+def _failures(observed: dict) -> list[str]:
+    """Every invariant this observation violates — the harness's verdict as data."""
+    broken: list[str] = []
+    for name, check in INVARIANTS:
+        try:
+            check(observed)
+        except AssertionError as err:
+            broken.append(f"{name}: {err}")
+    return broken
+
+
+@pytest.fixture(scope="module")
+def behaviour() -> dict:
+    """Run the real limiter once and return what it observed."""
+    return _observe(CONTACT_TS.read_text(encoding="utf-8"))
+
+
+def test_the_limiter_refuses_past_its_threshold(behaviour: dict) -> None:
+    """The submission after the limit is refused — and one fewer is not."""
+    _check_threshold(behaviour)
+
+
+def test_the_stored_history_accumulates(behaviour: dict) -> None:
+    """The stored window must grow, or the limiter can never trip."""
+    _check_accumulation(behaviour)
+
+
+def test_the_window_expires_at_its_edge(behaviour: dict) -> None:
+    """Expiry happens AT `RATE_WINDOW_MS`, strictly, and only to expired entries."""
+    _check_window(behaviour)
+
+
+def test_one_address_does_not_refuse_another(behaviour: dict) -> None:
+    """The limit is per address, not global."""
+    _check_isolation(behaviour)
+
+
+def test_the_map_converges_to_the_cap_under_a_flood(behaviour: dict) -> None:
+    """Memory is bounded by key count, and eviction stops at the cap."""
+    _check_cap(behaviour)
+
+
+def test_expired_keys_are_swept_before_live_ones(behaviour: dict) -> None:
+    """Over the cap, the cheap win comes first: expired keys go, live ones stay."""
+    _check_sweep(behaviour)
+
+
+# The eleven limiter-level escapes from the #2409 pin history, as an executable
+# battery: each must be caught (red) by the invariants above. Anchors are matched
+# uniquely and asserted present, so a refactor that moves one cannot leave a
+# mutation that never applies and a battery that silently proves nothing.
+MUTATIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "emptied history after the filter",
+        "const recent = (hits.get(ip) || []).filter((t) => t > cutoff);",
+        "const recent = (hits.get(ip) || []).filter((t) => t > cutoff);\n  recent.length = 0;",
+    ),
+    ("emptied history after the push", "\n  recent.push(now);", "\n  recent.push(now);\n  recent.length = 0;"),
+    (
+        "emptied history after the write-back",
+        "\n  hits.set(ip, recent);",
+        "\n  hits.set(ip, recent);\n  recent.length = 0;",
+    ),
+    ("predicate that never counts", "(t) => t > cutoff", "(t) => t > cutoff && false"),
+    ("empty array written back", "\n  hits.set(ip, recent);", "\n  hits.set(ip, []);"),
+    ("map cleared after the write-back", "\n  hits.set(ip, recent);", "\n  hits.set(ip, recent);\n  hits.clear();"),
+    ("store without `size`", "new Map<string, number[]>()", "new WeakMap()"),
+    ("threshold raised out of range", "const RATE_LIMIT = 5;", "const RATE_LIMIT = 1_000_000_000;"),
+    ("window cut to nothing", "const cutoff = now - RATE_WINDOW_MS;", "const cutoff = now;"),
+    ("trip comparison relaxed", "recent.length >= RATE_LIMIT", "recent.length > RATE_LIMIT"),
+    ("cap raised out of range", "const MAX_RATE_KEYS = 5000;", "const MAX_RATE_KEYS = 50_000_000;"),
+    ("expiry predicate made non-strict", "filter((t) => t > cutoff)", "filter((t) => t >= cutoff)"),
+    ("expiry filter removed", "(hits.get(ip) || []).filter((t) => t > cutoff)", "hits.get(ip) || []"),
+    ("eviction overshoots the cap", "let excess = hits.size - MAX_RATE_KEYS;", "let excess = hits.size - 100;"),
+    (
+        "expired sweep removed",
+        "for (const [k, v] of hits) {\n      if (v.every((t) => t <= cutoff)) hits.delete(k);\n    }",
+        "",
+    ),
+)
+
+
+@pytest.mark.parametrize(("label", "anchor", "replacement"), MUTATIONS, ids=[m[0] for m in MUTATIONS])
+def test_the_harness_catches_a_behavioural_break(label: str, anchor: str, replacement: str) -> None:
+    """Each mutation of the limiter must be caught — by the invariants or by the run.
+
+    This is the harness's own discriminating power, asserted. A mutation that leaves
+    the invariants green is a hole in the guard, and this test is where it shows up
+    rather than in a message claiming a detection count.
+    """
+    source = CONTACT_TS.read_text(encoding="utf-8")
+    assert anchor in source, (
+        f"the mutation anchor for {label!r} is gone from the limiter — update MUTATIONS "
+        "rather than leaving a battery that no longer applies"
+    )
+    try:
+        observed = _observe(source.replace(anchor, replacement, 1))
+    except AssertionError:
+        # The mutated limiter could not be extracted or run at all — caught.
+        return
+    assert _failures(observed), f"{label!r} escaped the harness: {observed!r}"
