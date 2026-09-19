@@ -489,9 +489,10 @@ def _drop_scratch_graph() -> None:
     ``_fresh_db`` deletes the PREVIOUS graph on the next call, which leaves
     the LAST graph of every process behind — one leaked graph per instrument
     run, on a shared server, which is the accumulation the docker lane
-    exists to prevent. Registered with ``atexit`` and called explicitly at
-    the end of ``run_full`` so the final graph goes away without waiting for
-    process exit.
+    exists to prevent. Registered with ``atexit`` and called from ``main``'s
+    ``finally`` — which covers every mode (``seed-timing``, full/live/
+    movement, and any raise) — so the final graph goes away without waiting
+    for process exit.
 
     It also restores ``TORTOISE_DB_URI`` to the value in force before the
     first docker call, so a caller that constructs another SDK after the run

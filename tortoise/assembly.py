@@ -1103,9 +1103,9 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
     """
     from tortoise.retrieval import (
         DEFAULT_CONTEXT_ITEM_CAP,
-        DEFAULT_CONTEXT_TOKEN_CAP,
         assemble_context,
         resolve_byte_cap_from_caps,
+        resolve_token_cap_from_caps,
     )
     if caps is None:
         from tortoise.retrieval import resolve_ask_retrieval_caps
@@ -1165,17 +1165,20 @@ def _assemble_connected(sdk, question: str, *, question_date: str | None = None,
         from tortoise.why import enrich_items, w4_enrichment_enabled
         if w4_enrichment_enabled():
             hits = enrich_items(sdk._get_proj(), hits)
-    # #4105 review fix: the byte ceiling fallback for a LEGACY caps dict
-    # (one that predates ``context_byte_cap``) is DERIVED from that dict's
-    # token cap, never the 32 KiB literal — otherwise a caller passing a
-    # widened token cap but no byte cap gets the old silent no-op back on
-    # exactly this seam.
-    legacy_token_cap = caps.get("context_token_cap",
-                                DEFAULT_CONTEXT_TOKEN_CAP)
+    # #4105 review fix: for a LEGACY caps dict (one that predates
+    # ``context_byte_cap``) BOTH the token budget and the byte ceiling come
+    # from ONE validated resolution of the same key — the byte ceiling is
+    # DERIVED from that dict's token cap, never the 32 KiB literal (which
+    # would re-open the silent no-op on exactly this seam), and the token
+    # budget is the SAME sanitised value (a raw read would raise on a
+    # non-numeric entry, or silently assemble at a different budget than the
+    # ceiling was derived from). An absent key falls back to the ask-lane
+    # default, so a caps dict with no token cap resolves like ``caps=None``.
+    token_cap = resolve_token_cap_from_caps(caps)
     byte_cap = resolve_byte_cap_from_caps(caps)
     selected = assemble_context(
         hits, top_k=caps.get("context_item_cap", DEFAULT_CONTEXT_ITEM_CAP),
-        max_context_tokens=legacy_token_cap,
+        max_context_tokens=token_cap,
         question_date=question_date,
         context_item_cap=caps.get("context_item_cap",
                                   DEFAULT_CONTEXT_ITEM_CAP),

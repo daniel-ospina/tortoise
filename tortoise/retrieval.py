@@ -388,19 +388,22 @@ def resolve_byte_cap_from_caps(caps: dict) -> int:
         return from_env
     return min(MAX_ASK_CONTEXT_BYTE_CAP,
                max(DEFAULT_CONTEXT_BYTE_CAP,
-                   _resolve_token_cap_from_caps(caps)
+                   resolve_token_cap_from_caps(caps)
                    * BYTES_PER_TOKEN_FLOOR))
 
 
-def _resolve_token_cap_from_caps(caps: dict) -> int:
-    """The token cap to derive a byte ceiling from, validated the same way
-    the env knob is (falling back to the ask-lane default).
+def resolve_token_cap_from_caps(caps: dict) -> int:
+    """A caps dict's ``context_token_cap``, validated the same way the env
+    knob is (falling back to the ask-lane default).
 
-    The DERIVED leg is the last resort, so it must not be the one place a
-    nominal value slips through unvalidated: a raw multiply would honour
-    ``0`` / an out-of-range dict value and RAISE on ``None`` or a string,
-    resolving a different ceiling (or a crash) on the dict seam than the env
-    seam resolves for the same nominal input.
+    THE single resolution of a caps dict's token budget: both the token
+    budget and the DERIVED byte ceiling of a legacy caps dict come from this
+    value, so they cannot be derived from different numbers (a raw read would
+    honour ``0`` / an out-of-range entry and RAISE on ``None`` or a
+    non-numeric string, resolving a different window — or a crash — on the
+    dict seam than the env seam resolves for the same nominal input). An
+    absent key falls back to ``DEFAULT_ASK_CONTEXT_TOKEN_CAP``, so a dict
+    with no token cap resolves like ``caps=None``.
     """
     raw = caps.get("context_token_cap", DEFAULT_ASK_CONTEXT_TOKEN_CAP)
     if isinstance(raw, bool):
