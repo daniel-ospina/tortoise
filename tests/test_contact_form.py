@@ -443,6 +443,14 @@ def test_the_confirmation_promises_no_reply() -> None:
     is true at that moment: the message was received. This is the relay's
     condition on shipping the form, and it is pinned here because copy is the
     easiest thing to soften without noticing.
+
+    WHAT THIS PIN CANNOT DO: it is a static scan, so a promise assembled by
+    EVALUATED indirection — a function returning half of it, a computed lookup
+    (`MAP.k`, `["a", "b"][1]`), a getter, `String.raw`, or a string imported from
+    another module — is outside its reach (cycle-18 review). The client's own
+    fallback is the exception: being a single fixed literal, it is pinned as an
+    EXACT expression rather than scanned, so no concatenation or call can hide
+    there. The behavioural answer for the rest is the TS harness filed as #4108.
     """
     src = _src(FUNCTION_TS)
     html_src = _src(CONTACT_HTML)
@@ -494,8 +502,20 @@ def test_the_confirmation_promises_no_reply() -> None:
     assert re.search(r"show\(\s*msg\s*,\s*data\.message\s*\|\|", script_code), (
         "the success branch must display the server's message (`data.message`)"
     )
-    assert '"Thanks — your message is on its way."' in script_code, (
-        "the success branch's own fallback must stay the reviewed, promise-free text"
+    # …and the fallback must BE the reviewed literal, not merely contain it.
+    # Membership let `"Thanks — your message is on its way." + half() + " reply
+    # soon."` through: `half()` returns `" We'll"`, so no single literal carries
+    # both a subject and a reply word, and the rendered defensive path is a promise
+    # (cycle-18 review). Pinned as an exact expression over the constant-INLINED
+    # script, so hoisting the string into a constant stays legitimate while any
+    # concatenation or evaluated call there does not.
+    inlined_script = _inline_constants(script_code)
+    assert re.search(
+        r'data\.message\s*\|\|\s*"Thanks — your message is on its way\."\s*[;,)]',
+        inlined_script,
+    ), (
+        "the success fallback must be exactly the reviewed literal — a concatenation "
+        "or a computed string there is visitor-facing text no promise scan can read"
     )
     # The whole PAGE is visitor-facing, not just its script: the static copy, the
     # lede and the noscript fallback are what a JS-off reader sees, and appending
