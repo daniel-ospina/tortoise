@@ -88,6 +88,7 @@ import argparse
 import contextlib
 import difflib
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -416,7 +417,56 @@ def assert_reader_pin() -> dict:
 
 # ── seeding + per-question run ──────────────────────────────────────────────
 
-def _fresh_db(tag: str) -> str:
+_DB_SEQ = itertools.count()
+_LAST_DOCKER_GRAPH: str | None = None
+
+
+def _drop_docker_graph(base: str, name: str) -> None:
+    """Best-effort delete of a scratch docker graph (keep the server's
+    memory bounded — graphs accumulate across a run otherwise)."""
+    from urllib.parse import urlparse
+    try:
+        import redis as _redis
+        u = urlparse(base)
+        client = _redis.Redis(host=u.hostname, port=u.port or 6379,
+                              password=u.password or None)
+        client.execute_command("GRAPH.DELETE", name)
+    except Exception:  # noqa: BLE001, RUF100 — cleanup is best-effort
+        pass
+
+
+def _fresh_db(tag: str) -> str | None:
+    """A per-call ISOLATED store.
+
+    Default: a fresh embedded redislite FILE (the historical lane). When
+    ``TORTOISE_ASK_SHAPE_DB_URI`` names a ``docker://`` base URI, use the
+    docker server with a UNIQUE per-call graph instead: the embedded lane
+    spawns one redislite server per question and cannot start one reliably
+    under fleet load (measured ~50% startup failure at load > 60,
+    ``No such file or directory`` on the unix socket), which injects
+    substrate faults into the live rate. The docker lane has no
+    per-question process to lose. The env var is a SUBSTRATE selector, not
+    a measurement knob — it changes where the graph lives, never what is
+    seeded or read.
+
+    Docker graphs are named ``<base>_<tag>_<pid>_<seq>`` (unique per process,
+    so two runs never append to each other's seed) and the PREVIOUS graph is
+    deleted on the next call — the sdk for it is always closed first, and a
+    server that accumulates every seeded graph hits its memory ceiling
+    mid-run (observed: 12 questions faulting with ``DB refused writes ...
+    memory ceiling``).
+    """
+    global _LAST_DOCKER_GRAPH
+    base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
+    if base:
+        prefix, _, _leaf = base.rpartition("/")
+        if _LAST_DOCKER_GRAPH:
+            _drop_docker_graph(base, _LAST_DOCKER_GRAPH)
+            _LAST_DOCKER_GRAPH = None
+        name = f"{_leaf or 'askshape'}_{tag}_{os.getpid()}_{next(_DB_SEQ)}"
+        os.environ["TORTOISE_DB_URI"] = f"{prefix}/{name}"
+        _LAST_DOCKER_GRAPH = name
+        return None
     return os.path.join(tempfile.mkdtemp(prefix=f"askshape_{tag}_"), "t.db")
 
 
