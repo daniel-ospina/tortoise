@@ -258,6 +258,20 @@ def test_drop_fingerprint_bounds_a_single_key_name_length(caplog):
     assert ha._telemetry_drop_fingerprint({"plan", "tier"}) == ("plan", "tier")
 
 
+def test_drop_site_label_is_bounded_too(caplog):
+    """The site label (``where``/``subject``) is a code literal at every current
+    call site, but the boundedness contract must not DEPEND on that: a future
+    request-derived label must not grow the counter, the per-site dict, or the
+    log line without bound."""
+    huge = "W" * 200_000
+    with caplog.at_level(logging.WARNING):
+        ha._report_unregistered(huge, huge, {"k"})
+    counter_key = next(k for k in ha._TELEMETRY_DROP_COUNTS if "k" in k[2])
+    assert len(counter_key[0]) <= ha._TELEMETRY_DROP_MAX_KEY_LEN + 32
+    assert len(counter_key[1]) <= ha._TELEMETRY_DROP_MAX_KEY_LEN + 32
+    assert all(len(rec.getMessage()) < 10_000 for rec in _warnings(caplog))
+
+
 def test_drop_state_is_bounded_across_distinct_sites(caplog):
     """The reported dict is bounded in its SITE dimension too — a future emit
     site misusing a caller-derived `subject` cannot grow it without bound — and

@@ -19595,6 +19595,14 @@ _TELEMETRY_DROP_SITE_OVERFLOW: tuple[str, str] = (
     "<site-overflow>", "<site-overflow>")
 
 
+def _truncate_label(text: str) -> str:
+    """Truncate an over-long label, keeping a length suffix in the rendering."""
+    if len(text) <= _TELEMETRY_DROP_MAX_KEY_LEN:
+        return text
+    return (text[:_TELEMETRY_DROP_MAX_KEY_LEN]
+            + f"...(+{len(text) - _TELEMETRY_DROP_MAX_KEY_LEN} more)")
+
+
 def _cap_dropped_key(key: object) -> object:
     """Truncate ONE over-long dropped key name so a fingerprint stays bounded.
 
@@ -19605,8 +19613,7 @@ def _cap_dropped_key(key: object) -> object:
     rendered = key if isinstance(key, str) else str(key)
     if len(rendered) <= _TELEMETRY_DROP_MAX_KEY_LEN:
         return key
-    return (rendered[:_TELEMETRY_DROP_MAX_KEY_LEN]
-            + f"...(+{len(rendered) - _TELEMETRY_DROP_MAX_KEY_LEN} more)")
+    return _truncate_label(rendered)
 
 
 def _telemetry_drop_fingerprint(keys: frozenset[str] | set[str]) -> tuple[str, ...]:
@@ -19687,6 +19694,12 @@ def _report_unregistered(where: str, subject: str,
     """
     if not unknown:
         return
+    # A site label is a code literal at every CURRENT call site, but the
+    # boundedness contract must not depend on that — cap it exactly as a key
+    # name is capped, so a future request-derived label cannot grow the
+    # counter, the per-site dict, or the log line without bound.
+    where = _truncate_label(where)
+    subject = _truncate_label(subject)
     fingerprint = _telemetry_drop_fingerprint(frozenset(unknown))
     with _TELEMETRY_DROP_LOCK:
         counter_key = (where, subject, fingerprint)
