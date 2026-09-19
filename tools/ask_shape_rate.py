@@ -895,6 +895,30 @@ def seed_timing(questions: list[dict], n: int = 1) -> dict:
 
 # ── main ────────────────────────────────────────────────────────────────────
 
+def _attempts() -> tuple[int, ...]:
+    """Attempts per question. A transient substrate failure (an embedded
+    FalkorDB socket vanishing mid-run — OBSERVED repeatedly on a
+    load-average-100+ host) is an INFRASTRUCTURE fault, not a product
+    result; retrying once on a fresh store keeps a valid measurement
+    obtainable without laundering the fault. Only a question that fails
+    BOTH attempts is recorded as a per-question FAIL, with its reason and
+    the attempt count."""
+    return (1, 2)
+
+
+def _fault_record(question: dict, error: str, attempts: int) -> dict:
+    """Canonical all-legs-FAIL record for a question that could not be run.
+    Every consumer reads the canonical keys, so a fault counts as a FAIL
+    (never a dropped question) and stays visible."""
+    return {"question_id": question.get("question_id"),
+            "expected_abstain": _abs_question(question),
+            "error": error, "attempts": attempts,
+            "abstained": None, "provider": None, "route": None,
+            "model": None, "duration_ms": None,
+            "l1_abstain": False, "l2_provenance": False,
+            "l3_grounding": False, "pass": False}
+
+
 def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
              blank: bool, retired_substitution: bool,
              mutation=None, limit: int | None = None) -> list[dict]:
@@ -904,15 +928,17 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
     records = []
     subset = questions[:limit] if limit else questions
     for q in subset:
-        sdk_mod._reset_ask_reader_cache_for_tests()
-        sdk = sdk_mod.TortoiseSDK(_fresh_db(f"m_{arm}"))
-        reader = BlankReader() if blank else probe
-        saved = sdk_mod._default_ask_reader_factory
-        sdk_mod._default_ask_reader_factory = lambda r=reader: r
-        saved_arc = sdk_mod._ask_reader_complete
-        if retired_substitution:
-            sdk_mod._ask_reader_complete = _retired_reader_complete
-        try:
+        rec: dict | None = None
+        last_err = ""
+        for attempt in _attempts():
+            sdk_mod._reset_ask_reader_cache_for_tests()
+            sdk = sdk_mod.TortoiseSDK(_fresh_db(f"m_{arm}_{attempt}"))
+            reader = BlankReader() if blank else probe
+            saved = sdk_mod._default_ask_reader_factory
+            sdk_mod._default_ask_reader_factory = lambda r=reader: r
+            saved_arc = sdk_mod._ask_reader_complete
+            if retired_substitution:
+                sdk_mod._ask_reader_complete = _retired_reader_complete
             try:
                 _seed_memory(sdk, q)
                 if mutation is not None:
@@ -922,25 +948,24 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
                     rec = evaluate_question(
                         sdk, q, reader_mode="blank" if blank else "probe",
                         probe=reader if not blank else None, mcp_mod=mcp_mod)
-            except Exception as e:  # noqa: BLE001, RUF100
-                # A transient substrate failure (an embedded store's socket
-                # vanishing mid-run is OBSERVED in this environment) must not
-                # kill the arm: record it as a per-question FAIL with its
-                # reason so the movement comparison stays computable and the
-                # failure stays visible rather than fatal.
-                rec = {"question_id": q.get("question_id"),
-                       "expected_abstain": _abs_question(q),
-                       "error": f"{type(e).__name__}: {e}",
-                       "abstained": None, "provider": None, "route": None,
-                       "model": None,
-                       "l1_abstain": False, "l2_provenance": False,
-                       "l3_grounding": False, "pass": False}
-            records.append(rec)
-        finally:
-            sdk_mod._ask_reader_complete = saved_arc
-            sdk_mod._default_ask_reader_factory = saved
-            sdk.close()
-            sdk_mod._reset_ask_reader_cache_for_tests()
+            except Exception as e:  # noqa: BLE001, RUF100 — infrastructure fault
+                rec = None
+                last_err = f"{type(e).__name__}: {e}"
+            finally:
+                sdk_mod._ask_reader_complete = saved_arc
+                sdk_mod._default_ask_reader_factory = saved
+                sdk.close()
+                sdk_mod._reset_ask_reader_cache_for_tests()
+            if rec is not None and not rec.get("error"):
+                rec["attempts"] = attempt
+                break
+            last_err = (rec or {}).get("error") or last_err
+            rec = None
+            if attempt != _attempts()[-1]:
+                time.sleep(1.0)   # let a thrashing host settle
+        if rec is None:
+            rec = _fault_record(q, last_err, _attempts()[-1])
+        records.append(rec)
     return records
 
 
@@ -1132,30 +1157,32 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         sdk_mod._reset_ask_reader_cache_for_tests()
         live: list[dict] = []
         for i, q in enumerate(questions):
-            sdk_mod._reset_ask_reader_cache_for_tests()
-            db = _fresh_db("live")
-            sdk = sdk_mod.TortoiseSDK(db)
-            try:
-                _seed_memory(sdk, q)
-                import tortoise.mcp_server as mcp_mod
-                with _shipping_handlers(sdk):
-                    rec = evaluate_question(sdk, q, reader_mode="live",
-                                            mcp_mod=mcp_mod)
-            except Exception as e:  # noqa: BLE001, RUF100
-                # Same contract as inside evaluate_question: a per-question
-                # exception is a FAIL, never a crash of the whole run and
-                # never a dropped question.
-                rec = {"question_id": q.get("question_id"),
-                       "expected_abstain": _abs_question(q),
-                       "error": f"{type(e).__name__}: {e}",
-                       "abstained": None, "provider": None, "route": None,
-                       "model": None,
-                       "l1_abstain": False, "l2_provenance": False,
-                       "l3_grounding": False, "pass": False,
-                       "duration_ms": None}
-            finally:
-                sdk.close()
+            rec: dict | None = None
+            last_err = ""
+            for attempt in _attempts():
                 sdk_mod._reset_ask_reader_cache_for_tests()
+                sdk = sdk_mod.TortoiseSDK(_fresh_db(f"live_{attempt}"))
+                try:
+                    _seed_memory(sdk, q)
+                    import tortoise.mcp_server as mcp_mod
+                    with _shipping_handlers(sdk):
+                        rec = evaluate_question(sdk, q, reader_mode="live",
+                                                mcp_mod=mcp_mod)
+                except Exception as e:  # noqa: BLE001, RUF100
+                    rec = None
+                    last_err = f"{type(e).__name__}: {e}"
+                finally:
+                    sdk.close()
+                    sdk_mod._reset_ask_reader_cache_for_tests()
+                if rec is not None and not rec.get("error"):
+                    rec["attempts"] = attempt
+                    break
+                last_err = (rec or {}).get("error") or last_err
+                rec = None
+                if attempt != _attempts()[-1]:
+                    time.sleep(1.0)
+            if rec is None:
+                rec = _fault_record(q, last_err, _attempts()[-1])
             # A per-question exception is a FAIL, never a VOID and never a
             # dropped question — only a RESULT whose provider is not the pin
             # makes the run VOID (a low rate must not be laundered as a void,
