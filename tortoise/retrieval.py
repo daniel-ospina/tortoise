@@ -104,7 +104,23 @@ DEFAULT_CONTEXT_BYTE_CAP = 32768
 #: deliberately generous (the ask-lane corpus measures ~5.8 bytes/token), so
 #: the byte bound normally does NOT bind before the token bound — it is the
 #: cheap guard against a single pathological huge hit, not a second budget.
+#:
+#: It is emphatically NOT a promise that the TOKEN cap is enforced in bytes:
+#: ``estimate_tokens_ask`` charges unspaced CJK at ~4.6 bytes/estimated-token
+#: and emoji at ~2, so no single bytes-per-token factor can bound the
+#: ESTIMATED count on those pools. That bound is enforced directly, by
+#: charging the same non-whitespace surcharge in ``assemble_context``'s token
+#: accounting (``_ask_token_surcharge``) — the byte cap stays a UTF-8
+#: backstop, never the enforcement point.
 BYTES_PER_TOKEN_FLOOR = 8
+
+#: #4105: hard upper bounds on the resolved budget, so a typo'd env value
+#: falls back to the default instead of resolving an unbounded window. The
+#: token bound is well above any model context window in use; the byte bound
+#: is shared by the explicit env path and the DERIVED path so the two can
+#: never disagree.
+MAX_ASK_CONTEXT_TOKEN_CAP = 200_000
+MAX_ASK_CONTEXT_BYTE_CAP = 1 << 40
 
 #: #4105: the ask lane's MEASURED window defaults. These are ASK-LANE
 #: specific — the eval lane and the extraction lane keep the shared
@@ -120,10 +136,13 @@ BYTES_PER_TOKEN_FLOOR = 8
 #: rank-147 turn) yet DILUTES the small reader, regressing four questions
 #: that passed at the historical caps (b0479f84, e831120c, f4f1d8a4_abs,
 #: eace081b) and dropping shape_rate to 6/21. At 16k (byte ceiling derived:
-#: 16,000 x 8), shape_rate is 10/21, abstain 15/21, grounding 15/21 — the
-#: three best-target questions pass, 0a995998's rank-147 turn stays out
-#: (its own pool-depth decision, #4105), and one question (eace081b)
-#: regresses. The 32k option remains one env var away and is reported.
+#: 16,000 x 8) the recorded runs put shape_rate at 10-11/21 with abstain and
+#: grounding at 15-16/21 (the reader is stochastic: 4 of the 21 questions
+#: flip on byte-identical code, so a single run is not a rate) — the
+#: deterministic property this default buys is that FOUR of the five
+#: window-miss answer-bearing turns (ranks 67/84/89/93) now reach the reader,
+#: while 0a995998's ranks 147/153 stay out (its own pool-depth decision,
+#: #4105). The 32k option remains one env var away and is reported.
 #: Metered cost stays under the documented $0.01/query structural target
 #: (16k prompt tokens x $0.21/M = $0.0034 + output).
 DEFAULT_ASK_RETRIEVAL_LIMIT = 200
@@ -276,7 +295,8 @@ def resolve_ask_retrieval_caps() -> dict:
         ASK_CONTEXT_ITEM_CAP_ENV, DEFAULT_ASK_CONTEXT_ITEM_CAP,
         hi=_POOL_CLAMP[1])
     token_cap = ask_env_int(
-        ASK_CONTEXT_TOKEN_CAP_ENV, DEFAULT_ASK_CONTEXT_TOKEN_CAP)
+        ASK_CONTEXT_TOKEN_CAP_ENV, DEFAULT_ASK_CONTEXT_TOKEN_CAP,
+        hi=MAX_ASK_CONTEXT_TOKEN_CAP)
     # Invariant 1: the window can never be narrower than the assembly cap.
     limit = max(limit, item_cap)
     # Invariant 2: the pool can never be narrower than the window. The
@@ -284,24 +304,27 @@ def resolve_ask_retrieval_caps() -> dict:
     # against (1..10000), so an out-of-range env value falls back to the
     # default at resolve time rather than handing the SDK a value it
     # rejects (which would fail every ask with a retrieval error).
+    #
+    # NOTE the pool is an EXPLICIT ``pool_size`` to ``tortoise_fts_query``,
+    # which the SDK's ``resolve_pool_size(exact=True)`` contract treats as an
+    # exact override — so ``pool_size == limit`` at the defaults is a
+    # deliberate measured choice (the instrument's fusion depth), NOT a floor
+    # over the SDK's own ``limit*2`` resolution. Raise ``TORTOISE_ASK_POOL_SIZE``
+    # to deepen the candidate pool; that changes what fusion sees.
     pool_size = max(
         ask_env_int(ASK_POOL_SIZE_ENV, DEFAULT_ASK_POOL_SIZE, hi=10000), limit)
     # Invariant 3: byte ceiling resolved; derived from the token cap when
     # not set (or set to GARBAGE — a typo must not pin the ceiling to the
     # 32 KiB floor and silently re-introduce the no-op) so a token raise is
-    # honoured in bytes too.
-    explicit_bytes = os.environ.get(ASK_CONTEXT_BYTE_CAP_ENV, "").strip()
-    byte_cap = None
-    if explicit_bytes:
-        try:
-            candidate = int(explicit_bytes)
-        except (TypeError, ValueError):
-            candidate = None
-        if candidate is not None and candidate >= 1:
-            byte_cap = min(candidate, 1 << 40)
+    # honoured in bytes too. Both paths share one parser and one upper
+    # clamp, so an explicit value and a derived one can never disagree
+    # about the bound.
+    byte_cap = _resolve_explicit_byte_cap(
+        os.environ.get(ASK_CONTEXT_BYTE_CAP_ENV, ""))
     if byte_cap is None:
-        byte_cap = max(DEFAULT_CONTEXT_BYTE_CAP,
-                       token_cap * BYTES_PER_TOKEN_FLOOR)
+        byte_cap = min(MAX_ASK_CONTEXT_BYTE_CAP,
+                       max(DEFAULT_CONTEXT_BYTE_CAP,
+                           token_cap * BYTES_PER_TOKEN_FLOOR))
     return {
         "limit": limit,
         "pool_size": pool_size,
@@ -311,21 +334,51 @@ def resolve_ask_retrieval_caps() -> dict:
     }
 
 
-def resolve_byte_cap_from_caps(caps: dict) -> int:
-    """The ask-lane byte ceiling for a caps dict, DERIVING it from the
-    dict's token cap when the dict carries no ``context_byte_cap`` (#4105).
+def _resolve_explicit_byte_cap(raw: str) -> int | None:
+    """Parse an explicit ``TORTOISE_ASK_CONTEXT_BYTE_CAP``-style value.
 
-    A caller may hand a LEGACY caps dict (one that predates #4105, e.g. an
-    eval arm built before the key existed). Falling back to the 32 KiB
-    literal there would re-introduce exactly the silent no-op #4105 removes
-    on that seam, so the fallback is derived from the dict's own token cap.
+    ``None`` means "no usable explicit value" — unset, blank, non-integer,
+    < 1 — so the caller DERIVES the ceiling instead. A negative or zero
+    value must never be honoured: it would drop every hit. The upper clamp
+    is shared with the derived path (``MAX_ASK_CONTEXT_BYTE_CAP``).
+    """
+    if not raw.strip():
+        return None
+    try:
+        candidate = int(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    if candidate < 1:
+        return None
+    return min(candidate, MAX_ASK_CONTEXT_BYTE_CAP)
+
+
+def resolve_byte_cap_from_caps(caps: dict) -> int:
+    """The ask-lane byte ceiling for a caps dict (#4105).
+
+    Precedence matches :func:`resolve_ask_retrieval_caps` exactly: an
+    explicit ``context_byte_cap`` in the dict, else the explicit
+    ``TORTOISE_ASK_CONTEXT_BYTE_CAP`` env, else a ceiling DERIVED from the
+    dict's own token cap. The env leg matters — without it a caller handing
+    a LEGACY caps dict (one that predates #4105) would silently assemble at
+    a different ceiling than the env-pinned ask lane, and an A/B comparison
+    across the two seams would be comparing budgets.
+
+    Falling back to the bare 32 KiB literal would also re-introduce exactly
+    the silent no-op #4105 removes on that seam, so the last resort is
+    always the DERIVED ceiling, never the literal.
     """
     explicit = caps.get("context_byte_cap")
     if explicit is not None:
         return explicit
-    return max(DEFAULT_CONTEXT_BYTE_CAP,
-               caps.get("context_token_cap", DEFAULT_CONTEXT_TOKEN_CAP)
-               * BYTES_PER_TOKEN_FLOOR)
+    from_env = _resolve_explicit_byte_cap(
+        os.environ.get(ASK_CONTEXT_BYTE_CAP_ENV, ""))
+    if from_env is not None:
+        return from_env
+    return min(MAX_ASK_CONTEXT_BYTE_CAP,
+               max(DEFAULT_CONTEXT_BYTE_CAP,
+                   caps.get("context_token_cap", DEFAULT_CONTEXT_TOKEN_CAP)
+                   * BYTES_PER_TOKEN_FLOOR))
 
 
 def resolve_ask_boost_multipliers() -> dict:
@@ -476,10 +529,11 @@ def estimate_tokens_ask(text: str) -> int:
     runs to ~0 words. The ask lane uses this conservative per-char
     multiplier for non-whitespace-delimited runs — pinned at ~0.6-0.7
     token/char (OVER-estimated versus the DeepSeek rate, so the meter can
-    never under-count). Because the multiplier is conservative, on
-    CJK-heavy pools the resolved BYTE ceiling binds FIRST (the ask-lane
-    default is 128 000 bytes, DERIVED from the 16 000-token cap by #4105; the old
-    32 KiB literal bound at ~10.9K chars ≈ ~6.5-7.6K estimated tokens).
+    never under-count). ``assemble_context`` charges this same surcharge in
+    its token accounting (:func:`_ask_token_surcharge`, #4105), so the
+    resolved TOKEN cap bounds ``context_tokens`` on CJK/emoji pools too —
+    the resolved byte ceiling (128 000 bytes by default, DERIVED from the
+    16 000-token cap) is a UTF-8 backstop, not the enforcement point.
 
     This is a conservative ESTIMATE, never an exact bill; it is the source
     of the response field ``context_tokens`` (the RENDERED-CONTEXT tokens
@@ -504,6 +558,24 @@ def estimate_tokens_ask(text: str) -> int:
         char_est = max(1, int(len(run) * per_char))
         surcharge += max(0, char_est - 1)
     return base + surcharge
+
+
+def _ask_token_surcharge(text: str) -> int:
+    """The part of ``estimate_tokens_ask(text)`` the whitespace-word budget
+    does NOT already charge — 0 for pure-ASCII text (#4105).
+
+    ``assemble_context``'s token budget is whitespace-word based
+    (``len(block.split()) * 1.1``), so it is blind to unspaced CJK/emoji runs
+    and a non-ASCII pool could overrun the resolved token cap while the drop
+    census stayed silent. Charging this surcharge in the same accounting
+    makes the TOKEN cap the real bound on every script; the byte cap stays a
+    cheap UTF-8 backstop. Identical to the old arithmetic on ASCII text, so
+    ASCII-only callers (and the frozen transcripts) are byte-for-byte
+    unchanged.
+    """
+    if not text:
+        return 0
+    return max(0, estimate_tokens_ask(text) - int(len(text.split()) * 1.1))
 
 
 _ROLE_PREFIX = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s+",
@@ -748,16 +820,24 @@ def assemble_context(
 
     ``stats`` (#4105): optional out-dict. When supplied it is updated with the
     admission census (``items_selected``, ``claim_bearing``, ``bytes_used``,
-    ``words_used``, ``dropped_by_token_cap``, ``dropped_by_byte_cap``,
-    ``byte_cap``, ``stopped_by``). It exists so a caller can tell WHICH bound
-    is binding — in particular, ``dropped_by_byte_cap > 0`` means the byte
-    ceiling alone kept admitted-by-token hits out, so a byte ceiling that
-    cannot be raised silently caps the window. The return value is unchanged
+    ``words_used``, ``nonascii_token_surcharge``, ``dropped_by_token_cap``,
+    ``dropped_by_byte_cap``, ``byte_cap``, ``stopped_by``). It exists so a
+    caller can tell WHICH bound is binding — in particular,
+    ``dropped_by_byte_cap > 0`` means the byte ceiling alone kept
+    admitted-by-token hits out, so a byte ceiling that cannot be raised
+    silently caps the window. ``stopped_by`` names the drop-bound that fired
+    (``byte_cap`` / ``token_cap`` / ``item_cap``, else ``None``), preferring
+    the byte/token caps over ``item_cap`` because the item bound is also
+    "reached" when the pool simply ended. The return value is unchanged
     (a list of hits), so pure-function callers are unaffected.
 
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
-    ``Current Date: …`` header words; the 1.1 markup multiplier applies
+    ``Current Date: …`` header words + the per-block non-ASCII surcharge
+    (``_ask_token_surcharge``, #4105 — zero for ASCII text, the estimator's
+    overage for unspaced CJK/emoji runs, so ``context_tokens`` is bounded by
+    ``max_context_tokens`` on every script); the 1.1 markup multiplier
+    applies
     ONCE to the joined total, so ``context_tokens ==
     estimate_tokens(render_context(...))`` holds exactly (no per-block
     ``int()`` drift). Oversized hits are SKIPPED (continue), never starving
@@ -792,6 +872,12 @@ def assemble_context(
                     if question_date else 0)
     selected: list[dict] = []
     words = header_words
+    # #4105: the whitespace-word budget is blind to unspaced CJK/emoji runs,
+    # so the estimator's surcharge for those runs is charged HERE too — the
+    # resolved token cap then bounds ``context_tokens`` on every script
+    # rather than only on whitespace-delimited text. Zero for ASCII input,
+    # so ASCII-only callers are byte-identical to the pre-#4105 arithmetic.
+    surcharge = 0
     # #4105: per-constraint drop census. ``dropped_by_byte_cap`` counts hits
     # the TOKEN cap admitted but the BYTE cap refused — i.e. hits the byte
     # ceiling alone kept out. That is the honest signal that the caller's
@@ -822,7 +908,9 @@ def assemble_context(
         claim_bearing += 1
         block = _render_block(h)
         cost = len(block.split())
-        if int((words + cost) * 1.1) > max_context_tokens:
+        sur_cost = _ask_token_surcharge(block)
+        if int((words + cost) * 1.1) + surcharge + sur_cost \
+                > max_context_tokens:
             dropped_by_token_cap += 1
             continue  # skip this hit; keep later ones (no starvation)
         if byte_cap is not None:
@@ -835,19 +923,28 @@ def assemble_context(
             bytes_used += len(block.encode("utf-8")) + 2
         selected.append(h)
         words += cost
+        surcharge += sur_cost
     if stats is not None:
+        # ``stopped_by`` names the bound(s) that ACTUALLY dropped a hit, and
+        # prefers the byte/token caps over ``item_cap``: the item bound is
+        # also "reached" when the pool simply ended or when a later cap had
+        # already refused everything, so reporting it first would mislabel
+        # the binding constraint. ``item_cap`` is reported only when it is
+        # the sole bound that cut the pool.
+        stopped_by = (
+            "byte_cap" if dropped_by_byte_cap else
+            "token_cap" if dropped_by_token_cap else
+            "item_cap" if len(selected) >= item_bound else None)
         stats.update({
             "items_selected": len(selected),
             "claim_bearing": claim_bearing,
             "bytes_used": bytes_used,
             "words_used": words,
+            "nonascii_token_surcharge": surcharge,
             "dropped_by_token_cap": dropped_by_token_cap,
             "dropped_by_byte_cap": dropped_by_byte_cap,
             "byte_cap": byte_cap,
-            "stopped_by": (
-                "item_cap" if len(selected) >= item_bound else
-                "byte_cap" if dropped_by_byte_cap else
-                "token_cap" if dropped_by_token_cap else None),
+            "stopped_by": stopped_by,
         })
     return selected
 

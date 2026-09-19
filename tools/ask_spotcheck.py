@@ -487,8 +487,9 @@ def _require_judge_key() -> str:
 def _turn_present(evidence_norm: str, content) -> bool:
     """True when a distinctive window of a turn's verbatim content appears
     in the normalized evidence string (the reader's assembled context). The
-    first ~200 chars are probed (a long turn truncated by the 32 KiB byte
-    cap still matches via its head); a <20-char probe is too weak to count.
+    first ~200 chars are probed (a long turn truncated by the reader's byte
+    ceiling still matches via its head); a <20-char probe is too weak to
+    count.
     """
     c = _normalize(content)
     if not c:

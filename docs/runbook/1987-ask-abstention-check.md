@@ -219,7 +219,7 @@ three non-abstention failure classes:
 | class | failures | cause (verified) |
 |---|---|---|
 | reader-MODEL content error | gpt4_8279ba02 (commits purchase date, no day count), gpt4_7a0daae1 (hedge), gpt4_6ed717ea (wrong order), 830ce83f (recency noise: commits the older Chicago mention; gold = the suburbs), 0100672e ($60 total vs $12 each), e831120c (hedge), b0479f84 (commits wrong recs) | deepseek-v4-flash answers wrong content — arithmetic, ordering, recency, per-unit reasoning |
-| retrieval gap (FTS top-40) | ceb54acb (answer turn ranks ~70: 'sexual fixations' list never retrieved), 1de5cff2 ('veja' turn not in top-40), gpt4_d84a3211 (dollar amounts not in top-40), 1d4e3b97 (chain/cassette turn not retrieved) | the product ask lane is FTS-only; the gold turns rank below the 8k/40 caps on these long haystacks |
+| retrieval gap (pre-#4105 FTS top-40) | ceb54acb (answer turn ranks ~70: 'sexual fixations' list never retrieved), 1de5cff2 ('veja' turn not in top-40), gpt4_d84a3211 (dollar amounts not in top-40), 1d4e3b97 (chain/cassette turn not retrieved) | the product ask lane is FTS-only; at the HISTORICAL 8k/40 caps the gold turns ranked below the window (fused ranks 67-153) on these long haystacks. The #4105 resolved defaults (200/200/16000) admit the answer-bearing turn for ceb54acb, 1de5cff2, 1d4e3b97 and e9327a54; 0a995998's ranks 147/153 still need the 32k option. |
 | containment-judge bar | d6233ab6 (long synthesis gold: needs ~45-word overlap), 1d4e3b97 (same) | the judge's `max(2, len(gold_words)//2)` word-overlap bar on ~70-90-word synthesis golds is structurally unreachable |
 
 qwen3.8-max diagnostic (same evidence, `qwen/qwen3.8-max` via the

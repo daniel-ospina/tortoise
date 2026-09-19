@@ -85,6 +85,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import difflib
 import hashlib
@@ -419,37 +420,88 @@ def assert_reader_pin() -> dict:
 
 _DB_SEQ = itertools.count()
 _LAST_DOCKER_GRAPH: str | None = None
+#: The ``TORTOISE_DB_URI`` in force before ``_fresh_db`` started rewriting it
+#: (None = not yet captured). Restored on every non-docker call.
+_PRIOR_DB_URI: str | None = None
 
 
 def _substrate_label() -> str:
     """A receipt-safe label for the store the run measured against.
 
-    Never the raw ``TORTOISE_ASK_SHAPE_DB_URI`` — its documented form
-    embeds a password, and a receipt is a tracked file that gets committed.
+    NEVER echoes the raw ``TORTOISE_ASK_SHAPE_DB_URI``, and never echoes the
+    URI's PATH: the documented form embeds a password in the userinfo, and a
+    receipt is a TRACKED file that gets committed. A malformed value (e.g. a
+    single slash, ``docker:/:pw@host:6379/g``) leaves the userinfo in
+    ``urlparse(...).path`` rather than in ``netloc``, so echoing the path is
+    a credential leak — the label is therefore built from validated
+    components ONLY, and any URI without a host is refused by name.
     """
     base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
     if not base:
         return "embedded"
     from urllib.parse import urlparse
     u = urlparse(base)
-    user = u.username or ""
-    auth = f"{user}:***@" if (user or u.password) else ""
+    if not u.netloc or not u.hostname:
+        # Fail LOUD here: a value this malformed is about to be used as a
+        # connection base too, and the label must never be the thing that
+        # discovers it. Name the problem, never the value.
+        raise SystemExit(
+            "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI is not a usable "
+            "connection URI (no host) — expected a form like "
+            "docker://:pw@host:6379/<graph>")
     port = f":{u.port}" if u.port else ""
-    return f"{u.scheme}://{auth}{u.hostname or ''}{port}/{u.path.lstrip('/')}"
+    auth = "***@" if (u.username or u.password) else ""
+    # The graph segment is deliberately NOT echoed (it is part of the path,
+    # which is where a malformed userinfo can land). The receipt records
+    # WHERE the rate was measured, not the scratch graph's name.
+    return f"{u.scheme}://{auth}{u.hostname}{port}/<graph>"
 
 
 def _drop_docker_graph(base: str, name: str) -> None:
     """Best-effort delete of a scratch docker graph (keep the server's
-    memory bounded — graphs accumulate across a run otherwise)."""
-    from urllib.parse import urlparse
+    memory bounded — graphs accumulate across a run otherwise).
+
+    The client is derived from the SAME resolver every product connection
+    uses (``tortoise.projection.resolve_db_endpoint``), so the delete can
+    never dial a different endpoint than the SDK that seeded the graph — an
+    independently-parsed port/host would make the delete a silent no-op
+    (it is wrapped in ``except: pass``) and the graphs would accumulate into
+    exactly the memory-ceiling fault this lane exists to avoid.
+    """
     try:
         import redis as _redis
-        u = urlparse(base)
-        client = _redis.Redis(host=u.hostname, port=u.port or 6379,
-                              password=u.password or None)
+
+        from tortoise.projection import resolve_db_endpoint
+
+        ep = resolve_db_endpoint(base)
+        client = _redis.Redis(host=ep.host, port=ep.port,
+                              username=ep.username or None,
+                              password=ep.password or None,
+                              ssl=bool(ep.ssl))
         client.execute_command("GRAPH.DELETE", name)
     except Exception:  # noqa: BLE001, RUF100 — cleanup is best-effort
         pass
+
+
+def _drop_scratch_graph() -> None:
+    """Drop the CURRENT scratch docker graph, if any (run teardown).
+
+    ``_fresh_db`` deletes the PREVIOUS graph on the next call, which leaves
+    the LAST graph of every process behind — one leaked graph per instrument
+    run, on a shared server, which is the accumulation the docker lane
+exists to prevent. Registered via ``atexit`` and called at the end of
+    ``run_full`` so the final graph goes away too.
+    """
+    global _LAST_DOCKER_GRAPH
+    base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
+    if base and _LAST_DOCKER_GRAPH:
+        _drop_docker_graph(base, _LAST_DOCKER_GRAPH)
+    _LAST_DOCKER_GRAPH = None
+
+
+# The last scratch graph of a process is otherwise never deleted; drop it on
+# exit so N runs do not leave N graphs on a shared server.
+atexit.register(_drop_scratch_graph)
 
 
 def _fresh_db(tag: str) -> str | None:
@@ -471,19 +523,30 @@ def _fresh_db(tag: str) -> str | None:
     deleted on the next call — the sdk for it is always closed first, and a
     server that accumulates every seeded graph hits its memory ceiling
     mid-run (observed: 12 questions faulting with ``DB refused writes ...
-    memory ceiling``).
+    memory ceiling``). The LAST graph of a run is dropped at process exit
+    (``_drop_scratch_graph``, registered with ``atexit``).
+
+    ``TORTOISE_DB_URI`` is written for the duration of the per-call graph and
+    RESTORED to its prior value on the next call, so a caller that
+    constructs another SDK after the run cannot silently attach to a scratch
+    graph.
     """
     global _LAST_DOCKER_GRAPH
+    global _PRIOR_DB_URI
+    prior = _PRIOR_DB_URI
+    if prior is None:
+        prior = os.environ.get("TORTOISE_DB_URI", "")
+        _PRIOR_DB_URI = prior
     base = os.environ.get("TORTOISE_ASK_SHAPE_DB_URI", "").strip()
     if base:
         from urllib.parse import urlparse
         parsed = urlparse(base)
         leaf = parsed.path.lstrip("/")
-        if not leaf:
+        if not leaf or not parsed.netloc:
             raise SystemExit(
                 "ask_shape_rate: TORTOISE_ASK_SHAPE_DB_URI must name a base "
                 "GRAPH segment (e.g. docker://:pw@host:6379/askshape) — a "
-                f"bare server URI is rejected: {base!r}")
+                "bare or malformed server URI is rejected")
         if _LAST_DOCKER_GRAPH:
             _drop_docker_graph(base, _LAST_DOCKER_GRAPH)
             _LAST_DOCKER_GRAPH = None
@@ -492,6 +555,10 @@ def _fresh_db(tag: str) -> str | None:
             f"{parsed.scheme}://{parsed.netloc}/{name}")
         _LAST_DOCKER_GRAPH = name
         return None
+    if prior:
+        os.environ["TORTOISE_DB_URI"] = prior
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
     return os.path.join(tempfile.mkdtemp(prefix=f"askshape_{tag}_"), "t.db")
 
 

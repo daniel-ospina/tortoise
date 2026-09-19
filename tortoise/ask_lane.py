@@ -317,7 +317,8 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     Local lane pipeline: validation FIRST (``AskValidationError``, zero
     model calls) → ``tortoise_fts_query`` (``include_terminal=True`` —
     the D8 supersession markers reach the reader; cost-bounded by the
-    same 8k/40 caps) → ask-path annotation (session-date join + speaker)
+    resolved caps — ``resolve_ask_retrieval_caps()``, default
+    200/200/16000/derived) → ask-path annotation (session-date join + speaker)
     → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
     → A5 evidence-mark boost (default ON — reorders the deduped pool by
     stored ``has_answer`` marks; zero marks = no-op) → A7 rerank
@@ -395,9 +396,10 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
     carry, NOT a mirror of the tags: a hit on the eval lane
     (``lme_session_index``) keeps its historical tag whatever id it carries.
     The derived tag is also part of the BYTE accounting, so a pool already at
-    the 32 KiB byte ceiling can admit slightly fewer hits than pre-change
-    (the 8K token cap is unaffected — the tag adds bytes, not whitespace
-    words).
+    the RESOLVED byte ceiling (128 000 bytes by default; #4105) can admit
+    slightly fewer hits than a pool below it (the token cap is unaffected —
+    the tag adds bytes, not whitespace words, and the non-ASCII surcharge is
+    zero for the ASCII tag).
 
     Raises: ``AskValidationError`` (input), ``AskRetrievalUnavailable``
     (retrieval/annotation/assembly raise), ``AskReaderUnavailable``

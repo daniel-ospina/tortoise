@@ -40,7 +40,9 @@ from tortoise.retrieval import (
     DEFAULT_ASK_RETRIEVAL_LIMIT,
     DEFAULT_CONTEXT_BYTE_CAP,
     DEFAULT_CONTEXT_TOKEN_CAP,
+    MAX_ASK_CONTEXT_BYTE_CAP,
     assemble_context,
+    estimate_tokens_ask,
     render_context,
     resolve_ask_retrieval_caps,
     resolve_byte_cap_from_caps,
@@ -112,26 +114,59 @@ def test_token_raise_raises_the_derived_byte_ceiling(monkeypatch):
 def test_explicit_byte_cap_wins_and_garbage_falls_back(monkeypatch):
     monkeypatch.setenv(ASK_CONTEXT_BYTE_CAP_ENV, "4096")
     assert resolve_ask_retrieval_caps()["context_byte_cap"] == 4096
-    monkeypatch.setenv(ASK_CONTEXT_BYTE_CAP_ENV, "not-a-number")
+    # A typo must not pin the ceiling to the 32 KiB floor and silently
+    # re-introduce the no-op, and a NON-POSITIVE value must never be honoured
+    # (0/negative would drop every hit) — all of them derive instead.
+    for garbage in ("not-a-number", "0", "-5", "", "  "):
+        monkeypatch.setenv(ASK_CONTEXT_BYTE_CAP_ENV, garbage)
+        caps = resolve_ask_retrieval_caps()
+        assert caps["context_byte_cap"] == max(
+            DEFAULT_CONTEXT_BYTE_CAP,
+            caps["context_token_cap"] * BYTES_PER_TOKEN_FLOOR), garbage
+    # …and the upper clamp is shared, so an absurd value cannot unbind it.
+    monkeypatch.setenv(ASK_CONTEXT_BYTE_CAP_ENV, str(1 << 50))
+    assert resolve_ask_retrieval_caps()["context_byte_cap"] == (
+        MAX_ASK_CONTEXT_BYTE_CAP)
+
+
+def test_a_token_cap_typo_cannot_resolve_an_unbounded_budget(monkeypatch):
+    """The token cap feeds the DERIVED byte ceiling, so it needs the same
+    out-of-range fallback + upper clamp as every other knob — otherwise one
+    extra zero resolves a context budget unbounded in BOTH dimensions."""
+    monkeypatch.setenv(ASK_CONTEXT_TOKEN_CAP_ENV, "1000000000000000")
     caps = resolve_ask_retrieval_caps()
+    assert caps["context_token_cap"] == DEFAULT_ASK_CONTEXT_TOKEN_CAP
     assert caps["context_byte_cap"] == max(
         DEFAULT_CONTEXT_BYTE_CAP,
         caps["context_token_cap"] * BYTES_PER_TOKEN_FLOOR)
 
 
-def test_out_of_range_window_env_falls_back_to_default(monkeypatch):
-    """The resolution never hands the SDK a value it rejects: ``limit`` /
-    ``item_cap`` are clamped to the same 1..10000 bound ``tortoise_fts_query``
-    validates ``pool_size`` against, so an out-of-range env falls back to the
-    default instead of failing every ask with a retrieval error."""
-    monkeypatch.setenv(ASK_CONTEXT_ITEM_CAP_ENV, "20000")
+@pytest.mark.parametrize(("env", "key", "default"), (
+    (ASK_RETRIEVAL_LIMIT_ENV, "limit", DEFAULT_ASK_RETRIEVAL_LIMIT),
+    (ASK_CONTEXT_ITEM_CAP_ENV, "context_item_cap", DEFAULT_ASK_CONTEXT_ITEM_CAP),
+    (ASK_POOL_SIZE_ENV, "pool_size", DEFAULT_ASK_POOL_SIZE),
+))
+@pytest.mark.parametrize("value", ("20000", "0", "-5", "garbage"))
+def test_out_of_range_window_env_falls_back_to_default(
+        monkeypatch, env, key, default, value):
+    """The resolution never hands the SDK a value it rejects: EACH of
+    ``limit`` / ``item_cap`` / ``pool_size`` is clamped to the same 1..10000
+    bound ``tortoise_fts_query`` validates ``pool_size`` against, so an
+    out-of-range env falls back to the default instead of failing every ask
+    with a retrieval error.
+
+    Parametrized per variable on purpose: probing only the item cap leaves
+    the ``limit`` and ``pool_size`` clamps unpinned, because a fallback item
+    cap makes ``limit <= 10000`` and ``pool_size <= 10000`` tautologies.
+    """
+    monkeypatch.setenv(env, value)
     caps = resolve_ask_retrieval_caps()
+    assert caps[key] == default, (env, value, caps[key])
     assert caps["limit"] <= 10000
     assert caps["pool_size"] <= 10000
-    assert caps["context_item_cap"] == DEFAULT_ASK_CONTEXT_ITEM_CAP
 
 
-def test_legacy_caps_dict_derives_the_byte_ceiling():
+def test_legacy_caps_dict_derives_the_byte_ceiling(monkeypatch):
     """A caps dict that predates #4105 (no ``context_byte_cap``) must get a
     DERIVED ceiling from its own token cap — never the 32 KiB literal, which
     would re-open the silent no-op on that seam."""
@@ -142,6 +177,15 @@ def test_legacy_caps_dict_derives_the_byte_ceiling():
         DEFAULT_CONTEXT_TOKEN_CAP * BYTES_PER_TOKEN_FLOOR)
     assert resolve_byte_cap_from_caps({
         "context_token_cap": 32000, "context_byte_cap": 4096}) == 4096
+    # The env leg must be honoured too, or a legacy-dict caller assembles at a
+    # different ceiling than the env-pinned ask lane and an A/B across the two
+    # seams compares budgets instead of behaviour.
+    monkeypatch.setenv(ASK_CONTEXT_BYTE_CAP_ENV, "32768")
+    assert resolve_byte_cap_from_caps({}) == 32768
+    assert resolve_byte_cap_from_caps({"context_token_cap": 8000}) == 32768
+    assert resolve_ask_retrieval_caps()["context_byte_cap"] == 32768
+    # …and an explicit dict key still wins over the env.
+    assert resolve_byte_cap_from_caps({"context_byte_cap": 4096}) == 4096
 
 
 # ── assemble_context: whole-hit byte drop + the binding-bound census ───────
@@ -156,12 +200,15 @@ def test_byte_cap_drops_whole_hits_and_is_a_hard_bound():
     assert 0 < len(selected) < 40
     rendered = render_context(selected, question_date="2024-01-01")
     assert len(rendered.encode("utf-8")) <= 4096
-    # whole-hit drop: every selected hit is a full original block
-    ids = {h["id"] for h in hits}
-    assert all(h["id"] in ids for h in selected)
+    # whole-hit drop: every selected hit's FULL content is present (an
+    # implementation that truncated a hit's content to fit the byte budget
+    # would keep the id and still pass an `id in ids` check, so assert on
+    # the rendered text instead).
+    for h in selected:
+        assert h["content"] in rendered
     assert stats["byte_cap"] == 4096
     assert stats["dropped_by_byte_cap"] > 0
-    assert stats["stopped_by"] in ("byte_cap", "item_cap")
+    assert stats["stopped_by"] == "byte_cap"
 
 
 def test_stats_name_the_byte_cap_as_the_binding_constraint():
@@ -206,6 +253,9 @@ def test_raising_the_byte_cap_makes_the_item_raise_real():
         context_item_cap=200, byte_cap=1 << 22, stats=stats)
     assert len(selected) == 200
     assert stats["dropped_by_byte_cap"] == 0
+    # The pool ran out at the item bound, and nothing was dropped by a
+    # budget — so the ITEM cap is the bound that cut it.
+    assert stats["stopped_by"] == "item_cap"
 
 
 def test_token_cap_census_is_reported_separately():
@@ -215,10 +265,59 @@ def test_token_cap_census_is_reported_separately():
         context_item_cap=200, byte_cap=None, stats=stats)
     assert stats["dropped_by_token_cap"] > 0
     assert stats["dropped_by_byte_cap"] == 0
+    assert stats["stopped_by"] == "token_cap"
+
+
+def test_stopped_by_is_none_when_no_bound_dropped_a_hit():
+    stats: dict = {}
+    assemble_context(_hits(3), top_k=3, max_context_tokens=100000,
+                     context_item_cap=200, byte_cap=1 << 22, stats=stats)
+    assert stats["items_selected"] == 3
+    assert stats["dropped_by_token_cap"] == 0
+    assert stats["dropped_by_byte_cap"] == 0
+    assert stats["stopped_by"] is None
+
+
+def test_nonascii_text_is_bounded_by_the_token_cap_not_only_the_byte_cap():
+    """#4105 review fix. The token budget is whitespace-word based, so it is
+    blind to unspaced CJK/emoji runs; the old 32 KiB literal happened to
+    compensate on those pools, and the DERIVED ceiling does not. The
+    estimator's surcharge is therefore charged in the same accounting, so
+    ``estimate_tokens_ask(evidence) <= token cap`` holds on every script —
+    for ASCII and non-ASCII alike."""
+    for label, run in (("cjk", "中"), ("emoji", "🏡")):
+        # 3000 chars per hit (``_hits`` truncates to ``words * 6``).
+        hits = _hits(10, words=500, content=run * 3000)
+        stats: dict = {}
+        selected = assemble_context(
+            hits, top_k=200, max_context_tokens=16000,
+            context_item_cap=200, byte_cap=128000, stats=stats)
+        evidence = render_context(selected)
+        assert len(evidence.encode("utf-8")) <= 128000, label
+        assert estimate_tokens_ask(evidence) <= 16000, (label,
+                                                        evidence[:40])
+        assert stats["dropped_by_token_cap"] > 0, label
+        assert stats["stopped_by"] == "token_cap", label
+        assert stats["nonascii_token_surcharge"] > 0, label
+
+
+def test_ascii_accounting_is_unchanged_by_the_surcharge():
+    """The surcharge is ZERO for pure-ASCII text, so ASCII-only callers (and
+    the frozen transcripts) are byte-identical to the pre-#4105 arithmetic."""
+    stats: dict = {}
+    selected = assemble_context(
+        _hits(8), top_k=200, max_context_tokens=16000,
+        context_item_cap=200, byte_cap=128000, stats=stats)
+    assert stats["nonascii_token_surcharge"] == 0
+    assert selected == assemble_context(
+        _hits(8), top_k=200, max_context_tokens=16000,
+        context_item_cap=200, byte_cap=128000)
 
 
 def test_stats_absent_is_a_no_op_for_pure_callers():
-    assert assemble_context(_hits(3), top_k=3, max_context_tokens=100000)
+    hits = _hits(3)
+    assert assemble_context(hits, top_k=3, max_context_tokens=100000) == \
+        assemble_context(hits, top_k=3, max_context_tokens=100000, stats={})
 
 
 # ── the ask lane threads the resolved caps and warns when bytes bind ───────
