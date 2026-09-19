@@ -243,8 +243,8 @@ jobs:
           # toString) — every full-matrix run collected tests/Array.py.
           echo "matrix_a=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_a"]))')" >> "$GITHUB_OUTPUT"
           echo "matrix_b=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_b"]))')" >> "$GITHUB_OUTPUT"
-          # Epic #1647 Task 9: the 17-file embedded carve-out leg (E2E-4) —
-          # excluded from both docker halves by the selector.
+          # Epic #1647 Task 9: the embedded carve-out leg (E2E-4) — excluded
+          # from both docker halves by the selector.
           echo "carve_out=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["carve_out"]))')" >> "$GITHUB_OUTPUT"
       - name: Tier-2 duration split (#1473)
         # #1473: LPT-pack the tier-2 selected files across halves a/b by
@@ -492,7 +492,7 @@ jobs:
         # D-3=A (the P2 flip) + Task 9 Step 1 (the P3 flip): BOTH fast
         # halves run on the provisioned passworded falkordb service (above)
         # via a job-level TORTOISE_DB_URI; the embedded lane is retired from
-        # the main test job (the 17 carve-out files moved to the dedicated
+        # the main test job (the carve-out files moved to the dedicated
         # URI-unset carve-out job — E2E-4). The matrix include cannot
         # condition on `full` (plan-review P1-7), so the URI is computed
         # run-step-local: full==true -> URI + EXPECT_URI on BOTH halves (the
@@ -1481,8 +1481,8 @@ jobs:
           if-no-files-found: ignore
 
   test-carve-out:
-    # Epic #1647 E2E-4 (Task 9 Step 5): the 17-file embedded carve-out's CI
-    # home — the 342 tests that run embedded BY DESIGN (recovery auto-rebuild
+    # Epic #1647 E2E-4 (Task 9 Step 5): the embedded carve-out's CI home —
+    # the tests that run embedded BY DESIGN (recovery auto-rebuild
     # D2/D3, busy-error D11, reaper/chaos, backup-restore, migration
     # integration). URI is DELIBERATELY unset (the redirect would fire and
     # flip these files to the server lane); TORTOISE_TEST_CARVE_OUT=1 is the
@@ -1507,7 +1507,7 @@ jobs:
     # daemon / registry / guard surfaces; a carve-out TEST file change
     # selects its owning surface, so it re-runs here too). docs/website/
     # config-only PRs (surfaces == [] -> carve_out_run == false) skip. When
-    # it runs it still runs the FULL 23-file carve_out leg (the embedded
+    # it runs it still runs the FULL carve_out leg (the embedded
     # set is one coherent E2E-4 surface — partial runs would weaken the
     # recovery/backup/migration guarantees; tier-2 legs already exclude
     # carve-out files, so this job is their only home on PRs).
@@ -1541,7 +1541,7 @@ jobs:
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live" --output /tmp/expected-nodeids.txt
       - name: Run carve-out suite (embedded, URI unset — E2E-4)
-        # The 17-file embedded carve-out. Deliberately NO TORTOISE_DB_URI:
+        # The embedded carve-out. Deliberately NO TORTOISE_DB_URI:
         # the carve-out's embedded-specific assertions (recovery, busy-error,
         # reaper, backup-restore) must run against FalkorDBLite. junitxml +
         # -r fEs (the manifest's observed-set source); pytest-rc for the

@@ -843,7 +843,7 @@ ENV_BROKEN_FILES = {"test_agent_signup.py"}
 
 
 def carve_out_files(manifest: dict) -> set[str]:
-    """Epic #1647 Task 9 (P3): the 17-file embedded carve-out set.
+    """Epic #1647 Task 9 (P3): the embedded carve-out set.
 
     The carve-out tests run embedded BY DESIGN (E2E-4) in the dedicated
     URI-unset job (TORTOISE_TEST_CARVE_OUT=1) — they are excluded from the
