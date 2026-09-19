@@ -842,7 +842,7 @@ def test_real_workflow_halves_are_consistent():
 
 def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg. Epic
-    #1647 Task 9: the 17-file carve-out set is its OWN leg (E2E-4) — it is
+    #1647 Task 9: the carve-out set is its OWN leg (E2E-4) — it is
     excluded from fast AND slow docker legs."""
     from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
     m = load_manifest()
@@ -1346,8 +1346,8 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
 
 
 def test_carve_out_job_uri_unset_with_carve_out_flag():
-    """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the 17-file
-    embedded set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
+    """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the embedded
+    set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
     carve-out to the server lane) with TORTOISE_TEST_CARVE_OUT=1 (the P4
     enforcement-prep escape), and consumes the changes job's carve_out
     output as its file list."""

@@ -3,7 +3,7 @@
 Epic #1647 P4 (Task 10) DEMOTION: this module is now DEV-MACHINE HYGIENE
 ONLY. CI runs the docker lane — the fast matrix provisions falkordb, and
 migrated files construct via the URI-aware redirect (never spawning a
-redislite server); the 17 carve-out files run embedded in the URI-unset
+redislite server); the carve-out files run embedded in the URI-unset
 carve-out job, whose conftest `_redislite_hygiene` session sweeps own their
 own orphan reclamation. Docker halves produce ~0 embedded orphans by
 construction (E2E-7). The reaper keeps its local-dev role: a dev box's
