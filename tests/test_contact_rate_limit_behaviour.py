@@ -47,10 +47,14 @@ THE DECLARED LIMIT. `MUTATIONS` is not a proof that the invariants catch every
 reachable change: it is the list of escapes we know, each asserted caught. Review
 cycles here have each found a class the previous battery missed — a predicate
 inspecting one entry rather than all of them, an eviction ordered by key name, a
-skipped write-back on the refusal path — because an invariant is only as strong as
-the state the DRIVER builds for it. A new class is caught when someone adds its
-scenario, and the battery's presence assertion makes a stale anchor say so out loud
-rather than pass quietly. The invariants are therefore not a completeness proof;
+skipped write-back on the refusal path, an over-eager sweep one millisecond inside
+the window — because an invariant is only as strong as the state the DRIVER builds
+for it. A new class is caught when someone adds its scenario, and the battery's
+presence assertion makes a stale anchor say so out loud rather than pass quietly.
+Two refusal-path details are knowingly NOT observed, because they change no security
+property and no scenario here mixes a refusal with an over-cap map: the refused key
+is not re-inserted (its position in the store is left alone), and the refusal path
+skips the cap block entirely. The invariants are therefore not a completeness proof;
 they are the behaviours that were demonstrably reachable, pinned where a mutation
 cannot reach them undetected.
 
@@ -266,6 +270,10 @@ const cap = Math.min(MAX_RATE_KEYS, CAP_CEILING);
 for (let i = 0; i < cap; i++) hits.set("live" + i, [T0]);
 for (let i = 0; i < 10; i++) hits.set("dead" + i, [expiredAt]);
 hits.set("dead-edge", [T0 - RATE_WINDOW_MS]);
+// The LIVE side of the same boundary: one millisecond inside the window the key must
+// SURVIVE. Over-expiring it is invisible to the counts (the oldest-first loop evicts
+// one more key and both totals land where they should), so it is observed by name.
+hits.set("live-edge", [T0 - RATE_WINDOW_MS + 1]);
 // A fully expired key with MORE THAN ONE timestamp: a sweep that inspects a single
 // entry instead of all of them keeps it, and no single-entry seed can show that.
 hits.set("dead-multi", [expiredAt, expiredAt - 1]);
@@ -280,6 +288,7 @@ for (const k of hits.keys()) {
 observations.deadKeysLeft = deadLeft;
 observations.liveKeysLeft = liveLeft;
 observations.mixedKeySurvived = hits.has("mixed");
+observations.liveEdgeSurvived = hits.has("live-edge");
 
 // 6. The re-insert of the current key, which the limiter's own comment calls
 // load-bearing. An address that submits again must be the LAST key in insertion
@@ -457,6 +466,10 @@ def _check_sweep(observed: dict) -> None:
         "a key holding one expired and one live timestamp must survive the sweep — "
         "dropping it discards history that still counts (an `every` swept as `some`)"
     )
+    assert observed["liveEdgeSurvived"] is True, (
+        "a key one millisecond INSIDE the window must survive the sweep — sweeping "
+        "at the wrong side of the cutoff loses a live history"
+    )
 
 
 def _check_reinsert(observed: dict) -> None:
@@ -626,6 +639,16 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
         "sweep boundary made strict",
         r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
         "v.every((t) => t < cutoff)",
+    ),
+    (
+        "sweep over-expires one millisecond",
+        r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
+        "v.every((t) => t <= cutoff + 1)",
+    ),
+    (
+        "the limit is shared, not per address",
+        r"hits\.get\(ip\)",
+        'hits.get("shared")',
     ),
     (
         "eviction sorts by key name",
