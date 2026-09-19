@@ -52,12 +52,13 @@ skipped write-back on the refusal path, an over-eager sweep one millisecond insi
 the window — because an invariant is only as strong as the state the DRIVER builds
 for it. A new class is caught when someone adds its scenario, and the battery's
 presence assertion makes a stale anchor say so out loud rather than pass quietly.
-Two refusal-path details are knowingly NOT observed, because they change no security
-property and no scenario here mixes a refusal with an over-cap map: the refused key
-is not re-inserted (its position in the store is left alone), and the refusal path
-skips the cap block entirely. The invariants are therefore not a completeness proof;
-they are the behaviours that were demonstrably reachable, pinned where a mutation
-cannot reach them undetected.
+Two refusal-path details are knowingly NOT covered by a mutation, though both are
+observed: the refusal path does not re-insert the key (so at the cap the refused
+address is the next eviction victim — the cap's documented tradeoff, pinned as a
+behaviour above) and it skips the cap block entirely (it cannot add a key, so there
+is nothing for the cap to bound). The invariants are therefore not a completeness
+proof; they are the behaviours that were demonstrably reachable, pinned where a
+mutation cannot reach them undetected.
 
 Node is required and the tests SKIP with a reason when it is absent, rather than
 passing silently.
@@ -194,6 +195,7 @@ const CLIENT_X = "192.0.2.11";
 const CLIENT_Y = "198.51.100.77";
 const CLIENT_V = "203.0.113.77";
 const CLIENT_R = "198.51.100.9";
+const CLIENT_K = "203.0.113.200";
 
 // The loops must not scale with a bumped constant: a huge RATE_LIMIT or
 // MAX_RATE_KEYS would make this harness HANG rather than fail. Each is exercised up
@@ -330,6 +332,19 @@ hits.clear();
 hits.set(CLIENT_R, [expiredAt, ...new Array(limit).fill(T0)]);
 observations.refusalRefuses = rateLimited(CLIENT_R, T0);
 observations.storedAfterRefusal = (hits.get(CLIENT_R) || []).length;
+
+// 8. What the refusal path does NOT do, observed at the cap. It does not re-insert
+// the key and it does not run the cap block, so a refused address keeps its old
+// position and the next NEW key's eviction takes it. That is the cap's documented
+// tradeoff — an evicted live key loses its history, and the cap buys a memory bound —
+// so this is pinned rather than left unobserved: if the refusal path ever changes,
+// the tradeoff changed with it and the limiter's comment must say so.
+hits.clear();
+for (let i = 0; i < limit; i++) rateLimited(CLIENT_K, T0 + i);
+for (let i = 0; i < cap - 1; i++) rateLimited("old" + i, T0);
+observations.refusedAtCap = rateLimited(CLIENT_K, T0 + limit);
+rateLimited("another", T0);
+observations.refusedKeySurvived = hits.has(CLIENT_K);
 
 console.log(JSON.stringify(observations));
 """
@@ -490,19 +505,40 @@ def _check_sweep(observed: dict) -> None:
 
 
 def _check_reinsert(observed: dict) -> None:
-    """A resubmitting address is re-inserted, so it is not evicted by its own call.
+    """A resubmitting address is re-inserted, so a later eviction spares its history.
 
-    Without the re-insert the key keeps its original position in insertion order, so
-    the eviction triggered by the next key takes its history: the address loses the
+    Re-setting an existing key does not grow the map, so the resubmitting call cannot
+    evict anything itself: the eviction comes with the NEXT new key, and a key left at
+    its original position is the oldest by then and goes — the address loses the
     submissions it already made and the limit becomes bypassable.
     """
     assert observed["reusedKeySurvived"] is True, (
-        "the resubmitting address must survive the eviction its own call triggers — "
-        "it was evicted, so its history is lost and the limit can be bypassed"
+        "the resubmitting address must survive the eviction the NEXT new key triggers "
+        "— it was evicted, so its history is lost and the limit can be bypassed"
     )
     assert observed["reusedKeyHistory"] == 2, (
         "the resubmitting address must keep its history (2 submissions), got "
         f"{observed['reusedKeyHistory']}"
+    )
+
+
+def _check_refusal_position(observed: dict) -> None:
+    """The refusal path is NOT re-inserted, and that is the documented tradeoff.
+
+    A refused address keeps its position, so at the cap the next new key's eviction
+    takes it. The limiter's comment justifies the re-insert for the ALLOWED path —
+    where the caller is adding a submission — and calls losing a live key to the cap
+    an accepted tradeoff. This pins the consequence: if the refusal path starts
+    re-inserting, the tradeoff changed and the limiter's comment must be updated with
+    it, so this assertion is where that decision has to be made out loud.
+    """
+    assert observed["refusedAtCap"] is True, (
+        "the address filling its window must be refused while the map is at the cap"
+    )
+    assert observed["refusedKeySurvived"] is False, (
+        "the refused key is expected to be the next eviction victim (the refusal path "
+        "does not re-insert it, and the cap accepts losing a live key) — if it now "
+        "survives, the refusal path changed: update the limiter's comment and this pin"
     )
 
 
@@ -514,6 +550,7 @@ INVARIANTS: tuple[tuple[str, Callable[[dict], None]], ...] = (
     ("cap", _check_cap),
     ("sweep", _check_sweep),
     ("re-insert", _check_reinsert),
+    ("refusal-position", _check_refusal_position),
 )
 
 
@@ -564,9 +601,14 @@ def test_expired_keys_are_swept_before_live_ones(behaviour: dict) -> None:
     _check_sweep(behaviour)
 
 
-def test_a_resubmitting_address_is_not_evicted_by_its_own_call(behaviour: dict) -> None:
-    """The re-insert keeps the caller's history out of the eviction it triggers."""
+def test_a_resubmitting_address_keeps_its_history(behaviour: dict) -> None:
+    """The re-insert keeps the caller's history out of the next eviction."""
     _check_reinsert(behaviour)
+
+
+def test_the_refusal_path_does_not_re_insert(behaviour: dict) -> None:
+    """A refused address keeps its position, so the cap may evict it — by design."""
+    _check_refusal_position(behaviour)
 
 
 # These are the escapes from the #2409 pin history plus the ones review found here, as
