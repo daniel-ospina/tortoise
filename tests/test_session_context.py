@@ -5,6 +5,7 @@ Runnable with: .venv/bin/python -m pytest tests/test_session_context.py -v
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -22,6 +23,7 @@ def sdk():
     sdk = TortoiseSDK(db_path)
     yield sdk
     sdk.close()
+    shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
 
 
 class TestSessionContext:

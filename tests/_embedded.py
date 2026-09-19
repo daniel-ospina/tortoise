@@ -20,13 +20,51 @@ import contextlib
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 
 import pytest
 
 from tortoise.config import is_db_uri
+from tortoise.env_truthy import is_truthy  # #4097: the declared truthy contract
 from tortoise.projection import FalkorProjection
+
+# #4096: session-scoped test trees created by fixtures in this module and in
+# tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
+# which `_redislite_hygiene` declares as a dependency so pytest's reverse-order
+# teardown runs it LAST — after `_redislite_hygiene` / `_server_graph_hygiene` have
+# used the socket/pid evidence inside these trees. A local `rmtree` in the shared
+# fixture's own finalizer would run first, destroy that evidence, and could orphan
+# a live redislite server (the #4068/#1005 class).
+SESSION_TMPDIRS: list[str] = []
+
+
+def register_session_tmpdir(path: str) -> None:
+    """Register a session-scoped test tree for end-of-session reclamation."""
+    SESSION_TMPDIRS.append(path)
+
+
+def reclaim_tmpdirs(dirs: list[str]) -> int:
+    """rmtree each tree in ``dirs`` (best-effort) and return the count.
+
+    Split out from the session reclaimer so the removal primitive is unit-
+    testable without draining the live ``SESSION_TMPDIRS`` registry mid-session.
+    """
+    for d in dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    return len(dirs)
+
+
+def drain_session_tmpdirs() -> int:
+    """Drain + reclaim ``SESSION_TMPDIRS`` (the session reclaimer's body).
+
+    Split from the fixture so the drain-and-clear behaviour is unit-testable
+    without driving a session-scoped pytest fixture.
+    """
+    dirs, SESSION_TMPDIRS[:] = list(SESSION_TMPDIRS), []
+    return reclaim_tmpdirs(dirs)
+
 
 # ── #3546: ONE process-wide embedded construction lock ────────────────────
 # Consolidated here from the two per-file copies that #3511 installed
@@ -179,6 +217,29 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_graph_integrity_gate",
     "test_guard",
     "test_hard_reject",
+    # #4047: the two #3845 fork-guard files carry a module-level
+    # ``pytestmark = pytest.mark.embedded_only`` — their SUBJECT is the embedded
+    # daemon (the module-fork wedge lives inside the bundled redis-server, and
+    # both the producer and the mitigation are embedded-daemon internals), so
+    # embedded-only is the honest classification and they must not be
+    # reclassified onto the server lane. They were registered on the docker
+    # api/core surfaces but ABSENT from this list and from
+    # ``config/ci-surfaces.yml`` ``carve_out``: a full selection COLLECTED them
+    # and every test SKIPPED via the embedded_only hook — a permanently green,
+    # permanently unexecuted gate on main. Registered here and in ``carve_out``
+    # so the URI-unset carve-out job runs them on every full selection.
+    "test_fork_safety_3845",
+    "test_fork_slot_wedge_3845",
+    # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
+    # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
+    # opener — which is only possible BECAUSE this stem is exempt. Without the
+    # exemption the redirect (the ``FalkorProjection.__init__`` block) would
+    # rename every path-built graph to a per-path ``test_*`` name, so under a
+    # server URI no production name would exist: the probe's ``own=True`` and
+    # the listing filter would assert FAIL, and the opener would return None.
+    # A hard RED, never a false pass. Same carve-out rationale as
+    # test_hosted_backup.
+    "test_cross_tenant_read_isolation",
     "test_hosted_backup",
     "test_migrate_db",
     "test_ops_safety",
@@ -237,10 +298,16 @@ def has_falkor() -> bool:
     if _HAS_FALKOR is None:
         try:
             from redislite.falkordb_client import FalkorDB  # noqa: F401
-            db_path = os.path.join(
-                tempfile.mkdtemp(prefix="tortoise_probe_"), "probe.db")
-            proj = FalkorProjection(db_path, graph_name="test")
-            proj.close()
+            tmpdir = tempfile.mkdtemp(prefix="tortoise_probe_")
+            try:
+                db_path = os.path.join(tmpdir, "probe.db")
+                proj = FalkorProjection(db_path, graph_name="test")
+                proj.close()
+            finally:
+                # #4096: reclaim the probe tree even if construction/close raises
+                # — one per process before _HAS_FALKOR caches, and the reaper
+                # never reaps a .db-only tree.
+                shutil.rmtree(tmpdir, ignore_errors=True)
             _HAS_FALKOR = True
         except Exception:
             _HAS_FALKOR = False
@@ -339,6 +406,17 @@ BACKEND_IDENTITY = BackendIdentity()
 # need no server) opt in via TORTOISE_TEST_CARVE_OUT=1. Lives HERE (not
 # conftest) for the same reason as _embedded_only_skip: an import via
 # `tests.conftest` re-executes conftest's top-level code mid-session.
+def _carve_out_opted_in() -> bool:
+    """The ``TORTOISE_TEST_CARVE_OUT`` opt-in, through the declared contract.
+
+    #4097: truthy spellings (1/true/yes/on) now opt in; unset/blank/falsy/garbage
+    do not. Previously only the exact string ``"1"`` did, so ``=true`` — what a
+    human or a CI author naturally writes — silently failed the URI gate. The
+    opt-in permits a URI-less embedded run; it deletes nothing.
+    """
+    return is_truthy(os.environ.get("TORTOISE_TEST_CARVE_OUT"))
+
+
 def _assert_p4_uri_required() -> None:
     """Epic #1647 Task 10 Step 1a (plan-review P1-9): fail the session when
     TORTOISE_DB_URI is unset UNLESS TORTOISE_TEST_CARVE_OUT=1 is set.
@@ -356,7 +434,7 @@ def _assert_p4_uri_required() -> None:
     (which would re-execute conftest's top-level code)."""
     if _uri_set_supported():
         return
-    if os.environ.get("TORTOISE_TEST_CARVE_OUT") == "1":
+    if _carve_out_opted_in():
         return
     pytest.fail(
         "default pytest requires TORTOISE_DB_URI (epic #1647 P4); run the "
@@ -960,6 +1038,14 @@ def _team_sweep_allowed(uri: str) -> bool:
     server is NOT an ownership record; the explicit opt-in is (CI's
     dedicated docker containers are fresh per job, so nothing accumulates
     there without the pass)."""
+    # OVERRIDES (#4097): env-truthiness truthy-set parsing ("1"/"true"/"yes"/"on").
+    # This gate requires the exact value "1": it is the SOLE authorization for an
+    # irreversible journal-blind DETACH DELETE + GRAPH.DELETE of the real-tenant
+    # org_*/team_* namespace (the `uri` parameter is dead — the #1884 URI inference
+    # was retracted — so no containment check compensates), and widening a
+    # destructive opt-in surface is not a vocabulary-coherence win. The refusal is
+    # logged with the exact required spelling, so the narrowing is discoverable.
+    # Pinned by tests/test_env_truthy.py::test_team_sweep_gate_is_narrow_by_design.
     return os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1"
 
 
@@ -1080,8 +1166,9 @@ def shared_proj():
     if not has_falkor():
         yield None
         return
-    db_path = os.path.join(
-        tempfile.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
+    tmpdir = tempfile.mkdtemp(prefix="tortoise_shared_embedded_")
+    register_session_tmpdir(tmpdir)
+    db_path = os.path.join(tmpdir, "shared.db")
     proj = FalkorProjection(db_path, graph_name="test")
     yield proj
     proj.close()

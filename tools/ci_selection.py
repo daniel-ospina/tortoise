@@ -97,6 +97,15 @@ SHARED_MODULES = (
     # surfaces (test_divergence_conformance, test_epic903_modes,
     # test_ingest_*, test_calibration) — a change here runs the full matrix.
     "tortoise/exceptions.py",
+    # #4097: cross-cutting leaf — the declared env-truthiness contract. Consumed by
+    # `core` (why, rerank, monitoring, model_adapters, frontmatter_validator,
+    # extractor_v2, backup_config, embedded_lifecycle, cimd, projection), `api`
+    # (hosted_api), `sdk` (sdk, retrieval) and `eval` (embeddings) — the `ep` and
+    # `onboarding` surfaces list the guard for coverage reasons, not because they
+    # import the leaf. A change to `env_flag`'s blank/garbage handling changes
+    # consumer behaviour on every surface, so it runs the full matrix (same
+    # rationale as exceptions.py above).
+    "tortoise/env_truthy.py",
     "tortoise/tool_registry.py",
     "tortoise/mcp_server.py",
     "tortoise/projection/",
@@ -146,11 +155,34 @@ SOURCE_PATTERNS = {
                    # #3616 pattern these entries sit next to, one level up.
                    "website/apps/blog-admin/vite.config.ts",
                    "website/apps/blog-admin/dist/index.html",
+                   # #3523: the dashboard's unknown-address guard
+                   # (tests/test_dashboard_unknown_address.py) reads the Pages
+                   # routing inputs for app.premiselabs.co plus the app's
+                   # location.pathname branches. `website/` sits in
+                   # NON_PYTHON_PREFIXES and neither path is under a Python
+                   # package prefix, so without these entries a PR that deletes
+                   # 404.html, adds a `/* / 200` catch-all, or adds an unrouted
+                   # pathname branch selects NO surface (surfaces=[], full=False)
+                   # and the guard never runs on the PR that owns it — the
+                   # #1349/#3332/#3616 silent-drop class, which registration
+                   # alone does not fix (registration only makes the file
+                   # CLASSIFIED; selection is what makes it RUN). `src/` is a
+                   # directory because the anti-drift check scans every non-test
+                   # source module for pathname branches, not just main.jsx.
+                   "website/apps/dashboard/public/_redirects",
+                   "website/apps/dashboard/public/404.html",
+                   "website/apps/dashboard/src/",
                    # The guard also reads the gate Function itself (it extracts
                    # returnToPath/gateDecision from it, and derives the console's
                    # mount path from its directory), so a change to the gate must
                    # run the guard too.
                    "website/functions/admin/[[path]].ts",
+                   # #4006 review: the guard's SERVER_BUILT_ROUTES (/team carrying
+                   # the Stripe ?session_id= return) are BUILT here, so a change to
+                   # the server-side return path must run the guard too — otherwise
+                   # public/_redirects goes stale against it and the guard stays
+                   # green: the same silent-drop class this entry exists to close.
+                   "tortoise/hosted_api.py",
                    # #3950: the blog-discoverability guard
                    # (test_website_docs_consistency.py
                    # ::test_every_in_scope_page_links_to_the_blog) covers all 12
@@ -172,6 +204,20 @@ SOURCE_PATTERNS = {
                    "website/security.html", "website/tos.html",
                    "website/license.html", "website/dpa.html",
                    "website/aviso-privacidad.html",
+                   # #3436: the two remaining top-level pages, listed for the
+                   # same reason as every other page entry in this tuple — they
+                   # are covered by the site-wide element-id uniqueness guard
+                   # (tests/test_website_docs_consistency.py), whose scope is
+                   # DERIVED as `website/*.html`. Their absence was verified
+                   # before listing: `select(["website/invite-accept.html"])`
+                   # returned surfaces=[] with the guard absent from
+                   # test_files, so a duplicate id could land on the invite
+                   # landing page without the guard running on the PR that
+                   # added it. Both are `noindex` pages, which keeps them out of
+                   # the blog guard's scope, not out of this one: a noindex page
+                   # is still a served document, and duplicate ids are invalid in
+                   # it.
+                   "website/404.html", "website/invite-accept.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
                    # tests/e2e/test_legal_pages.py in the separate `legal-e2e`
@@ -405,6 +451,13 @@ TOOL_CARVEOUTS = (
     # lands in the unknown-path fail-closed branch -> FULL matrix + both
     # legs — the heaviest but safest gate for the file that owns gating.
     "tools/ci_selection.py",
+    # #B7 (#3674): the activation-scorecard cohort roll-up. Its `roll_up`
+    # summing logic owns part of tests/test_activation_scorecard.py; without
+    # this carve-out a cohort-script-only change selects NO surface and the
+    # suite that pins it never runs. No SOURCE_PATTERN matches this path, so it
+    # lands in the unknown-path fail-closed branch -> FULL matrix + both legs,
+    # which is the safe outcome for a file that a metrics number depends on.
+    "tools/activation_cohort.py",
     # #3261: the pre-dispatch collision check (#3061) owns
     # tests/test_collision_preflight.py. Without this carve-out a
     # preflight-only change is swallowed by the flat "tools/" prefix,
@@ -419,6 +472,13 @@ TOOL_CARVEOUTS = (
     # A narrower core-only mapping is possible but not needed: a
     # collision-check change is rare and fail-closed is the safe default.
     "tools/collision_preflight.py",
+    # #2573: the CI embedder gate (tools/embedder_provision.py) owns
+    # tests/test_embedder_provision.py. Same silent-drop class as the
+    # preflight carve-out above: no SOURCE_PATTERNS entry matches it, so a
+    # change to the gate alone would classify as docs-only (surfaces=[] ->
+    # tier-1 smoke) and its own wiring/behaviour tests would never run on the
+    # PR that edits it.
+    "tools/embedder_provision.py",
 )
 
 
@@ -792,7 +852,7 @@ ENV_BROKEN_FILES = {"test_agent_signup.py"}
 
 
 def carve_out_files(manifest: dict) -> set[str]:
-    """Epic #1647 Task 9 (P3): the 17-file embedded carve-out set.
+    """Epic #1647 Task 9 (P3): the embedded carve-out set.
 
     The carve-out tests run embedded BY DESIGN (E2E-4) in the dedicated
     URI-unset job (TORTOISE_TEST_CARVE_OUT=1) — they are excluded from the

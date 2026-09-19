@@ -15,6 +15,7 @@ aboutObjects: tortoise
 | --- | --- |
 | Ask lane — **EVAL-ONLY** (`tortoise/ask_lane.py`, #1987/#3849: no REST route, no SDK method, no MCP tool) | `docs/product/answer-surface.md` |
 | **MCP tool surface + public SDK methods** — the curated list: every tool and public method, what it does, what uses it, a recommendation and its rationale; the approved baseline (`config/surface-manifest.yml`) and the gate that blocks unapproved expansion (#3863) | `docs/product/mcp-sdk-surface.md` |
+| **Canonical MCP tool list** — the owner-approved target surface (23 tools), read/write-separated, with the removals, the design decisions and the open items gating the cutover (#3863) | `docs/product/canonical-mcp-tools.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
 | **Ship-test instrument** — the per-deploy clean-browser onboarding walk (signup → wizard → connected only when the server observed it) + the observation artifact (#3806) | `docs/runbook/3806-ship-test-instrument.md` |
 | Hosted platform **infra runbook** — provisioning, secrets rotation, rollback, health checks, machine topology + autostop policy (§6), and the out-of-band availability watchdog with self-healing + alert dedupe (§7) (#2850) | `docs/infra-runbook.md` |
@@ -28,6 +29,7 @@ aboutObjects: tortoise
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | CI audit — measured runner-cost/lane analysis, read-only (2026-09-02) | `docs/research/2026-09-02-ci-audit.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |
+| Activation scorecard runbook — beta-readiness lane B7: which sessions activate vs merely sign up, the measurable-vs-blocked legs, cohort roll-up, measured production baseline, deploy requirement | `docs/runbook/b7-activation-scorecard.md` |
 | Ontology | `docs/ONTOLOGY.md` |
 | Registry graph schema (incl. Graph entity + scoped APIKey + quota — epic #2083) | `docs/registry-graph-schema.md` |
 | Definitions — account layer vs in-graph Subjects ("organization account" vocab note, #2311) | `docs/registry-graph-schema.md` (§ Definitions) · `docs/ONTOLOGY.md` §5/§6 |
@@ -43,6 +45,7 @@ aboutObjects: tortoise
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
 | E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |
+| Read-path latency profile — phase-by-phase measurement of the ask lane, store round-trips, and the captured-turn embedding census (WAVE-R / M1, #4194) | `docs/research/2026-09-19-m1-read-path-latency-profile.md` |
 | Temporal reasoning in competitor agent-memory systems (2026-09-02) | `docs/research/2026-09-02-temporal-reasoning-competitors.md` |
 | Temporal retrieval admission trace — where #2578's temporal evidence is lost (#2976, 2026-09-11) | `docs/research/2026-09-11-2976-temporal-retrieval-trace.md` |
 | Kinds classification-later deep research (#1695) | `docs/research/2026-08-26-classification-later.md` |

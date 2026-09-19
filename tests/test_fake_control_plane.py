@@ -83,3 +83,28 @@ def test_uuid_fidelity_escape_hatch() -> None:
     f = FakeControlPlane(tables={"org_memberships": []}, uuid_fidelity=False)
     assert f.query("org_memberships",
                    filters=[("user_id", "eq", "api")]) == []
+
+
+def test_unsupported_filter_op_raises_on_patch_and_delete() -> None:
+    """#3665 review: ``_matches`` (PATCH/DELETE) must RAISE on an op it does
+    not implement instead of silently treating it as "matches".
+
+    The GET path already raises for an unsupported op; letting the
+    PATCH/DELETE path ignore one makes the fake mutate MORE rows than the real
+    client would (the ignored predicate drops out), so a test can pass against
+    behaviour production does not have — the same "CI green while prod
+    differs" class this file exists to lock down.
+
+    REDs on: reverting ``_matches`` to the if-chain with no final op check.
+    GREEN legitimate form: an op every branch covers (``eq``)."""
+    f = FakeControlPlane(tables={"org_memberships": [
+        {"org_id": "t1", "user_id": "00000000-0000-0000-0000-000000000001",
+         "role": "member"},
+    ]}, uuid_fidelity=False)
+    with pytest.raises(ValueError, match="unsupported filter op"):
+        f.query("org_memberships", method="DELETE",
+                filters=[("org_id", "in", ["t1"])])
+
+    # the supported-op control: the same PATCH/DELETE path still works
+    assert f.query("org_memberships", method="DELETE",
+                   filters=[("org_id", "eq", "t1")]) == []

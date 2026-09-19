@@ -45,6 +45,8 @@ import threading
 import time
 from collections.abc import Sequence
 
+from .env_truthy import TRUTHY, is_truthy  # #4097: the declared truthy contract
+
 logger = logging.getLogger(__name__)
 
 RERANK_MODEL_DEFAULT = "cross-encoder/ms-marco-MiniLM-L6-v2"
@@ -52,7 +54,11 @@ RERANK_MAX_LENGTH = 512          # tokenizer-level (CrossEncoder max_length)
 RERANK_TRUNCATE_CHARS = 2048     # char pre-truncation (≈500 tokens) — the
                                  # two limits are aligned so long raw
                                  # transcripts cannot blow the tokenizer
-_TRUTHY = {"1", "true", "yes", "on"}
+#: #4097: alias of `tortoise.env_truthy.TRUTHY` (a plain assignment, not an
+#: import-alias, so ruff's F401 cannot red it). The name is imported by
+#: tools/longmem_eval/rerank.py and tools/longmem_eval/retrieve.py, so it must
+#: stay bound.
+_TRUTHY = TRUTHY
 
 #: A7 (#2070): ask-lane rerank knobs (mirror the eval's TORTOISE_LME_RERANK_*
 #: namespace; the eval keeps its own knobs and is byte-identical-off).
@@ -69,10 +75,10 @@ DEFAULT_ASK_RERANK_LAMBDA = 0.7
 
 def rerank_enabled(flag: bool | None = None) -> bool:
     """A7 gate. Explicit kwarg wins; else env TORTOISE_ASK_RERANK (fail-safe
-    OFF — only 1/true/yes/on enables)."""
+    OFF — only 1/true/yes/on enables, the declared contract since #4097)."""
     if flag is not None:
         return bool(flag)
-    return os.environ.get(ASK_RERANK_ENV, "").strip().lower() in _TRUTHY
+    return is_truthy(os.environ.get(ASK_RERANK_ENV))
 
 
 def _env_int(name: str, default: int) -> int:

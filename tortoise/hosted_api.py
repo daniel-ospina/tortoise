@@ -49,6 +49,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import API_KEY_PREFIXES, hash_api_key
+from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -1530,6 +1531,16 @@ _DREAM_QUEUE_TTL_S = 600
 _DREAM_EXECUTOR = ThreadPoolExecutor(
     max_workers=max(1, min(_int_env("TORTOISE_DREAM_WORKERS", 2), 8)),
     thread_name_prefix="dream-pass")
+
+# #3060 doctrine, applied to the activation scorecard: `LIFETIME_MEMORY_QUERY`
+# is an unbounded all-time scan of an org's Sessions + CONTAINS (the windowed
+# funnel rides the same hand-off), so this is the "long / stallable" class the
+# comment at the top of this file says must NOT share the loop's default
+# executor with ~80 other `to_thread` sites and the auth middleware's abuse
+# hooks. Its own small pool means a slow graph can only starve the scorecard.
+_SCORECARD_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(1, min(_int_env("TORTOISE_SCORECARD_WORKERS", 2), 8)),
+    thread_name_prefix="activation-scorecard")
 
 
 async def _run_dream_on_pool(fn, sdk, /, *args, **kwargs):
@@ -3145,12 +3156,12 @@ async def get_current_org(request: Request) -> dict:
                 # points counter counts graph nodes → max_graph_nodes (#310 GAP-B)
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
-                # #4010: sessions are UNLIMITED for every tier — the flat v1
-                # 1000 cap was REOPENED and SUPERSEDED (see the module comment
-                # in tortoise/quota.py). `_ms` (the stored t.max_sessions) is
-                # read so the deliberate departure is visible at the exact
-                # site, and then NOT honoured — a stored 1000 must never
-                # re-cap an org after the constant is gone.
+                # #4010: sessions are UNLIMITED for every tier — the flat
+                # 1000 was an inherited code fallback, never a ratified cap
+                # (see the module comment in tortoise/quota.py). `_ms` (the
+                # stored t.max_sessions) is read so the removal is visible at
+                # the exact site, and then NOT honoured — a stored 1000 must
+                # never re-cap an org after the constant is gone.
                 "max_sessions": None,
                 # #1748: key creator's user UUID rides the org dict (Supabase
                 # resolve_api_key parity) so session-user-owned endpoints can
@@ -3451,12 +3462,24 @@ async def _session_user_org(request: Request, user: dict) -> dict:
     _mp = row.get("max_points")
     if _mp is None:
         _mp = row.get("graph_size_cap")
+    # #3874: the key allowance is resolved through the MINT GATE's own
+    # resolver (_org_node_sync_limits → _org_limits_from_node) rather than a
+    # precedence copied here. The gate is the authority on the cap, so the
+    # pre-cap surface cannot advertise a value the gate would not enforce:
+    # there is ONE resolver, so the two cannot drift. A None/missing result
+    # (the resolver could not read the org) falls back to the pricing tier
+    # default — it must never pass a bare None, because a PRESENT-and-None
+    # limit means UNLIMITED to the quota gate (enforce_org_limit) and would
+    # fail OPEN.
+    _gate_limits = _org_node_sync_limits(org_id)
     org = {
         "org_id": org_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
         "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
         "max_points": int(_mp) if _mp is not None else lim["max_graph_nodes"],
-        "max_api_keys": lim["max_api_keys"],
+        "max_api_keys": (_gate_limits["max_api_keys"]
+                         if _gate_limits.get("max_api_keys") is not None
+                         else lim["max_api_keys"]),
         # #4010: sessions are unlimited for every tier — no cap of any kind,
         # so the resolved value is always the explicit None (the pre-#4010
         # `DEFAULT_MAX_SESSIONS` fallback is deleted, not relocated).
@@ -4036,6 +4059,14 @@ class OrgInfoResponse(BaseModel):
     tier: str
     max_users: int
     max_graphs: int | None
+    # #3874: the org's API-key allowance — exposed so the keys surface can
+    # state "you get N keys" BEFORE the create call refuses at the cap.
+    # Resolved by the auth lane from the SAME limits source the mint gate
+    # (_mint_key → _org_node_sync_limits) enforces: the stored org limit
+    # with a pricing.json tier fallback. None only when a legacy/override
+    # dict predates the field — the client must then stay silent rather
+    # than fabricate a number.
+    max_api_keys: int | None = None
     max_orgs: int | None
     # #308 (R7): "active" | "flagged" over HTTP — a suspended org never
     # reaches this handler (403 SUSPENDED fires in get_current_org first);
@@ -5244,6 +5275,12 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
         tier=org["tier"],
         max_users=org["max_users"],
         max_graphs=org["max_graphs"],
+        # #3874: the key allowance rides the overview read — the value is
+        # already resolved by get_current_org / _session_user_org from the
+        # org's stored limit (pricing tier fallback), the identical source
+        # _mint_key's cap gate counts against, so the pre-cap surface and
+        # the at-cap 402 detail cannot silently desync.
+        max_api_keys=org.get("max_api_keys"),
         # #308 (R7): flagged status rides /v1/team (suspended never reaches
         # here — the auth dependency 403s first; scoping delta 12).
         status="flagged" if org.get("flagged_at") is not None else "active",
@@ -5982,8 +6019,7 @@ def _signup_email_confirm() -> bool:
     Supabase's SMTP project-wide email-send bucket). false|0|no|off (case-insensitive) opt
     back into the confirmation-email funnel.
     """
-    val = os.environ.get("TORTOISE_SIGNUP_EMAIL_CONFIRM", "true").strip().lower()
-    return val not in ("false", "0", "no", "off")
+    return env_flag("TORTOISE_SIGNUP_EMAIL_CONFIRM", True)
 
 
 def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
@@ -8278,6 +8314,59 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                        f"for this capture exceeds {max_points}. Upgrade your plan.",
             )
 
+        # #3665 (lane B7): the COHORT COST CAP — the pre-spend gate. It lives
+        # in the SAME guard as the points estimate for the same reason: a
+        # replay (``session_existed``, capture_ok) writes no nodes and runs no
+        # extraction, so it spends nothing and must never be 402-blocked
+        # (#1727's lesson); a TRUE-retry (#2335 WI-2b) re-runs extraction and
+        # therefore CAN be refused. Placed here — before the turn-write loop
+        # and both extraction calls — so a trip refuses the capture before the
+        # capture's OWN writes: no Session MERGE, no turn Points, no
+        # ``capture_ok``, no receipt, and the transcript stays on the user's
+        # machine, retryable verbatim. (The 402 itself still records the
+        # per-harness ``session_capture_last_error_*`` key in the wrapper, the
+        # same as every other refusal, and files an incident — neither is
+        # capture data.) Refusing anywhere later would leave ``capture_ok``
+        # NULL and turn the next same-``session_id`` POST into a silent
+        # zero-extract replay (the hazard ``_reserve_capture_slot`` documents).
+        #
+        # The error pair is the house contract: a ``QuotaExceededError``
+        # subclass → 402 (REST) / ``ERR_QUOTA`` (MCP); ``QuotaCheckError`` →
+        # 500, fail-closed, never a silent pass.
+        #
+        # Off the event loop: the cap's resolution reads the control plane with
+        # a synchronous ``httpx`` client, and this API runs a single uvicorn
+        # worker — pricing a cohort inline would stall every concurrent request
+        # for two round-trips (the #2988/#3498 class, same as the analytics
+        # emit below). ``to_thread`` copies the contextvars, so the
+        # selfhost-transport exemption still applies inside the worker.
+        from tortoise.cohort_cost import (
+            CohortCostCapExceeded,
+            enforce_cohort_cost_cap,
+            file_cohort_cost_incident,
+        )
+        try:
+            await asyncio.to_thread(enforce_cohort_cost_cap, org)
+        except CohortCostCapExceeded as e:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "cohort_cost_cap_refusal org=%r cohort_since=%r spent=%.6f "
+                "cap=%.2f period=%r harness=%r",
+                org.get("org_id"), e.incident_detail.get("cohort_since"),
+                e.incident_detail.get("spent_usd", 0.0),
+                e.incident_detail.get("cap_usd", 0.0),
+                e.incident_detail.get("period"), body.harness)
+            # The incident is network-bound (GitHub issue + Telegram) — filed
+            # OFF the event loop. This API runs a single uvicorn worker, so an
+            # inline synchronous POST here would stall every concurrent
+            # request for the round-trip (the #2988/#3498 sync-HTTP class).
+            await asyncio.to_thread(
+                file_cohort_cost_incident, org["org_id"], e.incident_detail)
+            raise HTTPException(status_code=402, detail=str(e)) from None
+        except QuotaCheckError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Quota check failed: {e}") from None
+
     _check_org_limit(org, "sessions")
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
@@ -8777,8 +8866,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #3359: one capture_cost row per capture ATTEMPT that ran an
         # extraction (successful or errored — a failed extraction that made
         # provider calls has real spend, and the deadline/deadline_aborts
-        # disclosure depends on that row existing). Replay/M2 captures carry
-        # no extractor telemetry and emit nothing. Idempotent for free: this
+        # disclosure depends on that row existing). A ZERO-CALL capture —
+        # the empty-transcript / keyless path — carries no
+        # extractor telemetry and emits nothing; an M2 capture DOES make
+        # provider calls, so since #3824 it emits a row carrying its call
+        # count as ``unattributed`` rather than vanishing into the same
+        # silence as a zero-call capture. Idempotent for free: this
         # sits behind the SAME replay guard the write-op meter uses, so a
         # zero-node re-POST writes no second row; a genuine retry (#2335
         # WI-2b) does write a second row, which is why the report aggregates
@@ -8787,6 +8880,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         try:
             _cost_props = _capture_cost_props(session_id, meta)
             if _cost_props is not None:
+                # #3665 (lane B7): the SAME measured cost onto the durable
+                # per-period LEDGER, beside the analytics row it already
+                # writes. #3359's analytics row is a measurement, not a
+                # ledger: nothing keyed by org+period, so a spend CEILING
+                # could only read it by scanning every capture row in the
+                # period. The ledger row is one per (org, period) — the read
+                # side `cohort_cost.enforce_cohort_cost_cap` gates on.
+                # Best-effort by contract (record_capture_usage swallows its
+                # own failures): metering never blocks a committed capture.
+                # Off the event loop for the same reason as the emit below —
+                # the Supabase RPC and the embedded registry write are both
+                # blocking I/O and this API runs a single uvicorn worker.
+                from tortoise.metering import record_capture_usage
+                await asyncio.to_thread(
+                    record_capture_usage, org["org_id"],
+                    cost_usd=float(_cost_props.get("cost_usd") or 0.0))
                 # Off the event loop: `_track_analytics_event` POSTs
                 # synchronously (`httpx.Client`), and this API runs a single
                 # uvicorn worker — calling it inline stalls EVERY concurrent
@@ -10249,6 +10358,212 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
         "turn_points": turns,
         "extracted_points": extracted,
     }
+
+
+# #B7: the activation scorecard — which sessions actually produced memory, and
+# whether anything read it. Read-only; derives from data other components
+# already record (no new write, no change to the capture path).
+#
+# Distinct from `first_api_call` (tortoise/analytics.py), whose docstring calls
+# it the "Activation event" while it fires on ANY POST /v1/* returning <400,
+# and distinct from the dashboard's captureStatus `active` state, which is
+# receipt-authoritative ("the transcript was stored").
+#
+# The definition, its evidence, and the stages that are NOT measurable live in
+# tortoise/activation_scorecard.py — read that module's docstring first.
+@app.get("/v1/activation/scorecard")
+async def activation_scorecard(
+    since: str | None = None,
+    until: str | None = None,
+    org: dict = Depends(get_current_org_session_ungated),  # noqa: B008
+):
+    """Activation funnel for the calling org over [since, until).
+
+    Stages: captured -> stored -> memory_produced (session-scoped, graph),
+    recall_attempted (org/time-scoped, analytics), value_confirmed (a
+    REFUSAL — see the module). Every stage carries state + reason; a 0 is only
+    ever emitted with state == "measured".
+
+    Defaults to the beta's own <= 24h criterion window. 422 on a malformed,
+    naive, non-positive, or over-90-day window (a client error, never a silent
+    empty result).
+
+    Guards: `graphs:read` scope, then `_reject_graph_bound_org_surface` — the
+    graph legs read the org DEFAULT graph while the analytics leg is ORG-WIDE
+    (analytics_events carries no graph_id), so a graph-bound key would mix two
+    scopes and leak cross-graph activity.
+
+    Fail-soft: an unreadable graph or analytics store yields `unavailable`,
+    never a 500 and never a fabricated 0.
+    """
+    from tortoise.activation_scorecard import (
+        FUNNEL_QUERY as _FUNNEL,
+    )
+    from tortoise.activation_scorecard import (
+        LIFETIME_MEMORY_QUERY,
+        analytics_write_path_configured,
+        assemble,
+        graph_unavailable_stages,
+        stage_counts,
+    )
+    from tortoise.activation_scorecard import (
+        MCP_TELEMETRY_EVENT as _EVENT,
+    )
+    from tortoise.activation_scorecard import (
+        RECALL_PAGE_CAP as _CAP,
+    )
+    from tortoise.activation_scorecard import (
+        WindowError as _WindowError,
+    )
+    from tortoise.activation_scorecard import (
+        normalize_window as _norm_window,
+    )
+
+    _require_scope(org, "graphs:read", "activation_scorecard")
+    _reject_graph_bound_org_surface(org, "the activation scorecard")
+    try:
+        since_iso, until_iso = _norm_window(since, until)
+    except _WindowError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    log = logging.getLogger("tortoise.api")
+
+    def _read_graph() -> tuple[list, dict | None]:
+        sdk = _data_sdk(org)
+        proj = sdk._get_proj()
+        funnel = proj.g.query(
+            _FUNNEL, params={"since": since_iso, "until": until_iso}
+        ).result_set
+        life = proj.g.query(LIFETIME_MEMORY_QUERY).result_set
+        return funnel, ({"first_memory_at": life[0][0],
+                         "sessions_with_memory": life[0][1]} if life else None)
+
+    # ── Stages 1-3, and the lifetime baseline for stage 4 ──────────────────
+    graph_error: str | None = None
+    rows: list = []
+    lifetime: dict | None = None
+    try:
+        # The FalkorDB client is synchronous and LIFETIME_MEMORY_QUERY is an
+        # unbounded all-time scan, so this runs on the scorecard's OWN pool
+        # (#3060 doctrine, above) rather than the loop's shared default
+        # executor — a slow graph must not stall other tenants of that pool
+        # (#3772 is the same separation for the write handlers).
+        rows, lifetime = await _run_off_loop(_SCORECARD_EXECUTOR, _read_graph)
+    except HTTPException:
+        # An authorization/tenancy denial from `_data_sdk` is NOT a graph
+        # outage — swallowing it would convert a 403 into a 200 with
+        # `unavailable` stages, defeating the guard this try block sits under.
+        raise
+    except Exception:
+        graph_error = "org_graph_unavailable"
+        log.warning("activation scorecard graph unavailable (fail-soft): %s",
+                    org["org_id"], exc_info=True)
+
+    if graph_error:
+        graph_stages = graph_unavailable_stages(graph_error)
+        graph_detail = {"captured_sessions": None, "stored_sessions": None,
+                        "memory_produced_sessions": None,
+                        "turn_points_total": None, "extracted_points_total": None}
+    else:
+        try:
+            graph_stages, graph_detail = stage_counts(
+                rows, since_iso, until_iso)
+        except Exception:
+            # A malformed funnel row (a driver/version/proxy shape anomaly) must
+            # not become a 500 — the handler's contract is fail-soft for an
+            # unreadable graph, and the analytics fold carries the same guard.
+            graph_error = "org_graph_unavailable"
+            log.warning(
+                "activation scorecard graph fold failed (fail-soft): %s",
+                org["org_id"], exc_info=True)
+            graph_stages = graph_unavailable_stages(graph_error)
+            graph_detail = {"captured_sessions": None,
+                            "stored_sessions": None,
+                            "memory_produced_sessions": None,
+                            "turn_points_total": None,
+                            "extracted_points_total": None}
+
+    # ── Stage 4 ────────────────────────────────────────────────────────────
+    analytics_state = ("configured" if analytics_write_path_configured()
+                       else "unset")
+    recall_cell, recall_detail = await asyncio.to_thread(
+        _read_recall, org, since_iso, until_iso, lifetime, graph_error,
+        analytics_state, log, _EVENT, _CAP)
+
+    payload = assemble(
+        org_id=org["org_id"], since=since_iso, until=until_iso,
+        graph_stages=graph_stages, graph_detail=graph_detail,
+        recall_cell=recall_cell, recall_detail=recall_detail,
+        lifetime=lifetime, analytics_state=analytics_state,
+    )
+    if graph_error:
+        payload["integrity"].append(graph_error)
+    if analytics_state == "unset":
+        # The writer cannot reach the store: every window is unmeasured, and a
+        # historical window can never be backfilled. Say so in the payload.
+        payload["notes"].append(
+            "analytics write path is not configured on this server — stage 4 "
+            "is unmeasured, not zero, and historical events are unrecoverable")
+    return payload
+
+
+def _read_recall(org: dict, since: str, until: str, lifetime: dict | None,
+                 graph_error: str | None, analytics_state: str, log,
+                 event: str, cap: int):
+    """Read the analytics rows for the window and fold them into stage 4.
+
+    Returns `(stage_cell, detail)`. Deliberately returns a NON-measured cell
+    — NEVER a zero — for every case where the store cannot be trusted to be
+    complete. Which of the two non-measured states applies follows the
+    module's vocabulary rule: `unavailable` for the RECOVERABLE failures (not
+    configured, unreachable, a full page — the read helper has no offset
+    support, so a full page is a lower bound), and `not_measurable` for an org
+    that has never produced memory, where there is nothing to recall from and
+    no retry would change it. Conflating those two would accuse a healthy org
+    of failing to report.
+    """
+    from tortoise.activation_scorecard import (
+        recall_stages as _recall_stages,
+    )
+    if analytics_state != "configured":
+        return _recall_stages(
+            None, None, reason="analytics_write_path_unconfigured")
+    if graph_error:
+        # first_memory_at is unknown, so stage 4 cannot be conditioned.
+        return _recall_stages(None, None, reason=graph_error)
+    try:
+        from tortoise.supabase_control import get_control_plane
+        analytics_rows = get_control_plane().query(
+            "analytics_events",
+            select=["event_name", "properties", "created_at"],
+            filters=[("org_id", "eq", org["org_id"]),
+                     ("event_name", "eq", event),
+                     # `gte` (not `gt`) so this leg is [since, until) — the
+                     # SAME interval as the graph legs. With `gt`, a tool call
+                     # landing exactly ON `since` was excluded while a session
+                     # created at that same instant was included, so the funnel
+                     # could disagree with itself on the boundary instant.
+                     ("created_at", "gte", since),
+                     ("created_at", "lt", until)],
+            order="created_at.desc",
+            limit=cap,
+        )
+        # The fold runs INSIDE the fail-soft guard: a store/proxy that returns
+        # an array of non-mapping elements must become `unavailable`, not an
+        # AttributeError 500 — the endpoint's own contract.
+        truncated = (isinstance(analytics_rows, list)
+                     and len(analytics_rows) >= cap)
+        return _recall_stages(
+            analytics_rows,
+            (lifetime or {}).get("first_memory_at"),
+            truncated=truncated,
+            window=(since, until),
+            memory_sessions=(lifetime or {}).get("sessions_with_memory"))
+    except Exception:
+        log.warning("activation scorecard analytics unreachable (fail-soft): %s",
+                    org["org_id"], exc_info=True)
+        return _recall_stages(
+            None, None, reason="analytics_store_unreachable")
 
 
 # #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
@@ -16738,7 +17053,7 @@ def _linking_available() -> bool:
     via the Management API). Fail-closed: False until explicitly enabled —
     the banner's promise-free variant and the link-intent 503 depend on it.
     """
-    return os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED", "") == "1"
+    return is_truthy(os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED"))
 
 
 def _identity_admin_user(user_id: str) -> dict | None:
@@ -17712,6 +18027,15 @@ async def session_context(org: dict = Depends(get_current_org_gated)):  # noqa: 
         raise HTTPException(status_code=500, detail="Context unavailable")  # noqa: B904
 
 
+def _volunteer_slo_enforced() -> bool:
+    """`TORTOISE_VOLUNTEER_ENFORCE_SLO` — perf lane / induced-timeout tests only.
+
+    #4097: the single resolution point for that knob (``volunteer_context`` calls
+    it), through the declared truthy contract.
+    """
+    return is_truthy(os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO"))
+
+
 @app.post("/v1/context")
 async def volunteer_context(
     body: VolunteerContextRequest,
@@ -17778,8 +18102,7 @@ async def volunteer_context(
     # so a slow CI machine can never randomly empty a healthy request; the
     # HARD ceiling (8 × SLO) below degrades ANY pathological read (never 503,
     # never a hung caller) with the same fail-open shape.
-    enforce_slo = os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO", "").strip() \
-        .lower() in ("1", "true", "yes", "on")
+    enforce_slo = _volunteer_slo_enforced()
     completed = False
     try:
         # #1676 offload: the canonical pipeline is CPU/DB-blocking (hybrid
@@ -19535,6 +19858,11 @@ _ALLOWED_ANALYTICS_PROPS = {
     "calls", "retries", "prompt_tokens", "completion_tokens",
     "cost_usd", "calls_without_cost", "calls_without_usage",
     "deadline_aborts", "by_stage",
+    # #3824: provider calls the capture made that NO roll-up accounted for.
+    # Without this key in the allowlist the counter is stripped here — the
+    # documented #3359 loss mode — and F2 stays invisible even though the
+    # row was written.
+    "unattributed",
     # #3821: billing attribution. The Stripe webhook emits `plan` and `tier`
     # (the notify_kind row at the billing emit), but they were never
     # registered — so billing analytics rows have been written STRIPPED since
@@ -19669,7 +19997,7 @@ def _telemetry_strict() -> bool:
 
     Reading it at import time would both (a) make the flag untestable and
     (b) let a dev flag set before boot survive into production."""
-    return os.environ.get(_TELEMETRY_STRICT_ENV) == "1"
+    return is_truthy(os.environ.get(_TELEMETRY_STRICT_ENV))
 
 
 def _report_unregistered(where: str, subject: str,
@@ -20499,6 +20827,31 @@ def _analytics_alert_store():
         return None
 
 
+def _as_call_count(value) -> int:
+    """Coerce a #3824 call-evidence value to a non-negative int (0 on junk).
+
+    A producer is free to hand over ``None``/missing/negative/a
+    fraction/a non-finite or absurd-magnitude value; none of those may become
+    a phantom nonzero disclosure, and none may raise inside the capture
+    handler's best-effort emit. A call count is a WHOLE number, so a
+    fractional one is malformed and is treated as absent rather than
+    truncated into a phantom count. The magnitude bound matches the reader's
+    own ``_as_int`` (``tools/longmem_eval/costing.py``), so a magnitude the
+    emitter accepts is one the report cannot later read as junk.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    if isinstance(value, float) and not value.is_integer():
+        return 0
+    try:
+        if abs(value) > 1e300:
+            return 0
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return n if n > 0 else 0
+
+
 def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     """#3359: the per-session cost driver as an analytics ``properties`` dict.
 
@@ -20508,14 +20861,44 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
     ``calls_without_cost`` disclosure counter, and the per-stage/
     per-route ``by_stage`` envelope (repricable at report time).
 
-    Returns ``None`` when the extractor produced no LLM roll-up (a
-    replayed / M2 capture: ``meta["stats"]`` is ``{}``) — no measurement
-    exists, so no row is written. A capture whose extraction ERRORED does
-    carry a roll-up (and therefore a row): the provider calls were made and
-    their spend is real.
+    #3824 — TWO FACTS, NEVER ONE. A ``stats`` with no ``llm`` used to
+    collapse two distinct captures into the same ``None``:
+
+    * **F1 — zero provider calls.** The empty-transcript gate: nothing
+      was sent, so no row is written and the window stays clean.
+      ``return None`` is correct here.
+    * **F2 — calls were made and the roll-up did not survive.** The M2
+      session lane (#3747) issues real provider calls and discards their
+      usage; any future lane that builds its own ``meta`` does the same.
+      Absence made F2 indistinguishable from F1 *and* from "$0.00 spent",
+      so an all-M2 deployment read as "NO capture_cost ROWS IN THIS
+      WINDOW" — a missing measurement wearing the shape of a cheap one,
+      and #3780's cohort-cap denominator was set from that undercount.
+
+    The discriminator is the call evidence the producer keeps OUTSIDE the
+    roll-up (``meta["stats"]["unattributed"]``, written by
+    ``sdk._extract_session_llm``) — it survives exactly the case the
+    roll-up does not, because it is recorded at the CALL site rather than
+    reconstructed from the response. When it is present with no roll-up the
+    row is written anyway, every measured field zeroed and ``unattributed``
+    carrying the call count, so the spend is DISCLOSED rather than erased.
+    When a roll-up does survive, ``unattributed`` rides alongside it (0 on a
+    fully-metered capture) — the sibling-counter precedent
+    (``calls_without_cost`` / ``calls_without_usage`` /
+    ``deadline_aborts``) rather than a second, drifting total.
+
+    A capture whose extraction ERRORED does carry a roll-up (and therefore
+    a row): the provider calls were made and their spend is real.
     """
-    llm = ((meta.get("stats") or {}).get("llm") or {})
-    if not llm:
+    stats = meta.get("stats") or {}
+    llm = stats.get("llm") or {}
+    # #3824: calls made that no roll-up accounted for. Must live OUTSIDE
+    # ``llm`` — nested there it could not exist in the very case it
+    # describes (an empty roll-up).
+    unattributed = _as_call_count(stats.get("unattributed"))
+    if not llm and not unattributed:
+        # F1: zero provider calls. No measurement exists, so no row — a
+        # fabricated $0 row here is the phantom the reader must never see.
         return None
     return {
         "session_id": session_id,
@@ -20535,6 +20918,10 @@ def _capture_cost_props(session_id: str, meta: dict) -> dict | None:
         # session as a clean $0 (#1787 P2-L is the counter's origin).
         "deadline_aborts": int(llm.get("deadline_aborts", 0) or 0),
         "by_stage": llm.get("by_stage") or {},
+        # #3824: provider calls with no surviving roll-up. Rides the row so
+        # the reader can count them into the denominator and refuse to read
+        # the capture as a measured $0.
+        "unattributed": unattributed,
     }
 
 

@@ -6,7 +6,7 @@
 #
 # Epic #1647 P4 (Task 10) DEMOTION: this schedule is LOCAL-DEV MACHINE
 # HYGIENE ONLY. CI runs the docker lane (both fast halves provision
-# falkordb; the 17 carve-out files run in the URI-unset carve-out job whose
+# falkordb; the carve-out files run in the URI-unset carve-out job whose
 # conftest _redislite_hygiene sweeps its own sessions), so the embedded
 # reaper no longer carries any CI correctness role — docker halves produce
 # no embedded orphans by construction (E2E-7). Dev machines keep the
