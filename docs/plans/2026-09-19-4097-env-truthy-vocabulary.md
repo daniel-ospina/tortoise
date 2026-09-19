@@ -191,7 +191,7 @@ declared cells in Step 3.
 |---|---|---|
 | `backup_config._env_bool` | **delete**; call `env_flag(name, False)` at its 6 sites (`:252, :253, :274, :289, :428, :429`) | no referent outside `backup_config.py`; every call passes `default=False`, where `env_flag` is equivalent cell-for-cell |
 | `retrieval.ask_env_bool` | **keep**, body becomes `return env_flag(name, default)` | imported by `ask_lane.py:407`, `tests/test_evidence_assembly.py:53` |
-| `retrieval._ASK_TRUTHY` / `_ASK_FALSY` | **delete** (code review, cycle 1) | the names have **no referent anywhere** in the tree — `retrieval.py` states this at the deleted site — so the "documented knob surface" rationale was wrong; `ask_env_bool` is the only referent and it now delegates to `env_flag` |
+| `retrieval._ASK_TRUTHY` / `_ASK_FALSY` | **delete** (code review, cycle 1) | the names had **no referent outside `ask_env_bool`** — nothing else in the tree named them, and inlining that one reader into `env_flag` is what `_old_tristate` pins — so the "documented knob surface" rationale was wrong: keeping them would have shipped dead aliases advertising a knob nothing reads |
 | `rerank._TRUTHY` | **keep** as `from tortoise.env_truthy import TRUTHY as _TRUTHY` (referenced by `rerank_enabled`, so F401 does not fire) | imported by `tools/longmem_eval/rerank.py:38` and `retrieve.py` (6 sites) |
 | `cimd._env_flag` | **delete**; replace BOTH call sites with `env_flag` — `cimd.py:119` (`cimd_enabled`) **and `cimd.py:127` (`same_origin_redirects_required`)** | `client_id_metadata_document_supported` (`cimd.py:130`) delegates to `cimd_enabled()` and is left alone |
 
@@ -712,9 +712,11 @@ is disclosed in the PR body). What changed:
    literal, and is the third literal owner) and added to #4128.
 5. **Code review (after implementation), not plan review, corrected this plan's Step-1 row for
    `retrieval._ASK_TRUTHY`/`_ASK_FALSY`: they are DELETED, not kept.** The row above is corrected;
-   the names had no referent in the tree, so keeping them would have shipped dead aliases advertising
-   a knob nothing reads. The reaper's mirror was also corrected in the same pass: it is pinned to the
-   contract by vocabulary **identity**, not only by matrix parity.
+   the names had no referent outside `ask_env_bool`, so keeping them would have shipped dead aliases
+   advertising a knob nothing reads. The reaper's mirror was also corrected in the same pass: it is
+   pinned to the contract by vocabulary **identity**, not only by matrix parity. A later code-review
+   cycle also widened the guard's constant-anchor resolution to the ANNOTATED assignment form
+   (`_ONE: str = "1"`), which the scanner's own docstring already claimed to resolve.
 
 ## Deliberately NOT in this plan
 

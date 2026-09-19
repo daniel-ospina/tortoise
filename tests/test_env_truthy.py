@@ -496,14 +496,28 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
 }
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level names bound to a string constant: `NAME = "X"` and `NAME: str = "X"`."""
     out: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
-                and isinstance(node.value.value, str):
-            for target in node.targets:
+    for value, targets in _module_const_assigns(tree):
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            for target in targets:
                 if isinstance(target, ast.Name):
-                    out.setdefault(target.id, node.value.value)
+                    out.setdefault(target.id, value.value)
     return out
+
+
+def _module_const_assigns(tree: ast.Module):
+    """Yield `(value, targets)` for every module-level assignment, plain or ANNOTATED.
+
+    `ast.Assign` alone missed the annotated house idiom (`TRUTHY: frozenset[str] = ...`),
+    so `_ONE: str = "1"` was invisible as an anchor while the docstring claimed annotated
+    assignment was resolved (code review, cycle 5).
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            yield node.value, node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            yield node.value, [node.target]
 
 
 def _unwrap_chain(node: ast.expr) -> ast.expr:
@@ -638,14 +652,13 @@ def _module_collection_constants(tree: ast.Module) -> dict[str, set[str]]:
     its inline-literal form (code review caught the same blind spot for the scalar form).
     """
     out: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            values = _collection_values(node.value)
-            if values is None:
-                continue
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    out.setdefault(target.id, values)
+    for value, targets in _module_const_assigns(tree):
+        values = _collection_values(value)
+        if values is None:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                out.setdefault(target.id, values)
     return out
 
 
@@ -800,6 +813,12 @@ _SYNTHETIC_SHAPES = [
      "module constant anchor"),
     ('_ONES = ("1",)\nif os.environ.get("TORTOISE_SYNTH") in _ONES:\n    pass\n',
      "module constant membership anchor"),
+    ('_ONE: str = "1"\nif os.environ.get("TORTOISE_SYNTH") == _ONE:\n    pass\n',
+     "annotated module constant anchor"),
+    ('_ONES: tuple = ("1",)\nif os.environ.get("TORTOISE_SYNTH") in _ONES:\n    pass\n',
+     "annotated module constant membership anchor"),
+    ('NAME: str = "TORTOISE_SYNTH"\nif os.environ.get(NAME) == "1":\n    pass\n',
+     "annotated module constant name"),
 ]
 
 

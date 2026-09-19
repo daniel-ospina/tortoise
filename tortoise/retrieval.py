@@ -130,8 +130,8 @@ def ask_env_bool(name: str, default: bool) -> bool:
     truthy (1/true/yes/on) → True; explicit falsy (0/false/no/off) → False.
 
     #4097: delegates to the declared contract (`tortoise.env_truthy.env_flag`).
-    The pre-#4097 `_ASK_TRUTHY`/`_ASK_FALSY` locals had no referent anywhere in
-    the tree, so they were deleted rather than kept as dead aliases; the shared
+    The pre-#4097 `_ASK_TRUTHY`/`_ASK_FALSY` locals had no referent OUTSIDE this
+    function, so they were deleted rather than kept as dead aliases; the shared
     vocabularies live in `tortoise/env_truthy.py`.
     """
     return env_flag(name, default)
