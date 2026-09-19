@@ -119,10 +119,8 @@ class TestCrossLaneParity:
     ``tortoise.status_vocabulary`` is the ONE home of the four terms and of
     the boundary's mapping, and the client surfaces
     (``client/tortoise_client/cli.py``, ``tortoise/tortoise_client.py``) import
-    it. The read path must not re-fork that mapping, so this asserts the terms
-    rather than the wording: for each condition BOTH trees can express, the
-    read path's classifier and the boundary's agree — the equality is by
-    DELEGATION, and a future re-fork is what these rows catch.
+    it. For each condition BOTH trees can express, these rows assert that the
+    read path's classifier and the boundary's classifier return the same term.
     """
 
     @pytest.mark.parametrize(
