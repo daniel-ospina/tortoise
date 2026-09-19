@@ -6437,7 +6437,9 @@ def main(argv: list[str] | None = None) -> int:
     import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
     # #3809: the harness choices for `session verify` come from the module's
-    # single HARNESSES tuple (never a second inline list that could drift).
+    # single HARNESSES tuple, which is itself derived from
+    # capture_install.CAPTURE_SEAM — one definition, never a second list that
+    # could drift.
     from tortoise.session_verify import HARNESSES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)

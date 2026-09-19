@@ -11,10 +11,12 @@ Every test here drives the REAL CLI chain:
   same ``/v1/sessions`` + ``/v1/onboarding/state`` contract the hosted API
   does.
 
-The only test double is the ``tortoise`` CLI the fired hook invokes (a fake on
-PATH that POSTs the capture to the loopback server) — the seam, the event
-payload, the firing, the receipt read, the session retrieval and the deletion
-are all the production paths.
+The only test double is the `tortoise` console script the fired hook invokes:
+a shim on PATH that delegates every capture call to the REAL CLI
+(`tortoise.__main__.main`), so the transcript handed off by the installed hook
+is parsed by the production parser. The seam, the event payload, the firing,
+the parse, the receipt read, the session retrieval and the deletion are all the
+production paths.
 
 Each guard docstring names the mutation that turns it RED; the mutations were
 verified RED individually.
@@ -52,6 +54,8 @@ class _Graph:
         self.deletes: list[str] = []
         self.fail_post = False
         self.fail_delete = False
+        self.fail_get_session = False
+        self.hide_session_on_get = False
         self.no_source = False
         self.omit_source_field = False
         self.no_receipt = False
@@ -130,7 +134,10 @@ def _make_handlers(graph: _Graph):
                 return
             if self.path.startswith("/v1/sessions/"):
                 sid = self.path.rsplit("/", 1)[-1]
-                if sid in graph.sessions:
+                if graph.fail_get_session:
+                    self._send(500, {"detail": "read refused (test)"})
+                    return
+                if sid in graph.sessions and not graph.hide_session_on_get:
                     self._send(200, dict(graph.sessions[sid]))
                     return
                 self._send(404, {"detail": "Session not found"})
@@ -165,51 +172,36 @@ def hosted():
         server.server_close()
 
 
-# ── the fake `tortoise` the fired seam invokes ────────────────────────────
+# ── the `tortoise` the fired seam invokes ─────────────────────────────
 
-_FAKE_TORTOISE = """\
+#: The repo root the shim delegates into (tests/ → repo root).
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+_FAKE_TORTOISE = '''\
 #!/usr/bin/env python3
-import json, os, sys, uuid
-from urllib.request import Request, urlopen
+"""Test stand-in for the installed `tortoise` console script.
+
+It is NOT a capture implementation.  Every capture invocation (`session
+capture` / `sessions import`) is handed verbatim to the REAL CLI
+(`tortoise.__main__.main`), so the transcript the installed hook passes is
+parsed by the production parser and the turn count the test asserts comes from
+that parse — never from a payload hardcoded here.  Only the hook's background
+corpus re-index (`index`/`context`) and the unrelated probe beacon (`session
+probe`) are skipped: they are not the path under verification and would touch
+a real graph.
+"""
+import sys
 
 argv = sys.argv[1:]
-# The Claude hook backgrounds a corpus re-index; the fake must not block it.
 if argv and (argv[0] == "index" or argv[0] == "context"
              or argv[0] == "session" and len(argv) > 1 and argv[1] == "probe"):
     sys.exit(0)
-sid = None
-harness = None
-for i, a in enumerate(argv):
-    if a == "--harness" and i + 1 < len(argv):
-        harness = argv[i + 1]
-    if a == "--session-id" and i + 1 < len(argv):
-        sid = argv[i + 1]
-if sid is None:
-    sid = "fake-" + uuid.uuid4().hex[:8]
-payload = {
-    "session_id": sid,
-    "harness": harness,
-    "source": "verify",
-    "conversation": [
-        {"role": "user", "content": "probe turn one"},
-        {"role": "assistant", "content": "probe turn two"},
-    ],
-}
-req = Request(
-    os.environ["TORTOISE_API_URL"].rstrip("/") + "/v1/sessions",
-    data=json.dumps(payload).encode(),
-    headers={"Authorization": "Bearer " + os.environ["TORTOISE_API_KEY"],
-             "Content-Type": "application/json"},
-    method="POST",
-)
-try:
-    with urlopen(req, timeout=10) as resp:
-        resp.read()
-except Exception as exc:  # pragma: no cover - surfaces in the fired output
-    print("fake tortoise capture failed: %r" % (exc,), file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-"""
+
+sys.path.insert(0, "__SRC__")
+from tortoise.__main__ import main  # noqa: E402
+
+raise SystemExit(main(argv))
+'''
 
 
 @pytest.fixture
@@ -220,7 +212,8 @@ def setup(tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     fake = bindir / "tortoise"
-    fake.write_text(_FAKE_TORTOISE, encoding="utf-8")
+    fake.write_text(_FAKE_TORTOISE.replace("__SRC__", str(_REPO_ROOT)),
+                    encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     # Hermeticity: HOME is the temp home; the ambient CODEX_HOME (which would
     # move a Codex install to the real ~/.codex) is scrubbed.
@@ -534,3 +527,168 @@ def test_keep_leaves_the_probe_and_says_so(hosted, setup):
     graph, _url = hosted
     assert report["cleanup"]["kept"] is True
     assert graph.deletes == []
+
+
+# ── P1: the probe is deleted on the capture, not on the read ──────────────
+
+
+def test_guard_read_failure_after_capture_still_deletes_the_probe(
+        hosted, setup):
+    """A GET that 500s AFTER a successful capture must not orphan the probe.
+
+    Mutation: key cleanup on ``created=detail is not None`` and drop the
+    ``try/finally`` — the ``_ApiError`` escapes before ``_cleanup``,
+    ``POSTS=1``, ``graph.deletes == []`` and this REDs.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.fail_get_session = True
+    report = _verify(hosted, home, "claude", root)
+    assert len(graph.posts) == 1, "the seam must really have captured"
+    assert report["links"]["captured"]["status"] == "FAIL"
+    assert report["cleanup"]["attempted"] is True, report["cleanup"]
+    assert report["cleanup"]["deleted"] is True
+    assert report["session_id"] in graph.deletes
+    assert graph.sessions == {}, "the probe session must not remain"
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+def test_guard_never_claims_nothing_to_delete_after_a_capture(
+        hosted, setup):
+    """A persistent 404 must not be reported as "nothing to delete".
+
+    Deletion is keyed on the fired seam, not the observation.  Mutation:
+    key cleanup on ``detail is not None`` — the report claims "no session was
+    created — nothing to delete" with ``POSTS=1`` and this REDs.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.hide_session_on_get = True
+    report = _verify(hosted, home, "claude", root, timeout=6.0)
+    assert len(graph.posts) == 1
+    assert report["links"]["captured"]["status"] == "FAIL"
+    assert report["cleanup"]["attempted"] is True, report["cleanup"]
+    assert report["cleanup"]["deleted"] is True
+    assert "nothing to delete" not in report["cleanup"]["detail"]
+    assert report["session_id"] in graph.deletes
+    assert graph.sessions == {}
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+# ── P2-1: a leaked probe is BROKEN, never "unverifiable" ─────────────────
+
+
+def test_guard_cleanup_failure_beats_an_unverifiable_link(hosted, setup):
+    """The old-build memory link (UNVERIFIABLE) plus a failed DELETE exits 1.
+
+    Mutation: move the cleanup-error branch back BELOW the UNVERIFIABLE branch
+    in ``_exit_code`` — exit becomes 2 while ``cleanup.error`` is True, and
+    this REDs.
+    """
+    home, _bindir, _fake = setup
+    root = _install(home, "claude")
+    graph, _url = hosted
+    graph.omit_source_field = True
+    graph.fail_delete = True
+    report = _verify(hosted, home, "claude", root)
+    assert report["links"]["memory"]["status"] == "UNVERIFIABLE-IN-CI"
+    assert report["cleanup"]["error"] is True
+    assert report["exit_code"] == EXIT_BROKEN
+
+
+# ── P2-2: the CLI boundary (catch-all form + exit propagation) ────────────
+
+
+def _cli_args(**over):
+    import argparse
+    base = {"harness": "claude", "dir": None, "timeout": 1.0,
+            "keep": False, "json": False}
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def _bind_cli_verify(monkeypatch, func):
+    """Bind ``_cmd_session_verify`` to a stubbed ``verify_session_capture``."""
+    import tortoise.session_verify as sv
+    from tortoise.__main__ import _cmd_session_verify
+    monkeypatch.setattr(sv, "verify_session_capture", func)
+    return _cmd_session_verify
+
+
+class _BoundaryBoom(Exception):
+    """An exception no enumerated ``except (A, B)`` tuple can name."""
+
+
+def test_cli_boundary_catches_a_non_enumerated_exception(monkeypatch, capsys):
+    """The CLI boundary is the ruled CATCH-ALL, not an enumerated tuple.
+
+    Mutation: replace ``except Exception as e`` with ``except (ValueError,
+    _ApiError) as e`` in ``_cmd_session_verify`` — ``_BoundaryBoom`` escapes
+    the function and this REDs.
+    """
+    def _boom(*_a, **_k):
+        raise _BoundaryBoom("unexpected")
+
+    cmd = _bind_cli_verify(monkeypatch, _boom)
+    rc = cmd(_cli_args(), "tt_test", "http://127.0.0.1:1")
+    assert rc == EXIT_BROKEN
+    err = capsys.readouterr().err
+    assert "verify failed: _BoundaryBoom: unexpected" in err
+
+
+def test_cli_boundary_reraises_memory_error(monkeypatch):
+    """``MemoryError`` is re-raised, never converted to a refusal.
+
+    Mutation: delete the ``except MemoryError: raise`` arm — ``MemoryError``
+    is caught by the catch-all, returns 1, and this REDs.
+    """
+    def _boom(*_a, **_k):
+        raise MemoryError("out of memory")
+
+    cmd = _bind_cli_verify(monkeypatch, _boom)
+    with pytest.raises(MemoryError):
+        cmd(_cli_args(), "tt_test", "http://127.0.0.1:1")
+
+
+def test_cli_boundary_propagates_the_report_exit_code(monkeypatch, capsys):
+    """The report's exit code reaches the process exit code.
+
+    Mutation: ``return int(report.get("exit_code", EXIT_BROKEN))`` ->
+    ``return EXIT_OK`` — an UNVERIFIABLE (2) report exits 0 and this REDs.
+    """
+    report = {"harness": "claude", "root": "/tmp/x", "session_id": None,
+              "links": {"installed": {"status": "UNVERIFIABLE-IN-CI",
+                                      "detail": "not firable"}},
+              "cleanup": {}, "exit_code": EXIT_UNVERIFIABLE}
+    cmd = _bind_cli_verify(monkeypatch, lambda *_a, **_k: report)
+    assert cmd(_cli_args(), "tt_test", "http://127.0.0.1:1") == \
+        EXIT_UNVERIFIABLE
+
+
+def test_cli_boundary_defaults_a_missing_exit_code_to_broken(monkeypatch):
+    """A report with no ``exit_code`` must NOT exit 0.
+
+    Mutation: ``report.get("exit_code", EXIT_BROKEN)`` -> ``... , EXIT_OK`` —
+    the pre-contract shape silently exits 0 and this REDs.
+    """
+    report = {"harness": "claude", "root": "/tmp/x", "session_id": None,
+              "links": {}, "cleanup": {}}
+    cmd = _bind_cli_verify(monkeypatch, lambda *_a, **_k: report)
+    assert cmd(_cli_args(), "tt_test", "http://127.0.0.1:1") == EXIT_BROKEN
+
+
+# ── P2-4: one harness definition, not two ────────────────────────────────
+
+
+def test_harnesses_is_the_capture_seam_definition():
+    """``HARNESSES`` is derived from ``capture_install.CAPTURE_SEAM``.
+
+    Mutation: replace the derivation with a drifted hard-coded tuple (drop
+    ``pi``) — the two definitions no longer agree and this REDs.
+    """
+    from tortoise import capture_install as ci
+    from tortoise import session_verify as sv
+    assert tuple(sv.HARNESSES) == tuple(ci.CAPTURE_SEAM)
+    assert set(sv.HARNESSES) == set(ci.CAPTURE_SEAM)

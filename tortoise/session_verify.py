@@ -24,9 +24,10 @@ comes from ``tortoise.capture_receipts``, the same definition the server uses.
 HERMETICITY.  The probe transcript and the event payload are synthesized; the
 seam execution is real.  This module never writes the user's install.  The one
 write is the probe SESSION, which is unmistakably named
-``verify-<harness>-<timestamp>`` and deleted after the assertions — the
-deletion is reported, and a failed deletion is surfaced (exit non-zero), never
-swallowed.
+``verify-<harness>-<timestamp>`` and deleted whenever the seam was FIRED — keyed
+on the capture attempt, never on whether the read observed it, and run from a
+``finally`` so a failed API read cannot skip it.  The deletion is reported, and
+a failed deletion is surfaced (exit non-zero), never swallowed.
 
 HONEST DISCLOSURE.  A harness whose seam cannot be fired headlessly is NOT
 faked.  Cursor's ``sessionEnd`` fires only from a local desktop-editor session
@@ -65,8 +66,10 @@ __all__ = [
     "verify_session_capture",
 ]
 
-#: The four beta harnesses this command covers.
-HARNESSES: tuple[str, ...] = ("claude", "codex", "cursor", "pi")
+#: The beta harnesses this command covers — DERIVED from the capture seam's
+#: own definition, never a second list that could drift as harnesses are added
+#: or removed (the sibling-instance class that cost #3917/#4024 a cycle each).
+HARNESSES: tuple[str, ...] = tuple(capture_install.CAPTURE_SEAM)
 
 STATUS_PROVEN = "PROVEN"
 STATUS_FAIL = "FAIL"
@@ -480,93 +483,112 @@ def verify_session_capture(harness: str,
     report["links"]["installed"] = _link(
         STATUS_PROVEN,
         f"present, registered, and fired: {fired['detail']}")
+    # The seam was EXECUTED: the harness may have written a capture even when
+    # the read below never observes it.  Cleanup is keyed on THIS fact, never
+    # on the observation — a GET that 500s must not skip the delete, and a GET
+    # that persistently 404s must not report "nothing to delete" while a named
+    # probe session sits in the graph.
+    report["capture_attempted"] = True
 
-    # ── link 2: captured ─────────────────────────────────────────────────
-    detail, deadline = None, time.monotonic() + max(1.0, timeout)
-    while time.monotonic() < deadline:
-        detail = _session_detail(api_url, api_key, probe_id)
-        if detail is not None:
-            break
-        time.sleep(0.5)
-
-    receipt_after: str | None = None
+    detail: dict[str, Any] | None = None
     try:
-        receipt_after = _read_receipt(api_url, api_key, harness)
-    except _ApiError:
-        receipt_after = None
+        # ── link 2: captured ─────────────────────────────────────────────
+        deadline = time.monotonic() + max(1.0, timeout)
+        while time.monotonic() < deadline:
+            detail = _session_detail(api_url, api_key, probe_id)
+            if detail is not None:
+                break
+            time.sleep(0.5)
 
-    expected_turns = len(_PROBE_TURNS)
-    if detail is None:
+        receipt_after: str | None = None
+        try:
+            receipt_after = _read_receipt(api_url, api_key, harness)
+        except _ApiError:
+            receipt_after = None
+
+        expected_turns = len(_PROBE_TURNS)
+        if detail is None:
+            report["links"]["captured"] = _link(
+                STATUS_FAIL,
+                f"no session {probe_id!r} appeared within {timeout:g}s "
+                f"(receipt {'advanced' if receipt_after != receipt_before else 'did not advance'})",
+                receipt_before=receipt_before, receipt_after=receipt_after)
+        else:
+            turn_points = detail.get("turn_points") or []
+            turn_count_ok = len(turn_points) == expected_turns
+            receipt_ok = (receipt_after is not None
+                          and receipt_after != receipt_before)
+            if not receipt_ok:
+                report["links"]["captured"] = _link(
+                    STATUS_FAIL,
+                    f"session {probe_id!r} exists but "
+                    f"{capture_receipt_key(harness)} did not advance",
+                    receipt_before=receipt_before, receipt_after=receipt_after,
+                    turns=len(turn_points))
+            elif not turn_count_ok:
+                report["links"]["captured"] = _link(
+                    STATUS_FAIL,
+                    f"session {probe_id!r} has {len(turn_points)} turns, "
+                    f"expected {expected_turns}",
+                    receipt_before=receipt_before, receipt_after=receipt_after,
+                    turns=len(turn_points))
+            else:
+                report["links"]["captured"] = _link(
+                    STATUS_PROVEN,
+                    f"receipt advanced ({receipt_before!r} → {receipt_after!r}); "
+                    f"session {probe_id!r} retrievable with {len(turn_points)} turns",
+                    receipt_before=receipt_before, receipt_after=receipt_after,
+                    turns=len(turn_points))
+
+        # ── link 3: memory ───────────────────────────────────────────────
+        if detail is None:
+            report["links"]["memory"] = _link(
+                STATUS_FAIL, "not reachable — the session was never captured")
+        else:
+            source = detail.get("source", "<absent>")
+            extracted = detail.get("extracted")
+            source_ok = (isinstance(source, dict)
+                         and source.get("url") == f"session:{probe_id}")
+            extracted_ok = isinstance(extracted, int) and extracted >= 1
+            if source == "<absent>":
+                report["links"]["memory"] = _link(
+                    STATUS_UNVERIFIABLE,
+                    "the API build does not expose the session Source node; "
+                    "extraction was not asserted against it",
+                    extracted=extracted)
+            elif not source_ok:
+                report["links"]["memory"] = _link(
+                    STATUS_FAIL,
+                    f"session {probe_id!r} has no Source node in the graph "
+                    f"(url session:{probe_id})",
+                    extracted=extracted, source=source)
+            elif not extracted_ok:
+                report["links"]["memory"] = _link(
+                    STATUS_FAIL,
+                    f"session {probe_id!r} appears as a Source but extraction "
+                    f"produced no memory Point (extracted={extracted})",
+                    extracted=extracted, source=source)
+            else:
+                report["links"]["memory"] = _link(
+                    STATUS_PROVEN,
+                    f"session {probe_id!r} is the Source {source.get('url')!r} "
+                    f"and {extracted} memory Point(s) were extracted",
+                    extracted=extracted, source=source)
+    except _ApiError as e:
+        # The API read broke AFTER the seam fired: the chain is BROKEN, but
+        # the probe session may exist.  Record the failure and let the
+        # `finally` delete what the fire may have written.  An unexpected
+        # exception still runs the `finally` and then propagates to the CLI's
+        # catch-all (exit 1) — cleanup is never skipped either way.
         report["links"]["captured"] = _link(
-            STATUS_FAIL,
-            f"no session {probe_id!r} appeared within {timeout:g}s "
-            f"(receipt {'advanced' if receipt_after != receipt_before else 'did not advance'})",
-            receipt_before=receipt_before, receipt_after=receipt_after)
-    else:
-        turn_points = detail.get("turn_points") or []
-        turn_count_ok = len(turn_points) == expected_turns
-        receipt_ok = (receipt_after is not None
-                      and receipt_after != receipt_before)
-        if not receipt_ok:
-            report["links"]["captured"] = _link(
-                STATUS_FAIL,
-                f"session {probe_id!r} exists but "
-                f"{capture_receipt_key(harness)} did not advance",
-                receipt_before=receipt_before, receipt_after=receipt_after,
-                turns=len(turn_points))
-        elif not turn_count_ok:
-            report["links"]["captured"] = _link(
-                STATUS_FAIL,
-                f"session {probe_id!r} has {len(turn_points)} turns, "
-                f"expected {expected_turns}",
-                receipt_before=receipt_before, receipt_after=receipt_after,
-                turns=len(turn_points))
-        else:
-            report["links"]["captured"] = _link(
-                STATUS_PROVEN,
-                f"receipt advanced ({receipt_before!r} → {receipt_after!r}); "
-                f"session {probe_id!r} retrievable with {len(turn_points)} turns",
-                receipt_before=receipt_before, receipt_after=receipt_after,
-                turns=len(turn_points))
-
-    # ── link 3: memory ───────────────────────────────────────────────────
-    if detail is None:
+            STATUS_FAIL, f"the session read failed after the seam fired: {e}")
         report["links"]["memory"] = _link(
-            STATUS_FAIL, "not reachable — the session was never captured")
-    else:
-        source = detail.get("source", "<absent>")
-        extracted = detail.get("extracted")
-        source_ok = (isinstance(source, dict)
-                     and source.get("url") == f"session:{probe_id}")
-        extracted_ok = isinstance(extracted, int) and extracted >= 1
-        if source == "<absent>":
-            report["links"]["memory"] = _link(
-                STATUS_UNVERIFIABLE,
-                "the API build does not expose the session Source node; "
-                "extraction was not asserted against it",
-                extracted=extracted)
-        elif not source_ok:
-            report["links"]["memory"] = _link(
-                STATUS_FAIL,
-                f"session {probe_id!r} has no Source node in the graph "
-                f"(url session:{probe_id})",
-                extracted=extracted, source=source)
-        elif not extracted_ok:
-            report["links"]["memory"] = _link(
-                STATUS_FAIL,
-                f"session {probe_id!r} appears as a Source but extraction "
-                f"produced no memory Point (extracted={extracted})",
-                extracted=extracted, source=source)
-        else:
-            report["links"]["memory"] = _link(
-                STATUS_PROVEN,
-                f"session {probe_id!r} is the Source {source.get('url')!r} "
-                f"and {extracted} memory Point(s) were extracted",
-                extracted=extracted, source=source)
-
-    # ── cleanup: delete the probe session (never leave it behind) ────────
-    report["cleanup"] = _cleanup(api_url, api_key, probe_id, keep=keep,
-                                 created=detail is not None, report=report)
+            STATUS_FAIL, "not reachable — the session read failed")
+    finally:
+        # ── cleanup: delete the probe session (never leave it behind) ────
+        report["cleanup"] = _cleanup(
+            api_url, api_key, probe_id, keep=keep,
+            capture_attempted=report["capture_attempted"], report=report)
     report["exit_code"] = _exit_code(report)
     return report
 
@@ -583,14 +605,18 @@ def _probe_id(harness: str) -> str:
 
 
 def _cleanup(api_url: str, api_key: str, probe_id: str, *,
-             keep: bool, created: bool,
+             keep: bool, capture_attempted: bool,
              report: dict[str, Any]) -> dict[str, Any]:
     """Delete the probe session (and its local import receipt).
 
-    ``keep`` skips the deletion by operator request, and the report then says
-    so — an intentional keep is not a silent leak.  A failed deletion is
-    REPORTED and turns the command non-zero (it left a write in the graph); it
-    is never swallowed.
+    Deletion is keyed on whether the seam was FIRED (``capture_attempted``),
+    NOT on whether the GET observed a session: a failed read must never leave
+    a write behind, and the report must never claim "nothing to delete" when
+    the seam actually ran.  ``keep`` skips the deletion by operator request,
+    and the report then says so — an intentional keep is not a silent leak.
+    A failed deletion is REPORTED and turns the command non-zero (it left a
+    write in the graph); it is never swallowed.  A DELETE 404 means no probe
+    session exists, so nothing was left behind (not an error).
     """
     result: dict[str, Any] = {"attempted": False, "deleted": False,
                               "session_id": probe_id, "kept": False}
@@ -598,17 +624,21 @@ def _cleanup(api_url: str, api_key: str, probe_id: str, *,
         result["kept"] = True
         result["detail"] = "kept by --keep (the probe session was NOT deleted)"
         return result
-    if not created:
-        result["detail"] = "no session was created — nothing to delete"
+    if not capture_attempted:
+        result["detail"] = "no capture was attempted — nothing to delete"
         return result
     result["attempted"] = True
     try:
         body = _api(api_url, api_key, f"/v1/sessions/{probe_id}",
                     method="DELETE")
     except _ApiError as e:
+        if e.status == 404:
+            result["detail"] = (
+                f"no probe session {probe_id} to delete (DELETE 404) — "
+                "nothing was left behind")
+            return result
         result["detail"] = f"DELETE failed: {e} — the probe session remains"
         result["error"] = True
-        report["cleanup"] = result
         return result
     result["deleted"] = bool(body.get("deleted"))
     result["detail"] = (
@@ -640,11 +670,15 @@ def _exit_code(report: dict[str, Any]) -> int:
     statuses = [link["status"] for link in report["links"].values()]
     if STATUS_FAIL in statuses:
         return EXIT_BROKEN
-    if STATUS_UNVERIFIABLE in statuses:
-        return EXIT_UNVERIFIABLE
+    # A leaked write is a BROKEN link, not an unverifiable one: exit 2 means
+    # "nothing provably broken", and a failed DELETE proves the opposite.  This
+    # is checked BEFORE the UNVERIFIABLE branch so an old API build (memory
+    # UNVERIFIABLE) plus a failed cleanup still exits 1.
     cleanup = report.get("cleanup") or {}
     if cleanup.get("error"):
         return EXIT_BROKEN
+    if STATUS_UNVERIFIABLE in statuses:
+        return EXIT_UNVERIFIABLE
     return EXIT_OK
 
 
