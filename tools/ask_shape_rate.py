@@ -873,14 +873,28 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
         if retired_substitution:
             sdk_mod._ask_reader_complete = _retired_reader_complete
         try:
-            _seed_memory(sdk, q)
-            if mutation is not None:
-                mutation(sdk, q)
-            import tortoise.mcp_server as mcp_mod
-            with _shipping_handlers(sdk):
-                rec = evaluate_question(
-                    sdk, q, reader_mode="blank" if blank else "probe",
-                    probe=reader if not blank else None, mcp_mod=mcp_mod)
+            try:
+                _seed_memory(sdk, q)
+                if mutation is not None:
+                    mutation(sdk, q)
+                import tortoise.mcp_server as mcp_mod
+                with _shipping_handlers(sdk):
+                    rec = evaluate_question(
+                        sdk, q, reader_mode="blank" if blank else "probe",
+                        probe=reader if not blank else None, mcp_mod=mcp_mod)
+            except Exception as e:  # noqa: BLE001, RUF100
+                # A transient substrate failure (an embedded store's socket
+                # vanishing mid-run is OBSERVED in this environment) must not
+                # kill the arm: record it as a per-question FAIL with its
+                # reason so the movement comparison stays computable and the
+                # failure stays visible rather than fatal.
+                rec = {"question_id": q.get("question_id"),
+                       "expected_abstain": _abs_question(q),
+                       "error": f"{type(e).__name__}: {e}",
+                       "abstained": None, "provider": None, "route": None,
+                       "model": None,
+                       "l1_abstain": False, "l2_provenance": False,
+                       "l3_grounding": False, "pass": False}
             records.append(rec)
         finally:
             sdk_mod._ask_reader_complete = saved_arc
@@ -1045,6 +1059,18 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                 with _shipping_handlers(sdk):
                     rec = evaluate_question(sdk, q, reader_mode="live",
                                             mcp_mod=mcp_mod)
+            except Exception as e:  # noqa: BLE001, RUF100
+                # Same contract as inside evaluate_question: a per-question
+                # exception is a FAIL, never a crash of the whole run and
+                # never a dropped question.
+                rec = {"question_id": q.get("question_id"),
+                       "expected_abstain": _abs_question(q),
+                       "error": f"{type(e).__name__}: {e}",
+                       "abstained": None, "provider": None, "route": None,
+                       "model": None,
+                       "l1_abstain": False, "l2_provenance": False,
+                       "l3_grounding": False, "pass": False,
+                       "duration_ms": None}
             finally:
                 sdk.close()
                 sdk_mod._reset_ask_reader_cache_for_tests()
@@ -1083,6 +1109,10 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         receipt["live"] = {
             "per_question": live,
             "shape_rate": shape_rate,
+            "substrate_errors": [
+                {"question_id": r.get("question_id"),
+                 "error": r.get("error")}
+                for r in live if r.get("error")],
             "abstain_pn": _pn(live, "l1_abstain"),
             "provenance_pn": _pn(live, "l2_provenance"),
             "grounding_pn": _pn(live, "l3_grounding"),
