@@ -978,6 +978,24 @@ def _codex_home_isolation(monkeypatch):
     yield
 
 
+# ── #3819 (P1-2): ambient CURSOR_HOME isolation ───────────────────────────
+# Cursor has NO config-dir env var (verified: `CURSOR_HOME` appears nowhere in
+# Cursor 3.20.21's bundle; it reads `~/.cursor/hooks.json`), so the resolver
+# never consults one.  The scrub is DEFENSE-IN-DEPTH: a future code path that
+# reintroduced an env-scoped Cursor root cannot silently redirect an install
+# away from the real `~/.cursor` during an unrelated test.  It is NOT itself
+# the guard — no test can observe a property the code does not consult.  The
+# guard that CAN go red is
+# `test_no_cursor_test_can_reach_the_real_cursor_store` in
+# test_cursor_capture_hook.py, which re-introduces an ambient `CURSOR_HOME`
+# (aimed at the live store) and asserts the resolved root is still under the
+# tmp tree.
+@pytest.fixture(autouse=True)
+def _cursor_home_isolation(monkeypatch):
+    monkeypatch.delenv("CURSOR_HOME", raising=False)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _disable_embedder_autowarmup(monkeypatch):
     """#2952: keep the engine-init embedder warm-up out of the test suite.

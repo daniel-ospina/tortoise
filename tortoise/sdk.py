@@ -197,6 +197,74 @@ def _session_llm_mock_enabled() -> bool:
         "TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
 
 
+class _SessionLLMCallCounter:
+    """#3824: a transparent pass-through that counts model completions.
+
+    The M2 session lane discards its usage block wholesale, so by the time
+    its capture reaches the cost emitter there is no in-hand evidence that a
+    provider call happened — "made billed calls" and "made none" are the
+    same shape (an empty ``stats``). The emitter cannot recover that fact
+    from the roll-up, because the roll-up is exactly what is missing; it has
+    to come from the CALL site. This wrapper is that call site:
+    ``complete()`` is invoked once per provider request by ``_PointStage`` /
+    ``_RelationStage`` / ``_DocumentPointStage``, and the count survives
+    whatever the lane then does with the response.
+
+    Deliberately NOT a second cost/usage accumulator: it holds no tokens, no
+    charge and no per-stage envelope, so it cannot drift from a real
+    roll-up. It answers one question the roll-up cannot answer about
+    itself — "did this capture reach the provider at all?". Every other
+    PUBLIC attribute round-trips to the wrapped model — reads delegate, and
+    so do writes (``id``, ``provider``, ``usage_sink``), so
+    ``LLMExtractor.version`` and the #2185 usage seam are unaffected.
+    """
+
+    def __init__(self, model):
+        self._model = model
+        self.count = 0
+
+    def __getattr__(self, name):
+        # A leading underscore is resolved on THIS object only, so a missing
+        # ``_model`` raises instead of re-entering __getattr__ forever.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._model, name)
+
+    def __setattr__(self, name, value):
+        # Public attribute WRITES must reach the wrapped model too, or the
+        # wrapper silently swallows them: the #2185 usage seam is attached by
+        # assignment (``model.usage_sink = sink``), and a read-only
+        # ``__getattr__`` would leave the UNDERLYING model's sink unset —
+        # dropping every usage block the wrapper exists to keep visible.
+        # ``_model`` and the wrapper-local ``count`` are NOT forwarded.
+        if name.startswith("_") or name == "count":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._model, name, value)
+
+    def complete(self, *args, **kwargs):
+        self.count += 1
+        return self._model.complete(*args, **kwargs)
+
+
+def _session_llm_extractor(point_model, relation_model):
+    """Build the M2 ``LLMExtractor`` with #3824 call-evidence counters.
+
+    The counters ride on the extractor (``_call_counters``) because that is
+    the object ``_extract_session_llm`` holds; a fresh pair is built per
+    call to this helper, so a capture's count can never leak into the next
+    one (the extractor is built inside ``_extract_session_llm``, once per
+    capture).
+    """
+    from tortoise.extractor import LLMExtractor
+
+    counters = [_SessionLLMCallCounter(point_model),
+                _SessionLLMCallCounter(relation_model)]
+    extractor = LLMExtractor(counters[0], counters[1])
+    extractor._call_counters = counters
+    return extractor
+
+
 def _build_session_llm_extractor():
     """Build the M2 LLMExtractor for session capture from the configured
     provider (or None when no provider key is set — the no-key case STORES
@@ -206,14 +274,14 @@ def _build_session_llm_extractor():
     deterministic MockModel so the E2E/unit suites exercise the real LLM
     pipeline shape with zero network."""
     if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
-        from tortoise.extractor import LLMExtractor, MockModel
+        from tortoise.extractor import MockModel
 
-        return LLMExtractor(MockModel("mock-point"), MockModel("mock-relation"))
+        return _session_llm_extractor(
+            MockModel("mock-point"), MockModel("mock-relation"))
     provider = _session_llm_provider()
     if provider is None:
         return None
-    from tortoise.ingest import _PROVIDERS  # noqa: I001
-    from tortoise.extractor import LLMExtractor
+    from tortoise.ingest import _PROVIDERS
     from tortoise.models import OpenAICompatModel
 
     base_url, key_env = _PROVIDERS[provider]
@@ -238,7 +306,7 @@ def _build_session_llm_extractor():
             if not m:
                 raise ValueError(f"bad model spec {spec!r}; expected <model> or <provider>:<model>")
             model_id = m
-    return LLMExtractor(
+    return _session_llm_extractor(
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
     )
@@ -984,8 +1052,11 @@ def _emit_capture_observation(*, session_id: str, lane: str, mode: str,
     out-token (recovered-case max semantics per the #2408 Task-4 handoff:
     max(sX_out_tokens, truncation_completion_tokens_sX) — base in the
     truncation key, escalated final list in the out-token key) / error_census.
-    ``meta["stats"]`` is {} on replayed/M2 (no extractor_v2 telemetry) — the
-    line still fires with the mode + turns (a replay/no-op is observable).
+    ``meta["stats"]`` carries no ``llm`` roll-up on replayed/M2 (no
+    extractor_v2 telemetry) — ``{}`` on a replay and on a zero-call M2
+    capture, ``{"unattributed": N}`` on an M2 capture that issued N
+    completions (#3824). The line still fires with the mode + turns (a
+    replay/no-op is observable).
     """
     st = meta.get("stats") or {}
     rec = st.get("recovery") or {}
@@ -3736,7 +3807,9 @@ class TortoiseSDK:
             # sink decision) — present ONLY when the capture errored.
             **({"report_url": REPORT_HOOK_URL} if extraction_errors else {}),
             # #2335 WI-1a: the receipt carries the extractor telemetry
-            # (meta stats — real on v2, {} on replayed/M2). Additive.
+            # (meta stats — real on v2; {} on a replay or a zero-call M2
+            # capture, {"unattributed": N} on an M2 capture that reached the
+            # provider, #3824). Additive.
             "stats": meta.get("stats") or {},
         }
         # #1530 D8: extraction_provider reports the configured provider when a
@@ -3960,13 +4033,26 @@ class TortoiseSDK:
             # P1 #1529 (D6): completed-but-empty output is an additive
             # warning (nothing extractable ≠ failure), never a silent 0.
             warnings.append("LLM extraction produced no points")
+        # #3824: the call-level evidence — how many model completions this
+        # capture actually issued. Carried OUTSIDE the (empty on this lane)
+        # roll-up so the cost emitter can tell "billed calls, no roll-up"
+        # (F2) from "no calls at all" (F1) instead of collapsing both to
+        # None. Counted at the model boundary above, so it holds even when
+        # ``extractor.run`` raised after the first request.
+        calls_made = sum(
+            int(getattr(c, "count", 0) or 0)
+            for c in getattr(extractor, "_call_counters", ()) or ())
         meta = {
             "provider": None, "route": None, "failover_used": False,
             "errors": errors, "warnings": warnings,
             "mode": "error" if errors else "llm",
-            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats —
-            # stats is ALWAYS present, empty on the M2 branch.
-            "stats": {},
+            # #2335 WI-1a: the M2 pipeline has no extractor_v2 stats — the
+            # key is ALWAYS present, but its value is not always empty.
+            # #3824: the ONE extractor fact this lane can state without a
+            # roll-up is that it reached the provider, so ``stats`` is
+            # {"unattributed": N} when N completions were issued and {} when
+            # none were — a genuine zero-call path stays a clean no-row.
+            "stats": ({"unattributed": calls_made} if calls_made else {}),
         }
         return extracted, meta
 

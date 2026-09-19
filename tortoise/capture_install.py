@@ -37,6 +37,19 @@ What it installs, per harness
     is the script's absolute path, because Codex runs it from the session's
     cwd.
 
+``cursor``
+    ``tortoise/cursor-hooks/session-end.sh`` into ``~/.cursor/hooks/``
+    (mode 0755), and **merges** the ``sessionEnd`` registration into
+    ``~/.cursor/hooks.json``.  The root is the HOME-scoped ``.cursor`` dir —
+    ``CursorHooksService`` resolves ``pathService.userHome() / ".cursor" /
+    "hooks.json"`` and Cursor has NO config-dir env var (verified: ``CURSOR_HOME``
+    appears nowhere in Cursor 3.20.21's bundle), while a project-local
+    ``<repo>/.cursor/hooks.json`` is gated on workspace trust.  Cursor's entry
+    is a FLAT ``{"command": …, "timeout": …}`` script object — its own
+    validator rejects a nested matcher group and invalidates the WHOLE config.
+    ``sessionEnd`` is IDE-only: Cursor's docs state cloud agents have no
+    editor-lifetime session boundary.
+
 Idempotent by construction — this is also the upgrade path
 ----------------------------------------------------------
 Every target is compared before it is written: a script/extension whose bytes
@@ -126,7 +139,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shlex
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -146,6 +158,7 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 CAPTURE_SEAM: dict[str, str] = {
     "claude": "tortoise/claude-hooks/session-end.sh",
     "codex": "tortoise/codex-hooks/session-end.sh",
+    "cursor": "tortoise/cursor-hooks/session-end.sh",
     "pi": "tortoise/pi-hooks/tortoise-capture.ts",
 }
 
@@ -156,6 +169,12 @@ CLAUDE_SCRIPTS: tuple[str, ...] = ("session-start.sh", "session-end.sh")
 CODEX_SCRIPT_NAME = "tortoise-session-end.sh"
 CODEX_EVENT = "SessionEnd"
 
+#: Cursor's shipped capture hook (one script) and the event it registers.
+#: Cursor's `sessionEnd` is an IDE-only event (see the shipped hook's header):
+#: cloud agents have no editor-lifetime session boundary.
+CURSOR_SCRIPT_NAME = "tortoise-session-end.sh"
+CURSOR_EVENT = "sessionEnd"
+
 #: Codex hook registrations live in ``$CODEX_HOME/hooks.json`` — the ONE hook
 #: source Codex CLI 0.154.0 actually reads (verified live, #3818): neither the
 #: project-local ``<repo>/.codex/hooks.json`` nor ``<repo>/.codex/config.toml
@@ -163,6 +182,14 @@ CODEX_EVENT = "SessionEnd"
 #: environment override (default ``~/.codex``).
 CODEX_REGISTRATION_FILE = "hooks.json"
 CODEX_HOOKS_SUBDIR = "hooks"
+
+#: Cursor hook registrations live in ``~/.cursor/hooks.json`` — the ONE
+#: user-scoped hook source Cursor 3.20.21 reads (``CursorHooksService`` joins
+#: ``pathService.userHome() / ".cursor" / "hooks.json"``; verified against the
+#: installed bundle, #3819).  Unlike Codex there is NO config-dir env var —
+#: ``CURSOR_HOME`` does not exist in the app bundle.
+CURSOR_REGISTRATION_FILE = "hooks.json"
+CURSOR_HOOKS_SUBDIR = "hooks"
 
 #: The per-hook budget #3754 established and #3801 identified as the
 #: load-bearing half of the contract: Claude Code cancels a SessionEnd hook at
@@ -570,21 +597,42 @@ def codex_home(home: Path) -> Path:
         hook_install.get_layout("codex"), home)
 
 
-def merge_codex_capture_hooks(data: dict, *, command: str,
-                              root: str | os.PathLike[str] = ".",
-                              hooks_dir: str = CODEX_HOOKS_SUBDIR) -> dict:
-    """Merge the Codex ``SessionEnd`` capture registration into a
-    ``hooks.json`` document, in place, and return it.
+def cursor_home(home: Path) -> Path:
+    """Resolve Cursor's config root: ``~/.cursor`` (no env override).
+
+    Cursor resolves its hook source as
+    ``pathService.userHome() / ".cursor" / "hooks.json"`` (verified against
+    Cursor 3.20.21's bundle, #3819) and has NO config-dir env var — unlike
+    Codex's ``CODEX_HOME``, ``CURSOR_HOME`` does not exist.  ``home`` is the
+    user home (injectable for tests).
+
+    DELEGATES to :func:`tortoise.hook_install.default_root` — the ONE resolver
+    ``tortoise hooks status|upgrade`` also uses, so the installer and the CLI
+    can never disagree about where Cursor's hooks live.
+    """
+    return hook_install.default_root(
+        hook_install.get_layout("cursor"), home)
+
+
+def _merge_capture_hooks(data: dict, *, script_name: str, event: str,
+                         command: str, root: str | os.PathLike[str],
+                         hooks_dir: str, flat: bool) -> dict:
+    """Shared merge for a HOME-scoped harness's capture registration.
+
+    ONE implementation for Codex and Cursor: only ``flat`` and the event/
+    script names differ, and a per-harness copy is exactly the sibling
+    divergence #4024 paid four review cycles for.
 
     Merge, never overwrite: every unrelated key, every other event, and any
-    foreign hook already registered under ``SessionEnd`` survive untouched (a
+    foreign hook already registered under ``event`` survive untouched (a
     foreign hook is *appended after*, never replaced). An existing
     registration of ours is repaired in place to the current ``command`` —
-    Codex resolves the command string relative to its own cwd, so a relative
-    or stale-path registration is a silent no-capture; the absolute path the
-    installer emits is the fix.
+    these harnesses resolve the command string relative to their own cwd, so a
+    relative or stale-path registration is a silent no-capture; the absolute
+    path the installer emits is the fix.
 
-    The emitted entry is the nested matcher-group shape Codex 0.154.0 accepts
+    ``flat`` emits Cursor's flat script object (``{"command": …}``); the
+    default emits the nested matcher-group shape Codex 0.154.0 accepts
     (``[{hooks: [{type: "command", command: …}]}]`` — the same shape
     ``hook_install._entry_command_dicts`` reads; a flat event-level
     ``{type, command}`` is silently ignored by Codex).
@@ -592,47 +640,105 @@ def merge_codex_capture_hooks(data: dict, *, command: str,
     Raises :class:`ValueError` for a shape that cannot be merged safely.
     """
     root_path = Path(root)
+    if flat:
+        # Cursor's `hooks.json` REQUIRES a positive-integer `version`; without
+        # it Cursor rejects the WHOLE file and loads NO hooks (verified live:
+        # Cursor 3.20.21 logs `Invalid user config: Config version must be a
+        # number`).  Set it when absent/invalid; never overwrite a valid value.
+        version = data.get("version")
+        if not hook_install._is_positive_int_value(version):
+            data["version"] = 1
     hooks = data.get("hooks")
     if hooks is None:
         hooks = {}
         data["hooks"] = hooks
     if not isinstance(hooks, dict):
         raise ValueError('"hooks" is not a JSON object')
-    entries = hooks.get(CODEX_EVENT)
+    entries = hooks.get(event)
     if entries is None:
         entries = []
-        hooks[CODEX_EVENT] = entries
+        hooks[event] = entries
     if not isinstance(entries, list):
-        raise ValueError(f'"{CODEX_EVENT}" entries are not a list')
+        raise ValueError(f'"{event}" entries are not a list')
+    if flat:
+        # Cursor's validator rejects the WHOLE document — after which NO hook
+        # fires — on an unknown event key, a non-list event, or any entry it
+        # cannot parse.  Refuse loudly rather than append beside a broken
+        # entry and report success (#3819).  (The version key is set above,
+        # and structure is checked independently of it so a bad version can
+        # never mask a structural defect.)
+        refusal = hook_install._flat_structure_refusal(data)
+        if refusal:
+            raise ValueError(f"hooks.json {refusal}")
     registered: list[dict] = []
     for entry in entries:
         registered.extend(hook_install._entry_command_dicts(
-            entry, CODEX_SCRIPT_NAME, hooks_dir, root_path))
+            entry, script_name, hooks_dir, root_path, flat=flat))
     if registered:
         for existing in registered:
             existing["command"] = command
-            existing.setdefault("type", "command")
+            if not flat:
+                existing.setdefault("type", "command")
         return data
-    entries.append({"hooks": [{"type": "command", "command": command}]})
+    if flat:
+        entries.append({"command": command})
+    else:
+        entries.append({"hooks": [{"type": "command", "command": command}]})
     return data
 
 
-def _install_codex(home: Path, *, dry_run: bool) -> InstallResult:
-    """Install the Codex capture seam into ``$CODEX_HOME`` (#3818).
+def merge_codex_capture_hooks(data: dict, *, command: str,
+                              root: str | os.PathLike[str] = ".",
+                              hooks_dir: str = CODEX_HOOKS_SUBDIR) -> dict:
+    """Merge the Codex ``SessionEnd`` capture registration into a
+    ``hooks.json`` document, in place, and return it.
 
-    The registration file is ``$CODEX_HOME/hooks.json`` — the only hook source
-    Codex CLI 0.154.0 reads — and the shipped script is copied to
-    ``$CODEX_HOME/hooks/``. The registered command is the script's ABSOLUTE
-    path: Codex runs the command string from the session's cwd, so a relative
-    path would not resolve.
+    Thin wrapper over :func:`_merge_capture_hooks` (``flat=False``); see there
+    for the merge/repair contract and the entry shape.
     """
-    harness = "codex"
-    root = codex_home(home)
-    hooks_dir = root / CODEX_HOOKS_SUBDIR
-    dst = hooks_dir / CODEX_SCRIPT_NAME
-    settings_path = root / CODEX_REGISTRATION_FILE
+    return _merge_capture_hooks(
+        data, script_name=CODEX_SCRIPT_NAME, event=CODEX_EVENT,
+        command=command, root=root, hooks_dir=hooks_dir, flat=False)
 
-    src = PACKAGE_DIR / "codex-hooks" / "session-end.sh"
+
+def merge_cursor_capture_hooks(data: dict, *, command: str,
+                               root: str | os.PathLike[str] = ".",
+                               hooks_dir: str = CURSOR_HOOKS_SUBDIR) -> dict:
+    """Merge the Cursor ``sessionEnd`` capture registration into a
+    ``hooks.json`` document, in place, and return it.
+
+    Thin wrapper over :func:`_merge_capture_hooks` (``flat=True``).  Cursor's
+    entry is a FLAT script object: its own validator rejects a nested
+    ``{hooks: [...]}`` entry, which invalidates the WHOLE ``hooks.json`` and
+    silently disables every Cursor hook (#3819).
+    """
+    return _merge_capture_hooks(
+        data, script_name=CURSOR_SCRIPT_NAME, event=CURSOR_EVENT,
+        command=command, root=root, hooks_dir=hooks_dir, flat=True)
+
+
+def _install_home_scoped(harness: str, home: Path, *,
+                         dry_run: bool) -> InstallResult:
+    """Install a HOME-scoped capture seam described by its HarnessLayout.
+
+    ONE implementation for every HOME-scoped harness (Codex #3818, Cursor
+    #3819): the layout supplies the root env var, hooks dir, registration
+    file, entry shape, and shipped script, so the two seams cannot drift.
+
+    The registration file is ``<root>/hooks.json`` — the only hook source the
+    harness reads — and the shipped script is copied to ``<root>/hooks/``.
+    The registered command is the script's ABSOLUTE path: the hook runs from
+    the harness's own cwd, so a relative path would not resolve.
+    """
+    layout = hook_install.get_layout(harness)
+    spec = layout.scripts[0]
+    root = hook_install.default_root(layout, home)
+    hooks_dir = layout.hooks_root(root)
+    dst = hooks_dir / spec.name
+    settings_path = layout.settings_path(root)
+    assert settings_path is not None  # every HOME-scoped layout declares one
+
+    src = spec.source
     if not src.is_file():
         return InstallResult(harness, error=(
             f"shipped capture hook not found at {src} — this install is "
@@ -640,7 +746,8 @@ def _install_codex(home: Path, *, dry_run: bool) -> InstallResult:
     payload = src.read_bytes()
 
     for target in (dst, settings_path):
-        escape = _symlink_escape(root, target, label="Codex config dir")
+        escape = _symlink_escape(
+            root, target, label=f"{harness} config dir")
         if escape:
             return InstallResult(harness, error=f"Refusing: {escape}")
     non_regular = _refuse_non_regular(dst)
@@ -658,9 +765,11 @@ def _install_codex(home: Path, *, dry_run: bool) -> InstallResult:
             f"Refusing: {settings_path} could not be read — refusing to touch "
             "it. Merge manually."))
     before = json.dumps(data, sort_keys=True)
-    command = shlex.quote(str(dst))
+    command = hook_install._spec_command(layout, spec, root)
     try:
-        merge_codex_capture_hooks(data, command=command, root=root)
+        _merge_capture_hooks(
+            data, script_name=spec.name, event=spec.event, command=command,
+            root=root, hooks_dir=layout.hooks_dir, flat=layout.flat_entry)
     except ValueError as e:
         return InstallResult(harness, error=(
             f"Refusing: {settings_path} has {e} — refusing to touch it. "
@@ -677,14 +786,14 @@ def _install_codex(home: Path, *, dry_run: bool) -> InstallResult:
 
     if before != json.dumps(data, sort_keys=True):
         if dry_run:
-            actions.append(f"[dry-run] would merge the {CODEX_EVENT} capture "
+            actions.append(f"[dry-run] would merge the {spec.event} capture "
                            f"hook into {settings_path}")
         else:
             _atomic_bytes(settings_path,
                           (json.dumps(data, indent=2) + "\n").encode("utf-8"),
                           0o644 if not settings_path.exists()
                           else settings_path.stat().st_mode & 0o777)
-            actions.append(f"merged the {CODEX_EVENT} capture hook into "
+            actions.append(f"merged the {spec.event} capture hook into "
                            f"{settings_path}")
         changed = True
 
@@ -973,9 +1082,12 @@ def install_capture(
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
             return _install_failed(harness, e)
-    if harness == "codex":
+    if harness in ("codex", "cursor"):
+        # HOME-scoped harnesses share ONE installer; the layout supplies every
+        # harness-specific fact (#3818, #3819).
         try:
-            return _install_codex(
+            return _install_home_scoped(
+                harness,
                 Path(home) if home is not None else Path.home(),
                 dry_run=dry_run)
         except MemoryError:
@@ -998,9 +1110,14 @@ __all__ = [
     "CODEX_EVENT",
     "CODEX_REGISTRATION_FILE",
     "CODEX_SCRIPT_NAME",
+    "CURSOR_EVENT",
+    "CURSOR_REGISTRATION_FILE",
+    "CURSOR_SCRIPT_NAME",
     "InstallResult",
     "codex_home",
+    "cursor_home",
     "install_capture",
     "merge_capture_hooks",
     "merge_codex_capture_hooks",
+    "merge_cursor_capture_hooks",
 ]

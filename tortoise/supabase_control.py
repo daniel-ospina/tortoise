@@ -49,8 +49,9 @@ no new deps, matching the analytics-write pattern in hosted_api.py.
 
 Query dialect: ``query(table, select, filters, method, json_body, order,
 limit)`` where filters are ``(column, op, value)`` tuples with ops
-``eq | neq | is`` (None → ``IS NULL``) and ``lte`` (ISO-8601 cutoff,
-used by the deleted-org purge sweep, #302). ``method`` supports
+``eq | neq | is`` (None → ``IS NULL``) and the ordered, NULL-excluding
+``gt | gte | lt | lte`` (``lte`` is the ISO-8601 cutoff used by the
+deleted-org purge sweep, #302). ``method`` supports
 ``GET | POST | PATCH | DELETE`` (DELETE is used only by the post-grace
 hard-delete purge). The test fake implements the SAME interface over
 in-memory rows, so the resolution logic is shared verbatim between CI
@@ -69,8 +70,11 @@ import httpx
 _logger = logging.getLogger(__name__)
 
 # Env-var names: SUPABASE_SERVICE_ROLE_KEY is the canonical name (edge
-# functions, supabase/README.md); SUPABASE_SERVICE_KEY is the legacy name the
-# analytics write path uses — accept either so the flip works with both.
+# functions, supabase/README.md); SUPABASE_SERVICE_KEY is the legacy name —
+# accept either so the flip works with both. The analytics write path now reads
+# BOTH (it previously read only the legacy name, so every hosted analytics
+# event was written to ephemeral disk and lost — #3677), so no caller is left
+# on a single name.
 _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 
 # Base orgs columns (migration 0006 — the core orgs table; drift-safe).
@@ -172,6 +176,43 @@ def is_supabase_enabled() -> bool:
     if mode == "supabase":
         return True  # get_control_plane() raises when creds are missing
     return configured
+
+
+_LOGIC_TREE_RESERVED = ',()"'
+
+
+def _quote_in_logic_tree(value: object) -> str:
+    """Quote a value for a PostgREST logic tree.
+
+    Inside ``and=(...)``, a value containing ``,`` ``(`` ``)`` or ``"`` is
+    syntax, not data — ``a.gt.x,y`` is TWO conditions and ``a.gt.x)`` closes
+    the group. PostgREST's escape is to wrap the value in double quotes, with
+    an embedded ``"`` backslash-escaped. A value with none of the reserved
+    characters is emitted bare, so the common timestamp/count case keeps the
+    obvious form (#3686 re-review P2: the grouping added this hazard)."""
+    text = "" if value is None else str(value)
+    if not any(ch in text for ch in _LOGIC_TREE_RESERVED):
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _encode(op: str, value: object, in_logic_tree: bool = False) -> str:
+    """Encode one PostgREST filter condition. ``in_logic_tree`` applies the
+    quoting rule that only applies inside ``and=(...)``."""
+    if op == "is":
+        return "is.null" if value is None else f"is.{value}"
+    if op == "eq":
+        rendered = f"eq.{value}"
+    elif op == "neq":
+        rendered = f"neq.{value}"
+    elif op in ("gt", "lt", "gte", "lte"):
+        rendered = f"{op}.{value}"
+    else:
+        raise ValueError(f"unsupported filter op {op!r}")
+    if in_logic_tree:
+        head, _, tail = rendered.partition(".")
+        return f"{head}.{_quote_in_logic_tree(tail)}"
+    return rendered
 
 
 class SupabaseControlPlane:
@@ -301,8 +342,17 @@ class SupabaseControlPlane:
         """Run one PostgREST call. Returns row dicts; [] for PATCH/no rows.
 
         Filters: (column, op, value) with ops ``eq``, ``neq``, ``is``
-        (value None → ``col=is.null``), ``gt``, ``lt``, ``lte``. Raises
-        RuntimeError on any failure.
+        (value None → ``col=is.null``), ``gt``, ``gte``, ``lt``, ``lte``.
+        Raises RuntimeError on any failure.
+
+        Filters may repeat a column. TWO OR MORE conditions on the same column
+        are combined into one PostgREST ``and=(...)`` group — a flat query string
+        carries one operator per column, so a second condition would otherwise
+        silently REPLACE the first. A single condition keeps the plain flat form,
+        so existing callers' requests are unchanged. A filter whose column is
+        literally ``"and"`` raises ``ValueError``: it would collide with the
+        logic-tree key this method writes. Values inside the group that carry a
+        reserved character are quoted (see ``_LOGIC_TREE_RESERVED``).
 
         ``timeout`` (#2850/#2988): an optional PER-REQUEST override for the
         httpx call. ``None`` (the default) keeps the client-level timeout —
@@ -318,25 +368,42 @@ class SupabaseControlPlane:
         params: dict[str, str] = {}
         if select:
             params["select"] = ",".join(select)
+
+        # ⛔ A PostgREST flat query string carries ONE operator per column, and
+        # `params` is keyed by column — so a SECOND condition on the SAME column
+        # overwrites the first and SILENTLY DROPS a bound. That is not
+        # hypothetical: `_read_recall` passed `created_at gt since` +
+        # `created_at lt until`, so the lower bound vanished and the analytics
+        # leg read the org's whole history instead of the requested window
+        # (found by code review of #3686). `abuse.rule_event_between` had the
+        # same latent drop.
+        #
+        # Fix: group by column. A column with several conditions goes into one
+        # `and=(...)` group (PostgREST ANDs it against the other, flat params);
+        # single-condition columns keep the plain flat form, so no existing
+        # caller's request shape changes.
+        by_col: dict[str, list[tuple[str, object]]] = {}
         for col, op, value in filters or []:
-            if op == "is":
-                params[col] = "is.null" if value is None else f"is.{value}"
-            elif op == "eq":
-                params[col] = f"eq.{value}"
-            elif op == "neq":
-                params[col] = f"neq.{value}"
-            elif op in ("gt", "lt"):
-                # #765 plan Task 8: reconcile (expires_at < now) + the
-                # signup/org-creation rate-limit counts (created_at > cutoff)
-                # need ordered comparisons. NULL semantics mirror SQL: a row
-                # with a NULL column never matches (PostgREST's gt./lt. is
-                # NULL-excluding; the fake mirrors this).
-                params[col] = f"{op}.{value}"
-            elif op == "lte":
-                # ISO-8601 cutoff for the post-grace purge sweep (#302).
-                params[col] = f"lte.{value}"
+            if col == "and":
+                # `and` is the PostgREST logic-tree key this method itself
+                # writes. A filter on a column of that name would be silently
+                # overwritten by the grouped form — refuse it outright, not
+                # only when it happens to carry several conditions.
+                raise ValueError(
+                    "filter column 'and' collides with the PostgREST logic-"
+                    "tree key used to combine same-column conditions")
+            by_col.setdefault(col, []).append((op, value))
+        grouped: list[str] = []
+        for col, conds in by_col.items():
+            if len(conds) == 1:
+                op, value = conds[0]
+                params[col] = _encode(op, value)
             else:
-                raise ValueError(f"unsupported filter op {op!r}")
+                grouped.extend(
+                    f"{col}.{_encode(op, value, in_logic_tree=True)}"
+                    for op, value in conds)
+        if grouped:
+            params["and"] = f"({','.join(grouped)})"
         if order:
             params["order"] = order
         if limit is not None:

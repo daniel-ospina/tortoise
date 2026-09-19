@@ -29,6 +29,7 @@ aboutObjects: tortoise
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | CI audit — measured runner-cost/lane analysis, read-only (2026-09-02) | `docs/research/2026-09-02-ci-audit.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |
+| Activation scorecard runbook — beta-readiness lane B7: which sessions activate vs merely sign up, the measurable-vs-blocked legs, cohort roll-up, measured production baseline, deploy requirement | `docs/runbook/b7-activation-scorecard.md` |
 | Ontology | `docs/ONTOLOGY.md` |
 | Registry graph schema (incl. Graph entity + scoped APIKey + quota — epic #2083) | `docs/registry-graph-schema.md` |
 | Definitions — account layer vs in-graph Subjects ("organization account" vocab note, #2311) | `docs/registry-graph-schema.md` (§ Definitions) · `docs/ONTOLOGY.md` §5/§6 |
