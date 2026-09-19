@@ -14,6 +14,17 @@ assignees, claim comments) and piped the ONE local check
 
 Design contract
 ---------------
+0. THE TARGET IS ESTABLISHED, NOT ASSUMED. The tool resolves an explicit
+   ``owner/name`` (``--repo owner/name``, or derived from ``--repo PATH``/
+   cwd) and sends it on EVERY ``gh`` call, and it PRINTS the resolved
+   ``owner/name`` and the issue's FULL TITLE in the verdict. A verdict that
+   does not name what it measured cannot be trusted: on 2026-09-18 the tool
+   resolved TORTOISE #1178 from a tortoise worktree while the target was
+   AGENT-INFRA #1178, printed no repository and no title, and returned
+   ``CLEAN`` for work it never looked at (#4027). If the issue is ABSENT from
+   the target repo the run is INCOMPLETE (exit 2) — "not found here" is not
+   "no in-flight work". If ``--repo`` is omitted and the number resolves in
+   more than one candidate repo, the tool REFUSES rather than guess.
 1. EVERY surface is always evaluated. There is no ``--only`` flag, no partial
    mode, no early exit. If a surface cannot be queried the run is INCOMPLETE,
    never CLEAN.
@@ -38,7 +49,7 @@ Surfaces (7 rows; 6 are hit-capable, the 7th is the keyword source)
                                                          body only as a closing
                                                          reference)
   recently-closed PRs       gh api --paginate REST    (title / headRef;
-                            /repos/…/pulls?state=closed   body only as a
+                            /repos/<owner>/<repo>/pulls   body only as a
                                                          closing reference)
                                                          (#3587)
   local branches            git for-each-ref refs/heads
@@ -46,6 +57,33 @@ Surfaces (7 rows; 6 are hit-capable, the 7th is the keyword source)
   local worktrees           git worktree list --porcelain   (UNTRUNCATED)
   issue assignee/comments   gh issue view N (assignee + claim comments)
   issue keywords            gh issue view title, or --keywords (completeness)
+
+NOT PRESENT: a fleet-session surface. #1233 asked for one wired to
+`map-sessions.py`, and it was built and measured for this change — then left
+out, because the prescribed discipline (issue number + >= 2 distinctive title
+keywords) does not identify a session that HOLDS an issue; it identifies every
+session that has READ it. On #3827 the surface attributed 13 sessions, 11 of
+them sessions holding a pasted copy of the fleet board (a mailer-daemon
+session, a marketing session, ...). Every one of them is fail-closed noise, and
+blocking dispatch on 13 phantom holders would reproduce the exact
+"a gate that always fires is a gate that gets worked around" corrosion this
+change fixes for claim comments. Shipping it needs a mechanism that can tell a
+holder from a reader (a lane registry, or the board's lane->issue mapping) —
+see the #1233 note in the change report.
+
+Claim comments and lane identity
+--------------------------------
+Lanes share ONE GitHub account, so an author login cannot tell this lane's own
+claim comment from another lane's. A ``claim``-shaped comment is attributed to
+this lane only on POSITIVE evidence — a session UUID equal to this session's
+(``$PI_SESSION_ID`` / ``--session``) or a lane marker equal to ours
+(``$COLLISION_PREFLIGHT_LANE`` / ``--lane``). Anything else, including a
+same-account comment with no marker, is NOT ours: "we cannot tell whose it is"
+must never be read as "it is ours". The claim regex itself is deliberately
+narrow — it matches intent assertions ("claiming this", "/claim", "working on
+this") and NOT the ordinary English noun/verb ("a coverage claim", "claiming
+that X", "a green on it"), which is what made a lane's own long scoping /
+verdict comment fire a false COLLISION on #3827.
 
 Number matching is applied to full refs/paths/PR text; keyword matching is
 applied only to NAME-LIKE fields (branch refs, worktree basenames, PR head
@@ -80,10 +118,17 @@ cross-cutting engineering/product words); pass ``--keywords`` to override when
 
 Usage
 -----
-    python3 tools/collision_preflight.py <issue-number> [--repo PATH]
+    python3 tools/collision_preflight.py <issue-number>
+        [--repo OWNER/NAME | --repo PATH] [--lane ID] [--session UUID]
         [--keywords a,b,c] [--min-keywords N] [--gh PATH] [--git PATH]
         [--timeout SECS] [--pr-limit N] [--closed-pr-limit N]
         [--closed-pr-timeout SECS]
+
+``--repo`` accepts EITHER ``owner/name`` (the GitHub target; a local clone is
+located for the git surfaces) OR a path to a worktree of the target repo (the
+existing behaviour; ``owner/name`` is then derived from its remote). Omitted,
+the current directory is used and the number is checked for ambiguity across
+sibling repos before any verdict is issued.
 
 Exit codes
 ----------
@@ -100,6 +145,11 @@ Env seams (tests point these at stubs; production defaults are the real tools)
     COLLISION_PREFLIGHT_PR_LIMIT          open-PR cap     (default: 1000)
     COLLISION_PREFLIGHT_CLOSED_PR_LIMIT   closed-PR cap    (default: 5000)
     COLLISION_PREFLIGHT_CLOSED_PR_TIMEOUT closed-PR REST   (default: 600)
+    COLLISION_PREFLIGHT_LANE              this lane's id  (e.g. W0)
+    COLLISION_PREFLIGHT_REPO_ROOTS        ':'-separated roots scanned for
+                                          sibling repos (default: parent of the
+                                          current repo's main worktree)
+    PI_SESSION_ID / PI_SESSION_FILE       this session's id (claim attribution)
 """
 from __future__ import annotations
 
@@ -171,6 +221,32 @@ ALL_SURFACES = (
     SURFACE_ISSUE,
     SURFACE_KEYWORDS,
 )
+
+# ── target-repo resolution (#4027) ───────────────────────────────────────────
+# `--repo` accepts `owner/name` OR a directory path. The slug is what every
+# `gh` call is sent; the path is where the git surfaces run. When a slug is
+# given without a path (or vice versa) the other half is derived, and a half
+# that cannot be derived leaves its surfaces INCOMPLETE — never silently
+# reading a different repository.
+REPO_SLUG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+REPO_ROOTS_ENV = "COLLISION_PREFLIGHT_REPO_ROOTS"
+# Sibling repos probed for the omitted-`--repo` ambiguity refusal. Exceeding
+# the cap is INCOMPLETE (fail closed), never a silent partial scan.
+CANDIDATE_REPO_CAP = 40
+AMBIGUITY_TIMEOUT = 30.0
+
+# ── lane / session identity (defect 3) ──────────────────────────────────────
+# Lanes are not GitHub accounts: every lane on this fleet shares one login, so
+# a claim comment's AUTHOR cannot distinguish this lane from another. Ownership
+# of a claim comment is therefore established by SESSION UUID or LANE marker,
+# never by authorship alone.
+LANE_ENV = "COLLISION_PREFLIGHT_LANE"
+SESSION_ID_ENV = "PI_SESSION_ID"
+SESSION_FILE_ENV = "PI_SESSION_FILE"
+UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+LANE_MARKER_RE = re.compile(r"(?i)\blane[\s_-]+([A-Za-z]{1,4}[-_]?\d{1,3})\b")
 
 STATUS_CLEAN = "CLEAN"
 STATUS_HIT = "HIT"
@@ -279,14 +355,28 @@ _STRUCTURAL = {
     "upstream", "worktree", "worktrees", "detached", "bare",
 }
 
+# Claim-shaped comments. Narrow BY CONSTRUCTION: this matches an assertion of
+# INTENT to work the issue, never the ordinary English words "claim" /
+# "claiming" / "working on" / "on it" in prose. The live bug (defect 3): a
+# lane's own long scoping / research-verdict comment on #3827 matched the old
+# regex on "the config comment claiming a carve_out", "was a claim about the
+# hour", "a green on it would be a vacuous certificate" and "A coverage claim
+# must be stated PER ITEM" — every one of them prose, none a claim. A gate that
+# fires on the lane's own artifact is a gate that gets worked around.
 _CLAIM_RE = re.compile(
     r"(?i)(?:"
-    r"/claim\b|"
-    r"\bworking on\b|\bwork(?:ing)? this\b|\bon it\b|\bin progress\b|"
-    r"\btaking (?:this|it)\b|\bi'?ll (?:take|do|handle|fix)\b|\bclaim(?:ing)?\b|"
-    r"\bassigned to\b|\bdispatching\b|\bpicked (?:this|it) up\b|"
-    r"\bhandling this\b|\bwill (?:fix|implement|handle)\b|"
-    r"\bstarted (?:on )?this\b|\balready (?:fixing|working|implementing)\b"
+    r"(?:^|\s)/claim\b|"
+    r"\bclaim(?:ing|ed|s)?\s+(?:this|it|that|#\d+)\b|"
+    r"\bi(?:'ll| will| am|'m|m)\s+(?:take|do|handle|fix|implement|work on|pick|own)\b|"
+    r"\bworking on\s+(?:this|it|#\d+)\b|"
+    r"\bwork(?:ing)?\s+this\b|"
+    r"\bpick(?:ed|ing)?\s+(?:this|it)\s+up\b|"
+    r"\btaking\s+(?:this|it)\b|"
+    r"\bdispatch(?:ing)?\s+(?:this|it|#\d+)\b|"
+    r"\bstarted\s+(?:on\s+)?this\b|"
+    r"\balready\s+(?:fixing|working|implementing)\b|"
+    r"\bassigned\s+to\s+me\b|"
+    r"\bin\s+progress\b"
     r")"
 )
 
@@ -304,6 +394,30 @@ class Hit:
 
 
 @dataclass
+class Identity:
+    """Who is running this pre-flight. `login` is the GitHub account; `lane`
+    and `session_id` are what actually distinguish one lane from another on a
+    fleet where every lane shares the account."""
+
+    login: str | None = None
+    lane: str | None = None
+    session_id: str | None = None
+
+
+@dataclass
+class RepoTarget:
+    """The repo this verdict is ABOUT. `slug` (owner/name) is sent on every
+    `gh` call; `path` is where the git surfaces run. Either may be None when it
+    could not be derived — its surfaces then report INCOMPLETE, never a scan of
+    some other repository."""
+
+    slug: str | None = None
+    path: str | None = None
+    source: str = "unresolved"
+    requested: bool = False
+
+
+@dataclass
 class Surface:
     name: str
     status: str = STATUS_CLEAN
@@ -311,6 +425,7 @@ class Surface:
     note: str = ""
     truncated: bool = False
     truncation_note: str = ""
+    own_ignored: list[str] = field(default_factory=list)
 
     def add(self, ref: str, detail: str, strength: str) -> None:
         self.hits.append(Hit(self.name, ref, detail, strength))
@@ -589,7 +704,8 @@ def _gh_json_stream(gh_bin: str, args: list[str], repo: str, timeout: float) -> 
     return values
 
 
-def _closed_pr_list_rest(gh_bin: str, repo: str, timeout: float) -> list[dict]:
+def _closed_pr_list_rest(gh_bin: str, slug: str | None, cwd: str,
+                         timeout: float) -> list[dict]:
     """Enumerate ALL closed PRs over the REST API (#3587).
 
     `gh pr list --state closed` (GraphQL) resets on this host while the REST
@@ -601,15 +717,25 @@ def _closed_pr_list_rest(gh_bin: str, repo: str, timeout: float) -> list[dict]:
     projects exactly the fields the surface consumes; REST nests the branch
     under `head.ref`, so it is re-keyed to `headRefName` to keep
     `scan_pr_surface` transport-agnostic.
+
+    The path is built from the RESOLVED `owner/name` literally. It deliberately
+    does NOT use gh's `{owner}/{repo}` placeholders: those resolve from the
+    CURRENT DIRECTORY, which is exactly how the cross-repo false CLEAN of
+    #4027 happened (`gh api` has no `--repo` flag).
     """
+    if not slug:
+        raise SurfaceError(
+            "target-repo-unresolved: no owner/name for the target repo — "
+            "refusing to query the closed-PR surface against an unknown repo"
+        )
     args = [
         "api", "--paginate",
-        f"repos/{{owner}}/{{repo}}/pulls?state=closed&per_page={REST_PAGE_SIZE}",
+        f"repos/{slug}/pulls?state=closed&per_page={REST_PAGE_SIZE}",
         "--jq",
         "map({number, title, body, state, url, headRefName: .head.ref})",
     ]
     prs: list[dict] = []
-    for page in _gh_json_stream(gh_bin, args, repo, timeout):
+    for page in _gh_json_stream(gh_bin, args, cwd, timeout):
         if not isinstance(page, list):
             raise SurfaceError(
                 f"gh {' '.join(args)} returned a non-list page: "
@@ -671,27 +797,236 @@ def scan_pr_surface(
                         "reference (non-blocking)", "weak")
 
 
-def scan_issue_surface(surface: Surface, issue_data: dict) -> None:
+def _identity_markers(body: str) -> tuple[set[str], set[str]]:
+    """Session UUIDs and `lane X` markers named in a comment body."""
+    sessions = {m.group(0).lower() for m in UUID_RE.finditer(body or "")}
+    lanes = {m.group(1).upper() for m in LANE_MARKER_RE.finditer(body or "")}
+    return sessions, lanes
+
+
+def claim_attribution(body: str, login: str | None, identity: Identity) -> str:
+    """Attribute a claim-shaped comment: ``self`` | ``other`` | ``unknown``.
+
+    Lanes share ONE GitHub account, so the AUTHOR LOGIN ALONE cannot tell this
+    lane's own claim from another lane's — ownership on this tracker is named
+    by LANE / SESSION, never by author. A comment is therefore attributed to
+    this lane only on POSITIVE evidence: a session UUID equal to ours, or a
+    lane marker equal to ours. Every other outcome is NOT-OURS, including a
+    same-account comment with no marker at all: "we cannot tell whose it is"
+    must never be read as "it is ours" (fail closed, #4027).
+    """
+    if not login or login.strip().lower() in ("", "unknown", "ghost", "none"):
+        return "unknown"
+    if not identity.login:
+        # We do not even know who WE are: nothing can be attributed to us.
+        return "unknown"
+    if login.strip().lower() != identity.login.strip().lower():
+        return "other"
+    sessions, lanes = _identity_markers(body)
+    if identity.session_id and identity.session_id.strip().lower() in sessions:
+        return "self"
+    if identity.lane and identity.lane.strip().upper() in lanes:
+        return "self"
+    if sessions or lanes:
+        # A marker is present and it names somebody else.
+        return "other"
+    return "unknown"
+
+
+def scan_issue_surface(
+    surface: Surface, issue_data: dict, identity: Identity,
+) -> None:
+    """Assignee + claim comments.
+
+    A claim comment is a hit only when it is NOT attributable to this lane. A
+    comment we can positively attribute to ourselves is recorded as own
+    footprint (printed, non-blocking) rather than as a collision — otherwise a
+    lane could never dispatch the issue it had already claimed.
+    """
     for assignee in issue_data.get("assignees") or []:
         login = assignee.get("login") if isinstance(assignee, dict) else str(assignee)
         surface.add(f"assignee:{login}", "issue is assigned (claimed)", "strong")
     for comment in issue_data.get("comments") or []:
         body = comment.get("body") or ""
-        author = (comment.get("author") or {}).get("login", "unknown")
-        if _CLAIM_RE.search(body):
-            surface.add(f"comment by {author}", "claim-style comment: "
-                        + _one_line(body, 90), "strong")
+        if not _CLAIM_RE.search(body):
+            continue
+        author = comment.get("author") or {}
+        login = author.get("login") if isinstance(author, dict) else (
+            str(author) if author else None
+        )
+        who = claim_attribution(body, login, identity)
+        if who == "self":
+            surface.own_ignored.append(
+                f"claim comment by {login or 'unknown'} attributed to this lane "
+                f"(session/lane marker): {_one_line(body, 90)}"
+            )
+            continue
+        surface.add(
+            f"comment by {login or 'unknown'}",
+            f"claim-style comment ({who} attribution — not this lane): "
+            + _one_line(body, 90),
+            "strong",
+        )
     if not surface.hits:
         state = issue_data.get("state")
         if state and state.upper() != "OPEN":
             surface.note = f"issue state={state} (closed issues are warn-only, not a hit)"
 
 
+# ── target-repo resolution (#4027) ──────────────────────────────────────────
+
+def _remote_slug(git_bin: str, path: str, timeout: float) -> str | None:
+    """`owner/name` from the repo's git remote, OFFLINE.
+
+    Preferred over `gh repo view` because it is deterministic, needs no network,
+    and works identically in a linked worktree. Only gitlab/github-style
+    `host:owner/name` and `host/owner/name` URLs are understood; anything else
+    falls through to the gh fallback.
+    """
+    rc, out, _err, _to = _run([git_bin, "remote", "-v"], path, timeout)
+    if rc != 0:
+        return None
+    urls: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            urls.append((parts[0], parts[1]))
+    for name, url in urls:  # prefer `origin`
+        if name != "origin":
+            continue
+        m = re.search(r"[/:]((?:[^/]+))/([^/\s]+?)(?:\.git)?$", url)
+        if m and m.group(2):
+            return f"{m.group(1)}/{m.group(2)}"
+    for _name, url in urls:
+        m = re.search(r"[/:]((?:[^/]+))/([^/\s]+?)(?:\.git)?$", url)
+        if m and m.group(2):
+            return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def _gh_slug(gh_bin: str, path: str, timeout: float) -> str | None:
+    """`owner/name` from gh itself (fallback when there is no usable remote)."""
+    rc, out, _err, _to = _run(
+        [gh_bin, "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+        path, timeout,
+    )
+    if rc == 0 and out.strip():
+        return out.strip()
+    return None
+
+
+def resolve_slug(gh_bin: str, git_bin: str, path: str, timeout: float,
+                 explicit: str | None = None) -> tuple[str | None, str]:
+    """Resolve the GitHub `owner/name` for a local checkout."""
+    if explicit:
+        return explicit, "--repo"
+    slug = _remote_slug(git_bin, path, timeout)
+    if slug:
+        return slug, "git remote"
+    slug = _gh_slug(gh_bin, path, timeout)
+    if slug:
+        return slug, "gh repo view"
+    return None, "unresolved"
+
+
+def _main_worktree_root(git_bin: str, path: str, timeout: float) -> str | None:
+    """The MAIN worktree's root for a (possibly linked) worktree.
+
+    `--git-common-dir` points at the shared `.git`, so its parent is the main
+    checkout even when `path` is a linked worktree under `.worktrees/`. This is
+    what makes sibling-repo discovery work from a worktree, where the mere
+    parent directory would list the repo's OWN worktrees.
+    """
+    rc, out, _err, _to = _run(
+        [git_bin, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        path, timeout,
+    )
+    if rc != 0 or not out.strip():
+        return None
+    common = Path(out.strip())
+    return str(common.parent) if common.name == ".git" else str(common)
+
+
+def repo_roots(git_bin: str, path: str, timeout: float) -> list[str]:
+    """Directories scanned for sibling repos (for clone lookup + ambiguity)."""
+    override = os.environ.get(REPO_ROOTS_ENV, "").strip()
+    if override:
+        return [p for p in override.split(os.pathsep) if p]
+    root = _main_worktree_root(git_bin, path, timeout) or path
+    parent = Path(root).parent
+    return [str(parent)] if parent.is_dir() else []
+
+
+def _git_repo_dirs(roots: list[str]) -> list[str]:
+    dirs: list[str] = []
+    for root in roots:
+        try:
+            entries = sorted(Path(root).iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.is_dir() and (entry / ".git").exists():
+                dirs.append(str(entry))
+    return dirs
+
+
+def candidate_slugs(git_bin: str, timeout: float, roots: list[str]) -> list[str]:
+    """Distinct `owner/name` slugs of the local sibling repos, in stable order."""
+    slugs: list[str] = []
+    for directory in _git_repo_dirs(roots):
+        slug = _remote_slug(git_bin, directory, timeout)
+        if slug and slug not in slugs:
+            slugs.append(slug)
+    return slugs
+
+
+def find_local_clone(selector: str, git_bin: str, timeout: float,
+                     roots: list[str]) -> str | None:
+    """A local checkout of `selector`, so the git surfaces describe the TARGET
+    repo rather than whatever directory happens to be the cwd."""
+    for directory in _git_repo_dirs(roots):
+        if _remote_slug(git_bin, directory, timeout) == selector:
+            return directory
+    return None
+
+
+def probe_issue_in_repo(gh_bin: str, slug: str, issue: int, cwd: str,
+                        timeout: float) -> bool | None:
+    """True if #N resolves in `slug`; False if definitively absent; None if the
+    repo could not be queried at all (transport/auth) — never treated as
+    absent, because an unqueryable repo may be exactly where the issue lives."""
+    rc, out, err, _to = _run(
+        [gh_bin, "issue", "view", str(issue), "--repo", slug, "--json", "number"],
+        cwd, timeout,
+    )
+    if rc == 0:
+        return True
+    blob = f"{err}\n{out}".lower()
+    if "could not resolve to an issue" in blob or "could not resolve to a pull request" in blob:
+        return False
+    if "could not resolve to a repository" in blob:
+        # A local remote pointing at a repo GitHub does not have (deleted,
+        # renamed, private-to-someone-else): not a candidate at all.
+        return False
+    return None
+
+
 # ── orchestration ────────────────────────────────────────────────────────────
+
+def _classify_issue_error(exc: SurfaceError) -> str:
+    blob = str(exc).lower()
+    if "could not resolve to an issue" in blob or "could not resolve to a pull request" in blob:
+        return "issue-absent"
+    if "could not resolve to a repository" in blob:
+        return "repo-unresolved"
+    if "not found" in blob:
+        return "issue-absent"
+    return "transport"
+
 
 def run_preflight(
     issue: int,
-    repo: str,
+    target: RepoTarget,
     gh_bin: str,
     git_bin: str,
     timeout: float,
@@ -700,30 +1035,56 @@ def run_preflight(
     open_pr_limit: int = PR_LIMIT,
     closed_pr_limit: int = CLOSED_PR_LIMIT,
     closed_pr_timeout: float = CLOSED_PR_TIMEOUT,
+    identity: Identity | None = None,
 ) -> tuple[list[Surface], str | None, list[str], int, bool]:
+    identity = identity or Identity()
     surfaces: dict[str, Surface] = {name: Surface(name) for name in ALL_SURFACES}
+    cwd = target.path or os.getcwd()
+    slug = target.slug
 
     # 1. Issue metadata FIRST — it is both a surface (assignee/comments) and the
     #    keyword source for the name-like surfaces. A failure here leaves the
     #    keyword dimension INCOMPLETE (never silently number-only).
+    #
+    #    The target repo (`slug`) is sent EXPLICITLY on every gh call. If it
+    #    cannot be resolved the run is INCOMPLETE rather than inferred from the
+    #    cwd: querying "whatever repo this directory happens to be" is exactly
+    #    the cross-repo false CLEAN of #4027.
     issue_data: dict | None = None
     title: str | None = None
-    try:
-        data = _gh_json(
-            gh_bin,
-            ["issue", "view", str(issue), "--json",
-             "number,title,state,assignees,comments,url"],
-            repo, timeout,
+    if slug is None:
+        surfaces[SURFACE_ISSUE].incomplete(
+            "target-repo-unresolved: no owner/name could be derived for the "
+            f"target repo (source={target.source}) — refusing to query gh against "
+            "an unknown repository (NOT clean)"
         )
-        if isinstance(data, dict):
-            issue_data = data
-            title = data.get("title") or None
-        else:
-            raise SurfaceError("gh issue view returned non-object JSON")
-    except SurfaceError as exc:
-        surfaces[SURFACE_ISSUE].incomplete(f"gh-unavailable: {exc}")
+    else:
+        try:
+            data = _gh_json(
+                gh_bin,
+                ["issue", "view", str(issue), "--repo", slug, "--json",
+                 "number,title,state,assignees,comments,url"],
+                cwd, timeout,
+            )
+            if isinstance(data, dict):
+                issue_data = data
+                title = data.get("title") or None
+            else:
+                raise SurfaceError("gh issue view returned non-object JSON")
+        except SurfaceError as exc:
+            kind = _classify_issue_error(exc)
+            if kind == "issue-absent":
+                msg = (
+                    f"issue-absent: #{issue} does not exist in {slug} — "
+                    "\"not found here\" is NOT \"no in-flight work\" (fail closed)"
+                )
+            elif kind == "repo-unresolved":
+                msg = f"repo-unresolved: {slug} could not be resolved"
+            else:
+                msg = f"gh-unavailable: {exc}"
+            surfaces[SURFACE_ISSUE].incomplete(msg)
     if isinstance(issue_data, dict):
-        scan_issue_surface(surfaces[SURFACE_ISSUE], issue_data)
+        scan_issue_surface(surfaces[SURFACE_ISSUE], issue_data, identity)
 
     keywords = derive_keywords(title, explicit_keywords)
     suppressed = [] if explicit_keywords else suppressed_keywords(title)
@@ -774,13 +1135,21 @@ def run_preflight(
         (SURFACE_CLOSED_PRS, "closed", closed_pr_limit),
     ):
         surface = surfaces[surface_name]
+        if slug is None:
+            surface.incomplete(
+                "target-repo-unresolved: no owner/name for the target repo — "
+                "refusing to enumerate PRs against an unknown repository "
+                "(NOT clean)"
+            )
+            continue
         try:
             if state == "closed":
-                prs = _closed_pr_list_rest(gh_bin, repo, closed_pr_timeout)
+                prs = _closed_pr_list_rest(gh_bin, slug, cwd, closed_pr_timeout)
             else:
-                args = ["pr", "list", "--state", state, "--limit", str(limit + 1),
+                args = ["pr", "list", "--state", state, "--repo", slug,
+                        "--limit", str(limit + 1),
                         "--json", "number,title,body,headRefName,state,url"]
-                prs = _gh_json(gh_bin, args, repo, timeout)
+                prs = _gh_json(gh_bin, args, cwd, timeout)
             if not isinstance(prs, list):
                 raise SurfaceError(f"gh {state}-PR enumeration returned non-list JSON")
             if len(prs) > limit:
@@ -805,8 +1174,15 @@ def run_preflight(
         (SURFACE_REMOTE_BRANCHES, "refs/remotes", False),
     ):
         surface = surfaces[surface_name]
+        if target.path is None:
+            surface.incomplete(
+                f"no-local-clone: no local checkout of {slug or '(unknown repo)'} "
+                "was found — this surface cannot describe the TARGET repo and is "
+                "left INCOMPLETE rather than scanning a different one (NOT clean)"
+            )
+            continue
         try:
-            refs = _git_refs(git_bin, repo, namespace, timeout)
+            refs = _git_refs(git_bin, cwd, namespace, timeout)
             scan_branch_surface(surface, refs, issue, keywords, min_keywords, allow_kw)
             surface.note = f"{len(refs)} ref(s) enumerated"
             if not allow_kw and keywords:
@@ -816,22 +1192,29 @@ def run_preflight(
 
     # 4. Worktree surface — UNTRUNCATED by construction; the count is proof.
     surface = surfaces[SURFACE_WORKTREES]
-    try:
-        rc, out, err, timed_out = _run(
-            [git_bin, "worktree", "list", "--porcelain"], repo, timeout
+    if target.path is None:
+        surface.incomplete(
+            f"no-local-clone: no local checkout of {slug or '(unknown repo)'} was "
+            "found — the worktree surface cannot describe the TARGET repo and is "
+            "left INCOMPLETE rather than scanning a different one (NOT clean)"
         )
-        if rc != 0:
-            why = "timeout" if timed_out else f"exit {rc}"
-            raise SurfaceError(f"git worktree list failed ({why}): {_one_line(err)}")
-        blocks = _worktree_blocks(out)
-        if out.strip() and len(blocks) != sum(
-            1 for ln in out.splitlines() if ln.startswith("worktree ")
-        ):
-            raise SurfaceError("worktree porcelain parse lost an entry (refusing partial scan)")
-        scan_worktree_surface(surface, blocks, issue, keywords, min_keywords)
-        surface.note = f"{len(blocks)} worktree(s) enumerated (untruncated)"
-    except SurfaceError as exc:
-        surface.incomplete(f"git-unavailable: {exc}")
+    else:
+        try:
+            rc, out, err, timed_out = _run(
+                [git_bin, "worktree", "list", "--porcelain"], cwd, timeout
+            )
+            if rc != 0:
+                why = "timeout" if timed_out else f"exit {rc}"
+                raise SurfaceError(f"git worktree list failed ({why}): {_one_line(err)}")
+            blocks = _worktree_blocks(out)
+            if out.strip() and len(blocks) != sum(
+                1 for ln in out.splitlines() if ln.startswith("worktree ")
+            ):
+                raise SurfaceError("worktree porcelain parse lost an entry (refusing partial scan)")
+            scan_worktree_surface(surface, blocks, issue, keywords, min_keywords)
+            surface.note = f"{len(blocks)} worktree(s) enumerated (untruncated)"
+        except SurfaceError as exc:
+            surface.incomplete(f"git-unavailable: {exc}")
 
     ordered = [surfaces[name] for name in ALL_SURFACES]
     return ordered, title, keywords, issue, bool(explicit_keywords)
@@ -848,7 +1231,7 @@ def _assert_all_surfaces(ordered: list[Surface]) -> None:
 def format_report(
     ordered: list[Surface],
     issue: int,
-    repo: str,
+    target: RepoTarget,
     title: str | None,
     keywords: list[str],
     min_keywords: int,
@@ -862,9 +1245,16 @@ def format_report(
     weak = [h for h in hits if h.strength == "weak"]
 
     lines: list[str] = []
+    slug = target.slug or "(unresolved)"
     lines.append(f"collision-preflight: issue #{issue}")
-    lines.append(f"repo: {repo}")
-    lines.append(f"title: {title or '(unavailable)'}")
+    lines.append(f"repo: {slug}   [resolved from: {target.source}]")
+    lines.append(
+        f"local checkout: {target.path or '(none — git surfaces INCOMPLETE)'}"
+    )
+    # The FULL title, never truncated: this line is what makes a wrong-target
+    # read visible at the point of use (#4027). "(unavailable)" is itself a
+    # fail-closed signal — the run cannot be CLEAN without it.
+    lines.append(f"title: {title or '(unavailable — target not established)'}")
     lines.append(f"keywords: {', '.join(keywords) if keywords else '(none)'}")
     lines.append(f"keyword gate: >= {max(1, min_keywords)} distinct DISTINCTIVE keyword(s) for a keyword-only hit")
     lines.append("")
@@ -892,6 +1282,15 @@ def format_report(
                     f"  [{surface_name}] … +{len(surface_hits) - MAX_HITS_SHOWN} "
                     f"more hit(s) on this surface (total {len(surface_hits)})"
                 )
+    own_ignored = [(s.name, note) for s in ordered for note in s.own_ignored]
+    if own_ignored:
+        lines.append("")
+        lines.append(
+            "OWN FOOTPRINT (non-blocking — attributed to THIS lane by session/"
+            "lane marker, so it is not a collision)"
+        )
+        for name, note in own_ignored:
+            lines.append(f"  [{name}] {note}")
     if weak and not strong and not keyword_hits:
         lines.append("")
         lines.append("WEAK SIGNALS (non-blocking — prose is not work)")
@@ -908,7 +1307,8 @@ def format_report(
     if strong:
         lines.append(
             f"VERDICT: COLLISION (exit {EXIT_COLLISION}) — {len(hits)} hit(s) across "
-            f"{len({h.surface for h in hits})} surface(s); do NOT dispatch work for #{issue}"
+            f"{len({h.surface for h in hits})} surface(s) for #{issue} in {slug}; "
+            "do NOT dispatch"
         )
         if incomplete:
             lines.append(
@@ -919,8 +1319,8 @@ def format_report(
     if keyword_hits:
         lines.append(
             f"VERDICT: COLLISION (keyword-only) (exit {EXIT_COLLISION}) — {len(hits)} "
-            f"hit(s) across {len({h.surface for h in hits})} surface(s); do NOT dispatch "
-            f"work for #{issue}"
+            f"hit(s) across {len({h.surface for h in hits})} surface(s) for #{issue} in "
+            f"{slug}; do NOT dispatch"
         )
         if incomplete:
             lines.append(
@@ -932,7 +1332,7 @@ def format_report(
         lines.append(
             f"VERDICT: INCOMPLETE (exit {EXIT_INCOMPLETE}) — {len(incomplete)} surface(s) "
             f"could not be queried ({', '.join(s.name for s in incomplete)}); "
-            "this is NOT clean — fix gh auth/network and re-run"
+            f"this is NOT clean for #{issue} in {slug} — fix gh auth/network and re-run"
         )
         return "\n".join(lines) + "\n", EXIT_INCOMPLETE
     if weak:
@@ -942,9 +1342,125 @@ def format_report(
         )
     lines.append(
         f"VERDICT: CLEAN (exit {EXIT_CLEAN}) — {len(ordered)}/{len(ALL_SURFACES)} surfaces "
-        f"queried, no in-flight work found for #{issue}"
+        f"queried, no in-flight work found for #{issue} in {slug}"
     )
     return "\n".join(lines) + "\n", EXIT_CLEAN
+
+
+def _session_id_from_file(session_file: str | None) -> str | None:
+    """The session UUID that is the recovery key, from `PI_SESSION_FILE`."""
+    if not session_file:
+        return None
+    match = UUID_RE.search(Path(session_file).name)
+    return match.group(0).lower() if match else None
+
+
+def _resolve_target(args, timeout: float) -> tuple[RepoTarget | None, int]:
+    """Resolve `--repo` (owner/name OR path OR omitted) into a RepoTarget.
+
+    Returns (target, exit_code); exit_code != 0 means the CLI must abort.
+    """
+    repo_arg = args.repo
+    requested = repo_arg is not None
+    slug_explicit: str | None = None
+    if repo_arg is None:
+        path = os.getcwd()
+        source = "cwd"
+    elif Path(repo_arg).is_dir():
+        path = repo_arg
+        source = "--repo PATH"
+    elif REPO_SLUG_RE.fullmatch((repo_arg or "").strip()):
+        path = os.getcwd()
+        slug_explicit = repo_arg.strip()
+        source = "--repo owner/name"
+    else:
+        print(
+            "collision-preflight: --repo must be `owner/name` or an existing "
+            f"directory, got: {repo_arg!r}",
+            file=sys.stderr,
+        )
+        return None, EXIT_USAGE
+
+    target = RepoTarget(requested=requested)
+    roots = repo_roots(args.git, path, timeout)
+    if slug_explicit:
+        current, _how = resolve_slug(args.gh, args.git, path, timeout)
+        target.slug = slug_explicit
+        target.source = source
+        if current == slug_explicit:
+            target.path = path
+        else:
+            target.path = find_local_clone(slug_explicit, args.git, timeout, roots)
+    else:
+        slug, how = resolve_slug(args.gh, args.git, path, timeout)
+        target.slug = slug
+        target.path = path
+        target.source = f"{source} ({how})"
+    return target, 0
+
+
+def _ambiguity_refusal(args, target: RepoTarget, timeout: float) -> int | None:
+    """When `--repo` was omitted, refuse rather than guess which repo #N is in.
+
+    Returns an exit code to abort with, or None to proceed. A number that
+    resolves in more than one candidate repo (or that resolves elsewhere but
+    not here) must NEVER be silently resolved to whichever repo the cwd happens
+    to be — that is the cross-repo false CLEAN of #4027.
+    """
+    if target.requested or not target.slug:
+        return None
+    cwd = target.path or os.getcwd()
+    probe_timeout = min(timeout, AMBIGUITY_TIMEOUT)
+    roots = repo_roots(args.git, cwd, timeout)
+    try:
+        slugs = candidate_slugs(args.git, timeout, roots)
+    except Exception:  # pragma: no cover - defensive
+        slugs = []
+    if len(slugs) > CANDIDATE_REPO_CAP:
+        print(
+            f"collision-preflight: {len(slugs)} candidate repos exceed the "
+            f"{CANDIDATE_REPO_CAP} cap — refusing to guess which one #{args.issue} "
+            "belongs to; pass --repo owner/name",
+            file=sys.stderr,
+        )
+        return EXIT_INCOMPLETE
+    others = [s for s in slugs if s != target.slug]
+    holds_others: list[str] = []
+    unqueried: list[str] = []
+    for other in others:
+        verdict = probe_issue_in_repo(args.gh, other, args.issue, cwd, probe_timeout)
+        if verdict is True:
+            holds_others.append(other)
+        elif verdict is None:
+            unqueried.append(other)
+    current_holds = probe_issue_in_repo(args.gh, target.slug, args.issue, cwd, probe_timeout)
+    if current_holds is None:
+        unqueried.insert(0, target.slug)
+    holders = ([target.slug] if current_holds else []) + holds_others
+    if len(holders) > 1:
+        print(
+            f"collision-preflight: AMBIGUOUS target — #{args.issue} resolves in "
+            f"{', '.join(holders)}; refusing to guess. Re-run with --repo owner/name.",
+            file=sys.stderr,
+        )
+        return EXIT_INCOMPLETE
+    if current_holds is False and len(holds_others) == 1:
+        print(
+            f"collision-preflight: #{args.issue} does NOT exist in {target.slug} "
+            f"(the current repo) but resolves in {holds_others[0]} — "
+            f"re-run with --repo {holds_others[0]}",
+            file=sys.stderr,
+        )
+        return EXIT_INCOMPLETE
+    if unqueried:
+        print(
+            f"collision-preflight: cannot rule out a second repo for #{args.issue} "
+            f"— these candidates could not be probed: {', '.join(unqueried)}. "
+            "A partial check is never CLEAN; pass --repo owner/name to disambiguate.",
+            file=sys.stderr,
+        )
+        return EXIT_INCOMPLETE
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -953,8 +1469,19 @@ def main(argv: list[str] | None = None) -> int:
         description="Fail-loud, all-surface in-flight-work pre-flight for a GitHub issue (#3061).",
     )
     parser.add_argument("issue", type=int, help="issue number to check, e.g. 3061")
-    parser.add_argument("--repo", default=os.getcwd(),
-                        help="path to any worktree of the target repo (default: cwd)")
+    parser.add_argument(
+        "--repo", default=None,
+        help="target repo: `owner/name` (a local clone is located for the git "
+             "surfaces) OR a path to a worktree of the target repo. Omitted: the "
+             "current directory, with a cross-repo ambiguity refusal rather than a "
+             "guess (#4027)",
+    )
+    parser.add_argument("--lane", default=os.environ.get(LANE_ENV) or None,
+                        help="this lane's id (e.g. W0). Used to recognise the lane's "
+                             f"OWN claim comments (env {LANE_ENV})")
+    parser.add_argument("--session", default=os.environ.get(SESSION_ID_ENV) or None,
+                        help="this session's UUID; also read from PI_SESSION_ID / "
+                             "PI_SESSION_FILE")
     parser.add_argument("--keywords", default=None,
                         help="comma-separated keyword override when gh cannot supply the title")
     parser.add_argument("--min-keywords", type=int, default=DEFAULT_MIN_KEYWORDS,
@@ -992,11 +1519,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.issue <= 0:
         print("collision-preflight: issue number must be positive", file=sys.stderr)
         return EXIT_USAGE
-    if not Path(args.repo).is_dir():
-        print(f"collision-preflight: --repo not a directory: {args.repo}", file=sys.stderr)
-        return EXIT_USAGE
-    if args.timeout <= 0:
-        print("collision-preflight: --timeout must be > 0", file=sys.stderr)
+    if args.timeout <= 0 or not math.isfinite(args.timeout):
+        print("collision-preflight: --timeout must be finite and > 0", file=sys.stderr)
         return EXIT_USAGE
     if args.min_keywords < 1:
         print("collision-preflight: --min-keywords must be >= 1", file=sys.stderr)
@@ -1020,14 +1544,36 @@ def main(argv: list[str] | None = None) -> int:
         print("collision-preflight: --closed-pr-timeout must be > 0", file=sys.stderr)
         return EXIT_USAGE
 
+    target, code = _resolve_target(args, args.timeout)
+    if target is None:
+        return code
+
+    # Ambiguity refusal only when `--repo` was omitted: an explicit `--repo`
+    # (either form) is the operator's disambiguation and must not be second-guessed.
+    refusal = _ambiguity_refusal(args, target, args.timeout)
+    if refusal is not None:
+        return refusal
+
+    # Identity: the GitHub login plus the lane/session that actually distinguish
+    # one lane from another on an account shared by every lane.
+    session_id = (args.session or os.environ.get(SESSION_ID_ENV)
+                  or _session_id_from_file(os.environ.get(SESSION_FILE_ENV)))
+    identity = Identity(login=None, lane=args.lane, session_id=session_id)
+    rc, out, _err, _to = _run(
+        [args.gh, "api", "user", "-q", ".login"],
+        target.path or os.getcwd(), args.timeout,
+    )
+    if rc == 0 and out.strip():
+        identity.login = out.strip()
+
     try:
         ordered, title, keywords, issue, _ = run_preflight(
-            args.issue, args.repo, args.gh, args.git, args.timeout, args.keywords,
+            args.issue, target, args.gh, args.git, args.timeout, args.keywords,
             args.min_keywords, args.pr_limit, args.closed_pr_limit,
-            closed_pr_timeout,
+            closed_pr_timeout, identity,
         )
         report, code = format_report(
-            ordered, issue, args.repo, title, keywords, args.min_keywords
+            ordered, issue, target, title, keywords, args.min_keywords
         )
     except RuntimeError as exc:  # partial-run guard
         print(f"collision-preflight: {exc}", file=sys.stderr)
