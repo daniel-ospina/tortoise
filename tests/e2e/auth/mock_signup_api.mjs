@@ -70,6 +70,11 @@ const server = createServer((req, res) => {
         hasPassword: typeof parsed.password === "string" && parsed.password.length > 0,
         contentType: req.headers["content-type"] ?? null,
         authorization: req.headers.authorization ? "present" : null,
+        // The Turnstile token the BFF must FORWARD (#4104). The hosted API's
+        // `_check_turnstile` reads `cf-turnstile-response` (or `turnstile_token`)
+        // and 400s when a secret is configured but the token is absent — so if
+        // the route drops it, provisioning Turnstile breaks every signup.
+        turnstile: parsed["cf-turnstile-response"] ?? parsed.turnstile_token ?? null,
       });
 
       if (FAULTS.signup === "network") {

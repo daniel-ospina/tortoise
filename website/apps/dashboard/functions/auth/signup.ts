@@ -82,6 +82,7 @@ import {
   json,
 } from "../_shared/auth/session";
 import { ensureSchemaTokenColumns } from "../_shared/auth/token";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { fetchUserProfile, signInWithPassword } from "../_shared/auth/supabase";
 
 /** The hosted API origin is configuration, never a literal (topology as config). */
@@ -168,16 +169,36 @@ function accountCreatedNoSession(userId: string | undefined, email: string | und
 }
 
 export const onRequestPost: PagesFunction<SignupEnv> = async ({ request, env }) => {
+  // --- CSRF / login-CSRF gate FIRST: this route ISSUES a session ----------------
+  // It needs no cookie, so `SameSite=Lax` protects nothing: a cross-site HTML
+  // form can forge a valid JSON body and have the attacker's session issued into
+  // the victim's browser. The shared guard (Content-Type + Origin) kills that
+  // vector before the body is parsed.
+  const csrf = guardStateChangingRequest(request, env);
+  if (csrf) return csrf;
+
   // --- input validation FIRST: a malformed request must not reach the API ----
-  let body: { email?: unknown; password?: unknown };
+  let body: { email?: unknown; password?: unknown; "cf-turnstile-response"?: unknown };
   try {
-    body = (await request.json()) as { email?: unknown; password?: unknown };
+    body = (await request.json()) as {
+      email?: unknown;
+      password?: unknown;
+      "cf-turnstile-response"?: unknown;
+    };
   } catch {
     return json({ error: "invalid_request" }, { status: 400 });
   }
 
   const email = typeof body.email === "string" ? body.email.trim() : "";
   const password = typeof body.password === "string" ? body.password : "";
+  // The Turnstile token MUST be forwarded (#4104 review). `signup.html` adds
+  // `cf-turnstile-response` to this body when a site key is provisioned, and the
+  // hosted API's `_check_turnstile` 400s when a `TURNSTILE_SECRET_KEY` is set but
+  // the token is absent — so dropping it here made provisioning Turnstile break
+  // EVERY signup. Forwarded under the same key the API reads, and only when
+  // present, so a deployment without Turnstile is unaffected.
+  const turnstile =
+    typeof body["cf-turnstile-response"] === "string" ? body["cf-turnstile-response"] : "";
   const problem = emailProblem(body.email);
   if (problem) return json({ error: "invalid_email", message: problem }, { status: 400 });
   if (!password) {
@@ -217,7 +238,11 @@ export const onRequestPost: PagesFunction<SignupEnv> = async ({ request, env }) 
     upstream = await fetch(`${env.API_ORIGIN}/v1/signup/email`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({
+        email,
+        password,
+        ...(turnstile ? { "cf-turnstile-response": turnstile } : {}),
+      }),
       redirect: "manual",
     });
   } catch {

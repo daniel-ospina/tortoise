@@ -1470,11 +1470,16 @@
           return;
         }
 
-        // #3501: signup is server-side. `/auth/signup` calls GoTrue and, when
-        // the project has email confirmation ON, sends the confirmation email
-        // and returns NO session (`confirmationRequired`) — the page then shows
-        // the check-your-inbox state. With autoconfirm it returns a session and
-        // the route has already set `__Host-session`.
+        // #3501/#801: signup is server-side. `/auth/signup` proxies the hosted
+        // API's `POST {API_ORIGIN}/v1/signup/email` (the #801 admin path), which
+        // creates the auth user with `email_confirm=true` and sends NO email —
+        // the route then signs the user in server-side and sets
+        // `__Host-session`. The confirmation-email funnel is the API's opt-in
+        // `TORTOISE_SIGNUP_EMAIL_CONFIRM=false` mode: it returns
+        // `confirmationRequired:true` (no session) and the page shows the
+        // check-your-inbox state. GoTrue's own email-sending `/auth/v1/signup`
+        // is NEVER called from here — it burns Supabase's project-wide SMTP
+        // bucket and 429s every signup once exhausted.
         const body = { email: email, password: password };
         if (TURNSTILE_SITE_KEY) body["cf-turnstile-response"] = turnstileToken || "";
         const resp = await bffPost("/auth/signup", body);
@@ -1518,8 +1523,9 @@
           return;
         }
 
-        // 200: GoTrue either sent a confirmation email (no session) or signed
-        // the user in (autoconfirm).
+        // 200: either the API's opt-in confirmation funnel is active (no
+        // session; `confirmationRequired`) or the account was created
+        // pre-confirmed and the route signed the user in.
         if (payload.confirmationRequired) {
           // Analytics + conversion tracking (see pushSignupEvents). GoTrue's
           // confirmation-required body carries no user object, so the event is

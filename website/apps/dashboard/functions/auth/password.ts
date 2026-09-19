@@ -48,6 +48,7 @@ import {
   safeNext,
 } from "../_shared/auth/session";
 import { ensureSchemaTokenColumns } from "../_shared/auth/token";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { fetchUserProfile, signInWithPassword } from "../_shared/auth/supabase";
 
 /**
@@ -101,6 +102,14 @@ function isCredentialRejection(status: number, errorBody: string): boolean {
 const handle: PagesFunction<Env> = async ({ request, env }) => {
   const url = new URL(request.url);
 
+  // --- CSRF / login-CSRF gate FIRST: this route ISSUES a session ----------------
+  // It needs no cookie, so `SameSite=Lax` protects nothing. A cross-site HTML
+  // form can forge a valid JSON body and have the attacker's session issued
+  // into the victim's browser; the shared guard (Content-Type + Origin) kills
+  // that vector before the body is even parsed.
+  const csrf = guardStateChangingRequest(request, env);
+  if (csrf) return csrf;
+
   // --- input validation FIRST: a malformed request must not reach GoTrue -----
   let body: { email?: unknown; password?: unknown };
   try {
@@ -153,12 +162,30 @@ const handle: PagesFunction<Env> = async ({ request, env }) => {
     return json({ error: "provider_unavailable" }, { status: 503 });
   }
 
+  // --- validate the token response shape before trusting it (FIX 6) ----------
+  // `signInWithPassword` returns `{ok:true,data}` for ANY 2xx, so a 200 with a
+  // malformed body would make `result.data.user.id` throw a TypeError — an
+  // infrastructure fault surfacing as 500 instead of this route's declared 503.
+  // `/auth/signup` and `/auth/api-key` both validate their token shape; this
+  // route did not, so a corrupt upstream body became an unhandled 500.
+  const userId = result.data?.user?.id;
+  const refreshToken = result.data?.refresh_token;
+  const accessToken = result.data?.access_token;
+  if (
+    typeof userId !== "string" ||
+    !userId ||
+    typeof refreshToken !== "string" ||
+    !refreshToken
+  ) {
+    return json({ error: "provider_unavailable" }, { status: 503 });
+  }
+
   // --- mint the D1 session (identical to /auth/callback) ---------------------
   const now = Date.now();
   const handle = await createSession(
     env.SESSIONS,
-    result.data.user.id,
-    result.data.refresh_token,
+    userId,
+    refreshToken,
     SESSION_MAX_AGE_S,
   ).catch(() => null);
 
@@ -170,7 +197,7 @@ const handle: PagesFunction<Env> = async ({ request, env }) => {
 
   // The dashboard chrome needs email + display name and the D1 row stores
   // neither (§8.1). The BFF holds the token, so it asks; the browser cannot.
-  const profile = await fetchUserProfile(env, result.data.access_token);
+  const profile = await fetchUserProfile(env, accessToken);
 
   // `now` is captured BEFORE createSession's own Date.now(), so the reported
   // expiry is never later than the row's.
@@ -179,7 +206,7 @@ const handle: PagesFunction<Env> = async ({ request, env }) => {
   return json(
     {
       user: {
-        id: result.data.user.id,
+        id: userId,
         email: profile?.email ?? result.data.user.email,
         displayName: profile?.displayName,
       },

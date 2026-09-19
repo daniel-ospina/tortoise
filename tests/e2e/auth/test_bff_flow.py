@@ -373,6 +373,60 @@ def test_confirm_without_flow_is_interstitial(stack):
     assert "interstitial=1" in headers.get("Location", ""), headers
 
 
+def test_recovery_confirm_without_a_flow_cookie_mints_a_session(stack):
+    """#4104: recovery must complete CROSS-DEVICE, with no flow cookie.
+
+    A recovery link is emailed and is routinely opened on a DIFFERENT device or
+    browser than the one that requested it, so it cannot depend on the
+    `__Host-authflow` cookie `/auth/reset` cannot set on the clicking browser.
+    Possession of the single-use `token_hash` (delivered only to the account's
+    inbox) is the credential. The class-8 binding still applies to every OTHER
+    flow — see `test_confirm_without_flow_is_interstitial` above.
+    """
+    j = Jar()
+    status, body, headers = j.get(
+        f"{APP}/auth/confirm?token_hash=recovery-token&type=recovery", follow=False
+    )
+    assert status == 302, f"a recovery confirm must redirect, got {status} {body}"
+    assert j.cookie("__Host-session"), (
+        "recovery did not mint a session — the reset panel is then unreachable"
+    )
+    assert "/welcome?reset=1" in headers.get("Location", ""), (
+        f"a completed recovery must land on the reset panel, got {headers.get('Location')!r}"
+    )
+
+
+def test_recovery_confirm_ignores_a_stale_flow_cookie(stack):
+    """A leftover flow cookie from an aborted sign-in must not block recovery.
+
+    A stale `__Host-authflow` in the recovering browser is common; treating it as
+    a binding that failed would turn a valid reset link into an interstitial.
+    """
+    req = urllib.request.Request(
+        f"{APP}/auth/confirm?token_hash=recovery-token&type=recovery"
+    )
+    req.add_header("Cookie", "__Host-authflow=deadbeefdeadbeef")
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        with opener.open(req, timeout=30) as r:
+            status, headers = r.status, dict(r.headers)
+    except urllib.error.HTTPError as e:
+        status, headers = e.code, dict(e.headers)
+
+    assert status == 302, f"a stale flow cookie must not block recovery, got {status}"
+    loc = headers.get("Location", "")
+    assert "interstitial" not in loc, f"recovery was treated as an unbound flow: {loc!r}"
+    assert "/welcome?reset=1" in loc, f"expected the reset panel, got {loc!r}"
+    assert "__Host-session=" in headers.get("Set-Cookie", ""), (
+        f"recovery with a stale flow cookie minted no session: {headers.get('Set-Cookie')!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Contract: signed-out is 401, store-unreachable is 503 — never conflated (#3485)
 # ---------------------------------------------------------------------------

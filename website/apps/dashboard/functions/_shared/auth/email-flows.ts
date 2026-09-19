@@ -35,13 +35,12 @@
  * lets the routes answer 503 for a fault and 4xx for a genuine refusal — the
  * #3485 rule — without divergent copies of the same test.
  */
-import type { Env } from "./session";
 import type { SupabaseEnv, SupabaseResult } from "./supabase";
 
-/** The dashboard host. Configured, never a literal — topology is config. */
-export function appOrigin(env: Env): string {
-  return env.APP_ORIGIN ?? "https://app.premiselabs.co";
-}
+// The app-origin resolver lives with the CSRF guard so the configured default
+// exists in exactly ONE place (topology as config, §6). Re-exported here
+// because the email-flow routes have always imported it from this module.
+export { appOrigin } from "./csrf";
 
 async function post<T>(
   env: SupabaseEnv,
@@ -99,6 +98,12 @@ function redirectQuery(redirectTo?: string): string {
  *
  * A result that is neither retryable nor one of 401/403/404 is a genuine
  * user-signal refusal (e.g. unknown address) and is safe to ignore.
+ *
+ * ⚠️ 429 IS SPECIAL-CASED BY THE MAIL-SENDING ROUTES, BEFORE this predicate.
+ * GoTrue's `over_email_send_rate_limit` applies to the ADDRESS being mailed, so
+ * for `/recover` and `/resend` a 429 is folded into the enumeration-safe 200
+ * rather than classified here — surfacing it would make a known address
+ * distinguishable from an unknown one. See `auth/reset.ts` and `auth/resend.ts`.
  */
 export function isProviderFault(status: number, retryable: boolean): boolean {
   return retryable || status === 401 || status === 403 || status === 404;

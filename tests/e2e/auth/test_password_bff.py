@@ -324,6 +324,35 @@ def test_valid_credentials_mint_a_session_and_set_the_host_cookie(stack):
 
 
 # ---------------------------------------------------------------------------
+# A malformed 200 grant is infrastructure, never a 500 (#4104)
+# ---------------------------------------------------------------------------
+def test_a_malformed_200_grant_is_503_not_a_500(stack):
+    """A 200 with no usable token shape must be 503.
+
+    `call()` accepts ANY 2xx as `{ok:true, data}`, so dereferencing
+    `result.data.user.id` / `.refresh_token` on a malformed body throws a
+    TypeError — an infrastructure fault surfacing as an unhandled 500 instead of
+    this route's declared 503. `/auth/signup` and `/auth/api-key` already guard
+    the shape; this test pins the same guard here.
+    """
+    _fault(malformed=True)
+    try:
+        _calls(reset=True)
+        status, body, _ = _post(APP, "/auth/password", VALID)
+    finally:
+        _fault(malformed=False)
+
+    assert status == 503, (
+        f"a malformed 200 grant must surface as 503, got {status} {body} — a 500 "
+        "means the route dereferenced an unvalidated token shape"
+    )
+    assert status != 500, "an upstream body shape error became an unhandled 500"
+    assert json.loads(body)["error"] == "provider_unavailable", body
+    # The grant WAS attempted, so the branch is genuinely exercised.
+    assert _calls(), "the provider was never reached"
+
+
+# ---------------------------------------------------------------------------
 # 400: malformed input, BEFORE any upstream call
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(

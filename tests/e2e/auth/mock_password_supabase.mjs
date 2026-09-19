@@ -37,7 +37,7 @@ const USER = {
 };
 
 /** Injectable faults — see /__mock/fault. */
-const FAULTS = { passwordGrant: false, profile: false };
+const FAULTS = { passwordGrant: false, profile: false, malformed: false };
 
 /** Every password grant, in order. Never contains the raw password. */
 const passwordCalls = [];
@@ -103,6 +103,13 @@ const server = createServer((req, res) => {
           msg: "Invalid login credentials",
         });
       }
+      if (FAULTS.malformed) {
+        // A 200 whose body honours the declared TokenResponse shape only
+        // partially: no `user`, no `refresh_token`. `call()` accepts ANY 2xx as
+        // `{ok:true,data}`, so an unvalidated route would throw a TypeError here
+        // and surface a 500; it must answer 503 instead.
+        return json(res, 200, { access_token: "mock-access-malformed", expires_in: 3600 });
+      }
       return json(res, 200, issue(USER.id, USER.email));
     }
 
@@ -113,9 +120,10 @@ const server = createServer((req, res) => {
       return json(res, 200, { calls, count: calls.length });
     }
 
-    // Fault injection. POST {"passwordGrant":true} / {"profile":true}.
+    // Fault injection. POST {"passwordGrant":true} / {"profile":true} /
+    // {"malformed":true}.
     if (url.pathname === "/__mock/fault") {
-      for (const k of ["passwordGrant", "profile"]) {
+      for (const k of ["passwordGrant", "profile", "malformed"]) {
         if (typeof parsed[k] === "boolean") FAULTS[k] = parsed[k];
       }
       return json(res, 200, { ok: true, faults: { ...FAULTS } });

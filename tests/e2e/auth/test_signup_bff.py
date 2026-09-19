@@ -72,6 +72,12 @@ NEW = {"email": "new@example.test", "password": "correct-horse-battery-staple"}
 CONFIRM = {"email": "confirm@example.test", "password": "correct-horse-battery-staple"}
 EXISTING = {"email": "existing@example.test", "password": "correct-horse-battery-staple"}
 WEAK = {"email": "weak@example.test", "password": "correct-horse-battery-staple"}
+# The Turnstile token the page adds when a site key is provisioned (#4104).
+TURNSTILE = {
+    "email": "turnstile@example.test",
+    "password": "correct-horse-battery-staple",
+    "cf-turnstile-response": "turnstile-token-abc123",
+}
 
 # The user id / refresh token the GoTrue mock mints for an address, so tests can
 # assert on the D1 row without hardcoding an unrelated literal.
@@ -382,6 +388,82 @@ def test_account_created_mints_a_session_and_sets_the_host_cookie(stack):
     assert "mock-access" not in body and "mock-refresh" not in body, body
     # And no GoTrue signup, still.
     assert _signal_signup_calls() == [], _gt_calls()
+
+
+# ---------------------------------------------------------------------------
+# Turnstile: the token MUST be forwarded (#4104)
+# ---------------------------------------------------------------------------
+def test_turnstile_token_is_forwarded_to_the_api(stack):
+    """`signup.html` adds `cf-turnstile-response`; the route must forward it.
+
+    The hosted API's `_check_turnstile` 400s when `TURNSTILE_SECRET_KEY` is
+    configured but the token is absent, so dropping it here would make
+    provisioning Turnstile break EVERY signup.
+    """
+    _reset_upstream()
+    status, body, _ = _post(APP, "/auth/signup", TURNSTILE)
+    assert status == 200, f"{status} {body}"
+
+    api_calls = _api_calls()
+    assert len(api_calls) == 1, api_calls
+    assert api_calls[0]["turnstile"] == TURNSTILE["cf-turnstile-response"], (
+        "the Turnstile token was DROPPED on the way to the API — provisioning "
+        "Turnstile would then break every signup"
+    )
+
+
+def test_signup_without_a_turnstile_token_is_unaffected(stack):
+    """A deployment with no Turnstile must not gain a phantom empty field."""
+    _reset_upstream()
+    status, body, _ = _post(APP, "/auth/signup", NEW)
+    assert status == 200, f"{status} {body}"
+    api_calls = _api_calls()
+    assert len(api_calls) == 1, api_calls
+    assert api_calls[0]["turnstile"] is None, (
+        f"an absent token must not be forwarded as a key: {api_calls[0]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CSRF: a forged text/plain form and a cross-origin POST are refused
+# ---------------------------------------------------------------------------
+def test_signup_text_plain_forged_form_is_415_and_creates_nothing(stack):
+    _reset_upstream()
+    req = urllib.request.Request(
+        f"{APP}/auth/signup",
+        method="POST",
+        data=json.dumps(TURNSTILE).encode(),
+    )
+    req.add_header("Content-Type", "text/plain")
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(req, timeout=30) as r:
+            status, body = r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read().decode()
+    assert status == 415, f"a text/plain forged signup must be 415, got {status} {body}"
+    assert _api_calls() == [], "the API was contacted for a forged form"
+    assert _gt_calls() == [], "GoTrue was contacted for a forged form"
+
+
+def test_signup_cross_origin_json_is_403_and_creates_nothing(stack):
+    _reset_upstream()
+    req = urllib.request.Request(
+        f"{APP}/auth/signup",
+        method="POST",
+        data=json.dumps(TURNSTILE).encode(),
+    )
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Origin", "https://evil.example")
+    opener = urllib.request.build_opener(_NoRedirect())
+    try:
+        with opener.open(req, timeout=30) as r:
+            status, body = r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read().decode()
+    assert status == 403, f"a cross-origin signup must be 403, got {status} {body}"
+    assert _api_calls() == [], "the API was contacted from a foreign origin"
+    assert _gt_calls() == [], "GoTrue was contacted from a foreign origin"
 
 
 # ---------------------------------------------------------------------------

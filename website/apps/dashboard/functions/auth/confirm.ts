@@ -10,9 +10,11 @@
  * `type` values are owned by SCOPE.md §5.2 and NOT restated here. The caller
  * passes the value Supabase put in the template.
  *
- * The class-8 binding applies identically to /auth/callback: a token_hash that
- * does not match a live flow on THIS browser gets the interstitial, never a
- * silent session.
+ * The class-8 binding applies identically to /auth/callback for every flow
+ * EXCEPT recovery: an emailed recovery link is opened cross-device, so it is
+ * bound by the single-use `token_hash` rather than by a browser cookie. A
+ * token_hash that does not match a live flow on THIS browser gets the
+ * interstitial, never a silent session.
  *
  * Links already sent before the cutover are fragment-style and cannot be
  * redeemed here — that is an explicit unsupported-by-decision (§5.4), not an
@@ -56,22 +58,41 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
 
   if (!tokenHash || !type) return redirect("/auth?error=invalid_link");
 
-  // --- class-8 binding (same rule as /auth/callback) -------------------------
-  if (!flowCookie) return redirect("/auth?interstitial=1");
-
+  // --- flow binding (class-8) ------------------------------------------------
+  // RECOVERY IS DELIBERATELY EXEMPT from the `__Host-authflow` cookie binding.
+  // The recovery link is emailed and is routinely opened on a DIFFERENT device
+  // or browser than the one that requested it, so requiring a cookie set at
+  // request time would make the reset panel unreachable for exactly the users it
+  // exists for (#4104). Possession of the single-use `token_hash` — delivered
+  // only to the account's inbox — is itself the credential, and GoTrue enforces
+  // its single use and expiry in `verifyOtp` below.
+  //
+  // Non-recovery flows (email confirmation, invite, magic link) KEEP the class-8
+  // binding: they are started in the browser that must complete them, so a
+  // token_hash with no matching live flow on THIS browser is not honoured.
+  //
+  // A PRESENT-BUT-STALE cookie must not block a recovery click either (a
+  // leftover flow from an aborted sign-in is common); for recovery it is simply
+  // ignored.
+  const isRecovery = type === "recovery";
   let flow: FlowRow | null = null;
-  try {
-    flow = await env.SESSIONS.prepare(
-      "SELECT flow_id,kind,expires_at FROM auth_flows WHERE flow_id = ?1",
-    )
-      .bind(flowCookie)
-      .first<FlowRow>();
-  } catch {
-    return json({ error: "session_store_unavailable" }, { status: 503 });
+  if (flowCookie) {
+    try {
+      flow = await env.SESSIONS.prepare(
+        "SELECT flow_id,kind,expires_at FROM auth_flows WHERE flow_id = ?1",
+      )
+        .bind(flowCookie)
+        .first<FlowRow>();
+    } catch {
+      return json({ error: "session_store_unavailable" }, { status: 503 });
+    }
   }
 
-  if (!flow || flow.expires_at <= Date.now()) {
-    return redirect("/auth?interstitial=1", [clearCookie(FLOW_COOKIE)]);
+  if (!isRecovery) {
+    if (!flowCookie) return redirect("/auth?interstitial=1");
+    if (!flow || flow.expires_at <= Date.now()) {
+      return redirect("/auth?interstitial=1", [clearCookie(FLOW_COOKIE)]);
+    }
   }
 
   // --- server-side completion ------------------------------------------------
@@ -89,7 +110,7 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   // This runs BEFORE the new session is minted, so a failure here must stop the
   // flow rather than be swallowed: `catch(() => 0)` asserted the F15 guarantee
   // while leaving the stolen session alive.
-  if (flow.kind === "recovery" || type === "recovery") {
+  if (isRecovery || flow?.kind === "recovery") {
     try {
       await revokeAllForUser(env.SESSIONS, result.data.user.id);
     } catch {
@@ -111,9 +132,11 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   ).catch(() => null);
   if (!handle) return json({ error: "session_store_unavailable" }, { status: 503 });
 
-  await env.SESSIONS.prepare("DELETE FROM auth_flows WHERE flow_id = ?1").bind(flow.flow_id)
-    .run()
-    .catch(() => undefined);
+  if (flowCookie) {
+    await env.SESSIONS.prepare("DELETE FROM auth_flows WHERE flow_id = ?1").bind(flowCookie)
+      .run()
+      .catch(() => undefined);
+  }
 
   const dest = type === "recovery" ? "/welcome?reset=1" : "/welcome";
   return redirect(dest, [

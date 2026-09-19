@@ -45,6 +45,9 @@ MOCK_URL = ""
 KNOWN = {"email": "known@example.test"}
 UNKNOWN = {"email": "nobody@example.test"}
 REFUSED = {"email": "refused@example.test"}  # mock answers 422 user_not_found
+# The mock answers 429 for this address ONLY — GoTrue's `over_email_send_rate_limit`
+# is per ADDRESS, so the route must not let it distinguish accounts.
+RATELIMITED = {"email": "ratelimited@example.test"}
 
 
 class Proc:
@@ -159,7 +162,7 @@ def _fault(**kwargs) -> None:
 # ---------------------------------------------------------------------------
 # 200: the recovery mail is requested with the RESET-PANEL redirect
 # ---------------------------------------------------------------------------
-def test_valid_email_requests_recovery_with_the_reset_redirect(stack):
+def test_valid_email_requests_recovery_with_the_confirm_redirect(stack):
     _calls(reset=True)
     status, body, headers = _post(APP, "/auth/reset", KNOWN)
     assert status == 200, f"a valid address must be 200, got {status} {body}"
@@ -169,9 +172,12 @@ def test_valid_email_requests_recovery_with_the_reset_redirect(stack):
     assert len(calls) == 1, f"expected exactly one /recover call, got {calls}"
     assert calls[0]["flow"] == "recover", calls
     assert calls[0]["email"] == KNOWN["email"], calls
-    # The recovery link must land on the reset panel.
-    assert calls[0]["redirectTo"] == f"{APP}/welcome?reset=1", (
-        f"redirectTo must target the reset panel, got {calls[0]['redirectTo']!r}"
+    # #4104: the recovery link must land on the BFF's CONFIRM handler — never
+    # directly on /welcome?reset=1, which requires a session the recovering user
+    # by definition does not have (the dead-end this test now pins shut). The
+    # email template builds the click on this base with `{{ .TokenHash }}`.
+    assert calls[0]["redirectTo"] == f"{APP}/auth/confirm", (
+        f"redirectTo must target the confirm handler, got {calls[0]['redirectTo']!r}"
     )
     assert calls[0]["authorization"] == "present", calls
     assert "no-store" in headers.get("Cache-Control", ""), headers.get("Cache-Control")
@@ -245,6 +251,32 @@ def test_malformed_input_is_400_and_gotrue_is_not_called(stack, payload):
         f"GoTrue was contacted for a malformed request {payload!r} — validation "
         "must run before the upstream call"
     )
+
+
+def test_a_per_address_provider_429_is_an_indistinguishable_200(stack):
+    """A per-ADDRESS provider 429 must not leak existence (#4104).
+
+    GoTrue's `over_email_send_rate_limit` is applied to the address being
+    mailed, so a 503 (what the retryable classification used to produce) would
+    make repeated resets for a KNOWN address differ from an UNKNOWN one — an
+    account-existence oracle, which this route explicitly promises not to be.
+    The mock answers 429 for `ratelimited@example.test` ONLY.
+    """
+    _calls(reset=True)
+    s_normal, b_normal, _ = _post(APP, "/auth/reset", KNOWN)
+    s_limited, b_limited, _ = _post(APP, "/auth/reset", RATELIMITED)
+
+    assert s_limited == 200, (
+        f"a per-address provider 429 must be folded into the enumeration-safe "
+        f"200, got {s_limited} {b_limited}"
+    )
+    assert s_normal == 200, f"the normal address must also be 200, got {s_normal} {b_normal}"
+    assert b_limited == b_normal, (
+        "a rate-limited address produced a different body than a normal one — "
+        f"that difference is the oracle:\n{b_normal}\n{b_limited}"
+    )
+    calls = _calls()
+    assert {c["email"] for c in calls} == {KNOWN["email"], RATELIMITED["email"]}, calls
 
 
 # ---------------------------------------------------------------------------

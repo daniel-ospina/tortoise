@@ -53,7 +53,7 @@ const AUTO_USER = {
 /** Every upstream email-flow call, in order. Never contains a raw password. */
 const calls = [];
 
-/** fault values: false | 500 | 401 */
+/** fault values: false | 500 | 401 | 429 */
 const FAULTS = { signup: false, recover: false, resend: false, profile: false, password: false };
 
 const json = (res, status, body) => {
@@ -167,8 +167,31 @@ const server = createServer((req, res) => {
       const fault = FAULTS[flow];
       if (fault === 500) return json(res, 500, { error: "injected_provider_outage" });
       if (fault === 401) return json(res, 401, { error: "Invalid API key" });
+      if (fault === 429) {
+        // GoTrue's `over_email_send_rate_limit`, applied to the ADDRESS being
+        // mailed. Real GoTrue brackets this with a Retry-After; the route must
+        // fold it into the enumeration-safe 200 rather than leak it.
+        const payload = JSON.stringify({
+          error_code: "over_email_send_rate_limit",
+          msg: "Email rate limit exceeded",
+        });
+        res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" });
+        return res.end(payload);
+      }
       if (email === "refused@example.test") {
         return json(res, 422, { error_code: "user_not_found", msg: "No such user" });
+      }
+      if (email === "ratelimited@example.test") {
+        // GoTrue's `over_email_send_rate_limit` is applied to the ADDRESS being
+        // mailed, so it fires for THIS address and not for an unknown one — the
+        // differential the route must not leak. Bracketed with Retry-After the
+        // way real GoTrue does it.
+        const limited = JSON.stringify({
+          error_code: "over_email_send_rate_limit",
+          msg: "Email rate limit exceeded",
+        });
+        res.writeHead(429, { "Content-Type": "application/json", "Retry-After": "60" });
+        return res.end(limited);
       }
       // Identical body for every other address — known or unknown.
       return json(res, 200, {});

@@ -32,6 +32,7 @@ import {
   revokeAllForUser,
 } from "../_shared/auth/session";
 import { ensureSchemaTokenColumns, getAccessTokenForSession } from "../_shared/auth/token";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { updatePassword } from "../_shared/auth/supabase";
 
 /**
@@ -50,6 +51,12 @@ function passwordProblem(pw: string): string | null {
 }
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  // --- CSRF gate FIRST: enforce a JSON Content-Type + same Origin before the
+  // body is parsed (defense in depth — this route does need a session, so
+  // `SameSite=Lax` already blocks the cross-site form case).
+  const csrf = guardStateChangingRequest(request, env);
+  if (csrf) return csrf;
+
   const handle = readCookie(request, SESSION_COOKIE);
   if (!handle) return json({ error: "not_signed_in" }, { status: 401 });
   if (!env.SESSIONS) return json({ error: "session_store_unavailable" }, { status: 503 });

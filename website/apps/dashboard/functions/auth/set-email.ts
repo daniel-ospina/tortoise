@@ -48,6 +48,7 @@ import {
   getAccessTokenForSession,
   invalidateCachedToken,
 } from "../_shared/auth/token";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 
 /**
  * A deliberately shallow address check. The authoritative validation is
@@ -145,6 +146,12 @@ function extractUser(data: Record<string, unknown>): Record<string, unknown> {
 }
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  // --- CSRF gate FIRST: enforce JSON Content-Type + same Origin before the body
+  // is parsed. Defense in depth — this route needs a session, so `SameSite=Lax`
+  // already blocks the cross-site form case, but the rule is applied uniformly.
+  const csrf = guardStateChangingRequest(request, env);
+  if (csrf) return csrf;
+
   const handle = readCookie(request, SESSION_COOKIE);
   if (!handle) return json({ error: "not_signed_in" }, { status: 401 });
   if (!env.SESSIONS) return json({ error: "session_store_unavailable" }, { status: 503 });

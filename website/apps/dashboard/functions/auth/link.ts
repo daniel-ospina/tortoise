@@ -69,6 +69,7 @@ import {
   safeNext,
 } from "../_shared/auth/session";
 import { ensureSchemaTokenColumns, getAccessTokenForSession } from "../_shared/auth/token";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { bytesToB64url } from "../_shared/auth/jwt";
 
 interface LinkEnv extends Env {
@@ -276,5 +277,12 @@ export const onRequestGet: PagesFunction<LinkEnv> = async ({ request, env }) => 
 };
 
 /** POST is the same handler, matching `/auth/start`'s GET/POST alias. */
-export const onRequestPost: PagesFunction<LinkEnv> = (ctx) =>
-  (onRequestGet as PagesFunction<LinkEnv>)(ctx);
+export const onRequestPost: PagesFunction<LinkEnv> = (ctx) => {
+  // A POST initiates a link flow — apply the shared CSRF guard (JSON
+  // Content-Type + same Origin) for consistency with the other state-changing
+  // routes. The browser reaches this route by navigation (GET); the POST alias
+  // exists for parity, so no HTML form is a legitimate caller.
+  const csrf = guardStateChangingRequest(ctx.request, ctx.env);
+  if (csrf) return csrf;
+  return (onRequestGet as PagesFunction<LinkEnv>)(ctx);
+};

@@ -45,6 +45,7 @@ import {
   invalidateCachedToken,
 } from "../_shared/auth/token";
 import { fetchUserProfile } from "../_shared/auth/supabase";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 
 /** The one shape this endpoint emits, matching `/api/session`. */
 interface ProfilePayload {
@@ -217,6 +218,12 @@ export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
 
 /** Shared POST/PATCH handler: write `display_name`, then echo the same shape. */
 async function updateDisplayName(request: Request, env: Env): Promise<Response> {
+  // --- CSRF gate FIRST: JSON Content-Type + same Origin, before the body is
+  // parsed. Defense in depth — this route needs a session, so `SameSite=Lax`
+  // already blocks the cross-site form case, but the rule is applied uniformly.
+  const csrf = guardStateChangingRequest(request, env);
+  if (csrf) return csrf;
+
   const resolved = await resolveSession(request, env);
   if ("response" in resolved) return resolved.response;
   const { row } = resolved;

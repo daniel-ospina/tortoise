@@ -43,6 +43,9 @@ MOCK_URL = ""
 KNOWN = {"email": "known@example.test"}
 UNKNOWN = {"email": "nobody@example.test"}
 REFUSED = {"email": "refused@example.test"}  # mock answers 422 user_not_found
+# The mock answers 429 for this address ONLY — GoTrue's `over_email_send_rate_limit`
+# is per ADDRESS, so the route must not let it distinguish accounts.
+RATELIMITED = {"email": "ratelimited@example.test"}
 
 
 class Proc:
@@ -242,6 +245,31 @@ def test_malformed_input_is_400_and_gotrue_is_not_called(stack, payload):
         f"GoTrue was contacted for a malformed request {payload!r} — validation "
         "must run before the upstream call"
     )
+
+
+def test_a_per_address_provider_429_is_an_indistinguishable_200(stack):
+    """A per-ADDRESS provider 429 must not leak existence (#4104).
+
+    GoTrue's `over_email_send_rate_limit` applies to the address being mailed,
+    so a 503 would make repeated resends for a KNOWN address differ from an
+    UNKNOWN one — an account-existence oracle this route promises not to be.
+    The mock answers 429 for `ratelimited@example.test` ONLY.
+    """
+    _calls(reset=True)
+    s_normal, b_normal, _ = _post(APP, "/auth/resend", KNOWN)
+    s_limited, b_limited, _ = _post(APP, "/auth/resend", RATELIMITED)
+
+    assert s_limited == 200, (
+        f"a per-address provider 429 must be folded into the enumeration-safe "
+        f"200, got {s_limited} {b_limited}"
+    )
+    assert s_normal == 200, f"the normal address must also be 200, got {s_normal} {b_normal}"
+    assert b_limited == b_normal, (
+        "a rate-limited address produced a different body than a normal one — "
+        f"that difference is the oracle:\n{b_normal}\n{b_limited}"
+    )
+    calls = _calls()
+    assert {c["email"] for c in calls} == {KNOWN["email"], RATELIMITED["email"]}, calls
 
 
 # ---------------------------------------------------------------------------

@@ -4231,6 +4231,34 @@ function claimIntentInFlight() {
 
   async function logout() {
     setAccountMenuOpen(false) // #1148-ux: close the blob dropdown on logout
+
+    // #3501/#4104: sign-out is a SERVER operation now — the GoTrue session lives
+    // behind the BFF, so only POST /api/session (which revokes the D1 handle
+    // and clears the HttpOnly cookie) can end it. The supabase client's
+    // sign-out is gone: the browser holds no client session for it to clear,
+    // and clearing only the legacy cookie would leave the user signed in on
+    // reload.
+    //
+    // CHECK THE RESPONSE, and tear nothing down until it succeeds. `/api/session`
+    // answers 503 WITHOUT clearing the cookie when the D1 revoke did not land
+    // ("never report a successful sign-out on a failed write"). A 503 RESOLVES
+    // NORMALLY — the old `try/catch` only covered transport faults — so the code
+    // navigated to /auth anyway, whose head probe GETs /api/session, sees the
+    // still-live session (200), and bounces the user straight back. Sign-out
+    // then appeared to work while the handle stayed usable for its full TTL. On
+    // failure: surface it, keep the user signed in visually, and DO NOT navigate.
+    let revoked = false
+    try {
+      const res = await fetch(`${API_BASE}/session`, { method: 'POST' })
+      revoked = !!res && res.ok
+    } catch {
+      revoked = false
+    }
+    if (!revoked) {
+      setError('Could not sign out \u2014 please try again.')
+      return
+    }
+
     localStorage.removeItem(KEY_STORAGE)
     setApiKey('')
     apiKeyRef.current = null
@@ -4313,15 +4341,6 @@ function claimIntentInFlight() {
     setInviteRole('member')
     setNewGraphName('')
 
-    // #3501: sign-out is a SERVER operation now — the GoTrue session lives
-    // behind the BFF, so only POST /api/session (which revokes the D1 handle
-    // and clears the HttpOnly cookie) can end it. The supabase client's
-    // sign-out is gone: the browser holds no client session for it to clear,
-    // and clearing only the legacy cookie would leave the user signed in on
-    // reload.
-    try {
-      await fetch(`${API_BASE}/session`, { method: 'POST' })
-    } catch { /* best-effort — the mount gate re-checks on the next load */ }
     // #1511: the key-only card is gone — after signOut the dashboard has NO
     // !authed UI. Always go to /auth (origin-aware; the app-origin gate emits
     // the absolute target) so the sign-out lands on the login page instead of

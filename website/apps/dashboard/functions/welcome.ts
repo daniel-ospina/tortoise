@@ -33,11 +33,7 @@ import {
   readCookie,
   redirect,
 } from "./_shared/auth/session";
-
-/** The dashboard host. Configured, never a literal — topology is config (§6). */
-function appOrigin(env: Env): string {
-  return env.APP_ORIGIN ?? "https://app.premiselabs.co";
-}
+import { appOrigin } from "./_shared/auth/csrf";
 
 export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
   const url = new URL(request.url);

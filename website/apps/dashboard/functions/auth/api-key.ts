@@ -55,6 +55,7 @@ import {
   safeNext,
 } from "../_shared/auth/session";
 import { ensureSchemaTokenColumns } from "../_shared/auth/token";
+import { guardStateChangingRequest } from "../_shared/auth/csrf";
 import { fetchUserProfile } from "../_shared/auth/supabase";
 
 /** Upstream `/v1/session/login` lives on the hosted API (topology as config). */
@@ -91,6 +92,12 @@ function upstreamMessage(detail: unknown): string | undefined {
 
 const handle: PagesFunction<ApiKeyEnv> = async ({ request, env }) => {
   const url = new URL(request.url);
+
+  // --- CSRF / login-CSRF gate FIRST: this route ISSUES a session ----------------
+  // It needs no cookie, so `SameSite=Lax` protects nothing. The shared guard
+  // (Content-Type + Origin) kills the forged-form vector before the body is read.
+  const csrf = guardStateChangingRequest(request, env);
+  if (csrf) return csrf;
 
   // --- input validation FIRST: a malformed request must not reach the API -----
   let body: { api_key?: unknown };
