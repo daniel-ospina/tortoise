@@ -72,15 +72,19 @@ CONTACT_TO = "hello@premiselabs.co"
 #: differently (cycles 2-3), and every literal is scanned — not just the ones
 #: anchored to `message:` — because a CONCATENATION hid its second half.
 REPLY_PROMISE_VERBS = (
-    # A first-person COMMITMENT: "we'll reply", "we will respond", "we can follow
-    # up", "we aim to respond".
-    r"\b(?:we|i)(?:'ll| will| shall| can| aim to| try to)\s+"
+    # A first-person COMMITMENT. Up to three intervening words are allowed, so
+    # "we'll be sure to respond" / "we'll always reply" / "we aim to respond" are
+    # caught too (cycle-5 review: the immediate-adjacency form missed them while
+    # this comment claimed any wording). Deliberately fail-closed: a sentence
+    # that merely NEGATES a promise ("we do not reply to every message") also
+    # trips it, and the fix there is to phrase it without the commitment verb.
+    r"\b(?:we|i)(?:'ll| will| shall| can)\s+(?:\w+\s+){0,3}?"
     r"(?:reply|respond|reaching out|reach out|write back|write to you|get back to you|"
     r"be in touch|be in contact|get in touch|follow up|answer|contact you)\b"
-    # …or the present-tense form of the same promise: "we reply to every message".
-    r"|\bwe\s+(?:reply|respond|answer|write back|follow up|get back to you)\b"
+    # …or the present-tense form: "we reply to every message", "we always answer".
+    r"|\bwe\s+(?:\w+\s+){0,2}?(?:reply|respond|answer|write back|follow up|get back to you)\b"
     # …or a promise made TO the visitor: "you'll hear from us".
-    r"|\byou(?:'ll| will)\s+(?:hear|get a reply|receive a reply|be contacted)\b"
+    r"|\byou(?:'ll| will)\s+(?:\w+\s+){0,2}?(?:hear|get a reply|receive a reply|be contacted)\b"
     r"|\bexpect a reply\b|\ba reply will\b"
 )
 
@@ -375,18 +379,34 @@ def test_the_confirmation_promises_no_reply() -> None:
     # scripts and styles dropped, tags to spaces, entities unescaped, whitespace
     # collapsed.
     page_markup = re.sub(r"<(script|style)\b.*?</\1>", " ", html_src, flags=re.S | re.I)
-    page_text = " ".join(unescape(re.sub(r"<[^>]+>", " ", page_markup)).split())
-    assert not re.search(REPLY_PROMISE_VERBS, page_text, re.I), (
-        "the contact page promises a reply: "
-        f"{re.search(REPLY_PROMISE_VERBS, page_text, re.I).group(0)!r}"
+    # ATTRIBUTE-carried copy is visitor-facing too (cycle-5 review): the meta
+    # description is what search engines and link previews show, and a
+    # placeholder / aria-label / title / alt is text the visitor reads in the
+    # page. Replacing whole tags dropped all of it, so it is collected first.
+    attr_text = " ".join(
+        unescape(value)
+        for value in re.findall(
+            r'\b(?:content|placeholder|aria-label|title|value|alt)\s*=\s*"([^"]*)"',
+            page_markup,
+            re.I,
+        )
     )
-    # No client-side string may promise a reply either (comments excluded: the
-    # script explains the 503 path in prose).
-    client_code = "\n".join(
-        line for line in script.splitlines() if not line.strip().startswith(("//", "*", "/*"))
+    page_text = " ".join(
+        (unescape(re.sub(r"<[^>]+>", " ", page_markup)) + " " + attr_text).split()
     )
+    found = re.search(REPLY_PROMISE_VERBS, page_text, re.I)
+    assert found is None, (
+        f"the contact page promises a reply (in its text or an attribute): {found and found.group(0)!r}"
+    )
+    # No client-side string may promise a reply either. Comments are stripped from
+    # the SCRIPT the same way as the TS file: the earlier line-prefix filter left
+    # a trailing `// …` comment and a `/* … */` block's continuation lines in the
+    # scanned code (cycle-5 review), so a comment documenting the rule reddened
+    # the suite.
+    script_code = re.sub(r"/\*.*?\*/", "", script, flags=re.S)
+    script_code = re.sub(r"//[^\n]*", "", script_code)
     client_strings = re.findall(
-        r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`)', client_code
+        r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`)', script_code
     )
     for text in client_strings:
         assert not re.search(REPLY_PROMISE_VERBS, text, re.I), (
