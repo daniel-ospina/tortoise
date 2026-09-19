@@ -123,6 +123,7 @@ surfaces:
   # test_graphcopy_boolean_index_3154.py.
   - test_capture_cost_measurement.py
   - test_hosted_auth.py
+  - test_cross_tenant_read_isolation.py  # #3663: capture->read cross-tenant READ isolation (hosted api: search/sessions/detail/export + backups + MCP list_graphs + namespace opener)
   - test_hosted_backup.py
   # #3895: the dump's node set and edge set must be the SAME set — registered
   # under `api` because tortoise/hosted_backup.py owns that surface (see the
@@ -1000,6 +1001,7 @@ carve_out:
 - test_longmem_runner.py  # #2573/P3-lane-flip: embedded eval harness (D2-D4 vector-leg asserts are FalkorDBLite-only)
 - test_backup_e2e.py
 - test_config.py
+- test_cross_tenant_read_isolation.py  # #3663: asserts production org_{org_id} graph-name scoping; the carve-out exemption is load-bearing (without it the test redirect would rename every path-built graph, so in a URI-set lane the scoping checks would FAIL — hard RED, not a false pass)
 - test_embedded_concurrency.py
 - test_embedded_durability_claim.py  # #2879: embedded AOF durability drift pin (on-disk appendonlydir measurement)
 - test_embedded_lifecycle.py

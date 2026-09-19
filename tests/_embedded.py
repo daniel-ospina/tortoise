@@ -179,6 +179,16 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_graph_integrity_gate",
     "test_guard",
     "test_hard_reject",
+    # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
+    # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
+    # opener — which is only possible BECAUSE this stem is exempt. Without the
+    # exemption the redirect (the ``FalkorProjection.__init__`` block) would
+    # rename every path-built graph to a per-path ``test_*`` name, so under a
+    # server URI no production name would exist: the probe's ``own=True`` and
+    # the listing filter would assert FAIL, and the opener would return None.
+    # A hard RED, never a false pass. Same carve-out rationale as
+    # test_hosted_backup.
+    "test_cross_tenant_read_isolation",
     "test_hosted_backup",
     "test_migrate_db",
     "test_ops_safety",
