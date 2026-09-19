@@ -922,3 +922,172 @@ def test_p4_uri_required_enforcement(monkeypatch):
     # ... but CARVE_OUT=1 still opts the operator out of the URI-less shape
     monkeypatch.setenv("TORTOISE_TEST_CARVE_OUT", "1")
     _assert_p4_uri_required()
+
+
+# ── #4164: the marked tests must be SELECTED BY THE MARKER in CI ────────────
+# ── #4164: the marked tests must be SELECTED BY THE MARKER in CI ────────────
+# pytest flags that SUBTRACT from a selection, or execute nothing at all. Every
+# spelling argparse accepts is refused: attached short (`-kslow`), `=`-joined
+# long (`--deselect=x`), and the space form.
+_NARROWING_FLAGS = (
+    "-k", "--deselect", "--ignore", "--ignore-glob", "--last-failed", "--lf",
+    "--failed-first", "--new-first", "--stepwise", "--collect-only", "--co",
+    "--setup-only", "--setup-plan", "--fixtures")
+
+
+def _is_narrowing(arg: str) -> bool:
+    """Whether a pytest argument narrows (or empties) the selected set."""
+    for flag in _NARROWING_FLAGS:
+        if arg == flag or arg.startswith(flag + "="):
+            return True
+        # attached short-option value: `-kslow` IS `-k slow` to argparse (a
+        # bare `--keep…` must not match `-k`, hence the single-dash test)
+        if flag.startswith("-") and not flag.startswith("--") \
+                and arg.startswith(flag) and len(arg) > len(flag):
+            return True
+    return False
+
+
+def test_ci_runs_the_embedded_only_marker_selection():
+    """The embedded_only-marked tests must be selected BY THE MARKER, not by a
+    hand-written list.
+
+    #4164: the job that runs them URI-less (`test-d14-hosted-api`) selected
+    `tests/test_hosted_api.py -k "concurrent_first_calls or …"` — a hand list
+    of the five D14 guards (#2188). A hand list can only cover the marks
+    someone remembered, and the rest were collected-and-skipped on every
+    docker leg (the autouse D-2 hook) and executed nowhere: the marked tests
+    in test_audit, test_export_delete, test_index_directory, test_indexes,
+    test_lme_m6_evidence, test_onboard_prompt_ref, test_pack_state and
+    test_session_extraction_modes. Selecting `-m embedded_only` over `tests/`
+    cannot drift — any new marked test, in any file, in any of the three mark
+    forms (per-test decorator, class-level, class-body `pytestmark`) is picked
+    up by the next run with no edit here.
+
+    Pinned as the PROPERTY (a marker-driven selection exists, in a URI-less
+    CARVE_OUT job), never as the job's name or its step text — the job is free
+    to be renamed, and the count of marked tests is free to grow.
+    """
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    workflow = yaml.safe_load(
+        (root / ".github" / "workflows" / "python-ci.yml").read_text())
+    assert isinstance(workflow, dict), "python-ci.yml did not parse as a mapping"
+
+    def _steps(job: dict) -> list[dict]:
+        return list(job.get("steps") or [])
+
+    marker_selections = []
+    for job_name, job in (workflow.get("jobs") or {}).items():
+        job_env = dict(workflow.get("env") or {})
+        job_env.update(job.get("env") or {})
+        for step in _steps(job):
+            run = step.get("run") or ""
+            # the STEP's own env counts too: a URI declared on the step (or
+            # exported inline in the run) leaks exactly as one on the job does
+            step_env = dict(job_env)
+            step_env.update(step.get("env") or {})
+            # Read EVERY shell segment of the run — a marker selection may be
+            # the second command in a block, and the marker selection is
+            # identified per segment: `pytest`-ish words elsewhere (a
+            # `tee /tmp/pytest-d14.log`, a comment) do not carry the marker
+            # and are therefore never read as arguments. A quoted `-m
+            # "embedded_only"` is the same selection, so it is normalized
+            # rather than being a false red.
+            for segment in re.split(r"\|\||&&|[|;]", run.replace("\\\n", " ")):
+                if not re.search(r"-m\s+[\"']?embedded_only[\"']?", segment):
+                    continue
+                marker_selections.append((job_name, step_env, segment, run))
+
+    assert marker_selections, (
+        "no CI job runs `pytest -m embedded_only` — the marked tests are then "
+        "executed only where a hand-written list happens to name them, which "
+        "is the #4164 defect (silently skipped everywhere else)")
+
+    for job_name, step_env, run, whole_step in marker_selections:
+        assert "TORTOISE_DB_URI" not in step_env, (
+            f"{job_name}: the embedded_only marker selection must run with "
+            "TORTOISE_DB_URI UNSET — with a supported URI the autouse D-2 "
+            "hook skips every marked test, so the job would report a silent "
+            "all-skip (the workflow-level, job-level AND step-level env are "
+            "all checked)")
+        assert not re.search(r"\bTORTOISE_DB_URI\s*=", whole_step), (
+            f"{job_name}: the marker selection must not export "
+            "TORTOISE_DB_URI inline (`VAR=… pytest`) — same silent all-skip")
+        assert step_env.get("TORTOISE_TEST_CARVE_OUT") == "1", (
+            f"{job_name}: a URI-less run needs TORTOISE_TEST_CARVE_OUT=1 "
+            "(epic #1647 P4 — default pytest fails without one of the two)")
+        # a step that selects by marker but ALSO names test files is a hand
+        # list wearing a marker flag — the marker flag alone does not make it
+        # drift-free. `-m embedded_only tests/` scans the tree; `-m
+        # embedded_only tests/test_hosted_api.py` is the #2188 shape with one
+        # more flag, and the next marked test in another file stays dark.
+        #
+        # Everything below reads PYTEST's own arguments of THIS segment: the
+        # shell wrapper's flags are not pytest's (`timeout -s INT -k 10 15m`
+        # carries a `-k` that kills the process, not a test filter).
+        #
+        # The invocation is matched as a PATTERN, not as a bare token: the
+        # attached spelling `python -mpytest` is valid and yields no `pytest`
+        # token, which would skip every check below — a fail-OPEN, the one
+        # direction a guard may never take. No invocation but a marker present
+        # is therefore an assertion failure, not a `continue`.
+        invocation = re.search(
+            r"\bpython[0-9.]*\s+-m\s*pytest\b|\bpytest\b", run)
+        assert invocation is not None, (
+            f"{job_name}: the embedded_only marker appears in a run block with "
+            f"no recognisable pytest invocation — this guard cannot read it, "
+            f"and silence is not an option: {run[:200]!r}")
+        args = run[invocation.end():].split()
+
+        def _bare(token: str) -> str:
+            """The token without shell quoting — `"tests/x.py"` IS `tests/x.py`."""
+            return token.replace('"', "").replace("'", "")
+
+        # (a nodeid's PATH half counts: `--deselect tests/x.py::SomeClass`
+        # names a test file while ending in a class name — a documented way to
+        # drop one marked test that neither the file check below nor the
+        # runtime floor would notice)
+        named = [a for a in args if _bare(a).split("::", 1)[0].endswith(".py")]
+        assert not named, (
+            f"{job_name}: the marker selection must scan the test TREE, not "
+            f"name test files — that is a hand list with a marker flag, and "
+            f"the next marked test elsewhere stays dark: {named}")
+        # nor may it be NARROWED after being selected — a narrowing flag
+        # subtracts from the marked set exactly as a hand list would, and a
+        # single subtracted test usually stays above the runtime floor, so
+        # nothing else would report it. Every spelling argparse accepts is
+        # refused: attached short (`-kslow`), `=`-joined long (`--deselect=x`),
+        # and the space form. The list is the pytest surface that can SUBTRACT
+        # from a selection or execute nothing — not just the two flags this
+        # step happens to avoid today (`--collect-only` and friends leave the
+        # job green with nothing run, which the floor only catches when it is
+        # total).
+        narrowing = [a for a in args if _is_narrowing(a)]
+        assert not narrowing, (
+            f"{job_name}: the marker selection must not be narrowed by "
+            f"{narrowing} — a subtracted marked test runs nowhere, which is "
+            f"the #4164 defect behind a normal pytest flag")
+        # and the `-m` value must be EXACTLY the marker: `-m "embedded_only and
+        # not slow"` is an expression that narrows the set while still
+        # containing the token this test searches for. The value is read with
+        # a quote-aware pattern — a whitespace split would stop at the first
+        # word of a quoted expression and call the rest unrelated arguments.
+        pytest_text = " ".join(args)
+        marker_exprs = [
+            match.group(1).strip("\"'")
+            for match in re.finditer(r"-m\s+(\"[^\"]*\"|'[^']*'|\S+)", pytest_text)]
+        assert marker_exprs, (
+            f"{job_name}: could not read the -m value of the marker "
+            f"selection: {run[:120]!r}")
+        for expr in marker_exprs:
+            assert expr == "embedded_only", (
+                f"{job_name}: the marker selection must be exactly "
+                f"`-m embedded_only`, not the expression {expr!r} — an "
+                f"expression selects a subset, and the rest run nowhere")
+        assert any(_bare(a).rstrip("/") in {"tests", "tests/.", "./tests"}
+                   for a in args), (
+            f"{job_name}: the marker selection must target the tests tree "
+            f"(`tests/` as a pytest argument, not a word in the surrounding "
+            f"prose): {run[:120]!r}")
