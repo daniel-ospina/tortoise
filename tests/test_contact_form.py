@@ -846,16 +846,28 @@ def test_rate_limit_map_is_bounded() -> None:
     assert re.search(r"recent\.push\(\s*now\s*\)", body), (
         "the window must be extended with the CURRENT timestamp, or the limiter never trips"
     )
-    # …and the filtered window must REACH that push intact: cycle-15 pinned the
-    # filter's shape, but a plain statement in between — `recent.length = 0;` —
-    # leaves the stored history permanently `[now]`, so the trip can never fire
-    # while the filter, the push and the trip's own pins all still hold
-    # (cycle-19 review). Nothing may touch `recent` between the trip and the push.
-    between = body[_brace_end(body, trip_at) : body.index("recent.push(now)")]
-    assert not re.search(r"\brecent\b", between), (
-        "nothing may mutate the filtered window between the trip and the push: "
-        f"{between.strip()[:60]!r}"
+    # `cutoff` is what the window is filtered BY: `const cutoff = now` (or
+    # `Infinity`) makes every stored entry stale, so the window is always empty and
+    # the trip can never fire — while `RATE_WINDOW_MS` stays "used" by the
+    # `Retry-After` header, so the value pin above still passes (cycle-20 review).
+    cutoff_expr = re.search(r"const cutoff\s*=\s*([^;]+);", body)
+    assert cutoff_expr is not None, "the window cutoff must be derived from RATE_WINDOW_MS"
+    assert re.fullmatch(r"\s*now\s*-\s*RATE_WINDOW_MS\s*", cutoff_expr.group(1)), (
+        f"the cutoff must be `now - RATE_WINDOW_MS`, got {cutoff_expr.group(1).strip()!r}: a "
+        "cutoff that always stales every entry makes the window empty and the trip dead"
     )
+    # …and the filtered window must REACH the trip intact, as well as the push. The
+    # cycle-19 guard began at the trip block, so a plain statement inserted between
+    # the filter and the trip — `recent.length = 0;` — left the window empty before
+    # it was ever measured (cycle-20 review). Neither gap may touch `recent`.
+    window_end = body.index(";", body.index("const recent")) + 1
+    for label, span in (
+        ("the filter and the trip", body[window_end:trip_at]),
+        ("the trip and the push", body[_brace_end(body, trip_at) : body.index("recent.push(now)")]),
+    ):
+        assert not re.search(r"\brecent\b", span), (
+            f"nothing may mutate the filtered window between {label}: {span.strip()[:60]!r}"
+        )
     # The GUARD is part of the cap: inverting it (`<` instead of `>`) disables
     # eviction entirely while the loop below still reads correctly, and the guard
     # sat outside the old slice (cycle-3 review).
