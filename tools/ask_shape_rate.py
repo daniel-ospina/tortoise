@@ -110,6 +110,12 @@ from tools.ask_spotcheck import (  # noqa: E402
     _turn_present,
 )
 
+# Post-#3929 ask-surface seam: ``sdk.ask`` was REMOVED (the ask pipeline moved
+# to ``tortoise/ask_lane.py``, which now owns the entry point ``run_ask_lane``
+# AND the reader seams — the per-namespace reader cache, the reader factory and
+# the reader-complete hook). Drive the lane, never a deleted SDK method.
+from tortoise import ask_lane as ask_lane_mod  # noqa: E402
+
 FIXTURE_REL = os.path.join("tests", "fixtures", "ask_spotcheck_composition.json")
 #: Frozen fixture identity. A changed fixture is a NEW instrument, not a moved
 #: rate — the sha is asserted and there is deliberately NO env override.
@@ -358,8 +364,8 @@ def pinned_reader_env():
 
     ``TORTOISE_API_URL`` is narrowed out too: the LOCAL lane is the surface
     under test, and the fleet shell exports a hosted URL — with it set,
-    ``sdk.ask`` POSTs ``/v1/ask`` to the DEPLOYED service instead of running
-    the pinned tree (measured: a 404 ``ask exposure is not enabled``).
+    ``run_ask_lane`` refuses (hosted mode needs a LOCAL graph; #3929 removed
+    the hosted ``/v1/ask`` surface) instead of running the pinned tree.
     """
     narrowed_keys = (*NARROWED_PROVIDER_KEYS, "TORTOISE_API_URL")
     saved: dict[str, str | None] = {
@@ -512,9 +518,9 @@ def evaluate_question(sdk, question: dict, *, reader_mode: str,
     try:
         if probe is not None:
             probe.arm(question)
-        result = sdk.ask(question["question"],
-                         question_date=_to_iso_date(
-                             question.get("question_date") or ""))
+        result = ask_lane_mod.run_ask_lane(
+            sdk, question["question"],
+            question_date=_to_iso_date(question.get("question_date") or ""))
     except Exception as e:  # noqa: BLE001, RUF100 — per-question FAIL
         # Canonical leg keys: every consumer (_pn, _leg_map, movement_report)
         # reads `l1_abstain`/`l2_provenance`/`l3_grounding`. An exception is a
@@ -657,8 +663,9 @@ class BlankReader:
 
 def _retired_reader_complete(model, *, system: str, user: str):
     """The RETIRED pre-#2280 path: one raw call, blank output passed through
-    (never escalated, never fail-loud), so ``sdk.ask``'s surviving defensive
-    invariant substitutes ``NO_EVIDENCE_TEXT`` and labels it abstained."""
+    (never escalated, never fail-loud), so ``run_ask_lane``'s surviving
+    defensive invariant substitutes ``NO_EVIDENCE_TEXT`` and labels it
+    abstained."""
     raw = model.complete(system=system, user=user)
     return raw, int(getattr(model, "last_completion_tokens", 0) or 0)
 
@@ -837,19 +844,21 @@ def known_green(*, n_questions: int | None = None) -> dict:
         with open(os.path.join(TRANSCRIPTS_DIR, name)) as f:
             tx = json.load(f)
         for attempt in _attempts():
-            sdk_mod._reset_ask_reader_cache_for_tests()
+            ask_lane_mod._reset_ask_reader_cache_for_tests()
             sdk = sdk_mod.TortoiseSDK(_fresh_db(f"kg{attempt}"))
             replay = _ReplayReader(tx["completion"])
-            saved = sdk_mod._default_ask_reader_factory
-            sdk_mod._default_ask_reader_factory = lambda replay=replay: replay
+            saved = ask_lane_mod._default_ask_reader_factory
+            ask_lane_mod._default_ask_reader_factory = \
+                lambda replay=replay: replay
             try:
                 _seed(sdk, tx["seeds"])
-                res = sdk.ask(tx["question"],
-                              question_date=tx.get("question_date"))
+                res = ask_lane_mod.run_ask_lane(
+                    sdk, tx["question"],
+                    question_date=tx.get("question_date"))
             except Exception:  # noqa: BLE001, RUF100 — infrastructure fault
                 sdk.close()
-                sdk_mod._default_ask_reader_factory = saved
-                sdk_mod._reset_ask_reader_cache_for_tests()
+                ask_lane_mod._default_ask_reader_factory = saved
+                ask_lane_mod._reset_ask_reader_cache_for_tests()
                 if attempt != _attempts()[-1]:
                     time.sleep(1.0)
                 continue
@@ -872,9 +881,9 @@ def known_green(*, n_questions: int | None = None) -> dict:
                             "abstained": abstained,
                             "expected_abstained": tx["expected_abstained"]})
         finally:
-            sdk_mod._default_ask_reader_factory = saved
+            ask_lane_mod._default_ask_reader_factory = saved
             sdk.close()
-            sdk_mod._reset_ask_reader_cache_for_tests()
+            ask_lane_mod._reset_ask_reader_cache_for_tests()
     return {"ok": bool(results) and all(r["ok"] for r in results),
             "cases": results}
 
@@ -951,14 +960,14 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
         rec: dict | None = None
         last_err = ""
         for attempt in attempts:
-            sdk_mod._reset_ask_reader_cache_for_tests()
+            ask_lane_mod._reset_ask_reader_cache_for_tests()
             sdk = sdk_mod.TortoiseSDK(_fresh_db(f"m_{arm}_{attempt}"))
             reader = BlankReader() if blank else probe
-            saved = sdk_mod._default_ask_reader_factory
-            sdk_mod._default_ask_reader_factory = lambda r=reader: r
-            saved_arc = sdk_mod._ask_reader_complete
+            saved = ask_lane_mod._default_ask_reader_factory
+            ask_lane_mod._default_ask_reader_factory = lambda r=reader: r
+            saved_arc = ask_lane_mod._ask_reader_complete
             if retired_substitution:
-                sdk_mod._ask_reader_complete = _retired_reader_complete
+                ask_lane_mod._ask_reader_complete = _retired_reader_complete
             try:
                 _seed_memory(sdk, q)
                 if mutation is not None:
@@ -972,10 +981,10 @@ def _run_arm(questions: list[dict], *, arm: str, probe: ProbeReader | None,
                 rec = None
                 last_err = f"{type(e).__name__}: {e}"
             finally:
-                sdk_mod._ask_reader_complete = saved_arc
-                sdk_mod._default_ask_reader_factory = saved
+                ask_lane_mod._ask_reader_complete = saved_arc
+                ask_lane_mod._default_ask_reader_factory = saved
                 sdk.close()
-                sdk_mod._reset_ask_reader_cache_for_tests()
+                ask_lane_mod._reset_ask_reader_cache_for_tests()
             fault = _substrate_error(rec) if rec is not None else None
             designed = bool(
                 fault and expected_error_prefix
@@ -1032,12 +1041,12 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
         receipt["reader_env"] = env_info
         receipt["reader"] = assert_reader_pin()
         import tortoise.sdk as sdk_mod
-        sdk_mod._reset_ask_reader_cache_for_tests()
+        ask_lane_mod._reset_ask_reader_cache_for_tests()
         # The movement arms monkeypatch the reader seam; capture the REAL
         # seam and restore it before the pinned measurement so a leaked
         # patch can never taint the live rate.
-        _real_factory = sdk_mod._default_ask_reader_factory
-        _real_arc = sdk_mod._ask_reader_complete
+        _real_factory = ask_lane_mod._default_ask_reader_factory
+        _real_arc = ask_lane_mod._ask_reader_complete
 
         if args.phase_seed:
             st = seed_timing(questions, n=args.phase_seed)
@@ -1179,16 +1188,16 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                 return EXIT_ADOPT
 
         # ── the live run (REAL pinned reader over all 21) ──────────────────
-        sdk_mod._default_ask_reader_factory = _real_factory
-        sdk_mod._ask_reader_complete = _real_arc
-        sdk_mod._reset_ask_reader_cache_for_tests()
+        ask_lane_mod._default_ask_reader_factory = _real_factory
+        ask_lane_mod._ask_reader_complete = _real_arc
+        ask_lane_mod._reset_ask_reader_cache_for_tests()
         live: list[dict] = []
         for i, q in enumerate(questions):
             rec: dict | None = None
             last_err = ""
             live_attempts = _attempts()
             for attempt in live_attempts:
-                sdk_mod._reset_ask_reader_cache_for_tests()
+                ask_lane_mod._reset_ask_reader_cache_for_tests()
                 sdk = sdk_mod.TortoiseSDK(_fresh_db(f"live_{attempt}"))
                 try:
                     _seed_memory(sdk, q)
@@ -1201,7 +1210,7 @@ def run_full(args, questions: list[dict], fixture_shape: dict) -> int:
                     last_err = f"{type(e).__name__}: {e}"
                 finally:
                     sdk.close()
-                    sdk_mod._reset_ask_reader_cache_for_tests()
+                    ask_lane_mod._reset_ask_reader_cache_for_tests()
                 if rec is not None and _substrate_error(rec) is None:
                     rec["attempts"] = attempt
                     break

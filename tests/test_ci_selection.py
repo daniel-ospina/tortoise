@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.ci_selection import (  # noqa: I001
-    SOURCE_PATTERNS, load_manifest, select, integrity, slow_file_issues,
+    SOURCE_PATTERNS, SHARED_MODULES, load_manifest, select, integrity, slow_file_issues,
     unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
     surface_audit, render_surface_audit, duplicate_entries,
 )
@@ -56,9 +56,10 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     added; no slow leg, no carve-out leg.
     """
     for changed in (["website/docs.html"], ["website/faq.html"],
-                    ["website/welcome.html"], ["website/self-hosted.html"],
+                    ["website/apps/dashboard/public/welcome.html"],
+                    ["website/self-hosted.html"],
                     ["website/product.html"], ["website/index.html"],
-                    ["website/signup.html"], ["website/signin.html"],
+                    ["website/apps/dashboard/public/signup.html"],
                     ["website/privacy.html"],
                     ["docs/README.md", "website/self-hosted.html"]):
         r = _sel(changed)
@@ -101,6 +102,97 @@ def test_every_source_pattern_is_selectable():
     )
 
 
+def _tracked_files(root: Path) -> list[str]:
+    """The TRACKED file set — what `select()` reasons about, and what CI sees.
+
+    `git ls-files`, deliberately not `os.walk`. A walk is both slower and WRONG:
+    it counts untracked local build artifacts, and this repo carries ~148 sibling
+    checkouts under `.worktrees/` (measured: ~720k files / ~23s walked, vs ~2.4k
+    files / ~0.9s tracked). A dead entry could then look alive locally while
+    failing in CI — a false negative in exactly the environment a developer runs
+    in. `node_modules` is NOT excluded either: parts of it are tracked here, so
+    excluding it would diverge from git in the other direction.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:  # no git binary at all
+        raise AssertionError(
+            "git is not on PATH, so the tracked set is unknown — this test "
+            f"cannot decide liveness: {exc}"
+        ) from exc
+    # check=False + an explicit assert, rather than check=True: check=True would
+    # raise a bare CalledProcessError with no context, so an sdist export with no
+    # `.git`, or `fatal: detected dubious ownership`, would look like every entry
+    # being dead rather than like a broken environment.
+    assert proc.returncode == 0, (
+        "git ls-files failed, so the tracked set is unknown — this test cannot "
+        "decide liveness and must not report every entry as dead: "
+        + proc.stderr.decode("utf-8", "replace").strip()
+    )
+    return [p for p in proc.stdout.decode("utf-8").split("\0") if p]
+
+
+def test_source_patterns_all_name_something_real():
+    """Every SOURCE_PATTERNS entry must name a file (or directory) that EXISTS.
+
+    Why this exists — #4171. The admin-origin move DELETED
+    `website/functions/admin/[[path]].ts`, and its SOURCE_PATTERNS entry stayed.
+    That is not cosmetic staleness: entries are matched with `startswith`, never
+    against the filesystem, so a deleted path keeps "selecting" its surface for a
+    file nobody can edit. The PR that moves a guarded file to a new path
+    therefore selects NO surface for the new location, and the guard written for
+    that exact file silently stops running — the #1349/#3332 silent-drop class,
+    reached through a door the existing ratchet does not cover.
+
+    `test_every_source_pattern_is_selectable` cannot see this failure: a dead
+    path still matches its OWN pattern, so it "runs" its surface fine — there is
+    simply nothing left that can edit it. This is a third FORWARD check
+    (entry -> exists), NOT the reverse direction (guarded path -> has an entry),
+    which is still hand-pinned per guard wherever an author remembered to (see
+    `test_website_docs_consistency.py::test_every_guard_input_is_selectable_by_ci`).
+    The reverse direction remains the open half of this class.
+
+    Existence is checked against the tracked set, in the two shapes
+    SOURCE_PATTERNS actually uses. No glob branch: no entry is a glob, and
+    `select()` itself has no glob support, so a glob-shaped entry satisfied here
+    would still select nothing — the test would bless a dead entry.
+    """
+    root = Path(__file__).resolve().parents[1]
+    tracked = set(_tracked_files(root))
+
+    def names_something_real(pattern: str) -> bool:
+        # A real tracked path is always live.
+        if pattern in tracked:
+            return True
+        # Otherwise it must name a SUBTREE, anchored on the separator. `select()`
+        # matches with `startswith`, so a directory entry is live with OR without
+        # its trailing slash (`tortoise/onboarding` and `tortoise/onboarding/`
+        # both match). Reporting the slash-less form as "names NOTHING" would be
+        # false — it IS live — and would disagree with
+        # `test_every_source_pattern_is_selectable`, which accepts it.
+        return any(f.startswith(pattern.rstrip("/") + "/") for f in tracked)
+
+    dead = sorted(
+        f"[{surface}] {pat}"
+        for surface, pats in SOURCE_PATTERNS.items()
+        for pat in pats
+        if not names_something_real(pat)
+    )
+
+    assert not dead, (
+        "SOURCE_PATTERNS entries naming NOTHING tracked — a deleted or moved "
+        "guarded path keeps its entry, so a change to the file's NEW location "
+        "selects no surface and its guard silently stops running (#4171). "
+        "Repoint the entry at the new path, or delete it:\n  "
+        + "\n  ".join(dead)
+    )
+
+
 def test_unrelated_website_change_stays_tier1():
     """SITE_CARVEOUTS is not a wholesale `website/` removal.
 
@@ -123,7 +215,7 @@ def test_onboarding_change_selects_onboarding():
 
 
 def test_ep_change_selects_ep():
-    r = _sel(["tortoise/decide.py"])
+    r = _sel(["tortoise/ranking.py"])
     assert r["full"] is False
     assert r["surfaces"] == ["ep"]
     assert "test_decide.py" in r["test_files"]
@@ -135,6 +227,21 @@ def test_shared_module_goes_full():
     assert r["test_files"] == "ALL"
     r2 = _sel(["tests/conftest.py"])
     assert r2["full"] is True
+
+
+def test_every_shared_module_entry_selects_the_full_matrix():
+    """#4097: `SHARED_MODULES` is a hand-maintained list, so derive its invariant here.
+
+    `test_shared_module_goes_full` pins two literal examples; a future entry that is
+    added (or a cross-cutting leaf like `tortoise/env_truthy.py` that is REMOVED) would
+    otherwise silently downgrade to `core`-only and stop running the consumer suites.
+    """
+    py_modules = [m for m in SHARED_MODULES if m.endswith(".py")]
+    assert py_modules, "SHARED_MODULES should list python modules"
+    for module in py_modules:
+        result = _sel([module])
+        assert result["full"] is True, f"{module} is in SHARED_MODULES but selects {result}"
+        assert result["test_files"] == "ALL", module
 
 
 def test_unknown_path_goes_full():
@@ -184,7 +291,7 @@ def test_session_import_change_selects_the_window_guard():
 
 
 def test_two_surfaces_union():
-    r = _sel(["tortoise/decide.py", "tortoise/onboarding/SKILL.md"])
+    r = _sel(["tortoise/ranking.py", "tortoise/onboarding/SKILL.md"])
     assert r["full"] is False
     assert set(r["surfaces"]) == {"ep", "onboarding"}
 
@@ -367,13 +474,13 @@ def test_slow_files_never_in_fast_gate_selections():
     assert slow, "slow_files must be non-empty"
     assert not (set(m["tier1"]) & slow), "tier1 leaks a slow file"
 
-    docs = _sel(["docs/README.md", "website/welcome.html"])
+    docs = _sel(["docs/README.md", "website/apps/dashboard/public/welcome.html"])
     assert not (set(docs["test_files"]) & slow), "docs-only tier-1 leaks slow files"
 
     core = _sel(["tortoise/graph.py", "tortoise/ingest.py"])
     assert not (set(core["test_files"]) & slow), "tier-2 core leaks slow files"
 
-    ep = _sel(["tortoise/decide.py", "tortoise/ranking.py"])
+    ep = _sel(["tortoise/ranking.py", "tortoise/analyze.py"])
     assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
 
 
@@ -388,7 +495,7 @@ def test_slow_files_emitted_on_every_return_path():
         (["docs/README.md"], "pull_request"),
         (["tortoise/sdk.py"], "pull_request"),
         (["mystery-dir/x.py"], "pull_request"),
-        (["tortoise/decide.py"], "pull_request"),
+        (["tortoise/ranking.py"], "pull_request"),
     ]:
         r = select(changed, event, m)
         assert "slow_files" in r, f"missing slow_files for {changed}/{event}"
@@ -409,7 +516,7 @@ def test_diff_gate_keys_emitted_on_every_return_path():
         (["docs/README.md"], "pull_request"),
         (["tortoise/sdk.py"], "pull_request"),
         (["mystery-dir/x.py"], "pull_request"),
-        (["tortoise/decide.py"], "pull_request"),
+        (["tortoise/ranking.py"], "pull_request"),
     ]:
         r = select(changed, event, m)
         for key in ("slow_run", "slow_selected", "carve_out_run"):
@@ -458,9 +565,9 @@ def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
 def test_tier2_slow_run_scoped_to_matched_surfaces():
     """#2148: tier-2 PRs run only their matched surfaces' slow files. ep
     owns test_dream / test_ep_sources / test_source_inheritance_own — a
-    decide.py-only PR selects exactly those (never the full 24-file leg
+    ranking.py-only PR selects exactly those (never the full 24-file leg
     set), and the carve-out job skips (ep owns no carve-out file)."""
-    r = _sel(["tortoise/decide.py"])
+    r = _sel(["tortoise/ranking.py"])
     assert r["full"] is False and r["surfaces"] == ["ep"]
     assert r["slow_run"] is True
     assert r["carve_out_run"] is False
@@ -827,7 +934,7 @@ def test_real_workflow_halves_are_consistent():
 
 def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg. Epic
-    #1647 Task 9: the 17-file carve-out set is its OWN leg (E2E-4) — it is
+    #1647 Task 9: the carve-out set is its OWN leg (E2E-4) — it is
     excluded from fast AND slow docker legs."""
     from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
     m = load_manifest()
@@ -850,6 +957,44 @@ def test_push_legs_partitions_every_classified_file():
     assert set(legs["carve_out"]) == carve, "carve_out leg must be exactly the config set"
     # bench push_extra lands in half b
     assert any(f.startswith("bench/") for f in legs["half_b"])
+
+
+def test_carve_out_mirrors_test_no_redirect_stems():
+    """#4047: `carve_out:` and `TEST_NO_REDIRECT_STEMS` are one set in two homes.
+
+    `config/ci-surfaces.yml`'s `carve_out:` routes a file to the URI-unset
+    carve-out job and bars it from every docker leg; `tests/_embedded.py`'s
+    `TEST_NO_REDIRECT_STEMS` is the redirect exemption that keeps a module
+    embedded if it is executed with a URI set. A stem in only ONE of them is a
+    silent hole, in opposite directions (see the failure message).
+
+    Scope, stated honestly: this pin catches ONE-LIST-ONLY drift. It does NOT
+    catch #4047's own shape — the fork guards were missing from BOTH lists, so
+    the two sets were EQUAL then and this assertion passed on the pre-fix tree.
+    That shape is caught by the source scan in
+    `tests/test_markers.py::test_module_level_embedded_only_modules_are_carve_out`;
+    the two guards cover different holes and neither subsumes the other.
+    """
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    m = load_manifest()
+    # The one documented asymmetry: the bench smoke file is path-qualified in
+    # the manifest (`bench/...`) and bare-stem keyed in the registry. The
+    # registry/redirect mechanism is itself stem-keyed, so a collapse can only
+    # happen where the stem genuinely collides.
+    carve = {f.removesuffix(".py").removeprefix("bench/") for f in m["carve_out"]}
+    registry = set(TEST_NO_REDIRECT_STEMS)
+    assert carve == registry, (
+        "carve_out and TEST_NO_REDIRECT_STEMS have drifted — a stem in only "
+        "one of the two registries is a silent hole: "
+        f"registry-only={sorted(registry - carve)} — in the redirect registry "
+        "but NOT routed to the carve-out job, so a full (URI-set) selection "
+        "collects it on a docker leg and skips its embedded_only-marked tests "
+        "there; with a module-level mark that is the whole file, reported "
+        "green. "
+        f"carve-out-only={sorted(carve - registry)} — routed to the carve-out "
+        "job but not redirect-exempt, so an out-of-band URI run would flip its "
+        "embedded constructions to the server lane instead of the embedded "
+        "daemon")
 
 
 def test_integrity_no_matrix_drift():
@@ -1293,8 +1438,8 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
 
 
 def test_carve_out_job_uri_unset_with_carve_out_flag():
-    """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the 17-file
-    embedded set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
+    """E2E-4 (Task 9 Step 5): the dedicated carve-out job runs the embedded
+    set URI-UNSET (no TORTOISE_DB_URI — a URI would redirect the
     carve-out to the server lane) with TORTOISE_TEST_CARVE_OUT=1 (the P4
     enforcement-prep escape), and consumes the changes job's carve_out
     output as its file list."""
@@ -1703,7 +1848,7 @@ def test_drift_gate_cannot_skip_the_test_matrix():
 _AUDIT_SOURCES = {
     "tortoise/hosted_api.py": "",
     "tortoise/api.py": "",
-    "tortoise/decide.py": "",
+    "tortoise/ranking.py": "",
     "tortoise/sdk.py": "",
     "tortoise/ep.py": "",
     "tortoise/exceptions.py": "",

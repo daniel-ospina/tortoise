@@ -55,6 +55,7 @@ from tortoise.capture_receipts import (  # #3809: ONE key definition
 from tortoise.capture_receipts import (
     capture_receipt_key as _capture_receipt_key,
 )
+from tortoise.env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -4467,7 +4468,7 @@ def _control_plane_unavailable() -> HTTPException:
     handler as a raw 500, which the client rendered as the misleading
     "Invalid API key.". This 503 carries a structured error_code the client
     maps to the unified unavailable copy (copy-string contract with
-    website/signup.html: "Sign-in is temporarily unavailable — try again in
+    website/apps/dashboard/public/signup.html: "Sign-in is temporarily unavailable — try again in
     a moment.").
     """
     return HTTPException(
@@ -6024,8 +6025,7 @@ def _signup_email_confirm() -> bool:
     Supabase's SMTP project-wide email-send bucket). false|0|no|off (case-insensitive) opt
     back into the confirmation-email funnel.
     """
-    val = os.environ.get("TORTOISE_SIGNUP_EMAIL_CONFIRM", "true").strip().lower()
-    return val not in ("false", "0", "no", "off")
+    return env_flag("TORTOISE_SIGNUP_EMAIL_CONFIRM", True)
 
 
 def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
@@ -8320,6 +8320,59 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                        f"for this capture exceeds {max_points}. Upgrade your plan.",
             )
 
+        # #3665 (lane B7): the COHORT COST CAP — the pre-spend gate. It lives
+        # in the SAME guard as the points estimate for the same reason: a
+        # replay (``session_existed``, capture_ok) writes no nodes and runs no
+        # extraction, so it spends nothing and must never be 402-blocked
+        # (#1727's lesson); a TRUE-retry (#2335 WI-2b) re-runs extraction and
+        # therefore CAN be refused. Placed here — before the turn-write loop
+        # and both extraction calls — so a trip refuses the capture before the
+        # capture's OWN writes: no Session MERGE, no turn Points, no
+        # ``capture_ok``, no receipt, and the transcript stays on the user's
+        # machine, retryable verbatim. (The 402 itself still records the
+        # per-harness ``session_capture_last_error_*`` key in the wrapper, the
+        # same as every other refusal, and files an incident — neither is
+        # capture data.) Refusing anywhere later would leave ``capture_ok``
+        # NULL and turn the next same-``session_id`` POST into a silent
+        # zero-extract replay (the hazard ``_reserve_capture_slot`` documents).
+        #
+        # The error pair is the house contract: a ``QuotaExceededError``
+        # subclass → 402 (REST) / ``ERR_QUOTA`` (MCP); ``QuotaCheckError`` →
+        # 500, fail-closed, never a silent pass.
+        #
+        # Off the event loop: the cap's resolution reads the control plane with
+        # a synchronous ``httpx`` client, and this API runs a single uvicorn
+        # worker — pricing a cohort inline would stall every concurrent request
+        # for two round-trips (the #2988/#3498 class, same as the analytics
+        # emit below). ``to_thread`` copies the contextvars, so the
+        # selfhost-transport exemption still applies inside the worker.
+        from tortoise.cohort_cost import (
+            CohortCostCapExceeded,
+            enforce_cohort_cost_cap,
+            file_cohort_cost_incident,
+        )
+        try:
+            await asyncio.to_thread(enforce_cohort_cost_cap, org)
+        except CohortCostCapExceeded as e:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "cohort_cost_cap_refusal org=%r cohort_since=%r spent=%.6f "
+                "cap=%.2f period=%r harness=%r",
+                org.get("org_id"), e.incident_detail.get("cohort_since"),
+                e.incident_detail.get("spent_usd", 0.0),
+                e.incident_detail.get("cap_usd", 0.0),
+                e.incident_detail.get("period"), body.harness)
+            # The incident is network-bound (GitHub issue + Telegram) — filed
+            # OFF the event loop. This API runs a single uvicorn worker, so an
+            # inline synchronous POST here would stall every concurrent
+            # request for the round-trip (the #2988/#3498 sync-HTTP class).
+            await asyncio.to_thread(
+                file_cohort_cost_incident, org["org_id"], e.incident_detail)
+            raise HTTPException(status_code=402, detail=str(e)) from None
+        except QuotaCheckError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Quota check failed: {e}") from None
+
     _check_org_limit(org, "sessions")
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
@@ -8833,6 +8886,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         try:
             _cost_props = _capture_cost_props(session_id, meta)
             if _cost_props is not None:
+                # #3665 (lane B7): the SAME measured cost onto the durable
+                # per-period LEDGER, beside the analytics row it already
+                # writes. #3359's analytics row is a measurement, not a
+                # ledger: nothing keyed by org+period, so a spend CEILING
+                # could only read it by scanning every capture row in the
+                # period. The ledger row is one per (org, period) — the read
+                # side `cohort_cost.enforce_cohort_cost_cap` gates on.
+                # Best-effort by contract (record_capture_usage swallows its
+                # own failures): metering never blocks a committed capture.
+                # Off the event loop for the same reason as the emit below —
+                # the Supabase RPC and the embedded registry write are both
+                # blocking I/O and this API runs a single uvicorn worker.
+                from tortoise.metering import record_capture_usage
+                await asyncio.to_thread(
+                    record_capture_usage, org["org_id"],
+                    cost_usd=float(_cost_props.get("cost_usd") or 0.0))
                 # Off the event loop: `_track_analytics_event` POSTs
                 # synchronously (`httpx.Client`), and this API runs a single
                 # uvicorn worker — calling it inline stalls EVERY concurrent
@@ -17000,7 +17069,7 @@ def _linking_available() -> bool:
     via the Management API). Fail-closed: False until explicitly enabled —
     the banner's promise-free variant and the link-intent 503 depend on it.
     """
-    return os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED", "") == "1"
+    return is_truthy(os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED"))
 
 
 def _identity_admin_user(user_id: str) -> dict | None:
@@ -17974,6 +18043,15 @@ async def session_context(org: dict = Depends(get_current_org_gated)):  # noqa: 
         raise HTTPException(status_code=500, detail="Context unavailable")  # noqa: B904
 
 
+def _volunteer_slo_enforced() -> bool:
+    """`TORTOISE_VOLUNTEER_ENFORCE_SLO` — perf lane / induced-timeout tests only.
+
+    #4097: the single resolution point for that knob (``volunteer_context`` calls
+    it), through the declared truthy contract.
+    """
+    return is_truthy(os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO"))
+
+
 @app.post("/v1/context")
 async def volunteer_context(
     body: VolunteerContextRequest,
@@ -18040,8 +18118,7 @@ async def volunteer_context(
     # so a slow CI machine can never randomly empty a healthy request; the
     # HARD ceiling (8 × SLO) below degrades ANY pathological read (never 503,
     # never a hung caller) with the same fail-open shape.
-    enforce_slo = os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO", "").strip() \
-        .lower() in ("1", "true", "yes", "on")
+    enforce_slo = _volunteer_slo_enforced()
     completed = False
     try:
         # #1676 offload: the canonical pipeline is CPU/DB-blocking (hybrid
@@ -19936,7 +20013,7 @@ def _telemetry_strict() -> bool:
 
     Reading it at import time would both (a) make the flag untestable and
     (b) let a dev flag set before boot survive into production."""
-    return os.environ.get(_TELEMETRY_STRICT_ENV) == "1"
+    return is_truthy(os.environ.get(_TELEMETRY_STRICT_ENV))
 
 
 def _report_unregistered(where: str, subject: str,
