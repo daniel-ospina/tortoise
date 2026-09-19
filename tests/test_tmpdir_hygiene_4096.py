@@ -2,8 +2,9 @@
 
 `tests/test_validity_windows.py` `mkdtemp`-ed a tree per test and its finalizer only
 closed the SDK, so 5,725 `tortoise_validity_test_*` dirs accumulated on the dev box
-(and 52 sibling fixtures leaked the same way across 47 files, including three that
-create their tree in a same-module helper).
+(and 52 sibling fixtures leaked the same way across 47 files — 49 direct, 2 that
+create their tree in a same-module helper, plus `conftest.py::test_user`, flagged
+transitively because it depends on the `provision_test_user` fixture).
 
 This is the regression guard for the class: an AST scan over ``tests/`` that fails
 if any ``@pytest.fixture`` reaches ``tempfile.mkdtemp`` without also reaching a
@@ -14,8 +15,11 @@ session-scoped shared trees are reclaimed at the very end of the run by
 sweeps need their socket/pid evidence).
 
 Fixture roots are collected with ``ast.walk``, so fixtures nested in a ``class``
-(or any other body) are covered, not just module-level ``def``s. Same-module call
-chains are resolved (a fixture is clean if a helper it calls reclaims).
+(or any other body) are covered, not just module-level ``def``s. Call chains are
+resolved against every function in the module (module-level, class-body, nested),
+so a fixture that creates or reclaims its tree through a class-body helper is
+resolved too. Resolution is BY NAME, so a same-named helper in an unrelated scope
+can satisfy the reclaim check — a false negative, not a false positive.
 
 Known gap, documented rather than silent: cross-module helper resolution is not
 implemented — a fixture whose tree is created by a helper imported from another
@@ -87,10 +91,12 @@ def _references_any(node: ast.AST, names: set[str]) -> bool:
 def scan_source(src: str, label: str) -> list[str]:
     """Return ``<label>:<line> <fixture>`` for every leaking fixture in ``src``."""
     tree = ast.parse(src, filename=label)
-    module_funcs = {
-        n.name: n for n in tree.body
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    # Index every function (module-level, class-body, nested) so a fixture that
+    # creates or reclaims its tree in a class-body helper resolves too.
+    module_funcs: dict[str, ast.AST] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            module_funcs.setdefault(n.name, n)
     out: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -223,6 +229,18 @@ def test_reclaim_tmpdirs_removes_the_tree():
     assert os.path.isdir(d)
     assert reclaim_tmpdirs([d]) == 1
     assert not os.path.exists(d)
+
+
+def test_drain_session_tmpdirs_removes_and_clears(monkeypatch):
+    """`_reclaim_session_tmpdirs`'s body must remove the registered trees AND
+    empty the registry — otherwise a session tree leaks and a later drain
+    re-removes a stale path."""
+    from tests import _embedded
+    d = tempfile.mkdtemp(prefix="tortoise_reclaim_test_")
+    monkeypatch.setattr(_embedded, "SESSION_TMPDIRS", [d])
+    assert _embedded.drain_session_tmpdirs() == 1
+    assert not os.path.exists(d)
+    assert _embedded.SESSION_TMPDIRS == []
 
 
 def test_shared_embedded_db_registers_its_tree(shared_embedded_db):

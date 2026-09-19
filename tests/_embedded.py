@@ -31,11 +31,11 @@ from tortoise.projection import FalkorProjection
 
 # #4096: session-scoped test trees created by fixtures in this module and in
 # tests/conftest.py. They are reclaimed by `conftest.py::_reclaim_session_tmpdirs`,
-# which is declared BEFORE the hygiene fixtures so pytest's reverse-order teardown
-# runs it LAST — after `_redislite_hygiene` / `_server_graph_hygiene` have used the
-# socket/pid evidence inside these trees. A local `rmtree` in the shared fixture's
-# own finalizer would run first, destroy that evidence, and could orphan a live
-# redislite server (the #4068/#1005 class).
+# which `_redislite_hygiene` declares as a dependency so pytest's reverse-order
+# teardown runs it LAST — after `_redislite_hygiene` / `_server_graph_hygiene` have
+# used the socket/pid evidence inside these trees. A local `rmtree` in the shared
+# fixture's own finalizer would run first, destroy that evidence, and could orphan
+# a live redislite server (the #4068/#1005 class).
 SESSION_TMPDIRS: list[str] = []
 
 
@@ -53,6 +53,16 @@ def reclaim_tmpdirs(dirs: list[str]) -> int:
     for d in dirs:
         shutil.rmtree(d, ignore_errors=True)
     return len(dirs)
+
+
+def drain_session_tmpdirs() -> int:
+    """Drain + reclaim ``SESSION_TMPDIRS`` (the session reclaimer's body).
+
+    Split from the fixture so the drain-and-clear behaviour is unit-testable
+    without driving a session-scoped pytest fixture.
+    """
+    dirs, SESSION_TMPDIRS[:] = list(SESSION_TMPDIRS), []
+    return reclaim_tmpdirs(dirs)
 
 
 # ── #3546: ONE process-wide embedded construction lock ────────────────────
@@ -275,12 +285,15 @@ def has_falkor() -> bool:
         try:
             from redislite.falkordb_client import FalkorDB  # noqa: F401
             tmpdir = tempfile.mkdtemp(prefix="tortoise_probe_")
-            db_path = os.path.join(tmpdir, "probe.db")
-            proj = FalkorProjection(db_path, graph_name="test")
-            proj.close()
-            # #4096: reclaim the probe tree — one per process before _HAS_FALKOR
-            # caches, and the reaper never reaps a .db-only tree.
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            try:
+                db_path = os.path.join(tmpdir, "probe.db")
+                proj = FalkorProjection(db_path, graph_name="test")
+                proj.close()
+            finally:
+                # #4096: reclaim the probe tree even if construction/close raises
+                # — one per process before _HAS_FALKOR caches, and the reaper
+                # never reaps a .db-only tree.
+                shutil.rmtree(tmpdir, ignore_errors=True)
             _HAS_FALKOR = True
         except Exception:
             _HAS_FALKOR = False

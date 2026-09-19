@@ -206,22 +206,18 @@ def _reclaim_session_tmpdirs():
     sweeps) would destroy that evidence and could orphan a live redislite server
     (#4068/#1005).
 
-    Declared before the hygiene fixtures, `autouse`, and with no dependency on the
-    shared fixtures: pytest tears session fixtures down in reverse setup order, so
-    this is set up early (regardless of which tests request the shared trees) and
-    torn down LAST — after both sweeps. It reads the registry the shared fixtures
-    populate (`tests._embedded.SESSION_TMPDIRS`).
-
-    The teardown-last edge is **structural, not alphabetical**: `_redislite_hygiene`
-    declares this fixture as a dependency, so setup runs reclaim -> redislite ->
-    server_graph and reverse-order teardown runs server_graph -> redislite ->
-    reclaim. (pytest orders same-scope autouse fixtures by NAME, not declaration
-    order — a rename would silently invert a declaration-order assumption.)
+    `autouse`, and with no dependency on the shared fixtures, so it is set up
+    regardless of which tests request the shared trees; it reads the registry they
+    populate (`tests._embedded.SESSION_TMPDIRS`). The teardown-last edge is
+    **structural, not alphabetical**: `_redislite_hygiene` declares this fixture as
+    a dependency, so setup runs reclaim -> redislite -> server_graph and
+    reverse-order teardown runs server_graph -> redislite -> reclaim. (pytest orders
+    same-scope autouse fixtures by NAME, not declaration order — a rename would
+    silently invert a declaration-order assumption.)
     """
     yield
     from tests import _embedded as _embedded_mod
-    dirs, _embedded_mod.SESSION_TMPDIRS[:] = list(_embedded_mod.SESSION_TMPDIRS), []
-    _embedded_mod.reclaim_tmpdirs(dirs)
+    _embedded_mod.drain_session_tmpdirs()
 
 
 @pytest.fixture
