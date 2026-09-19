@@ -88,11 +88,12 @@ from tortoise.sdk import (
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
-    _capture_turn_embedding_plan,  # #4194: per-turn prior-hash + local-embedder batch
+    _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_texts,  # #4194: the ONE stored-turn text definition (shared with the embed batch)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _emit_capture_observation,  # #2335 WI-1d: observation leg (hosted lane tag)
+    _existing_turn_hashes,  # #4194: prior content_hash for the write's preserve/clear guard
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
@@ -8411,21 +8412,25 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #3551 tracks collapsing all three onto one shared
     # primitive. The LLM extraction that follows the
     # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
-    # #4194: embed the turns that need it BEFORE the loop (new / content-
-    # changed / no stored vector), in ONE local-model call, using the same
-    # embedder `create_point` stores from and the read path encodes queries
-    # with. Fail-soft: `None` per turn when no embedder is available — the
-    # turn is still stored and the read path declares its vector leg impaired.
+    # #4194: embed the whole window BEFORE the loop — the stored text of each
+    # turn, exactly as the loop writes it — in ONE local-model call, using the
+    # same embedder `create_point` stores from and the read path encodes queries
+    # with. Every turn is re-encoded every capture so a model rotation
+    # self-heals. Fail-soft: `None` per turn when no embedder is available —
+    # the turn is still stored and the read path declares its vector leg
+    # impaired. The prior content_hash (for the write's preserve/clear
+    # decision) is read on the loop; only the encode is offloaded.
     #
-    # #4194/#3086: the pre-read + encode run OFF the event loop on the capture
-    # pool. The turn loop itself is a tracked on-loop residual (#3086); the
-    # local-model encode over a capture window must not add to it. SDK
-    # `capture_session` is synchronous (there is no loop to free) and calls the
-    # same helper inline — the two share the helper, not the scheduling.
+    # #4194/#3086: the encode runs OFF the event loop on the capture pool. The
+    # turn loop itself is a tracked on-loop residual (#3086); the local-model
+    # encode over a capture window must not add to it. SDK `capture_session`
+    # is synchronous (there is no loop to free) and calls the same helper
+    # inline — the two share the helper, not the scheduling.
     _turn_texts = _capture_turn_texts(windowed)
-    _turn_prior_hashes, _turn_embs = await _run_off_loop(
-        _CAPTURE_EXECUTOR, _capture_turn_embedding_plan,
-        proj, session_id, _turn_texts)
+    _turn_ids = [f"{session_id}_t{i}" for i in range(len(_turn_texts))]
+    _turn_prior, _turn_prior_ok = _existing_turn_hashes(proj, _turn_ids)
+    _turn_embs = await _run_off_loop(
+        _CAPTURE_EXECUTOR, _capture_turn_embeddings, _turn_texts)
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))
         # P1 #1529 (D10, #721 parity): the stored text (and its isinstance-first
@@ -8446,7 +8451,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         turn_id = f"{session_id}_t{i}"
         turn_text = _turn_texts[i]
         turn_embedding = _turn_embs[i]
-        turn_prior_hash = _turn_prior_hashes[i]
+        turn_prior_hash = _turn_prior.get(_turn_ids[i])
         _turn_rows = proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
@@ -8456,19 +8461,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "    t.createdAt=coalesce(t.createdAt, $now), "
             "    t.updatedAt=$now, t.content_hash=$ch, "
             # #4194: three-way guard. New vector if we encoded one; else
-            # PRESERVE the stored vector only when the content is UNCHANGED
-            # (`$prior_ch = $ch`, read pre-write — never `t.content_hash`,
-            # which this same SET reassigns); else CLEAR it, because a
-            # preserved vector for changed text would rank the turn by text no
-            # longer on the node (the dense-leg lie).
+            # PRESERVE the stored vector when the prior is UNKNOWN (probe
+            # failed — an unknown prior is not a changed prior) or when the
+            # content is UNCHANGED (`$prior_ch = $ch`, read pre-write — never
+            # `t.content_hash`, which this SET reassigns); else CLEAR it,
+            # because a preserved vector for changed text would rank the turn
+            # by text no longer on the node (the dense-leg lie).
             "    t.embedding=CASE WHEN $emb IS NOT NULL THEN vecf32($emb) "
+            "        WHEN $prior_ok = false THEN t.embedding "
             "        WHEN $prior_ch = $ch THEN t.embedding ELSE NULL END "
             "RETURN t.createdAt AS createdAt, t.status AS status",
             params={"id": turn_id, "c": turn_text, "k": "event",
                     "speaker": role, "s": "draft", "now": now,
                     "ch": _content_hash(turn_text),
                     "emb": turn_embedding,
-                    "prior_ch": turn_prior_hash},
+                    "prior_ch": turn_prior_hash,
+                    "prior_ok": _turn_prior_ok},
         ).result_set
         # #3947 review (F4 + parity): the write's COALESCE owns the stored
         # timestamp and status — a RE-capture keeps the original createdAt and
