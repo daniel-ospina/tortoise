@@ -182,8 +182,8 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
     # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
     # opener. The class-level test redirect (the redirect block in
-    # ``Projection.__init__``, projection/__init__.py) renames every path-built
-    # graph to ``test_{db-file-basename}_{sha1(session+path+name)[:12]}``, so
+    # ``FalkorProjection.__init__``, projection/__init__.py) renames every
+    # path-built graph to ``test_{db-file-basename}_{sha1(session+path+name)[:12]}``, so
     # under a server URI no production name exists: the probe's ``own=True``
     # and the listing filter assert FAIL, and the opener returns None. A hard
     # RED, never a false pass. Same carve-out rationale as test_hosted_backup.

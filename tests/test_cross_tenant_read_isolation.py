@@ -236,7 +236,12 @@ def xtenant(tmp_path_factory):
                         "tid": _ORG_IDS[t]})
 
         # Session-capture consent + self-verify (mirrors test_hosted_api's
-        # fixture: a silent no-op here would 403 every capture downstream).
+        # fixture). The seed is asserted here because neither downstream gate
+        # would catch a silent no-op: an ABSENT onboarding_state is not fatal
+        # at all (``_get_onboarding_state`` auto-initializes the defaults,
+        # where ``session_recording`` is True), and a recording flag that read
+        # back False surfaces at capture as a 409 state-conflict — the
+        # recording gate's status, NOT the old 403 consent error.
         for t in ("A", "B"):
             state = ha._update_onboarding_state(
                 _ORG_IDS[t], session_recording=True)
