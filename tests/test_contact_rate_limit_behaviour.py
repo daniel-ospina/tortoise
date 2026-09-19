@@ -43,6 +43,17 @@ for them). The window's SEMANTICS are verified against the declared constant; th
 constant's magnitude is a product choice pinned only loosely in
 `test_contact_form.py`, so a shorter-but-sane window does not red here.
 
+THE DECLARED LIMIT. `MUTATIONS` is not a proof that the invariants catch every
+reachable change: it is the list of escapes we know, each asserted caught. Review
+cycles here have each found a class the previous battery missed — a predicate
+inspecting one entry rather than all of them, an eviction ordered by key name, a
+skipped write-back on the refusal path — because an invariant is only as strong as
+the state the DRIVER builds for it. A new class is caught when someone adds its
+scenario, and the battery's presence assertion makes a stale anchor say so out loud
+rather than pass quietly. The invariants are therefore not a completeness proof;
+they are the behaviours that were demonstrably reachable, pinned where a mutation
+cannot reach them undetected.
+
 Node is required and the tests SKIP with a reason when it is absent, rather than
 passing silently.
 """
@@ -224,10 +235,11 @@ observations.otherAddressOk = !rateLimited("y", T0 + limit);
 
 // 4. The cap, under a REAL flood of distinct addresses through `rateLimited`. One
 // more key than the cap is attempted, so a correct eviction leaves exactly
-// MAX_RATE_KEYS. The names DESCEND with age, so lexicographic order is the opposite
-// of insertion order: an eviction that sorts by key name instead of taking the
-// oldest key must red here. `size` on a store that lacks it is reported as -1 so the
-// assertion fails loudly instead of passing on `undefined`.
+// MAX_RATE_KEYS. The flood's FIRST-INSERTED name is `ip{planned-1}` and the LAST is
+// `ip0`, and `ip0` sorts first lexicographically: an eviction that sorts keys by name
+// rather than taking the oldest evicts the address that just submitted, which the
+// `newestKept` assertion below catches. `size` on a store that lacks it is reported
+// as -1 so the assertion fails loudly instead of passing on `undefined`.
 hits.clear();
 const planned = Math.min(MAX_RATE_KEYS, CAP_CEILING) + 1;
 for (let i = 0; i < planned; i++) rateLimited("ip" + (planned - 1 - i), T0);
@@ -254,6 +266,9 @@ const cap = Math.min(MAX_RATE_KEYS, CAP_CEILING);
 for (let i = 0; i < cap; i++) hits.set("live" + i, [T0]);
 for (let i = 0; i < 10; i++) hits.set("dead" + i, [expiredAt]);
 hits.set("dead-edge", [T0 - RATE_WINDOW_MS]);
+// A fully expired key with MORE THAN ONE timestamp: a sweep that inspects a single
+// entry instead of all of them keeps it, and no single-entry seed can show that.
+hits.set("dead-multi", [expiredAt, expiredAt - 1]);
 hits.set("mixed", [expiredAt, T0]);
 rateLimited("fresh", T0);
 let deadLeft = 0;
@@ -587,8 +602,15 @@ MUTATIONS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "expired sweep removed",
-        r"for \(const \[k, v\] of hits\) \{\s*if \(v\.every\(\(t\) => t <= cutoff\)\) hits\.delete\(k\);\s*\}",
+        r"for\s*\(\s*const\s+\[k,\s*v\]\s+of\s+hits\s*\)\s*\{\s*"
+        r"if\s*\(\s*v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)\s*\)\s*"
+        r"hits\.delete\(k\)\s*;\s*\}",
         "",
+    ),
+    (
+        "sweep inspects one timestamp only",
+        r"v\.every\(\s*\(t\)\s*=>\s*t\s*<=\s*cutoff\s*\)",
+        "v.length === 1 && v[0] <= cutoff",
     ),
     (
         "refusal path skips the pruning write-back",
