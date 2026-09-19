@@ -1003,25 +1003,22 @@ class _IdCollector(HTMLParser):
     """The `id` of every element the parser attaches to the document.
 
     `handle_starttag` is the right hook: the tokenizer emits no start tag inside
-    a comment, and `script`/`style` are the stdlib's CDATA set
-    (`HTMLParser.CDATA_CONTENT_ELEMENTS`), so an `id="…"` quoted in either can
-    never reach this method. The comment case is exactly the #3436 false
-    positive — a raw-text scan counted the removal note that quoted
-    `<section id="beta-gate">` as a second element.
+    a comment — which is exactly the #3436 false positive, a raw-text scan that
+    counted the removal note quoting `<section id="beta-gate">` as a second
+    element.
 
     Only the FIRST `id` on a tag is recorded. The stdlib hands the collector
     BOTH attributes of `<div id="a" id="b">` (verified), but the tokenizer drops
     the duplicate before a browser ever sees it — counting the second would
     invent a duplicate the document does not have.
 
-    Deliberately OVER-counted, and it fails LOUD when it is. The stdlib's
-    raw-text handling is narrower than a browser's and varies with the
-    interpreter, so this collector can count an `id` a browser never exposes as
-    a document element. That is the direction a duplicate-id guard must err in —
-    a false positive is a red test a human reads, while a false negative ships
-    the defect — and
-    `test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id` pins one
-    such shape so a change to the direction is deliberate.
+    Deliberately OVER-counted, and it fails LOUD when it is: the collector can
+    count an `id` a browser does not expose as a document element. `<template>`
+    content is the pinned case — a browser keeps it in an inert fragment that
+    `getElementById` never reaches, while the stdlib parses it as ordinary
+    markup. Fail-loud is the direction a duplicate-id guard must err in: a false
+    positive is a red test a human reads, while a false negative ships the
+    defect.
     """
 
     def __init__(self) -> None:
@@ -1066,11 +1063,12 @@ def _all_website_pages() -> list[Path]:
 
 
 def _assert_no_duplicate_ids(page_name: str, html: str) -> None:
-    """The guard's assertion, factored out so its own test can drive it.
+    """The guard's assertion, shared with the test that exercises IT.
 
-    `test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id` calls THIS
-    function rather than a copy of its body, so a regression in the assertion
-    below reds both tests (review finding).
+    `test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id` calls this
+    rather than a copy of its body, because no page in the corpus carries a
+    duplicate — so the parametrized guard only ever executes the passing path,
+    and this is the only test that executes the failing one.
     """
     duplicates = _duplicate_element_ids(html)
     assert not duplicates, (
@@ -1121,10 +1119,8 @@ def test_id_uniqueness_guard_fails_on_a_deliberately_duplicated_id() -> None:
     # An `id` in `<template>` content IS counted: a browser keeps that content
     # inert in a fragment `getElementById` never reaches, while the stdlib parses
     # it as markup. That is the fail-loud direction, pinned so changing it is
-    # deliberate. Only `<template>` is pinned: the stdlib's raw-text set is
-    # interpreter-dependent (3.9: `script`/`style`; 3.12 adds
-    # `xmp`/`iframe`/`noembed`/`noframes`), and `<template>` behaves the same on
-    # both.
+    # deliberate; `<template>` is pinned because it is unaffected by the stdlib's
+    # raw-text set, which varies by interpreter.
     assert _duplicate_element_ids(
         '<template><div id="dup"></div></template><div id="dup"></div>'
     ) == {"dup": [1, 1]}
@@ -1161,8 +1157,9 @@ def test_id_guard_covers_every_website_page() -> None:
         f"missing={sorted(_ALL_WEBSITE_PAGES_AT_3436 - got)} "
         f"added={sorted(got - _ALL_WEBSITE_PAGES_AT_3436)}. If a page genuinely "
         f"left the site, update `_ALL_WEBSITE_PAGES_AT_3436` in the same PR and "
-        f"say why. If one was ADDED, widen `_all_website_pages()` too if the new "
-        f"page should be guarded."
+        f"say why. If one was ADDED, add it to `_ALL_WEBSITE_PAGES_AT_3436` — a "
+        f"top-level `.html` is already inside `_all_website_pages()`, so the pin "
+        f"is what needs the edit."
     )
 
 

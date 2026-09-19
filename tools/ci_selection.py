@@ -181,8 +181,10 @@ SOURCE_PATTERNS = {
                    # returned surfaces=[] with the guard absent from
                    # test_files, so a duplicate id could land on the invite
                    # landing page without the guard running on the PR that
-                   # added it. Both are `noindex` pages — but a `noindex` page is
-                   # still a document the visitor's browser runs a script in.
+                   # added it. Both are `noindex` pages, which keeps them out of
+                   # the blog guard's scope, not out of this one: a noindex page
+                   # is still a served document, and duplicate ids are invalid in
+                   # it.
                    "website/404.html", "website/invite-accept.html",
                    # The shared href extractor both blog-guard layers call
                    # (tests/test_website_docs_consistency.py here, and
