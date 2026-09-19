@@ -158,32 +158,48 @@ class _NotFoundDoc(HTMLParser):
             self._buf.append(data)
 
 
-def test_top_level_404_html_uses_no_comment_syntax() -> None:
-    """No HTML comment syntax in 404.html — the ambiguity is refused, not modelled.
+DOCTYPE_ONLY = re.compile(r"(?is)<!doctype[^>]*>")
 
-    Three comment-boundary divergences were found and each hid a payload from
-    the parse that the browser then ran or acted on (#4006 review, cycles 8-9):
 
-    * `<!-->` (abrupt-empty-comment) and `<!--->` (abrupt-closing) end a comment
-      in the HTML5 tokenizer but NOT in Python's HTMLParser, so a following
-      `<script>`/`<meta http-equiv>` was swallowed into one comment;
-    * `--!>` likewise closes a comment in the browser only;
+def test_top_level_404_html_uses_no_markup_declaration_besides_doctype() -> None:
+    """Every `<!` declaration except the doctype is refused, not modelled.
+
+    Python's HTMLParser and the HTML5 tokenizer disagree about the whole family,
+    and each disagreement hid a payload the browser then ran or acted on — the
+    element never reached `handle_starttag`, so the script pin, the element bans
+    and the URL checks never saw it (#4006 review, cycles 8-9):
+
+    * `<!--` — Python closes a comment only at `--` + optional space + `>`, the
+      tokenizer ALSO at `<!-->` (abrupt-empty) and `<!--->` (abrupt-closing), and
+      at `--!>`; so a following `<script>` or `<meta http-equiv="refresh">` was
+      swallowed into one comment while Chromium ended it and complied;
+    * `<![CDATA[…]]>` (and any `<![name[…]]>`) — Python consumes through the
+      first `]]>`, but in HTML content the tokenizer raises a
+      cdata-in-html-content parse error and emits a BOGUS COMMENT ending at the
+      first `>`, so it resumes parsing and honours the markup Python swallowed;
     * and the REVERSE holds too — a `<!--` inside a quoted attribute value is
-      plain attribute text to the browser, so a stripper that removes it there
-      would hide a real `<meta http-equiv="refresh">` from this guard.
+      plain attribute text to the browser, so a guard that treats it as a
+      comment start would hide a real `<meta http-equiv="refresh">` from itself.
 
-    Every model of comment boundaries is therefore a place for the guard and the
-    browser to disagree. A not-found page needs no comments, so the guard refuses
-    the syntax outright: with no `<!--` in the document, neither the tokenizer's
-    comment states nor the parser's can differ. The page's own `#3523` rationale
-    lives in this file and in the script's comment below, not in HTML comments.
+    Each spelling was fixable one at a time; the class is not, because it is the
+    guard's own parse that is wrong. A not-found page needs exactly one `<!`
+    declaration — the doctype, whose `>`-terminated reading the two agree on — so
+    the guard refuses the rest outright instead of modelling them. The page's own
+    `#3523` rationale lives in this file and in the script's comment, not in HTML
+    comments. (A spec-accurate tokenizer or a real browser is the durable answer;
+    filed as #4073.)
     """
     body = NOT_FOUND.read_text()
-    assert "<!--" not in body, (
-        "404.html contains an HTML comment. Comment-boundary handling is a known "
-        "source of parser-vs-browser divergence (abrupt-empty `<!-->`, "
-        "abrupt-closing `<!--->`, `--!>`, and `<!--` inside a quoted attribute "
-        "value), so this page carries no comment syntax at all (#4006 review)"
+    # Strip the one declaration both parsers read identically: the doctype ends
+    # at its first `>` in Python AND in the tokenizer's DOCTYPE state.
+    remainder = DOCTYPE_ONLY.sub("", body)
+    assert "<!" not in remainder, (
+        "404.html carries a markup declaration other than the doctype (an HTML "
+        "comment, a `<![…[` marked section, or any other `<!`). Python's "
+        "HTMLParser and the browser disagree about every one of these — the "
+        "browser parses and acts on markup Python swallows — so declarations "
+        "are refused rather than modelled (#4006 review): "
+        f"{remainder[remainder.find('<!'):][:40]!r}"
     )
 
 
