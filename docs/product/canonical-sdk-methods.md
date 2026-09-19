@@ -64,52 +64,57 @@ cold handle. Both are itemised under **Declaration defects**.
 
 ## The target list
 
-Grouped by the user action each group serves. Members are the current method names —
-this is a collapse of names that already exist, not a design of new ones.
+**The names are the approved MCP names.** A capability has one name across both layers —
+the MCP tool and the SDK method behind it. An earlier revision of this document invented a
+second vocabulary (`search`, `get`, `traverse`, `dream`, `create_source`), which meant the
+same capability answered to two names depending on which layer you were reading. That is
+corrected here: every group whose capability has an approved MCP tool **carries that tool's
+name**, and only the SDK-only groups (no tool exposes them) have names of their own.
+
+Members are the current method names — this is a collapse of names that already exist, not a
+design of new ones. Names are verb-first, 2–3 words, no internal jargon.
 
 ### READ
 
-| # | Canonical | Members (current names) | Action |
-|---|---|---|---|
-| R1 | `search` | `tortoise_fts_query`, `query`, `paginated_query`, `query_points_by_tag`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse — **`search` is a new name** (no SDK `search` exists) |
-| R2 | `recall(mode=)` | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context` | keep, **new dispatcher** |
-| R3 | `get(type=)` | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, **new dispatcher** |
-| R4 | `traverse` | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |
-| R5 | `overview(section=)` | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, **new dispatcher** — `test_guard` is test infrastructure, kept for the safety guard, not as a capability |
-| R6 | `review_connections` | `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
-| R7 | `provenance` | `get_provenance_chain`, `belief_timeline`, `restore_point_at` | keep — **both provenance methods stay** |
-| R8 | `events_poll`, `list_batches` | `events_poll`, `list_batch`, `list_batches` | keep |
-| R9 | confidence **read** | `get_confidence`, `calibrate_summary`, `calibration_passed` | keep — see **Declaration defects** |
+| # | Canonical | MCP tool | Members (current names) | Action |
+|---|---|---|---|---|
+| R1 | `search_knowledge` | #1 | `tortoise_fts_query`, `suggest_entry_points`, `search_sessions`, `issue_insight`, `topic_summarize`, `annotate_ask_hits` | keep, collapse |
+| R2 | `list_knowledge` | #2 | `query`, `paginated_query`, `query_points_by_tag` | keep, collapse |
+| R3 | `recall_beliefs` | #3 | `recall_state`, `recall_gaps`, `recall_subgraph`, `retrieval_legs`, `volunteer_context`, `session_context`, `get_confidence`, `calibrate_summary`, `calibration_passed`, `get_provenance_chain`, `provenance`, `belief_timeline`, `restore_point_at` | keep, collapse — absorbs the confidence reads and both provenance methods |
+| R4 | `get_entity` | #4 | `get_point`, `get_entity`, `get_session`, `get_events`, `resolve_id` | keep, collapse |
+| R5 | `explore_connections` | #5 | `expand_relationships`, `traverse`, `get_owned_entities`, `get_org_structure` | keep, collapse |
+| R6 | `graph_overview` | #6 | `status`, `taxonomy`, `list_pointkinds`, `list_sources`, `list_tags`, `list_namespaces`, `list_relations`, `list_topics`, `list_graphs`, `stale_points`, `summarize_structure`, `check_structure`, `audit`, `validate_domain`, `dream_health_check`, `dream_health_state`, `test_guard` | keep, collapse — `test_guard` is test infrastructure kept for the safety guard, not a capability |
+| R7 | `review_link_candidates` | #7 | `review_connections`, `get_cross_lens_candidates`, `list_dedup_candidates` | keep, collapse |
+| R8 | `poll_events` | #8 | `events_poll` | keep |
+| R9 | `inspect_batch` | #9 | `list_batch`, `list_batches` | keep, collapse |
 
 ### WRITE
 
-| # | Canonical | Members (current names) | Action |
-|---|---|---|---|
-| W1 | `create_entity(type=)` | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | keep — **`create_point` is absorbed**, mirroring the approved MCP list. `create_point` and `create_event` survive as warning aliases (#3883) because the eval harness calls them by name |
-| W2 | `create_source` | `create_source`, `complete_source` | keep — **not foldable** (below) |
-| W3 | `create_edge(relation=)` | `create_edge`, `create_derivation`, `link_source_to_entity` | keep + collapse |
-| W4 | `create_operator(op_type=)` | `create_operator`, `create_direct_edge` | keep — **not foldable** (below) |
-| W5 | `index_directory` | `index_file`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
-| W6 | `ingest` | `ingest` | keep |
-| W7 | `capture_session` | `capture_session`, `checkpoint`, `diary_write`, `diary_read` | keep |
-| W8 | `commit_session` | `commit_session` | keep — **not foldable into W7**: a different backend (hosted `/v1/sessions/commit` + API key), and the name does not convey that |
-| W9 | `update` | `update`, `update_point`, `update_entity` | keep + collapse |
-| W10 | `delete` | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep + collapse |
-| W11 | `supersede(transfer_edges=)` | `supersede`, `supersede_point`, `invalidate_point` | keep + collapse |
-| W12 | `retract_point` | `retract_point` | keep — **no successor, not a `supersede`** |
-| W13 | `promote_point` | `promote_point`, `list_drafts`, `quarantine_batch` | keep |
-| W14 | `operator_action(action=)` | `operator_action`, `mitigate_operator`, `annotate_operator` | keep + collapse |
-| W15 | `set_point_baseline` | `set_point_baseline` | keep |
-| W16 | `dream` | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | keep — **`compute_confidence` mislabelled read** |
-| W17 | `assess_source` | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
-| W18 | `approve_merge` | `approve_merge` | keep |
-| W19 | `file_decision`, `file_human_approval` | `file_decision`, `file_human_approval` | keep |
+| # | Canonical | MCP tool | Members (current names) | Action |
+|---|---|---|---|---|
+| W1 | `create_entity` | #10 | `create_entity`, `create_point`, `create_subject`, `create_object`, `create_event`, `create_document`, `create_or_update_point`, `batch_create_points` | keep — `create_point` and `create_event` survive as warning aliases (#3883), the eval harness calls them by name |
+| W2 | `register_source` | #11 | `create_source`, `complete_source` | keep — **not foldable** |
+| W3 | `index_files` | #12 | `index_file`, `index_directory`, `ingest_corpus`, `index_sessions`, `mine_corpus`, `reconcile_sessions`, `session_index_health`, `backfill_about_entities` | keep — **2 self-declared DEPRECATED** |
+| W4 | `capture_knowledge` | #13 | `capture_session`, `checkpoint`, `diary_write`, `diary_read`, `ingest` | keep — **`ingest` is the batch-with-relationships call and is under-named here; see Open items** |
+| W5 | `manage_source_trust` | #14 | `assess_source`, `set_source_tier`, `get_source_reliability`, `backfill_sources` | keep — **`get_source_reliability` writes** |
+| W6 | `link_entities` | #15 | `create_edge`, `create_derivation`, `link_source_to_entity`, `create_operator`, `create_direct_edge` | keep, collapse — **the two creators are not foldable into each other**, but they share one name at the surface |
+| W7 | `record_decision` | #16 | `file_decision`, `file_human_approval` | keep, collapse |
+| W8 | `revise_knowledge` | #17 | `update`, `update_point`, `update_entity`, `supersede`, `supersede_point`, `invalidate_point`, `retract_point`, `promote_point`, `set_point_baseline`, `list_drafts`, `quarantine_batch` | keep, collapse — **the widest group; see Open items** |
+| W9 | `delete_knowledge` | #18 | `delete`, `delete_point`, `delete_entity`, `delete_point_wrapped` | keep, collapse |
+| W10 | `stabilize_beliefs` | #19 | `dream`, `compute_confidence`, `compute_reputation`, `record_calibration` | keep — **`compute_confidence` mislabelled read** |
+| W11 | `approve_merge` | #20 | `approve_merge` | keep |
+| W12 | `adjust_relationship` | #21 | `operator_action`, `mitigate_operator`, `annotate_operator` | keep, collapse |
+| W13 | `manage_deployment` | #22 | `org_*`, `graph_*`, `membership_*`, `apikey_*`, `invitation_*`, `signup_token_*` | keep, **namespaced** |
+| W14 | `commit_session` | — | `commit_session` | keep — **SDK-only**, no MCP tool: it extracts locally then POSTs to `/v1/sessions/commit`, needing a hosted endpoint and an API key |
+| W15 | utilities | — | `ulid`, `close` | `close` is core lifecycle; **`ulid` is a removal candidate** |
 
-### Control plane — namespaced
+### SDK-only — no MCP tool exposes these
 
-These are operator/admin surfaces, not memory operations. They are **not** part of the
-agent-facing read/write guarantee, and per the competitor evidence they belong behind a
-namespace rather than flattened onto the same object as `search`.
+`commit_session` · the control-plane namespaces under `manage_deployment` · `ulid`, `close`.
+
+### Control plane — the `manage_deployment` members, namespaced
+
+Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 
 | # | Namespace | Members |
 |---|---|---|
@@ -119,7 +124,6 @@ namespace rather than flattened onto the same object as `search`.
 | N4 | `apikey` | `apikey_create`, `apikey_list`, `apikey_revoke`, `apikey_verify` |
 | N5 | `invitation` | `invitation_create`, `invitation_list`, `invitation_get_by_token`, `invitation_get_by_id`, `invitation_accept`, `invitation_revoke`, `cleanup_expired_invitations`, `sweep_invite_ghost_memberships` |
 | N6 | `signup_token` | `signup_token_lookup`, `signup_token_recover`, `signup_token_revoke` |
-| N7 | utilities | `ulid`, `close` |
 
 ### Archived
 
