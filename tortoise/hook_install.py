@@ -1179,6 +1179,47 @@ def _entry_is_ours(entry: object, script_name: str,
                                flat=flat) is not None
 
 
+def registered_commands(root: str | os.PathLike[str],
+                        harness: str = "claude",
+                        ) -> list[tuple[str, str]]:
+    """Every ``(event, command)`` the harness will RUN for this installed seam.
+
+    Reads the harness's OWN registration file through the SAME loader helpers
+    ``detect_install`` classifies with (``_entry_command_dicts`` /
+    ``_entry_is_ours``), so the command ``tortoise session verify`` fires is
+    byte-identical to the one ``detect_install`` judged current — no second
+    parser that could disagree about which entry is ours.
+
+    Returns ``[]`` for a scripts-only layout (no settings file), an absent
+    file, an unreadable/malformed file, or when no entry invokes our script.
+    Read-only; never raises for a user file (a malformed file is simply no
+    registration to report).
+    """
+    layout = get_layout(harness)
+    settings_path = layout.settings_path(Path(root))
+    if settings_path is None:
+        return []
+    data, _refusal = _load_settings(settings_path)
+    if not isinstance(data, dict):
+        return []
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    commands: list[tuple[str, str]] = []
+    for spec in layout.scripts:
+        entries = hooks.get(spec.event)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            for inner in _entry_command_dicts(
+                    entry, spec.name, layout.hooks_dir, Path(root),
+                    flat=layout.flat_entry):
+                command = inner.get("command")
+                if isinstance(command, str) and command.strip():
+                    commands.append((spec.event, command))
+    return commands
+
+
 def _load_settings(path: Path | None) -> tuple[dict | None, str | None]:
     """Load a settings file.  Returns ``(data, error)`` — never raises."""
     if path is None:
