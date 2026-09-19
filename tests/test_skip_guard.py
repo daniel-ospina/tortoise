@@ -942,3 +942,94 @@ def _all_skip_reasons() -> set[str]:
             if isinstance(reason, str):
                 found.add(reason)
     return found
+
+
+# ── #4221: the import-failure reason class ────────────────────────────────
+# A skip whose reason reports that the module under test could not be
+# IMPORTED is never a legitimate availability precondition — the test never
+# ran, and the suite reports green while testing nothing. The first instance
+# (#4221): tests/test_event_log.py + tests/test_crash_recovery_e2e.py imported
+# a nonexistent top-level `shared_state` package and swallowed the
+# ModuleNotFoundError into pytest.skip(allow_module_level=True), hiding 26
+# data-integrity tests (SHA-256 hash-chained event log + crash recovery).
+
+IMPORT_ERROR_REASONS = [
+    ("tests/test_event_log.py::TestAppendAndReplay::test_append_single_event",
+     "could not import 'shared_state': No module named 'shared_state'"),
+    ("tests/test_x.py::test_a", "ModuleNotFoundError: No module named 'foo'"),
+    ("tests/test_x.py::test_b",
+     "cannot import name 'bar' from 'tortoise.shared_state'"),
+    ("tests/test_x.py::test_c", "ImportError while importing test module"),
+]
+# Reasons that must NOT trip the import class. A generic optional-dependency
+# absence is a deliberate skip, not an import failure.
+NON_IMPORT_ERROR_REASONS = [
+    "requires network access",
+    "sklearn not installed",
+    "frozen LongMemEval-S dataset not cached (CI)",
+]
+
+
+class TestGuardFailsOnImportErrorSkip:
+    def test_real_reasons_all_red_in_v_format(self):
+        for nodeid, reason in IMPORT_ERROR_REASONS:
+            proc = run_guard(_v_line(nodeid, reason))
+            assert proc.returncode == 1, f"import-error skip not caught: {reason!r}"
+            assert nodeid in proc.stdout
+            assert "import" in proc.stdout
+
+    def test_rs_summary_format_red(self):
+        proc = run_guard(
+            "SKIPPED [1] tests/test_event_log.py:27: could not import "
+            "'shared_state': No module named 'shared_state'\n"
+        )
+        assert proc.returncode == 1
+        assert "test_event_log.py" in proc.stdout
+
+    def test_non_import_reasons_do_not_trip(self):
+        for reason in NON_IMPORT_ERROR_REASONS:
+            proc = run_guard(_v_line("tests/test_x.py::test_y", reason))
+            assert proc.returncode == 0, (
+                f"FALSE TRIP on a non-import reason: {reason!r}\n"
+                f"stdout={proc.stdout!r}"
+            )
+
+    def test_legacy_line_matcher_wires_the_import_class(self):
+        # Half a / P1 CI uses find_violations directly (no junitxml) — the
+        # import class must red there too, or the two paths disagree.
+        find_violations = _skip_guard.find_violations
+        for nodeid, reason in IMPORT_ERROR_REASONS:
+            assert find_violations(_v_line(nodeid, reason)) == [nodeid], (
+                f"legacy matcher missed the import class: {reason!r}"
+            )
+        for reason in NON_IMPORT_ERROR_REASONS:
+            assert find_violations(_v_line("tests/test_x.py::test_y", reason)) == [], (
+                f"legacy matcher false-tripped on: {reason!r}"
+            )
+
+    def test_junitxml_matcher_wires_the_import_class(self, tmp_path):
+        # The junitxml path (the AUTHORITATIVE reason source) must agree with
+        # the legacy line matcher — a reason-level skip reds with no manifest.
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable",
+            "could not import 'shared_state': No module named 'shared_state'"))
+        proc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=junit)
+        assert proc == 1
+
+    def test_junitxml_non_import_reason_stays_green(self, tmp_path):
+        junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+            "redislite unavailable", "sklearn not installed"))
+        rc = run_guard_with_manifest(str(tmp_path / "pytest.log"), junit=junit)
+        assert rc == 0
+
+    def test_three_classes_are_independent(self):
+        # Regression guard for the three families: the import predicate is
+        # blind to the other two classes' reasons and vice versa.
+        falkor_only = "Live FalkorDB (Docker) not available"
+        embedder_only = "bge-small-en-v1.5 not cached locally"
+        import_only = "No module named 'shared_state'"
+        assert _skip_guard.is_import_error_reason_violation(import_only)
+        assert not _skip_guard.is_import_error_reason_violation(falkor_only)
+        assert not _skip_guard.is_import_error_reason_violation(embedder_only)
+        assert not _skip_guard.is_falkor_reason_violation(import_only)
+        assert not _skip_guard.is_embedder_reason_violation(import_only)

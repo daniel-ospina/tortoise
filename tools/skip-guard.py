@@ -158,6 +158,30 @@ _EMBEDDER_UNAVAILABLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Import-failure reason class (#4221) ──────────────────────────────────
+# A skip whose reason reports that the module under test could not be
+# IMPORTED is never a legitimate availability precondition — the test cannot
+# execute at all, and the suite reports green while testing nothing. The
+# first instance of this class (#4221): tests/test_event_log.py and
+# tests/test_crash_recovery_e2e.py imported a nonexistent top-level
+# `shared_state` package and swallowed the ModuleNotFoundError into
+# pytest.skip(allow_module_level=True), hiding 26 data-integrity tests (the
+# SHA-256 hash-chained event log + crash recovery).
+#
+# Matched shapes are the standard message forms only: pytest.importorskip's
+# default ("could not import 'x': No module named 'x'"), the bare exception
+# names, and a failed `from pkg import name`. A generic availability phrase
+# ("sklearn not installed") is NOT an import message and stays out of this
+# class — that is the deliberately-optional-dependency shape.
+_IMPORT_ERROR_RE = re.compile(
+    r"no module named"
+    r"|modulenotfounderror"
+    r"|importerror"
+    r"|cannot import name"
+    r"|could not import",
+    re.IGNORECASE,
+)
+
 # Intentional availability-class reason families, exempt from the FalkorDB
 # trip. Prefix match on the raw reason (case-sensitive for these two).
 _EXEMPT_REASON_PREFIXES = (
@@ -220,6 +244,17 @@ def is_embedder_reason_violation(reason: str) -> bool:
     return bool(_EMBEDDER_UNAVAILABLE_RE.search(reason))
 
 
+def is_import_error_reason_violation(reason: str) -> bool:
+    """True when a skip reason reports a failed IMPORT of the tested module.
+
+    Such a test never ran — the suite would report green while asserting
+    nothing (#4221). Deliberately narrower than "a dependency is absent": an
+    optional-dependency probe that states its own absence ("sklearn not
+    installed") is not an import message and is not in this class.
+    """
+    return bool(_IMPORT_ERROR_RE.search(reason))
+
+
 def is_falkor_reason_violation(reason: str) -> bool:
     """True when a FalkorDB-mentioning skip reason is a REAL violation.
 
@@ -278,7 +313,8 @@ def find_violations(log_text: str) -> list[str]:
                 # canonical exclusion is the reason-family prefix above).
                 continue
             violations.append(extract_nodeid(line))
-        elif is_embedder_reason_violation(reason):
+        elif (is_embedder_reason_violation(reason)
+              or is_import_error_reason_violation(reason)):
             violations.append(extract_nodeid(line))
     return violations
 
@@ -344,10 +380,11 @@ def _read_manifest(path: str) -> tuple[set[str], list[str]] | None:
     return expected, invalid
 
 
-def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], str | None]:
+def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], list[str], str | None]:
     """Parse a junitxml (xunit1) into observed nodeids + reason violations.
 
-    Returns (observed, falkor_violations, embedder_violations, contract_error).
+    Returns (observed, falkor_violations, embedder_violations,
+    import_violations, contract_error).
     Raises OSError/ET.ParseError when the file is missing or malformed.
 
     contract_error is set (non-None) when any <testcase> lacks the file/name
@@ -359,6 +396,7 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], str | Non
     observed: set[str] = set()
     falkor_violations: list[str] = []
     embedder_violations: list[str] = []
+    import_violations: list[str] = []
     contract_error: str | None = None
     tree = ET.parse(path)
     for tc in tree.iter("testcase"):
@@ -370,7 +408,8 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], str | Non
             reason = (skipped.get("message") or "").strip()
             falkor = is_falkor_reason_violation(reason)
             embedder = is_embedder_reason_violation(reason)
-            if falkor or embedder:
+            import_error = is_import_error_reason_violation(reason)
+            if falkor or embedder or import_error:
                 # Reason-level violation: report best-effort nodeid — under
                 # xunit2 there is no file attr, so fall back to class::name.
                 if file and name:
@@ -381,6 +420,8 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], str | Non
                     falkor_violations.append(nodeid)
                 if embedder:
                     embedder_violations.append(nodeid)
+                if import_error:
+                    import_violations.append(nodeid)
         if not file or not name:
             # junit_family=xunit2 (pytest's default) emits no file/line attrs —
             # nodeid reconstruction is impossible, and a silently-mangled nodeid
@@ -392,7 +433,8 @@ def _read_junitxml(path: str) -> tuple[set[str], list[str], list[str], str | Non
             )
             continue
         observed.add(reconstruct_nodeid(file, classname, name))
-    return observed, falkor_violations, embedder_violations, contract_error
+    return (observed, falkor_violations, embedder_violations,
+            import_violations, contract_error)
 
 
 def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
@@ -436,8 +478,10 @@ def _parse_args(argv: list[str]) -> tuple[str | None, str | None, str | None]:
 
 
 def _report(violations: list[str], falkor_violations: list[str],
-            embedder_violations: list[str]) -> int:
-    if not violations and not falkor_violations and not embedder_violations:
+            embedder_violations: list[str],
+            import_violations: list[str]) -> int:
+    if (not violations and not falkor_violations
+            and not embedder_violations and not import_violations):
         return 0
 
     if violations:
@@ -466,6 +510,13 @@ def _report(violations: list[str], falkor_violations: list[str],
             print(f"   - {nodeid}")
         print(f"{len(embedder_violations)} skip line(s) matching the "
               "embedder-unavailable reason family.")
+    if import_violations:
+        print("❌ tests skipped because their module could not be IMPORTED — "
+              "CI would be green while these tests never ran (issue #4221):")
+        for nodeid in sorted(set(import_violations)):
+            print(f"   - {nodeid}")
+        print(f"{len(import_violations)} skip line(s) matching the "
+              "import-failure reason family.")
     return 1
 
 
@@ -639,11 +690,12 @@ def main(argv: list[str]) -> int:
         observed: set[str] = set()
         falkor_violations: list[str] = []
         embedder_violations: list[str] = []
+        import_violations: list[str] = []
         contract_error: str | None = None
         if junit_path is not None:
             try:
                 (observed, falkor_violations, embedder_violations,
-                 contract_error) = _read_junitxml(junit_path)
+                 import_violations, contract_error) = _read_junitxml(junit_path)
             except (OSError, ET.ParseError) as exc:
                 print(f"❌ junitxml {junit_path!r} missing or unreadable "
                       f"({exc}) — no observed testcases, so every one of the "
@@ -655,24 +707,28 @@ def main(argv: list[str]) -> int:
                 print(f"❌ {contract_error}", file=sys.stderr)
                 observed = set()  # reconstruction impossible → all absent
         missing = sorted(expected - observed)
-        return _report(missing, falkor_violations, embedder_violations)
+        return _report(missing, falkor_violations, embedder_violations,
+                       import_violations)
 
     if junit_path is not None:
         # ── junitxml mode without a manifest: reason matcher only ────────
         try:
-            _, falkor_violations, embedder_violations, contract_error = (
-                _read_junitxml(junit_path))
+            (_, falkor_violations, embedder_violations, import_violations,
+             contract_error) = _read_junitxml(junit_path)
         except (OSError, ET.ParseError):
             falkor_violations = []
             embedder_violations = []
+            import_violations = []
             contract_error = None
         if contract_error:
             # Reason extraction (<skipped message>) works without file/name
-            # attrs, so a real FalkorDB or embedder skip under a non-xunit1
-            # junitxml must still red — never swallow it (fail-open). The
-            # diagnostic names the root cause alongside any violations.
+            # attrs, so a real FalkorDB, embedder, or import-failure skip under
+            # a non-xunit1 junitxml must still red — never swallow it
+            # (fail-open). The diagnostic names the root cause alongside any
+            # violations.
             print(f"❌ {contract_error}", file=sys.stderr)
-        return _report([], falkor_violations, embedder_violations)
+        return _report([], falkor_violations, embedder_violations,
+                       import_violations)
 
     # ── Legacy line-matcher mode (back-compat) ───────────────────────────
     try:
@@ -687,7 +743,7 @@ def main(argv: list[str]) -> int:
 
     print("❌ guarded availability-class tests SKIPPED in this run — CI would "
           "be green while testing nothing (live-FalkorDB #1436 / "
-          "embedder-unavailable #2573):")
+          "embedder-unavailable #2573 / import-failure #4221):")
     for nodeid in sorted(set(violations)):
         print(f"   - {nodeid}")
     print(f"{len(violations)} skip line(s) matching a guarded reason family.")
