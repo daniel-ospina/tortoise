@@ -161,8 +161,9 @@ and filed** (never left in the in-scope set).
 | 2 | A **non-regular / unremovable occupant** at the marker path (a directory; a re-planted symlink) | Fail **closed**: never return a non-regular fd, never follow, abort the record | `test_marker_write_non_regular_occupant_fails_closed` |
 | 3 | A **FIFO** at the marker path | Never block (`O_NONBLOCK`); remove and replace non-blocking | `test_open_marker_no_follow_replaces_fifo_without_blocking` |
 | 4 | A **transient write failure** (`ENOSPC`) on the marker | Skip THIS record only — never propagate out of `reap()`, never abort the sweep | `test_marker_write_error_skips_one_record_not_the_sweep` |
-| 5 | A **symlink planted at `<tempdir>/.tortoise/.reaper.lock`** (T5) | `_ReaperLock.acquire()` must refuse it (ELOOP), never truncate the target; the lock dir must be **owned by the invoking uid** (a foreign-owned dir fails closed) | `test_reaper_lock_never_follows_symlink`, `test_reaper_lock_refuses_a_foreign_owned_lock_dir` |
-| 5b | A **symlinked `<tempdir>/.tortoise`** (T5) | The holder read must be anchored on the dir fd (basename-only `O_NOFOLLOW` is insufficient) and bounded | `test_lock_holder_pid_never_follows_a_symlinked_lock_dir` |
+| 5 | A **symlink planted at the lock path** (T5) — the bind-relative `<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`, and a link at the lock DIR | `_ReaperLock.acquire()` must refuse it (ELOOP), never truncate the target; the lock dir must be **owned by the invoking uid** (a foreign-owned dir fails closed) | `test_reaper_lock_never_follows_symlink`, `test_reaper_lock_refuses_a_foreign_owned_lock_dir` |
+| 5b | A **symlinked lock DIR**, and a **foreign-owned lock DIR** (T5) | The holder read must be anchored on the dir fd (basename-only `O_NOFOLLOW` is insufficient), bounded, ownership-gated, and use `O_NONBLOCK` | `test_lock_holder_pid_never_follows_a_symlinked_lock_dir`, `test_lock_holder_pid_ignores_a_foreign_owned_lock_dir`, `test_reaper_lock_holder_pid_never_blocks_on_fifo` |
+| 5c | A **pre-created lock-dir name we cannot remove** — a directory, symlink, or plain file owned by a foreign uid under a 1777 sticky `/tmp` | EVERY refusal must fail closed AND log: a silent `return False` is indistinguishable from ordinary lock contention, and the condition is permanent, so silence would stop the reaper without a trace. Ordinary flock contention must stay SILENT | `test_foreign_owned_lock_dir_fails_closed_and_warns`, `test_symlink_at_lock_dir_refuses_loudly` |
 
 **ESCALATED — declared out of scope, filed as #4136** (these are NOT in this PR's contract)
 
@@ -255,11 +256,20 @@ escalated, because it is the identical mechanical class on the scheduled path an
 > sink — a planted symlink truncated the target and a FIFO hung startup before the watchdog was
 > armed.
 >
-> **OVERRIDES:** the lock dir is now UID-SCOPED, `<tempdir>/.tortoise-reaper-<euid>` (it was the
-> fixed `<tempdir>/.tortoise`), and `acquire()` fails closed when that dir exists but is not owned
-> by our euid. Reason: a fixed name under a shared `/tmp` is pre-creatable by ANY local uid, and
-> combined with the ownership check that made the refusal permanent — a zero-privilege denial of
-> the victim's reaper. **This is a deliberate reduction in reach:** on a shared-tempdir box a
-> foreign uid's reaper no longer contends with ours (it cannot reap our sockets anyway), and a
-> hostile uid can still target our exact `<euid>` dir. That residual is accepted rather than
-> silently inherited, and it is LOGGED (a warning naming the path) instead of failing quietly.
+> **OVERRIDES:** the lock dir is UID-SCOPED, `<tempdir>/.tortoise-reaper-<euid>` (it was the fixed
+> `<tempdir>/.tortoise`), and `acquire()` fails closed when that dir exists but is not owned by our
+> euid. Reason: a fixed name under a shared `/tmp` is pre-creatable by ANY local uid, and combined
+> with the ownership check that made the refusal permanent — a zero-privilege denial of the
+> victim's reaper. **This is a deliberate reduction in reach:** on a shared-tempdir box a foreign
+> uid's reaper no longer contends with ours.
+>
+> **The residual this accepts, stated plainly:** a hostile uid can still pre-create our exact
+> `<euid>` name — as a directory, a symlink, or a plain file — and the 1777 sticky bit means we
+> cannot remove it, so it is a targeted denial of OUR sweeps. EVERY refusal path therefore logs
+> `"reaper lock unavailable (<reason>) at <path> — refusing to lock; this path is owned by another
+> uid and can only be removed by its owner or root, so sweeps are skipped until then"` (unopenable
+> dir, foreign-owned dir, unopenable lock file, unwrappable fd, non-regular lock path), so no
+> variant can fail silently and be mistaken for ordinary lock contention. It is logged, not
+> prevented. Cross-uid non-interference of the DESTRUCTION paths is likewise NOT established by
+> this PR — that is the open provenance question tracked by #4136; the only thing claimed here is
+> that a foreign uid's sweeper shares no lock with ours.

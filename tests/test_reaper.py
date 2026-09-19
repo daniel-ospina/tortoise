@@ -2394,8 +2394,8 @@ def test_marker_write_error_skips_one_record_not_the_sweep(monkeypatch):
 
 def test_reaper_lock_never_follows_symlink(tmp_path):
     """#4098 / CWE-377: the singleton lock lives in the SHARED tempdir
-    (`<tempdir>/.tortoise/.reaper.lock`), so a symlink planted at the lock
-    path must be REFUSED (ELOOP from O_NOFOLLOW) — the pre-#4098
+    (`<tempdir>/.tortoise-reaper-<uid>/.reaper.lock`), so a symlink
+    planted at the lock path must be REFUSED (ELOOP from O_NOFOLLOW) — the pre-#4098
     `open(path, "a")` truncated the symlink target."""
     from tortoise.embedded_reaper import _ReaperLock
     lock_dir = tmp_path / ".tortoise"
@@ -2456,7 +2456,7 @@ def test_reaper_lock_refuses_a_foreign_owned_lock_dir(tmp_path, monkeypatch):
 def test_lock_holder_pid_never_follows_a_symlinked_lock_dir(
         tmp_path, monkeypatch):
     """#4098 review: `O_NOFOLLOW` alone protects the BASENAME, so a symlink
-    planted at `<tempdir>/.tortoise` would still redirect the holder read
+    planted at the lock DIR would still redirect the holder read
     (log spoofing) and could serve an unbounded file before `signal.alarm` is
     armed. The read is anchored on the dir fd and must return 'unknown'."""
     import tortoise.embedded_reaper as _R
@@ -2467,6 +2467,23 @@ def test_lock_holder_pid_never_follows_a_symlinked_lock_dir(
     link.symlink_to(real_dir, target_is_directory=True)
     monkeypatch.setattr(_R, "_LOCK_PATH", str(link / ".reaper.lock"))
     assert _R._lock_holder_pid() == "unknown"
+
+
+def test_lock_holder_pid_ignores_a_foreign_owned_lock_dir(tmp_path, monkeypatch):
+    """#4098 review: the holder read gated the lock FILE but not its DIR, so
+    an attacker-owned dir holding a world-readable regular `.reaper.lock`
+    still fed attacker-chosen text into the reaper log. Apply the same
+    ownership gate `acquire()` uses."""
+    import tortoise.embedded_reaper as _R
+    lock_dir = tmp_path / f".tortoise-reaper-{os.geteuid()}"
+    lock_dir.mkdir()
+    (lock_dir / ".reaper.lock").write_text("4242")
+    monkeypatch.setattr(_R, "_LOCK_PATH", str(lock_dir / ".reaper.lock"))
+    # Sanity: with our real euid the holder IS read.
+    assert _R._lock_holder_pid() == "4242"
+    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 1)
+    assert _R._lock_holder_pid() == "unknown", \
+        "a foreign-owned lock dir's contents are attacker-authored"
 
 
 def test_reaper_lock_holder_pid_never_blocks_on_fifo(tmp_path, monkeypatch):
@@ -2485,7 +2502,7 @@ def test_reaper_lock_holder_pid_never_blocks_on_fifo(tmp_path, monkeypatch):
 @pytest.mark.timeout(30)
 def test_reaper_lock_symlinked_dir_is_not_chmodded(tmp_path):
     """#4098 cycle-2 P2: `os.chmod` FOLLOWS a symlink (Linux has no lchmod),
-    so tightening a pre-existing `<tempdir>/.tortoise` must not run on the
+    so tightening a pre-existing lock DIR must not run on the
     path — a planted symlink reached the mode change before the O_NOFOLLOW
     gate. The dir is opened O_NOFOLLOW first and tightened through the fd."""
     from tortoise.embedded_reaper import _ReaperLock
@@ -3366,6 +3383,31 @@ def test_foreign_owned_lock_dir_fails_closed_and_warns(tmp_path, caplog, monkeyp
     assert any("not owned by this uid" in r.message for r in caplog.records), \
         "the refusal must be loud, not silent"
     assert fake._fh is None, "no fd may be left open on the refusal path"
+
+
+def test_symlink_at_lock_dir_refuses_loudly(tmp_path, caplog):
+    """#4098 review: `os.makedirs(exist_ok=True)` accepts a SYMLINK to a
+    directory, so a planted link at the uid-scoped lock-dir name fails later
+    at `O_NOFOLLOW|O_DIRECTORY` with ELOOP. That refusal used to be silent,
+    which is indistinguishable from ordinary lock contention — and under a
+    sticky `/tmp` the victim cannot remove it, so the reaper would stop
+    sweeping for good without a word. Every refusal must be logged."""
+    import logging
+
+    import tortoise.embedded_reaper as er
+
+    real_dir = tmp_path / "elsewhere"
+    real_dir.mkdir()
+    planted = tmp_path / f".tortoise-reaper-{os.geteuid()}"
+    os.symlink(str(real_dir), str(planted))
+    lock = er._ReaperLock(str(planted / ".reaper.lock"))
+    with caplog.at_level(logging.WARNING, logger=er.logger.name):
+        assert lock.acquire() is False, "a symlinked lock dir must fail closed"
+    assert any("reaper lock unavailable" in r.message for r in caplog.records), \
+        "the ELOOP refusal must be loud, not silent"
+    assert lock._fh is None
+    assert not os.path.exists(str(real_dir / ".reaper.lock")), \
+        "no lock file may be created through the planted symlink"
 
 
 def test_cross_home_sweepers_share_one_lock():

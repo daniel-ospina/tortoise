@@ -2081,6 +2081,23 @@ class _ReaperLock:
         self.path = path
         self._fh = None
 
+    def _refuse(self, reason: str) -> bool:
+        # #4098 review: EVERY refusal must be LOUD. A silent `return False`
+        # is indistinguishable from "another sweeper holds the lock", and on
+        # a shared `/tmp` this path is attacker-triggerable and PERMANENT: a
+        # foreign uid can pre-create our uid-scoped name as a directory, a
+        # symlink to one, or a plain file, and the 1777 sticky bit stops us
+        # removing it — so the reaper would stop sweeping until root
+        # intervenes. Say so, and do not prescribe an action this uid cannot
+        # perform.
+        logger.warning(
+            "reaper lock unavailable (%s) at %s — refusing to lock; this "
+            "path is owned by another uid and can only be removed by its "
+            "owner or root, so sweeps are skipped until then",
+            reason, self.path)
+        self._fh = None
+        return False
+
     def acquire(self) -> bool:
         import fcntl
         # #4098 (CWE-377): the lock lives in the SHARED tempdir
@@ -2097,8 +2114,7 @@ class _ReaperLock:
             dir_fd = os.open(lock_dir,
                              os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError:
-            self._fh = None
-            return False
+            return self._refuse("cannot open the lock directory")
         try:
             # #4098 review: a PRE-EXISTING dir may have been created by another
             # local uid (any local uid can `mkdir /tmp/.tortoise-reaper-<uid>`),
@@ -2109,12 +2125,7 @@ class _ReaperLock:
             # uid-scoped name means this needs a deliberate, targeted
             # pre-creation, not the ordinary shared-`/tmp` case.
             if os.fstat(dir_fd).st_uid != os.geteuid():
-                logger.warning(
-                    "reaper lock dir is not owned by this uid (%s) — refusing "
-                    "to lock (a foreign-owned dir can swap the lock inode "
-                    "under us); remove it to restore sweeps", lock_dir)
-                self._fh = None
-                return False
+                return self._refuse("the lock directory is not owned by this uid")
             # Best-effort tighten of a PRE-EXISTING dir. Done through the fd:
             # chmod(2) FOLLOWS a symlink and Linux has no lchmod, so a path
             # chmod would run before the O_NOFOLLOW gate and let a planted
@@ -2128,8 +2139,7 @@ class _ReaperLock:
                              os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
                              dir_fd=dir_fd)
             except OSError:
-                self._fh = None
-                return False
+                return self._refuse("cannot open the lock file")
             try:
                 self._fh = os.fdopen(fd, "r+")
             except Exception:
@@ -2140,8 +2150,7 @@ class _ReaperLock:
                     os.close(fd)
                 except OSError:
                     pass
-                self._fh = None
-                return False
+                return self._refuse("cannot wrap the lock fd")
         finally:
             try:  # noqa: SIM105
                 os.close(dir_fd)
@@ -2159,8 +2168,7 @@ class _ReaperLock:
                 self._fh.close()
             except OSError:
                 pass
-            self._fh = None
-            return False
+            return self._refuse("the lock path is not a regular file")
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._fh.seek(0)
