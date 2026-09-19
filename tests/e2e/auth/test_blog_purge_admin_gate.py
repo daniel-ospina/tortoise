@@ -37,6 +37,7 @@ the property under test is untouched.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -76,6 +77,37 @@ def _wait(port: int, timeout: float = 90.0) -> bool:
     return False
 
 
+def _d1_files() -> list[Path]:
+    return [
+        p
+        for p in WEBSITE_DIR.glob(".wrangler/state/v3/d1/**/*.sqlite")
+        if p.name != "metadata.sqlite"
+    ]
+
+
+def _warm_d1() -> None:
+    """Force Miniflare to MATERIALISE the bound D1 database file.
+
+    `--d1 SESSIONS` only declares the binding: the SQLite file appears on the
+    first D1 ACCESS, not at boot. Seeding the schema first (the obvious order)
+    therefore times out on a clean CI runner and passes only where an earlier
+    run already created the file. A purge request carrying an unknown
+    `__Host-session` handle IS a D1 read — `requireAdmin` resolves the cookie
+    against `sessions` before it reaches the purge — and is refused.
+    """
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        req = urllib.request.Request(f"{APP}/blog/api/purge", method="POST", data=b"{}")
+        req.add_header("Cookie", "__Host-session=" + "0" * 64)
+        req.add_header("Content-Type", "application/json")
+        with contextlib.suppress(Exception):
+            urllib.request.urlopen(req, timeout=15).read()
+        if _d1_files():
+            return
+        time.sleep(0.3)
+    raise RuntimeError(f"no D1 sqlite appeared under {WEBSITE_DIR}")
+
+
 def _d1_sqlite() -> Path:
     """Newest local D1 database file, waiting for wrangler to create it.
 
@@ -84,11 +116,7 @@ def _d1_sqlite() -> Path:
     """
     deadline = time.time() + 30
     while time.time() < deadline:
-        files = [
-            p
-            for p in WEBSITE_DIR.glob(".wrangler/state/v3/d1/**/*.sqlite")
-            if p.name != "metadata.sqlite"
-        ]
+        files = _d1_files()
         if files:
             return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)[0]
         time.sleep(0.3)
@@ -148,9 +176,11 @@ def stack():
         pytest.fail("pages dev failed to start")
     time.sleep(2.5)
 
-    # Make the `sessions` table exist before any request resolves a cookie
-    # against it (see the module docstring for why this is setup, not a
-    # weakened assertion).
+    # The local D1 sqlite is created LAZILY, on first D1 ACCESS — make one
+    # request touch the binding before seeding the schema into it, or the glob
+    # below times out on a clean runner (it only passes where an earlier run
+    # already created the file).
+    _warm_d1()
     _seed_schema()
 
     yield {"app": APP, "mock": MOCK_URL}

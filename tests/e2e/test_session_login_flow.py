@@ -31,6 +31,7 @@ Flows (the user's #1511 acceptance):
 """
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
 import os
@@ -108,6 +109,43 @@ def _bff_path(url: str) -> str:
     return path
 
 
+def _local_d1_files() -> list[Path]:
+    """Local D1 database files (never `metadata.sqlite` — Miniflare's own index)."""
+    return [
+        p for p in DASHBOARD_DIR.glob(".wrangler/state/v3/d1/**/*.sqlite")
+        if p.name != "metadata.sqlite"
+    ]
+
+
+def _warm_local_d1(timeout: float = 30.0) -> None:
+    """Force Miniflare to MATERIALISE the bound D1 database file.
+
+    `--d1 SESSIONS` only declares the binding: the SQLite file appears on the
+    first D1 ACCESS, not at boot. Globbing for it first (the obvious order)
+    therefore works only on a machine where an earlier run already created it,
+    and times out on a clean CI runner. One `/api/session` read with an unknown
+    handle IS a D1 access — it creates the file on the way. Its status is not
+    the point and depends on the starting state: 503 while the `sessions` table
+    does not exist yet (the clean-runner case this warm-up exists for), 401 once
+    it does.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        req = urllib.request.Request(
+            DASHBOARD_URL.rstrip("/") + "/api/session",
+            headers={"Cookie": f"{SESSION_COOKIE}={'0' * 64}"},
+        )
+        with contextlib.suppress(Exception):
+            urllib.request.urlopen(req, timeout=10).read()
+        if _local_d1_files():
+            return
+        time.sleep(0.3)
+    raise RuntimeError(
+        f"no D1 database sqlite appeared under {DASHBOARD_DIR} — is the "
+        "dashboard preview running with `--d1 SESSIONS`?"
+    )
+
+
 def _local_d1_sqlite() -> Path:
     """The D1 database file the `:8790` preview's Functions actually read.
 
@@ -121,10 +159,7 @@ def _local_d1_sqlite() -> Path:
     """
     deadline = time.time() + 30
     while time.time() < deadline:
-        files = [
-            p for p in DASHBOARD_DIR.glob(".wrangler/state/v3/d1/**/*.sqlite")
-            if p.name != "metadata.sqlite"
-        ]
+        files = _local_d1_files()
         if files:
             return max(files, key=lambda p: p.stat().st_mtime)
         time.sleep(0.3)
@@ -144,6 +179,7 @@ def _seed_bff_session(user_id: str) -> str:
     """
     handle = secrets.token_hex(32)
     now = int(time.time() * 1000)
+    _warm_local_d1()
     con = sqlite3.connect(_local_d1_sqlite(), timeout=15)
     try:
         con.executescript(AUTH_MIGRATION.read_text(encoding="utf-8"))
