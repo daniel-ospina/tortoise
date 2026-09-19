@@ -149,6 +149,71 @@ Operator/admin surfaces. **Not** part of the agent-facing read/write guarantee.
 |---|---|
 | `backfill_v25` | A one-shot migration setting `status='live'` where NULL and backfilling `pointKind` — targeting `ONTOLOGY_v2.5` while the schema is **v3.13**. Zero customers, pre-beta. The approved MCP list proposes the same archive for its tool (`tortoise_backfill_v25`); like that one, this is a **proposal** — the baseline still records the method `lifecycle: active`. A migration written against a schema several versions old is a liability, not a capability. |
 
+## What each group does
+
+One line each, in plain language. Read/write is stated because it is a guarantee, not a
+label — a read tool can be handed to an agent without handing it a way to destroy something.
+
+### READ
+
+| Canonical | What it does |
+|---|---|
+| `search_knowledge` | **Find things by text.** Full-text and hybrid search, plus suggesting where to start, searching past sessions, and summarizing a topic. |
+| `list_knowledge` | **Browse and filter without searching by text** — enumerate by kind, tag, or page through results. |
+| `recall_beliefs` | **Ask what the system currently believes, and how strongly.** Returns confidence, the gaps (what it does *not* know), a subgraph, provenance (who decided it, where it came from), and how a belief changed over time. |
+| `get_entity` | **Fetch one node by id**, whichever kind it is — a claim, an entity, a session, an event. |
+| `explore_connections` | **Walk outward from a node** — what it links to, and what those link to. Includes the governance views (what your org owns). |
+| `graph_overview` | **The state of the whole graph** — taxonomy, counts, tags, sources, namespaces, topics, stale items — plus integrity checks, ontology validation, audit, and belief-engine health. |
+| `review_link_candidates` | **Suggested connections the system found but has not made.** Read-only; nothing is merged. |
+| `poll_events` | **Read the event log** since a point in time. |
+| `inspect_batch` | **Look at a batch of items held for review.** |
+
+### WRITE
+
+| Canonical | What it does |
+|---|---|
+| `create_entity` | **Add one node** — a claim (Point), or a referent (subject, object, event, document). Creating a Point is the variant that affects beliefs; the rest do not. |
+| `write_knowledge` | **Add many interconnected things in one call** — points, entities, sources, *and the connections between them*, written nodes-first so links can reference things created in the same call. |
+| `register_source` | **Declare that a source exists and how much to trust it.** The URL *is* the node identity; carries a credibility tier and a date. **Reads no content.** |
+| `index_files` | **Read files from disk and turn their content into memory** — points, entities, embeddings. Batched, with resume. |
+| `capture_knowledge` | **An agent's own journal** — save a batch of session notes (deduped), write a diary entry, read entries back. ⚠️ **Misnamed, and it mixes a read with writes — see below.** |
+| `capture_session_local` | **Turn a conversation into memory in your own graph.** Turns become points; an LLM extracts beliefs and the links between them. |
+| `capture_session_hosted` | **The same, against the hosted service** — extracts locally, validates, then sends. Needs an API key and a reachable endpoint. |
+| `manage_source_trust` | **Score and set how reliable a source is**, and read the cached reliability back. |
+| `link_entities` | **Connect two nodes.** Epistemic relations (supports, contradicts) build an operator; everything else a plain edge. The caller does not need to know which. |
+| `record_decision` | **Record a human decision or approval** as a first-class node that later retrieval can find. |
+| `revise_knowledge` | **Change something already stored** — edit it, replace it with a successor, withdraw it, promote a draft, or set its starting confidence. |
+| `delete_knowledge` | **Remove a node.** |
+| `stabilize_beliefs` | **Recompute confidence across the graph** so beliefs settle after a change. |
+| `approve_merge` | **Approve merging two things the system thinks are the same.** |
+| `adjust_relationship` | **Change an existing epistemic link's strength, or annotate it.** |
+| `manage_deployment` | **Administration** — orgs, graphs, members, API keys, invitations, agent signup. |
+| utilities | `close` tears down connections; `ulid` generates an id. |
+
+### Two problems this exposes
+
+**1. `capture_knowledge` mixes a read with writes.** Its members are `checkpoint` and
+`diary_write` (writes) and `diary_read` (**a read**). That breaks the rule the rest of this
+list is built on: a tool on the customer-grantable surface is either read or write, never
+both. It has to split.
+
+**2. `capture_knowledge` does not describe what it does.** The members are an agent's own
+journal, not knowledge capture. `capture` also now collides with
+`capture_session_local` / `capture_session_hosted`, which *do* capture sessions.
+
+**Proposed split** (owner decision):
+
+| Was | Becomes | Kind |
+|---|---|---|
+| `checkpoint`, `diary_write` | `write_journal` | write |
+| `diary_read` | `read_journal` | read |
+
+**Also observed:** `checkpoint` and the diary methods take `wing` / `room` parameters.
+That vocabulary appears nowhere in `docs/ONTOLOGY.md`, which models graphs, namespaces and
+containment differently. These three methods may descend from an earlier memory model and
+should be checked against the ontology before they are carried forward — flagged, not
+concluded.
+
 ## What collapses — and what the discriminator is
 
 Most rows below are genuine duplicates: the members differ by nothing, by a type, or by a
