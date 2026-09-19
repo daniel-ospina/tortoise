@@ -31,9 +31,9 @@ history — a per-request key (`crypto.randomUUID()`) and a `hits.clear()` in th
 handler body — are NOT visible here; they stay the pins' job (the call site pinned
 verbatim, every `hits` reference confined), verified red on both.
 
-`MUTATIONS` below replays the eleven limiter-level escapes as an executable
-battery, so the detection claim is an artifact in the repo rather than a number in
-a message.
+`MUTATIONS` below replays those escapes — plus the ones review found here — as an
+executable battery, so the detection claim is an artifact in the repo rather than a
+number in a message.
 
 SCOPE, HONESTLY. The extraction is deliberately narrow — the limiter, its
 constants and its store, not the module — so this harness says nothing about the
@@ -140,8 +140,17 @@ def _limiter_source(code: str) -> str:
     start = source.index("function rateLimited")
     body = source[start : _brace_end(source, start)]
     # The signature carries TypeScript annotations only; the body is plain JS. The
-    # parameters are passed positionally by the harness, so a changed ORDER is a
-    # behaviour change and the assertions below catch it.
+    # parameters are bound POSITIONALLY by the harness, which passes (address, time),
+    # so the source's parameter order is part of the contract this file depends on:
+    # a reorder would silently rebind both names and look green, so it is asserted
+    # here rather than assumed.
+    signature = re.search(r"function rateLimited\(([^)]*)\)", body)
+    assert signature is not None, "rateLimited's signature was not found"
+    params = [part.split(":")[0].strip() for part in signature.group(1).split(",")]
+    assert params == ["ip", "now"], (
+        f"rateLimited's parameters must be (ip, now), found {params!r} — the harness "
+        "binds them positionally, so a reorder must fail here and not pass silently"
+    )
     body = re.sub(
         r"function rateLimited\([^)]*\)(\s*:\s*[\w<>\[\]]+)?\s*\{",
         "function rateLimited(ip, now) {",
@@ -230,7 +239,8 @@ observations.mapSize = hits.size === undefined ? -1 : hits.size;
 // and leaves the dead ones behind, which the counts below show.
 hits.clear();
 const expiredAt = T0 - RATE_WINDOW_MS - 1;
-for (let i = 0; i < MAX_RATE_KEYS; i++) hits.set("live" + i, [T0]);
+const cap = Math.min(MAX_RATE_KEYS, CAP_CEILING);
+for (let i = 0; i < cap; i++) hits.set("live" + i, [T0]);
 for (let i = 0; i < 10; i++) hits.set("dead" + i, [expiredAt]);
 rateLimited("fresh", T0);
 let deadLeft = 0;
@@ -327,7 +337,15 @@ def _check_window(observed: dict) -> None:
 
 
 def _check_isolation(observed: dict) -> None:
-    """The limit is per address, not global."""
+    """The limit is per address, not global — both halves are required.
+
+    `otherAddressOk` alone would pass for a limiter that refuses nobody, so the
+    over-limit address tripping is asserted too.
+    """
+    assert observed["oneAddressTrips"] is True, (
+        "the over-limit address must still be refused — a limiter that refuses "
+        "nobody would otherwise satisfy the isolation check"
+    )
     assert observed["otherAddressOk"] is True, (
         "a different address must not be refused by another address's history"
     )
@@ -336,10 +354,9 @@ def _check_isolation(observed: dict) -> None:
 def _check_cap(observed: dict) -> None:
     """The cap bounds KEY COUNT, and lands ON the cap rather than short of it.
 
-    A store without `size` (a `WeakMap`, reported as -1), a cap that is never
-    reached, and an over-eviction that drops live keys all show up here — the last
-    one matters most, because an evicted live key loses its history and the limit
-    becomes bypassable.
+    A cap that is never reached and an over-eviction that drops live keys both show
+    up here — the second matters most, because an evicted live key loses its history
+    and the limit becomes bypassable.
     """
     assert observed["maxRateKeys"] <= observed["capCeiling"], (
         f"MAX_RATE_KEYS={observed['maxRateKeys']} is larger than this harness floods "
@@ -426,57 +443,75 @@ def test_expired_keys_are_swept_before_live_ones(behaviour: dict) -> None:
     _check_sweep(behaviour)
 
 
-# The eleven limiter-level escapes from the #2409 pin history, as an executable
-# battery: each must be caught (red) by the invariants above. Anchors are matched
-# uniquely and asserted present, so a refactor that moves one cannot leave a
-# mutation that never applies and a battery that silently proves nothing.
+# These are the escapes from the #2409 pin history plus the ones review found here, as
+# an executable battery: each must be caught by the invariants above. Patterns are
+# matched as REGEXES with flexible whitespace, so re-indenting or reformatting the
+# limiter does not break the battery — the harness asserts behaviour, not layout —
+# and each pattern is asserted present, so a mutation that stops applying fails
+# loudly instead of leaving a battery that proves nothing.
 MUTATIONS: tuple[tuple[str, str, str], ...] = (
     (
         "emptied history after the filter",
-        "const recent = (hits.get(ip) || []).filter((t) => t > cutoff);",
-        "const recent = (hits.get(ip) || []).filter((t) => t > cutoff);\n  recent.length = 0;",
+        r"const recent = \(hits\.get\(ip\) \|\| \[\]\)\.filter\(\(t\) => t > cutoff\);",
+        "\\g<0>\n  recent.length = 0;",
     ),
-    ("emptied history after the push", "\n  recent.push(now);", "\n  recent.push(now);\n  recent.length = 0;"),
+    ("emptied history after the push", r"recent\.push\(now\);", "\\g<0>\n  recent.length = 0;"),
+    ("emptied history after the write-back", r"hits\.set\(ip, recent\);", "\\g<0>\n  recent.length = 0;"),
+    ("predicate that never counts", r"\(t\) => t > cutoff", "\\g<0> && false"),
+    ("empty array written back", r"hits\.set\(ip, recent\);", "hits.set(ip, []);"),
+    ("map cleared after the write-back", r"hits\.set\(ip, recent\);", "\\g<0>\n  hits.clear();"),
     (
-        "emptied history after the write-back",
-        "\n  hits.set(ip, recent);",
-        "\n  hits.set(ip, recent);\n  recent.length = 0;",
+        "store that reports no size",
+        r"new Map<string, number\[\]>\(\)",
+        'new Proxy(new Map(), { get: (t, p) => p === "size" ? undefined : '
+        "(typeof t[p] === 'function' ? t[p].bind(t) : t[p]) })",
     ),
-    ("predicate that never counts", "(t) => t > cutoff", "(t) => t > cutoff && false"),
-    ("empty array written back", "\n  hits.set(ip, recent);", "\n  hits.set(ip, []);"),
-    ("map cleared after the write-back", "\n  hits.set(ip, recent);", "\n  hits.set(ip, recent);\n  hits.clear();"),
-    ("store without `size`", "new Map<string, number[]>()", "new WeakMap()"),
-    ("threshold raised out of range", "const RATE_LIMIT = 5;", "const RATE_LIMIT = 1_000_000_000;"),
-    ("window cut to nothing", "const cutoff = now - RATE_WINDOW_MS;", "const cutoff = now;"),
-    ("trip comparison relaxed", "recent.length >= RATE_LIMIT", "recent.length > RATE_LIMIT"),
-    ("cap raised out of range", "const MAX_RATE_KEYS = 5000;", "const MAX_RATE_KEYS = 50_000_000;"),
-    ("expiry predicate made non-strict", "filter((t) => t > cutoff)", "filter((t) => t >= cutoff)"),
-    ("expiry filter removed", "(hits.get(ip) || []).filter((t) => t > cutoff)", "hits.get(ip) || []"),
-    ("eviction overshoots the cap", "let excess = hits.size - MAX_RATE_KEYS;", "let excess = hits.size - 100;"),
+    ("store that cannot hold string keys", r"new Map<string, number\[\]>\(\)", "new WeakMap()"),
+    ("threshold raised out of range", r"const RATE_LIMIT = 5;", "const RATE_LIMIT = 1_000_000_000;"),
+    ("window cut to nothing", r"const cutoff = now - RATE_WINDOW_MS;", "const cutoff = now;"),
+    ("trip comparison relaxed", r"recent\.length >= RATE_LIMIT", "recent.length > RATE_LIMIT"),
+    ("cap raised out of range", r"const MAX_RATE_KEYS = 5000;", "const MAX_RATE_KEYS = 50_000_000;"),
+    ("expiry predicate made non-strict", r"filter\(\(t\) => t > cutoff\)", "filter((t) => t >= cutoff)"),
+    (
+        "expiry filter removed",
+        r"\(hits\.get\(ip\) \|\| \[\]\)\.filter\(\(t\) => t > cutoff\)",
+        "hits.get(ip) || []",
+    ),
+    (
+        "eviction overshoots the cap",
+        r"let excess = hits\.size - MAX_RATE_KEYS;",
+        "let excess = hits.size - 100;",
+    ),
     (
         "expired sweep removed",
-        "for (const [k, v] of hits) {\n      if (v.every((t) => t <= cutoff)) hits.delete(k);\n    }",
+        r"for \(const \[k, v\] of hits\) \{\s*if \(v\.every\(\(t\) => t <= cutoff\)\) hits\.delete\(k\);\s*\}",
         "",
     ),
 )
 
 
-@pytest.mark.parametrize(("label", "anchor", "replacement"), MUTATIONS, ids=[m[0] for m in MUTATIONS])
-def test_the_harness_catches_a_behavioural_break(label: str, anchor: str, replacement: str) -> None:
-    """Each mutation of the limiter must be caught — by the invariants or by the run.
+@pytest.mark.parametrize(
+    ("label", "pattern", "replacement"), MUTATIONS, ids=[m[0] for m in MUTATIONS]
+)
+def test_the_harness_catches_a_behavioural_break(label: str, pattern: str, replacement: str) -> None:
+    """Each mutation of the limiter must be caught — by an invariant, or by the run.
 
     This is the harness's own discriminating power, asserted. A mutation that leaves
     the invariants green is a hole in the guard, and this test is where it shows up
-    rather than in a message claiming a detection count.
+    rather than in a message claiming a detection count. `\\g<0>` in a replacement
+    means "the matched text", so a mutation that inserts around an anchor keeps it.
     """
     source = CONTACT_TS.read_text(encoding="utf-8")
-    assert anchor in source, (
+    assert re.search(pattern, source), (
         f"the mutation anchor for {label!r} is gone from the limiter — update MUTATIONS "
         "rather than leaving a battery that no longer applies"
     )
+    mutated = re.sub(pattern, replacement, source, count=1)
     try:
-        observed = _observe(source.replace(anchor, replacement, 1))
+        observed = _observe(mutated)
     except AssertionError:
-        # The mutated limiter could not be extracted or run at all — caught.
+        # The mutated limiter could not be extracted or run at all: a store that
+        # cannot hold the address keys, say. Caught — the harness refuses to
+        # certify a limiter it cannot execute rather than passing it.
         return
     assert _failures(observed), f"{label!r} escaped the harness: {observed!r}"
