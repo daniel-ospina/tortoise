@@ -671,10 +671,11 @@ surfaces:
   - test_terminal_status_vocabulary.py
   ep:
   # #4097: the env-truthiness non-divergence guard scans ALL of `tortoise/**` —
-  # including this surface's mapped modules (`decide.py`, `dream.py`, `analyze.py`,
-  # `ranking.py`). A `SOURCES_PATTERNS` match REPLACES the `core` fallback, so
-  # without this registration a change to one of them runs no part of the guard
-  # (the #1349/#3332/#3616 silent-drop class).
+  # including this surface's mapped modules (`dream.py`, `analyze.py`, `ranking.py`).
+  # A `SOURCE_PATTERNS` match REPLACES the `core` fallback, so without this
+  # registration a change to one of them runs no part of the guard (the
+  # #1349/#3332/#3616 silent-drop class). `tests/test_env_truthy.py` derives this
+  # requirement from SOURCE_PATTERNS, so a new/split surface cannot silently drop it.
   - test_env_truthy.py
   - test_a9_direct_edge_traversal.py
   # #2938: direct unit tests of tortoise/analyze.py (an ep-mapped source).
@@ -863,7 +864,7 @@ surfaces:
   - test_coverage_loop_rules.py  # #2567 (hermetic rules leg)
   - test_entity_key_expansion.py  # #2518 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
-  - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the ledger pins retrieval.ask_env_bool)
+  - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the migration oracle pins `retrieval.ask_env_bool` as a migrated site)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
   - test_assembly_fixtures.py  # #2165 Task 1: connected-assembly fixture substrate + R16(b) calibration (docker-lane)
   - test_assembly_pure.py  # #2165 Task 2: pure shape classifier + subject extraction (no-DB unit)
@@ -892,7 +893,7 @@ surfaces:
   - test_kind_classifier.py
   - test_kind_eval_set.py
   eval:
-  # #4097: dual-registered with `core`/`sdk`/`api`/`ep`/`onboarding` — the guard
+  # #4097: registered in `core`/`sdk`/`api`/`ep`/`eval`/`onboarding` — the guard
   # scans all of `tortoise/**`, and this surface owns `tortoise/embeddings.py`
   # (a module #4097 migrated) and `tortoise/cross_lens.py`.
   - test_env_truthy.py

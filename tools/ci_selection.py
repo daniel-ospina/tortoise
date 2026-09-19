@@ -97,6 +97,11 @@ SHARED_MODULES = (
     # surfaces (test_divergence_conformance, test_epic903_modes,
     # test_ingest_*, test_calibration) — a change here runs the full matrix.
     "tortoise/exceptions.py",
+    # #4097: cross-cutting leaf — the declared env-truthiness contract, imported by
+    # core/api/sdk/ep/eval/onboarding resolvers. A change to `env_flag`'s blank/garbage
+    # handling changes consumer behaviour on every surface, so it runs the full matrix
+    # (same rationale as exceptions.py above).
+    "tortoise/env_truthy.py",
     "tortoise/tool_registry.py",
     "tortoise/mcp_server.py",
     "tortoise/projection/",

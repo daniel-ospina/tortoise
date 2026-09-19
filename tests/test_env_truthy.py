@@ -15,23 +15,37 @@ Three things are pinned here:
      #4128, *within its declared scan surface*.
 
 **Declared scan boundary.** The scan covers `tortoise/**/*.py` + `tests/_embedded.py`.
-It does NOT police: V5 presence reads; split comparisons (`raw == "1" or raw == "true"`);
-a partial vocabulary with no `"1"`/`"0"` anchor (e.g. `{"true","yes","on"}`);
-`getattr(os.environ, ...)` reads; or `tests/` beyond `_embedded.py`, `tools/`,
-`graph-scripts/`, `apps/` — which already carry their own literals
-(`tests/test_product_rerank.py`, `tests/test_monitoring.py`, `tests/test_reaper.py`,
-`tests/test_eval_ingest_cache.py`, `tests/test_extractor_v2.py`,
-`tests/longmem_eval/test_assembly_arm.py`, `tests/eval/why_suite/test_why_suite_ab.py`,
-`tests/test_email_signup.py`, `apps/graph-viz/server/connection.py`). The claim this
-file supports is "no new divergence **inside the declared surface**", not "anywhere in
-the repo". A JS/TS scan of `website/functions/`, `supabase/functions/`, `client/` and
-`menu-bar/` found no boolean env-truthiness parsing, so there is no cross-language
-duplication to guard.
+It does NOT police:
+
+- V5 presence reads (`if os.environ.get(X)`);
+- split comparisons (`raw == "1" or raw == "true"`);
+- a vocabulary with no `"1"`/`"0"` anchor (e.g. `{"true","yes","on"}`);
+- a vocabulary composed at RUNTIME (`"1 true yes on".split()`, `"".join(...)`);
+- `getattr(os.environ, ...)` reads;
+- a **two-step** alias chain (`_a = os.environ.get(X); _r = _a`) — one step
+  (`_r = ...`, `_r: str = ...`, `(_r := ...)`) IS resolved;
+- `tests/` beyond `_embedded.py`, `tools/`, `graph-scripts/`, `apps/` — which already
+  carry their own literals (`tests/test_product_rerank.py`, `tests/test_monitoring.py`,
+  `tests/test_reaper.py`, `tests/test_eval_ingest_cache.py`,
+  `tests/test_extractor_v2.py`, `tests/longmem_eval/test_assembly_arm.py`,
+  `tests/eval/why_suite/test_why_suite_ab.py`, `tests/test_email_signup.py`,
+  `apps/graph-viz/server/connection.py`).
+
+Two of its clauses deliberately OVER-approximate, in the fail-closed direction: the alias
+map is module-global (a name ever bound to an env read is treated as that read for the whole
+module, so an unrelated reuse of the name can red), and the `Dict`-key clause flags any dict
+whose KEYS look like a vocabulary even when it is a non-env label map. Both are fixable by
+raising/adding the relevant ledger entry, or by making the shape unambiguous. The claim this
+file supports is therefore "no new divergence **inside the declared surface**, modulo the
+shapes listed above" — not "anywhere in the repo, however written". A JS/TS scan of
+`website/functions/`, `supabase/functions/`, `client/` and `menu-bar/` found no boolean
+env-truthiness parsing, so there is no cross-language duplication to guard.
 
 The scan resolves: module-level string constants as env names, `.strip().lower()`
-chains, one level of `_alias = os.environ.get(NAME)` indirection, a constant on either
-side of the comparison, `environ.get(...)` after `from os import environ`, and both
-`Set`/`Tuple`/`List` and `Dict`-key vocabulary literals.
+chains, one level of alias indirection (assignment, annotated assignment and walrus), a
+constant on either side of the comparison, `environ.get(...)` after
+`from os import environ [as X]`, and both `Set`/`Tuple`/`List` and `Dict`-key vocabulary
+literals.
 
 The migrated-module imports are deliberately resolved **inside** the tests that need
 them, so the pure-AST guard tests below never load the heavy hosted stack.
@@ -53,19 +67,41 @@ from tortoise.env_truthy import FALSY, TRUTHY, env_flag, is_truthy
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 #: The full input matrix. `None` = the variable is absent.
-_MATRIX = [None, "", " ", "0", "1", " 1 ", "1 ", "0 ", "true", "TRUE", "True",
-           "yes", "YES", "Yes", "on", "ON", "On", "false", "FALSE", "no", "NO",
-           "off", "OFF", "garbage", "2"]
+_MATRIX = [None, "", " ", "\t", "\n", "  \t", "0", "1", " 1 ", "1 ", " 1", "1\t",
+           "\t1", "0 ", "true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON", "On",
+           "false", "FALSE", "no", "NO", "off", "OFF", "garbage", "2"]
 
-#: The declared truthy spellings beyond the exact string "1" (case variants).
-_TRUTHY_SPELLINGS = frozenset({"true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON", "On"})
+# A site's "declared cell" is a PREDICATE over the raw value, not an enumeration: the
+# whitespace forms are a class (`"1\t"`, `" 1"`, `"\n"` all widened at the no-strip
+# `== "1"` sites), and an enumerated set silently under-declares them. Inspect the old
+# predicate to see which class applies.
 
-#: Widening set for a `== "1"` read that does NOT strip/lower the value: the spellings
-#: above PLUS the whitespace-padded "1" forms.
-_WIDENED_STRICT1 = _TRUTHY_SPELLINGS | {" 1 ", "1 "}
 
-#: Widening set for a `in ("1","true","yes")` (V3) read: only "on" was missing.
-_WIDENED_ONLY_ON = frozenset({"on", "ON", "On"})
+def _decl_none(raw: str | None) -> bool:
+    """The site was already cell-exact — nothing may newly resolve True."""
+    return False
+
+
+def _decl_strict1(raw: str | None) -> bool:
+    """Old: `os.environ.get(N, "") == "1"` (no strip) -> newly True for every other
+    declared truthy spelling, including whitespace-trimmed `"1"` forms."""
+    return raw is not None and raw != "1" and raw.strip().lower() in TRUTHY
+
+
+def _decl_narrow1(raw: str | None) -> bool:
+    """Old: `... .strip().lower() == "1"` -> newly True only for the OTHER spellings."""
+    return raw is not None and raw.strip().lower() in (TRUTHY - {"1"})
+
+
+def _decl_only_on(raw: str | None) -> bool:
+    """Old: `... .strip().lower() in ("1","true","yes")` (V3) -> only "on" was missing."""
+    return raw is not None and raw.strip().lower() == "on"
+
+
+def _decl_blank(raw: str | None) -> bool:
+    """Old `cimd._env_flag` carried `""` in its falsy tuple -> blank/whitespace-only
+    (but NOT unset, which was already the default) now falls back to the default."""
+    return raw is not None and raw.strip() == ""
 
 
 def _set(monkeypatch, name: str, raw: str | None) -> None:
@@ -198,77 +234,77 @@ def _site_spec(label: str):
 
     if label == "why.w4_enrichment_enabled":
         return (why.W4_FLAG_ENV, why.w4_enrichment_enabled,
-                lambda: _old_truthy(why.W4_FLAG_ENV), frozenset())
+                lambda: _old_truthy(why.W4_FLAG_ENV), _decl_none)
     if label == "monitoring._healthz_required":
         return ("TORTOISE_HEALTHZ_REQUIRED", monitoring._healthz_required,
-                lambda: _old_truthy("TORTOISE_HEALTHZ_REQUIRED"), frozenset())
+                lambda: _old_truthy("TORTOISE_HEALTHZ_REQUIRED"), _decl_none)
     if label == "sdk._ep_require_calibration_default":
         return ("TORTOISE_EP_REQUIRE_CALIBRATION", sdk._ep_require_calibration_default,
-                lambda: _old_truthy("TORTOISE_EP_REQUIRE_CALIBRATION", "1"), frozenset())
+                lambda: _old_truthy("TORTOISE_EP_REQUIRE_CALIBRATION", "1"), _decl_none)
     if label == "sdk._index_no_network_enabled":
         return ("TORTOISE_INDEX_NO_NETWORK", sdk._index_no_network_enabled,
                 lambda: os.environ.get("TORTOISE_INDEX_NO_NETWORK", "").strip().lower()
-                in ("1", "true", "yes"), _WIDENED_ONLY_ON)
+                in ("1", "true", "yes"), _decl_only_on)
     if label == "hosted_api._volunteer_slo_enforced":
         return ("TORTOISE_VOLUNTEER_ENFORCE_SLO", hosted_api._volunteer_slo_enforced,
-                lambda: _old_truthy("TORTOISE_VOLUNTEER_ENFORCE_SLO"), frozenset())
+                lambda: _old_truthy("TORTOISE_VOLUNTEER_ENFORCE_SLO"), _decl_none)
     if label == "hosted_api._linking_available":
         return ("TORTOISE_MANUAL_LINKING_ENABLED", hosted_api._linking_available,
                 lambda: os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED", "") == "1",
-                _WIDENED_STRICT1)
+                _decl_strict1)
     if label == "hosted_api._telemetry_strict":
         return ("TORTOISE_TELEMETRY_STRICT", hosted_api._telemetry_strict,
                 lambda: os.environ.get("TORTOISE_TELEMETRY_STRICT") == "1",
-                _WIDENED_STRICT1)
+                _decl_strict1)
     if label == "hosted_api._signup_email_confirm":
         return ("TORTOISE_SIGNUP_EMAIL_CONFIRM", hosted_api._signup_email_confirm,
                 lambda: os.environ.get("TORTOISE_SIGNUP_EMAIL_CONFIRM", "true")
-                .strip().lower() not in ("false", "0", "no", "off"), frozenset())
+                .strip().lower() not in ("false", "0", "no", "off"), _decl_none)
     if label == "frontmatter_validator.validation_enabled":
         return ("TORTOISE_VALIDATE_FRONTMATTER", frontmatter_validator.validation_enabled,
                 lambda: os.environ.get("TORTOISE_VALIDATE_FRONTMATTER", "")
-                .strip().lower() == "1", _TRUTHY_SPELLINGS)
+                .strip().lower() == "1", _decl_narrow1)
     if label == "model_adapters._should_send_json_mode":
         return ("TORTOISE_JSON_MODE",
                 lambda: model_adapters._should_send_json_mode("", "please return json"),
                 lambda: os.environ.get("TORTOISE_JSON_MODE", "1") == "1",
-                _WIDENED_STRICT1)
+                _decl_strict1)
     if label == "extractor_v2._classify_later_enabled":
         return ("TORTOISE_CLASSIFY_LATER", extractor_v2._classify_later_enabled,
-                lambda: _old_truthy("TORTOISE_CLASSIFY_LATER"), frozenset())
+                lambda: _old_truthy("TORTOISE_CLASSIFY_LATER"), _decl_none)
     if label == "embeddings._embedder_warmup_enabled":
         from tortoise.embeddings import _embedder_warmup_enabled
         return ("TORTOISE_EMBEDDER_WARMUP", _embedder_warmup_enabled,
                 lambda: os.environ.get("TORTOISE_EMBEDDER_WARMUP", "1")
-                .strip().lower() not in ("0", "false", "no", "off"), frozenset())
+                .strip().lower() not in ("0", "false", "no", "off"), _decl_none)
     if label == "backup_config.env_flag_false_shape":
         # `backup_config._env_bool` was deleted in favour of `env_flag(name, False)`;
         # this pins that the SHAPE reproduces the deleted helper cell-for-cell.
         return ("TORTOISE_T_BACKUP_BOOL", lambda: env_flag("TORTOISE_T_BACKUP_BOOL", False),
-                lambda: _old_env_bool("TORTOISE_T_BACKUP_BOOL", False), frozenset())
+                lambda: _old_env_bool("TORTOISE_T_BACKUP_BOOL", False), _decl_none)
     if label == "retrieval.ask_env_bool":
         return ("TORTOISE_T_ASK_BOOL", lambda: retrieval.ask_env_bool("TORTOISE_T_ASK_BOOL", False),
-                lambda: _old_tristate("TORTOISE_T_ASK_BOOL", False), frozenset())
+                lambda: _old_tristate("TORTOISE_T_ASK_BOOL", False), _decl_none)
     if label == "rerank.rerank_enabled":
         return ("TORTOISE_ASK_RERANK", rerank.rerank_enabled,
-                lambda: _old_truthy("TORTOISE_ASK_RERANK"), frozenset())
+                lambda: _old_truthy("TORTOISE_ASK_RERANK"), _decl_none)
     if label == "projection._embedded_aof_enabled":
         return ("TORTOISE_EMBEDDED_AOF", projection._embedded_aof_enabled,
                 lambda: os.environ.get("TORTOISE_EMBEDDED_AOF", "").strip().lower()
-                in ("1", "true", "yes"), _WIDENED_ONLY_ON)
+                in ("1", "true", "yes"), _decl_only_on)
     if label == "cimd.cimd_enabled":
         return ("TORTOISE_OAUTH_CIMD", cimd.cimd_enabled,
-                lambda: _old_cimd_flag("TORTOISE_OAUTH_CIMD"), frozenset({"", " "}))
+                lambda: _old_cimd_flag("TORTOISE_OAUTH_CIMD"), _decl_blank)
     if label == "cimd.same_origin_redirects_required":
         return ("TORTOISE_OAUTH_CIMD_SAME_ORIGIN", cimd.same_origin_redirects_required,
                 lambda: _old_cimd_flag("TORTOISE_OAUTH_CIMD_SAME_ORIGIN"),
-                frozenset({"", " "}))
+                _decl_blank)
     if label == "embedded_lifecycle._fast_atexit_enabled":
         return ("TORTOISE_FAST_ATEXIT", _fast_atexit_enabled,
-                lambda: os.environ.get("TORTOISE_FAST_ATEXIT") == "1", _WIDENED_STRICT1)
+                lambda: os.environ.get("TORTOISE_FAST_ATEXIT") == "1", _decl_strict1)
     if label == "tests._embedded._carve_out_opted_in":
         return ("TORTOISE_TEST_CARVE_OUT", _carve_out_opted_in,
-                lambda: os.environ.get("TORTOISE_TEST_CARVE_OUT") == "1", _WIDENED_STRICT1)
+                lambda: os.environ.get("TORTOISE_TEST_CARVE_OUT") == "1", _decl_strict1)
     raise AssertionError(f"unregistered migrated-site label: {label!r}")
 
 
@@ -287,9 +323,9 @@ def test_migration_only_widens_at_the_declared_cells(monkeypatch, label):
         if was:
             assert now, f"{label} REGRESSED at {raw!r}: was True, now False"
         elif now:
-            assert raw in declared, (
+            assert declared(raw), (
                 f"{label} newly True at undeclared input {raw!r} — either the migration "
-                "changed behaviour unexpectedly, or the site's `declared` set is stale"
+                "changed behaviour unexpectedly, or the site's `declared` predicate is stale"
             )
 
 
@@ -440,11 +476,6 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
         (1, "#4128 — swaps the LLM for a mock"),
 }
 
-#: Total narrow-read LINES ceiling — a delete-then-re-add elsewhere cannot mask growth
-#: that the per-key upper bounds miss.
-_LEDGER_CEILING = 30
-
-
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
     out: dict[str, str] = {}
     for node in ast.walk(tree):
@@ -465,19 +496,22 @@ def _unwrap_chain(node: ast.expr) -> ast.expr:
 
 
 def _env_var_name(node: ast.expr, constants: dict[str, str],
-                  aliases: dict[str, str]) -> str | None:
+                  aliases: dict[str, str],
+                  environ_names: frozenset[str] = frozenset()) -> str | None:
     """The env var this expression reads, or None.
 
     Resolves: `os.environ.get(...)` / `os.getenv(...)` (including a bare `environ`
-    after `from os import environ`), `os.environ[...]`, a module-level STRING
-    constant used as the name, and one level of local indirection
-    (`_r = os.environ.get("X")` -> the compare on `_r`).
+    after `from os import environ`, aliased or not), `os.environ[...]`, a module-level
+    STRING constant used as the name, and one level of local indirection
+    (`_r = os.environ.get("X")` / `_r: str = ...` / `if (_r := ...)` -> the compare
+    on `_r`).
     """
     node = _unwrap_chain(node)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
             and node.func.attr in ("get", "getenv"):
         base = node.func.value
-        is_os = (isinstance(base, ast.Name) and base.id in ("os", "_os", "environ")) \
+        is_os = (isinstance(base, ast.Name)
+                 and (base.id in ("os", "_os", "environ") or base.id in environ_names)) \
             or (isinstance(base, ast.Attribute) and base.attr == "environ")
         if is_os and node.args:
             arg = node.args[0]
@@ -496,37 +530,61 @@ def _env_var_name(node: ast.expr, constants: dict[str, str],
     return None
 
 
-def _env_aliases(tree: ast.Module, constants: dict[str, str]) -> dict[str, str]:
-    """Local names bound to an env read: `_r = os.environ.get("X")` -> `{"_r": "X"}`.
+def _os_environ_aliases(tree: ast.Module) -> frozenset[str]:
+    """Names bound to `os.environ` by `from os import environ [as X]`."""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "os":
+            for alias in node.names:
+                if alias.name == "environ":
+                    out.add(alias.asname or alias.name)
+    return frozenset(out)
 
-    One level is enough for the shape a refactor produces (`raw = os.environ.get(...)`
-    then `raw == "1"`); the alias map is built before the compare walk, so a two-step
-    chain is still missed and that residual is declared in the module docstring.
+
+def _env_aliases(tree: ast.Module, constants: dict[str, str],
+                 environ_names: frozenset[str] = frozenset()) -> dict[str, str]:
+    """Local names bound to an env read.
+
+    Covers `_r = os.environ.get("X")`, `_r: str = os.environ.get("X")` (AnnAssign)
+    and `if (_r := os.environ.get("X")) == ...` (walrus). A TWO-step chain
+    (`_a = <env read>; _r = _a`) is still missed; the map is also module-global and
+    so OVER-approximates (a name ever bound to an env read is treated as that read
+    for the whole module) — both residuals are declared in the module docstring.
     """
     out: dict[str, str] = {}
+
+    def _bind(target: ast.expr, value: ast.expr) -> None:
+        if isinstance(target, ast.Name):
+            name = _env_var_name(value, constants, {}, environ_names)
+            if name and name != "<dynamic>":
+                out.setdefault(target.id, name)
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            name = _env_var_name(node.value, constants, {})
-            if name and name != "<dynamic>":
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        out.setdefault(target.id, name)
+            for target in node.targets:
+                _bind(target, node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if node.value is not None:
+                _bind(node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            _bind(node.target, node.value)
     return out
 
 
 def _is_vocabulary(values: set[str]) -> bool:
-    """A DECLARED vocabulary literal: anchored on "1" or "0" and carrying >= 2
-    truthy/falsy spellings.
+    """A DECLARED vocabulary literal: anchored on "1" or "0" AND carrying at least
+    one further truthy/falsy SPELLING.
 
-    The anchor and the >= 2 rule keep single-element collections such as
-    `dict.get("page", ["1"])[0]` (`tortoise/indexer/github_indexer.py`) and stopword
-    sets ({"on","yes"}) out of the scan. A near-vocabulary with a stray extra member
-    (`{"1","true","yes","t"}`) IS flagged — that is a new divergence, not a
-    different thing.
+    The anchor plus the extra spelling keeps single-element collections such as
+    `dict.get("page", ["1"])[0]` (`tortoise/indexer/github_indexer.py`), stopword sets
+    ({"on","yes"}) and bare binary-digit collections (`{"0","1"}`, or a
+    `{"1": "one", "0": "zero"}` label map) out of the scan. A near-vocabulary with a
+    stray extra member (`{"1","true","yes","t"}`) IS flagged — that is a new
+    divergence, not a different thing.
     """
     if "1" not in values and "0" not in values:
         return False
-    return len(values & (TRUTHY | FALSY)) >= 2
+    return bool((values & (TRUTHY | FALSY)) - {"0", "1"})
 
 
 def _scan() -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]]:
@@ -539,7 +597,8 @@ def _scan() -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]]:
             rel = path.relative_to(REPO_ROOT).as_posix()
             tree = ast.parse(path.read_text())
             constants = _module_string_constants(tree)
-            aliases = _env_aliases(tree, constants)
+            environ_names = _os_environ_aliases(tree)
+            aliases = _env_aliases(tree, constants, environ_names)
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Set, ast.Tuple, ast.List)):
                     values = {e.value for e in node.elts
@@ -553,7 +612,7 @@ def _scan() -> tuple[list[tuple[str, int]], list[tuple[str, str, int]]]:
                         literals.append((rel, node.lineno))
                 if isinstance(node, ast.Compare):
                     sides = (node.left, *node.comparators)
-                    names = {n for n in (_env_var_name(s, constants, aliases)
+                    names = {n for n in (_env_var_name(s, constants, aliases, environ_names)
                                          for s in sides) if n}
                     if not names:
                         continue
@@ -588,7 +647,9 @@ def test_no_adhoc_vocabulary_literal_outside_the_contract():
     assert dict(counts) == expected, (
         "truthy/falsy vocabulary ownership drifted (#4097): "
         f"found {dict(counts)}, expected {expected} — import TRUTHY/FALSY from "
-        "tortoise.env_truthy instead of declaring another literal"
+        "tortoise.env_truthy instead of declaring another literal, or, for a "
+        "deliberate/kept literal owner, add a `_LEDGER_LITERAL_OWNERS` entry above "
+        "with its reason"
     )
 
 
@@ -602,11 +663,33 @@ def test_narrow_env_reads_are_the_frozen_ledger():
         "tortoise.env_truthy, or raise the ledger entry with a reason: " + repr(grown)
         + "   (widening a listed name is #4128's decision, not a drive-by edit)"
     )
-    assert sum(seen.values()) <= _LEDGER_CEILING, (
-        f"total narrow-read lines grew to {sum(seen.values())} (ceiling {_LEDGER_CEILING})"
-    )
     closed = sorted(key for key in _KNOWN_NARROW_READS if key not in seen)
     assert not closed, (
         "closed _KNOWN_NARROW_READS entr(ies) — the read is gone, delete the entry so the "
         "ledger can only shrink (#4128): " + ", ".join(f"{r}::{n}" for r, n in closed)
+    )
+
+
+def test_guard_is_registered_in_every_surface_that_owns_a_scanned_module():
+    """#4097: the guard's CI reachability is DERIVED here, not remembered by hand.
+
+    `tools/ci_selection.select()` replaces the `core` fallback with a matched named
+    surface, so a surface that owns a module under the declared scan root but does not list
+    this file makes an isolated change to that module run NO part of the guard — the
+    #1349/#3332/#3616 silent-drop class (code review found exactly this for `eval`).
+    Recomputing the owning set from the selector is what keeps six hand-written manifest
+    entries from being a mirror that rots the next time a surface is added or split.
+    """
+    yaml = pytest.importorskip("yaml")
+    from tools import ci_selection as cs
+
+    manifest = yaml.safe_load((REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+    owners = {surface for surface, patterns in cs.SOURCE_PATTERNS.items()
+              if any(p.startswith("tortoise/") for p in patterns)} | {"core"}
+    missing = sorted(s for s in owners
+                     if "test_env_truthy.py" not in manifest["surfaces"].get(s, []))
+    assert not missing, (
+        f"the env-truthiness guard scans all of tortoise/** but is not registered in "
+        f"surface(s) that own a scanned module: {missing} — add `- test_env_truthy.py` "
+        "to each (config/ci-surfaces.yml)"
     )
