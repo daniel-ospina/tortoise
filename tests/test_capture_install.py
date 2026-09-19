@@ -1413,6 +1413,83 @@ def test_hooks_claude_also_survives_an_unresolvable_home(
     assert "to repair" in r.stderr, r.stderr
 
 
+@pytest.mark.parametrize(
+    ("hooks_cmd", "currency"),
+    [("status", "are current"), ("upgrade", "already current")],
+)
+@pytest.mark.parametrize("harness", ["codex", "claude"])
+@pytest.mark.parametrize("home", ["~", "~/x"])
+def test_explicit_dir_keeps_an_unresolvable_home_irrelevant(
+        tmp_path, harness, hooks_cmd, home, currency):
+    """An explicit ``--dir`` makes ``HOME`` irrelevant, so an unresolvable
+    ``HOME`` must NOT abort a ``hooks status`` / ``hooks upgrade`` that names a
+    valid absolute install root.  The refusal in the sibling tests above comes
+    from ``_P.home()`` RAISING; evaluating it ABOVE the ``explicit_dir``
+    ternary (the 145260bb1 form) aborts a ``--dir`` inspect/repair that had no
+    need to consult ``HOME`` at all, returning a false refusal (rc=1).  This
+    test observes BOTH sides of that boundary: WITH ``--dir`` the command
+    succeeds, WITHOUT ``--dir`` the SAME ``HOME`` refuses cleanly — so the
+    happy path is meaningful rather than merely optimistic.
+
+    The no-``--dir`` half duplicates the sibling coverage
+    (``test_codex_hooks_refuses_an_unresolvable_home_as_a_populated_error`` and
+    ``test_hooks_claude_also_survives_an_unresolvable_home``); it is asserted
+    here too so the pair reads as one boundary rather than two disconnected
+    tests.
+
+    Claude's asymmetry is encoded, not fought: the Claude layout is
+    project-scoped, so ``default_root`` ignores ``home`` and only the RAISING
+    homes (``~``/``~/x``) — the matrix here — reach it; a RELATIVE ``HOME`` is
+    not a Claude refusal by design and is deliberately NOT asserted.
+
+    Mutation (VERIFIED RED): re-hoist ``home = _P.home()`` above the
+    ``explicit_dir`` ternary — ``default_root(layout, home)`` then never
+    receives an unraised ``HOME``, and every ``--dir`` case here REDs on
+    ``returncode == 0`` with a ``RuntimeError`` refusal (the #4024 P2-1 gap:
+    no test covered ``--dir`` plus an unresolvable ``HOME``)."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    install_home = tmp_path / "installhome"
+    install_home.mkdir()
+
+    # A CURRENT seam at an ABSOLUTE dir, so the ``--dir`` invocation has
+    # something valid to inspect (status: current; upgrade: nothing to do).
+    if harness == "codex":
+        assert install_capture("codex", home=install_home).ok
+        abs_dir = capture_install.codex_home(install_home)
+    else:
+        assert install_capture("claude", root=proj).ok
+        abs_dir = proj
+
+    env = {
+        **os.environ,
+        "HOME": home,
+        "CODEX_HOME": "",
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+
+    # WITH ``--dir``: HOME is irrelevant — the explicit absolute root is
+    # valid, so the command succeeds and reports the normal currency sentence.
+    with_dir = _run(
+        ("hooks", hooks_cmd, "--harness", harness, "--dir", str(abs_dir)),
+        env, proj)
+    assert with_dir.returncode == 0, (
+        with_dir.returncode, with_dir.stdout, with_dir.stderr)
+    assert currency in with_dir.stdout, with_dir.stdout + with_dir.stderr
+    assert "Traceback" not in with_dir.stderr, with_dir.stderr
+
+    # WITHOUT ``--dir``: the same HOME refuses cleanly (populated message, no
+    # traceback) — the other side of the boundary.
+    without_dir = _run(("hooks", hooks_cmd, "--harness", harness), env, proj)
+    assert without_dir.returncode != 0, (
+        without_dir.returncode, without_dir.stdout, without_dir.stderr)
+    assert "Traceback" not in without_dir.stderr, without_dir.stderr
+    assert "Could not determine home directory." in without_dir.stderr, (
+        without_dir.stderr)
+    assert "to repair" in without_dir.stderr, without_dir.stderr
+
+
 # ── the CLI surface (`tortoise install <harness>`) ──────────────────────
 
 
