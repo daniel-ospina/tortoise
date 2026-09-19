@@ -181,13 +181,8 @@ class TestCrossLaneParity:
         ``tortoise/tortoise_client.py`` (the S9 skill-wiring client) imports
         the terms from the home module, and its exit-code map is the
         #3832/D5 split the vocabulary exists to protect: ``degraded`` (off by
-        outage) and ``unconfigured`` (off by policy) must stay DISTINCT.
-
-        The BINDING is what is pinned, not string identity: CPython interns
-        identifier-like literals, so a re-forked ``STATUS_DEGRADED =
-        "degraded"`` in the client would still satisfy ``is``. Asserting the
-        client module's own ``status_vocabulary`` binding is what actually
-        catches a re-fork.
+        outage) and ``unconfigured`` (off by policy) must stay DISTINCT. This
+        asserts the client module's binding to that home and the split.
         """
         from tortoise import tortoise_client
 
