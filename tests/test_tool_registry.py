@@ -761,3 +761,130 @@ class TestCapabilityModel:
         unresolved = quota_gated_wrap_sites(_PROBE_SRC).unresolved
         assert unresolved, "dynamic wrap site not detected"
         assert any("unresolvable" in u for u in unresolved)
+
+    def test_declared_set_violations_can_fail(self):
+        """The declared-set liveness predicate is itself falsifiable."""
+        from tool_surface_capabilities import declared_set_violations
+
+        from tortoise.tool_registry import TOOL_REGISTRY
+        without_dream = [e for e in TOOL_REGISTRY if e.sdk_method != "dream"]
+        assert any("no tool binding" in v or "does not resolve" in v
+                   for v in declared_set_violations(without_dream))
+        # a synthetic SDK lacking a declared method fails resolution
+        assert any("does not resolve" in v
+                   for v in declared_set_violations(TOOL_REGISTRY,
+                                                   sdk_src="class TortoiseSDK:\n    pass\n"))
+
+    def test_guard1_declared_and_unguarded_branches_fail(self):
+        """Guard 1 must fire on the declared-binding leg and on an HTTP-excluded
+        tool that reaches a privileged op without self-guarding."""
+        from tool_surface_capabilities import privileged_exposure_violations
+
+        from tortoise.tool_registry import _ro, _rw
+        declared = _probe("tortoise_probe_fs", "ingest_corpus",
+                          annotations=_ro(), http_policy=True)
+        assert privileged_exposure_violations([declared], _PROBE_SRC)
+        unguarded = _probe("tortoise_probe_unguarded_excluded", "ingest_corpus",
+                           annotations=_rw(), http_policy=False)
+        assert privileged_exposure_violations([unguarded], _PROBE_SRC)
+
+    def test_guard2_undeclared_and_nonsdk_branches_fail(self):
+        """Guard 2's 2c (empty sdk_method) and non-SDK-writer branches fail."""
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import _ro
+        undeclared = _probe("tortoise_undeclared_empty", "", annotations=_ro(),
+                            http_policy=True)
+        assert any("empty sdk_method" in v
+                   for v in write_classification_violations([undeclared], _PROBE_SRC))
+        non_sdk = _probe("tortoise_pack_install", "upsert_tenant_manifest",
+                         annotations=_ro(), http_policy=True)
+        assert any("non-SDK writer" in v
+                   for v in write_classification_violations([non_sdk], _PROBE_SRC))
+
+    def test_read_through_write_is_not_flagged(self):
+        """The read-through subtraction: a read-only HTTP tool reaching
+        `compute_confidence` is deliberately NOT a violation."""
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import _ro
+        src = (
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def tortoise_probe_readthrough():\n"
+            "    return _safe(_get_org_sdk().compute_confidence)\n"
+        )
+        entry = _probe("tortoise_probe_readthrough", "compute_confidence",
+                       annotations=_ro(), http_policy=True)
+        assert write_classification_violations([entry], src) == []
+
+    def test_T1_nested_stub_guard_and_wrapper_dispatch_fail(self):
+        """A nested stub named like the HTTP check is not a guard; a wrapped
+        dynamic lookup (`h = TABLE.get(k) or DEFAULT; h()`) fails closed."""
+        from tool_surface_capabilities import (
+            binding_resolution_violations,
+            handler_self_guards,
+            write_classification_violations,
+        )
+
+        from tortoise.tool_registry import _ro, _rw
+        stub_src = (
+            "def _http_excluded_error(): ...\n"
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def tortoise_excl_writer():\n"
+            "    def _transport_http_stub():\n"
+            "        return False\n"
+            "    if _transport_http_stub():\n"
+            "        return _http_excluded_error()\n"
+            "    return _safe(_get_org_sdk().create_point, 'x')\n"
+        )
+        assert not handler_self_guards("tortoise_excl_writer", stub_src)
+        excl = _probe("tortoise_excl_writer", "create_point", annotations=_rw(),
+                      http_policy=False)
+        assert write_classification_violations([excl], stub_src)
+
+        wrapper_src = (
+            "def _get_org_sdk(): ...\n"
+            "def _safe(fn, *a, **k): ...\n"
+            "def tortoise_merged_read():\n"
+            "    h = _TABLE.get('cp') or _get_org_sdk().update_point\n"
+            "    return h()\n"
+        )
+        merged = _probe("tortoise_merged_read", "query", annotations=_ro(),
+                        http_policy=True)
+        assert binding_resolution_violations([merged], wrapper_src)
+
+    def test_synthetic_source_drives_filesystem_and_operator_only(self):
+        """Every derivation reflects an injected source, not just real data."""
+        from tool_surface_capabilities import (
+            sdk_filesystem_methods,
+            sdk_operator_only_mutators,
+        )
+        fs_src = (
+            "class TortoiseSDK:\n"
+            "    def walker(self, directory):\n"
+            "        from pathlib import Path\n"
+            "        return list(Path(directory).rglob('*.md'))\n"
+        )
+        assert "walker" in sdk_filesystem_methods(fs_src)
+        op_src = (
+            "class TortoiseSDK:\n"
+            "    def tenant_write(self):\n"
+            "        self._get_registry().query('MERGE (t:Graph {id:$i})')\n"
+            "    def control_write(self):\n"
+            "        self._get_registry().query('MERGE (t:Team {id:$i})')\n"
+        )
+        op = sdk_operator_only_mutators(op_src)
+        assert "control_write" in op and "tenant_write" not in op
+
+    def test_module_level_cypher_constant_is_a_mutator(self):
+        """Cypher held in a module-level constant is still a graph mutation."""
+        from tool_surface_capabilities import sdk_graph_mutators
+        src = (
+            "CREATE_X = 'CREATE (n:Point {id: $id})'\n"
+            "class TortoiseSDK:\n"
+            "    def create_via_const(self):\n"
+            "        return self._graph_query(CREATE_X)\n"
+        )
+        assert "create_via_const" in sdk_graph_mutators(src)

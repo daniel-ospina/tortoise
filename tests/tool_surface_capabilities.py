@@ -156,13 +156,12 @@ _FS_ATTRS: frozenset[str] = frozenset({
 _MUTATING = re.compile(r"\b(CREATE|MERGE|DETACH\s+DELETE|DELETE|SET|REMOVE|DROP)\b")
 # A decisive mutating clause (`CREATE (`, `MERGE (`, `DETACH DELETE`) is
 # sufficient on its own — a bare `CREATE (g:Graph {...})` has no MATCH hint.
-_MUTATING_STRONG = re.compile(r"\b(CREATE|MERGE)\s*[\(\{]|DETACH\s+DELETE")
-# Schema DDL (CREATE INDEX/CONSTRAINT) is NOT a node mutation: _get_registry()
+# Schema DDL (CREATE INDEX/CONSTRAINT) is deliberately NOT matched: _get_registry()
 # lazily runs _ensure_registry_indexes(), so counting DDL as mutation would make
 # every control-plane READ (org_list, graph_list, apikey_list, …) a "mutator"
-# and false-red a legitimate read tool after the cutover.  Declared out of
-# scope here; the schema bootstrap is not a tool-surface node write.
-_SCHEMA_DDL = re.compile(r"\bCREATE\s+(INDEX|CONSTRAINT)\b")
+# and false-red a legitimate read tool after the cutover.  The schema bootstrap
+# is not a tool-surface node write.
+_MUTATING_STRONG = re.compile(r"\b(CREATE|MERGE)\s*[\(\{]|DETACH\s+DELETE")
 _CYPHER_HINT = re.compile(r"\b(MATCH|RETURN|WHERE|UNWIND|CALL|WITH)\b")
 _LABEL = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -235,7 +234,8 @@ def _is_projection(node: ast.AST) -> bool:
     return False
 
 
-def _scan_body(node: ast.AST) -> tuple[bool, bool, bool, set, set[str]]:
+def _scan_body(node: ast.AST, const_map: dict[str, str] | None = None) \
+        -> tuple[bool, bool, bool, set, set[str]]:
     """Scan one function body.
 
     Returns (mutates_directly, reaches_fs_directly, uses_registry,
@@ -248,13 +248,17 @@ def _scan_body(node: ast.AST) -> tuple[bool, bool, bool, set, set[str]]:
     labels: set[str] = set()
     callees: set[tuple[str | None, str]] = set()
 
+    const_map = const_map or {}
     for sub in ast.walk(node):
         text: str | None = None
         if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
                 and id(sub) not in doc_ids:
             text = sub.value
-        elif isinstance(sub, ast.JoinedStr):  # f-string Cypher (CREATE INDEX ...)
+        elif isinstance(sub, ast.JoinedStr):
             text = ast.unparse(sub)
+        elif isinstance(sub, ast.Name) and sub.id in const_map:
+            # Cypher held in a module-level constant and passed by name
+            text = const_map[sub.id]
         if text is not None and _MUTATING.search(text) and (
                 _CYPHER_HINT.search(text) or _MUTATING_STRONG.search(text)):
             mutates = True
@@ -313,9 +317,17 @@ def _sdk_analysis(source: str | None) -> dict:
     registry_users: set[str] = set()
     method_labels: dict[str, set[str]] = {}
 
+    const_map: dict[str, str] = {}
+    for item in tree.body:
+        if isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant) \
+                and isinstance(item.value.value, str):
+            for t in item.targets:
+                if isinstance(t, ast.Name):
+                    const_map[t.id] = item.value.value
+
     all_nodes = {**{f"mod:{k}": v for k, v in funcs.items()}, **methods}
     for name, node in all_nodes.items():
-        mut, fs, reg, callees, labels = _scan_body(node)
+        mut, fs, reg, callees, labels = _scan_body(node, const_map)
         calls[name] = callees
         if mut:
             direct_mut.add(name)
@@ -456,22 +468,39 @@ def _dynamic_dispatch(node: ast.AST) -> list[str]:
     h()`, `fn = getattr(sdk, "create_point"); fn()`) — the merge shape a
     name-keyed dispatch table produces.
     """
+    def _has_lookup(value: ast.AST) -> bool:
+        for n in ast.walk(value):
+            if isinstance(n, ast.Subscript):
+                return True
+            if isinstance(n, ast.Call) and (
+                    (getattr(n.func, "id", None) or getattr(n.func, "attr", None))
+                    in ("get", "setdefault", "pop", "getattr", "partial")):
+                return True
+        return False
+
     found: list[str] = []
     dynamic: set[str] = set()
     for sub in ast.walk(node):
         if isinstance(sub, (ast.Assign, ast.AnnAssign)):
             value = sub.value
             targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
-            is_lookup = isinstance(value, ast.Subscript) or (
-                isinstance(value, ast.Call)
-                and (getattr(value.func, "id", None)
-                     or getattr(value.func, "attr", None))
-                in ("get", "setdefault", "pop", "getattr", "partial"))
-            if is_lookup:
+            if value is not None and _has_lookup(value):
                 for t in targets:
-                    key = _recv_key(t)
-                    if key:
-                        dynamic.add(key)
+                    for elt in (t.elts if isinstance(t, ast.Tuple) else [t]):
+                        key = _recv_key(elt)
+                        if key:
+                            dynamic.add(key)
+        elif isinstance(sub, ast.NamedExpr):
+            if _has_lookup(sub.value):
+                key = _recv_key(sub.target)
+                if key:
+                    dynamic.add(key)
+        elif isinstance(sub, ast.For):
+            it = ast.unparse(sub.iter)
+            if ".values()" in it or ".items()" in it or ".keys()" in it:
+                for n in ast.walk(sub.target):
+                    if isinstance(n, ast.Name):
+                        dynamic.add(n.id)
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Call):
             continue
@@ -512,6 +541,11 @@ def _handler_operations_cached(tool_name: str, source: str | None) -> HandlerOpe
             for alias in item.names:
                 if alias.name in ("tortoise.sdk", "tortoise.sdk.sdk"):
                     module_aliases.add(alias.asname or alias.name.split(".")[-1])
+                    module_aliases.add(alias.asname or ".".join(alias.name.split(".")[:-1]))
+        if isinstance(item, ast.ImportFrom) and item.module == "tortoise":
+            for alias in item.names:
+                if alias.name == "sdk":
+                    module_aliases.add(alias.asname or "sdk")
 
     sdk_methods = sdk_method_names()
     ops: set[str] = set()
@@ -522,6 +556,16 @@ def _handler_operations_cached(tool_name: str, source: str | None) -> HandlerOpe
         node = stack.pop()
         unresolved.extend(_dynamic_dispatch(node))
         params = _param_names(node)
+        # function-local imports (`import tortoise.sdk as s` inside the body)
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Import):
+                for alias in sub.names:
+                    if alias.name == "tortoise.sdk":
+                        module_aliases.add(alias.asname or "sdk")
+            if isinstance(sub, ast.ImportFrom) and sub.module == "tortoise":
+                for alias in sub.names:
+                    if alias.name == "sdk":
+                        module_aliases.add(alias.asname or "sdk")
         aliases: set[str] = set()
         for sub in ast.walk(node):
             if isinstance(sub, (ast.Assign, ast.AnnAssign)):
@@ -652,7 +696,8 @@ def _self_guard_cached(tool_name: str, source: str | None) -> bool:
     conjunctive or dead guard does not count.
     """
     tree = _mcp_tree(source)
-    funcs = _mcp_functions(tree)
+    # module-level only: a nested stub is NOT a real HTTP check
+    funcs = _module_level_funcs(tree)
     start = funcs.get(tool_name)
     if start is None:
         return False
@@ -670,12 +715,12 @@ def _self_guard_cached(tool_name: str, source: str | None) -> bool:
         if isinstance(stmt, (ast.If, ast.For, ast.While, ast.Try, ast.With,
                              ast.Return, ast.Raise, ast.AsyncFor, ast.AsyncWith)):
             return False
-    if guard is None or not _positive_http_test(guard.test):
+    if guard is None or not _positive_http_test(guard.test, funcs):
         return False
     return _returns_directly_guards(guard.body, funcs)
 
 
-def _positive_http_test(test: ast.AST) -> bool:
+def _positive_http_test(test: ast.AST, funcs: dict[str, ast.AST]) -> bool:
     """A POSITIVE check that the transport IS http — an inverted
     (`if not _transport...`) or conjunctive guard must NOT count."""
     if isinstance(test, (ast.UnaryOp, ast.BoolOp)):
@@ -686,7 +731,11 @@ def _positive_http_test(test: ast.AST) -> bool:
             isinstance(c, ast.Constant) and c.value == "http" for c in test.comparators)
     if isinstance(test, ast.Call):
         name = ast.unparse(test.func)
-        return "transport" in name and "http" in name
+        if "transport" in name and "http" in name:
+            # must be a MODULE-LEVEL callee — a nested stub returning False is
+            # not a real HTTP check.
+            return isinstance(test.func, ast.Name) and test.func.id in funcs
+        return False
     return False
 
 
