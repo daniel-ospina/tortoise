@@ -285,10 +285,11 @@ extraction-bearing path is bounded IN ORDER:
 1. **Turn cap** — `MAX_SESSION_TURNS = 500` → `400` above it.
 2. **Points quota (pre-write estimate)** — `402` when the extraction-aware
    estimate exceeds the team's points quota. Estimate:
-   `est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
-   (the ×2 covers the M2 relations stage's IMPL/NAND operator nodes; sentence
-   count is capped per turn — the #329 flood gate). Skipped entirely on the
-   keyless path, which extracts nothing.
+   `est = 3 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
+   (the ×3 is the DEFAULT v2 lane — points + operators + the entities/events
+   allowance; the M2 lane uses ×2, `tortoise/sdk.py::_session_extraction_estimate`.
+   Sentence count is capped per turn — the #329 flood gate). Skipped entirely
+   on the keyless path, which extracts nothing.
 
 No sessions quota: the flat `max_sessions = 1000` was removed in **#4010** —
 sessions are unlimited for every tier, and a stored `Team.max_sessions` is
@@ -298,9 +299,9 @@ Free-tier interplay (product/pricing.json): `max_graph_nodes: 10000` is the
 points-quota numerator for NON-episodic Points only (turn Points / Session /
 Event are episodic and don't count), and `included_write_ops_per_month: 10000`
 is the write-ops budget. Worst-case node amplification per turn: 200
-sentences × 2 = 400 nodes, so a full 500-turn session is ~200K estimated
-nodes — for an extraction-bearing capture, always stopped by the 402 gate
-BEFORE any write. In practice the
+sentences × 3 = 600 nodes (v2 default), so a full 500-turn session is ~300K
+estimated nodes — for an extraction-bearing capture, always stopped by the 402
+gate BEFORE any write. In practice the
 cheap-tier models extract far fewer points than the cap; the estimate is the
 fail-closed upper bound.
 

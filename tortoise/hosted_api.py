@@ -8562,11 +8562,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # prior stored-turn count — not on which branch ran (see the meter below).
     prior_turn_count = 0
     if session_existed:
-        _prior_turns = proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
-            "WHERE t.is_episodic = true RETURN count(t)",
-            params={"sid": session_id}).result_set
-        prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
+        # Best-effort (#3892 cycle 2): this read feeds ONLY the write-op
+        # meter, and it sits AFTER the Session MERGE that already committed —
+        # a transient graph error here must never 500 a committed capture
+        # (the file's posture, and every sibling bookkeeping read in this
+        # function). On failure 0 makes the meter OVER-count
+        # (`len(windowed) > 0`), the documented conservative posture, never a
+        # blind spot. It also must not abort the keyless→keyed upgrade this
+        # PR exists to enable.
+        try:
+            _prior_turns = proj.g.query(
+                "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) "
+                "WHERE t.is_episodic = true RETURN count(t)",
+                params={"sid": session_id}).result_set
+            prior_turn_count = int(_prior_turns[0][0]) if _prior_turns else 0
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").warning(
+                "prior_turn_count read failed (non-fatal, metering over-counts)",
+                exc_info=True)
+            prior_turn_count = 0
 
     for i, turn in enumerate(windowed):
         role = _normalize_turn_role(turn.get("role"))

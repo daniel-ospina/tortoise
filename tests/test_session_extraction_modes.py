@@ -628,3 +628,48 @@ def test_cmd_session_capture_success_still_returns_0(tmp_path, monkeypatch, caps
     assert _cmd_session_capture(args, "api-key", "http://api") == 0
     out = capsys.readouterr().out
     assert "Captured session: s-ok" in out
+
+
+def test_cmd_session_capture_replayed_is_not_reported_as_not_extracted(
+        tmp_path, monkeypatch, capsys):
+    """#4188 (review cycle 2): only the `no-provider` mode means "not
+    extracted". A `replayed` receipt means the PRIOR capture SUCCEEDED — its
+    memory points DO exist — so emitting the not-extracted line for it is a
+    false statement about the session. The no-provider mode must still
+    disclose it. (Mutation guard: the pre-fix `not mode.startswith("llm")`
+    predicate printed "Extraction: replayed" and fails the first assert.)"""
+    import json
+
+    from tortoise.__main__ import _cmd_session_capture, _parse_transcript
+
+    f = tmp_path / "transcript.txt"
+    f.write_text("User: we decided to ship it\nAssistant: agreed\n")
+    assert _parse_transcript(f.read_text())
+
+    def _run(mode):
+        payload = {"session_id": "s-mode", "extraction_mode": mode,
+                   "extracted": 0, "points": [], "errors": [],
+                   "warnings": []}
+
+        class _FakeResp:
+            def read(self):
+                return json.dumps(payload).encode()
+
+        class _FakeCtx:
+            def __enter__(self):
+                return _FakeResp()
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen",
+                            lambda req, timeout: _FakeCtx())
+        capsys.readouterr()  # drain
+        args = type("A", (), {"file": str(f)})()
+        assert _cmd_session_capture(args, "api-key", "http://api") == 0
+        return capsys.readouterr().err
+
+    # a REPLAY: the prior capture succeeded — never claim "not extracted".
+    assert "Extraction:" not in _run("replayed")
+    # a KEYLESS store: this IS the not-extracted state — must be disclosed.
+    assert "Extraction: no-provider" in _run("no-provider")
