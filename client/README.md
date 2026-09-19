@@ -125,16 +125,16 @@ configured-but-down split this contract exists to keep, and the reason a bare
 to `available` / `degraded` / `unconfigured` here, with its exit codes
 (`0`/`3`/`4`) unchanged.
 
-⚠️ **One raised divergence in the read path.** The read-path half of this
-contract is an unmerged branch (`tortoise/read_status.py` on
-`feat/3892-read-path-status` / PR #4040). It uses the same four terms but maps
-them differently: it takes `unconfigured` to mean *"no store configured **or**
-unreachable"* and `degraded` to mean *"a leg did not run"*, where this boundary
-takes `degraded` to mean the **configured-but-unreachable** (outage) condition.
-The same word would then name two conditions, and the distinction #3832 / D5
-exists to protect (*never configured* vs *configured but down*) is collapsed on
-the read path. Flagged for resolution — not silently aligned. See
-`tortoise/status_vocabulary.py` for the full note.
+**The read path consumes the same declaration.** `tortoise/read_status.py`
+(the LLM-free search/recall read path) imports these four terms from
+`tortoise/status_vocabulary.py` and delegates its configuration /
+reachability / content mapping to that module's `classify`, so both surfaces
+name the same condition with the same term — including the #3832 / D5 split
+(*never configured* vs *configured but down*). The read path carries one
+dimension the four terms do not name — a retrieval leg that did not run, e.g.
+the embedder is absent — as `degraded` (an impaired memory), with the leg
+detail kept in its own `leg_trace`. See `tortoise/status_vocabulary.py` for
+the full note.
 
 Only the `status` probe emits `3`/`4`; `list-tools` and `call` are operations
 against a declared endpoint, so any failure there keeps the generic code `1`.

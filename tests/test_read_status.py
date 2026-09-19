@@ -13,10 +13,16 @@ MUTATION PROOF — the guard is shown to MOVE (the reverts and their verbatim
 pytest output are recorded in the PR body / the lane report):
 
 * **Collapse the failed path back onto empty** — make ``classify_read_status``
-  return ``STATUS_EMPTY`` when the store was not reached (the #3892 defect) →
+  return ``STATUS_EMPTY`` when the store was not reached, **and** map the SDK's
+  ``_get_proj()`` and probe-failure sites to ``empty`` (the #3892 defect) →
   ``TestClassify::test_never_declared_is_unconfigured``,
-  ``test_unconfigured_is_not_empty`` and the end-to-end
-  ``test_state_a_store_that_will_not_open_is_degraded`` RED.
+  ``test_unconfigured_is_not_empty``, the end-to-end
+  ``test_state_a_store_that_will_not_open_is_degraded``,
+  ``test_state_real_unreachable_server_is_degraded`` and
+  ``test_engine_read_path_never_reports_unconfigured`` RED. (The classifier
+  change alone does not move the SDK-level ones — those sites write their term
+  directly — so the mutation has to include them; that is why the end-to-end
+  tests are named here.)
 * **Re-fork the mapping** — make the configured-but-unreachable condition
   report ``unconfigured`` again (the pre-alignment read-path mapping) → the
   ``degraded`` tests and the cross-lane parity rows RED.
@@ -106,9 +112,13 @@ class TestVocabulary:
 class TestCrossLaneParity:
     """The same condition names the same term on both surfaces (#3805).
 
-    The read path and the client boundary draw from ONE home module, so this
-    asserts the terms rather than the wording: for each condition BOTH trees
-    can express, the read path's classifier and the boundary's must agree.
+    ``tortoise.status_vocabulary`` is the ONE home of the four terms and of
+    the boundary's mapping, and the client surfaces
+    (``client/tortoise_client/cli.py``, ``tortoise/tortoise_client.py``) import
+    it. The read path must not re-fork that mapping, so this asserts the terms
+    rather than the wording: for each condition BOTH trees can express, the
+    read path's classifier and the boundary's agree — the equality is by
+    DELEGATION, and a future re-fork is what these rows catch.
     """
 
     @pytest.mark.parametrize(
@@ -141,6 +151,45 @@ class TestCrossLaneParity:
         assert classify_read_status(
             reached=True, hit_count=3, degraded=True
         ) == status_vocabulary.STATUS_DEGRADED
+
+    def test_the_read_path_overrides_a_contradictory_configured_false(self):
+        """The ONE row the two implementations can disagree on, pinned.
+
+        ``configured=False`` beside a read that ANSWERED is self-
+        contradictory, and a read that answered proves a store was declared.
+        The read path re-normalises it to ``available``/``empty``; the
+        boundary's ``classify`` returns ``unconfigured`` from a flat
+        configuration-first check. The read path's resolution is the intended
+        one (the vocabulary's invariant), and it is recorded here rather than
+        left as a silent second mapping.
+        """
+        assert status_vocabulary.classify(
+            configured=False, reached=True, hits=3
+        ) == status_vocabulary.STATUS_UNCONFIGURED
+        assert classify_read_status(
+            configured=False, reached=True, hit_count=3,
+            degraded=False) == status_vocabulary.STATUS_AVAILABLE
+
+    def test_the_client_surfaces_share_the_boundary_terms_and_exit_split(
+            self):
+        """The boundary half is the REAL client lane, not a copy.
+
+        ``tortoise/tortoise_client.py`` (the S9 skill-wiring client) imports
+        these terms from the home module, and its exit-code map is the
+        #3832/D5 split the vocabulary exists to protect: ``degraded`` (off by
+        outage) and ``unconfigured`` (off by policy) must stay DISTINCT.
+        """
+        from tortoise import tortoise_client
+
+        assert tortoise_client.STATUS_AVAILABLE is status_vocabulary.STATUS_AVAILABLE
+        assert tortoise_client.STATUS_EMPTY is status_vocabulary.STATUS_EMPTY
+        assert (tortoise_client.STATUS_DEGRADED
+                is status_vocabulary.STATUS_DEGRADED)
+        assert (tortoise_client.STATUS_UNCONFIGURED
+                is status_vocabulary.STATUS_UNCONFIGURED)
+        codes = tortoise_client._STATUS_EXIT_CODES
+        assert codes[status_vocabulary.STATUS_DEGRADED] != codes[
+            status_vocabulary.STATUS_UNCONFIGURED]
 
 
 class TestClassify:
