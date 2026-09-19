@@ -369,24 +369,58 @@ class EmbeddingModel:
         return self._model.encode(texts, batch_size=batch_size, show_progress_bar=False)
 
 
+def _truncate_for_embedding(content: str, max_tokens: int) -> str:
+    """The ONE stored-text composition used by every write-side embedder.
+
+    Word-truncation to ``max_tokens`` before encoding prevents OOM. Shared by
+    :func:`compute_embedding` and :func:`compute_embeddings` so the batched
+    and single forms can never compose a different string for the same input
+    (#4194).
+    """
+    return " ".join(content.split()[:max_tokens])
+
+
+def compute_embeddings(
+    texts: list[str], max_tokens: int = 512,
+) -> list[list[float] | None]:
+    """Batched form of :func:`compute_embedding` — SAME embedder, per text.
+
+    Returns one entry per input text: a 384-dim list, or ``None`` where the
+    model is unavailable / the encode failed. This exists so a whole capture
+    window can be embedded in ONE model call instead of one per turn (#4194)
+    without forking the embedder: it routes through the same
+    ``EmbeddingModel`` singleton, the same :func:`_truncate_for_embedding`
+    composition and the same un-normalised model output as
+    :func:`compute_embedding`, so a batched vector and a single vector are
+    byte-identical for the same text. A stored vector MUST agree with the
+    query encoder (model, dimension, normalisation) or the dense leg still
+    "runs" and returns garbage — worse than an honest empty leg.
+    """
+    if not texts:
+        return []
+    model = EmbeddingModel.get()
+    if model is None:
+        return [None] * len(texts)
+    try:
+        truncated = [_truncate_for_embedding(t, max_tokens) for t in texts]
+        vecs = model.encode(truncated)
+        if vecs is None or len(vecs) != len(texts):
+            return [None] * len(texts)
+        return [vec.tolist() for vec in vecs]
+    except Exception:
+        return [None] * len(texts)
+
+
 def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None:
     """Compute embedding for a single text. Returns 384-dim list or None.
 
     Truncates to max_tokens before encoding to prevent OOM.
     Returns None if model unavailable or encoding fails.
+
+    Delegates to :func:`compute_embeddings` so the single and batched forms
+    share one composition and can never diverge (#4194).
     """
-    model = EmbeddingModel.get()
-    if model is None:
-        return None
-    try:
-        words = content.split()[:max_tokens]
-        truncated = " ".join(words)
-        vec = model.encode([truncated])
-        if vec is None or len(vec) == 0:
-            return None
-        return vec[0].tolist()
-    except Exception:
-        return None
+    return compute_embeddings([content], max_tokens)[0]
 
 
 def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:

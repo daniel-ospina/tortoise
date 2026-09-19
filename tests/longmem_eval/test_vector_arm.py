@@ -498,6 +498,31 @@ def test_encode_cache_intercepts_ingest_and_reuses(tmp_path, monkeypatch):
             sdk.close()
 
 
+def test_encode_cache_intercepts_the_batched_embedder(tmp_path, monkeypatch):
+    """#4194: the cache wraps the BATCHED form too.
+
+    ``compute_embedding`` now delegates to ``compute_embeddings``, and the
+    capture turn write calls the batched form directly. Wrapping only the
+    single form would silently let that write path bypass the cache.
+    """
+    calls = {"n": 0}
+
+    def _counting_batch(texts, max_tokens=512):
+        calls["n"] += 1
+        return [_fake_vec(t) for t in texts]
+
+    monkeypatch.setattr(emb, "compute_embeddings", _counting_batch)
+    cache = encode_cache.EncodeCache(tmp_path / "c.json", model_id="m")
+    with cache.active():
+        assert emb.compute_embeddings(["a", "b"]) == [
+            _fake_vec("a"), _fake_vec("b")]
+        assert calls["n"] == 1  # ONE batched encode for both misses
+        assert emb.compute_embeddings(["a", "b"]) == [
+            _fake_vec("a"), _fake_vec("b")]
+        assert calls["n"] == 1  # second call served from the cache
+    assert emb.compute_embeddings is _counting_batch  # restored
+
+
 def test_encode_query_routes_through_active_cache(tmp_path):
     cache = encode_cache.EncodeCache(tmp_path / "c.json", model_id="m")
     with cache.active():
