@@ -143,9 +143,14 @@ class TestOnboardingJourney:
         assert r.status_code == 200
         assert r.json()["connected"] is False
 
-    def test_e2e_github_connect_returns_auth_url(self, client):
+    def test_e2e_github_connect_returns_auth_url(self, client, monkeypatch):
         """E2E-3: GitHub connect returns an authorize URL (mock client id)."""
-        os.environ["GITHUB_CLIENT_ID"] = "e2e-client"
+        # #4152: monkeypatch, not os.environ — a RAW assignment here LEAKED
+        # GITHUB_CLIENT_ID=e2e-client into the rest of the pytest process, so
+        # tests/test_github_connect.py::test_connect_returns_auth_url (which
+        # only setdefaults the var at import) asserted against e2e-client and
+        # failed whenever this file ran first on the same xdist worker.
+        monkeypatch.setenv("GITHUB_CLIENT_ID", "e2e-client")
         r = client.post("/v1/onboarding/github/connect", json={"org": "acme"})
         assert r.status_code == 200
         assert "github.com/login/oauth/authorize" in r.json()["auth_url"]
