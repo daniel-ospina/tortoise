@@ -136,7 +136,7 @@ This changes the **discovery** step of code that SIGTERMs processes and `rmtree`
 
 | Touch point | Type | Covered by | Status |
 |---|---|---|---|
-| `_find_socket_dirs` / `discover()` | internal API | this change | ✅ |
+| `_iter_candidate_dirs` / `_scan_socket_dirs` | internal API | this change (replaces the deleted `_find_socket_dirs`, which had no production caller and dropped `.complete`) | ✅ |
 | `_sweep_quarantine_dirs` | internal API | this change | ✅ |
 | `_run_sweep` / `main()` CLI | internal + CLI | this change (`--full-scan`) | ✅ |
 | `tools/embedded_orphans.py --deep` | operator tool | this change (`full_scan=True` + truncation reporting) | ✅ |
@@ -149,4 +149,4 @@ This changes the **discovery** step of code that SIGTERMs processes and `rmtree`
 
 ## OVERRIDES
 
-> **OVERRIDES:** the unconditional full-tempdir socket-dir walk recorded by **#1642 FIX 2** (the `SOCKET_WALK_TIMEOUT` comment in `tortoise/embedded_reaper.py`, "pollution cannot disable the ONLY path that cleans killed-suite residue") — pass-2 **discovery** is now scoped to the ephemeral namespace. Reason: for depth-1 candidates that namespace is *exactly* the set every **REMOVAL** path already requires (`_is_ephemeral_dir` — `_remove_stale_socket_dir` Guard 1, the quarantine removal, and the kill-path tempdir cleanup; the KILL verb itself is gated by classification plus the pass-1 lemma that live servers are enumerated name-independently), so scoping loses no removable or killable record while removing the 224k-entry metadata storm. The recorded intent ("never gated on the tempdir's entry count") is preserved — the new gate is a **name** scope, not an entry-count gate — and `--full-scan` restores the pre-#4068 un-scoped enumeration.
+> **OVERRIDES:** the unconditional full-tempdir socket-dir walk recorded by **#1642 FIX 2** (the pass-2 discovery comment in `tortoise/embedded_reaper.py` — "pollution cannot disable the ONLY path that cleans killed-suite residue" — with the budget intent recorded in the `SOCKET_WALK_TIMEOUT` comment) — pass-2 **discovery** is now scoped to the ephemeral namespace. Reason: for depth-1 candidates that namespace is *exactly* the set every **REMOVAL** path already requires (`_is_ephemeral_dir` — `_remove_stale_socket_dir` Guard 1, the quarantine removal, and the kill-path tempdir cleanup; the KILL verb itself is gated by classification plus the pass-1 lemma that live servers are enumerated name-independently), so scoping loses no removable or killable record while removing the 224k-entry metadata storm. The recorded intent ("never gated on the tempdir's entry count") is preserved — the new gate is a **name** scope, not an entry-count gate — and `--full-scan` restores the pre-#4068 un-scoped enumeration.
