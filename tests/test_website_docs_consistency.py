@@ -1069,8 +1069,9 @@ class _IdCollector(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         for name, value in attrs:
             if name == "id":
-                # FIRST id wins, empty or not: the tokenizer drops a duplicate
-                # attribute, so `id="" id="x"` leaves the element with no id.
+                # FIRST id wins, empty or not — the stdlib hands over both
+                # attributes of a duplicate pair and a browser keeps the first,
+                # so `id="" id="x"` leaves the element with no id.
                 if value:
                     self.ids.append((value, self.getpos()[0]))
                 return
@@ -1310,9 +1311,10 @@ def test_id_guard_covers_every_website_page() -> None:
         f"missing={sorted(_ALL_WEBSITE_PAGES_AT_3436 - got)} "
         f"added={sorted(got - _ALL_WEBSITE_PAGES_AT_3436)}. If a page genuinely "
         f"left the site, update `_ALL_WEBSITE_PAGES_AT_3436` in the same PR and "
-        f"say why. If one was ADDED, add it to `_ALL_WEBSITE_PAGES_AT_3436` — a "
-        f"top-level `.html` is already inside `_all_website_pages()`, so the pin "
-        f"is what needs the edit."
+        f"say why; if one was ADDED, add it to the pin. A page that MOVED is not "
+        f"gone — a page moved under `website/apps/` is no longer top-level, so "
+        f"widen `_all_website_pages()` in this PR (see #4111), or the guard "
+        f"stops covering the page this change was filed about."
     )
 
 
