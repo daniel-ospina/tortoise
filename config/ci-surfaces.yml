@@ -35,6 +35,7 @@ surfaces:
   - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_onboarding_email_http.py
   - test_sentry.py
+  - test_telemetry_registration.py
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -123,6 +124,11 @@ surfaces:
   - test_capture_cost_measurement.py
   - test_hosted_auth.py
   - test_hosted_backup.py
+  # #3895: the dump's node set and edge set must be the SAME set — registered
+  # under `api` because tortoise/hosted_backup.py owns that surface (see the
+  # #3154 note in tools/ci_selection.py). A hosted_backup.py-only change now
+  # selects this file (docker-lane; dump/restore round-trips).
+  - test_dump_edge_asymmetry_3895.py
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
@@ -217,6 +223,10 @@ surfaces:
   # CLI-wiring regression still runs the install guard. See the core entry for
   # the mechanism half.
   - test_capture_install.py
+  # #3818: the Codex SessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
+  # registration as test_capture_install.py (mechanism = core; CLI = api).
+  - test_codex_capture_hook.py
   # #3795/#3801: the `tortoise hooks` CLI surface lives in tortoise/__main__.py
   # (api-classified source) — dual-registered so a CLI-wiring regression runs
   # this guard. See the core entry for the mechanism half.
@@ -374,6 +384,10 @@ surfaces:
   # surface (the #3575/#3795 precedent: without that entry a CLI-wiring-only
   # change would run no guard for the very change it guards).
   - test_capture_install.py
+  # #3818: the Codex SessionEnd capture hook — the shipped artifact, its
+  # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
+  # registration as test_capture_install.py (mechanism = core; CLI = api).
+  - test_codex_capture_hook.py
   # #3795/#3801: capture-hook install drift detection + in-place upgrade. Its
   # sources are `tortoise/hook_install.py` and `tortoise/claude-hooks/` — an
   # ENGINE path classified `core` (any unmatched `tortoise/` prefix). Dual-
@@ -1019,6 +1033,13 @@ durations:
   # not a precise cost. Re-measure rather than trusting it if the import graph
   # changes.
   test_no_legacy_token_path.py: 60.0
+  # #3895: 21 docker-lane dump/restore + graph-rebuild tests (~40 graph
+  # round-trips). HIGH-VARIANCE: measured 68-106s warm across runs (the
+  # session-hygiene sweep and the shared container's load dominate the tail),
+  # 126-183s on the embedded lane. Loose middle so the LPT packer does not
+  # under-weight it against default_weight=2.0 — the file is NOT slow-listed,
+  # it stays in the derived fast halves.
+  test_dump_edge_asymmetry_3895.py: 90.0
   test_divergence_conformance.py: 57.8
   test_export_cli.py: 53.7
   test_github_indexer.py: 51.5

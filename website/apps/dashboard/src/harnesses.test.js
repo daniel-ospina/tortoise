@@ -324,6 +324,28 @@ test('#3575: HARNESS_INSTALL.pi installs the in-repo Pi capture extension', () =
   assert.match(HARNESS_CAPTURE_INSTALL.pi, /tortoise\/pi-hooks\/tortoise-capture\.ts/)
 })
 
+// #3818 (P2-4): the copy-paste Codex capture install must honour the SAME
+// `$CODEX_HOME` override the installer does. A hardcoded `~/.codex` command
+// writes the hook into a file Codex never reads on a non-default setup — the
+// silent no-capture the seam exists to prevent, on the surface most likely to
+// be read.
+test('#3818: the Codex capture install copy honours $CODEX_HOME', () => {
+  const codex = HARNESS_CAPTURE_INSTALL.codex
+  assert.ok(codex, 'HARNESS_CAPTURE_INSTALL.codex present')
+  assert.match(codex, /\$\{CODEX_HOME:-\$HOME\/\.codex\}/,
+    'the copy must use the ${CODEX_HOME:-$HOME/.codex} default the installer honours')
+  // Pin the COMMANDS, not just the prose: a comment naming $CODEX_HOME left
+  // the actual mkdir/cp/chmod lines hardcoded to ~/.codex.
+  const commandLines = codex.split('\n').filter((l) => /^(mkdir|cp|chmod)\b/.test(l))
+  assert.ok(commandLines.length >= 3, commandLines)
+  for (const line of commandLines) {
+    assert.ok(line.includes('CODEX_HOME'),
+      `command ignores $CODEX_HOME: ${line}`)
+    assert.ok(!line.includes('~/.codex'),
+      `command hardcodes ~/.codex: ${line}`)
+  }
+})
+
 // #3713 P2-3 (review of #3721): Pi loads a top-level `tortoise-capture.ts` AND
 // a `tortoise-capture/index.ts` as TWO extensions (no basename dedupe), so a
 // pre-existing agent-infra `tortoise-capture/` double-POSTs every session_id

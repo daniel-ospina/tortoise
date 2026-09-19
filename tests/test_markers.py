@@ -211,6 +211,12 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     "test_navigation.py": {
         "name (MagicMock param)": "unit-mock",
     },
+    "test_dump_edge_asymmetry_3895.py": {
+        # #3895: a scratch registry handle for the create_backup stamp seam
+        # (`_stamp_backup_latest` MATCHes Team.id) — the test seeds it itself
+        # and no production seam resolves the name.
+        '"registry_3895"': "test-constructed",  # scratch registry handle for create_backup's stamp seam
+    },
 }
 
 # Carve-out / non-migrated files exempt from both guards.
