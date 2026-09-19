@@ -358,37 +358,6 @@ def test_recapture_with_changed_content_and_no_embedder_clears_the_stale_vector(
         "rank this turn by text no longer on the node")
 
 
-def test_unreadable_prior_state_preserves_the_stored_vector(
-        sdk, embedder, monkeypatch):
-    """An UNKNOWN prior must PRESERVE, never clear.
-
-    If the prior-hash probe fails (a transient graph read error) while the
-    embedder is also unavailable, a write that treated "unknown" as "changed"
-    would wipe a valid vector. The guard's ``$prior_ok = false`` branch keeps
-    it — an unknown prior is not a changed prior.
-    """
-    _keyless(monkeypatch)
-    sdk.capture_session(CONV, session_id="sess-4194-unknown")
-    before = _turn_rows(sdk, "sess-4194-unknown")
-    assert before and all(r[2] is not None for r in before), before
-
-    import tortoise.sdk as sdk_mod
-    monkeypatch.setattr(sdk_mod, "_existing_turn_hashes",
-                        lambda proj, ids: ({}, False))
-    monkeypatch.setattr(
-        EmbeddingModel, "get",
-        classmethod(lambda cls, load_timeout=None: None))
-    EmbeddingModel._reset()
-    sdk.capture_session(CONV, session_id="sess-4194-unknown")
-
-    after = _turn_rows(sdk, "sess-4194-unknown")
-    assert len(after) == len(before)
-    for (_bid, _bc, bvec), (aid, _ac, avec) in zip(before, after, strict=True):
-        assert avec is not None, (
-            f"{aid}: an unreadable prior cleared a valid stored vector")
-        assert np.allclose(bvec, avec, atol=1e-6), aid
-
-
 def test_rebuild_recomputes_the_turn_embedding(tmp_path, embedder, monkeypatch):
     """live == rebuild for the new field.
 

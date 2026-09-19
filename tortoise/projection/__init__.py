@@ -4399,10 +4399,14 @@ class FalkorProjection(
             # succeeded on self._vector_index_api for the query path.
             if not getattr(self, '_is_embedded', False):
                 # #4194: the width comes from the ONE constant
-                # `compute_embeddings` validates stored vectors against, so the
-                # index and the write path can never disagree — a bare 384 here
-                # plus a rotated `EMBEDDING_DIM` would bless vectors the index
-                # cannot hold (the mismatched-vector trap).
+                # `compute_embeddings` validates stored vectors against, so a
+                # FRESH index creation and the write path cannot disagree — a
+                # bare literal here plus a rotated `EMBEDDING_DIM` would bless
+                # vectors the index cannot hold (the mismatched-vector trap).
+                # ⛔ This single-sources CREATION only: an EXISTING index is
+                # never reconciled (both 'already' branches below assume it is
+                # correct). A dimension change is still the documented
+                # drop-and-recreate operation, not a constant edit.
                 from ..embeddings import EMBEDDING_DIM
                 try:
                     self.g.query(
