@@ -227,7 +227,7 @@ measurement justifies a change.
   the reader/retrieval call FAILS. Selfhost records nothing — the
   transport-keyed `_selfhost_transport` exemption, never a value-keyed
   "selfhost" check (a hosted team literally named "selfhost" was
-  record-and-budget-charged before #3849; nothing is metered today).
+  record-and-budget-charged before #3849; no product caller meters today).
 
 ## Error vocabulary
 
