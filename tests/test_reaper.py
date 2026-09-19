@@ -293,29 +293,42 @@ def test_discover_unknown_old_settings_pattern_scoped_absent_full_scan_protected
         assert matches[0]["classification"] == "protected"
 
 
-def test_full_scan_does_not_add_actions_beyond_scoped(tmp_path):
-    """Adversarial class 4, corrected: `--full-scan` restores the pre-#4068
-    UN-SCOPED enumeration. For a record whose dir is out of the ephemeral
-    namespace, the scoped sweep produces zero actions (the dir is
-    containment-refused) and the broad sweep produces zero NEW actions
-    either. A non-ephemeral dead-socket dir is never acted on in EITHER
-    mode — the rmtree path re-derives containment."""
-    from tortoise.embedded_reaper import _run_sweep
-    dbdir = tmp_path / "my-custom-name"
-    dbdir.mkdir()
-    (dbdir / "redis.socket").write_text("")
-    (dbdir / "custom.db.settings").write_text(json.dumps({
-        "pidfile": str(dbdir / "redis.pid"),
-        "unixsocket": str(dbdir / "redis.socket"),
-        "dbdir": str(dbdir),
-    }))
-    for full_scan in (False, True):
-        with monkeypatch_tempdir(tmp_path):
-            acted = _run_sweep(dry_run=False, batch_size=None,
-                               full_scan=full_scan, sweep_pid_files=False)
-        assert not [r for r in acted
-                    if str(dbdir) in str(r.get("dbdir", ""))], (full_scan, acted)
-    assert dbdir.exists(), "non-ephemeral dir must survive every sweep mode"
+def test_full_scan_does_not_add_actions_beyond_scoped(monkeypatch):
+    """Adversarial class 4: `--full-scan` restores the pre-#4068 UN-SCOPED
+    enumeration, but it cannot add an ACTION. The fixture is aged past the
+    boot-cooldown guard and carries a REAL dead socket, so the removal chain
+    actually runs — and is refused by CONTAINMENT (the dir's name is outside
+    the ephemeral namespace). Removing Guard 1 reddens this test."""
+    import shutil
+    import time as _t
+
+    import tortoise.embedded_reaper as _R
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        outdir = base / "my-custom-name"
+        outdir.mkdir()
+        sp = outdir / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()  # real dead socket -> the probe guard would NOT refuse
+        (outdir / "redis.pid").write_text("99999999\n")
+        (outdir / "x.settings").write_text(json.dumps({
+            "pidfile": str(outdir / "redis.pid"), "unixsocket": str(sp),
+            "dbdir": str(outdir), "dbfilename": "redis.db"}))
+        old = _t.time() - 120
+        os.utime(str(outdir), (old, old))  # past the boot-cooldown guard
+        # `outdir` realpaths under the tempdir but its NAME is out of the
+        # discovery namespace, so containment (not probe/age) must refuse.
+        monkeypatch.setattr(_R, "_real_gettempdir", lambda: str(base))
+        for full_scan in (False, True):
+            acted = _R._run_sweep(dry_run=False, batch_size=None,
+                                  full_scan=full_scan, sweep_pid_files=False)
+            assert not [r for r in acted
+                        if str(outdir) in str(r.get("dbdir", ""))], (
+                            full_scan, acted)
+        assert outdir.is_dir() and sp.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def test_live_candidate_is_found_by_pass1_regardless_of_dir_name(
@@ -342,15 +355,19 @@ def test_live_candidate_is_found_by_pass1_regardless_of_dir_name(
     assert [r["dbdir"] for r in recs] == [str(tmp_path / "my-custom-name")], recs
 
 
-def test_symlinked_decoy_dir_never_reaped():
-    """Adversarial class 1: a record pointing at a symlinked
-    ephemeral-named dir with a decoy DEAD socket gets ZERO actions, and the
-    link plus its target survive. The socket must be a real dead unix socket
-    (bind+close) or the case aborts at the probe guard and proves nothing
-    about containment."""
+def test_symlinked_decoy_dir_never_reaped(monkeypatch):
+    """Adversarial class 1: an ephemeral-named SYMLINK pointing OUTSIDE the
+    reaper's tempdir. Discovery cannot enumerate it (symlinked entries are
+    skipped), and a crafted record is refused by CONTAINMENT on the realpath
+    — the target is not under the tempdir. The fixture is aged past the
+    boot-cooldown guard and carries a REAL dead socket, so the refusal is
+    provably containment's and not a probe/age abort; the link and its target
+    survive. Removing Guard 1 lets the target be renamed/rmtree'd and this
+    test reddens."""
     import shutil
+    import time as _t
 
-    from tortoise.embedded_reaper import reap
+    import tortoise.embedded_reaper as _R
     base = Path(tempfile.mkdtemp(prefix="tt_"))
     try:
         target = base / "decoy-target"
@@ -363,15 +380,23 @@ def test_symlinked_decoy_dir_never_reaped():
         (target / "x.settings").write_text(json.dumps({
             "pidfile": str(target / "redis.pid"), "unixsocket": str(sp),
             "dbdir": str(target), "dbfilename": "redis.db"}))
+        old = _t.time() - 120
+        os.utime(str(target), (old, old))  # past the boot-cooldown guard
         link = base / "tmpDECOYXX"
         link.symlink_to(target, target_is_directory=True)
+        # the reaper's tempdir is redirected elsewhere, so the link's realpath
+        # (the target) is OUT of tree -> containment must refuse
+        monkeypatch.setattr(_R, "_real_gettempdir",
+                            lambda: "/nonexistent-4068-other-root")
+        assert _R._is_ephemeral_dir(os.path.realpath(str(link)),
+                                    _R._real_gettempdir()) is False
         rec = {
             "pid": None, "socket_path": str(link / "redis.socket"),
             "dbdir": str(link), "path_based": True, "dir_missing": False,
             "client_count": None, "uptime": None,
             "classification": "stale_socket", "settings": None,
         }
-        acted = reap([rec], dry_run=False)
+        acted = _R.reap([rec], dry_run=False)
         assert not [r for r in acted
                     if str(link) in str(r.get("dbdir", ""))], acted
         assert link.is_symlink() and target.is_dir()
@@ -382,11 +407,12 @@ def test_symlinked_decoy_dir_never_reaped():
 
 def test_namespace_match_with_escaping_realpath_refused(monkeypatch):
     """Adversarial class 2: a record whose `dbdir` realpaths OUTSIDE the
-    reaper's tempdir is refused by the destruction Containment guard. The
-    refusal is proven to come from CONTAINMENT (a real dead socket is
-    present, so the probe guard would otherwise pass) and the containment
-    verdict is asserted directly."""
+    reaper's tempdir is refused by the destruction CONTAINMENT guard. The
+    fixture is aged past the boot-cooldown guard and carries a REAL dead
+    socket, so neither the probe nor the age guard can be the reason —
+    removing Guard 1 reddens this test."""
     import shutil
+    import time as _t
 
     import tortoise.embedded_reaper as _R
     base = Path(tempfile.mkdtemp(prefix="tt_"))
@@ -395,6 +421,8 @@ def test_namespace_match_with_escaping_realpath_refused(monkeypatch):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.bind(str(sp))
         s.close()  # real dead socket -> the probe guard would NOT refuse
+        old = _t.time() - 120
+        os.utime(str(base), (old, old))  # past the boot-cooldown guard
         # redirect the reaper's notion of the tempdir so `base` is out of tree
         monkeypatch.setattr(_R, "_real_gettempdir",
                             lambda: "/nonexistent-4068-other-root")
